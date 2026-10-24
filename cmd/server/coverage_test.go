@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -2290,26 +2291,15 @@ func TestStoreGetAnalyticsSubpaths(t *testing.T) {
 	})
 }
 
-func TestSubpathPrecomputedIndex(t *testing.T) {
+func TestSubpathCountsFromPackets(t *testing.T) {
 	db := setupRichTestDB(t)
 	defer db.Close()
 	store := NewPacketStore(db, nil)
 	store.Load()
-	// #1008: indexes built in background goroutine; wait before reading.
-	if !store.WaitIndexesReady(5 * time.Second) {
-		t.Fatal("indexes never became ready")
-	}
-
-	// After Load(), the precomputed index must be populated.
-	if len(store.spIndex) == 0 {
-		t.Fatal("expected spIndex to be populated after Load()")
-	}
-	if store.spTotalPaths == 0 {
-		t.Fatal("expected spTotalPaths > 0 after Load()")
-	}
 
 	// The rich test DB has paths ["aa","bb"], ["aabb","ccdd"], and
-	// ["eeff","0011","2233"].  That yields 5 unique raw subpaths.
+	// ["eeff","0011","2233"].  That yields 5 unique raw subpaths, counted
+	// on demand from the packets (#413).
 	expectedRaw := map[string]int{
 		"aa,bb":          1,
 		"aabb,ccdd":      1,
@@ -2317,21 +2307,20 @@ func TestSubpathPrecomputedIndex(t *testing.T) {
 		"0011,2233":      1,
 		"eeff,0011,2233": 1,
 	}
-	for key, want := range expectedRaw {
-		got, ok := store.spIndex[key]
-		if !ok {
-			t.Errorf("expected spIndex[%q] to exist", key)
-		} else if got != want {
-			t.Errorf("spIndex[%q] = %d, want %d", key, got, want)
-		}
+	fast := store.GetAnalyticsSubpaths("", 2, 8, 100)
+	gotRaw := map[string]int{}
+	for _, sp := range fast["subpaths"].([]map[string]interface{}) {
+		gotRaw[strings.Join(sp["rawHops"].([]string), ",")] += sp["count"].(int)
 	}
-	if store.spTotalPaths != 3 {
-		t.Errorf("spTotalPaths = %d, want 3", store.spTotalPaths)
+	if !reflect.DeepEqual(gotRaw, expectedRaw) {
+		t.Errorf("raw subpath counts = %v, want %v", gotRaw, expectedRaw)
+	}
+	if tp := fast["totalPaths"]; tp != 3 {
+		t.Errorf("totalPaths = %v, want 3", tp)
 	}
 
 	// Fast-path (no region) and slow-path (with region) must return the
 	// same shape.
-	fast := store.GetAnalyticsSubpaths("", 2, 8, 100)
 	slow := store.GetAnalyticsSubpaths("SJC", 2, 4, 50)
 	for _, r := range []map[string]interface{}{fast, slow} {
 		if _, ok := r["subpaths"]; !ok {
@@ -2341,41 +2330,15 @@ func TestSubpathPrecomputedIndex(t *testing.T) {
 			t.Error("missing totalPaths in result")
 		}
 	}
-
-	// Verify fast path totalPaths matches index.
-	if tp, ok := fast["totalPaths"].(int); ok && tp != store.spTotalPaths {
-		t.Errorf("fast totalPaths=%d, spTotalPaths=%d", tp, store.spTotalPaths)
-	}
 }
 
-func TestSubpathTxIndexPopulated(t *testing.T) {
+func TestSubpathDetailMatchCount(t *testing.T) {
 	db := setupRichTestDB(t)
 	defer db.Close()
 	store := NewPacketStore(db, nil)
 	store.Load()
-	// #1008: indexes built in background goroutine; wait before reading.
-	if !store.WaitIndexesReady(5 * time.Second) {
-		t.Fatal("indexes never became ready")
-	}
 
-	// spTxIndex must be populated alongside spIndex
-	if len(store.spTxIndex) == 0 {
-		t.Fatal("expected spTxIndex to be populated after Load()")
-	}
-
-	// Every key in spIndex must also exist in spTxIndex with matching count
-	for key, count := range store.spIndex {
-		txs, ok := store.spTxIndex[key]
-		if !ok {
-			t.Errorf("spTxIndex missing key %q that exists in spIndex", key)
-			continue
-		}
-		if len(txs) != count {
-			t.Errorf("spTxIndex[%q] has %d txs, spIndex count is %d", key, len(txs), count)
-		}
-	}
-
-	// GetSubpathDetail should return correct match count via indexed lookup
+	// GetSubpathDetail counts the transmissions holding the subpath
 	detail := store.GetSubpathDetail([]string{"eeff", "0011"})
 	if matches := detail.TotalMatches; matches != 1 {
 		t.Errorf("totalMatches = %d, want 1", matches)

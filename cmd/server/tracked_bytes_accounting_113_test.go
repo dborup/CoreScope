@@ -481,25 +481,45 @@ func TestTrackedBytes_MixedSequenceDoesNotDrift_113(t *testing.T) {
 	}
 }
 
+// acct113LoadTracking loads a store of acct113CreateDB transmissions that
+// tracks at least minBytes, sizing the transmission count from a first load
+// so the test does not depend on the current per-tx estimate.
+func acct113LoadTracking(t *testing.T, minBytes int64) *PacketStore {
+	t.Helper()
+	n := 3000
+	for attempt := 0; attempt < 3; attempt++ {
+		dbPath := filepath.Join(t.TempDir(), fmt.Sprintf("acct%d.db", n))
+		acct113CreateDB(t, dbPath, n, 0)
+		store := acct113Load(t, dbPath)
+		if store.trackedBytes >= minBytes {
+			return store
+		}
+		n = int(float64(n)*float64(minBytes)/float64(store.trackedBytes)*1.05) + 1
+	}
+	t.Fatalf("setup: no store reached %d tracked bytes", minBytes)
+	return nil
+}
+
 // A memory-triggered pass must start above the high watermark and finish at
 // or below the low one, without taking much more than needed.
 func TestMemoryEviction_CrossesHighAndReachesLow_113(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "acct.db")
-	acct113CreateDB(t, dbPath, 3000, 0)
-	store := acct113Load(t, dbPath)
+	// maxMemoryMB is whole MiB just below the tracked size T, so one pass
+	// must free 1-0.85*floor(T)/T of the store. That is under the 25% safety
+	// cap only while T is large against 1 MiB: at T=7.9 MiB it was 25.03%
+	// once #411 and #413 had each removed a per-tx term from the estimate.
+	// From 16 MiB on it stays between 15% and 20.4% whatever the estimate.
+	store := acct113LoadTracking(t, 16*1048576)
 	acct113Check(t, store, "after Load")
 
 	tracked := store.trackedBytes
-	// Just below the tracked size: one pass needs about 15-24% of the store,
-	// under the 25% safety cap.
 	store.maxMemoryMB = int(tracked / 1048576)
-	if store.maxMemoryMB < 4 {
-		t.Fatalf("setup: only %d bytes tracked; the store is too small for the watermark arithmetic", tracked)
-	}
 	high := int64(store.maxMemoryMB) * 1048576
 	low := int64(float64(high) * 0.85)
 	if tracked <= high {
 		t.Fatalf("setup: trackedBytes %d does not exceed the high watermark %d", tracked, high)
+	}
+	if share := float64(tracked-low) / float64(tracked); share >= 0.21 {
+		t.Fatalf("setup: one pass must free %.2f%% of the store, too close to the 25%% cap", share*100)
 	}
 	before := len(store.packets)
 	store.RunEviction()

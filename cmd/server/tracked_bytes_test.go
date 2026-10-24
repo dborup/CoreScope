@@ -18,7 +18,7 @@ func TestEstimateStoreTxBytes_ReasonableValues(t *testing.T) {
 	}
 	got := estimateStoreTxBytes(tx)
 
-	// Should be at least base (384) + maps (200) + indexes + path/subpath costs
+	// Should be at least base (384) + maps (200) + indexes + path costs
 	if got < 700 {
 		t.Errorf("estimate too low for 3-hop tx: %d", got)
 	}
@@ -28,7 +28,8 @@ func TestEstimateStoreTxBytes_ReasonableValues(t *testing.T) {
 }
 
 // TestEstimateStoreTxBytes_ManyHopsSubpaths verifies that packets with many
-// hops estimate significantly more due to O(path²) subpath index entries.
+// hops estimate more by their path-hop index entries only: the O(path²)
+// subpath index they were also charged for is gone (#413).
 func TestEstimateStoreTxBytes_ManyHopsSubpaths(t *testing.T) {
 	tx2 := &StoreTx{
 		Hash:       "aabb",
@@ -43,12 +44,8 @@ func TestEstimateStoreTxBytes_ManyHopsSubpaths(t *testing.T) {
 	est2 := estimateStoreTxBytes(tx2)
 	est10 := estimateStoreTxBytes(tx10)
 
-	// 10 hops → 45 subpath combos × 40 = 1800 bytes just for subpaths
-	if est10 <= est2 {
-		t.Errorf("10-hop (%d) should estimate more than 2-hop (%d)", est10, est2)
-	}
-	if est10 < est2+1500 {
-		t.Errorf("10-hop (%d) should estimate at least 1500 more than 2-hop (%d)", est10, est2)
+	if want := est2 + 8*perPathHopBytes; est10 != want {
+		t.Errorf("10-hop (%d) should estimate 8 path hops more than 2-hop (%d), %d", est10, est2, want)
 	}
 }
 

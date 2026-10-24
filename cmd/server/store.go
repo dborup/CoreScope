@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/heap"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -315,29 +316,24 @@ type PacketStore struct {
 	// Per-store dedupe set for one-shot schema-degradation warnings. Field
 	// (not package-level) so each test gets a fresh state — see #1199 item 5.
 	schemaDegradationLogged sync.Map
-	// Precomputed subpath index: raw comma-joined hops → occurrence count.
-	// Built during Load(), incrementally updated on ingest. Avoids full
-	// packet iteration at query time (O(unique_subpaths) vs O(total_packets)).
-	spIndex      map[string]int        // "hop1,hop2" → count
-	spTxIndex    map[string][]*StoreTx // "hop1,hop2" → transmissions containing this subpath
-	spTotalPaths int                   // transmissions with paths >= 2 hops
-	// Background-build ready gates for spIndex/spTxIndex and byPathHop
-	// (#1008). Flipped from false→true exactly once by the goroutine
-	// kicked off in Load() (or synchronously by the background chunk
-	// loader). Handlers gate reads via SubpathIndexReady() /
-	// PathHopIndexReady(); while false, they respond 503 + Retry-After.
-	subpathReady atomic.Bool
+	// Route Patterns (subpaths) keep no index: they are counted on demand
+	// from s.packets (#413).
+	//
+	// Background-build ready gate for byPathHop (#1008). Flipped from
+	// false→true exactly once by the goroutine kicked off in Load() (or
+	// synchronously by the background chunk loader). Readers check it via
+	// PathHopIndexReady().
 	pathHopReady atomic.Bool
-	// indexReadyChan is closed exactly once when BOTH subpathReady
-	// and pathHopReady are true (#1008 review m6). Replaces the
-	// previous 2ms poll in WaitIndexesReady. Lazily allocated by
-	// indexReadyCh / maybeCloseIndexReadyCh in index_ready_1008.go.
+	// indexReadyChan is closed exactly once when pathHopReady is true
+	// (#1008 review m6). Replaces the previous 2ms poll in
+	// WaitIndexesReady. Lazily allocated by indexReadyCh /
+	// maybeCloseIndexReadyCh in index_ready_1008.go.
 	indexReadyChMu sync.Mutex
 	indexReadyChan chan struct{}
-	// subpathBuildGate, nil in production, runs at the start of the
-	// background subpath index build that Load() starts. A test sets it
+	// pathHopBuildGate, nil in production, runs at the start of the
+	// background path-hop index build that Load() starts. A test sets it
 	// before Load() to hold the not-ready window open (#227).
-	subpathBuildGate func()
+	pathHopBuildGate func()
 	// Precomputed distance analytics: hop distances and path totals.
 	// Built LAZILY on first /api/analytics/distance request (#1011) —
 	// previously eager in Load() at startup, which was O(n²) work for
@@ -639,6 +635,12 @@ type PacketStore struct {
 	// Test-only hook called with "obs-miss", "obs-scan" and "obs-write" as a
 	// cache miss moves through loadObsCounts. Nil in production.
 	statsHook func(stage string)
+	// Concurrent subpathCache misses for one key share one count (#413);
+	// see shareSubpathCount.
+	subpathSF singleflight.Group
+	// Test-only hook called with "miss" and "count" as a subpathCache miss
+	// moves through shareSubpathCount. Nil in production.
+	subpathHook func(stage string)
 
 	// Test-only hook fired at the very start of loadBackgroundChunks
 	// (after the #1809 invariant check). Nil in production. Used by
@@ -848,8 +850,6 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		rfCacheTTL:           60 * time.Second,
 		collisionCacheTTL:    3600 * time.Second,
 		invCooldown:          300 * time.Second,
-		spIndex:              make(map[string]int, 4096),
-		spTxIndex:            make(map[string][]*StoreTx, 4096),
 		advertPubkeys:        make(map[string]int),
 		pathHopResolved:      make(map[*StoreTx][]uint64),
 		fallbackByNode:       make(map[*StoreTx][]string),
@@ -1182,13 +1182,6 @@ func (s *PacketStore) Load() error {
 		s.indexByNode(tx)
 	}
 
-	// Build precomputed subpath index for O(1) analytics queries
-	// — DEFERRED to a background goroutine (#1008). Same rationale
-	// as the distance index (#1011): synchronous build under s.mu
-	// blocks HTTP readiness ~60s at Cascadia scale. The goroutine is
-	// started AFTER s.loaded = true below.
-	// s.buildSubpathIndex()
-
 	// Build path-hop index for O(1) node path lookups
 	// — DEFERRED to a background goroutine (#1008).
 	// s.buildPathHopIndex()
@@ -1226,11 +1219,10 @@ func (s *PacketStore) Load() error {
 		log.Printf("[store] cold load: skipped %d ambiguous-prefix relay hops (unique_prefix gate, PR #1643 R1)",
 			coldLoadAmbiguousHopsSkipped)
 	}
-	// Kick off background subpath + path-hop index builds (#1008).
-	// The goroutine acquires s.mu.Lock() and so will block until Load's
-	// deferred Unlock fires when this function returns. HTTP handlers
-	// gate reads behind SubpathIndexReady() / PathHopIndexReady() and
-	// respond 503 + Retry-After: 5 until the builds finish.
+	// Kick off the background path-hop index build (#1008). The
+	// goroutine acquires s.mu.Lock() and so will block until Load's
+	// deferred Unlock fires when this function returns. Readers check
+	// PathHopIndexReady() until the build finishes.
 	s.startBackgroundIndexBuilds()
 	return nil
 }
@@ -1243,8 +1235,8 @@ func (s *PacketStore) Load() error {
 // last_seen but can overlap it by first_seen. localPackets are merged into
 // s.packets by first_seen (mergeByFirstSeen, #114).
 //
-// byPayloadType is updated here incrementally. byPathHop, spIndex, and
-// distHops are NOT updated here — the caller (loadBackgroundChunks) rebuilds
+// byPayloadType is updated here incrementally. byPathHop and distHops are
+// NOT updated here — the caller (loadBackgroundChunks) rebuilds
 // those once after all chunks are merged.
 
 // accumulateDedup appends pks to byTx[txID], deduplicating per-tx via the
@@ -1840,7 +1832,6 @@ func (s *PacketStore) loadBackgroundChunks() {
 
 	// Rebuild analytics indexes once after all chunks are merged.
 	s.mu.Lock()
-	s.buildSubpathIndex()
 	s.buildPathHopIndex()
 	// Distance index is now lazy (#1011) — built on first
 	// /api/analytics/distance request, not at background-load
@@ -1852,10 +1843,10 @@ func (s *PacketStore) loadBackgroundChunks() {
 	// it unnecessary.
 	s.distDataGen.Add(1)
 	s.mu.Unlock()
-	// #1008 review m3: flip the ready flags after the synchronous
+	// #1008 review m3: flip the ready flag after the synchronous
 	// rebuild for symmetry with startBackgroundIndexBuilds. Safe
 	// today because the chunk loader runs after Load() has already
-	// kicked the goroutines that set these to true; this is a
+	// kicked the goroutine that sets it to true; this is a
 	// belt-and-suspenders against a future reorder where the chunk
 	// loader could be the first writer.
 	s.markIndexesReadySync()
@@ -1961,7 +1952,7 @@ func setTxPath(tx *StoreTx, pathJSON string) {
 // rechargeTx re-estimates tx and returns the change since it was last
 // charged, for the caller to add to trackedBytes (#113). A tx is first
 // charged when it is created, before its observations are merged, so its
-// path costs (byPathHop, spTxIndex) are unknown then: call it again once
+// path costs (byPathHop) are unknown then: call it again once
 // pickBestObservation has set the path. Eviction subtracts what was charged
 // (chargedBytes, see txChargedBytes) and never re-estimates, so the total
 // stays exact however often the path changed in between.
@@ -3526,11 +3517,8 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		s.trackedBytes += rechargeTx(tx)
 	}
 
-	// Incrementally update precomputed subpath index with new transmissions
+	// Incrementally update the path-hop index with new transmissions
 	for _, tx := range broadcastTxs {
-		if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
-			s.spTotalPaths++
-		}
 		addTxToPathHopIndex(s.byPathHop, tx)
 	}
 	if len(broadcastTxs) > 0 {
@@ -3965,8 +3953,8 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		broadcastMaps = append(broadcastMaps, broadcastMap)
 	}
 
-	// Re-pick best observation for updated transmissions and update subpath index
-	// if the path changed.
+	// Re-pick best observation for updated transmissions and update the
+	// path-hop index if the path changed.
 	oldPaths := make(map[int]string, len(updatedTxs))
 	for txID, tx := range updatedTxs {
 		oldPaths[txID] = tx.PathJSON
@@ -4022,22 +4010,12 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 	return broadcastMaps
 }
 
-// reindexTxPath moves tx in the subpath and path-hop indexes after its best
+// reindexTxPath moves tx in the path-hop index after its best
 // path changed from oldPath to tx.PathJSON (pickBestObservation, which also
 // parsed it into tx.parsedPath). The caller invalidates the relay-stats cache once for
 // a batch. Must hold s.mu for writing.
 func (s *PacketStore) reindexTxPath(tx *StoreTx, oldPath string) {
-	// Path changed — remove old subpaths, add new ones.
 	oldHops := parsePathJSON(oldPath)
-	if len(oldHops) >= 2 {
-		// Temporarily set parsedPath to old hops for removal.
-		saved, savedFlag := tx.parsedPath, tx.pathParsed
-		tx.parsedPath, tx.pathParsed = oldHops, true
-		if removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
-			s.spTotalPaths--
-		}
-		tx.parsedPath, tx.pathParsed = saved, savedFlag
-	}
 	// Remove old path-hop index entries using old hops.
 	// Resolved pubkey entries are managed via resolvedPubkeyIndex, not byPathHop.
 	if len(oldHops) > 0 {
@@ -4047,9 +4025,6 @@ func (s *PacketStore) reindexTxPath(tx *StoreTx, oldPath string) {
 		tx.parsedPath, tx.pathParsed = saved, savedFlag
 	}
 	// pickBestObservation already parsed the new path into tx.parsedPath.
-	if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
-		s.spTotalPaths++
-	}
 	addTxToPathHopIndex(s.byPathHop, tx)
 }
 
@@ -4828,87 +4803,6 @@ func txGetParsedPath(tx *StoreTx) []string {
 	return tx.parsedPath
 }
 
-// addTxToSubpathIndex extracts all raw subpaths (lengths 2–8) from tx and
-// increments their counts in the index.  Returns true if the tx contributed
-// (path had ≥ 2 hops).
-func addTxToSubpathIndex(idx map[string]int, tx *StoreTx) bool {
-	return addTxToSubpathIndexFull(idx, nil, tx)
-}
-
-// addTxToSubpathIndexFull is like addTxToSubpathIndex but also appends
-// tx to txIdx for each subpath key (if txIdx is non-nil).
-func addTxToSubpathIndexFull(idx map[string]int, txIdx map[string][]*StoreTx, tx *StoreTx) bool {
-	hops := txGetParsedPath(tx)
-	if len(hops) < 2 {
-		return false
-	}
-	maxL := min(8, len(hops))
-	for l := 2; l <= maxL; l++ {
-		for start := 0; start <= len(hops)-l; start++ {
-			key := strings.ToLower(strings.Join(hops[start:start+l], ","))
-			idx[key]++
-			if txIdx != nil {
-				txIdx[key] = append(txIdx[key], tx)
-			}
-		}
-	}
-	return true
-}
-
-// removeTxFromSubpathIndex is the inverse of addTxToSubpathIndex — it
-// decrements counts for all raw subpaths of tx.  Returns true if the tx
-// had a path.
-func removeTxFromSubpathIndex(idx map[string]int, tx *StoreTx) bool {
-	return removeTxFromSubpathIndexFull(idx, nil, tx)
-}
-
-// removeTxFromSubpathIndexFull is like removeTxFromSubpathIndex but also
-// removes tx from txIdx for each subpath key (if txIdx is non-nil).
-func removeTxFromSubpathIndexFull(idx map[string]int, txIdx map[string][]*StoreTx, tx *StoreTx) bool {
-	hops := txGetParsedPath(tx)
-	if len(hops) < 2 {
-		return false
-	}
-	maxL := min(8, len(hops))
-	for l := 2; l <= maxL; l++ {
-		for start := 0; start <= len(hops)-l; start++ {
-			key := strings.ToLower(strings.Join(hops[start:start+l], ","))
-			idx[key]--
-			if idx[key] <= 0 {
-				delete(idx, key)
-			}
-			if txIdx != nil {
-				txs := txIdx[key]
-				for i, t := range txs {
-					if t == tx {
-						txIdx[key] = append(txs[:i], txs[i+1:]...)
-						break
-					}
-				}
-				if len(txIdx[key]) == 0 {
-					delete(txIdx, key)
-				}
-			}
-		}
-	}
-	return true
-}
-
-// buildSubpathIndex scans all packets and populates spIndex + spTotalPaths.
-// Must be called with s.mu held.
-func (s *PacketStore) buildSubpathIndex() {
-	s.spIndex = make(map[string]int, 4096)
-	s.spTxIndex = make(map[string][]*StoreTx, 4096)
-	s.spTotalPaths = 0
-	for _, tx := range s.packets {
-		if addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx) {
-			s.spTotalPaths++
-		}
-	}
-	log.Printf("[store] Built subpath index: %d unique raw subpaths from %d paths",
-		len(s.spIndex), s.spTotalPaths)
-}
-
 // buildPathHopIndex rebuilds byPathHop: raw wire hops from every packet's
 // path_json, plus the resolved full-pubkey hops carried over from the
 // previous index (see retainResolvedPathHops).
@@ -5599,7 +5493,7 @@ func (s *PacketStore) buildDistanceIndex(snapshots ...pathNodeSnapshot) {
 // usage and independent of GC state.
 //
 // Issue #743: Previous estimates missed major per-packet allocations:
-// - spTxIndex: O(path²) entries per tx (50-150MB at scale)
+// - spTxIndex: O(path²) entries per tx (50-150MB at scale; removed by #413)
 // - Per-tx maps: obsKeys, observerSet (~11MB at scale; only busy tx since #411)
 // - byPathHop index entries (20-40MB at scale)
 // Note: ResolvedPath per-obs overhead eliminated by #800 refactor.
@@ -5613,9 +5507,6 @@ const (
 
 	// Per path hop: byPathHop index entry (pointer + map bucket)
 	perPathHopBytes = 50
-
-	// Per subpath entry in spTxIndex: string key + slice append + pointer
-	perSubpathEntryBytes = 40
 
 	// ParsedDecoded caches json.Unmarshal of DecodedJSON as a
 	// map[string]interface{}, about 4x the JSON length. Analytics touch
@@ -5650,8 +5541,8 @@ const (
 )
 
 // estimateStoreTxBytes returns the estimated memory cost of a StoreTx (excluding observations).
-// Includes byPathHop entries and spTxIndex subpath entries; the dedup maps of a
-// busy tx are charged separately (obsIndexBytes).
+// Includes byPathHop entries; the dedup maps of a busy tx are charged
+// separately (obsIndexBytes).
 func estimateStoreTxBytes(tx *StoreTx) int64 {
 	base := int64(storeTxBaseBytes)
 	base += int64(len(tx.RawHex) + len(tx.Hash) + len(tx.DecodedJSON) + len(tx.PathJSON))
@@ -5661,12 +5552,6 @@ func estimateStoreTxBytes(tx *StoreTx) int64 {
 	// Path-dependent costs
 	hops := int64(len(txGetParsedPath(tx)))
 	base += hops * perPathHopBytes
-
-	// spTxIndex: O(path²) subpath combinations
-	if hops > 1 {
-		subpaths := hops * (hops - 1) / 2
-		base += subpaths * perSubpathEntryBytes
-	}
 
 	return base
 }
@@ -5681,7 +5566,6 @@ func estimateStoreTxBytesTypical(numObs int) int64 {
 	base += decodedCacheFactor * 200
 	hops := int64(3)
 	base += hops * perPathHopBytes
-	base += (hops * (hops - 1) / 2) * perSubpathEntryBytes
 	base += resolvedRelayBytes(typicalResolvedRelays)
 	// Add observation costs
 	obsBase := int64(storeObsBaseBytes) + 30 + 30 + 60 + 25 // observer ID + name + path + timestamp
@@ -5951,9 +5835,6 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 
 		// Remove from resolved pubkey index
 		s.removeFromResolvedPubkeyIndex(tx.ID)
-
-		// Remove from subpath index
-		removeTxFromSubpathIndexFull(s.spIndex, s.spTxIndex, tx)
 	}
 	// Remove from the path-hop index: raw AND resolved keys, all duplicates,
 	// in one pass per batch (#115). See evictFromPathHopIndex.
@@ -6185,7 +6066,7 @@ func hasUpperASCII(s string) bool {
 // loops that resolve hops outside any per-tx scope (subpath/topology
 // aggregations). Caller passes the slice of txs to consider; we union the
 // per-tx contexts with de-dup. Used by call sites that read from precomputed
-// indices (s.spIndex, s.spTxIndex) or that resolve user-supplied hops.
+// indices or that resolve user-supplied hops.
 //
 // Result is order-independent in semantics; iteration order is deterministic
 // only modulo Go's map iteration (acceptable — the resolver's tier-2 averages
@@ -11062,90 +10943,42 @@ func (s *PacketStore) GetNodeHopAnalytics(pubkey string, days int) (*NodeHopAnal
 // ignored the Time window filter because callers always reached the unbounded
 // path. With a zero TimeWindow this is byte-equivalent to GetAnalyticsSubpaths.
 //
-// For non-zero windows we iterate the packet list and filter on
-// `tx.FirstSeen`. We deliberately do not consult the precomputed `spIndex`
-// (which has no per-tx timestamp), so the windowed path is O(N_tx · path²);
-// this matches the slow region-filtered path and keeps the fast unbounded
-// hot path untouched. Results are cached by (region|area|window) so repeated
-// renders of the same window don't re-scan.
+// For non-zero windows the transmissions whose `tx.FirstSeen` falls inside
+// the window are counted one by one, like a region-filtered query, so the
+// windowed path is O(N_tx · path²). Results are cached by
+// (region|area|window) so repeated renders of the same window don't re-scan.
 func (s *PacketStore) GetAnalyticsSubpathsWithWindow(region string, minLen, maxLen, limit int, window TimeWindow) map[string]interface{} {
 	if window.IsZero() {
 		return s.GetAnalyticsSubpaths(region, minLen, maxLen, limit)
 	}
 
 	cacheKey := fmt.Sprintf("%s|%d|%d|%d|w=%s", region, minLen, maxLen, limit, window.CacheKey())
-	s.cacheMu.Lock()
-	if cached, ok := s.subpathCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
-		s.cacheHits++
-		s.cacheMu.Unlock()
-		return cached.data
-	}
-	s.cacheMisses++
-	s.cacheMu.Unlock()
-
-	result := s.computeAnalyticsSubpathsWindowed(region, minLen, maxLen, limit, window)
-
-	s.cacheMu.Lock()
-	putCachedResultLocked(s.subpathCache, cacheKey, &cachedResult{data: result, expiresAt: time.Now().Add(s.rfCacheTTL)})
-	s.cacheMu.Unlock()
-
-	return result
+	return s.loadSubpaths(cacheKey, func() *cachedResult {
+		return &cachedResult{data: s.computeAnalyticsSubpathsWindowed(region, minLen, maxLen, limit, window)}
+	}).data
 }
 
-// computeAnalyticsSubpathsWindowed iterates s.packets and bounds the result
-// to transmissions whose FirstSeen falls inside `window`. Optionally also
-// region-filters. Mirrors computeSubpathsSlow but with the window predicate
-// inlined and without requiring a non-empty region.
+// computeAnalyticsSubpathsWindowed counts the subpaths of the transmissions
+// whose FirstSeen falls inside `window` (a zero window holds them all),
+// optionally region-filtered: per transmission, by resolved hop name, every
+// length from minLen to maxLen, rawHops as the path stores them.
 func (s *PacketStore) computeAnalyticsSubpathsWindowed(region string, minLen, maxLen, limit int, window TimeWindow) map[string]interface{} {
 	_, pm := s.getCachedNodesAndPM()
 	var regionObs map[string]bool
 	if region != "" {
 		regionObs = s.resolveRegionObservers(region)
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	contextPubkeys := buildAggregateHopContextPubkeys(s.packets, pm)
-	hopCache := make(map[string]*nodeInfo)
-	graph := s.graph.Load()
-	resolveHop := func(hop string) string {
-		if cached, ok := hopCache[hop]; ok {
-			if cached != nil {
-				return cached.Name
-			}
-			return hop
-		}
-		r, _, _ := pm.resolveWithContext(hop, contextPubkeys, graph)
-		hopCache[hop] = r
-		if r != nil {
-			return r.Name
-		}
-		return hop
-	}
+	paths, contextPubkeys := s.snapshotSubpathPaths(regionObs, pm)
+	resolveHop := subpathHopResolver(pm, contextPubkeys, s.graph.Load())
 
 	subpathCounts := make(map[string]*subpathAccum)
 	totalPaths := 0
 
-	for _, tx := range s.packets {
-		if !window.Includes(tx.FirstSeen) {
+	for _, p := range paths {
+		if !window.IsZero() && !window.Includes(p.firstSeen) {
 			continue
 		}
-		hops := txGetParsedPath(tx)
-		if len(hops) < 2 {
-			continue
-		}
-		if regionObs != nil {
-			match := false
-			for _, obs := range tx.Observations {
-				if regionObs[obs.ObserverID] {
-					match = true
-					break
-				}
-			}
-			if !match {
-				continue
-			}
-		}
+		hops := p.hops
 		totalPaths++
 
 		named := make([]string, len(hops))
@@ -11172,23 +11005,70 @@ func (s *PacketStore) computeAnalyticsSubpathsWindowed(region string, minLen, ma
 
 func (s *PacketStore) GetAnalyticsSubpaths(region string, minLen, maxLen, limit int) map[string]interface{} {
 	cacheKey := fmt.Sprintf("%s|%d|%d|%d", region, minLen, maxLen, limit)
+	return s.loadSubpaths(cacheKey, func() *cachedResult {
+		return &cachedResult{data: s.computeAnalyticsSubpaths(region, minLen, maxLen, limit)}
+	}).data
+}
 
+// loadSubpaths returns the subpathCache entry for cacheKey or, on a miss,
+// the entry of one count shared by every concurrent caller of cacheKey,
+// which is stored with the TTL set.
+func (s *PacketStore) loadSubpaths(cacheKey string, count func() *cachedResult) *cachedResult {
 	s.cacheMu.Lock()
 	if cached, ok := s.subpathCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		s.cacheHits++
 		s.cacheMu.Unlock()
-		return cached.data
+		return cached
 	}
 	s.cacheMisses++
 	s.cacheMu.Unlock()
 
-	result := s.computeAnalyticsSubpaths(region, minLen, maxLen, limit)
+	return shareSubpathCount(s, "1:"+cacheKey, func() (*cachedResult, bool) {
+		s.cacheMu.Lock()
+		defer s.cacheMu.Unlock()
+		return s.subpathCachedLocked(cacheKey)
+	}, func() *cachedResult {
+		entry := count()
+		s.cacheMu.Lock()
+		entry.expiresAt = time.Now().Add(s.rfCacheTTL)
+		putCachedResultLocked(s.subpathCache, cacheKey, entry)
+		s.cacheMu.Unlock()
+		return entry
+	})
+}
 
-	s.cacheMu.Lock()
-	putCachedResultLocked(s.subpathCache, cacheKey, &cachedResult{data: result, expiresAt: time.Now().Add(s.rfCacheTTL)})
-	s.cacheMu.Unlock()
+// subpathCachedLocked returns the unexpired subpathCache entry for key.
+// Caller holds s.cacheMu.
+func (s *PacketStore) subpathCachedLocked(key string) (*cachedResult, bool) {
+	cached, ok := s.subpathCache[key]
+	if !ok || !time.Now().Before(cached.expiresAt) {
+		return nil, false
+	}
+	return cached, true
+}
 
-	return result
+// shareSubpathCount runs count for a subpathCache miss, once for every
+// concurrent caller of flightKey (#413). A count scans the whole store and
+// allocates about as much as the removed index held, so N overlapping misses
+// must not run N counts (PR #529 review F1). cached checks the cache again
+// inside the flight, so a caller that missed just before an earlier count
+// stored its result uses that result instead of counting again.
+func shareSubpathCount[T any](s *PacketStore, flightKey string, cached func() (T, bool), count func() T) T {
+	s.subpathHookAt("miss")
+	v, _, _ := s.subpathSF.Do(flightKey, func() (interface{}, error) {
+		if v, ok := cached(); ok {
+			return v, nil
+		}
+		s.subpathHookAt("count")
+		return count(), nil
+	})
+	return v.(T)
+}
+
+func (s *PacketStore) subpathHookAt(stage string) {
+	if s.subpathHook != nil {
+		s.subpathHook(stage)
+	}
 }
 
 // GetAnalyticsSubpathsBulkWithWindow is the window-aware variant. For a zero
@@ -11207,7 +11087,7 @@ func (s *PacketStore) GetAnalyticsSubpathsBulkWithWindow(region string, groups [
 }
 
 // GetAnalyticsSubpathsBulk returns multiple length-range buckets from a single
-// scan of the subpath index, avoiding repeated iterations.
+// count of the subpaths, avoiding repeated scans.
 func (s *PacketStore) GetAnalyticsSubpathsBulk(region string, groups []subpathGroup) []map[string]interface{} {
 	// For region queries or when there are few groups, fall back to individual calls
 	// which benefit from per-key caching.
@@ -11219,57 +11099,80 @@ func (s *PacketStore) GetAnalyticsSubpathsBulk(region string, groups []subpathGr
 		return results
 	}
 
-	// Check if all groups are cached.
-	allCached := true
-	cachedResults := make([]map[string]interface{}, len(groups))
-	s.cacheMu.Lock()
+	cacheKeys := make([]string, len(groups))
 	for i, g := range groups {
-		cacheKey := fmt.Sprintf("|%d|%d|%d", g.MinLen, g.MaxLen, g.Limit)
-		if cached, ok := s.subpathCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
-			cachedResults[i] = cached.data
-		} else {
-			allCached = false
-			break
-		}
+		cacheKeys[i] = fmt.Sprintf("|%d|%d|%d", g.MinLen, g.MaxLen, g.Limit)
 	}
-	if allCached {
+	// allCached returns the entries when every group is cached.
+	allCached := func() ([]*cachedResult, bool) {
+		s.cacheMu.Lock()
+		defer s.cacheMu.Unlock()
+		entries := make([]*cachedResult, len(groups))
+		for i, key := range cacheKeys {
+			cached, ok := s.subpathCachedLocked(key)
+			if !ok {
+				return nil, false
+			}
+			entries[i] = cached
+		}
+		return entries, true
+	}
+	entries, ok := allCached()
+	if ok {
+		s.cacheMu.Lock()
 		s.cacheHits += int64(len(groups))
 		s.cacheMu.Unlock()
-		return cachedResults
-	}
-	s.cacheMu.Unlock()
-
-	// Refresh DB-backed metadata before the store-only scan.
-	_, pm := s.getCachedNodesAndPM()
-	s.mu.RLock()
-	// Aggregate hop-disambiguation context across all packets so the
-	// resolver's tiers 1 and 2 light up even on this bulk-aggregate path
-	// (the index iterates raw subpath strings, not per-tx). See #1197.
-	contextPubkeys := buildAggregateHopContextPubkeys(s.packets, pm)
-	hopCache := make(map[string]*nodeInfo)
-	graph := s.graph.Load() // hoist out of resolver closure (PR #1208 carmack #1)
-	resolveHop := func(hop string) string {
-		if cached, ok := hopCache[hop]; ok {
-			if cached != nil {
-				return cached.Name
+	} else {
+		entries = shareSubpathCount(s, "n:"+strings.Join(cacheKeys, ";"), allCached, func() []*cachedResult {
+			perGroup, totalPaths := s.countSubpathGroups(groups)
+			entries := make([]*cachedResult, len(groups))
+			for i, g := range groups {
+				entries[i] = &cachedResult{data: s.rankSubpaths(perGroup[i], totalPaths, g.Limit)}
 			}
-			return hop
-		}
-		r, _, _ := pm.resolveWithContext(hop, contextPubkeys, graph)
-		hopCache[hop] = r
-		if r != nil {
-			return r.Name
-		}
-		return hop
-	}
 
-	perGroup := make([]map[string]*subpathAccum, len(groups))
+			// Cache individual results for future single-key lookups too.
+			s.cacheMu.Lock()
+			for i, e := range entries {
+				e.expiresAt = time.Now().Add(s.rfCacheTTL)
+				putCachedResultLocked(s.subpathCache, cacheKeys[i], e)
+			}
+			s.cacheMu.Unlock()
+			return entries
+		})
+	}
+	results := make([]map[string]interface{}, len(groups))
+	for i, e := range entries {
+		results[i] = e.data
+	}
+	return results
+}
+
+// subpathMaxHops is the longest subpath the unfiltered Route Patterns count,
+// the cap the former precomputed index had (#413). Window and region
+// queries count every length up to maxLen.
+const subpathMaxHops = 8
+
+// countSubpathGroups counts the subpaths of every transmission once for all
+// groups: by raw hops, lower-cased and comma-joined, 2 to subpathMaxHops
+// long, each occurrence counted. Those keys are then resolved to node names
+// per group, raw keys with the same names merged. totalPaths is the number
+// of transmissions with a path of 2+ hops.
+func (s *PacketStore) countSubpathGroups(groups []subpathGroup) (perGroup []map[string]*subpathAccum, totalPaths int) {
+	_, pm := s.getCachedNodesAndPM()
+	paths, contextPubkeys := s.snapshotSubpathPaths(nil, pm)
+	maxLen := 0
+	for _, g := range groups {
+		maxLen = max(maxLen, g.MaxLen)
+	}
+	counts := countRawSubpaths(paths, min(maxLen, subpathMaxHops))
+	resolveHop := subpathHopResolver(pm, contextPubkeys, s.graph.Load())
+
+	perGroup = make([]map[string]*subpathAccum, len(groups))
 	for i := range groups {
 		perGroup[i] = make(map[string]*subpathAccum)
 	}
-
-	for rawKey, count := range s.spIndex {
-		hops := strings.Split(rawKey, ",")
+	for _, c := range counts {
+		hops := strings.Split(c.key, ",")
 		hopLen := len(hops)
 
 		// Resolve hop names once, reuse across groups.
@@ -11294,26 +11197,158 @@ func (s *PacketStore) GetAnalyticsSubpathsBulk(region string, groups []subpathGr
 				entry = &subpathAccum{}
 				perGroup[gi][namedKey] = entry
 			}
-			entry.add(rawKey, count)
+			entry.add(c.key, c.count)
 		}
 	}
-	totalPaths := s.spTotalPaths
-	s.mu.RUnlock()
+	return perGroup, len(paths)
+}
 
-	results := make([]map[string]interface{}, len(groups))
-	for i, g := range groups {
-		results[i] = s.rankSubpaths(perGroup[i], totalPaths, g.Limit)
+// subpathPath is a transmission's parsed hop list and FirstSeen, copied by
+// snapshotSubpathPaths. hops is shared with the transmission, not copied: a
+// path change installs a new slice and never edits one in place.
+type subpathPath struct {
+	hops      []string
+	firstSeen string
+}
+
+// snapshotSubpathPaths copies, under s.mu, what Route Patterns count: every
+// transmission with a path of 2+ hops (with an observer in regionObs when
+// regionObs is non-nil), and the hop-disambiguation context aggregated over
+// all packets (#1197). Enumerating, resolving and ranking run on the copy
+// after the lock is released (#413).
+func (s *PacketStore) snapshotSubpathPaths(regionObs map[string]bool, pm *prefixMap) ([]subpathPath, []string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	paths := make([]subpathPath, 0, len(s.packets))
+	for _, tx := range s.packets {
+		hops := txGetParsedPath(tx)
+		if len(hops) < 2 {
+			continue
+		}
+		if regionObs != nil {
+			match := false
+			for _, obs := range tx.Observations {
+				if regionObs[obs.ObserverID] {
+					match = true
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+		paths = append(paths, subpathPath{hops: hops, firstSeen: tx.FirstSeen})
 	}
+	return paths, buildAggregateHopContextPubkeys(s.packets, pm)
+}
 
-	// Cache individual results for future single-key lookups too.
-	s.cacheMu.Lock()
-	for i, g := range groups {
-		cacheKey := fmt.Sprintf("|%d|%d|%d", g.MinLen, g.MaxLen, g.Limit)
-		putCachedResultLocked(s.subpathCache, cacheKey, &cachedResult{data: results[i], expiresAt: time.Now().Add(s.rfCacheTTL)})
+// rawSubpathCount is one distinct raw subpath key and its occurrences.
+type rawSubpathCount struct {
+	key   string
+	count int
+}
+
+// countRawSubpaths counts every subpath of 2 to maxHops hops of paths, each
+// occurrence once, by its lower-cased, comma-joined hops. The key is built in
+// a reused buffer and allocated only for a subpath not seen before.
+func countRawSubpaths(paths []subpathPath, maxHops int) []rawSubpathCount {
+	var counts []rawSubpathCount
+	idx := make(map[string]int)
+	var buf []byte
+	for _, p := range paths {
+		hops := p.hops
+		for start := 0; start+2 <= len(hops); start++ {
+			buf = appendLowerHop(buf[:0], hops[start])
+			for l := 2; l <= maxHops && start+l <= len(hops); l++ {
+				buf = appendLowerHop(append(buf, ','), hops[start+l-1])
+				if i, ok := idx[string(buf)]; ok {
+					counts[i].count++
+					continue
+				}
+				idx[string(buf)] = len(counts)
+				counts = append(counts, rawSubpathCount{key: string(buf), count: 1})
+			}
+		}
 	}
-	s.cacheMu.Unlock()
+	return counts
+}
 
-	return results
+// subpathOccurrences is how often key, a lower-cased comma-joined subpath,
+// occurs in hops as a run of 2 to subpathMaxHops hops (each run compared
+// lower-cased): the count countRawSubpaths gives key for this path.
+func subpathOccurrences(hops []string, key string) int {
+	n := 0
+	for start := 0; start+2 <= len(hops); start++ {
+		pos, ok := matchLowerHop(key, 0, hops[start])
+		for l := 2; ok && l <= subpathMaxHops && start+l <= len(hops); l++ {
+			if pos >= len(key) || key[pos] != ',' {
+				break
+			}
+			if pos, ok = matchLowerHop(key, pos+1, hops[start+l-1]); ok && pos == len(key) {
+				n++
+				break
+			}
+		}
+	}
+	return n
+}
+
+// matchLowerHop reports whether key continues at pos with
+// strings.ToLower(hop), and where that ends. It compares in place for an
+// ASCII hop (the hex prefixes every path holds).
+func matchLowerHop(key string, pos int, hop string) (int, bool) {
+	for i := 0; i < len(hop); i++ {
+		c := hop[i]
+		if c >= utf8.RuneSelf {
+			lower := strings.ToLower(hop)
+			return pos + len(lower), strings.HasPrefix(key[pos:], lower)
+		}
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if pos+i >= len(key) || key[pos+i] != c {
+			return pos, false
+		}
+	}
+	return pos + len(hop), true
+}
+
+// appendLowerHop appends strings.ToLower(hop) to buf, without allocating for
+// an ASCII hop (the hex prefixes every path holds).
+func appendLowerHop(buf []byte, hop string) []byte {
+	for i := 0; i < len(hop); i++ {
+		if hop[i] >= utf8.RuneSelf {
+			return append(buf, strings.ToLower(hop)...)
+		}
+	}
+	for i := 0; i < len(hop); i++ {
+		c := hop[i]
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		buf = append(buf, c)
+	}
+	return buf
+}
+
+// subpathHopResolver resolves a hop to the name of the node it stands for, or
+// to the hop itself when it matches no node, once per hop per request.
+func subpathHopResolver(pm *prefixMap, contextPubkeys []string, graph *NeighborGraph) func(string) string {
+	hopCache := make(map[string]*nodeInfo)
+	return func(hop string) string {
+		if cached, ok := hopCache[hop]; ok {
+			if cached != nil {
+				return cached.Name
+			}
+			return hop
+		}
+		r, _, _ := pm.resolveWithContext(hop, contextPubkeys, graph)
+		hopCache[hop] = r
+		if r != nil {
+			return r.Name
+		}
+		return hop
+	}
 }
 
 // subpathAccum holds a running count for a single named subpath.
@@ -11334,133 +11369,63 @@ func (a *subpathAccum) add(raw string, n int) {
 }
 
 func (s *PacketStore) computeAnalyticsSubpaths(region string, minLen, maxLen, limit int) map[string]interface{} {
-	_, pm := s.getCachedNodesAndPM()
-	regionObs := s.resolveRegionObservers(region)
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Aggregate hop-disambiguation context across all packets — bulk
-	// aggregator over s.spIndex / per-tx fallback both need it. See #1197.
-	contextPubkeys := buildAggregateHopContextPubkeys(s.packets, pm)
-	hopCache := make(map[string]*nodeInfo)
-	graph := s.graph.Load() // hoist out of resolver closure (PR #1208 carmack #1)
-	resolveHop := func(hop string) string {
-		if cached, ok := hopCache[hop]; ok {
-			if cached != nil {
-				return cached.Name
-			}
-			return hop
-		}
-		r, _, _ := pm.resolveWithContext(hop, contextPubkeys, graph)
-		hopCache[hop] = r
-		if r != nil {
-			return r.Name
-		}
-		return hop
-	}
-
-	// For region queries fall back to packet iteration (region filtering
-	// requires per-transmission observer checks).
+	// Region filtering needs each transmission's observers, so a region
+	// query is counted per transmission like a windowed one.
 	if region != "" {
-		return s.computeSubpathsSlow(regionObs, minLen, maxLen, limit, resolveHop)
+		return s.computeAnalyticsSubpathsWindowed(region, minLen, maxLen, limit, TimeWindow{})
 	}
-
-	// Fast path: read from precomputed raw-hop subpath index.
-	// Resolve raw hop prefixes to names and merge counts.
-	namedCounts := make(map[string]*subpathAccum, len(s.spIndex))
-	for rawKey, count := range s.spIndex {
-		hops := strings.Split(rawKey, ",")
-		hopLen := len(hops)
-		if hopLen < minLen || hopLen > maxLen {
-			continue
-		}
-		named := make([]string, hopLen)
-		for i, h := range hops {
-			named[i] = resolveHop(h)
-		}
-		namedKey := strings.Join(named, " → ")
-		entry := namedCounts[namedKey]
-		if entry == nil {
-			entry = &subpathAccum{}
-			namedCounts[namedKey] = entry
-		}
-		entry.add(rawKey, count)
-	}
-
-	return s.rankSubpaths(namedCounts, s.spTotalPaths, limit)
+	perGroup, totalPaths := s.countSubpathGroups([]subpathGroup{{minLen, maxLen, limit}})
+	return s.rankSubpaths(perGroup[0], totalPaths, limit)
 }
 
-// computeSubpathsSlow is the original O(N) packet-iteration path, used only
-// for region-filtered queries where we must check per-transmission observers.
-func (s *PacketStore) computeSubpathsSlow(regionObs map[string]bool, minLen, maxLen, limit int, resolveHop func(string) string) map[string]interface{} {
-
-	subpathCounts := make(map[string]*subpathAccum)
-	totalPaths := 0
-
-	for _, tx := range s.packets {
-		hops := txGetParsedPath(tx)
-		if len(hops) < 2 {
-			continue
-		}
-		if regionObs != nil {
-			match := false
-			for _, obs := range tx.Observations {
-				if regionObs[obs.ObserverID] {
-					match = true
-					break
-				}
-			}
-			if !match {
-				continue
-			}
-		}
-		totalPaths++
-
-		named := make([]string, len(hops))
-		for i, h := range hops {
-			named[i] = resolveHop(h)
-		}
-
-		for l := minLen; l <= maxLen && l <= len(named); l++ {
-			for start := 0; start <= len(named)-l; start++ {
-				sub := strings.Join(named[start:start+l], " → ")
-				raw := strings.Join(hops[start:start+l], ",")
-				entry := subpathCounts[sub]
-				if entry == nil {
-					entry = &subpathAccum{}
-					subpathCounts[sub] = entry
-				}
-				entry.add(raw, 1)
-			}
-		}
-	}
-
-	return s.rankSubpaths(subpathCounts, totalPaths, limit)
+// subpathEntry is one named subpath of a ranking.
+type subpathEntry struct {
+	path  string
+	count int
+	raw   string
 }
 
-// rankSubpaths sorts accumulated subpath counts by frequency, truncates to
-// limit, and builds the API response map.
+// subpathRanksBefore is the Route Patterns order: the most frequent first and
+// #256 ties broken on the path, so the order and the limit cut are stable.
+func subpathRanksBefore(a, b subpathEntry) bool {
+	if a.count != b.count {
+		return a.count > b.count
+	}
+	return a.path < b.path
+}
+
+// subpathTopN is a heap of the best entries seen so far, the worst on top.
+type subpathTopN []subpathEntry
+
+func (h subpathTopN) Len() int           { return len(h) }
+func (h subpathTopN) Less(i, j int) bool { return subpathRanksBefore(h[j], h[i]) }
+func (h subpathTopN) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *subpathTopN) Push(x any)        { *h = append(*h, x.(subpathEntry)) }
+func (h *subpathTopN) Pop() any {
+	old := *h
+	e := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return e
+}
+
+// rankSubpaths keeps the `limit` highest-ranked accumulated subpaths and
+// builds the API response map. Paths are distinct map keys, so the order is
+// total and the bounded heap keeps exactly the entries a full sort cut at
+// limit would, without sorting every distinct subpath (#413).
 func (s *PacketStore) rankSubpaths(counts map[string]*subpathAccum, totalPaths, limit int) map[string]interface{} {
-	type subpathEntry struct {
-		path  string
-		count int
-		raw   string
-	}
-	ranked := make([]subpathEntry, 0, len(counts))
+	limit = max(limit, 0)
+	top := make(subpathTopN, 0, min(limit, len(counts)))
 	for path, data := range counts {
-		ranked = append(ranked, subpathEntry{path, data.count, data.raw})
-	}
-	// #256: counts iteration order is random; ties break on the path so the
-	// order and the limit cut are stable.
-	sort.Slice(ranked, func(i, j int) bool {
-		if ranked[i].count != ranked[j].count {
-			return ranked[i].count > ranked[j].count
+		e := subpathEntry{path, data.count, data.raw}
+		if len(top) < limit {
+			heap.Push(&top, e)
+		} else if limit > 0 && subpathRanksBefore(e, top[0]) {
+			top[0] = e
+			heap.Fix(&top, 0)
 		}
-		return ranked[i].path < ranked[j].path
-	})
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
 	}
+	ranked := []subpathEntry(top)
+	sort.Slice(ranked, func(i, j int) bool { return subpathRanksBefore(ranked[i], ranked[j]) })
 
 	subpaths := make([]map[string]interface{}, 0, len(ranked))
 	for _, e := range ranked {
@@ -11534,22 +11499,92 @@ type subpathDetailObserver struct {
 	count    int
 }
 
+// subpathMatch is what a subpath detail reads of one matched transmission,
+// copied under s.mu so the detail is built after the lock is released.
+type subpathMatch struct {
+	firstSeen                string
+	snr, rssi                float64
+	hasSNR, hasRSSI          bool
+	observerID, observerName string
+	hops                     []string // shared with the transmission, see subpathPath
+	hopContext               []string
+}
+
+// subpathTxHops is a transmission and its hop list, copied under s.mu for
+// SubpathDetail to match outside it: tx is only read under s.mu, hops is
+// shared with tx (see subpathPath).
+type subpathTxHops struct {
+	tx   *StoreTx
+	hops []string
+}
+
 // SubpathDetail gathers the parts of a subpath detail.
 func (s *PacketStore) SubpathDetail(rawHops []string) *subpathDetailParts {
 	_, pm := s.getCachedNodesAndPM()
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 
-	// Build the subpath key the same way the index does (lowercase, comma-joined)
+	// The subpath key as Route Patterns counts it (lowercase, comma-joined)
 	spKey := strings.ToLower(strings.Join(rawHops, ","))
 
-	// Direct lookup instead of scanning all packets
-	matchedTxs := s.spTxIndex[spKey]
+	// Under the lock only the hop lists are copied. Finding the
+	// transmissions that hold the subpath, once per occurrence as Route
+	// Patterns counts them, runs after it is released, so a writer waits for
+	// a pointer copy per packet rather than a comparison of every path (#413,
+	// PR #529 review F2).
+	s.mu.RLock()
+	n := len(s.packets)
+	s.mu.RUnlock()
+	all := make([]subpathTxHops, 0, n) // allocated outside the lock
+	s.mu.RLock()
+	for _, tx := range s.packets {
+		if hops := txGetParsedPath(tx); len(hops) >= 2 {
+			all = append(all, subpathTxHops{tx: tx, hops: hops})
+		}
+	}
+	s.mu.RUnlock()
 
+	s.subpathHookAt("match")
+	var hits []subpathTxHops
+	for _, c := range all {
+		for n := subpathOccurrences(c.hops, spKey); n > 0; n-- {
+			hits = append(hits, c)
+		}
+	}
+	all = nil
+
+	// Under the lock again, O(matches): copy what the detail reads of the
+	// matched transmissions. Which transmissions matched, and on which path,
+	// is as of the first copy.
+	s.mu.RLock()
+	matchedTxs := make([]*StoreTx, len(hits))
+	for i, c := range hits {
+		matchedTxs[i] = c.tx
+	}
 	// Hop-disambiguation context: union over the matched txs that produced
 	// this subpath. This is the right scope — those are the packets that
 	// witnessed the requested hop sequence. See #1197.
 	contextPubkeys := buildAggregateHopContextPubkeys(matchedTxs, pm)
+	matched := make([]subpathMatch, len(hits))
+	for i, c := range hits {
+		tx, m := c.tx, &matched[i]
+		m.firstSeen, m.observerID, m.observerName = tx.FirstSeen, tx.ObserverID, tx.ObserverName
+		if tx.SNR != nil {
+			m.snr, m.hasSNR = *tx.SNR, true
+		}
+		if tx.RSSI != nil {
+			m.rssi, m.hasRSSI = *tx.RSSI, true
+		}
+		m.hops = c.hops
+		// Per-tx context so the resolver picks the right candidate when
+		// prefixes are ambiguous (#1197); a tx's occurrences are adjacent
+		// and share it.
+		if i > 0 && hits[i-1].tx == tx {
+			m.hopContext = matched[i-1].hopContext
+		} else {
+			m.hopContext = buildHopContextPubkeys(tx, pm)
+		}
+	}
+	s.mu.RUnlock()
+
 	// Hoist atomic graph.Load() once for the whole request (PR #1208
 	// carmack #1) — used by the rawHops loop AND the matched-tx loop below.
 	graph := s.graph.Load()
@@ -11560,10 +11595,10 @@ func (s *PacketStore) SubpathDetail(rawHops []string) *subpathDetailParts {
 		pm:          pm,
 		graph:       graph,
 		hopContext:  contextPubkeys,
-		matchCount:  len(matchedTxs),
+		matchCount:  len(matched),
 		hourBuckets: make([]int, 24),
 	}
-	// Resolve the requested hops (copies: the parts outlive the lock)
+	// Resolve the requested hops (copies: the parts outlive the request)
 	for i, hop := range rawHops {
 		if r, _, _ := pm.resolveWithContext(hop, contextPubkeys, graph); r != nil {
 			n := *r
@@ -11573,8 +11608,8 @@ func (s *PacketStore) SubpathDetail(rawHops []string) *subpathDetailParts {
 
 	parents := map[string]*subpathDetailParent{}
 	observers := map[[2]string]int{} // keyed by observer id and name
-	for _, tx := range matchedTxs {
-		ts := tx.FirstSeen
+	for _, m := range matched {
+		ts := m.firstSeen
 		if ts != "" {
 			if p.firstSeen == "" || ts < p.firstSeen {
 				p.firstSeen = ts
@@ -11590,27 +11625,24 @@ func (s *PacketStore) SubpathDetail(rawHops []string) *subpathDetailParts {
 				p.hourBuckets[t.Hour()]++
 			}
 		}
-		if tx.SNR != nil {
-			p.snrSum += *tx.SNR
+		if m.hasSNR {
+			p.snrSum += m.snr
 			p.snrCount++
 		}
-		if tx.RSSI != nil {
-			p.rssiSum += *tx.RSSI
+		if m.hasRSSI {
+			p.rssiSum += m.rssi
 			p.rssiCount++
 		}
-		if tx.ObserverName != "" {
-			observers[[2]string{tx.ObserverID, tx.ObserverName}]++
+		if m.observerName != "" {
+			observers[[2]string{m.observerID, m.observerName}]++
 		}
 
-		// Full parent path (resolved). Per-tx context so the resolver picks
-		// the right candidate when prefixes are ambiguous. See #1197.
-		txCtx := buildHopContextPubkeys(tx, pm)
-		hops := txGetParsedPath(tx)
-		pathHops := make([]subpathDetailHop, len(hops))
-		key := make([]string, 0, 2*len(hops))
-		for i, h := range hops {
+		// Full parent path (resolved), with the tx's own hop context.
+		pathHops := make([]subpathDetailHop, len(m.hops))
+		key := make([]string, 0, 2*len(m.hops))
+		for i, h := range m.hops {
 			pathHops[i].raw = h
-			if r, _, _ := pm.resolveWithContext(h, txCtx, graph); r != nil {
+			if r, _, _ := pm.resolveWithContext(h, m.hopContext, graph); r != nil {
 				pathHops[i].pubkey, pathHops[i].name = r.PublicKey, r.Name
 			}
 			key = append(key, h, pathHops[i].pubkey)

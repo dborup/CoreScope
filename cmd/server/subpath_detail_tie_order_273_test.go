@@ -13,15 +13,10 @@ import (
 // at N it was random which tied entries made the cut. These tests compute the
 // detail many times and require the same, fully specified order every time.
 
-// newSubpathDetailStore builds a tie-order store and feeds every packet through
-// the same subpath index that production uses, so GetSubpathDetail resolves its
-// matched transmissions exactly as it would at runtime.
+// newSubpathDetailStore builds a tie-order store; GetSubpathDetail finds its
+// matched transmissions in the packets exactly as it would at runtime.
 func newSubpathDetailStore(packets []*StoreTx) *PacketStore {
-	s := newTieOrderStore(packets)
-	for _, tx := range packets {
-		addTxToSubpathIndexFull(s.spIndex, s.spTxIndex, tx)
-	}
-	return s
+	return newTieOrderStore(packets)
 }
 
 func TestSubpathDetailParentPathsTieOrder_273(t *testing.T) {

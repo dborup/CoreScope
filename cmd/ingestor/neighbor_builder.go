@@ -245,6 +245,7 @@ func (s *Store) buildNeighborEdges() (neighborEdgesBuild, error) {
 	JOIN transmissions t ON t.id = o.transmission_id
 	LEFT JOIN observers obs ON obs.rowid = o.observer_idx
 	WHERE o.timestamp > ?
+	AND o.direction IS NOT 'tx' -- TX is not a reception; NULL legacy rows still count.
 	ORDER BY o.timestamp
 	LIMIT ?`, watermarkEpoch, neighborBuilderMaxBatch)
 	if err != nil {

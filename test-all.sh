@@ -148,6 +148,7 @@ run test-issue-1473-prefix-generator.js
 run test-issue-1770-mobile-row-clamp.js
 run test-issue-1849-trace-hashbytes.js
 run test-node-analytics-hop-chart.js
+run test-page-lifecycle-2248.js
 run test-analytics-hop-depth-ui.js
 run test-channels-ping-bot-reply.js
 run test-channels-observed-path-hash-size.js
