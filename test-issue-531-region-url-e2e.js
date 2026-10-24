@@ -24,11 +24,17 @@
  *      rewrites the URL to #/packets.
  *   6. Back and forward restore each entry's ?region=: the view loads with it
  *      and any request it makes carries it.
+ *   7. A change in the control keeps a ?region= in the hash in step with the
+ *      selection on every view with a control (replaceState, other
+ *      parameters kept), so a stale link value cannot override the choice on
+ *      Back or on reload; picking All removes it.
+ *   8. ?region=All in any case means all regions: one unfiltered request.
  *
  * Mutants: drop the RegionFilter.syncFromUrl() call in app.js's navigate()
  * (1, 2, 3, 6 red); restore Packets' own ?region= handling (3 red); drop the
  * off*() calls in packets/nodes/live destroy() (4, 5 red); notify after every
- * fresh-load region check (1 red: a second load).
+ * fresh-load region check (1 red: a second load); drop the hash write-back
+ * after a control change (7 red); treat All as a code (8 red: two loads).
  *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-531-region-url-e2e.js
  */
@@ -65,8 +71,12 @@ let browser;
 async function openPage(saved) {
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
   await ctx.addInitScript((sel) => {
-    if (sel) localStorage.setItem('meshcore-region-filter', JSON.stringify(sel));
-    else localStorage.removeItem('meshcore-region-filter');
+    // Seeded once per tab, so a reload keeps what the page saved.
+    if (!sessionStorage.getItem('__seeded531')) {
+      sessionStorage.setItem('__seeded531', '1');
+      if (sel) localStorage.setItem('meshcore-region-filter', JSON.stringify(sel));
+      else localStorage.removeItem('meshcore-region-filter');
+    }
     window.__listeners = { region: new Set(), area: new Set() };
     function count(globalName, key) {
       let api;
@@ -133,6 +143,21 @@ function apiCounts(page, from) {
 async function goHash(page, hash) {
   await page.evaluate((h) => { location.hash = h; }, hash);
 }
+
+// Toggles `code` in the view's control, pill bar or dropdown (the menu
+// re-renders closed after each change). el.click() also reaches Live's
+// dropdown, whose menu may sit in a collapsed panel.
+async function pick(page, controlId, code) {
+  await page.waitForSelector('#' + controlId + ' [data-region="' + code + '"]', { state: 'attached', timeout: 15000 });
+  await page.evaluate(([id, c]) => document.querySelector('#' + id + ' [data-region="' + c + '"]').click(), [controlId, code]);
+}
+// From the single selected `from` to the single selected `to`: add, then drop.
+async function switchRegion(page, controlId, from, to) {
+  await pick(page, controlId, to);
+  await pick(page, controlId, from);
+  eq(await shown(page, controlId), [to], 'control after the switch');
+}
+const hashRegions = (page) => page.evaluate(() => new URLSearchParams(location.hash.split('?')[1] || '').getAll('region'));
 
 (async () => {
   browser = await chromium.launch({
@@ -337,6 +362,99 @@ async function goHash(page, hash) {
     since(page, m, /\/api\/channels(\?|$)/).forEach((u) => eq(regionOf(u), 'OAK', '/api/channels after forward'));
     await page.context().close();
   });
+
+  // 7. A control change keeps the hash ?region= in step.
+  const WRITE_BACK = [
+    { name: 'packets', extra: '', control: 'packetsRegionFilter', api: view('packets').api },
+    { name: 'nodes', extra: 'keep=1', control: 'nodesRegionFilter', api: view('nodes').api },
+    { name: 'live', extra: 'keep=1', control: 'liveRegionFilter', api: view('live').api },
+    { name: 'channels', extra: 'keep=1', control: 'chRegionFilter', api: view('channels').api },
+    { name: 'analytics', extra: 'tab=topology', control: 'analyticsRegionFilter', api: /\/api\/analytics\/topology\?/ },
+    { name: 'observers', extra: 'keep=1', control: 'obsRegionFilter', api: null },
+  ];
+  for (const v of WRITE_BACK) {
+    const link = `#/${v.name}?${v.extra ? v.extra + '&' : ''}region=SJC`;
+    await test(`${link} over saved SFO, then OAK in the control: the hash says OAK and a reload keeps it`, async () => {
+      const page = await openPage(['SFO']);
+      await page.goto(`${BASE}/${link}`, { waitUntil: 'domcontentloaded' });
+      eq(await shown(page, v.control), ['SJC'], 'control from the link');
+      await page.waitForTimeout(SETTLE_MS);
+      await switchRegion(page, v.control, 'SJC', 'OAK');
+      eq(await hashRegions(page), ['OAK'], 'hash region after the switch');
+      const hash = await page.evaluate(() => location.hash);
+      assert(hash.startsWith('#/' + v.name + '?'), 'route kept: ' + hash);
+      if (v.extra) {
+        const [k, val] = v.extra.split('=');
+        eq(new URLSearchParams(hash.split('?')[1]).get(k), val, v.extra + ' kept in ' + hash);
+      }
+      eq(await saved(page), ['OAK'], 'saved selection');
+      await page.waitForTimeout(SETTLE_MS);
+      const r = mark(page);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      if (v.api) eq(regionOf(await firstRequest(page, r, v.api)), 'OAK', 'first request after reload');
+      eq(await shown(page, v.control), ['OAK'], 'control after reload');
+      eq(await saved(page), ['OAK'], 'saved after reload');
+      eq(page.__errors, [], 'page errors');
+      await page.context().close();
+    });
+  }
+
+  await test('fresh #/nodes?region=SJC, OAK in the control, Channels, Back: OAK, not SJC', async () => {
+    const page = await openPage(['SFO']);
+    await page.goto(`${BASE}/#/nodes?region=SJC`, { waitUntil: 'domcontentloaded' });
+    eq(await shown(page, 'nodesRegionFilter'), ['SJC'], 'control from the link');
+    await page.waitForTimeout(SETTLE_MS);
+    await switchRegion(page, 'nodesRegionFilter', 'SJC', 'OAK');
+    // Checked last, so a failure first shows what the user sees after Back.
+    const afterSwitch = await page.evaluate(() => location.hash);
+    await page.waitForTimeout(SETTLE_MS);
+    let m = mark(page);
+    await goHash(page, '#/channels');
+    eq(regionOf(await firstRequest(page, m, view('channels').api)), 'OAK', 'channels');
+    await page.waitForTimeout(SETTLE_MS);
+    m = mark(page);
+    await page.goBack();
+    eq(await shown(page, 'nodesRegionFilter'), ['OAK'], 'control after back');
+    eq(await page.evaluate(() => RegionFilter.getRegionParam()), 'OAK', 'selection after back');
+    eq(await saved(page), ['OAK'], 'saved after back');
+    await page.waitForTimeout(SETTLE_MS);
+    since(page, m, /\/api\/nodes\?/).forEach((u) => eq(regionOf(u), 'OAK', '/api/nodes after back'));
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    eq(await shown(page, 'nodesRegionFilter'), ['OAK'], 'control after reload');
+    eq(afterSwitch, '#/nodes?region=OAK', 'hash after the switch');
+    await page.context().close();
+  });
+
+  await test('fresh #/nodes?region=SJC, All in the control: region leaves the hash; Back and reload keep All', async () => {
+    const page = await openPage(['SFO']);
+    await page.goto(`${BASE}/#/nodes?keep=1&region=SJC`, { waitUntil: 'domcontentloaded' });
+    eq(await shown(page, 'nodesRegionFilter'), ['SJC'], 'control from the link');
+    await page.waitForTimeout(SETTLE_MS);
+    await pick(page, 'nodesRegionFilter', '__all__');
+    eq(await page.evaluate(() => location.hash), '#/nodes?keep=1', 'hash after All');
+    await goHash(page, '#/channels');
+    await shown(page, 'chRegionFilter');
+    await page.goBack();
+    eq(await shown(page, 'nodesRegionFilter'), 'ALL', 'control after back');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    eq(await shown(page, 'nodesRegionFilter'), 'ALL', 'control after reload');
+    eq(await saved(page), null, 'saved selection');
+    await page.context().close();
+  });
+
+  // 8. ?region=All.
+  for (const [v, all] of [['nodes', 'All'], ['live', 'aLL']]) {
+    await test(`fresh #/${v}?region=${all} over saved SFO: all regions, one unfiltered request`, async () => {
+      const page = await openPage(['SFO']);
+      await page.goto(`${BASE}/#/${v}?region=${all}`, { waitUntil: 'domcontentloaded' });
+      await firstRequest(page, 0, view(v).api);
+      eq(await shown(page, view(v).control), 'ALL', 'control');
+      await page.waitForTimeout(SETTLE_MS);
+      eq(since(page, 0, view(v).api).map(regionOf), [null], view(v).api + ' regions');
+      eq(await saved(page), null, 'saved selection');
+      await page.context().close();
+    });
+  }
 
   await browser.close();
   console.log(`\n${passed} passed, ${failed} failed`);

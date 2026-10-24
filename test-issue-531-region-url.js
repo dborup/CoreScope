@@ -16,6 +16,14 @@
  *     told once; a saved selection with no link keeps today's silent cleanup.
  *   - app.js's router calls syncFromUrl after the old page's destroy() and
  *     before the new page's init().
+ *   - "All" in any case is the server's catch-all (#770): a link with only
+ *     that selects all regions with no request carrying it; next to real
+ *     codes it is dropped.
+ *   - A change in the control keeps a `region` parameter already in the hash
+ *     in step with the selection (replaceState, other parameters and the
+ *     route kept; removed for all regions) before listeners hear of it, so a
+ *     stale link value cannot override the choice on Back or reload. A hash
+ *     without one is left alone.
  *
  * Usage: node test-issue-531-region-url.js
  */
@@ -38,9 +46,17 @@ function load(opts) {
   const store = {};
   if (opts.stored) store['meshcore-region-filter'] = JSON.stringify(opts.stored);
   let fetches = 0;
+  const replaced = [];
   const ctx = {
     window: {},
     document: { addEventListener() {}, removeEventListener() {} },
+    location: { hash: opts.hash || '' },
+    history: {
+      state: null,
+      replaceState(state, title, url) { replaced.push(url); ctx.location.hash = url; },
+      pushState() { throw new Error('pushState must not be used'); },
+    },
+    URLSearchParams,
     localStorage: {
       getItem: (k) => (k in store ? store[k] : null),
       setItem: (k, v) => { store[k] = String(v); },
@@ -53,12 +69,17 @@ function load(opts) {
   ctx.window = ctx;
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(__dirname + '/public/region-filter.js', 'utf8'), ctx, { filename: 'region-filter.js' });
+  vm.runInContext(fs.readFileSync(__dirname + '/public/url-state.js', 'utf8'), ctx, { filename: 'url-state.js' });
   const RF = ctx.RegionFilter;
   const calls = [];
-  RF.onChange((sel) => calls.push(sel ? Array.from(sel) : null));
+  const hashAtNotify = [];
+  RF.onChange((sel) => { calls.push(sel ? Array.from(sel) : null); hashAtNotify.push(ctx.location.hash); });
   const container = { innerHTML: '', style: {}, onclick: null, querySelector: () => ({ setAttribute() {} }) };
-  return { RF, store, calls, container, fetches: () => fetches };
+  return { RF, store, calls, container, ctx, replaced, hashAtNotify, fetches: () => fetches };
 }
+// A click on a region pill in `container` (the pill bar: four regions).
+const click = (container, code) => container.onclick({ target: { closest: () => ({ dataset: { region: code } }) } });
+const hashParams = (hash) => new URLSearchParams(String(hash).split('?')[1] || '');
 const saved = (store) => (store['meshcore-region-filter'] ? JSON.parse(store['meshcore-region-filter']) : null);
 const sync = (RF, hash) => { if (typeof RF.syncFromUrl !== 'function') throw new Error('RegionFilter.syncFromUrl is missing'); return RF.syncFromUrl(hash); };
 
@@ -260,6 +281,113 @@ test('a click in the control still notifies once', async () => {
   await t.RF.init(container);
   container.onclick({ target: { closest: () => ({ dataset: { region: 'SJC' } }) } });
   assert.deepStrictEqual(t.calls, [['SJC']]);
+});
+
+section('\n=== #531 ?region=All (the server\'s #770 sentinel) ===');
+
+test('?region=All in any case means all regions: the saved selection is cleared, listeners told once', async () => {
+  for (const v of ['All', 'ALL', 'all', '%20aLl%20', 'All,all']) {
+    const t = load({ stored: ['SFO'] });
+    await t.RF.init(t.container);
+    assert.strictEqual(sync(t.RF, '#/nodes?region=' + v), true, v);
+    assert.strictEqual(t.RF.getSelected(), null, v);
+    assert.strictEqual(t.RF.regionQueryString(), '', v);
+    assert.strictEqual(saved(t.store), null, v);
+    assert.deepStrictEqual(t.calls, [null], v);
+  }
+});
+
+test('fresh load: ?region=All in any case sends no region and notifies nobody when regions load', async () => {
+  for (const v of ['All', 'ALL', 'all', '%20aLl%20']) {
+    const t = load({ stored: ['SFO'] });
+    sync(t.RF, '#/nodes?region=' + v);
+    assert.strictEqual(t.RF.regionQueryString(), '', v + ': before regions load');
+    t.calls.length = 0;
+    await t.RF.init(t.container);
+    assert.strictEqual(t.RF.getSelected(), null, v);
+    assert.deepStrictEqual(t.calls, [], v + ': no second load after regions load');
+  }
+});
+
+test('?region=All with all regions already selected is a no-op', async () => {
+  const t = load();
+  await t.RF.init(t.container);
+  assert.strictEqual(sync(t.RF, '#/nodes?region=all'), false);
+  assert.deepStrictEqual(t.calls, []);
+});
+
+test('All next to real codes is dropped, as the server does', async () => {
+  const t = load({ stored: ['SFO'] });
+  sync(t.RF, '#/nodes?region=SJC,All,OAK');
+  assert.strictEqual(t.RF.regionQueryString(), '&region=' + encodeURIComponent('SJC,OAK'));
+});
+
+section('\n=== #531 a change in the control keeps the hash ?region= in step ===');
+
+test('a change rewrites the hash region with replaceState and keeps the other parameters', async () => {
+  const t = load({ stored: ['SFO'], hash: '#/analytics?tab=topology&region=SJC&window=24h' });
+  sync(t.RF, t.ctx.location.hash);
+  await t.RF.init(t.container);
+  click(t.container, 'OAK');
+  const p = hashParams(t.ctx.location.hash);
+  assert.ok(t.ctx.location.hash.startsWith('#/analytics?'), t.ctx.location.hash);
+  assert.strictEqual(p.get('region'), 'SJC,OAK');
+  assert.strictEqual(p.get('tab'), 'topology');
+  assert.strictEqual(p.get('window'), '24h');
+  assert.strictEqual(t.replaced.length, 1, 'one replaceState');
+  click(t.container, 'SJC');
+  assert.strictEqual(hashParams(t.ctx.location.hash).get('region'), 'OAK');
+  // A reload reads the hash again: the choice stands.
+  assert.strictEqual(sync(t.RF, t.ctx.location.hash), false);
+  assert.deepStrictEqual(Array.from(t.RF.getSelected()), ['OAK']);
+});
+
+test('a change keeps the route subpath', async () => {
+  const t = load({ hash: '#/nodes/abc%20def?region=SJC' });
+  sync(t.RF, t.ctx.location.hash);
+  await t.RF.init(t.container);
+  click(t.container, 'OAK');
+  assert.strictEqual(t.ctx.location.hash.split('?')[0], '#/nodes/abc%20def');
+  assert.strictEqual(hashParams(t.ctx.location.hash).get('region'), 'SJC,OAK');
+});
+
+test('a change to all regions removes region from the hash', async () => {
+  const t = load({ stored: ['SFO'], hash: '#/live?node=abc&region=SJC' });
+  sync(t.RF, t.ctx.location.hash);
+  await t.RF.init(t.container);
+  click(t.container, '__all__');
+  assert.strictEqual(t.ctx.location.hash, '#/live?node=abc');
+  assert.strictEqual(sync(t.RF, t.ctx.location.hash), false, 'a reload keeps all regions');
+  assert.strictEqual(t.RF.getSelected(), null);
+});
+
+test('repeated, empty or unknown-only region parameters are replaced too', async () => {
+  for (const hash of ['#/nodes?region=SJC&region=MRY', '#/nodes?region=', '#/nodes?region=XXX']) {
+    const t = load({ hash });
+    sync(t.RF, hash);
+    await t.RF.init(t.container);
+    click(t.container, 'OAK');
+    assert.deepStrictEqual(hashParams(t.ctx.location.hash).getAll('region'), [t.RF.getRegionParam()], hash);
+  }
+});
+
+test('listeners see the updated hash', async () => {
+  const t = load({ hash: '#/nodes?region=SJC' });
+  sync(t.RF, t.ctx.location.hash);
+  await t.RF.init(t.container);
+  t.hashAtNotify.length = 0;
+  click(t.container, 'OAK');
+  assert.deepStrictEqual(t.hashAtNotify.map((h) => hashParams(h).get('region')), ['SJC,OAK']);
+});
+
+test('a hash without a region parameter is left alone', async () => {
+  for (const hash of ['#/nodes', '#/channels/abc', '#/analytics?tab=topology']) {
+    const t = load({ hash });
+    await t.RF.init(t.container);
+    click(t.container, 'OAK');
+    assert.strictEqual(t.ctx.location.hash, hash);
+    assert.deepStrictEqual(t.replaced, [], hash);
+  }
 });
 
 section('\n=== #531 app.js router: sync between destroy() and init() ===');
