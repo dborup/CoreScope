@@ -811,6 +811,7 @@ func TestAllEndpointsReturn200(t *testing.T) {
 		{"/api/config/cache", http.StatusOK},
 		{"/api/config/client", http.StatusOK},
 		{"/api/config/regions", http.StatusOK},
+		{"/api/config/regions/groups", http.StatusOK},
 		{"/api/config/theme", http.StatusOK},
 		{"/api/config/map", http.StatusOK},
 		{"/api/packets?limit=5", http.StatusOK},

@@ -4,6 +4,7 @@
 (function () {
   var LS_KEY = 'meshcore-region-filter';
   var _regions = {};       // { code: label }
+  var _groups = [];        // #416: [{ name, codes[] }] quick picks, [] = none
   var _selected = null;    // Set of selected region codes, null = all
   var _listeners = [];
   var _container = null;
@@ -27,9 +28,17 @@
 
   _selected = loadFromStorage();
 
-  /** Fetch regions from server */
+  /** Fetch regions from server.
+   *  #416: the optional quick-pick groups come from their own endpoint,
+   *  asked for in parallel so the groups cost no extra round trip, and with
+   *  its own failure path — a deployment whose server predates the endpoint,
+   *  or an operator who configured no groups, must get exactly the control
+   *  this component rendered before. */
   async function fetchRegions() {
     if (_loaded) return _regions;
+    var groupsReq = fetch('/api/config/regions/groups')
+      .then(function (r) { return r.json(); })
+      .catch(function () { return []; });
     try {
       var data = await fetch('/api/config/regions').then(function (r) { return r.json(); });
       _regions = data || {};
@@ -45,7 +54,106 @@
     } catch (e) {
       _regions = {};
     }
+    // No try/catch here on purpose: a failed request, a non-JSON body and a
+    // body that is not a list of groups are all turned into [] by the
+    // request's own catch and by normalizeGroups, so a swallow-everything
+    // wrapper would only hide a real defect in one of them.
+    _groups = normalizeGroups(await groupsReq);
     return _regions;
+  }
+
+  /**
+   * #416: the groups the control will offer, from the server's answer.
+   *
+   * The server already drops malformed entries and codes no observer
+   * reports, so this is a guard rather than a second implementation of the
+   * rules: a response that is not a list of {name, codes[]} is ignored, and
+   * every code is matched against the region list this component just
+   * loaded. That last step is what makes the two parallel responses safe to
+   * combine — a code can disappear between them (the region list is partly
+   * the set of observer IATAs in the database), and a quick pick for a code
+   * no pill offers would be a filter the user cannot undo by clicking.
+   *
+   * Codes take the spelling the region list uses, so a group's selection
+   * compares equal to one assembled by clicking pills. A group left with no
+   * code is dropped, not rendered as a button that does nothing.
+   */
+  function normalizeGroups(list) {
+    if (!Array.isArray(list)) return [];
+    var byUpper = {};
+    Object.keys(_regions).forEach(function (c) { byUpper[String(c).toUpperCase()] = c; });
+    var out = [];
+    list.forEach(function (g) {
+      if (!g || typeof g.name !== 'string' || !Array.isArray(g.codes)) return;
+      var seen = {};
+      var codes = [];
+      g.codes.forEach(function (c) {
+        var known = byUpper[String(c).trim().toUpperCase()];
+        if (!known || seen[known]) return;
+        seen[known] = true;
+        codes.push(known);
+      });
+      if (codes.length > 0) out.push({ name: g.name, codes: codes });
+    });
+    return out;
+  }
+
+  /** #416: the groups on offer, as a copy callers cannot mutate. */
+  function getGroups() {
+    return _groups.map(function (g) { return { name: g.name, codes: g.codes.slice() }; });
+  }
+
+  /** Two selections (Set or null for all regions) hold the same regions. */
+  function sameSelection(a, b) {
+    if (!a || !b) return !a && !b;
+    if (a.size !== b.size) return false;
+    var same = true;
+    a.forEach(function (c) { if (!b.has(c)) same = false; });
+    return same;
+  }
+
+  function notify() {
+    var sel = getSelected();
+    _listeners.forEach(function (fn) { fn(sel); });
+  }
+
+  /**
+   * #416: the one place a new selection is saved, rendered and announced, so
+   * a quick pick and a click on a pill travel the same path and a page
+   * refetches once either way.
+   *
+   * An unchanged selection re-renders (the dropdown's own checkboxes have
+   * already toggled themselves, so the markup has to be put back) but saves
+   * nothing and tells nobody: picking the group already shown, or clearing a
+   * filter that is already clear, must not make every listening page fetch
+   * again. Returns whether the selection changed.
+   */
+  function applySelection(next, container) {
+    if (sameSelection(_selected, next)) {
+      render(container);
+      return false;
+    }
+    _selected = next;
+    saveToStorage();
+    render(container);
+    notify();
+    return true;
+  }
+
+  /** #416: what picking `group` selects — its codes, or all regions (null)
+   *  when they are every code there is, the same normalization a pill click
+   *  applies so the two cannot disagree about what "everything" means. */
+  function groupSelection(group) {
+    if (group.codes.length >= Object.keys(_regions).length) return null;
+    return new Set(group.codes);
+  }
+
+  /** #416: select the codes of the group at `index`. An index that names no
+   *  group changes nothing. */
+  function pickGroup(index, container) {
+    var group = _groups[index];
+    if (!group) return;
+    applySelection(groupSelection(group), container);
   }
 
   /** Get selected regions as array, or null if all */
@@ -68,22 +176,22 @@
 
   /** Handle a region toggle (shared logic for both pill and dropdown modes) */
   function toggleRegion(region, codes, container) {
+    var next;
     if (region === '__all__') {
-      _selected = null;
+      next = null;
+    } else if (!_selected) {
+      next = new Set([region]);
     } else {
-      if (!_selected) {
-        _selected = new Set([region]);
-      } else if (_selected.has(region)) {
-        _selected.delete(region);
-        if (_selected.size === 0) _selected = null;
+      next = new Set(_selected);
+      if (next.has(region)) {
+        next.delete(region);
+        if (next.size === 0) next = null;
       } else {
-        _selected.add(region);
+        next.add(region);
       }
-      if (_selected && _selected.size === codes.length) _selected = null;
+      if (next && next.size === codes.length) next = null;
     }
-    saveToStorage();
-    render(container);
-    _listeners.forEach(function (fn) { fn(getSelected()); });
+    applySelection(next, container);
   }
 
   // #333: region codes include observer IATA values from MQTT, so every code
@@ -99,8 +207,8 @@
     return sel.length + ' Regions';
   }
 
-  /** Render pill bar mode (≤4 regions) */
-  function renderPills(container, codes) {
+  /** Pill bar mode markup (≤4 regions) */
+  function pillsHtml(codes) {
     var allSelected = !_selected;
     var html = '<div class="region-filter-bar" role="group" aria-label="Region filter">';
     html += '<span class="region-filter-label" id="region-filter-label">Region:</span>';
@@ -113,17 +221,11 @@
         '" data-region="' + escapeHtml(code) + '" role="checkbox" aria-checked="' + !!active + '">' + escapeHtml(label) + '</button>';
     });
     html += '</div>';
-    container.innerHTML = html;
-
-    container.onclick = function (e) {
-      var btn = e.target.closest('[data-region]');
-      if (!btn) return;
-      toggleRegion(btn.dataset.region, codes, container);
-    };
+    return html;
   }
 
-  /** Render dropdown mode (>4 regions) */
-  function renderDropdown(container, codes) {
+  /** Dropdown mode markup (>4 regions) */
+  function dropdownHtml(codes) {
     var allSelected = !_selected;
     var html = '<div class="region-dropdown-wrap" role="group" aria-label="Region filter">';
     html += '<button class="region-dropdown-trigger" aria-haspopup="listbox" aria-expanded="false">' +
@@ -140,8 +242,11 @@
         (active ? ' checked' : '') + '> ' + escapeHtml(label) + '</label>';
     });
     html += '</div></div>';
-    container.innerHTML = html;
+    return html;
+  }
 
+  /** Wire the dropdown control after its markup is in the container. */
+  function wireDropdown(container, codes) {
     var trigger = container.querySelector('.region-dropdown-trigger');
     var menu = container.querySelector('.region-dropdown-menu');
 
@@ -170,6 +275,49 @@
     };
   }
 
+  /** #416: quick-pick row markup, empty when no group is on offer. The codes
+   *  go in the title so the label can stay short without hiding what it
+   *  selects; both slots are escaped (#333) because a group name is operator
+   *  text and the codes are observer IATA values from MQTT. */
+  function quickPicksHtml() {
+    if (_groups.length === 0) return '';
+    var html = '<div class="region-quick-picks" role="group" aria-label="Region quick picks">';
+    _groups.forEach(function (g, i) {
+      var active = sameSelection(_selected, groupSelection(g));
+      html += '<button type="button" class="region-quick-pick' + (active ? ' region-quick-pick-active' : '') +
+        '" data-region-group="' + i + '" aria-pressed="' + active +
+        '" title="' + escapeHtml(g.codes.join(', ')) + '">' + escapeHtml(g.name) + '</button>';
+    });
+    return html + '</div>';
+  }
+
+  /** #416: one delegated handler for the whole container, so the quick picks
+   *  work in both modes without a second listener. In dropdown mode
+   *  [data-region] belongs to the menu's own change handler — handling the
+   *  bubbled click here too would toggle the region twice. */
+  function wireClicks(container, codes, pillMode) {
+    container.onclick = function (e) {
+      var pick = e.target.closest('[data-region-group]');
+      var index = pick && pick.dataset ? pick.dataset.regionGroup : null;
+      if (index != null && /^[0-9]+$/.test(String(index))) {
+        pickGroup(Number(index), container);
+        return;
+      }
+      if (!pillMode) return;
+      var btn = e.target.closest('[data-region]');
+      if (!btn) return;
+      toggleRegion(btn.dataset.region, codes, container);
+    };
+  }
+
+  /** #416: the container only wraps onto a second line while it has a
+   *  quick-pick row to wrap (public/style.css). */
+  function setQuickPickClass(container, on) {
+    if (!container.classList) return;
+    if (on) container.classList.add('has-region-quick-picks');
+    else container.classList.remove('has-region-quick-picks');
+  }
+
   /** Render the filter bar into a container element */
   function render(container) {
     // Clean up previous outside-click listener if any
@@ -179,15 +327,16 @@
     if (codes.length < 2) {
       container.innerHTML = '';
       container.style.display = 'none';
+      setQuickPickClass(container, false);
       return;
     }
     container.style.display = '';
 
-    if (codes.length > 4 || container._forceDropdown) {
-      renderDropdown(container, codes);
-    } else {
-      renderPills(container, codes);
-    }
+    var dropdown = codes.length > 4 || container._forceDropdown;
+    container.innerHTML = (dropdown ? dropdownHtml(codes) : pillsHtml(codes)) + quickPicksHtml();
+    if (dropdown) wireDropdown(container, codes);
+    wireClicks(container, codes, !dropdown);
+    setQuickPickClass(container, _groups.length > 0);
   }
 
   /** Subscribe to selection changes. Callback receives selected array or null */
@@ -271,7 +420,8 @@
     onChange: onChange,
     offChange: offChange,
     fetchRegions: fetchRegions,
-    setSelected: setSelected
+    setSelected: setSelected,
+    getGroups: getGroups
   };
   window.RegionShowAll = {
     get: showAllGet,

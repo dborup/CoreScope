@@ -183,6 +183,7 @@ run test-analytics-sorting-236.js
 run test-channels-merge-1498-unit.js
 run test-issue-1518-home-url.js
 run test-live-region-filter.js
+run test-issue-416-region-quick-picks.js
 run test-issue-1136-observer-iata-map.js
 run test-channel-issue-1101.js
 run test-observer-iata-1188.js

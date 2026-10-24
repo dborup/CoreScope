@@ -313,6 +313,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/config/cache", s.handleConfigCache).Methods("GET")
 	r.HandleFunc("/api/config/client", s.handleConfigClient).Methods("GET")
 	r.HandleFunc("/api/config/regions", s.handleConfigRegions).Methods("GET")
+	r.HandleFunc("/api/config/regions/groups", s.handleConfigRegionGroups).Methods("GET")
 	r.HandleFunc("/api/regions/observed", s.handleRegionsObserved).Methods("GET")
 	r.HandleFunc("/api/config/theme", s.handleConfigTheme).Methods("GET")
 	r.HandleFunc("/api/config/map", s.handleConfigMap).Methods("GET")
@@ -771,7 +772,10 @@ func (s *Server) handleGPSSanity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-func (s *Server) handleConfigRegions(w http.ResponseWriter, r *http.Request) {
+// effectiveRegions is the region code → label map the frontend filters by:
+// the configured `regions` entries plus every observer IATA in the database,
+// which stands in for its own label when the operator named none.
+func (s *Server) effectiveRegions() map[string]string {
 	regions := make(map[string]string)
 	for k, v := range s.cfg.Regions {
 		regions[k] = v
@@ -782,7 +786,22 @@ func (s *Server) handleConfigRegions(w http.ResponseWriter, r *http.Request) {
 			regions[c] = c
 		}
 	}
-	writeJSON(w, regions)
+	return regions
+}
+
+func (s *Server) handleConfigRegions(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.effectiveRegions())
+}
+
+// handleConfigRegionGroups serves the optional named quick-pick groups (#416)
+// as a sibling of /api/config/regions rather than a field inside it: that
+// endpoint's flat code → label object is a documented contract
+// (docs/api-spec.md, proto/config.proto RegionsResponse) and every existing
+// consumer reads it as one, so the groups get their own path and the map
+// stays untouched. Serves [] when the operator configured none, which is
+// what the region filter needs to render exactly as before.
+func (s *Server) handleConfigRegionGroups(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, regionGroupsForRegions(s.cfg.RegionGroups, s.effectiveRegions()))
 }
 
 func (s *Server) handleConfigTheme(w http.ResponseWriter, r *http.Request) {
