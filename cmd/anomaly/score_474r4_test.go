@@ -173,6 +173,30 @@ func TestScoreRealLabelsWithNoSenderIsTheStrictCount(t *testing.T) {
 	}
 }
 
+// With labelled senders and no episode, the real-sender recall is 0/S, not
+// 0/0: it is written as 0, and every sender is an undetected per_incident
+// row. Only "no labelled sender" leaves the field out (round-4 draft §6).
+func TestScoreRealLabelsWithSendersAndNoEpisodeWritesRecall(t *testing.T) {
+	dir := t.TempDir()
+	labels := r4RealLabels(t, dir, 0, 24*time.Hour, r4Sender{"7f", time.Hour, 2 * time.Hour, time.Minute})
+	report := craftReport(t, dir)
+	code, m, out, stderr := r4Score(t, report, "-real-labels", labels)
+	if code != exitOK {
+		t.Fatalf("exit %d: %s", code, stderr)
+	}
+	if m.Episodes != 0 || m.FalsePositives != 0 || m.StrictFalsePositives == nil || *m.StrictFalsePositives != 0 {
+		t.Fatalf("%+v", m)
+	}
+	recall, ok := r4Fields(t, out)["recall"]
+	if !ok || string(recall) != "0" {
+		t.Errorf("recall with 1 labelled sender and 0 episodes: %q (present %v), want 0: %s", recall, ok, out)
+	}
+	if m.Incidents != 1 || m.IncidentsDetected != 0 || len(m.PerIncident) != 1 ||
+		m.PerIncident[0].Bot != "real-1" || m.PerIncident[0].Detected {
+		t.Errorf("per_incident %+v, want one undetected real-1", m.PerIncident)
+	}
+}
+
 // r4Fields returns the top-level fields of a metrics file.
 func r4Fields(t *testing.T, out string) map[string]json.RawMessage {
 	t.Helper()
