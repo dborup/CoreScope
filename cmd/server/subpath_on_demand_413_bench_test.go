@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"runtime/metrics"
 	"sync"
 	"sync/atomic"
@@ -204,6 +205,49 @@ func BenchmarkSubpathsColdConcurrent_413(b *testing.B) {
 			}
 			b.ReportMetric(float64(peak)/(1<<20), "peak-heap-MB")
 			b.ReportMetric(float64(counts.Load())/float64(b.N), "counts/op")
+		})
+	}
+}
+
+// BenchmarkSubpathDetailWriterWait_413 runs a store writer that takes
+// PacketStore.mu in a loop while subpath-detail requests run (PR #529 review
+// F2). max-writer-wait-µs is the longest it waited for the lock. GC is off
+// while it runs, so a collection's pause does not count as lock time.
+func BenchmarkSubpathDetailWriterWait_413(b *testing.B) {
+	s := bench413Store(b)
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	hot, cold := subpath413DetailKeys(s.packets)
+	for _, c := range []struct {
+		name string
+		hops []string
+	}{{"hot", hot}, {"cold", cold}} {
+		b.Run(c.name, func(b *testing.B) {
+			stop := make(chan struct{})
+			waited := make(chan time.Duration)
+			go func() {
+				var max time.Duration
+				for {
+					select {
+					case <-stop:
+						waited <- max
+						return
+					default:
+					}
+					t0 := time.Now()
+					s.mu.Lock()
+					if w := time.Since(t0); w > max {
+						max = w
+					}
+					s.mu.Unlock()
+					runtime.Gosched()
+				}
+			}()
+			for i := 0; i < b.N; i++ {
+				s.GetSubpathDetail(c.hops)
+			}
+			b.StopTimer()
+			close(stop)
+			b.ReportMetric(float64((<-waited).Microseconds()), "max-writer-wait-µs")
 		})
 	}
 }

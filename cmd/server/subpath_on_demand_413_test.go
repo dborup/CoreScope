@@ -679,6 +679,37 @@ func TestSubpathCountingReleasesStoreLock_413(t *testing.T) {
 			s.mu.Unlock()
 		})
 	}
+
+	// The detail matches the subpath against every packet; that scan must
+	// not hold the lock either (PR #529 review F2), only the copy of the hop
+	// lists before it and of the matched transmissions after it.
+	t.Run("subpath-detail-match", func(t *testing.T) {
+		s := newSubpath413Store(nodes, packets)
+		parked, release := make(chan struct{}), make(chan struct{})
+		s.subpathHook = func(stage string) {
+			if stage == "match" {
+				close(parked)
+				<-release
+			}
+		}
+		done := make(chan struct{})
+		go func() { defer close(done); s.GetSubpathDetail([]string{"aa", "bb"}) }()
+		defer func() { <-done }()
+		defer close(release)
+		select {
+		case <-parked:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the detail never reached matching")
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for !s.mu.TryLock() {
+			if time.Now().After(deadline) {
+				t.Fatal("a store writer could not take PacketStore.mu while the detail matched: matching runs under the lock")
+			}
+			runtime.Gosched()
+		}
+		s.mu.Unlock()
+	})
 }
 
 func allStacks413() string {

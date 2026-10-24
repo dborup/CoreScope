@@ -11496,6 +11496,14 @@ type subpathMatch struct {
 	hopContext               []string
 }
 
+// subpathTxHops is a transmission and its hop list, copied under s.mu for
+// SubpathDetail to match outside it: tx is only read under s.mu, hops is
+// shared with tx (see subpathPath).
+type subpathTxHops struct {
+	tx   *StoreTx
+	hops []string
+}
+
 // SubpathDetail gathers the parts of a subpath detail.
 func (s *PacketStore) SubpathDetail(rawHops []string) *subpathDetailParts {
 	_, pm := s.getCachedNodesAndPM()
@@ -11503,23 +11511,47 @@ func (s *PacketStore) SubpathDetail(rawHops []string) *subpathDetailParts {
 	// The subpath key as Route Patterns counts it (lowercase, comma-joined)
 	spKey := strings.ToLower(strings.Join(rawHops, ","))
 
-	// Under the lock: find the transmissions holding the subpath, once per
-	// occurrence as Route Patterns counts them, and copy what the detail
-	// reads of them (#413).
+	// Under the lock only the hop lists are copied. Finding the
+	// transmissions that hold the subpath, once per occurrence as Route
+	// Patterns counts them, runs after it is released, so a writer waits for
+	// a pointer copy per packet rather than a comparison of every path (#413,
+	// PR #529 review F2).
 	s.mu.RLock()
-	var matchedTxs []*StoreTx
+	n := len(s.packets)
+	s.mu.RUnlock()
+	all := make([]subpathTxHops, 0, n) // allocated outside the lock
+	s.mu.RLock()
 	for _, tx := range s.packets {
-		for n := subpathOccurrences(txGetParsedPath(tx), spKey); n > 0; n-- {
-			matchedTxs = append(matchedTxs, tx)
+		if hops := txGetParsedPath(tx); len(hops) >= 2 {
+			all = append(all, subpathTxHops{tx: tx, hops: hops})
 		}
+	}
+	s.mu.RUnlock()
+
+	s.subpathHookAt("match")
+	var hits []subpathTxHops
+	for _, c := range all {
+		for n := subpathOccurrences(c.hops, spKey); n > 0; n-- {
+			hits = append(hits, c)
+		}
+	}
+	all = nil
+
+	// Under the lock again, O(matches): copy what the detail reads of the
+	// matched transmissions. Which transmissions matched, and on which path,
+	// is as of the first copy.
+	s.mu.RLock()
+	matchedTxs := make([]*StoreTx, len(hits))
+	for i, c := range hits {
+		matchedTxs[i] = c.tx
 	}
 	// Hop-disambiguation context: union over the matched txs that produced
 	// this subpath. This is the right scope — those are the packets that
 	// witnessed the requested hop sequence. See #1197.
 	contextPubkeys := buildAggregateHopContextPubkeys(matchedTxs, pm)
-	matched := make([]subpathMatch, len(matchedTxs))
-	for i, tx := range matchedTxs {
-		m := &matched[i]
+	matched := make([]subpathMatch, len(hits))
+	for i, c := range hits {
+		tx, m := c.tx, &matched[i]
 		m.firstSeen, m.observerID, m.observerName = tx.FirstSeen, tx.ObserverID, tx.ObserverName
 		if tx.SNR != nil {
 			m.snr, m.hasSNR = *tx.SNR, true
@@ -11527,10 +11559,15 @@ func (s *PacketStore) SubpathDetail(rawHops []string) *subpathDetailParts {
 		if tx.RSSI != nil {
 			m.rssi, m.hasRSSI = *tx.RSSI, true
 		}
-		m.hops = txGetParsedPath(tx)
+		m.hops = c.hops
 		// Per-tx context so the resolver picks the right candidate when
-		// prefixes are ambiguous. See #1197.
-		m.hopContext = buildHopContextPubkeys(tx, pm)
+		// prefixes are ambiguous (#1197); a tx's occurrences are adjacent
+		// and share it.
+		if i > 0 && hits[i-1].tx == tx {
+			m.hopContext = matched[i-1].hopContext
+		} else {
+			m.hopContext = buildHopContextPubkeys(tx, pm)
+		}
 	}
 	s.mu.RUnlock()
 
