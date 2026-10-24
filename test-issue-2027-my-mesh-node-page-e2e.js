@@ -126,7 +126,7 @@ async function newHarness(browser) {
   // assertion depends on, among others `box-sizing: border-box`.
   await page.addStyleTag({ path: path.join(PUB, 'style.css') });
   await page.addStyleTag({ path: path.join(PUB, 'home.css') });
-  for (const file of ['app.js', 'roles.js', 'heard-by.js']) await page.addScriptTag({ path: path.join(PUB, file) });
+  for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js']) await page.addScriptTag({ path: path.join(PUB, file) });
   await page.evaluate(() => {
     // No nav shell / other pages exist in this fixture, so the real router
     // (wired to hashchange at app.js load time) would null-deref walking
@@ -137,7 +137,9 @@ async function newHarness(browser) {
     window.fixturePages = {};
     registerPage = (name, mod) => { window.fixturePages[name] = mod; };
     window.__apiCalls = [];
-    window.__apiResponders = {};
+    // #262: the My Mesh grid fetches the bulk observer list once per render.
+    // An empty list is the pre-#262 card shape (no node here is an observer).
+    window.__apiResponders = { '/observers': { data: { observers: [] } } };
     api = async (p) => {
       window.__apiCalls.push(p);
       const r = window.__apiResponders[p];
@@ -393,8 +395,8 @@ function cardFor(page, pubkey) {
       // (or a leaked card click) has already recorded its calls by the time
       // the re-render lands.
       const added = await page.evaluate((n) => window.__apiCalls.slice(n), before);
-      assert.deepEqual(added, ['/nodes/' + encodeURIComponent(ERROR_PK) + '/health?include=advertIntervals'],
-        'exactly one re-render of the remaining node and no health fetch for the removed one');
+      assert.deepEqual(added, ['/observers', '/nodes/' + encodeURIComponent(ERROR_PK) + '/health?include=advertIntervals'],
+        'exactly one re-render of the remaining node (one bulk observer fetch, #262) and no health fetch for the removed one');
       const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]').map((n) => n.pubkey));
       assert.deepEqual(stored, [ERROR_PK], 'only the focused node is removed from My Mesh');
       assert.equal(await page.evaluate(() => location.hash), '', 'removing must not navigate');
@@ -485,7 +487,7 @@ function cardFor(page, pubkey) {
       return route.fulfill({ contentType: 'text/html', body: '<html><body><main id="fixture"></main></body></html>' });
     });
     await page.goto(ORIGIN + '/');
-    for (const file of ['app.js', 'roles.js', 'heard-by.js']) await page.addScriptTag({ path: path.join(PUB, file) });
+    for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js']) await page.addScriptTag({ path: path.join(PUB, file) });
     await page.evaluate(() => {
       window.removeEventListener('hashchange', navigate);
       window.fixturePages = {};

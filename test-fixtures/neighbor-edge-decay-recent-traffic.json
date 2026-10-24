@@ -1,0 +1,29 @@
+{
+  "_comment": "Recent-traffic scenario for neighbor_edges.count decay (#544, PR #574 review F1). Two neighbours of the same node share the hop prefix. A has large old credit and one recent credit; B has a short recent burst. cmd/ingestor/neighbor_edge_decay_test.go credits both edges day by day through the real write path (credits on a day land one hour before that day's decay check; day 0 credits come before the first check, which starts the clock) and asserts the lifetime counts (decay disabled, the default) and the decayed counts (halfLifeDays). cmd/server/neighbor_edge_decay_consumers_test.go feeds both snapshots to the real hop resolver: with lifetime counts the hop resolves to A by affinity, with decayed counts to B. Decay makes affinity follow recent traffic, so an established edge can lose to a newer one.",
+  "halfLifeDays": 7,
+  "days": 60,
+  "edges": [
+    {
+      "neighbor": "A",
+      "credits": [
+        { "day": 0, "n": 400 },
+        { "day": 56, "n": 1 }
+      ],
+      "lastSeenHoursAgo": 97,
+      "lifetimeCount": 401,
+      "decayedCount": 5
+    },
+    {
+      "neighbor": "B",
+      "credits": [
+        { "day": 59, "n": 10 },
+        { "day": 60, "n": 10 }
+      ],
+      "lastSeenHoursAgo": 1,
+      "lifetimeCount": 20,
+      "decayedCount": 17
+    }
+  ],
+  "resolvedLifetime": "A",
+  "resolvedDecayed": "B"
+}

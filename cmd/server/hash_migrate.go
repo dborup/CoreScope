@@ -64,9 +64,11 @@ import (
 // attributed to nothing, where before the merge they were attributed to a
 // ghost transmission that counted the same packet twice.
 
-// hashRekeySweeps counts the passes over all of nodeHashes or byNode that a
-// batch needed. Test observability only: with the resolved-pubkey index on, the
-// keys of a transmission are found through the transmission and none is needed.
+// hashRekeySweeps counts the passes over all of byNode that a batch needed.
+// Test observability only: with the resolved-pubkey index on, the keys of a
+// transmission are found through the transmission and none is needed. A rehash
+// alone needs none either way: byNode's de-dup sets hold transmission IDs,
+// which a rehash keeps (#534).
 var hashRekeySweeps atomic.Int64
 
 // lockHold accumulates how long the migration held the store's write lock, one
@@ -215,11 +217,8 @@ func (s *PacketStore) applyContentHashUpdates(updates []hashUpdate, snapshots ..
 	if len(live) == 0 {
 		return 0, 0
 	}
-	keys := &nodeKeyFinder{s: s}
-	s.rekeyNodeHashes(live, keys)
-
 	m := newHashMerge()
-	m.keys = keys
+	m.keys = &nodeKeyFinder{s: s}
 	for _, u := range live {
 		tx := u.tx
 		if s.byHash[u.oldHash] == tx {
@@ -249,12 +248,12 @@ func (s *PacketStore) applyContentHashUpdates(updates []hashUpdate, snapshots ..
 }
 
 // nodeKeyFinder finds the pubkeys a transmission is indexed under in byNode and
-// nodeHashes without walking those indexes. A transmission is indexed under its
+// nodeTxIDs without walking those indexes. A transmission is indexed under its
 // decoded pubkeys, the relays the path_json fallback resolved (recorded in
 // fallbackByNode) and the relays its observations' resolved_path names; the
 // last are recorded only as hashes, in the resolved-pubkey index, so they are
-// mapped back to pubkeys through the pubkeys nodeHashes holds. That map costs
-// one pass over the keys of nodeHashes (the nodes, not their transmissions),
+// mapped back to pubkeys through the pubkeys nodeTxIDs holds. That map costs
+// one pass over the keys of nodeTxIDs (the nodes, not their transmissions),
 // built on first use and only when a transmission of the batch has resolved
 // relays.
 type nodeKeyFinder struct {
@@ -279,8 +278,8 @@ func (f *nodeKeyFinder) keys(tx *StoreTx) []string {
 	out = append(out, f.s.fallbackByNode[tx]...)
 	if rev := f.s.resolvedPubkeyReverse[tx.ID]; len(rev) > 0 {
 		if f.byHash == nil {
-			f.byHash = make(map[uint64][]string, len(f.s.nodeHashes))
-			for pk := range f.s.nodeHashes {
+			f.byHash = make(map[uint64][]string, len(f.s.nodeTxIDs))
+			for pk := range f.s.nodeTxIDs {
 				h := resolvedPubkeyHash(pk)
 				f.byHash[h] = append(f.byHash[h], pk)
 			}
@@ -290,53 +289,6 @@ func (f *nodeKeyFinder) keys(tx *StoreTx) []string {
 		}
 	}
 	return out
-}
-
-// rekeyNodeHashes renames the hash keys of s.nodeHashes. nodeHashes[pubkey] is
-// the set of hashes of the transmissions byNode[pubkey] holds; a transmission
-// that changes hash must change its key in every set it is in, or a later
-// observation of it is indexed a second time and eviction, which removes the
-// key by the transmission's current hash, leaves the old one behind.
-//
-// The keys of each transmission are found through the transmission
-// (nodeKeyFinder), so a batch costs what the batch holds. Only with the
-// resolved-pubkey index off, where a transmission's resolved relays are
-// recorded nowhere, does it fall back to one pass over all of nodeHashes.
-func (s *PacketStore) rekeyNodeHashes(updates []hashUpdate, keys *nodeKeyFinder) {
-	if !keys.usable() {
-		renames := make(map[string]string, len(updates))
-		for _, u := range updates {
-			renames[u.oldHash] = u.newHash
-		}
-		s.rekeyNodeHashesSweep(renames)
-		return
-	}
-	for _, u := range updates {
-		for _, pk := range keys.keys(u.tx) {
-			if hashes := s.nodeHashes[pk]; hashes[u.oldHash] {
-				delete(hashes, u.oldHash)
-				hashes[u.newHash] = true
-			}
-		}
-	}
-}
-
-// rekeyNodeHashesSweep is the fallback: one pass over all of nodeHashes.
-func (s *PacketStore) rekeyNodeHashesSweep(renames map[string]string) {
-	hashRekeySweeps.Add(1)
-	var moved []string
-	for _, hashes := range s.nodeHashes {
-		moved = moved[:0]
-		for h := range hashes {
-			if _, ok := renames[h]; ok {
-				moved = append(moved, h)
-			}
-		}
-		for _, h := range moved {
-			delete(hashes, h)
-			hashes[renames[h]] = true
-		}
-	}
 }
 
 // moveObservations moves loser's observations to winner, dropping the ones
@@ -519,12 +471,11 @@ func (s *PacketStore) finishHashMerge(m *hashMerge, metadata pathNodeSnapshot) i
 }
 
 // removeTxsFromByNode removes the given transmissions from the byNode lists
-// and rebuilds nodeHashes for each list it changed, from the transmissions the
-// list still holds: a duplicate and its survivor share one hash after the
-// merge, so the key cannot be deleted by hash without also dropping the
-// survivor's, and a key the duplicate alone held must go. pks are the pubkeys
-// the transmissions are indexed under (nodeKeyFinder); nil means unknown, and
-// every list is looked at.
+// and their IDs from those lists' de-dup sets. A duplicate and its survivor
+// share one hash after the merge but never an ID, so the duplicate's entry
+// goes and the survivor's stays. pks are the pubkeys the transmissions are
+// indexed under (nodeKeyFinder); nil means unknown, and every list is looked
+// at.
 func (s *PacketStore) removeTxsFromByNode(remove map[*StoreTx]bool, pks map[string]struct{}) {
 	one := func(pk string) {
 		list := s.byNode[pk]
@@ -532,7 +483,7 @@ func (s *PacketStore) removeTxsFromByNode(remove map[*StoreTx]bool, pks map[stri
 		for _, t := range list {
 			if remove[t] {
 				hit = true
-				break
+				s.unlistNodeTx(pk, t)
 			}
 		}
 		if !hit {
@@ -541,15 +492,9 @@ func (s *PacketStore) removeTxsFromByNode(remove map[*StoreTx]bool, pks map[stri
 		kept := slices.DeleteFunc(list, func(t *StoreTx) bool { return remove[t] })
 		if len(kept) == 0 {
 			delete(s.byNode, pk)
-			delete(s.nodeHashes, pk)
 			return
 		}
 		s.byNode[pk] = kept
-		hashes := make(map[string]bool, len(kept))
-		for _, t := range kept {
-			hashes[t.Hash] = true
-		}
-		s.nodeHashes[pk] = hashes
 	}
 	if pks != nil {
 		for pk := range pks {

@@ -548,9 +548,12 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 
+	// Register before the listener binds (#567): once /api/healthz answers, a
+	// SIGTERM must reach this handler. Registered inside the goroutine, it
+	// could arrive first and take Go's default action (exit -1, no shutdown).
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		sig := <-sigCh
 		log.Printf("[server] received %v, shutting down...", sig)
 

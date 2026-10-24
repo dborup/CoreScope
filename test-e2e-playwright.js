@@ -571,34 +571,41 @@ async function run() {
     assert(!navVersionBadge, 'version-badge should not be in the navbar (moved to Perf dashboard)');
     const navEngineBadge = await page.$('#navStats .engine-badge');
     assert(!navEngineBadge, 'engine-badge should not be in the navbar (moved to Perf dashboard)');
-    // Check if health API exposes version info
-    const hasVersionData = await page.evaluate(async () => {
-      try {
-        const res = await fetch('/api/health');
-        const data = await res.json();
-        return !!(data.version || data.commit);
-      } catch { return false; }
+    // The server resolves version/commit from ldflags, .git-commit or
+    // `git rev-parse` in its cwd; without any of them both read "unknown" and
+    // the card is deliberately hidden, so the card used to depend on where
+    // the server was started (#567). Serve fixed values through the real
+    // /api/health response instead. uptimeHuman, which the Uptime card shows,
+    // marks which response the overview was rendered from.
+    let served = null;
+    await page.route('**/api/health', async route => {
+      const res = await route.fetch();
+      await route.fulfill({ response: res, json: { ...(await res.json()), ...served } });
     });
-    if (!hasVersionData) {
-      console.log('    ⏭️  Server does not expose version/commit in /api/health — perf card test skipped');
-      return;
+    const versionCardAfter = async (health, reload) => {
+      served = health;
+      if (reload) await page.reload({ waitUntil: 'domcontentloaded' });
+      else await page.goto(`${BASE}/#/perf`, { waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(uptime => Array.from(document.querySelectorAll('.perf-card'))
+        .some(c => c.querySelector('.perf-label')?.textContent.trim() === 'Uptime' &&
+          c.querySelector('.perf-num')?.textContent.trim() === uptime), health.uptimeHuman, { timeout: 10000 });
+      return page.evaluate(() => {
+        const label = Array.from(document.querySelectorAll('.perf-card .perf-label'))
+          .find(el => el.textContent.trim() === 'Version');
+        if (!label) return null;
+        const num = label.closest('.perf-card').querySelector('.perf-num, .perf-num--small');
+        return num ? num.textContent.trim() : '';
+      });
+    };
+    try {
+      const hidden = await versionCardAfter({ version: 'unknown', commit: 'unknown', uptimeHuman: 'e2e-567-unknown' }, false);
+      assert(hidden === null, `Version card must be hidden when version and commit are unknown, got "${hidden}"`);
+      const shown = await versionCardAfter({ version: 'v9.9.9-e2e', commit: '0123456789abcdef', uptimeHuman: 'e2e-567-known' }, true);
+      assert(shown !== null, 'Version perf-card not found on #/perf');
+      assert(shown === 'v9.9.9-e2e · 01234567', `Version card text = "${shown}", want "v9.9.9-e2e · 01234567"`);
+    } finally {
+      await page.unroute('**/api/health');
     }
-    // Version card should appear on the Perf dashboard
-    await page.goto(`${BASE}/#/perf`, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => {
-      const cards = document.querySelectorAll('.perf-card .perf-label');
-      return Array.from(cards).some(el => el.textContent.trim() === 'Version');
-    }, { timeout: 10000 });
-    // waitForFunction already confirmed the Version label exists; just grab the num text
-    const versionNumText = await page.evaluate(() => {
-      const labels = document.querySelectorAll('.perf-card .perf-label');
-      const label = Array.from(labels).find(el => el.textContent.trim() === 'Version');
-      if (!label) return null;
-      const num = label.closest('.perf-card').querySelector('.perf-num, .perf-num--small');
-      return num ? num.textContent.trim() : '';
-    });
-    assert(versionNumText !== null, 'Version perf-card not found on #/perf');
-    assert(versionNumText.length > 0, 'Version card .perf-num should have non-empty text');
   });
 
   // --- Group: Nodes page (tests 2, 5) ---

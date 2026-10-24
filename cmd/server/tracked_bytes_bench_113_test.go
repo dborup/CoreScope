@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -49,10 +48,7 @@ func BenchmarkTrackedBytes_Load_113(b *testing.B) {
 func BenchmarkTrackedBytes_IngestNewTx_113(b *testing.B) {
 	dbPath := bench113DB(b)
 	store := acct113Load(b, dbPath)
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
-	if err != nil {
-		b.Fatal(err)
-	}
+	conn := acct113OpenWriter(b, dbPath)
 	defer conn.Close()
 	maxTx := bench113Tx
 	maxObs := 0
@@ -82,10 +78,7 @@ func BenchmarkTrackedBytes_IngestNewTx_113(b *testing.B) {
 func BenchmarkTrackedBytes_IngestNewObs_113(b *testing.B) {
 	dbPath := bench113DB(b)
 	store := acct113Load(b, dbPath)
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
-	if err != nil {
-		b.Fatal(err)
-	}
+	conn := acct113OpenWriter(b, dbPath)
 	defer conn.Close()
 	maxObs := 0
 	if err := conn.QueryRow(`SELECT COALESCE(MAX(id),0) FROM observations`).Scan(&maxObs); err != nil {

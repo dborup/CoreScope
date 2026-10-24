@@ -310,12 +310,30 @@
     }
 
     const observerLists = new Map();
+    // #262: a node in My Mesh may ALSO be a registered observer, which is a
+    // separate property from its mesh role. One bulk /observers request per
+    // grid render feeds every card (O(n) index build, O(1) per card) — never
+    // a request per card, never a scan of the list per card. A failed or
+    // unusable response leaves the index unavailable, which the grid reports
+    // explicitly instead of silently dropping the observer identity.
+    const observerIndexPromise = api('/observers', { ttl: CLIENT_TTL.observers })
+      .then(payload => MyMeshObservers.index(payload), () => MyMeshObservers.index(null));
+    const observerRecords = new Map();
 
     const cards = await Promise.all(myNodes.map(async (mn) => {
+      // The health request starts BEFORE the observer list is awaited: the
+      // node part of the card never depends on /observers, so a slow or
+      // retrying observer request must not sit in front of it. The no-op
+      // catch only marks the rejection handled while we wait on the index;
+      // the try below still sees the real error.
+      // The 240 s nodeHealth TTL is intentional: it matches node detail's
+      // cadence fetch (CLIENT_TTL.nodeDetail), and WS traffic drops it early.
+      const healthPromise = api(healthPath(mn.pubkey, true), { ttl: CLIENT_TTL.nodeHealth });
+      healthPromise.catch(() => {});
+      const observer = MyMeshObservers.match(await observerIndexPromise, mn.pubkey);
+      if (observer) observerRecords.set(mn.pubkey, observer);
       try {
-        // The 240 s nodeHealth TTL is intentional: it matches node detail's
-        // cadence fetch (CLIENT_TTL.nodeDetail), and WS traffic drops it early.
-        const h = await api(healthPath(mn.pubkey, true), { ttl: CLIENT_TTL.nodeHealth });
+        const h = await healthPromise;
         const node = h.node || {};
         const stats = h.stats || {};
         // #76: the preview names direct observers; the dialog lists both.
@@ -355,14 +373,17 @@
           : `<span class="text-muted" title="${escapeAttr(HeardBy.EMPTY_DIRECT_TIP)}">none proven</span>`;
         const relayCount = heard.relay.length ? ` · <span class="mnc-relay-count" title="${escapeAttr(HeardBy.RELAY_TIP)}">${heard.relay.length} via relay</span>` : '';
 
-        return `<div class="my-node-card ${status}" data-key="${mn.pubkey}" tabindex="0" role="button">
+        return `<div class="my-node-card ${status}${observer ? ' is-observer' : ''}" data-key="${mn.pubkey}" tabindex="0" role="button">
           <div class="mnc-header">
             <div class="mnc-status">${statusDot}</div>
             <div class="mnc-name">${escapeHtml(name)}</div>
+            ${observerBadgeHtml(observer, node.role)}
             <div class="mnc-role">${node.role || '?'}</div>
             <button class="mnc-remove" data-key="${mn.pubkey}" title="Remove from My Mesh" aria-label="Remove ${escapeAttr(name)} from My Mesh"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
           </div>
           <div class="mnc-status-text">${statusText}${heardAt ? ' · ' + timeAgo(heardAt) : ''}</div>
+          ${observerPanelHtml(observer)}
+          ${observer ? `<div class="mnc-section-lbl">${escapeHtml(MyMeshObservers.NODE_SECTION_LABEL)}</div>` : ''}
           <div class="mnc-metrics">
             <div class="mnc-metric">
               <div class="mnc-val">${stats.packetsToday ?? 0}</div>
@@ -386,6 +407,7 @@
           <div class="mnc-spark">${sparkHtml}</div>
           <div class="mnc-actions">
             <button class="mnc-btn" data-action="node" data-key="${escapeAttr(mn.pubkey)}">Node page →</button>
+            ${observerActionHtml(observer, mn.pubkey, name)}
             <button class="mnc-btn" data-action="health" data-key="${mn.pubkey}">Full health →</button>
             <button class="mnc-btn" data-action="packets" data-key="${mn.pubkey}">View packets →</button>
           </div>
@@ -396,21 +418,34 @@
         const statusMsg = is404
           ? 'Waiting for first advert — this node has been seen in channel messages but hasn\u2019t advertised yet'
           : 'Could not load data';
-        return `<div class="my-node-card silent" data-key="${mn.pubkey}" tabindex="0" role="button">
+        // #262: the observer record comes from the bulk observer list, not
+        // from node health, so a failed health request must not hide the
+        // observer identity, status or reported traffic. The mesh role is
+        // genuinely unknown here, so the badge carries no secondary term.
+        const fallbackName = mn.name || truncate(mn.pubkey, 12);
+        return `<div class="my-node-card silent${observer ? ' is-observer' : ''}" data-key="${mn.pubkey}" tabindex="0" role="button">
           <div class="mnc-header">
             <div class="mnc-status">${statusIcon}</div>
-            <div class="mnc-name">${escapeHtml(mn.name || truncate(mn.pubkey, 12))}</div>
-            <button class="mnc-remove" data-key="${mn.pubkey}" title="Remove" aria-label="Remove ${escapeAttr(mn.name || truncate(mn.pubkey, 12))} from My Mesh"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
+            <div class="mnc-name">${escapeHtml(fallbackName)}</div>
+            ${observerBadgeHtml(observer, null)}
+            <button class="mnc-remove" data-key="${mn.pubkey}" title="Remove" aria-label="Remove ${escapeAttr(fallbackName)} from My Mesh"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
           </div>
           <div class="mnc-status-text">${statusMsg}</div>
+          ${observerPanelHtml(observer)}
           <div class="mnc-actions">
             <button class="mnc-btn" data-action="node" data-key="${escapeAttr(mn.pubkey)}">Node page →</button>
+            ${observerActionHtml(observer, mn.pubkey, fallbackName)}
           </div>
         </div>`;
       }
     }));
 
-    grid.innerHTML = cards.join('');
+    // #262: an unavailable observer list is reported once for the whole
+    // grid. Without it a card would silently look like a non-observer, which
+    // is a false negative the operator cannot see.
+    const observerNotice = (await observerIndexPromise).available ? ''
+      : `<div class="my-nodes-observer-notice" role="status"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> ${escapeHtml(MyMeshObservers.UNAVAILABLE_NOTICE)}</div>`;
+    grid.innerHTML = observerNotice + cards.join('');
     revealClippedObserverButtons(grid);
 
     // Wire up remove buttons
@@ -430,6 +465,14 @@
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
         if (btn.dataset.action === 'node') window.location.hash = '#/nodes/' + encodeURIComponent(btn.dataset.key);
+        // #262: navigate with the MATCHED observer record's own id, so the
+        // observer page always opens the right device. observers rows are
+        // stored uppercase and nodes rows lowercase (#1836), so the node key
+        // is never re-cased by hand here.
+        if (btn.dataset.action === 'observer') {
+          const href = MyMeshObservers.pageHref(observerRecords.get(btn.dataset.key));
+          if (href) window.location.hash = href;
+        }
         if (btn.dataset.action === 'health') loadHealth(btn.dataset.key);
         if (btn.dataset.action === 'packets') window.location.hash = '#/packets/' + btn.dataset.key;
         if (btn.dataset.action === 'observers') showObservers(btn, observerLists.get(btn.dataset.key) || HeardBy.lists(null));
@@ -453,6 +496,50 @@
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handler(e); }
       });
     });
+  }
+
+  // ==================== #262 OBSERVER IDENTITY ON A CARD ====================
+  // All three helpers take the matched observer row (or null) and render
+  // nothing at all for a node that has no observer record, so an ordinary
+  // repeater/room card is byte-for-byte what it was before #262.
+
+  // OBSERVER is the primary badge; the node's mesh role keeps its own
+  // .mnc-role chip right beside it and is never overwritten. The title spells
+  // the pair out ("Observer · Repeater") for pointer and assistive tech.
+  function observerBadgeHtml(observer, nodeRole) {
+    if (!observer) return '';
+    const summary = MyMeshObservers.roleSummary(nodeRole);
+    return `<span class="mnc-badge-observer" title="${escapeAttr(summary)}" aria-label="${escapeAttr(summary)}">${escapeHtml(MyMeshObservers.PRIMARY_BADGE)}</span>`;
+  }
+
+  // Observer-sourced status and traffic, kept in their own labelled block so
+  // nothing here can be read as the node's own activity. Every value states
+  // its source; a missing one renders an em dash rather than a zero.
+  function observerPanelHtml(observer) {
+    if (!observer) return '';
+    const st = MyMeshObservers.status(observer);
+    const dot = `<span class="${st.cls}" aria-hidden="true"><svg class="ph-icon"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span>`;
+    const reported = st.reportedAt ? MyMeshObservers.STATUS_REPORTED_PREFIX + timeAgo(st.reportedAt) : '';
+    const lastReport = MyMeshObservers.lastReport(observer);
+    const traffic = MyMeshObservers.traffic(observer);
+    return `<div class="mnc-observer-panel" data-observer-id="${escapeAttr(String(observer.id || ''))}">
+      <div class="mnc-section-lbl">${escapeHtml(MyMeshObservers.OBSERVER_SECTION_LABEL)}</div>
+      <div class="mnc-observer-rows">
+        <div class="mnc-observer-row" title="${escapeAttr(MyMeshObservers.STATUS_TIP)}"><strong>${escapeHtml(MyMeshObservers.STATUS_ROW_LABEL)}</strong> ${dot} <span class="mnc-observer-state">${escapeHtml(st.label)}</span>${escapeHtml(reported)}</div>
+        <div class="mnc-observer-row"><strong>${escapeHtml(MyMeshObservers.LAST_REPORT_ROW_LABEL)}</strong> <span class="mnc-observer-last">${lastReport ? escapeHtml(timeAgo(lastReport)) : escapeHtml(MyMeshObservers.UNKNOWN_VALUE)}</span></div>
+      </div>
+      <div class="mnc-metric mnc-observer-metric" title="${escapeAttr(MyMeshObservers.TRAFFIC_TIP)}">
+        <div class="mnc-val">${escapeHtml(traffic.value)}</div>
+        <div class="mnc-lbl">${escapeHtml(traffic.label)}</div>
+      </div>
+    </div>`;
+  }
+
+  // The direct Observer page action. Only rendered for a matched observer;
+  // the existing Node page action is untouched and always present.
+  function observerActionHtml(observer, pubkey, name) {
+    if (!MyMeshObservers.pageHref(observer)) return '';
+    return `<button class="mnc-btn mnc-observer-page" data-action="observer" data-key="${escapeAttr(pubkey)}" aria-label="Open the observer page for ${escapeAttr(name)}">Observer page →</button>`;
   }
 
   // #351 R1: measure after layout. scrollWidth > clientWidth is exactly when

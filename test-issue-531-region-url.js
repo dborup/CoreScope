@@ -45,6 +45,7 @@ function load(opts) {
   opts = opts || {};
   const store = {};
   if (opts.stored) store['meshcore-region-filter'] = JSON.stringify(opts.stored);
+  const session = Object.assign({}, opts.session);
   let fetches = 0;
   const replaced = [];
   const ctx = {
@@ -52,8 +53,13 @@ function load(opts) {
     document: { addEventListener() {}, removeEventListener() {} },
     location: { hash: opts.hash || '' },
     history: {
-      state: null,
-      replaceState(state, title, url) { replaced.push(url); ctx.location.hash = url; },
+      state: opts.state === undefined ? null : opts.state,
+      // As in a browser: the state is stored as given, and a missing URL
+      // keeps the current one. `replaced` logs URL rewrites only.
+      replaceState(state, title, url) {
+        ctx.history.state = state === undefined ? null : JSON.parse(JSON.stringify(state));
+        if (url !== undefined) { replaced.push(url); ctx.location.hash = url; }
+      },
       pushState() { throw new Error('pushState must not be used'); },
     },
     URLSearchParams,
@@ -61,6 +67,11 @@ function load(opts) {
       getItem: (k) => (k in store ? store[k] : null),
       setItem: (k, v) => { store[k] = String(v); },
       removeItem: (k) => { delete store[k]; },
+    },
+    sessionStorage: {
+      getItem: (k) => (k in session ? session[k] : null),
+      setItem: (k, v) => { session[k] = String(v); },
+      removeItem: (k) => { delete session[k]; },
     },
     fetch: async () => { fetches++; return { json: async () => REGIONS }; },
     escapeHtml: (s) => String(s),
@@ -75,7 +86,7 @@ function load(opts) {
   const hashAtNotify = [];
   RF.onChange((sel) => { calls.push(sel ? Array.from(sel) : null); hashAtNotify.push(ctx.location.hash); });
   const container = { innerHTML: '', style: {}, onclick: null, querySelector: () => ({ setAttribute() {} }) };
-  return { RF, store, calls, container, ctx, replaced, hashAtNotify, fetches: () => fetches };
+  return { RF, store, session, calls, container, ctx, replaced, hashAtNotify, fetches: () => fetches };
 }
 // A click on a region pill in `container` (the pill bar: four regions).
 const click = (container, code) => container.onclick({ target: { closest: () => ({ dataset: { region: code } }) } });
@@ -388,6 +399,118 @@ test('a hash without a region parameter is left alone', async () => {
     assert.strictEqual(t.ctx.location.hash, hash);
     assert.deepStrictEqual(t.replaced, [], hash);
   }
+});
+
+test('#556: a change keeps the entry\'s history.state', async () => {
+  const t = load({ hash: '#/analytics?tab=topology&region=SJC', state: { analyticsView: { tab: 'topology' } } });
+  sync(t.RF, t.ctx.location.hash);
+  await t.RF.init(t.container);
+  click(t.container, 'OAK');
+  assert.strictEqual(hashParams(t.ctx.location.hash).get('region'), 'SJC,OAK');
+  assert.ok(t.ctx.history.state, 'history.state was dropped');
+  assert.deepStrictEqual(t.ctx.history.state.analyticsView, { tab: 'topology' });
+});
+
+section('\n=== #556 Back/Forward: a link\'s region does not override a later choice ===');
+
+// The router's sync on entering a history entry: `state` is that entry's
+// history.state (null for a new entry, the saved object on Back/Forward).
+function enter(t, hash, state) {
+  t.ctx.location.hash = hash;
+  t.ctx.history.state = state === undefined ? null : state;
+  return sync(t.RF, hash);
+}
+const entryState = (t) => JSON.parse(JSON.stringify(t.ctx.history.state));
+
+test('link, other entry, choice in the control, Back to the link: the choice stands', async () => {
+  const t = load({ stored: ['SFO'] });
+  await t.RF.init(t.container);
+  assert.strictEqual(enter(t, '#/nodes?region=SJC'), true, 'the link applies on a new entry');
+  const linkEntry = entryState(t);
+  enter(t, '#/channels');
+  click(t.container, 'OAK');
+  click(t.container, 'SJC');
+  assert.deepStrictEqual(Array.from(t.RF.getSelected()), ['OAK']);
+  assert.strictEqual(enter(t, '#/nodes?region=SJC', linkEntry), false, 'Back must not reapply SJC');
+  assert.deepStrictEqual(Array.from(t.RF.getSelected()), ['OAK']);
+  assert.deepStrictEqual(saved(t.store), ['OAK']);
+  // Forward and Back again, and a reload of the entry, keep it.
+  enter(t, '#/channels', null);
+  assert.strictEqual(enter(t, '#/nodes?region=SJC', linkEntry), false);
+  assert.deepStrictEqual(Array.from(t.RF.getSelected()), ['OAK']);
+});
+
+test('the choice survives a reload of the tab (it is kept per tab)', async () => {
+  const t = load({ stored: ['SFO'] });
+  await t.RF.init(t.container);
+  enter(t, '#/nodes?region=SJC');
+  const linkEntry = entryState(t);
+  enter(t, '#/channels');
+  click(t.container, 'OAK');
+  click(t.container, 'SJC');
+  // Reload on #/channels, then Back to the link's entry.
+  const r = load({ stored: saved(t.store), session: t.session });
+  await r.RF.init(r.container);
+  assert.strictEqual(enter(r, '#/nodes?region=SJC', linkEntry), false);
+  assert.deepStrictEqual(Array.from(r.RF.getSelected()), ['OAK']);
+});
+
+test('Back and Forward between links with no choice in between still apply each link', async () => {
+  const t = load({ stored: ['SFO'] });
+  await t.RF.init(t.container);
+  enter(t, '#/nodes?region=SJC');
+  const first = entryState(t);
+  enter(t, '#/channels?region=OAK');
+  const second = entryState(t);
+  assert.strictEqual(enter(t, '#/nodes?region=SJC', first), true, 'Back');
+  assert.deepStrictEqual(Array.from(t.RF.getSelected()), ['SJC']);
+  assert.strictEqual(enter(t, '#/channels?region=OAK', second), true, 'Forward');
+  assert.deepStrictEqual(Array.from(t.RF.getSelected()), ['OAK']);
+});
+
+test('a link on a new entry wins after earlier choices; so does a first load', async () => {
+  const t = load({ stored: ['SFO'] });
+  await t.RF.init(t.container);
+  click(t.container, 'OAK');
+  assert.strictEqual(enter(t, '#/nodes?region=MRY'), true, 'a new entry after a choice');
+  assert.deepStrictEqual(Array.from(t.RF.getSelected()), ['MRY']);
+  const fresh = load({ stored: ['SFO'], session: t.session, hash: '#/nodes?region=SJC' });
+  assert.strictEqual(sync(fresh.RF, fresh.ctx.location.hash), true, 'deep link on first load');
+  assert.deepStrictEqual(Array.from(fresh.RF.getSelected()), ['SJC']);
+});
+
+test('the mark keeps the entry\'s other history.state keys and leaves the URL alone', async () => {
+  const t = load();
+  await t.RF.init(t.container);
+  enter(t, '#/analytics?tab=topology&region=SJC', { analyticsView: { tab: 'topology' } });
+  assert.deepStrictEqual(t.ctx.history.state.analyticsView, { tab: 'topology' });
+  assert.strictEqual(t.ctx.location.hash, '#/analytics?tab=topology&region=SJC');
+  assert.deepStrictEqual(t.replaced, []);
+});
+
+test('Clear in Packets (setSelected) counts as a choice', async () => {
+  const t = load({ stored: ['SFO'] });
+  await t.RF.init(t.container);
+  enter(t, '#/nodes?region=SJC');
+  const linkEntry = entryState(t);
+  enter(t, '#/packets');
+  t.RF.setSelected([]);
+  assert.strictEqual(enter(t, '#/nodes?region=SJC', linkEntry), false);
+  assert.strictEqual(t.RF.getSelected(), null);
+});
+
+test('storage blocked: Back still keeps a choice made in this page', async () => {
+  const t = load({ stored: ['SFO'] });
+  t.ctx.sessionStorage.getItem = () => { throw new Error('blocked'); };
+  t.ctx.sessionStorage.setItem = () => { throw new Error('blocked'); };
+  await t.RF.init(t.container);
+  enter(t, '#/nodes?region=SJC');
+  const linkEntry = entryState(t);
+  enter(t, '#/channels');
+  click(t.container, 'OAK');
+  click(t.container, 'SJC');
+  assert.strictEqual(enter(t, '#/nodes?region=SJC', linkEntry), false);
+  assert.deepStrictEqual(Array.from(t.RF.getSelected()), ['OAK']);
 });
 
 section('\n=== #531 app.js router: sync between destroy() and init() ===');
