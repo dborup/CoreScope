@@ -77,9 +77,7 @@ func TestHandleNodePaths_SortByRecency_1145(t *testing.T) {
 	hub := NewHub()
 	srv := NewServer(db, cfg, hub)
 	store := NewPacketStore(db, nil)
-	if err := store.Load(); err != nil {
-		t.Fatalf("store.Load: %v", err)
-	}
+	loadStoreIndexed(t, store)
 	srv.store = store
 	router := mux.NewRouter()
 	srv.RegisterRoutes(router)
@@ -152,9 +150,7 @@ func TestHandleNodePaths_SortCountTiebreaker_1145(t *testing.T) {
 	hub := NewHub()
 	srv := NewServer(db, cfg, hub)
 	store := NewPacketStore(db, nil)
-	if err := store.Load(); err != nil {
-		t.Fatalf("store.Load: %v", err)
-	}
+	loadStoreIndexed(t, store)
 	srv.store = store
 	router := mux.NewRouter()
 	srv.RegisterRoutes(router)
