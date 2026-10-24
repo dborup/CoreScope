@@ -518,6 +518,17 @@ func main() {
 	// via cmd/server/neighbor_recomputer.go on the same cadence.
 	stopNeighborBuilder := store.StartNeighborEdgesBuilder(NeighborEdgesBuilderInterval)
 	defer stopNeighborBuilder()
+
+	// Daily neighbor_edges.count decay (#544), checked hourly. Ingestor-owned
+	// like the builder and retention above; the server only reads counts.
+	halfLife := cfg.NeighborEdgeCountHalfLifeDaysOrDefault()
+	stopNeighborDecay := store.StartNeighborEdgeDecay(halfLife, NeighborEdgeDecayCheckInterval)
+	defer stopNeighborDecay()
+	if halfLife > 0 {
+		log.Printf("[neighbor-decay] enabled: edge counts halve every %d days, never below %d", halfLife, neighborEdgeDecayFloor)
+	} else {
+		log.Printf("[neighbor-decay] disabled (neighborEdgeCountHalfLifeDays < 0): edge counts only grow")
+	}
 	log.Printf("[neighbor-build] enabled (interval=%s)", NeighborEdgesBuilderInterval)
 
 	// #188: re-resolve NULL resolved_path rows now that the prefix index

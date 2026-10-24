@@ -120,6 +120,11 @@ type Config struct {
 	// (#1287 — moved from cmd/server). 0 = default 5.
 	NeighborEdgesMaxAgeDays int `json:"neighborEdgesMaxAgeDays,omitempty"`
 
+	// NeighborEdgeCountHalfLifeDays is the half-life of neighbor_edges.count
+	// (#544, neighbor_edge_decay.go). 0 / unset = default 7; negative =
+	// decay disabled (counts only ever grow, the pre-#544 behaviour).
+	NeighborEdgeCountHalfLifeDays int `json:"neighborEdgeCountHalfLifeDays,omitempty"`
+
 	// IngestBufferSize caps the in-memory queue (number of MQTT messages) held
 	// while the single SQLite writer is blocked by startup migrations/prunes
 	// (#1608). Received messages are drained once the write path is ready.
@@ -146,6 +151,18 @@ func (c *Config) NeighborEdgesDaysOrDefault() int {
 		return 5
 	}
 	return c.NeighborEdgesMaxAgeDays
+}
+
+// NeighborEdgeCountHalfLifeDaysOrDefault returns the count half-life in days,
+// or 0 when decay is disabled.
+func (c *Config) NeighborEdgeCountHalfLifeDaysOrDefault() int {
+	if c == nil || c.NeighborEdgeCountHalfLifeDays == 0 {
+		return 7
+	}
+	if c.NeighborEdgeCountHalfLifeDays < 0 {
+		return 0
+	}
+	return c.NeighborEdgeCountHalfLifeDays
 }
 
 // IngestBufferSizeOrDefault returns the ingest buffer capacity. Default 50000:

@@ -384,6 +384,8 @@
   },
   "ingestBufferSize": 50000,
   "_comment_ingestBufferSize": "Number of MQTT messages held in memory while the single SQLite writer is blocked by a startup migration/prune (#1608). Drained once the write path is ready; bounded memory (small closure per item). 0 / omit / negative => default 50000 (applied by IngestBufferSizeOrDefault before NewIngestBuffer). A positive value below the default is honored as-is; sub-1 values reaching NewIngestBuffer directly clamp to 1 with a WARN log.",
+  "neighborEdgeCountHalfLifeDays": 7,
+  "_comment_neighborEdgeCountHalfLifeDays": "Ingestor only (#544). Half-life in days of neighbor_edges.count: once per whole day every count is multiplied by 0.5^(1/N) and rounded, never below 3, so old credit (for example bridge TX copies counted before #540) halves every N days and an edge credited r times a day settles near r * 1.44 * N. Edges and last_seen never change (retention still decides which edges exist). The stored counts weight hop disambiguation, bridge/coverage scores, estimated positions and the GPS sanity check; the neighbour list and neighbour graph are built from packets and are not affected. 0 / omit = default 7 (the affinity score's half-life); negative = disabled (counts only grow) and resets the decay clock. The clock is stored in the database: missed days are applied after downtime, and the first decay is one day after the feature first runs. See docs/deployment.md.",
   "neighborGraph": {
     "maxAgeDays": 5,
     "maxEdgeKm": 500,

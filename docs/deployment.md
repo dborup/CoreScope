@@ -620,6 +620,45 @@ preferences and deep links cannot enable it against the server policy. A
 Customizer display preference is deferred to a later milestone and must
 remain subordinate to this operator setting.
 
+### Neighbour edge count decay (`neighborEdgeCountHalfLifeDays`)
+
+The ingestor stores one row per neighbour edge in `neighbor_edges`, with a
+count of the receptions that credited it. It now decays these counts once a
+day (#544). Before this, counts only ever grew, so credit that should never
+have been given stayed on active edges for good. One example is MQTT
+bridges' own TX copies before #540.
+
+```json
+{
+  "neighborEdgeCountHalfLifeDays": 7
+}
+```
+
+- Default `7` (omitted or `0`): once per whole day, every count is
+  multiplied by 0.5^(1/7) and rounded, never below 3, so old credit halves
+  every week. An edge credited *r* times a day settles at about 9.6 × *r*
+  (± 5 from rounding). At this half-life, counts of 5 or less no longer
+  change.
+- Decay never deletes an edge and never changes `last_seen`. Edge retention
+  (`neighborEdgesMaxAgeDays`, default 5 days) still decides which edges
+  exist, and Reach still counts the same neighbours.
+- Readers of the stored counts use them as weights: hop disambiguation
+  (affinity), bridge and coverage scores, the count-weighted estimated
+  position, and the GPS sanity check. Those now follow recent traffic
+  instead of lifetime totals. Hop disambiguation requires at least 3
+  credits, and decay never goes below that. The neighbour list and the
+  neighbour graph are built from packets in memory and are not affected.
+- A negative value disables decay. Counts then only grow, which was the
+  behaviour before #544. Disabling also resets the decay clock, so enabling
+  it again starts fresh instead of catching up the disabled days.
+- The decay clock is stored in the database. After downtime the ingestor
+  applies each missed day, with the same result as daily runs. The first
+  decay happens one day after the feature first runs. There is no one-off
+  rewrite: an existing lifetime count decays like any other.
+
+Only the **ingestor** reads this setting. Restart it after a change. The Go
+server stays read-only and needs no change.
+
 ### Large region lists in an external file (`hashRegionsPath`)
 
 `hashRegions` lives inline in `config.json`. On a real deployment that is a

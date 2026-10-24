@@ -1,0 +1,112 @@
+{
+  "_comment": "Shared golden table for neighbor_edges.count decay (#544). cmd/ingestor/neighbor_edge_decay_test.go asserts that the ingestor SQL turns before into after over days daily steps at halfLifeDays; cmd/server/neighbor_edge_decay_consumers_test.go feeds the before and after counts to the server consumers that read persisted counts. Each step sets count = max(floor, round(count * 0.5^(1/halfLifeDays))) for counts above floor, and only when that lowers the count; at a 7-day half-life rounding leaves counts of 5 or less unchanged.",
+  "halfLifeDays": 7,
+  "floor": 3,
+  "cases": [
+    {
+      "before": 1,
+      "days": 1,
+      "after": 1
+    },
+    {
+      "before": 2,
+      "days": 1,
+      "after": 2
+    },
+    {
+      "before": 3,
+      "days": 1,
+      "after": 3
+    },
+    {
+      "before": 4,
+      "days": 1,
+      "after": 4
+    },
+    {
+      "before": 5,
+      "days": 1,
+      "after": 5
+    },
+    {
+      "before": 6,
+      "days": 1,
+      "after": 5
+    },
+    {
+      "before": 7,
+      "days": 1,
+      "after": 6
+    },
+    {
+      "before": 8,
+      "days": 1,
+      "after": 7
+    },
+    {
+      "before": 10,
+      "days": 1,
+      "after": 9
+    },
+    {
+      "before": 11,
+      "days": 1,
+      "after": 10
+    },
+    {
+      "before": 12,
+      "days": 1,
+      "after": 11
+    },
+    {
+      "before": 20,
+      "days": 1,
+      "after": 18
+    },
+    {
+      "before": 28,
+      "days": 1,
+      "after": 25
+    },
+    {
+      "before": 50,
+      "days": 1,
+      "after": 45
+    },
+    {
+      "before": 100,
+      "days": 1,
+      "after": 91
+    },
+    {
+      "before": 101,
+      "days": 1,
+      "after": 91
+    },
+    {
+      "before": 1000,
+      "days": 1,
+      "after": 906
+    },
+    {
+      "before": 100000,
+      "days": 1,
+      "after": 90572
+    },
+    {
+      "before": 1000,
+      "days": 3,
+      "after": 744
+    },
+    {
+      "before": 1000,
+      "days": 30,
+      "after": 51
+    },
+    {
+      "before": 100000,
+      "days": 365,
+      "after": 5
+    }
+  ]
+}
