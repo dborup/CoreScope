@@ -24,7 +24,7 @@ func createTestDBMultiDay(t *testing.T, numDays, txPerDay int) string {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
 
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}

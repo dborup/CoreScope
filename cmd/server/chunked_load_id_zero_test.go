@@ -29,7 +29,7 @@ import (
 
 func createTestDBWithIDZero(tb testing.TB, dbPath string, extraTx int) {
 	tb.Helper()
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		tb.Fatal(err)
 	}

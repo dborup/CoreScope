@@ -34,7 +34,7 @@ type fixtureTx114 struct {
 func createChunkOrderDB(t *testing.T, txs []fixtureTx114) string {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "chunk-order.db")
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}

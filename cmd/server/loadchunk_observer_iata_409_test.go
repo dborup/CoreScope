@@ -19,7 +19,7 @@ import (
 func createObserverIATAFixture409(t *testing.T, v3 bool, ts string) string {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}

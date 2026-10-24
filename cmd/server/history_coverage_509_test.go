@@ -145,7 +145,7 @@ func TestCoverage509DatabaseRetentionDuringBackgroundLoad(t *testing.T) {
 	now := time.Now().UTC()
 	dbPath := coverage509Rows(t, now, 5, 200, 40*time.Hour)
 	store := openCoverage509Store(t, dbPath, &PacketStoreConfig{RetentionHours: coverage509RetentionHours, HotStartupHours: 12})
-	writer, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	writer, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +417,7 @@ func TestCoverage509ConcurrentIngestAtRetentionEdge(t *testing.T) {
 		const reheard, plain, edge, regular = 5, 3, 4, 200
 		dbPath := coverage509BelowFloorRows(t, now, reheard, plain, edge, regular)
 		store := openCoverage509Store(t, dbPath, &PacketStoreConfig{RetentionHours: coverage509RetentionHours, HotStartupHours: hot})
-		writer, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+		writer, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -534,7 +534,7 @@ func TestCoverage509StagingShapeBackgroundLoad(t *testing.T) {
 			dbPath := coverage509Rows(t, now, reheardOld, regular, time.Hour)
 			store := openCoverage509Store(t, dbPath, &PacketStoreConfig{
 				RetentionHours: coverage509RetentionHours, HotStartupHours: 6, MaxMemoryMB: 1})
-			writer, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+			writer, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -660,7 +660,7 @@ func TestCoverage509BackgroundEdgeFlooredAtRetention(t *testing.T) {
 	const regular, sliver = 200, 3
 	dbPath := coverage509Rows(t, now, 0, regular, 0)
 	store := openCoverage509Store(t, dbPath, &PacketStoreConfig{RetentionHours: coverage509RetentionHours, HotStartupHours: 12})
-	writer, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	writer, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}
