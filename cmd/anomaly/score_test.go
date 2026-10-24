@@ -82,7 +82,7 @@ func TestScoreRecallOnAnInjectedBot(t *testing.T) {
 	}
 	report := replayInto(t, r.dir, "b", replayConfigJSON(""), r.outPath)
 	res := scoreInto(t, report, r.labPath)
-	if res.Incidents != 1 || res.IncidentsDetected != 1 || res.Recall != 1 {
+	if res.Incidents != 1 || res.IncidentsDetected != 1 || *res.Recall != 1 {
 		t.Fatalf("recall: %+v", res)
 	}
 	if res.TruePositives == 0 || res.FalsePositives != 0 || res.FalseAlarmsPerDay != 0 {
@@ -140,7 +140,7 @@ func TestScoreFalseAlarmArmWithoutLabels(t *testing.T) {
 	if res.Episodes != 0 || res.FalsePositives != 0 || res.FalseAlarmsPerDay != 0 || res.Incidents != 0 {
 		t.Fatalf("background raised alarms: %+v", res)
 	}
-	if res.Recall != 0 || res.MedianTimeToDetect != nil {
+	if *res.Recall != 0 || res.MedianTimeToDetect != nil {
 		t.Fatalf("no labels must give no recall and no medians: %+v", res)
 	}
 }
@@ -154,7 +154,7 @@ func TestScoreExcludedChannelDetectsNothing(t *testing.T) {
 		t.Fatalf("without exclusions the bot must be detected: %+v", plain)
 	}
 	excl := scoreInto(t, replayInto(t, r.dir, "x", replayConfigJSON(`"exclude_channels": ["7f"],`), r.outPath), r.labPath)
-	if excl.Episodes != 0 || excl.IncidentsDetected != 0 || excl.Recall != 0 {
+	if excl.Episodes != 0 || excl.IncidentsDetected != 0 || *excl.Recall != 0 {
 		t.Fatalf("the excluded channel still produced episodes: %+v", excl)
 	}
 	// Excluding another channel leaves the bot alone.
@@ -453,13 +453,13 @@ func TestScoreBotsFilter(t *testing.T) {
 			periodNS: int64(p), key: "v1|s=stream|pt=5|ch=1:11|rc=flood|rk=relay|hop=1:fd"},
 	)
 	all := scoreInto(t, report, labels)
-	if all.Incidents != 2 || all.IncidentsSelected != 2 || all.IncidentsDetected != 2 || all.Recall != 1 ||
+	if all.Incidents != 2 || all.IncidentsSelected != 2 || all.IncidentsDetected != 2 || *all.Recall != 1 ||
 		all.TruePositives != 2 || all.FalsePositives != 0 {
 		t.Fatalf("unfiltered: %+v", all)
 	}
 	blind := scoreInto(t, report, labels, "-bots", "bot-a")
 	if blind.Incidents != 2 || blind.IncidentsSelected != 1 || blind.IncidentsDetected != 1 ||
-		blind.Recall != 1 || len(blind.PerIncident) != 1 || blind.PerIncident[0].Bot != "bot-a" {
+		*blind.Recall != 1 || len(blind.PerIncident) != 1 || blind.PerIncident[0].Bot != "bot-a" {
 		t.Fatalf("blind arm: %+v", blind)
 	}
 	// The sanity bot's episode is still a true positive, not a false alarm.

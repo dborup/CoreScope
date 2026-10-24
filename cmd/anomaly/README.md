@@ -491,7 +491,8 @@ automated senders on the real background. The match is the one above, on
 the **channel hash** (the labels carry no stream key, so any route group of
 the hash matches), with the labels file's own tolerance. An episode that
 matches no labelled sender is a false alarm; `recall` is then the
-**real-sender recall** (labelled senders with at least one episode), and
+**real-sender recall** (labelled senders with at least one episode; with no
+labelled sender it is 0/0 and the field is left out, not written as 0), and
 each sender is a per-incident row named `real-1`, `real-2`, ... in the
 file's order. Beside them the metrics carry round 3's **strict** reading of
 the same episodes, every one a false alarm: `strict_false_positives` and

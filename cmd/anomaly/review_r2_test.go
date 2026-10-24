@@ -437,7 +437,7 @@ func TestScoreMatchesOnTheStreamKeyNotTheChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.IncidentsDetected != 0 || res.Recall != 0 || res.TruePositives != 0 {
+	if res.IncidentsDetected != 0 || *res.Recall != 0 || res.TruePositives != 0 {
 		t.Fatalf("another route group is not the bot: %+v", res)
 	}
 	if res.FalsePositives != 1 || res.PeriodMismatches != 0 {
@@ -502,7 +502,7 @@ func TestScoreBaselineDropsEpisodesPresentWithoutInjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.IncidentsDetected != 0 || res.Recall != 0 {
+	if res.IncidentsDetected != 0 || *res.Recall != 0 {
 		t.Fatalf("a pre-existing episode is not a detection: %+v", res)
 	}
 	if res.BaselineEpisodes != 1 || res.TruePositives != 0 || res.FalsePositives != 0 {

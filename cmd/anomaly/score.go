@@ -172,9 +172,11 @@ type scoreResult struct {
 	// IncidentsMissed is the selected incidents that were not detected, and
 	// IncidentsBaselineMasked the subset of those whose own series already
 	// carried a -baseline episode.
-	IncidentsMissed         int     `json:"incidents_missed"`
-	IncidentsBaselineMasked int     `json:"incidents_baseline_masked"`
-	Recall                  float64 `json:"recall"`
+	IncidentsMissed         int `json:"incidents_missed"`
+	IncidentsBaselineMasked int `json:"incidents_baseline_masked"`
+	// Recall is always written, 0 included, except with -real-labels and no
+	// labelled sender: the real-sender recall is then 0/0 and left out.
+	Recall *float64 `json:"recall,omitempty"`
 	// Medians over the detected incidents. A median hides the slow tail:
 	// clean trains alarm at the earliest pulse the rule allows, so half the
 	// panel can sit at that floor while the realistic shapes take many times
@@ -430,9 +432,13 @@ func (l realLabels) incidents() InjectLabels {
 }
 
 // withStrictCount records the real labels' file name and round 3's strict
-// count: every episode a false alarm.
+// count: every episode a false alarm. With no labelled sender the
+// real-sender recall is undefined and left out.
 func (r *scoreResult) withStrictCount(realLabelsName string) {
 	r.RealLabels = realLabelsName
+	if r.Incidents == 0 {
+		r.Recall = nil
+	}
 	n := r.Episodes
 	r.StrictFalsePositives = &n
 	perDay := 0.0
@@ -559,9 +565,11 @@ func score(rep scoreReport, lab InjectLabels, rule, labelsPath, baselinePath str
 	if days > 0 {
 		res.FalseAlarmsPerDay = float64(res.FalsePositives) / days
 	}
+	recall := 0.0
 	if res.IncidentsSelected > 0 {
-		res.Recall = float64(res.IncidentsDetected) / float64(res.IncidentsSelected)
+		recall = float64(res.IncidentsDetected) / float64(res.IncidentsSelected)
 	}
+	res.Recall = &recall
 	// The selected tail is reported whenever anything is selected, including
 	// the case where every selected incident was missed and every percentile
 	// is infinite.
