@@ -889,7 +889,10 @@
   let _packetSortColumn = null;
   let _packetSortDirection = 'desc';
   let showHexHashes = localStorage.getItem('meshcore-hex-hashes') === 'true';
-  var _pendingUrlRegion = null;
+  // #531: kept so destroy() can unsubscribe; otherwise a region or area
+  // change on a later page reloads packets and rewrites that page's URL.
+  var _regionChangeHandler = null;
+  var _areaChangeHandler = null;
 
   var DEFAULT_TIME_WINDOW = 15;
 
@@ -1435,8 +1438,6 @@
       savedTimeWindowMin = _urlTimeWindow;
       localStorage.setItem('meshcore-time-window', String(_urlTimeWindow));
     }
-    var _urlRegion = _initUrlParams.get('region');
-    if (_urlRegion) _pendingUrlRegion = _urlRegion;
     var _urlHash = _initUrlParams.get('hash');
     if (_urlHash) filters.hash = _urlHash;
     // ?obs=<observation id> on #/packets/<hash> selects that observation in
@@ -1725,6 +1726,8 @@
     // #282 (1): drop the module-level Escape handler so a destroyed packets page
     // leaves no live document keydown listener (and never stacks across visits).
     document.removeEventListener('keydown', _pktEsc);
+    if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; }
+    if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; }
     removeAllByopOverlays();
     packets = [];
     hashIndex = new Map();    selectedId = null;
@@ -2027,12 +2030,9 @@
     // Init shared RegionFilter component
     RegionFilter.init(document.getElementById('packetsRegionFilter'), { dropdown: true });
     AreaFilter.init(document.getElementById('packetsAreaFilter'));
-    if (_pendingUrlRegion) {
-      RegionFilter.setSelected(_pendingUrlRegion.split(',').filter(Boolean));
-      _pendingUrlRegion = null;
-    }
-    RegionFilter.onChange(function() { updatePacketsUrl(); loadPackets(); });
-    AreaFilter.onChange(function() { updatePacketsUrl(); loadPackets(); });
+    // ?region= is already the selection (RegionFilter.syncFromUrl, #531).
+    _regionChangeHandler = RegionFilter.onChange(function() { updatePacketsUrl(); loadPackets(); });
+    _areaChangeHandler = AreaFilter.onChange(function() { updatePacketsUrl(); loadPackets(); });
 
     // --- Packet Filter Language ---
     (function() {
