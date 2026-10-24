@@ -321,12 +321,19 @@
     const observerRecords = new Map();
 
     const cards = await Promise.all(myNodes.map(async (mn) => {
+      // The health request starts BEFORE the observer list is awaited: the
+      // node part of the card never depends on /observers, so a slow or
+      // retrying observer request must not sit in front of it. The no-op
+      // catch only marks the rejection handled while we wait on the index;
+      // the try below still sees the real error.
+      // The 240 s nodeHealth TTL is intentional: it matches node detail's
+      // cadence fetch (CLIENT_TTL.nodeDetail), and WS traffic drops it early.
+      const healthPromise = api(healthPath(mn.pubkey, true), { ttl: CLIENT_TTL.nodeHealth });
+      healthPromise.catch(() => {});
       const observer = MyMeshObservers.match(await observerIndexPromise, mn.pubkey);
       if (observer) observerRecords.set(mn.pubkey, observer);
       try {
-        // The 240 s nodeHealth TTL is intentional: it matches node detail's
-        // cadence fetch (CLIENT_TTL.nodeDetail), and WS traffic drops it early.
-        const h = await api(healthPath(mn.pubkey, true), { ttl: CLIENT_TTL.nodeHealth });
+        const h = await healthPromise;
         const node = h.node || {};
         const stats = h.stats || {};
         // #76: the preview names direct observers; the dialog lists both.

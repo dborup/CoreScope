@@ -75,6 +75,20 @@ test('a short prefix of a registered observer key never matches', () => {
   }
 });
 
+test('two different FULL keys sharing a long leading prefix never match (no prefix fallback)', () => {
+  // Observer and node keys agree on the first 12..62 hex chars but differ at
+  // the end: only the full normalised key is an identity.
+  for (const shared of [12, 16, 32, 63]) {
+    const observerKey = KEY_OBS.slice(0, shared) + 'e'.repeat(64 - shared);
+    const nodeKey = KEY_OBS.slice(0, shared) + 'f'.repeat(64 - shared);
+    assert.notStrictEqual(observerKey, nodeKey);
+    const idx = MMO.index({ observers: [{ id: observerKey.toUpperCase(), name: 'Neighbour' }] });
+    assert.strictEqual(idx.byId.size, 1);
+    assert.strictEqual(MMO.match(idx, nodeKey), null, shared + ' shared leading hex chars must not match');
+    assert.strictEqual(MMO.match(idx, observerKey).name, 'Neighbour');
+  }
+});
+
 test('"Dokk1" and "Dokk1 Meshview" stay separate devices — names never match', () => {
   const idx = MMO.index(payload);
   // The plain node's display name is a prefix of the observer's display name.

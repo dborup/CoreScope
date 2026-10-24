@@ -56,10 +56,13 @@ const observersPayload = {
     { id: 'e'.repeat(64), name: 'Dokk1 Lab Meshview', last_seen: iso(60000), last_packet_at: iso(60000), packetsLastHour: 50 },
     // A 12-hex PREFIX of KEY_PLAIN: must never match the plain card.
     { id: KEY_PLAIN.slice(0, 12).toUpperCase(), name: 'Prefix Trap', last_seen: iso(60000), packetsLastHour: 999 },
+    // A FULL 64-hex key sharing its first 12 chars with KEY_PLAIN but a
+    // different device: still must never match the plain card.
+    { id: (KEY_PLAIN.slice(0, 12) + '9'.repeat(52)).toUpperCase(), name: 'Full Key Neighbour', last_seen: iso(60000), packetsLastHour: 888 },
   ],
 };
 
-async function render(page, { observersFail = false } = {}) {
+async function render(page, { observersFail = false, holdObservers = false } = {}) {
   await page.route('**/*', route => {
     const u = new URL(route.request().url());
     if (u.origin !== ORIGIN) return route.abort();
@@ -84,6 +87,7 @@ async function render(page, { observersFail = false } = {}) {
       window.apiCalls.push(route);
       if (route === '/stats') return { totalNodes: 4 };
       if (route === '/observers') {
+        if (data.holdObservers) await new Promise(resolve => { window.releaseObservers = resolve; });
         if (data.observersFail) throw Error('500 observers unavailable');
         return data.observers;
       }
@@ -96,9 +100,10 @@ async function render(page, { observersFail = false } = {}) {
     };
     localStorage.setItem('meshcore-user-level', 'experienced');
     localStorage.setItem('meshcore-my-nodes', JSON.stringify(data.keys.map(pubkey => ({ pubkey, name: 'Node' }))));
-  }, { observers: observersPayload, health, keys: KEYS, activity: activity(), observersFail });
+  }, { observers: observersPayload, health, keys: KEYS, activity: activity(), observersFail, holdObservers });
   await page.addScriptTag({ path: path.join(ROOT, 'home.js') });
   await page.evaluate(() => window.fixturePages.home.init(document.getElementById('fixture')));
+  if (holdObservers) return;
   await page.waitForFunction(n => document.querySelectorAll('.my-node-card').length === n, KEYS.length);
 }
 
@@ -234,6 +239,15 @@ async function render(page, { observersFail = false } = {}) {
       if (width < 500) await roomBtn.tap(); else await roomBtn.click();
       assert.equal(await page.evaluate(() => location.hash), '#/observers/' + KEY_ROOM.toUpperCase());
       await page.evaluate(() => { location.hash = ''; });
+
+      // ── a slow /observers must not delay the node health requests ──
+      // The observers response is held open: every card's health request has
+      // to be on the wire anyway, and the cards render once it is released.
+      await render(page, { holdObservers: true });
+      await page.waitForFunction(keys => keys.every(k => window.apiCalls.some(c => c.indexOf('/nodes/' + k + '/health') === 0)), KEYS, { timeout: 5000 });
+      await page.evaluate(() => window.releaseObservers());
+      await page.waitForFunction(n => document.querySelectorAll('.my-node-card').length === n, KEYS.length);
+      assert.equal(await page.locator('.my-node-card.is-observer').count(), 2);
 
       // ── a healthy grid carries no unavailable notice ──
       assert.equal(await page.locator('.my-nodes-observer-notice').count(), 0);
