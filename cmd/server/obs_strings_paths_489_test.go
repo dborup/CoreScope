@@ -687,19 +687,32 @@ func TestObsStringPoolNeverBlocksStoreWriters_489(t *testing.T) {
 			done := make(chan struct{})
 			go func() { defer close(done); tc.run() }()
 
-			// The ingest is now either finished or stuck in the pool. Either
-			// way it must not be holding s.mu: a writer gets the lock.
-			locked := make(chan struct{})
-			go func() {
-				s.mu.Lock()
-				s.mu.Unlock()
-				close(locked)
-			}()
+			// It must really be parked: the row it reads carries a value the
+			// pool does not hold, so it cannot get past interning. Without
+			// this the rest of the test would prove nothing.
 			select {
-			case <-locked:
-			case <-time.After(10 * time.Second):
+			case <-done:
 				unpark()
-				t.Fatal("a store writer waited on s.mu while an ingest was parked in the sharing pool: the pool is being used under the store lock")
+				t.Fatal("the ingest finished while every pool shard was locked, so it never needed the pool: this test proves nothing")
+			case <-time.After(500 * time.Millisecond):
+			}
+
+			// Parked in the pool, it must not be holding s.mu: a writer gets
+			// the lock, over and over, for as long as the pool stays locked.
+			for i := 0; i < 20; i++ {
+				locked := make(chan struct{})
+				go func() {
+					s.mu.Lock()
+					s.mu.Unlock()
+					close(locked)
+				}()
+				select {
+				case <-locked:
+				case <-time.After(5 * time.Second):
+					unpark()
+					t.Fatalf("probe %d: a store writer waited on s.mu while an ingest was parked in the sharing pool: the pool is being used under the store lock", i)
+				}
+				time.Sleep(5 * time.Millisecond)
 			}
 			unpark()
 			select {

@@ -310,4 +310,9 @@ func TestStoreObsLayoutFitsSharedStrsInPadding_489(t *testing.T) {
 	if got := unsafe.Sizeof(StoreObs{}); got != 200 {
 		t.Fatalf("unsafe.Sizeof(StoreObs{}) = %d, want 200: sharedStrs must use existing padding", got)
 	}
+	// One shard per cache line, so a write on one does not invalidate the
+	// next one's lock (see obsStringShard).
+	if got := unsafe.Sizeof(obsStringShard{}); got != 64 {
+		t.Fatalf("unsafe.Sizeof(obsStringShard{}) = %d, want 64: adjust the padding", got)
+	}
 }
