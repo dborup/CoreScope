@@ -118,7 +118,7 @@ type StoreObs struct {
 	// Direction are canonical copies the store's bounded sharing pool holds
 	// (#489, obs_strings_pool.go), so estimateStoreObsBytes charges only
 	// the bytes this observation owns. It uses the same padding block as
-	// wireRoute, so StoreObs stays 200 bytes.
+	// wireRoute, so StoreObs stays 168 bytes (#490).
 	sharedStrs uint8
 }
 
