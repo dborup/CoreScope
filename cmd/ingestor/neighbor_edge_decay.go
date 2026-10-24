@@ -176,3 +176,18 @@ func (s *Store) StartNeighborEdgeDecay(halfLifeDays int, interval time.Duration)
 		<-done
 	}
 }
+
+// startNeighborEdgeDecayFromConfig is the ingestor's decay wiring: it
+// starts the background check at the configured half-life and logs the
+// mode. It returns the stop function and the half-life in use (0 when
+// disabled).
+func startNeighborEdgeDecayFromConfig(s *Store, cfg *Config, interval time.Duration) (func(), int) {
+	halfLife := cfg.NeighborEdgeCountHalfLifeDaysOrDefault()
+	stop := s.StartNeighborEdgeDecay(halfLife, interval)
+	if halfLife > 0 {
+		log.Printf("[neighbor-decay] enabled: edge counts halve every %d days, never below %d", halfLife, neighborEdgeDecayFloor)
+	} else {
+		log.Printf("[neighbor-decay] disabled (neighborEdgeCountHalfLifeDays < 0): edge counts only grow")
+	}
+	return stop, halfLife
+}
