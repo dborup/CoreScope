@@ -493,9 +493,10 @@ type NeighborGraphConfig struct {
 	MaxEdgeKm  float64 `json:"maxEdgeKm"`  // geo-implausibility threshold (km); 0 = default 500; negative disables (#1228)
 
 	// CacheRecomputeIntervalSeconds: cadence for the background
-	// recomputer that rebuilds the default-shape neighbor-graph
-	// response (#1481 P0-1). 0/missing = default 300 (5 min).
-	// Lower = fresher data, more CPU per minute. #1483.
+	// recomputer that rebuilds both the neighbor graph and its cached
+	// responses. Requests keep the graph until the next build finishes.
+	// 0/missing = default 300 (5 min). Lower = fresher data, with a full
+	// graph build on every tick; higher = an older graph between ticks.
 	CacheRecomputeIntervalSeconds int `json:"cacheRecomputeIntervalSeconds,omitempty"`
 }
 
