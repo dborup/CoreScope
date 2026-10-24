@@ -209,3 +209,99 @@ func TestNeighborEdgeDecay_SnapshotConsumers(t *testing.T) {
 		}
 	})
 }
+
+type persistedEdge struct {
+	a, b  string
+	count int
+	age   time.Duration // last_seen before now
+}
+
+// persistedNeighborGraph stores edges in a neighbor_edges table and loads
+// them the way the server does (loadNeighborEdgesFromDB).
+func persistedNeighborGraph(t *testing.T, edges []persistedEdge) *NeighborGraph {
+	t.Helper()
+	db := setupTestDB(t)
+	defer db.Close()
+	if _, err := db.conn.Exec(`CREATE TABLE IF NOT EXISTS neighbor_edges (node_a TEXT NOT NULL, node_b TEXT NOT NULL, count INTEGER DEFAULT 1, last_seen TEXT, PRIMARY KEY (node_a, node_b))`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, e := range edges {
+		a, b := e.a, e.b
+		if a > b {
+			a, b = b, a
+		}
+		if _, err := db.conn.Exec(`INSERT INTO neighbor_edges (node_a, node_b, count, last_seen) VALUES (?, ?, ?, ?)`,
+			a, b, e.count, now.Add(-e.age).Format(time.RFC3339)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return loadNeighborEdgesFromDB(db.conn)
+}
+
+type decayRecentTraffic struct {
+	Edges []struct {
+		Neighbor         string `json:"neighbor"`
+		LastSeenHoursAgo int    `json:"lastSeenHoursAgo"`
+		LifetimeCount    int    `json:"lifetimeCount"`
+		DecayedCount     int    `json:"decayedCount"`
+	} `json:"edges"`
+	ResolvedLifetime string `json:"resolvedLifetime"`
+	ResolvedDecayed  string `json:"resolvedDecayed"`
+}
+
+// With decay enabled, affinity follows recent traffic, so an established
+// edge can lose a hop to a newer one (review F1). The counts come from the
+// ingestor's simulation of the shared scenario (the real write path and
+// the real decay): A has 400 old credits and one recent one, B a burst of
+// 20 over the last two days. On the lifetime counts (decay off, the
+// default) the hop resolves to A by affinity; on the decayed counts it
+// resolves to B, also by affinity.
+func TestNeighborEdgeDecay_RecentTrafficFlipsAffinity(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "test-fixtures", "neighbor-edge-decay-recent-traffic.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sc decayRecentTraffic
+	if err := json.Unmarshal(raw, &sc); err != nil {
+		t.Fatal(err)
+	}
+	if len(sc.Edges) != 2 || sc.ResolvedLifetime == sc.ResolvedDecayed {
+		t.Fatalf("scenario: %d edges, %s -> %s", len(sc.Edges), sc.ResolvedLifetime, sc.ResolvedDecayed)
+	}
+	target := pk64("7a7a")
+	pubkey := map[string]string{}
+	var nodes []nodeInfo
+	for i, e := range sc.Edges {
+		pubkey[e.Neighbor] = pk64(fmt.Sprintf("b0%02x", i+1)) // shared hop prefix "b0"
+		nodes = append(nodes, nodeInfo{PublicKey: pubkey[e.Neighbor], Name: e.Neighbor, Role: "repeater"})
+	}
+	pm := buildPrefixMap(nodes)
+	resolve := func(decayed bool) (string, string) {
+		var edges []persistedEdge
+		for _, e := range sc.Edges {
+			count := e.LifetimeCount
+			if decayed {
+				count = e.DecayedCount
+			}
+			edges = append(edges, persistedEdge{target, pubkey[e.Neighbor], count, time.Duration(e.LastSeenHoursAgo) * time.Hour})
+		}
+		r, method, _ := pm.resolveWithContext("b0", []string{target}, persistedNeighborGraph(t, edges))
+		if r == nil {
+			return "", method
+		}
+		return r.Name, method
+	}
+	for _, tc := range []struct {
+		name    string
+		decayed bool
+		want    string
+	}{
+		{"lifetime counts", false, sc.ResolvedLifetime},
+		{"decayed counts", true, sc.ResolvedDecayed},
+	} {
+		if got, method := resolve(tc.decayed); got != tc.want || method != "neighbor_affinity" {
+			t.Errorf("%s: resolved to %q via %s, want %q via neighbor_affinity", tc.name, got, method, tc.want)
+		}
+	}
+}

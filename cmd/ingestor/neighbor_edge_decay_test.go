@@ -267,19 +267,55 @@ func TestNeighborEdgeDecay_LongGapStopsAtFloor(t *testing.T) {
 	}
 }
 
-// A clock that moved backwards decays nothing and keeps the clock.
+// A clock that moved back by up to one day decays nothing and keeps the
+// clock, so the next step still comes one day after the last one.
 func TestNeighborEdgeDecay_ClockBackwardsIsNoop(t *testing.T) {
+	for _, back := range []time.Duration{time.Second, 12 * time.Hour, decayDay} {
+		t.Run(back.String(), func(t *testing.T) {
+			s := newDecayStore(t)
+			insertDecayEdge(t, s, "a", "b", 500, decayT0.Format(time.RFC3339))
+			mustDecay(t, s, decayT0, 7)
+			if d := mustDecay(t, s, decayT0.Add(-back), 7); d.Steps != 0 || d.Lowered != 0 || d.ClockReset {
+				t.Fatalf("backwards clock decayed or reset: %+v", d)
+			}
+			if got := decayEdgeCount(t, s, "a", "b"); got != 500 {
+				t.Fatalf("count = %d, want 500", got)
+			}
+			if through, _ := decayClock(t, s); through != decayT0.Unix() {
+				t.Fatalf("clock moved to %d", through)
+			}
+		})
+	}
+}
+
+// A stored clock more than one day ahead of now (the host clock was once
+// far in the future, review F5) is reset to now instead of stalling decay
+// until real time catches up. The reset decays nothing; the next step is
+// one day later.
+func TestNeighborEdgeDecay_ClockFarAheadResets(t *testing.T) {
 	s := newDecayStore(t)
 	insertDecayEdge(t, s, "a", "b", 500, decayT0.Format(time.RFC3339))
-	mustDecay(t, s, decayT0, 7)
-	if d := mustDecay(t, s, decayT0.Add(-10*decayDay), 7); d.Steps != 0 || d.Lowered != 0 {
-		t.Fatalf("backwards clock decayed: %+v", d)
-	}
-	if got := decayEdgeCount(t, s, "a", "b"); got != 500 {
-		t.Fatalf("count = %d, want 500", got)
+	mustDecay(t, s, decayT0.Add(100*decayDay), 7) // first run starts the clock 100 days ahead
+	if d := mustDecay(t, s, decayT0, 7); d.Steps != 0 || d.Lowered != 0 || !d.ClockReset {
+		t.Fatalf("corrected clock: %+v, want a reset without decay", d)
 	}
 	if through, _ := decayClock(t, s); through != decayT0.Unix() {
-		t.Fatalf("clock moved to %d", through)
+		t.Fatalf("clock = %d, want reset to %d", through, decayT0.Unix())
+	}
+	if got := decayEdgeCount(t, s, "a", "b"); got != 500 {
+		t.Fatalf("count after reset = %d, want 500", got)
+	}
+	if d := mustDecay(t, s, decayT0.Add(decayDay), 7); d.Steps != 1 {
+		t.Fatalf("one day after the reset: %+v, want one step", d)
+	}
+	if got := decayEdgeCount(t, s, "a", "b"); got != 453 {
+		t.Fatalf("count one day after the reset = %d, want 453", got)
+	}
+	// Just past the one-day tolerance resets too.
+	s2 := newDecayStore(t)
+	mustDecay(t, s2, decayT0.Add(decayDay+time.Second), 7)
+	if d := mustDecay(t, s2, decayT0, 7); !d.ClockReset {
+		t.Fatalf("clock 1 day + 1 s ahead: %+v, want a reset", d)
 	}
 }
 
@@ -537,14 +573,18 @@ func TestNeighborEdgeCountHalfLifeDaysOrDefault(t *testing.T) {
 		cfg  *Config
 		want int
 	}{
-		{nilCfg, 7},
-		{&Config{}, 7},
+		{nilCfg, 0}, // opt-in (review F1/F2): unset means disabled
+		{&Config{}, 0},
 		{&Config{NeighborEdgeCountHalfLifeDays: 3}, 3},
 		{&Config{NeighborEdgeCountHalfLifeDays: 30}, 30},
 		{&Config{NeighborEdgeCountHalfLifeDays: -1}, 0},
 	} {
 		if got := tc.cfg.NeighborEdgeCountHalfLifeDaysOrDefault(); got != tc.want {
-			t.Errorf("%+v: got %d, want %d", tc.cfg, got, tc.want)
+			set := "nil config"
+			if tc.cfg != nil {
+				set = fmt.Sprint(tc.cfg.NeighborEdgeCountHalfLifeDays)
+			}
+			t.Errorf("neighborEdgeCountHalfLifeDays %s: got %d, want %d", set, got, tc.want)
 		}
 	}
 	var cfg Config
@@ -553,6 +593,173 @@ func TestNeighborEdgeCountHalfLifeDaysOrDefault(t *testing.T) {
 	}
 	if got := cfg.NeighborEdgeCountHalfLifeDaysOrDefault(); got != 14 {
 		t.Fatalf("JSON key: got %d, want 14", got)
+	}
+}
+
+// The ingestor's wiring (main.go) passes the configured half-life to the
+// background check: off by default, the configured value otherwise. The
+// clock is seeded 25 hours back, so the check at start applies exactly
+// one step at whatever half-life it was given (review F4).
+func TestStartNeighborEdgeDecayFromConfig(t *testing.T) {
+	var nilCfg *Config
+	for _, tc := range []struct {
+		name         string
+		cfg          *Config
+		wantHalfLife int
+		wantCount    int
+		wantClock    bool
+	}{
+		{"nil config is off", nilCfg, 0, 1000, false},
+		{"default is off", &Config{}, 0, 1000, false},
+		{"negative is off", &Config{NeighborEdgeCountHalfLifeDays: -1}, 0, 1000, false},
+		{"7 days", &Config{NeighborEdgeCountHalfLifeDays: 7}, 7, 906, true},
+		{"1 day", &Config{NeighborEdgeCountHalfLifeDays: 1}, 1, 500, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newDecayStore(t)
+			insertDecayEdge(t, s, "a", "b", 1000, decayT0.Format(time.RFC3339))
+			if err := ensureNeighborEdgeDecayState(s.db); err != nil {
+				t.Fatal(err)
+			}
+			seeded := time.Now().Add(-25 * time.Hour).Unix()
+			if _, err := s.db.Exec(`INSERT INTO neighbor_edge_decay_state (id, decayed_through, updated_at) VALUES (1, ?, '')`, seeded); err != nil {
+				t.Fatal(err)
+			}
+			stop, halfLife := startNeighborEdgeDecayFromConfig(s, tc.cfg, time.Hour)
+			stop() // returns once the check at start has run
+			if halfLife != tc.wantHalfLife {
+				t.Errorf("half-life %d, want %d", halfLife, tc.wantHalfLife)
+			}
+			if got := decayEdgeCount(t, s, "a", "b"); got != tc.wantCount {
+				t.Errorf("count %d, want %d", got, tc.wantCount)
+			}
+			through, ok := decayClock(t, s)
+			if ok != tc.wantClock {
+				t.Fatalf("clock present = %v, want %v", ok, tc.wantClock)
+			}
+			if ok && through != seeded+int64(decayDay/time.Second) {
+				t.Errorf("clock %d, want one day after the seed", through)
+			}
+		})
+	}
+}
+
+// config.example.json is copied as a live config by some deployments, so
+// it keeps decay off. It and docs/deployment.md say that decay is opt-in
+// and irreversible and point to the replay measurement (review F3).
+func TestConfigExampleKeepsNeighborEdgeDecayOff(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "config.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.NeighborEdgeCountHalfLifeDaysOrDefault(); got != 0 {
+		t.Errorf("config.example.json enables decay (half-life %d days)", got)
+	}
+	var comments map[string]any
+	if err := json.Unmarshal(data, &comments); err != nil {
+		t.Fatal(err)
+	}
+	comment, _ := comments["_comment_neighborEdgeCountHalfLifeDays"].(string)
+	docs, err := os.ReadFile(filepath.Join("..", "..", "docs", "deployment.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	section := string(docs)
+	if i := strings.Index(section, "### Neighbour edge count decay"); i >= 0 {
+		section = section[i:]
+		if j := strings.Index(section[1:], "\n### "); j >= 0 {
+			section = section[:j+1]
+		}
+	} else {
+		t.Fatal("docs/deployment.md has no decay section")
+	}
+	for name, text := range map[string]string{"config.example.json": strings.ToLower(comment), "docs/deployment.md": strings.ToLower(section)} {
+		for _, want := range []string{"opt-in", "irreversible", "neighbor-edge-decay-replay.sh"} {
+			if !strings.Contains(text, want) {
+				t.Errorf("%s does not say %q about decay", name, want)
+			}
+		}
+	}
+}
+
+type decayRecentTraffic struct {
+	HalfLifeDays int `json:"halfLifeDays"`
+	Days         int `json:"days"`
+	Edges        []struct {
+		Neighbor string `json:"neighbor"`
+		Credits  []struct {
+			Day int `json:"day"`
+			N   int `json:"n"`
+		} `json:"credits"`
+		LastSeenHoursAgo int `json:"lastSeenHoursAgo"`
+		LifetimeCount    int `json:"lifetimeCount"`
+		DecayedCount     int `json:"decayedCount"`
+	} `json:"edges"`
+}
+
+// Recent traffic can outrank old lifetime credit once decay is on (review
+// F1). Both edges are credited day by day through the builder's write
+// path; the shared fixture pins the resulting counts, and the server's
+// consumer test shows the hop resolver picking A on the lifetime counts
+// and B on the decayed ones. With the default configuration decay is off
+// and the lifetime counts stay.
+func TestNeighborEdgeDecay_RecentTrafficScenario(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "test-fixtures", "neighbor-edge-decay-recent-traffic.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sc decayRecentTraffic
+	if err := json.Unmarshal(raw, &sc); err != nil {
+		t.Fatal(err)
+	}
+	if len(sc.Edges) != 2 || sc.Days <= 0 {
+		t.Fatalf("scenario: %d edges over %d days", len(sc.Edges), sc.Days)
+	}
+	simulate := func(halfLifeDays int) *Store {
+		s := newDecayStore(t)
+		for day := 0; day <= sc.Days; day++ {
+			at := decayT0.Add(time.Duration(day) * decayDay)
+			var credits []edgeRow
+			for _, e := range sc.Edges {
+				for _, c := range e.Credits {
+					for i := 0; i < c.N && c.Day == day; i++ {
+						credits = append(credits, canonEdge(e.Neighbor, "target", at.Add(-time.Hour).Format(time.RFC3339)))
+					}
+				}
+			}
+			if len(credits) > 0 {
+				if err := s.persistNeighborEdges(credits); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mustDecay(t, s, at, halfLifeDays)
+		}
+		return s
+	}
+	end := decayT0.Add(time.Duration(sc.Days) * decayDay)
+	lifetime := simulate((&Config{}).NeighborEdgeCountHalfLifeDaysOrDefault())
+	decayed := simulate(sc.HalfLifeDays)
+	for _, e := range sc.Edges {
+		a, b := canonEdge(e.Neighbor, "target", "").a, canonEdge(e.Neighbor, "target", "").b
+		if got := decayEdgeCount(t, lifetime, a, b); got != e.LifetimeCount {
+			t.Errorf("%s with the default config: count %d, want the lifetime %d", e.Neighbor, got, e.LifetimeCount)
+		}
+		if got := decayEdgeCount(t, decayed, a, b); got != e.DecayedCount {
+			t.Errorf("%s at a %d-day half-life: count %d, want %d", e.Neighbor, sc.HalfLifeDays, got, e.DecayedCount)
+		}
+		for _, s := range []*Store{lifetime, decayed} {
+			ls, err := time.Parse(time.RFC3339, decayEdges(t, s)[a+"--"+b].lastSeen)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if h := int(end.Sub(ls) / time.Hour); h != e.LastSeenHoursAgo {
+				t.Errorf("%s last seen %d h before the end, want %d", e.Neighbor, h, e.LastSeenHoursAgo)
+			}
+		}
 	}
 }
 

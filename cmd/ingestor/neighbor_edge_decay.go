@@ -49,8 +49,9 @@ const NeighborEdgeDecayCheckInterval = time.Hour
 
 // neighborEdgeDecay reports one DecayNeighborEdgeCounts call.
 type neighborEdgeDecay struct {
-	Steps   int   // whole days applied
-	Lowered int64 // edge-count updates over all steps
+	Steps      int   // whole days applied
+	Lowered    int64 // edge-count updates over all steps
+	ClockReset bool  // the stored clock was more than a day ahead and was reset to now
 }
 
 func ensureNeighborEdgeDecayState(db *sql.DB) error {
