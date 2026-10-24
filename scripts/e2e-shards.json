@@ -2160,6 +2160,15 @@
       ]
     },
     {
+      "file": "test-e2e-532-route-hop-count.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 8
+    },
+    {
       "file": "test-e2e-1267-mobile-vcr.js",
       "shard": 3,
       "env": {
