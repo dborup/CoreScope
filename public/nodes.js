@@ -620,6 +620,7 @@
   }
 
   let regionChangeHandler = null;
+  let areaChangeHandler = null;
   let packetCountHelpCleanup = null;
 
   function init(app, routeParam) {
@@ -691,7 +692,7 @@
     RegionFilter.init(document.getElementById('nodesRegionFilter'));
     AreaFilter.init(document.getElementById('nodesAreaFilter'));
     regionChangeHandler = RegionFilter.onChange(function () { _allNodes = null; _fleetSkew = null; loadNodes(); });
-    AreaFilter.onChange(function () { _allNodes = null; _fleetSkew = null; loadNodes(); });
+    areaChangeHandler = AreaFilter.onChange(function () { _allNodes = null; _fleetSkew = null; loadNodes(); });
 
     if (search) {
       var _si = document.getElementById('nodeSearch');
@@ -1371,6 +1372,8 @@
     closeDetailView();
     if (regionChangeHandler) RegionFilter.offChange(regionChangeHandler);
     regionChangeHandler = null;
+    if (areaChangeHandler) AreaFilter.offChange(areaChangeHandler);
+    areaChangeHandler = null;
     nodes = [];
     selectedKey = null;
   }
