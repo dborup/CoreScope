@@ -421,8 +421,12 @@ func TestHashMigrate_MergesDuplicatesInMemory_215(t *testing.T) {
 						t.Errorf("byObsID[%d] is not the observation of tx %d", o.ID, tx.ID)
 					}
 				}
-				if int(tx.UniqueObserverCount) != len(tx.observerSet) || len(tx.observerSet) != 4 {
-					t.Errorf("group %d survivor has %d unique observers (%d in the set), want 4", g, tx.UniqueObserverCount, len(tx.observerSet))
+				observers := map[string]bool{}
+				for _, o := range tx.Observations {
+					observers[o.ObserverID] = true
+				}
+				if int(tx.UniqueObserverCount) != len(observers) || len(observers) != 4 {
+					t.Errorf("group %d survivor has %d unique observers (%d in its observations), want 4", g, tx.UniqueObserverCount, len(observers))
 				}
 				for k := 1; k <= 3; k++ {
 					if loser := s.byTxID[g*10+k]; k != 1 && loser != nil {

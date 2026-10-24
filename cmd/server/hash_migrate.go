@@ -346,13 +346,9 @@ func (s *PacketStore) rekeyNodeHashesSweep(renames map[string]string) {
 // from the path-hop index, which reads it; the index entries of loser itself
 // are removed there.
 func (s *PacketStore) moveObservations(winner, loser *StoreTx, m *hashMerge) {
-	if winner.obsKeys == nil {
-		winner.obsKeys = make(map[string]bool)
-		winner.observerSet = make(map[string]bool)
-	}
 	for _, o := range loser.Observations {
-		dk := o.ObserverID + "|" + o.PathJSON
-		if winner.obsKeys[dk] {
+		dup, knownObserver := winner.lookupObservation(o.ObserverID, o.PathJSON)
+		if dup {
 			delete(s.byObsID, o.ID)
 			s.totalObs--
 			s.trackedBytes -= estimateStoreObsBytes(o)
@@ -363,13 +359,7 @@ func (s *PacketStore) moveObservations(winner, loser *StoreTx, m *hashMerge) {
 			continue
 		}
 		o.TransmissionID = winner.ID
-		winner.Observations = append(winner.Observations, o)
-		winner.obsKeys[dk] = true
-		if o.ObserverID != "" && !winner.observerSet[o.ObserverID] {
-			winner.observerSet[o.ObserverID] = true
-			winner.UniqueObserverCount++
-		}
-		winner.ObservationCount++
+		s.trackedBytes += winner.addObservation(o, knownObserver)
 		if o.Timestamp > winner.LatestSeen {
 			winner.LatestSeen = o.Timestamp
 		}
@@ -470,6 +460,7 @@ func (s *PacketStore) finishHashMerge(m *hashMerge, metadata pathNodeSnapshot) i
 	for _, l := range m.losers {
 		l.Observations = nil
 		l.ObservationCount = 0
+		l.obsKeys, l.observerSet = nil, nil
 	}
 	s.removeTxsFromByNode(m.loserSet, nodePks)
 	for pt := range affectedPayloadTypes {

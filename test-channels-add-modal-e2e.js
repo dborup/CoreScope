@@ -153,14 +153,15 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   });
 
   await step('Remove channel: clicking ✕ removes row + clears localStorage key', async () => {
-    const removeBtn = await page.$(
-      '.ch-section-mychannels [data-remove-channel]');
-    if (!removeBtn) { console.log('    (skip — no user-added rows)'); return; }
-    const hash = await removeBtn.getAttribute('data-remove-channel');
-    await removeBtn.click(); // dialog auto-accepted
+    const menuBtn = await page.$(
+      '.ch-section-mychannels [data-row-menu]');
+    if (!menuBtn) { console.log('    (skip — no user-added rows)'); return; }
+    const hash = await menuBtn.getAttribute('data-row-menu');
+    await menuBtn.click();
+    await page.click('#chRowMenu [data-remove-channel]'); // dialog auto-accepted
     await page.waitForFunction((h) => {
-      return !document.querySelector('[data-remove-channel="' + CSS.escape(h) + '"]');
-    }, { timeout: 5000 }, hash);
+      return !document.querySelector('[data-row-menu="' + CSS.escape(h) + '"]');
+    }, hash, { timeout: 5000 });
   });
 
   await browser.close();

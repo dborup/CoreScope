@@ -120,7 +120,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
           JSON.stringify({ Touch2052: '00112233445566778899aabbccddeeff' })));
         await target.goto(BASE + (mobile ? '/#/packets' : '/#/channels'),
           { waitUntil: 'domcontentloaded' });
-        const action = mobile ? '.filter-toggle-btn-mirror' : '[data-share-channel]';
+        const action = mobile ? '.filter-toggle-btn-mirror' : '[data-row-menu]';
         await target.waitForSelector(action);
         await target.evaluate(() => document.fonts.ready);
         // Mobile page-actions rebuilds the mirror while packets initializes.
@@ -153,6 +153,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         if (mobile) {
           await target.waitForSelector('.filter-bar.filters-expanded');
         } else {
+          await target.locator('#chRowMenu [data-share-channel]').click();
           await target.waitForSelector('#chShareModal:not(.hidden)');
           assert((await target.inputValue('#chShareKey')) === '00112233445566778899aabbccddeeff',
             'Share must open the selected channel key');
