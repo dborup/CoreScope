@@ -579,9 +579,9 @@ func TestEstimateStoreObsBytes(t *testing.T) {
 		PathJSON:   `["aa"]`,
 	}
 	est := estimateStoreObsBytes(obs)
-	// storeObsBaseBytes(192) + len(ObserverID=6) + len(PathJSON=6) + 2*48(96);
+	// storeObsBaseBytes(176) + len(ObserverID=6) + len(PathJSON=6) + 2*48(96);
 	// no dedup key is allocated or charged per observation (#411)
-	expected := int64(192 + 6 + 6 + 2*48)
+	expected := int64(176 + 6 + 6 + 2*48)
 	if est != expected {
 		t.Fatalf("estimateStoreObsBytes = %d, want %d", est, expected)
 	}
