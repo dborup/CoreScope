@@ -67,6 +67,12 @@ func TestRepeaterRelayInfoMap_ConcurrentIngestAndEviction(t *testing.T) {
 	}
 	publishLocked()
 	store.mu.Unlock()
+	// The oracle must describe the same relay evidence the bulk reader sees
+	// from round 0 on, or a reader that finishes before round 1 compares
+	// against a different answer (#567).
+	if first := oracle[0]; first[relayA].RelayCount24h == 0 || first[relayB].RelayCount24h == 0 {
+		t.Fatalf("round-0 oracle credits no relay: %+v", first)
+	}
 
 	readRound := func() int {
 		store.mu.RLock()
