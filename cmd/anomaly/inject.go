@@ -776,17 +776,53 @@ func labelIncidents(bot, channel, key string, evs []injEvent, l labellingSpec) [
 		times = append(times, e.t)
 	}
 	sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
+	r := periodicRuns(times, l, time.Duration(l.PulseMergeGap))
+	var out []Incident
+	for _, run := range r.runs {
+		out = append(out, Incident{Bot: bot, Channel: channel, Key: key, Start: time.Unix(0, r.pulses[run[0]]).UTC(),
+			Stop: time.Unix(0, r.pulses[run[1]]).UTC(), Period: dur(r.period), Pulses: run[1] - run[0] + 1})
+	}
+	return out
+}
+
+// pulseRuns is the outcome of the #457 §4 periodic recipe over one series.
+type pulseRuns struct {
+	// pulses are the pulse times; first[i] is the index, in the input times,
+	// of pulse i's first event, so pulse i holds times[first[i]:first[i+1]].
+	pulses []int64
+	first  []int
+	// period is P, the median pulse gap inside [MinPeriod, MaxPeriod]; 0
+	// when there is none.
+	period int64
+	// runs are the maximal runs of at least MinPulses pulses whose every gap
+	// fits, as [first pulse, last pulse] indices, inclusive.
+	runs [][2]int
+}
+
+// periodicRuns applies the labelling recipe (#457 §4) to sorted event times:
+// events closer than merge to a pulse's first event are that pulse, P is the
+// median pulse gap inside [MinPeriod, MaxPeriod], and a run is a maximal
+// stretch of at least MinPulses pulses whose every gap is within
+// max(ToleranceAbs, ToleranceRel*P) of k*P for some k in 1..MaxHarmonic.
+// inject labels its bots with merge = PulseMergeGap; label passes its own.
+func periodicRuns(times []int64, l labellingSpec, merge time.Duration) pulseRuns {
+	var r pulseRuns
+	if len(times) == 0 {
+		return r
+	}
 	// Events closer than the merge gap are one pulse, timed at its first
 	// event (as the detector's BurstGap does).
-	pulses := []int64{times[0]}
-	for _, t := range times[1:] {
-		if t-pulses[len(pulses)-1] >= int64(time.Duration(l.PulseMergeGap)) {
-			pulses = append(pulses, t)
+	r.pulses, r.first = []int64{times[0]}, []int{0}
+	for i, t := range times[1:] {
+		if t-r.pulses[len(r.pulses)-1] >= int64(merge) {
+			r.pulses = append(r.pulses, t)
+			r.first = append(r.first, i+1)
 		}
 	}
-	if len(pulses) < 2 {
-		return nil
+	if len(r.pulses) < 2 {
+		return r
 	}
+	pulses := r.pulses
 	gaps := make([]int64, 0, len(pulses)-1)
 	inRange := make([]int64, 0, len(pulses)-1)
 	for i := 1; i < len(pulses); i++ {
@@ -797,13 +833,11 @@ func labelIncidents(bot, channel, key string, evs []injEvent, l labellingSpec) [
 		}
 	}
 	if len(inRange) == 0 {
-		return nil
+		return r
 	}
 	period := medianInt64(inRange)
-	tol := int64(float64(period) * l.ToleranceRel)
-	if a := int64(time.Duration(l.ToleranceAbs)); a > tol {
-		tol = a
-	}
+	r.period = period
+	tol := l.tolerance(period)
 	fits := func(g int64) bool {
 		for k := 1; k <= l.MaxHarmonic; k++ {
 			d := g - int64(k)*period
@@ -816,13 +850,11 @@ func labelIncidents(bot, channel, key string, evs []injEvent, l labellingSpec) [
 		}
 		return false
 	}
-	var out []Incident
 	// A run is a maximal stretch of pulses whose every gap fits.
 	runStart := 0
 	flush := func(end int) { // pulses[runStart:end+1] is the run
 		if end-runStart+1 >= l.MinPulses {
-			out = append(out, Incident{Bot: bot, Channel: channel, Key: key, Start: time.Unix(0, pulses[runStart]).UTC(),
-				Stop: time.Unix(0, pulses[end]).UTC(), Period: dur(period), Pulses: end - runStart + 1})
+			r.runs = append(r.runs, [2]int{runStart, end})
 		}
 	}
 	for i, g := range gaps {
@@ -832,7 +864,17 @@ func labelIncidents(bot, channel, key string, evs []injEvent, l labellingSpec) [
 		}
 	}
 	flush(len(pulses) - 1)
-	return out
+	return r
+}
+
+// tolerance is the recipe's per-gap tolerance at period p, in nanoseconds:
+// max(ToleranceAbs, ToleranceRel*p).
+func (l labellingSpec) tolerance(p int64) int64 {
+	tol := int64(float64(p) * l.ToleranceRel)
+	if a := int64(time.Duration(l.ToleranceAbs)); a > tol {
+		tol = a
+	}
+	return tol
 }
 
 // medianInt64 returns the median of a non-empty slice: the middle value, or
