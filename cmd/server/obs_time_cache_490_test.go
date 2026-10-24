@@ -245,3 +245,21 @@ func TestStoreObsBaseBytesIsTheHeapSizeClass_490(t *testing.T) {
 	}
 	runtime.KeepAlive(keep)
 }
+
+// The differential property on any input: every table case seeds the
+// corpus; `go test -fuzz FuzzStoreObsParsedTime_490` searches further.
+func FuzzStoreObsParsedTime_490(f *testing.F) {
+	for _, c := range obsTimeCases490 {
+		f.Add(c.ts)
+	}
+	f.Fuzz(func(t *testing.T, ts string) {
+		want, wantOK := legacyParsedTime490(ts)
+		o := &StoreObs{Timestamp: ts}
+		for call := 1; call <= 2; call++ {
+			got, ok := o.ParsedTime()
+			if d := sameParsedTime490(got, ok, want, wantOK); d != "" {
+				t.Fatalf("%q call %d: %s: got %v %v, want %v %v", ts, call, d, got, ok, want, wantOK)
+			}
+		}
+	})
+}

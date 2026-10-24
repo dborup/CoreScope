@@ -103,43 +103,74 @@ type StoreObs struct {
 	// #1481 P0-2: cached parsed timestamp. The legacy handlers parse
 	// Timestamp as RFC3339Nano/RFC3339/"2006-01-02 15:04:05" with a
 	// fallback chain on every read; for /api/observers/{id}/analytics
-	// that fires 60k+ times per request under RLock. ParsedTime returns
-	// the parsed value once, caching for the lifetime of the StoreObs.
-	tsParseOnce sync.Once
-	tsParsed    time.Time
-	tsParsedOK  bool
+	// that fires 60k+ times per request under RLock. ParsedTime parses
+	// once and keeps the result here in one word (#490, see
+	// tsCacheEncode): a sync.Once, time.Time and bool took 40 bytes.
+	tsCache atomic.Uint64
 	// wireRoute is the route type in this observation's own frame header
 	// (observations.raw_hex, #77), plus one; 0 when no frame was stored.
 	// One content hash can be heard on flood and direct routes (#308), so
 	// per-observation routing evidence (Heard By, #76) reads this, not
 	// tx.RouteType. The frame itself is not kept (#881). It fills padding
-	// after tsParsedOK, so StoreObs does not grow.
+	// after tsCache, so StoreObs does not grow.
 	wireRoute uint8
 }
+
+// tsCache holds tsCacheNotParsed until the first ParsedTime call, then one
+// of the other two sentinels or tsCacheEncode of the parsed time.
+const (
+	tsCacheNotParsed uint64 = iota // the zero value: ParsedTime not called yet
+	tsCacheInvalid                 // Timestamp is empty or not a time
+	tsCacheReparse                 // parsed, but not held exactly as UTC nanoseconds
+)
+
+// tsCacheEncode maps UnixNano n to the cache word by flipping its sign bit,
+// so the epoch and negative times are held like any other. The sentinels
+// are the encodings of the first three instants UnixNano can hold, from
+// 1677-09-21T00:12:43.145224192Z; ParsedTime reparses those.
+func tsCacheEncode(n int64) uint64 { return uint64(n) ^ (1 << 63) }
 
 // ParsedTime returns the parsed Timestamp, caching the result.
 // Tries RFC3339Nano → RFC3339 → "2006-01-02 15:04:05" in order.
 // Returns (zero, false) if Timestamp is empty or unparseable.
-// Thread-safe via sync.Once.
+// Safe for concurrent use: callers racing on the first call each parse and
+// store the same word. A time not in UTC, or outside what UnixNano holds,
+// is parsed again on each call so its location and value are kept.
 func (o *StoreObs) ParsedTime() (time.Time, bool) {
-	o.tsParseOnce.Do(func() {
-		if o.Timestamp == "" {
-			return
+	switch c := o.tsCache.Load(); c {
+	case tsCacheNotParsed:
+	case tsCacheInvalid:
+		return time.Time{}, false
+	case tsCacheReparse:
+		return parseObsTimestamp(o.Timestamp)
+	default:
+		return time.Unix(0, int64(c^(1<<63))).UTC(), true
+	}
+	t, ok := parseObsTimestamp(o.Timestamp)
+	c := tsCacheInvalid
+	if ok {
+		c = tsCacheReparse
+		// Held only when the word gives t back exactly: in UTC, and the
+		// instant itself (UnixNano wraps outside its range).
+		if n := t.UnixNano(); t.Location() == time.UTC && time.Unix(0, n).Equal(t) && tsCacheEncode(n) > tsCacheReparse {
+			c = tsCacheEncode(n)
 		}
-		if t, err := time.Parse(time.RFC3339Nano, o.Timestamp); err == nil {
-			o.tsParsed, o.tsParsedOK = t, true
-			return
+	}
+	o.tsCache.Store(c)
+	return t, ok
+}
+
+// parseObsTimestamp is ParsedTime's parser, without the cache.
+func parseObsTimestamp(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range [...]string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, true
 		}
-		if t, err := time.Parse(time.RFC3339, o.Timestamp); err == nil {
-			o.tsParsed, o.tsParsedOK = t, true
-			return
-		}
-		if t, err := time.Parse("2006-01-02 15:04:05", o.Timestamp); err == nil {
-			o.tsParsed, o.tsParsedOK = t, true
-			return
-		}
-	})
-	return o.tsParsed, o.tsParsedOK
+	}
+	return time.Time{}, false
 }
 
 // ParsedDecoded returns the parsed DecodedJSON map, caching the result.
@@ -5499,7 +5530,7 @@ func (s *PacketStore) buildDistanceIndex(snapshots ...pathNodeSnapshot) {
 // Note: ResolvedPath per-obs overhead eliminated by #800 refactor.
 const (
 	storeTxBaseBytes  = 384 // StoreTx struct fields + map pointers + sync.Once + string headers
-	storeObsBaseBytes = 192 // StoreObs struct fields + string headers
+	storeObsBaseBytes = 176 // StoreObs struct fields + string headers: the heap size class of its 168 bytes (#490)
 	strHdr            = 16  // Go string header (ptr + len) on a 64-bit build; used by GetStoreMemoryBreakdown
 	indexEntryBytes   = 48  // average cost of one index map entry (key + pointer + bucket overhead)
 	numIndexesPerTx   = 5   // byHash, byTxID, byNode, byPayloadType, nodeHashes entries
