@@ -681,9 +681,9 @@ func TestScoreSelectedTailCountsAMissAsInfinite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sub.IncidentsMissed != 0 || sub.P75TTDSelectedInfinite || sub.Recall != 1 {
+	if sub.IncidentsMissed != 0 || sub.P75TTDSelectedInfinite || *sub.Recall != 1 {
 		t.Fatalf("-bots subset: missed %d, infinite %v, recall %.2f",
-			sub.IncidentsMissed, sub.P75TTDSelectedInfinite, sub.Recall)
+			sub.IncidentsMissed, sub.P75TTDSelectedInfinite, *sub.Recall)
 	}
 }
 

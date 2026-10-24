@@ -5,7 +5,8 @@ part of the server or the ingestor, is not built into any image and has no
 defaults: every bound is an explicit flag.
 
 Only `export` reads a database, read-only. Nothing here ever writes to a
-CoreScope database: `inject` and `score` read and write plain files.
+CoreScope database: `keys`, `inject`, `label` and `score` read and write
+plain files.
 
 ```sh
 cd cmd/anomaly && go build -o corescope-anomaly .
@@ -479,6 +480,82 @@ series, overlapping its window, that the plain arm already had) and
 here); `incidents_baseline_masked` counts them. That tells a no-go caused by
 background contamination apart from a detector miss.
 
-Provenance (`labels`, `baseline`) is recorded as the file names only, never
-the paths they were read from: a path can carry a user or a host name, and a
-metrics file may be shared.
+Provenance (`labels`, `baseline`, `real_labels`) is recorded as the file
+names only, never the paths they were read from: a path can carry a user or
+a host name, and a metrics file may be shared.
+
+### Real-traffic labels in arm A (`-real-labels`, #474 round 4)
+
+`-real-labels` takes arm A's ground truth from [`label`](#label): real
+automated senders on the real background. The match is the one above, on
+the **channel hash** (the labels carry no stream key, so any route group of
+the hash matches), with the labels file's own tolerance. An episode that
+matches no labelled sender is a false alarm; `recall` is then the
+**real-sender recall** (labelled senders with at least one episode; with no
+labelled sender it is 0/0 and the field is left out, not written as 0), and
+each sender is a per-incident row named `real-1`, `real-2`, ... in the
+file's order. Beside them the metrics carry round 3's **strict** reading of
+the same episodes, every one a false alarm: `strict_false_positives` and
+`strict_false_alarms_per_day`. Those three fields (with `real_labels`) are
+written only with `-real-labels`, so every other run's metrics file is
+unchanged.
+
+`-real-labels` is arm A's flag only: it combines with none of `-labels`,
+`-baseline` and `-bots`. Each labels file is accepted by its own flag only
+(`real: true` against `synthetic: true`), and the real labels' window must
+cover `[-start, -end)` — a sender outside the labelled window could not have
+been labelled.
+
+## label
+
+Labels real automated senders in an export from aggregate signals alone, so
+the false-alarm arm can tell a real sender — the rule's target — from a
+false alarm (#474 round 4). It reads the export only, opens no database,
+needs no decryption (so it works on channels nobody holds a key for), uses
+no detector output and refuses a line with an injected id.
+
+```sh
+corescope-anomaly label -input bg.jsonl -payload-type 5 -exclude-channels 81 \
+  -start 2026-10-26T00:00:00Z -end 2026-11-02T00:00:00Z \
+  -pulse-merge-gap 60s -min-period 1m -max-period 1h -min-pulses 8 -max-harmonic 3 \
+  -tolerance-abs 30s -tolerance-rel 0.1 -min-size-share 0.95 \
+  -max-lines 50000000 -max-line-bytes 4096 -out labels-real.json
+```
+
+The recipe, restated in the output's `recipe`:
+
+1. **Channel-hash level.** Every line of the payload type on one channel
+   hash, through any route group, inside `[-start, -end)`, not excluded. A
+   sender entering through changing first hops is one series here, where the
+   rule's stream key would split it.
+2. **Segments.** A channel's lines are split at every gap no run can bridge
+   (more than `max_harmonic · max_period` plus the tolerance at
+   `max_period`), so P is estimated from the segment's own traffic and not
+   from a week of everything on the hash. Splitting there never cuts a run.
+3. **The §4 periodic recipe** (see [Labels](#labels)) per segment, with the
+   pulse merge capped at half the segment's raw cadence:
+   `min(pulse_merge_gap, P0/2)`, P0 the median raw gap of at least
+   `min_period/2`. A fixed 60 s merge folds every other pulse of a
+   one-minute train into its neighbour, so the recipe could not label the
+   bottom of its own period range; from a 2-minute cadence up the cap is
+   inactive and the merge is exactly `pulse_merge_gap`.
+4. **Constant size.** A run is kept only when one payload size carries at
+   least `min_size_share` of its lines (every line of its pulses, multi-part
+   parts included). A line whose payload length is unknown counts in the run
+   but never as the common size.
+
+**Why the size test.** The timing recipe alone is looser than the rule — its
+tolerance over k = 1..3 is nearly continuous at short periods — so on its own
+it would label almost anything the rule fires on, and arm A would pass by
+construction. The rule never reads a payload size. Human chat mixes sizes
+(text of different lengths and sender names, in 16-byte cipher blocks); an
+automated sender repeating one message format does not. A periodic train of
+varied size — a verse bot, say — is therefore **not** labelled and stays a
+false alarm: the label can excuse an episode only when evidence the detector
+does not use agrees with it. The counters `timing_runs` and `size_rejected`
+show how many runs the timing recipe found and how many the size test
+refused.
+
+The output holds `(channel, start, stop, period, size_share)` tuples and
+counts: no ids, hops, routes, size values, names or text. It is a pure
+function of the lines and the flags; the input's line order does not matter.
