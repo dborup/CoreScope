@@ -439,6 +439,8 @@
 
   "analytics": {
     "defaultIntervalSeconds": 300,
+    "pauseWhenIdle": false,
+    "_comment_pauseWhenIdle": "Issue #492. Opt-in, default false (every analytics snapshot is recomputed on its interval whether read or not). When true, a scheduled recompute is skipped if nothing read that endpoint's default snapshot since the previous recompute, so an instance whose analytics pages are rarely open stops recomputing and allocating for them. Freshness trade-off: the first read after a pause is served the existing snapshot at once — it can be much older than the interval — and wakes one refresh; reads after that see fresh data. While pauseWhenIdle is on, responses served from a snapshot carry X-Analytics-Snapshot (current|stale) and X-Analytics-Snapshot-Age-Seconds, so a stale snapshot is never presented as freshly computed. Startup load, warm-up gates and failed recomputes are unaffected: a recomputer only pauses after a successful pass that started once the startup load finished.",
     "recomputeIntervalSeconds": {
       "topology": 300,
       "rf": 300,

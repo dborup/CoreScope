@@ -2883,6 +2883,7 @@ func (s *Server) handleObserverClockSkew(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, []ObserverCalibration{})
 		return
 	}
+	setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompObserversClockSkew)) // #492
 	writeJSON(w, s.store.GetObserverCalibrations())
 }
 
@@ -2892,6 +2893,9 @@ func (s *Server) handleFleetClockSkew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	area := r.URL.Query().Get("area")
+	if area == "" {
+		setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompNodesClockSkew)) // #492
+	}
 	writeJSON(w, s.store.GetFleetClockSkew(area))
 }
 
@@ -2917,6 +2921,7 @@ func (s *Server) handleAnalyticsRF(w http.ResponseWriter, r *http.Request) {
 				writeAnalyticsWarmup503(w)
 				return
 			}
+			setAnalyticsSnapshotHeaders(w, rc) // #492
 		}
 		writeJSON(w, s.store.GetAnalyticsRFWithWindow(region, area, window))
 		return
@@ -2967,6 +2972,7 @@ func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request)
 				writeAnalyticsWarmup503(w)
 				return
 			}
+			setAnalyticsSnapshotHeaders(w, rc) // #492
 		}
 		// The store hands out its shared cached result; the filter never
 		// writes to it and returns a filtered copy when anything is hidden.
@@ -3006,6 +3012,7 @@ func (s *Server) handleAnalyticsChannels(w http.ResponseWriter, r *http.Request)
 				writeAnalyticsWarmup503(w)
 				return
 			}
+			setAnalyticsSnapshotHeaders(w, rc) // #492
 		}
 		writeJSON(w, s.store.GetAnalyticsChannelsWithWindow(region, area, window))
 		return
@@ -3044,6 +3051,9 @@ func (s *Server) handleAnalyticsDistance(w http.ResponseWriter, r *http.Request)
 			_, _ = w.Write([]byte(`{"status":"building","retry_after_seconds":5,"detail":"distance index is being computed (lazy build, #1011). Retry after Retry-After seconds."}`))
 			return
 		}
+		if region == "" && area == "" {
+			setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompDistance)) // #492
+		}
 		writeJSON(w, s.store.GetAnalyticsDistance(region, area))
 		return
 	}
@@ -3064,6 +3074,9 @@ func (s *Server) handleAnalyticsHashSizes(w http.ResponseWriter, r *http.Request
 		if s.rejectAnalyticsFilters(w, region, area) {
 			return
 		}
+		if region == "" && area == "" {
+			setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompHashSizes)) // #492
+		}
 		writeJSON(w, s.store.GetAnalyticsHashSizes(region, area))
 		return
 	}
@@ -3083,6 +3096,9 @@ func (s *Server) handleAnalyticsHashCollisions(w http.ResponseWriter, r *http.Re
 		area := r.URL.Query().Get("area")
 		if s.rejectAnalyticsFilters(w, region, area) {
 			return
+		}
+		if region == "" && area == "" {
+			setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompHashCollisions)) // #492
 		}
 		writeJSON(w, s.store.GetAnalyticsHashCollisions(region, area))
 		return
