@@ -231,6 +231,7 @@ run test-a11y-axe-routes-coverage.js
 
 # Green unit tests that no runner registered before (#174 inventory)
 run test-1108-region-hide-nodes.js
+run test-issue-531-region-url.js
 run test-458-scope-name-case.js
 run test-a11y-1715-dark-role-swatches.js
 run test-analytics-distance-view-path.js
