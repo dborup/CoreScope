@@ -245,6 +245,27 @@
     return '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#' + name + '"/></svg>';
   }
 
+  // #532: hops shown in route meta are recorded relays only. Rows marked
+  // _fromPayload are sender/recipient endpoints decoded from the payload; they
+  // stay in `positions` for layout, distance and stripes but are not hops.
+  function relayHopCount(positions) {
+    var n = 0;
+    if (!positions) return 0;
+    for (var i = 0; i < positions.length; i++) {
+      if (positions[i] && !positions[i]._fromPayload) n++;
+    }
+    return n;
+  }
+
+  // Shared by the desktop header and the mobile collapsed summary.
+  // opts (mobile only): { type, multiPath, totalObservers }.
+  function routeMetaText(positions, totalKm, opts) {
+    opts = opts || {};
+    return (opts.type ? '<b>' + escapeHtml(opts.type) + '</b> · ' : '') +
+      relayHopCount(positions) + ' hops · ' + totalKm + ' km' +
+      (opts.multiPath ? ' · ' + opts.totalObservers + ' obs' : '');
+  }
+
   function buildSidebar(positions, mapRef, layer, edges, markers, opts) {
     opts = opts || {};
     var total = positions.length;
@@ -437,7 +458,7 @@
           '<div class="mc-rt-title">Route</div>' +
           backLink +
         '</div>' +
-        '<div class="mc-rt-meta">' + total + ' hops · ' + totalKm + ' km' +
+        '<div class="mc-rt-meta">' + routeMetaText(positions, totalKm) +
           (unresolvedCount ? ' · ' + unresolvedCount + ' unresolved' : '') +
         '</div>' +
         contextBlock +
@@ -492,9 +513,7 @@
         }).join('→');
       }
     } catch (e) { console.warn('[route-view]', e); }
-    summaryLine = (typeTag ? '<b>' + escapeHtml(typeTag) + '</b> · ' : '') +
-                  total + ' hops · ' + totalKm + ' km' +
-                  (multiPath ? ' · ' + totalObservers + ' obs' : '') +
+    summaryLine = routeMetaText(positions, totalKm, { type: typeTag, multiPath: multiPath, totalObservers: totalObservers }) +
                   (hexRoute ? '<br><span class="mc-rt-mobile-hex">' + escapeHtml(hexRoute) + '</span>' : '');
     sidebar.innerHTML =
       // Desktop: resize handle on the right edge + collapse button.
@@ -1530,5 +1549,5 @@
     }
   }
 
-  window.MeshRouteView = { render: render };
+  window.MeshRouteView = { render: render, relayHopCount: relayHopCount, routeMetaText: routeMetaText };
 })();
