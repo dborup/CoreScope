@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
@@ -576,28 +575,28 @@ func TestNodeTxSetKeepsIDsBeyondUint32_534(t *testing.T) {
 // resolved-pubkey index entry. The set entry is the part #534 shrank, so the
 // charge must follow it or trackedBytes overstates the store and eviction
 // runs early. Measured in a child process (see TestNodeTxSetsRetainedHeap_534)
-// as the marginal heap per key between stores of 1 and 4 resolved keys per
-// transmission: the charge must stay within a third of it either way, the band
+// as the marginal heap per key between stores whose transmissions are indexed
+// under 1 and under 4 resolved relays, through indexResolvedPathHops as Load
+// does per observation (no SQL, so it stays cheap under the CI's -race and
+// coverage): the charge must stay within a third of it either way, the band
 // the calibration of #164 sat in at 100k and 500k transmissions.
 func TestResolvedRelayChargeTracksHeap_534(t *testing.T) {
 	if os.Getenv("CORESCOPE_534_CHARGE_CHILD") == "1" {
 		const n = 40000
-		run := func(maxResolved int) (heap int64, keys int) {
-			dbPath := filepath.Join(t.TempDir(), "c.db")
-			acct113CreateDBOpts(t, dbPath, n, 0, maxResolved)
-			db, err := OpenDB(dbPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer db.conn.Close()
+		run := func(perTx int) (heap int64, keys int) {
 			s, h := heapOf(func() *PacketStore {
-				s := NewPacketStore(db, &PacketStoreConfig{})
-				if err := s.Load(); err != nil {
-					t.Fatal(err)
-				}
-				s.WaitIndexesReady(time.Minute)
-				for _, tx := range s.packets {
-					tx.ParsedDecoded()
+				s := NewPacketStore(nil, &PacketStoreConfig{})
+				hopsSeen := map[string]bool{}
+				pks := make([]string, 0, perTx)
+				for i := 1; i <= n; i++ {
+					tx := &StoreTx{ID: i, Hash: fmt.Sprintf("h%06d", i)}
+					s.packets = append(s.packets, tx)
+					s.byHash[tx.Hash], s.byTxID[tx.ID] = tx, tx
+					pks = pks[:0]
+					for h := 0; h < perTx; h++ {
+						pks = append(pks, acct113PK(i+h*7))
+					}
+					s.indexResolvedPathHops(tx, pks, hopsSeen)
 				}
 				return s
 			})
@@ -608,7 +607,7 @@ func TestResolvedRelayChargeTracksHeap_534(t *testing.T) {
 			return h, keys
 		}
 		h1, k1 := run(1)
-		h4, k4 := run(99)
+		h4, k4 := run(4)
 		fmt.Printf("BN534CHARGE perKey=%.2f keys=%d,%d\n", float64(h4-h1)/float64(k4-k1), k1, k4)
 		return
 	}
