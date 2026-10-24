@@ -17,7 +17,7 @@ func makeTestStore(count int, startTime time.Time, intervalMin int) *PacketStore
 		byObsID:       make(map[int]*StoreObs, count*2),
 		byObserver:    make(map[string][]*StoreObs),
 		byNode:        make(map[string][]*StoreTx),
-		nodeHashes:    make(map[string]map[string]bool),
+		nodeTxIDs:    newNodeTxIndex(),
 		byPayloadType: make(map[int][]*StoreTx),
 		distHops:      make([]distHopRecord, 0),
 		distPaths:     make([]distPathRecord, 0),
@@ -71,12 +71,7 @@ func makeTestStore(count int, startTime time.Time, intervalMin int) *PacketStore
 		store.byPayloadType[pt] = append(store.byPayloadType[pt], tx)
 
 		// Index by node
-		pk := fmt.Sprintf("pk%04d", i)
-		if store.nodeHashes[pk] == nil {
-			store.nodeHashes[pk] = make(map[string]bool)
-		}
-		store.nodeHashes[pk][hash] = true
-		store.byNode[pk] = append(store.byNode[pk], tx)
+		store.addToByNode(tx, fmt.Sprintf("pk%04d", i))
 
 		// Add to distance index
 		store.distHops = append(store.distHops, distHopRecord{tx: tx, Hash: hash})
@@ -217,8 +212,8 @@ func TestEvictStale_CleansNodeIndexes(t *testing.T) {
 	if len(store.byNode) != 10 {
 		t.Fatalf("expected 10 nodes indexed, got %d", len(store.byNode))
 	}
-	if len(store.nodeHashes) != 10 {
-		t.Fatalf("expected 10 nodeHashes, got %d", len(store.nodeHashes))
+	if len(store.nodeTxIDs) != 10 {
+		t.Fatalf("expected 10 nodeTxIDs, got %d", len(store.nodeTxIDs))
 	}
 
 	evicted := store.EvictStale()
@@ -230,8 +225,8 @@ func TestEvictStale_CleansNodeIndexes(t *testing.T) {
 	if len(store.byNode) != 0 {
 		t.Fatalf("expected 0 nodes, got %d", len(store.byNode))
 	}
-	if len(store.nodeHashes) != 0 {
-		t.Fatalf("expected 0 nodeHashes, got %d", len(store.nodeHashes))
+	if len(store.nodeTxIDs) != 0 {
+		t.Fatalf("expected 0 nodeTxIDs, got %d", len(store.nodeTxIDs))
 	}
 	if len(store.byPayloadType) != 0 {
 		t.Fatalf("expected 0 payload types, got %d", len(store.byPayloadType))
@@ -255,7 +250,7 @@ func TestEvictStale_CleansResolvedPathNodeIndexes(t *testing.T) {
 		byObsID:       make(map[int]*StoreObs),
 		byObserver:    make(map[string][]*StoreObs),
 		byNode:        make(map[string][]*StoreTx),
-		nodeHashes:    make(map[string]map[string]bool),
+		nodeTxIDs:    newNodeTxIndex(),
 		byPayloadType: make(map[int][]*StoreTx),
 		distHops:      make([]distHopRecord, 0),
 		distPaths:     make([]distPathRecord, 0),
@@ -309,8 +304,8 @@ func TestEvictStale_CleansResolvedPathNodeIndexes(t *testing.T) {
 	if len(store.byNode[relayPK]) != 1 {
 		t.Fatalf("expected 1 entry in byNode[%s], got %d", relayPK, len(store.byNode[relayPK]))
 	}
-	if !store.nodeHashes[relayPK][tx.Hash] {
-		t.Fatalf("expected nodeHashes[%s] to contain %s", relayPK, tx.Hash)
+	if !store.nodeTxIDs[relayPK].has(tx) {
+		t.Fatalf("expected nodeTxIDs[%s] to contain %d", relayPK, tx.ID)
 	}
 
 	evicted := store.RunEviction()
@@ -322,8 +317,8 @@ func TestEvictStale_CleansResolvedPathNodeIndexes(t *testing.T) {
 	if len(store.byNode[relayPK]) != 0 {
 		t.Fatalf("expected byNode[%s] to be empty after eviction, got %d", relayPK, len(store.byNode[relayPK]))
 	}
-	if _, exists := store.nodeHashes[relayPK]; exists {
-		t.Fatalf("expected nodeHashes[%s] to be deleted after eviction", relayPK)
+	if _, exists := store.nodeTxIDs[relayPK]; exists {
+		t.Fatalf("expected nodeTxIDs[%s] to be deleted after eviction", relayPK)
 	}
 	// Verify resolved pubkey index is cleaned up
 	h := resolvedPubkeyHash(relayPK)

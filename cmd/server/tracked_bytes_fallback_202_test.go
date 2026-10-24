@@ -181,7 +181,7 @@ func TestFallbackRelays_AreCharged_202(t *testing.T) {
 	}
 }
 
-// Eviction removes what the fallback indexed (byNode, nodeHashes) and credits
+// Eviction removes what the fallback indexed (byNode, nodeTxIDs) and credits
 // what it charged: an emptied store holds nothing and is charged nothing.
 func TestFallbackRelays_EvictionRemovesAndCredits_202(t *testing.T) {
 	for _, sc := range leak202Scenarios {
@@ -204,9 +204,9 @@ func TestFallbackRelays_EvictionRemovesAndCredits_202(t *testing.T) {
 			if s.trackedBytes != 0 {
 				t.Errorf("trackedBytes = %d after every transmission was evicted, want 0", s.trackedBytes)
 			}
-			if len(s.byNode) != 0 || len(s.nodeHashes) != 0 {
-				t.Errorf("an emptied store still indexes %d nodes in byNode and %d in nodeHashes: evicted transmissions are pinned",
-					len(s.byNode), len(s.nodeHashes))
+			if len(s.byNode) != 0 || len(s.nodeTxIDs) != 0 {
+				t.Errorf("an emptied store still indexes %d nodes in byNode and %d in nodeTxIDs: evicted transmissions are pinned",
+					len(s.byNode), len(s.nodeTxIDs))
 			}
 		})
 	}

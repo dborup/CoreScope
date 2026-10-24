@@ -72,18 +72,17 @@ func TestHashMigrate_RekeysDestAndSrcPubkeys_215(t *testing.T) {
 				hm215Migrate(s, batch)
 
 				s.mu.RLock()
-				pairHash, singleHash := ComputeContentHash(hm215Raw(80)), ComputeContentHash(hm215Raw(82))
 				for _, pk := range []string{acct113PK(150), acct113PK(151)} {
-					if got := s.nodeHashes[pk]; len(got) != 1 || !got[pairHash] {
-						t.Errorf("nodeHashes[%s...] = %v, want exactly the new hash of the merged pair", pk[:4], got)
+					if got := s.nodeTxIDs[pk]; got.len() != 1 || !got.has(s.byTxID[80]) {
+						t.Errorf("nodeTxIDs[%s...] = %v, want exactly the survivor 80", pk[:4], bn534SetIDs(s, pk))
 					}
 					if list := s.byNode[pk]; len(list) != 1 || list[0].ID != 80 {
 						t.Errorf("byNode[%s...] = %v, want only the survivor 80", pk[:4], hm215IDs(list))
 					}
 				}
 				for _, pk := range []string{acct113PK(152), acct113PK(153)} {
-					if got := s.nodeHashes[pk]; len(got) != 1 || !got[singleHash] {
-						t.Errorf("nodeHashes[%s...] = %v, want exactly the new hash of the single", pk[:4], got)
+					if got := s.nodeTxIDs[pk]; got.len() != 1 || !got.has(s.byTxID[82]) {
+						t.Errorf("nodeTxIDs[%s...] = %v, want exactly the single 82", pk[:4], bn534SetIDs(s, pk))
 					}
 				}
 				s.mu.RUnlock()
