@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -117,10 +118,29 @@ func (p *obsStringPool) intern(s string) (string, bool) {
 	if p == nil || s == "" {
 		return s, false
 	}
-	// RED COMMIT: the table is not consulted yet, so every value stays the
-	// row scan's own copy -- exactly what master does. The green commit
-	// replaces this body with the real lookup.
-	return s, false
+	p.mu.RLock()
+	c, ok := p.table[s]
+	p.mu.RUnlock()
+	if ok {
+		p.interned.Add(1)
+		return c, true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if c, ok := p.table[s]; ok {
+		p.interned.Add(1)
+		return c, true
+	}
+	if len(p.table) >= obsStringPoolMax {
+		p.full.Add(1)
+		return s, false
+	}
+	// Clone so a value scanned out of a larger buffer does not pin it.
+	c = strings.Clone(s)
+	p.table[c] = c
+	p.bytes.Add(int64(len(c)) + obsStringEntryBytes)
+	p.interned.Add(1)
+	return c, true
 }
 
 // obsStrings is one observation's observer metadata after interning, with the

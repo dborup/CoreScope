@@ -399,8 +399,10 @@ func TestObsStringsMetadataChangeLeavesOlderObservations_489(t *testing.T) {
 	}
 	entriesBefore := s.obsStrPool.entries()
 
-	// The ingestor renames observer 0 and a new observation arrives.
-	const newName = "Renamed Repeater 00"
+	// The ingestor renames observer 0 and a new observation arrives. The new
+	// name shares a prefix with the old one, so a pool that matched values
+	// loosely instead of exactly would hand the old copy back here.
+	const newName = "Nord Repeater 00 (renamed)"
 	if _, err := conn.Exec(`UPDATE observers SET name = ? WHERE rowid = 1`, newName); err != nil {
 		t.Fatal(err)
 	}
