@@ -18,6 +18,14 @@
       "measurementNote": "New suite; controlled-response navigation and range races at desktop/mobile. No CI duration measured yet; assigned to the lowest measured shard."
     },
     {
+      "file": "test-node-reach-429-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; intercepted Reach 429 retry, exhaustion, navigation and window-change cancellation. No CI duration measured yet (about 30s locally); assigned to shard 2 like the other Reach suites."
+    },
+    {
       "file": "test-nav-stats-throttle-491-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },

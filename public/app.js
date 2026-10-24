@@ -316,6 +316,9 @@ async function api(path, { ttl = 0, bust = false, retry503 = true } = {}) {
           err.status = res.status;
           const ra = parseInt(res.headers.get('Retry-After'), 10);
           if (res.status === 503 && isFinite(ra) && ra > 0) err.retryAfterSeconds = ra;
+          // #530: a 429 carries its raw Retry-After for the one caller that
+          // retries it (the Reach view). api() itself never retries a 429.
+          if (res.status === 429) err.retryAfter = res.headers.get('Retry-After');
           // #199: a JSON error body travels as err.body (e.g. the node-detail
           // 404's inactive_node / observer); a non-JSON body leaves it unset.
           try { err.body = await res.json(); } catch (_) { /* not JSON */ }
