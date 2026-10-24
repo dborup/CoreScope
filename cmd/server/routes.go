@@ -75,9 +75,8 @@ type Server struct {
 	saveMu sync.Mutex
 
 	// Neighbor affinity graph: background-built, with one synchronous first build.
-	neighborMu      sync.Mutex // protects the published pointer, never a graph build
-	neighborBuildMu sync.Mutex // serializes initial and background builds
-	neighborGraph   *NeighborGraph
+	neighborBuildMu sync.Mutex                    // serializes initial and background builds
+	neighborGraph   atomic.Pointer[NeighborGraph] // published snapshot; readers never lock
 
 	// #2073 node-detail advert route breakdown, per pubkey
 	// (node_advert_routes_cache.go).

@@ -46,11 +46,16 @@ function load(opts) {
   const regions = opts.regions || REGIONS;
   const groups = 'groups' in opts ? opts.groups : GROUPS;
   const fetched = [];
+  const replaced = [];
   const ctx = {
     window: {},
     document: { addEventListener() {}, removeEventListener() {} },
     location: { hash: opts.hash || '' },
-    history: { state: null, replaceState() {} },
+    history: {
+      state: null,
+      replaceState(state, title, url) { replaced.push(url); ctx.location.hash = url; },
+      pushState() { throw new Error('pushState must not be used'); },
+    },
     URLSearchParams,
     localStorage: {
       getItem: (k) => (k in store ? store[k] : null),
@@ -73,10 +78,15 @@ function load(opts) {
   ctx.window = ctx;
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(__dirname + '/public/region-filter.js', 'utf8'), ctx, { filename: 'region-filter.js' });
+  vm.runInContext(fs.readFileSync(__dirname + '/public/url-state.js', 'utf8'), ctx, { filename: 'url-state.js' });
   const RF = ctx.RegionFilter;
   const calls = [];
-  RF.onChange((sel) => { calls.push(sel ? Array.from(sel) : null); });
-  return { RF, store, calls, container: makeContainer(), ctx, fetched };
+  const hashAtNotify = [];
+  RF.onChange((sel) => {
+    calls.push(sel ? Array.from(sel) : null);
+    hashAtNotify.push(ctx.location.hash);
+  });
+  return { RF, store, calls, hashAtNotify, container: makeContainer(), ctx, fetched, replaced };
 }
 
 // A container stand-in: innerHTML is a plain string, and the handlers the
@@ -320,6 +330,68 @@ test('a dropdown checkbox click is not also handled as a quick pick', async () =
   // delegated container handler must ignore it or the toggle fires twice.
   clickRegion(t.container, 'SJC');
   assert.deepStrictEqual(t.calls, []);
+});
+
+section('\n=== #416 URL state, through #531\'s replaceState helper ===');
+
+// The quick picks carry no URL code of their own: applySelection calls
+// #531/#549's syncUrlRegion for every real change, so these assert the quick
+// pick travels that same path rather than re-testing the helper.
+
+test('a quick pick updates a region parameter already in the hash', async () => {
+  const t = load({ hash: '#/nodes?region=MRY&sortBy=lastSeen' });
+  await t.RF.init(t.container);
+  pickGroup(t.container, 0);
+  assert.strictEqual(t.replaced.length, 1, 'one replaceState expected, got ' + t.replaced.length);
+  const params = new URLSearchParams(String(t.ctx.location.hash).split('?')[1] || '');
+  assert.strictEqual(params.get('region'), 'SJC,SFO,OAK');
+  assert.strictEqual(params.get('sortBy'), 'lastSeen', 'the other parameters must survive');
+  assert.ok(/^#\/nodes\b/.test(t.ctx.location.hash), 'the route must survive: ' + t.ctx.location.hash);
+});
+
+test('listeners hear the change only after the URL carries it', async () => {
+  const t = load({ hash: '#/nodes?region=MRY' });
+  await t.RF.init(t.container);
+  pickGroup(t.container, 0);
+  assert.deepStrictEqual(t.calls, [['SJC', 'SFO', 'OAK']]);
+  assert.ok(/region=SJC%2CSFO%2COAK/.test(t.hashAtNotify[0]),
+    'the hash at notify time was ' + t.hashAtNotify[0]);
+});
+
+test('an all-regions group takes the region parameter out of the hash', async () => {
+  const t = load({
+    hash: '#/nodes?region=SJC',
+    stored: ['SJC'],
+    groups: [{ name: 'Everything', codes: ['SJC', 'SFO', 'OAK', 'MRY'] }],
+  });
+  await t.RF.init(t.container);
+  pickGroup(t.container, 0);
+  assert.ok(!/region=/.test(t.ctx.location.hash), 'region left in the hash: ' + t.ctx.location.hash);
+});
+
+test('a hash with no region parameter is left alone', async () => {
+  const t = load({ hash: '#/nodes?sortBy=lastSeen' });
+  await t.RF.init(t.container);
+  pickGroup(t.container, 0);
+  assert.deepStrictEqual(t.replaced, [], 'the quick pick wrote to a hash that had no region');
+  assert.strictEqual(t.ctx.location.hash, '#/nodes?sortBy=lastSeen');
+});
+
+test('a no-op quick pick writes no URL', async () => {
+  const t = load({ hash: '#/nodes?region=SJC,SFO,OAK', stored: ['SJC', 'SFO', 'OAK'] });
+  await t.RF.init(t.container);
+  pickGroup(t.container, 0);
+  assert.deepStrictEqual(t.replaced, []);
+  assert.deepStrictEqual(t.calls, []);
+});
+
+test('a link selection lights the matching group', async () => {
+  const t = load({ hash: '#/nodes?region=sjc,sfo,oak' });
+  await t.RF.init(t.container);
+  t.RF.syncFromUrl('#/nodes?region=sjc,sfo,oak');
+  t.RF.render(t.container);
+  assert.ok(/region-quick-pick region-quick-pick-active" data-region-group="0" aria-pressed="true"/
+    .test(t.container.innerHTML), t.container.innerHTML);
 });
 
 section('\n=== #416 markup: accessible and escaped ===');

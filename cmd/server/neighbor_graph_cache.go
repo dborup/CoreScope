@@ -21,6 +21,19 @@ import (
 
 const neighborGraphCacheInterval = 5 * time.Minute
 
+// neighborGraphRebuildEvery returns how many recompute ticks make up one graph
+// rebuild: ceil(neighborGraphTTL / interval), at least 1. The response cache is
+// refreshed on every tick, but the ~seconds-long graph build runs at most once
+// per neighborGraphTTL, so cacheRecomputeIntervalSeconds neither multiplies the
+// rebuild CPU nor changes the graph's age below the TTL. Intervals at or above
+// the TTL rebuild on every tick (graph age == interval).
+func neighborGraphRebuildEvery(interval time.Duration) int {
+	if interval <= 0 || interval >= neighborGraphTTL {
+		return 1
+	}
+	return int((neighborGraphTTL + interval - 1) / interval)
+}
+
 // neighborGraphCacheEntry holds both the response struct (kept for
 // tests / structured access) and the pre-marshaled bytes that the
 // handler writes verbatim.
@@ -46,14 +59,15 @@ func (s *Server) startNeighborGraphRecomputer(interval time.Duration, stop <-cha
 	if interval <= 0 {
 		interval = neighborGraphCacheInterval
 	}
+	every := neighborGraphRebuildEvery(interval)
 	go func() {
 		s.recomputeNeighborGraphCache()
 		t := time.NewTicker(interval)
 		defer t.Stop()
-		for {
+		for tick := 1; ; tick++ {
 			select {
 			case <-t.C:
-				s.recomputeNeighborGraphCache()
+				s.recomputeNeighborGraphCacheTick(tick%every == 0)
 			case <-stop:
 				return
 			}
@@ -66,6 +80,13 @@ func (s *Server) startNeighborGraphRecomputer(interval time.Duration, stop <-cha
 // rebuild doesn't kill the background goroutine — but logs the panic
 // and increments a counter so operators see the failure (#1483 follow-up).
 func (s *Server) recomputeNeighborGraphCache() {
+	s.recomputeNeighborGraphCacheTick(true)
+}
+
+// recomputeNeighborGraphCacheTick refreshes the cached responses, first
+// rebuilding the graph when rebuildGraph is set. The responses are always built
+// from the graph published by this call (or the existing one when skipped).
+func (s *Server) recomputeNeighborGraphCacheTick(rebuildGraph bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[neighbor-graph-cache] rebuild panic: %v\n%s", r, debug.Stack())
@@ -73,7 +94,9 @@ func (s *Server) recomputeNeighborGraphCache() {
 		}
 	}()
 	start := time.Now()
-	s.rebuildNeighborGraph()
+	if rebuildGraph {
+		s.rebuildNeighborGraph()
+	}
 	resp := s.buildDefaultNeighborGraphResponse()
 	var buf bytes.Buffer
 	if err := json.NewEncoder(&buf).Encode(resp); err != nil {

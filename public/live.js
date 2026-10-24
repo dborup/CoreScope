@@ -84,6 +84,9 @@
   // Region filter (#1045): observer_id → IATA code, populated from /api/observers
   let observerIataMap = {};
   let regionFilterChangeHandler = null;
+  // #531: AreaFilter subscriptions, removed in destroy() like the region one.
+  let areaNodesChangeHandler = null;
+  let areaOutlineChangeHandler = null;
 
   /**
    * Returns true if the packet group matches the selected regions.
@@ -1706,7 +1709,7 @@
 
     injectSVGFilters();
     AreaFilter.init(document.getElementById('liveAreaFilter'));
-    AreaFilter.onChange(function () { loadNodes(); });
+    areaNodesChangeHandler = AreaFilter.onChange(function () { loadNodes(); });
     await loadNodes();
     if (generation !== liveGeneration) return;
     applyLiveControlEffects();
@@ -2058,7 +2061,7 @@
           if (e.target.checked) { selectedAreaLayer.addTo(map); } else { map.removeLayer(selectedAreaLayer); }
         });
       }
-      AreaFilter.onChange(refresh);
+      areaOutlineChangeHandler = AreaFilter.onChange(refresh);
       refresh();
     })();
 
@@ -4782,6 +4785,8 @@
       RegionFilter.offChange(regionFilterChangeHandler);
       regionFilterChangeHandler = null;
     }
+    if (areaNodesChangeHandler) { AreaFilter.offChange(areaNodesChangeHandler); areaNodesChangeHandler = null; }
+    if (areaOutlineChangeHandler) { AreaFilter.offChange(areaOutlineChangeHandler); areaOutlineChangeHandler = null; }
     if (map) { map.remove(); map = null; }
     if (_onResize) {
       window.removeEventListener('resize', _onResize);

@@ -9,6 +9,7 @@
   var _listeners = [];
   var _container = null;
   var _loaded = false;
+  var _urlBeforeLoad = false; // #531: the selection came from a link before regions loaded
 
   function loadFromStorage() {
     try {
@@ -45,12 +46,15 @@
       _loaded = true;
       // If stored selection has codes no longer valid, clean up
       if (_selected) {
-        var codes = Object.keys(_regions);
-        var cleaned = new Set();
-        _selected.forEach(function (c) { if (codes.includes(c)) cleaned.add(c); });
-        _selected = cleaned.size > 0 ? cleaned : null;
+        _selected = knownCodes(Array.from(_selected));
         saveToStorage();
+        // #531: a link's codes are checked here on a fresh load, after pages
+        // may already have fetched with them. A dropped code matches no
+        // observer (the region list holds every observer's IATA), so only a
+        // fall back to all regions changes what they show: tell them once.
+        if (_urlBeforeLoad && !_selected) notify();
       }
+      _urlBeforeLoad = false;
     } catch (e) {
       _regions = {};
     }
@@ -60,6 +64,26 @@
     // wrapper would only hide a real defect in one of them.
     _groups = normalizeGroups(await groupsReq);
     return _regions;
+  }
+
+  /** Region codes keyed by their upper-case form: codes match
+   *  case-insensitively, as the server does. */
+  function regionsByUpper() {
+    var byUpper = {};
+    Object.keys(_regions).forEach(function (c) { byUpper[String(c).toUpperCase()] = c; });
+    return byUpper;
+  }
+
+  /** The configured codes among `codes`, in their configured spelling (codes
+   *  match case-insensitively, as the server does). null when none is. */
+  function knownCodes(codes) {
+    var byUpper = regionsByUpper();
+    var kept = new Set();
+    codes.forEach(function (c) {
+      var known = byUpper[String(c).toUpperCase()];
+      if (known) kept.add(known);
+    });
+    return kept.size > 0 ? kept : null;
   }
 
   /**
@@ -80,8 +104,7 @@
    */
   function normalizeGroups(list) {
     if (!Array.isArray(list)) return [];
-    var byUpper = {};
-    Object.keys(_regions).forEach(function (c) { byUpper[String(c).toUpperCase()] = c; });
+    var byUpper = regionsByUpper();
     var out = [];
     list.forEach(function (g) {
       if (!g || typeof g.name !== 'string' || !Array.isArray(g.codes)) return;
@@ -117,16 +140,85 @@
     _listeners.forEach(function (fn) { fn(sel); });
   }
 
+  function decodeParam(s) {
+    try { return decodeURIComponent(s.replace(/\+/g, ' ')); } catch (e) { return s; }
+  }
+
+  /** #531: the codes in the hash-query `region` parameter (the first one if
+   *  repeated), trimmed, without empty entries or repeats. null when there is
+   *  no parameter or it holds no code. "All" in any case is the server's
+   *  catch-all (#770): it is dropped, and a parameter holding only that
+   *  gives [] (all regions). */
+  function parseUrlRegions(hash) {
+    var h = String(hash || '');
+    var q = h.indexOf('?');
+    if (q < 0) return null;
+    var raw = null;
+    h.slice(q + 1).split('&').some(function (pair) {
+      var eq = pair.indexOf('=');
+      if (decodeParam(eq < 0 ? pair : pair.slice(0, eq)) !== 'region') return false;
+      raw = eq < 0 ? '' : decodeParam(pair.slice(eq + 1));
+      return true;
+    });
+    if (raw == null) return null;
+    var seen = new Set();
+    var codes = [];
+    var all = false;
+    raw.split(',').forEach(function (c) {
+      c = c.trim();
+      if (c.toUpperCase() === 'ALL') all = true;
+      else if (c && !seen.has(c.toUpperCase())) { seen.add(c.toUpperCase()); codes.push(c); }
+    });
+    return codes.length > 0 || all ? codes : null;
+  }
+
+  /** #531: after a change in the control, a `region` parameter already in the
+   *  hash follows the selection (removed for all regions), with replaceState
+   *  and the other parameters kept, so a stale link value cannot override the
+   *  choice on Back or reload. A hash without one is left alone. */
+  function syncUrlRegion() {
+    if (!window.URLState || !window.location || !window.history) return;
+    var hash = window.location.hash;
+    if (!Object.prototype.hasOwnProperty.call(URLState.parseHash(hash).params, 'region')) return;
+    var next = URLState.updateHashParams({ region: getRegionParam() }, hash);
+    if (next === hash) return;
+    try { window.history.replaceState(window.history.state, '', next); } catch (e) { /* Safari throttles replaceState */ }
+  }
+
   /**
-   * #416: the one place a new selection is saved, rendered and announced, so
-   * a quick pick and a click on a pill travel the same path and a page
-   * refetches once either way.
+   * #531: make a link's ?region= the selection, saved like a click. The
+   * router calls this after the old page's destroy() and before the new
+   * page's init(), so the new page's first region-dependent fetch (Live's
+   * early node fetch included) already carries it. No parameter, or one with
+   * no code, leaves the saved selection; "All" selects all regions. Once
+   * regions are loaded unknown codes are dropped, and none left means all
+   * regions; before that, fetchRegions() drops them. Listeners hear a genuine
+   * change once. Returns whether the selection changed.
+   */
+  function syncFromUrl(hash) {
+    var codes = parseUrlRegions(hash);
+    if (!codes) return false;
+    var next = codes.length === 0 ? null : _loaded ? knownCodes(codes) : new Set(codes);
+    _urlBeforeLoad = !_loaded;
+    if (sameSelection(_selected, next)) return false;
+    _selected = next;
+    saveToStorage();
+    notify();
+    return true;
+  }
+
+  /**
+   * #416: the one place a new selection is saved, rendered, put in the URL
+   * and announced, so a quick pick and a click on a pill travel the same
+   * path and a page refetches once either way. #531's syncUrlRegion runs
+   * here, before listeners hear of the change, which is what gives the
+   * quick picks URL state with no code of their own.
    *
    * An unchanged selection re-renders (the dropdown's own checkboxes have
    * already toggled themselves, so the markup has to be put back) but saves
-   * nothing and tells nobody: picking the group already shown, or clearing a
-   * filter that is already clear, must not make every listening page fetch
-   * again. Returns whether the selection changed.
+   * nothing, touches no URL and tells nobody: picking the group already
+   * shown, or clearing a filter that is already clear, must not make every
+   * listening page fetch again. Returns whether the selection changed.
    */
   function applySelection(next, container) {
     if (sameSelection(_selected, next)) {
@@ -136,6 +228,7 @@
     _selected = next;
     saveToStorage();
     render(container);
+    syncUrlRegion();
     notify();
     return true;
   }
@@ -421,6 +514,7 @@
     offChange: offChange,
     fetchRegions: fetchRegions,
     setSelected: setSelected,
+    syncFromUrl: syncFromUrl,
     getGroups: getGroups
   };
   window.RegionShowAll = {
