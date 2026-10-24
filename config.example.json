@@ -325,6 +325,11 @@
     "OAK": "Oakland, US",
     "MRY": "Monterey, US"
   },
+  "_comment_regionGroups": "Optional (#416). Named quick picks over the region codes above: each group renders as one button next to the region filter that selects exactly those codes in one click. Omit the key, or leave it [], and the region filter behaves exactly as it did before the option existed. These are convenience labels over region codes, NOT verified geographic boundaries. Limits: at most 12 groups, at most 24 distinct codes per group, names at most 40 characters. A group that breaks one of those limits, has no name or lists no code is dropped with one log line at startup — a truncated code list or a shortened name would mislabel the filter, so the whole entry is refused instead. Repeated group names (case-insensitive) keep the first one; repeated codes inside a group are de-duplicated. Codes are matched case-insensitively against the served region list (config entries plus every observer IATA in the database), so a code no observer reports is dropped from the group and a group left with no code is not offered at all — an operator can list an observer that is not up yet without creating a dead button. Served by GET /api/config/regions/groups; the flat GET /api/config/regions map is unchanged.",
+  "regionGroups": [
+    { "name": "Bay Area", "codes": ["SFO", "SJC", "OAK"] },
+    { "name": "Central Coast", "codes": ["MRY"] }
+  ],
   "cacheTTL": {
     "stats": 10,
     "nodeDetail": 300,

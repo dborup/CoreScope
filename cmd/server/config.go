@@ -253,6 +253,19 @@ type Config struct {
 
 	Regions map[string]string `json:"regions"`
 
+	// RegionGroups are operator-named quick picks over the observer-region
+	// codes the region filter offers (#416). Optional: an absent or empty
+	// list means the filter behaves exactly as it did before the feature
+	// existed. Normalized once at load by normalizeRegionGroups (see the
+	// caps and the drop/normalize rule there) and filtered per request
+	// against the served region map by regionGroupsForRegions, so a group
+	// never offers a code no observer reports.
+	//
+	// These are convenience labels over region codes, not verified
+	// geographic boundaries: "Bay Area" means "the codes the operator
+	// listed", nothing more.
+	RegionGroups []RegionGroup `json:"regionGroups,omitempty"`
+
 	Roles            map[string]interface{} `json:"roles"`
 	HealthThresholds *HealthThresholds      `json:"healthThresholds"`
 	Map              map[string]interface{} `json:"map"`
@@ -466,6 +479,144 @@ func (c *Config) ClientRxCoverageEnabled() bool {
 	return c != nil && c.ClientRxCoverage != nil && c.ClientRxCoverage.Enabled
 }
 
+// RegionGroup is one named quick pick over observer-region codes (#416).
+type RegionGroup struct {
+	Name  string   `json:"name"`
+	Codes []string `json:"codes"`
+}
+
+// Bounds on the `regionGroups` config (#416). The quick picks render as one
+// wrapped row of buttons next to the region control, so the group count is
+// what keeps that row readable on a 390 px screen rather than a scroll trap;
+// 12 is roughly two rows there and well past what an operator curates by
+// hand. regionGroupCodesMax covers a large metro cluster (a dozen observers
+// per city) while keeping one pick's `region=` parameter short. The name cap
+// is what fits a button without wrapping mid-word at that width.
+const (
+	regionGroupsMax     = 12
+	regionGroupCodesMax = 24
+	regionGroupNameMax  = 40
+)
+
+// normalizeRegionGroups returns the usable groups from the raw `regionGroups`
+// config, in configured order, and reports every entry it drops through warn.
+//
+// A structural violation drops the whole entry: no name, a name longer than
+// regionGroupNameMax runes, no codes, more than regionGroupCodesMax distinct
+// codes, a name already used by an earlier kept group, or more than
+// regionGroupsMax groups. Silently filtering by a subset of a too-long code
+// list, or labelling a group with a truncated name, would mislabel the filter
+// the operator asked for, so it is refused instead.
+//
+// Trimming and case-insensitive de-duplication are normalization, not
+// violations: they are applied and never warned about. Codes are kept in
+// their first configured spelling — the served spelling is decided per
+// request by regionGroupsForRegions, because the region map includes observer
+// codes that only exist in the database.
+//
+// An absent or empty list returns nothing and warns about nothing, so a
+// deployment without the option is silent at startup as before.
+func normalizeRegionGroups(in []RegionGroup, warn func(string, ...interface{})) []RegionGroup {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]RegionGroup, 0, len(in))
+	seenName := make(map[string]bool, len(in))
+	overflow := 0
+	for _, g := range in {
+		name := strings.TrimSpace(g.Name)
+		if name == "" {
+			warn("[region-groups] dropping a group with no name")
+			continue
+		}
+		if len([]rune(name)) > regionGroupNameMax {
+			warn("[region-groups] dropping group %q: name is %d characters, the maximum is %d",
+				name, len([]rune(name)), regionGroupNameMax)
+			continue
+		}
+		codes := make([]string, 0, len(g.Codes))
+		seenCode := make(map[string]bool, len(g.Codes))
+		for _, c := range g.Codes {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			key := strings.ToUpper(c)
+			if seenCode[key] {
+				continue
+			}
+			seenCode[key] = true
+			codes = append(codes, c)
+		}
+		if len(codes) == 0 {
+			warn("[region-groups] dropping group %q: it lists no region code", name)
+			continue
+		}
+		if len(codes) > regionGroupCodesMax {
+			warn("[region-groups] dropping group %q: %d region codes, the maximum is %d",
+				name, len(codes), regionGroupCodesMax)
+			continue
+		}
+		if seenName[strings.ToUpper(name)] {
+			warn("[region-groups] dropping a repeated group name %q: the first one stands", name)
+			continue
+		}
+		if len(out) >= regionGroupsMax {
+			overflow++
+			continue
+		}
+		seenName[strings.ToUpper(name)] = true
+		out = append(out, RegionGroup{Name: name, Codes: codes})
+	}
+	if overflow > 0 {
+		warn("[region-groups] dropping %d group(s) past the maximum of %d", overflow, regionGroupsMax)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// regionGroupsForRegions filters normalized groups down to what a client can
+// actually select: the codes present in `regions` (the same effective map
+// GET /api/config/regions serves, config entries plus every observer IATA in
+// the database), matched case-insensitively and returned in that map's
+// spelling so a quick pick's codes compare equal to the region control's own.
+//
+// Codes no observer reports are dropped, because the region list is partly
+// dynamic — an operator may configure a group for an observer that is not up
+// yet, and a code that matches nothing would be an unselectable pill. A group
+// left with no code at all is omitted rather than rendered as a no-op.
+//
+// Always returns a non-nil slice, so the endpoint serves [] and not null.
+func regionGroupsForRegions(groups []RegionGroup, regions map[string]string) []RegionGroup {
+	out := make([]RegionGroup, 0, len(groups))
+	if len(groups) == 0 || len(regions) == 0 {
+		return out
+	}
+	byUpper := make(map[string]string, len(regions))
+	for code := range regions {
+		byUpper[strings.ToUpper(code)] = code
+	}
+	for _, g := range groups {
+		codes := make([]string, 0, len(g.Codes))
+		seen := make(map[string]bool, len(g.Codes))
+		for _, c := range g.Codes {
+			served, ok := byUpper[strings.ToUpper(strings.TrimSpace(c))]
+			if !ok || seen[served] {
+				continue
+			}
+			seen[served] = true
+			codes = append(codes, served)
+		}
+		if len(codes) == 0 {
+			continue
+		}
+		out = append(out, RegionGroup{Name: g.Name, Codes: codes})
+	}
+	return out
+}
+
 // ClientRegionsConfig gates the opt-in declared-region reports (#126).
 type ClientRegionsConfig struct {
 	Enabled bool `json:"enabled"`
@@ -675,6 +826,7 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		cfg.NormalizeTimestampConfig()
 		cfg.migrateDeprecatedConfig()
 		cfg.applyListLimitsDefaults()
+		cfg.RegionGroups = normalizeRegionGroups(cfg.RegionGroups, log.Printf)
 		applyCORSEnv(cfg)
 		cfg.loadHashRegionsFile(p)
 		return cfg, nil

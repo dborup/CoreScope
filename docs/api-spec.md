@@ -56,6 +56,7 @@
 - [GET /api/traces/:hash](#get-apitraceshash)
 - [GET /api/config/theme](#get-apiconfigtheme)
 - [GET /api/config/regions](#get-apiconfigregions)
+- [GET /api/config/regions/groups](#get-apiconfigregionsgroups)
 - [GET /api/config/areas](#get-apiconfigareas)
 - [GET /api/config/areas/polygons](#get-apiconfigareaspolygons)
 - [GET /api/config/client](#get-apiconfigclient)
@@ -2751,6 +2752,56 @@ Available regions (IATA codes) merged from config + DB.
 ```
 
 Returns a flat key-value object.
+
+**Note:** this object is a flat `code → label` map and stays one. Named
+quick-pick groups over these codes are served separately by
+[GET /api/config/regions/groups](#get-apiconfigregionsgroups).
+
+---
+
+## GET /api/config/regions/groups
+
+Optional named quick-pick groups over the region codes from
+[GET /api/config/regions](#get-apiconfigregions), defined in `config.json`
+under `regionGroups` (issue #416). The frontend renders each group as one
+button next to the region filter that selects that group's codes in one
+action.
+
+### Response `200`
+
+```jsonc
+[
+  {
+    "name":  string,    // operator label, e.g. "Bay Area"
+    "codes": [string]   // region codes, e.g. ["SFO", "SJC", "OAK"]
+  }
+]
+```
+
+Returns `[]` when no groups are configured — the region filter then behaves
+exactly as it did before the option existed.
+
+Group names are convenience labels over region codes, **not** verified
+geographic boundaries.
+
+**Normalization and limits.** Config entries are normalized once at startup
+and filtered per request:
+
+| Case | Behaviour |
+| --- | --- |
+| `regionGroups` absent or `[]` | Response is `[]`. |
+| Name blank, or longer than 40 characters | Group dropped, one startup log line. |
+| No codes listed | Group dropped, one startup log line. |
+| More than 24 distinct codes in one group | Group dropped, one startup log line. |
+| More than 12 groups | Groups past the 12th dropped, one startup log line. |
+| Repeated group name (case-insensitive) | First one stands, later ones dropped. |
+| Repeated code within a group | De-duplicated, case-insensitively, first spelling kept. |
+| Code no observer reports | Dropped from the group; a group with no code left is omitted from the response. |
+
+A structural violation drops the whole entry rather than serving a
+truncated code list or a shortened name, because either would mislabel the
+filter the operator asked for. Codes are matched case-insensitively and
+returned in the spelling `GET /api/config/regions` uses.
 
 ---
 
