@@ -637,8 +637,6 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				PayloadType: nullIntPtr(payloadType),
 				DecodedJSON: nullStrVal(decodedJSON),
 				ScopeName:   nullStrVal(scopeName),
-				obsKeys:     make(map[string]bool),
-				observerSet: make(map[string]bool),
 			}
 			s.byHash[hashStr] = tx
 			s.mergeRouteMaskOrQueue(tx, routeMask)
@@ -661,8 +659,8 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 			obsIDStr := nullStrVal(observerID)
 			obsPJ := nullStrVal(pathJSON)
 
-			dk := obsIDStr + "|" + obsPJ
-			if tx.obsKeys[dk] {
+			dup, knownObserver := tx.lookupObservation(obsIDStr, obsPJ)
+			if dup {
 				continue
 			}
 
@@ -692,14 +690,8 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 			s.indexObservationRelayHops(tx, decodePersistedRelayPath(nullStrVal(resolvedPathStr)), obsPJ, obsIDStr, relayPM, hopsSeen, coldLoadAmbiguousHopsSkipped)
 
 			tx.mergeObservedPathHashSize(obsPJ)
-			tx.Observations = append(tx.Observations, obs)
-			tx.obsKeys[dk] = true
+			s.trackedBytes += tx.addObservation(obs, knownObserver)
 			s.analyticsHistory.observedFrom = earlierNodeAnalyticsEvidence(s.analyticsHistory.observedFrom, obs.Timestamp)
-			if obs.ObserverID != "" && !tx.observerSet[obs.ObserverID] {
-				tx.observerSet[obs.ObserverID] = true
-				tx.UniqueObserverCount++
-			}
-			tx.ObservationCount++
 			if obs.Timestamp > tx.LatestSeen {
 				tx.LatestSeen = obs.Timestamp
 			}
