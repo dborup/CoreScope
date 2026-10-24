@@ -36,7 +36,6 @@ func TestIssue1008_M1_PrewarmWaitsForIndexes(t *testing.T) {
 	// WaitIndexesReady would return immediately on the channel select
 	// (correct for production semantics where flags never reset,
 	// wrong for this synthetic test).
-	store.subpathReady.Store(false)
 	store.pathHopReady.Store(false)
 	store.indexReadyChMu.Lock()
 	store.indexReadyChan = nil

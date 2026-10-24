@@ -528,7 +528,6 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	sort.SliceStable(s.packets, func(i, j int) bool {
 		return s.packets[i].FirstSeen < s.packets[j].FirstSeen
 	})
-	s.buildSubpathIndex()
 	s.buildPathHopIndex()
 	s.buildDistanceIndex(nodeSnapshot)
 	if s.hotStartupHours > 0 {

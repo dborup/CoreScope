@@ -27,7 +27,6 @@ func regionsObservedFixture(t testing.TB) (*Server, time.Time, string) {
 	store.packets = []*StoreTx{{FirstSeen: store.oldestLoaded}}
 	store.backgroundLoadDone.Store(true)
 	store.pathHopReady.Store(true)
-	store.subpathReady.Store(true)
 	srv := NewServer(db, &Config{}, NewHub())
 	srv.store = store
 	return srv, now, key
