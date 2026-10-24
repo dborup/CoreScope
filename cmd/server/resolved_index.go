@@ -104,7 +104,9 @@ func (s *PacketStore) loadCanonicalResolvedPathsAt(snapshots map[int][]*StoreObs
 	if s.db == nil || s.db.conn == nil {
 		return out
 	}
-	longestTx := make(map[int]int, len(snapshots))
+	// obs id -> every tx whose longest observation it is; the same id can
+	// be the longest of several txs, and each must be answered.
+	longestTx := make(map[int][]int, len(snapshots))
 	missing := make([]int, 0, len(snapshots))
 	fallback := make([]int, 0)
 	for txID, observations := range snapshots {
@@ -128,9 +130,14 @@ func (s *PacketStore) loadCanonicalResolvedPathsAt(snapshots map[int][]*StoreObs
 			}
 			continue
 		}
-		longestTx[longest.ID] = txID
-		missing = append(missing, longest.ID)
+		if _, queued := longestTx[longest.ID]; !queued {
+			missing = append(missing, longest.ID)
+		}
+		longestTx[longest.ID] = append(longestTx[longest.ID], txID)
 	}
+	// Ascending ids make chunk membership and LRU insert order independent of
+	// map iteration: when one request inserts past lruMaxSize, FIFO eviction
+	// drops the lowest ids and the highest survive (#548).
 	sort.Ints(missing)
 	for start := 0; start < len(missing); start += resolvedPathBatchSize {
 		chunk := missing[start:min(start+resolvedPathBatchSize, len(missing))]
@@ -157,27 +164,32 @@ func (s *PacketStore) loadCanonicalResolvedPathsAt(snapshots map[int][]*StoreObs
 			}
 			rows.Close()
 		}
+		putIDs := make([]int, 0, len(chunk))
+		putRPs := make([][]*string, 0, len(chunk))
 		for _, id := range chunk {
-			txID := longestTx[id]
-			if err != nil {
-				// Retain the scalar error/recovery behavior for a failed batch.
-				if rp := s.fetchResolvedPathForTxBestAt(txID, snapshots[txID], now); rp != nil {
-					out[txID] = rp
-				}
-				continue
-			}
 			rp, present := stored[id]
-			if present {
-				s.lruMu.Lock()
-				s.lruPut(id, rp)
-				s.lruMu.Unlock()
+			// Only a row that exists with a non-NULL resolved_path is cached;
+			// an absent row or NULL must stay a miss (#548).
+			if err == nil && present {
+				putIDs = append(putIDs, id)
+				putRPs = append(putRPs, rp)
 			}
-			if rp != nil {
-				out[txID] = rp
-			} else {
-				fallback = append(fallback, txID)
+			for _, txID := range longestTx[id] {
+				if err != nil {
+					// Retain the scalar error/recovery behavior for a failed batch.
+					if rp := s.fetchResolvedPathForTxBestAt(txID, snapshots[txID], now); rp != nil {
+						out[txID] = rp
+					}
+					continue
+				}
+				if rp != nil {
+					out[txID] = rp
+				} else {
+					fallback = append(fallback, txID)
+				}
 			}
 		}
+		s.lruPutBatch(putIDs, putRPs)
 	}
 	s.loadFallbackResolvedPathsAt(fallback, snapshots, out, now)
 	return out
@@ -224,6 +236,8 @@ func (s *PacketStore) loadFallbackResolvedPathsAt(txIDs []int, snapshots map[int
 			}
 			rows.Close()
 		}
+		putIDs := make([]int, 0, len(chunk))
+		putRPs := make([][]*string, 0, len(chunk))
 		for _, txID := range chunk {
 			if err != nil {
 				if rp := s.fetchResolvedPathForTxBestAt(txID, snapshots[txID], now); rp != nil {
@@ -238,12 +252,12 @@ func (s *PacketStore) loadFallbackResolvedPathsAt(txIDs []int, snapshots map[int
 			if rp != nil {
 				out[txID] = rp
 				if id != 0 {
-					s.lruMu.Lock()
-					s.lruPut(id, rp)
-					s.lruMu.Unlock()
+					putIDs = append(putIDs, id)
+					putRPs = append(putRPs, rp)
 				}
 			}
 		}
+		s.lruPutBatch(putIDs, putRPs)
 	}
 }
 
@@ -633,6 +647,20 @@ func (s *PacketStore) lruPut(obsID int, rp []*string) {
 	}
 	s.apiResolvedPathLRU[obsID] = entry
 	s.lruOrder = append(s.lruOrder, obsID)
+}
+
+// lruPutBatch adds the entries in order under one lruMu hold, so a chunk costs
+// one lock round-trip instead of one per id. It takes lruMu itself; callers
+// must not hold it.
+func (s *PacketStore) lruPutBatch(ids []int, rps [][]*string) {
+	if len(ids) == 0 {
+		return
+	}
+	s.lruMu.Lock()
+	for i, id := range ids {
+		s.lruPut(id, rps[i])
+	}
+	s.lruMu.Unlock()
 }
 
 // lruDelete removes an entry. Must be called under s.lruMu write lock.
