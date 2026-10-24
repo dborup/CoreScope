@@ -327,13 +327,13 @@
     RegionFilter.init(document.getElementById('analyticsRegionFilter'));
     AreaFilter.init(document.getElementById('analyticsAreaFilter'));
     setAreaFilterVisibility(_currentTab);
-    RegionFilter.onChange(function () { loadAnalytics(); });
-    AreaFilter.onChange(function () { loadAnalytics(); });
+    _regionChangeHandler = RegionFilter.onChange(reloadForFilters);
+    _areaChangeHandler = AreaFilter.onChange(reloadForFilters);
 
     // Time-window picker (#842) — refresh analytics on change.
     const tw = document.getElementById('analyticsTimeWindow');
     if (tw) {
-      tw.addEventListener('change', function () { _updateAnalyticsUrl(); loadAnalytics(); });
+      tw.addEventListener('change', function () { _updateAnalyticsUrl(); reloadForFilters(); });
     }
 
     // Delegated click/keyboard handler for clickable table rows
@@ -377,10 +377,20 @@
     };
     window.addEventListener('theme-refresh', _themeRefreshHandler);
 
+    // Independent tabs fetch their own data; the bulk load must not defer
+    // their first render or start them a second time when its answers land.
+    if (!LOAD_TABS.has(_currentTab)) renderTab(_currentTab);
     loadAnalytics();
   }
 
+  function reloadForFilters() {
+    loadAnalytics();
+    if (!LOAD_TABS.has(_currentTab)) renderTab(_currentTab);
+  }
+
   var _themeRefreshHandler = null;
+  var _regionChangeHandler = null;
+  var _areaChangeHandler = null;
   let _currentTab = 'overview';
 
   // Append a query fragment to a path (#179, #193). The filter fragments
@@ -542,7 +552,7 @@
       ]);
       if (gen !== _loadGen) return;
       _analyticsData = { hashData, rfData, topoData, chanData, collisionData, airtimeData };
-      renderTab(_currentTab);
+      if (LOAD_TABS.has(_currentTab)) renderTab(_currentTab);
     } catch (e) {
       if (gen !== _loadGen) return;
       const ms = _retryAfterDelayMs(e);
@@ -3359,7 +3369,7 @@
     }
   }
 
-function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
+function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; } if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; } _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
 
   // Expose for testing
   if (typeof window !== 'undefined') {

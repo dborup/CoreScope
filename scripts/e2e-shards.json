@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-page-lifecycle-2248-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; controlled-response navigation and range races at desktop/mobile. No CI duration measured yet; assigned to the lowest measured shard."
+    },
+    {
       "file": "test-nav-stats-throttle-491-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },

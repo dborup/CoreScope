@@ -9,6 +9,9 @@
   let charts = [];
   let currentDays = 7;
   let currentPubkey = null;
+  // A range selection or a new visit invalidates every result from the
+  // previous load, including battery and hop requests started by it.
+  let loadSequence = 0;
 
   function destroyCharts() {
     charts.forEach(c => { try { c.destroy(); } catch {} });
@@ -31,6 +34,8 @@
   }
 
   async function loadAnalytics(container, pubkey, days) {
+    const sequence = ++loadSequence;
+    const isCurrent = () => sequence === loadSequence;
     currentPubkey = pubkey;
     currentDays = days;
     destroyCharts();
@@ -42,9 +47,11 @@
     try {
       data = await api('/nodes/' + encodeURIComponent(pubkey) + '/analytics?days=' + days, { ttl: CLIENT_TTL.nodeAnalytics });
     } catch (e) {
+      if (!isCurrent()) return;
       container.innerHTML = '<div style="padding:40px;text-align:center;color:#ff6b6b">Failed to load analytics: ' + escapeHtml(e.message) + '</div>';
       return;
     }
+    if (!isCurrent()) return;
 
     const n = data.node;
     const s = data.computedStats;
@@ -190,8 +197,8 @@
     buildObserverChart(data);
     buildHopChart(data);
     buildHeatmap(data);
-    loadBatteryChart(pubkey, currentDays);
-    loadHopAnalyticsChart(pubkey, currentDays);
+    loadBatteryChart(pubkey, currentDays, isCurrent);
+    loadHopAnalyticsChart(pubkey, currentDays, isCurrent);
   }
 
   function buildActivityChart(data) {
@@ -322,15 +329,17 @@
     }
   }
 
-  async function loadBatteryChart(pubkey, days) {
+  async function loadBatteryChart(pubkey, days, isCurrent) {
     let data;
     try {
       data = await api('/nodes/' + encodeURIComponent(pubkey) + '/battery?days=' + days);
     } catch (e) {
+      if (!isCurrent()) return;
       const empty = document.getElementById('batteryEmpty');
       if (empty) { empty.style.display = 'block'; empty.textContent = 'Battery data unavailable: ' + e.message; }
       return;
     }
+    if (!isCurrent()) return;
     const ctx = document.getElementById('batteryChart');
     const empty = document.getElementById('batteryEmpty');
     const badge = document.getElementById('batteryStatusBadge');
@@ -401,12 +410,16 @@
   let hopAnalyticsFilter = 'flood';
   let hopAnalyticsHistChart = null;
 
-  async function loadHopAnalyticsChart(pubkey, days) {
+  async function loadHopAnalyticsChart(pubkey, days, isCurrent) {
+    const sequence = loadSequence;
+    isCurrent = isCurrent || (() => sequence === loadSequence);
     hopAnalyticsFilter = 'flood';
     try {
       const data = await api('/nodes/' + encodeURIComponent(pubkey) + '/hop_analytics?days=' + days);
+      if (!isCurrent()) return;
       hopAnalyticsPackets = (data && data.packets) || [];
     } catch (e) {
+      if (!isCurrent()) return;
       hopAnalyticsPackets = [];
       const empty = document.getElementById('hopAnalyticsEmpty');
       if (empty) { empty.style.display = 'block'; empty.textContent = 'Hop-count data unavailable: ' + e.message; }
@@ -565,6 +578,7 @@
   }
 
   function destroy() {
+    loadSequence++;
     destroyCharts();
     currentPubkey = null;
   }
