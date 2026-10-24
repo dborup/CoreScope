@@ -466,6 +466,49 @@
 
 .mnc-status-text { font-size: .8rem; color: var(--text-muted); margin-bottom: 12px; padding-left: 28px; }
 
+/* #262 — observer identity is a SEPARATE property from the mesh role, so the
+   OBSERVER badge sits beside the .mnc-role chip instead of replacing it. It
+   is the prominent one: filled with the themed observer role color, where
+   .mnc-role stays a muted surface chip. Both colors are theme variables, so
+   the badge follows light/dark and every colorblind preset. */
+.mnc-badge-observer {
+  font: 700 .65rem var(--font); text-transform: uppercase; letter-spacing: .04em;
+  padding: 2px 8px; border-radius: 4px; flex-shrink: 0;
+  background: var(--role-observer); color: var(--surface-1);
+}
+
+/* Observer-sourced status and traffic, visually separated from the node
+   metrics below it so the two sources cannot be read as one. */
+/* Two columns so the status rows and the traffic metric share one band
+   instead of stacking — #304 keeps these cards compact. Both collapse to a
+   single column on a narrow viewport (see the responsive block below). */
+.mnc-observer-panel {
+  border: 1px solid var(--border); border-left: 3px solid var(--role-observer);
+  border-radius: 6px; padding: 7px 10px; margin-bottom: 10px;
+  background: var(--surface-2);
+  display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; align-items: center;
+}
+.mnc-observer-panel > .mnc-section-lbl { grid-column: 1 / -1; }
+.mnc-section-lbl {
+  font: 700 .62rem var(--font); text-transform: uppercase; letter-spacing: .06em;
+  color: var(--text-muted); margin-bottom: 4px;
+}
+.mnc-observer-panel .mnc-section-lbl { color: var(--role-observer); }
+.mnc-observer-row { font-size: .75rem; color: var(--text-muted); line-height: 1.45; }
+.mnc-observer-row strong { color: var(--text); font-weight: 600; }
+.mnc-observer-metric { text-align: right; }
+.mnc-observer-metric .mnc-lbl { white-space: nowrap; }
+.my-node-card.is-observer:hover { border-color: var(--role-observer); }
+
+/* A failed/unusable observer list is stated once for the whole grid rather
+   than letting every card look like a confirmed non-observer. */
+.my-nodes-observer-notice {
+  grid-column: 1 / -1; display: flex; align-items: flex-start; gap: 8px;
+  font-size: .8rem; line-height: 1.45; color: var(--text-muted);
+  border: 1px solid var(--border); border-left: 3px solid var(--status-yellow);
+  border-radius: 6px; padding: 10px 12px; background: var(--surface-2);
+}
+
 .mnc-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
 .mnc-metric { text-align: center; }
 .mnc-val { font: 700 1rem var(--font); color: var(--text); }
@@ -526,4 +569,8 @@
   .my-nodes-grid { grid-template-columns: 1fr; padding: 0 12px 16px; }
   .mnc-metrics { grid-template-columns: repeat(2, 1fr); }
   .mnc-remove { opacity: 1; }
+  /* #262 — one column on a phone: the nowrap traffic label would otherwise
+     squeeze the status rows below their own text width. */
+  .mnc-observer-panel { grid-template-columns: 1fr; }
+  .mnc-observer-metric { text-align: left; margin-top: 4px; }
 }
