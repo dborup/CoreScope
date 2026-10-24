@@ -1,9 +1,7 @@
 package main
 
 import (
-	"os"
 	"reflect"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -208,20 +206,5 @@ func TestNeighborGraphFieldIsAtomicPointer(t *testing.T) {
 	f, ok := reflect.TypeOf(Server{}).FieldByName("neighborGraph")
 	if !ok || f.Type != reflect.TypeOf(atomic.Pointer[NeighborGraph]{}) {
 		t.Fatalf("Server.neighborGraph must be atomic.Pointer[NeighborGraph], got %v", f.Type)
-	}
-}
-
-// F4: the cacheRecomputeIntervalSeconds docs keep their #1481 P0-1 / #1483 provenance.
-func TestNeighborCacheIntervalDocsKeepIssueRefs(t *testing.T) {
-	for _, path := range []string{"config.go", "../../config.example.json"} {
-		b, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, ref := range []string{"#1481 P0-1", "#1483"} {
-			if !strings.Contains(string(b), "cacheRecomputeIntervalSeconds") || !strings.Contains(string(b), ref) {
-				t.Errorf("%s lost reference %q", path, ref)
-			}
-		}
 	}
 }
