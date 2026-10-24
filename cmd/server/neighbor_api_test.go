@@ -19,7 +19,7 @@ func makeTestServer(graph *NeighborGraph) *Server {
 	srv := &Server{
 		perfStats: NewPerfStats(),
 	}
-	srv.neighborGraph = graph
+	srv.neighborGraph.Store(graph)
 	return srv
 }
 
@@ -364,7 +364,7 @@ func TestNeighborAPI_DistanceKm_WithGPS(t *testing.T) {
 	srv.store = NewPacketStore(db, nil)
 
 	now := time.Now()
-	srv.neighborGraph = makeTestGraph(newEdge("aaaa", "bbbb", "bb", 50, now))
+	srv.neighborGraph.Store(makeTestGraph(newEdge("aaaa", "bbbb", "bb", 50, now)))
 
 	rr := serveRequest(srv, "GET", "/api/nodes/aaaa/neighbors")
 	var resp NeighborResponse
@@ -398,7 +398,7 @@ func TestNeighborAPI_DistanceKm_NoGPS(t *testing.T) {
 	srv.store = NewPacketStore(db, nil)
 
 	now := time.Now()
-	srv.neighborGraph = makeTestGraph(newEdge("aaaa", "bbbb", "bb", 50, now))
+	srv.neighborGraph.Store(makeTestGraph(newEdge("aaaa", "bbbb", "bb", 50, now)))
 
 	rr := serveRequest(srv, "GET", "/api/nodes/aaaa/neighbors")
 	var resp NeighborResponse
