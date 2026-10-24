@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-262-mymesh-observer-e2e.js",
+      "shard": 1,
+      "env": { "CHROMIUM_REQUIRE": "1" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #262 My Mesh observer identity, status, traffic, navigation and unavailable state at 1280 px and 390 px. Fully stubbed (no BASE_URL server). About 6s locally; no CI duration measured yet. Assigned to shard 1, the shard with the fewest suites."
+    },
+    {
       "file": "test-issue-416-region-quick-picks-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },

@@ -43,13 +43,16 @@ async function render(page, responses, width, height) {
   await page.goto(ORIGIN + '/');
   await page.addStyleTag({ path: path.join(ROOT, 'style.css') });
   await page.addStyleTag({ path: path.join(ROOT, 'home.css') });
-  for (const file of ['app.js', 'roles.js', 'heard-by.js']) await page.addScriptTag({ path: path.join(ROOT, file) });
+  for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js']) await page.addScriptTag({ path: path.join(ROOT, file) });
   await page.evaluate((data) => {
     window.removeEventListener('hashchange', navigate);
     window.fixturePages = {};
     registerPage = (name, mod) => { window.fixturePages[name] = mod; };
     api = async (route) => {
       if (route === '/stats') return { totalNodes: 3 };
+      // #262: the grid fetches the bulk observer list once. None of these
+      // synthetic nodes is an observer, so the cards keep their #304 shape.
+      if (route === '/observers') return { observers: [] };
       if (route in data) return data[route];
       throw Error('Unexpected API: ' + route);
     };
