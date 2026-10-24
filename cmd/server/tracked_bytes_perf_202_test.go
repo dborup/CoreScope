@@ -131,10 +131,11 @@ func TestPerf_HashMigrateMerge_202(t *testing.T) {
 }
 
 // Hash migration of CORESCOPE_PERF_215_ROWS (default 5000) transmissions that all carry a stale hash and do not
-// collide, each indexed under three node keys (#215). It measures the rename of
-// the nodeHashes keys that the migration now does per batch. Compiles against
-// master too (where the migration also writes the DB, on this in-memory
-// handle).
+// collide, each indexed under three node keys (#215). It measured the rename of
+// the hash keys of byNode's de-dup sets that the migration did per batch; the
+// sets hold transmission IDs since #534, so a rehash no longer touches them.
+// Compiles against master too (where the migration also writes the DB, on this
+// in-memory handle).
 func TestPerf_HashMigrateRehash_215(t *testing.T) {
 	runs := perf202Runs(t)
 	rows, _ := strconv.Atoi(os.Getenv("CORESCOPE_PERF_215_ROWS"))

@@ -982,13 +982,10 @@ func TestNodeHealthPartialFromPackets(t *testing.T) {
 	if srv.store.byNode == nil {
 		srv.store.byNode = make(map[string][]*StoreTx)
 	}
-	if srv.store.nodeHashes == nil {
-		srv.store.nodeHashes = make(map[string]map[string]bool)
+	if srv.store.nodeTxIDs == nil {
+		srv.store.nodeTxIDs = newNodeTxIndex()
 	}
-	srv.store.byNode[ghostPubkey] = []*StoreTx{
-		{Hash: "abc123", FirstSeen: now, SNR: &snr, ObservationCount: 1},
-	}
-	srv.store.nodeHashes[ghostPubkey] = map[string]bool{"abc123": true}
+	srv.store.addToByNode(&StoreTx{ID: 991, Hash: "abc123", FirstSeen: now, SNR: &snr, ObservationCount: 1}, ghostPubkey)
 	srv.store.mu.Unlock()
 
 	req := httptest.NewRequest("GET", "/api/nodes/"+ghostPubkey+"/health", nil)
@@ -4136,7 +4133,7 @@ func TestNodeInResolvedPath(t *testing.T) {
 	// which uses the membership index. Test the index-based approach.
 	store := &PacketStore{
 		byNode:               make(map[string][]*StoreTx),
-		nodeHashes:           make(map[string]map[string]bool),
+		nodeTxIDs:            newNodeTxIndex(),
 		useResolvedPathIndex: true,
 	}
 	store.initResolvedPathIndex()

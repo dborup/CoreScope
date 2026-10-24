@@ -29,8 +29,8 @@ func TestFallbackRelays_ChargeIsExactlyTheRecord_202(t *testing.T) {
 						t.Fatalf("tx %d is recorded twice under %s", tx.ID, pk)
 					}
 					seen[pk] = true
-					if !with.nodeHashes[pk][tx.Hash] || countTxInLocked(with.byNode[pk], tx) != 1 {
-						t.Fatalf("tx %d is recorded under %s but byNode/nodeHashes do not hold it once", tx.ID, pk)
+					if !with.nodeTxIDs[pk].has(tx) || countTxInLocked(with.byNode[pk], tx) != 1 {
+						t.Fatalf("tx %d is recorded under %s but byNode/nodeTxIDs do not hold it once", tx.ID, pk)
 					}
 				}
 			}
@@ -83,9 +83,9 @@ func TestFallbackRelays_PartialEvictionStaysExact_202(t *testing.T) {
 	if n := s.RunEviction(); n != 100 {
 		t.Fatalf("second pass evicted %d, want 100", n)
 	}
-	if s.trackedBytes != 0 || len(s.fallbackByNode) != 0 || len(s.byNode) != 0 || len(s.nodeHashes) != 0 {
-		t.Fatalf("emptied store: trackedBytes=%d records=%d byNode=%d nodeHashes=%d, want all 0",
-			s.trackedBytes, len(s.fallbackByNode), len(s.byNode), len(s.nodeHashes))
+	if s.trackedBytes != 0 || len(s.fallbackByNode) != 0 || len(s.byNode) != 0 || len(s.nodeTxIDs) != 0 {
+		t.Fatalf("emptied store: trackedBytes=%d records=%d byNode=%d nodeTxIDs=%d, want all 0",
+			s.trackedBytes, len(s.fallbackByNode), len(s.byNode), len(s.nodeTxIDs))
 	}
 }
 
@@ -105,7 +105,7 @@ func TestIndexObservationRelayHops_FallbackChargesOncePerRelay_202(t *testing.T)
 
 	var fresh []int // relays tx is not indexed under yet
 	for k := 0; k < 256 && len(fresh) < 3; k++ {
-		if !s.nodeHashes[acct113PK(k)][tx.Hash] {
+		if !s.nodeTxIDs[acct113PK(k)].has(tx) {
 			fresh = append(fresh, k)
 		}
 	}
@@ -144,7 +144,7 @@ func TestIndexObservationRelayHops_FallbackChargesOncePerRelay_202(t *testing.T)
 	other := s.packets[1]
 	var held int
 	for k := 0; k < 256; k++ {
-		if !s.nodeHashes[acct113PK(k)][other.Hash] {
+		if !s.nodeTxIDs[acct113PK(k)].has(other) {
 			held = k
 			break
 		}

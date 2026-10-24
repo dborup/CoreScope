@@ -89,8 +89,8 @@ func (d *hm215DB) ballast(t testing.TB) {
 	d.tx(t, 1000, raw, ComputeContentHash(raw), ts, 4, hm215Advert(acct113PK(240)))
 	// PK(18) is also the relay of the second row of every stale group, which
 	// the survivor (the first row) does not have: removing that row leaves the
-	// ballast alone in byNode[PK(18)], and its nodeHashes entry must then hold
-	// the ballast's hash only.
+	// ballast alone in byNode[PK(18)], and its nodeTxIDs entry must then hold
+	// the ballast's ID only.
 	d.observation(t, 1000, 0, `["05","11","12"]`, fmt.Sprintf(`[%q,%q,%q]`, acct113PK(5), acct113PK(17), acct113PK(18)), ts)
 	d.observation(t, 1000, 1, `["aa"]`, "", ts) // fallback relay
 }
@@ -167,7 +167,7 @@ type hm215Snapshot struct {
 	Packets       int
 	TrackedBytes  int64
 	ByNode        map[string][]int
-	NodeHashes    map[string][]string
+	NodeTxIDs     map[string][]int
 	ByPayloadType map[int]int
 	ByObserver    map[string]int
 	ByObsID       int
@@ -186,7 +186,7 @@ func hm215Snap(s *PacketStore) hm215Snapshot {
 	defer s.mu.RUnlock()
 	sn := hm215Snapshot{
 		Packets: len(s.packets), TrackedBytes: s.trackedBytes,
-		ByNode: map[string][]int{}, NodeHashes: map[string][]string{},
+		ByNode: map[string][]int{}, NodeTxIDs: map[string][]int{},
 		ByPayloadType: map[int]int{}, ByObserver: map[string]int{},
 		ByObsID: len(s.byObsID), ByTxID: len(s.byTxID), ByHash: len(s.byHash),
 		PathHopRecs: len(s.pathHopResolved), FallbackRecs: len(s.fallbackByNode),
@@ -200,11 +200,8 @@ func hm215Snap(s *PacketStore) hm215Snapshot {
 		}
 		sort.Ints(sn.ByNode[pk])
 	}
-	for pk, hashes := range s.nodeHashes {
-		for h := range hashes {
-			sn.NodeHashes[pk] = append(sn.NodeHashes[pk], h)
-		}
-		sort.Strings(sn.NodeHashes[pk])
+	for pk := range s.nodeTxIDs {
+		sn.NodeTxIDs[pk] = bn534SetIDs(s, pk)
 	}
 	for pt, list := range s.byPayloadType {
 		sn.ByPayloadType[pt] = len(list)
@@ -437,17 +434,17 @@ func TestHashMigrate_MergesDuplicatesInMemory_215(t *testing.T) {
 				if list := s.byNode[pk]; len(list) != 1 || list[0] != tx {
 					t.Errorf("byNode[%s...] = %d entries, want exactly the survivor", pk[:4], len(list))
 				}
-				if got := s.nodeHashes[pk]; len(got) != 1 || !got[tx.Hash] {
-					t.Errorf("nodeHashes[%s...] = %v, want exactly the new hash", pk[:4], got)
+				if got := s.nodeTxIDs[pk]; got.len() != 1 || !got.has(tx) {
+					t.Errorf("nodeTxIDs[%s...] = %v, want exactly the survivor %d", pk[:4], bn534SetIDs(s, pk), tx.ID)
 				}
 				if n := s.advertPubkeys[pk]; n != 1 {
 					t.Errorf("advertPubkeys[%s...] = %d, want 1 (one advert transmission)", pk[:4], n)
 				}
 			}
-			for pk, hashes := range s.nodeHashes {
-				for h := range hashes {
-					if strings.HasPrefix(h, "stale-") {
-						t.Errorf("nodeHashes[%s...] still holds the old hash %s", pk[:4], h)
+			for pk := range s.nodeTxIDs {
+				for _, id := range bn534SetIDs(s, pk) {
+					if s.byTxID[id] == nil {
+						t.Errorf("nodeTxIDs[%s...] still holds the merged-away tx %d", pk[:4], id)
 					}
 				}
 			}
@@ -534,11 +531,12 @@ func TestHashMigrate_EvictionReturnsToBaseline_215(t *testing.T) {
 	}
 }
 
-// Renaming the nodeHashes keys of a batch must cost what the batch holds, not
-// what the whole index holds: with the resolved-pubkey index on, the keys of a
-// transmission are found through the transmission (its decoded pubkeys, its
-// fallback relays, its resolved relays), and no pass over all of nodeHashes
-// runs under the store's write lock (#215 review, N2).
+// Removing the duplicates of a batch from byNode must cost what the batch
+// holds, not what the whole index holds: with the resolved-pubkey index on, the
+// keys of a transmission are found through the transmission (its decoded
+// pubkeys, its fallback relays, its resolved relays), and no pass over all of
+// byNode runs under the store's write lock (#215 review, N2). A rehash alone
+// touches no node index at all since the sets hold IDs (#534).
 func TestHashMigrate_RenameDoesNotWalkTheWholeIndex_215(t *testing.T) {
 	d := hm215Create(t)
 	d.ballast(t)
@@ -547,7 +545,7 @@ func TestHashMigrate_RenameDoesNotWalkTheWholeIndex_215(t *testing.T) {
 	before := hashRekeySweeps.Load()
 	hm215Migrate(s, 2)
 	if n := hashRekeySweeps.Load() - before; n != 0 {
-		t.Errorf("the rename walked the whole of nodeHashes %d times, want 0 with the resolved-pubkey index on", n)
+		t.Errorf("the merge walked the whole of byNode %d times, want 0 with the resolved-pubkey index on", n)
 	}
 	// With the index off the relays of a transmission are not recorded
 	// anywhere, so the one pass per batch stays as the fallback.
@@ -558,7 +556,7 @@ func TestHashMigrate_RenameDoesNotWalkTheWholeIndex_215(t *testing.T) {
 	before = hashRekeySweeps.Load()
 	hm215Migrate(s2, 100)
 	if n := hashRekeySweeps.Load() - before; n == 0 {
-		t.Error("with the resolved-pubkey index off no pass ran: the relay keys would be left under the old hash")
+		t.Error("with the resolved-pubkey index off no pass ran: the duplicates would stay listed under their relays")
 	}
 }
 
@@ -703,7 +701,7 @@ func TestHashMigrate_IsIdempotent_215(t *testing.T) {
 }
 
 // A late observation of a migrated transmission must find the node index
-// already holding it: a stale nodeHashes key would index it a second time.
+// already holding it: a set keyed by the old hash would index it a second time.
 func TestHashMigrate_RekeysNodeHashesSoLateObservationsDoNotDuplicate_215(t *testing.T) {
 	d := hm215Create(t)
 	d.ballast(t)
@@ -740,10 +738,10 @@ func TestHashMigrate_RekeysNodeHashesSoLateObservationsDoNotDuplicate_215(t *tes
 // relay structurally holds, at most what a resolved relay holds, of which the
 // fallback relay is a strict subset.
 func TestPerFallbackRelayBytes_IsPinned_215(t *testing.T) {
-	// A byNode slot holds a pointer (8). The nodeHashes entry holds a key
-	// string header (16) and a bool. The record in fallbackByNode holds the
-	// pubkey string header (16).
-	const floor = 8 + 16 + 16 + 1
+	// A byNode slot holds a pointer (8). The nodeTxIDs entry holds a uint32
+	// transmission ID (4, #534). The record in fallbackByNode holds the pubkey
+	// string header (16).
+	const floor = 8 + 4 + 16
 	if got := fallbackRelayBytes(1) - fallbackRelayBytes(0); got < perFallbackRecordBytes+floor {
 		t.Errorf("one fallback relay is charged %d bytes, want at least %d", got, perFallbackRecordBytes+floor)
 	}

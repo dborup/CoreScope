@@ -238,18 +238,18 @@ func (tx *StoreTx) ParsedDecoded() map[string]interface{} {
 type PacketStore struct {
 	mu               sync.RWMutex
 	db               *DB
-	packets          []*StoreTx                 // sorted by first_seen ASC (oldest first; newest at tail)
-	byHash           map[string]*StoreTx        // hash → *StoreTx
-	byTxID           map[int]*StoreTx           // transmission_id → *StoreTx
-	byObsID          map[int]*StoreObs          // observation_id → *StoreObs
-	maxTxID          int                        // highest transmission_id in store
-	maxObsID         int                        // highest observation_id in store
-	byObserver       map[string][]*StoreObs     // observer_id → observations
-	obsStrPool       *obsStringPool             // shared observer metadata strings (#489); nil = disabled
-	byNode           map[string][]*StoreTx      // pubkey → transmissions
-	nodeHashes       map[string]map[string]bool // pubkey → Set<hash>
-	byPathHop        map[string][]*StoreTx      // lowercase hop/pubkey → transmissions with that hop in path
-	byPayloadType    map[int][]*StoreTx         // payload_type → transmissions
+	packets          []*StoreTx             // sorted by first_seen ASC (oldest first; newest at tail)
+	byHash           map[string]*StoreTx    // hash → *StoreTx
+	byTxID           map[int]*StoreTx       // transmission_id → *StoreTx
+	byObsID          map[int]*StoreObs      // observation_id → *StoreObs
+	maxTxID          int                    // highest transmission_id in store
+	maxObsID         int                    // highest observation_id in store
+	byObserver       map[string][]*StoreObs // observer_id → observations
+	obsStrPool       *obsStringPool         // shared observer metadata strings (#489); nil = disabled
+	byNode           map[string][]*StoreTx  // pubkey → transmissions
+	nodeTxIDs        map[string]*nodeTxSet  // pubkey → IDs of the transmissions byNode[pubkey] lists (#534)
+	byPathHop        map[string][]*StoreTx  // lowercase hop/pubkey → transmissions with that hop in path
+	byPayloadType    map[int][]*StoreTx     // payload_type → transmissions
 	loaded           bool
 	analyticsHistory nodeAnalyticsHistory // guarded by mu; retained analytics coverage (#485)
 	totalObs         int
@@ -498,7 +498,7 @@ type PacketStore struct {
 
 	// fallbackByNode records, per transmission, the relay pubkeys the
 	// path_json fallback (indexObservationRelayHops) put it under in byNode
-	// and nodeHashes, and nothing else. Without a persisted resolved_path
+	// and nodeTxIDs, and nothing else. Without a persisted resolved_path
 	// there is no other record of them, so eviction reads them here to remove
 	// the entries and to credit what addFallbackRelay charged (#202). At most
 	// one entry per (relay, live transmission): evictStaleInternal deletes
@@ -868,7 +868,7 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		obsStrPool:    newObsStringPool(),
 		byNode:        make(map[string][]*StoreTx),
 		byPathHop:     make(map[string][]*StoreTx),
-		nodeHashes:    make(map[string]map[string]bool),
+		nodeTxIDs:     newNodeTxIndex(),
 		byPayloadType: make(map[int][]*StoreTx),
 		rfCache:       make(map[string]*cachedResult),
 		topoCache:     make(map[string]*cachedResult),
@@ -2036,7 +2036,7 @@ func resolvedRelayBytes(n int) int64 {
 }
 
 // fallbackRelayBytes is the memory a tx holds for n relays the path_json
-// fallback indexed it under (#202): per relay a byNode slot, a nodeHashes
+// fallback indexed it under (#202): per relay a byNode slot, a nodeTxIDs
 // entry and the pubkey in the record, plus the fallbackByNode map entry once.
 // Like resolvedRelayBytes it is a function of n alone, so eviction re-derives
 // the charge from len(s.fallbackByNode[tx]).
@@ -2191,7 +2191,7 @@ func pathFirstHop(pathJSON string) string {
 //   - hopsSeen is a reusable scratch map; addResolvedPubkeysToPathHopIndex
 //     clear()s it on entry.
 //   - Safe to call once per observation: every index it feeds is
-//     idempotent per (transmission, pubkey) — byNode via nodeHashes,
+//     idempotent per (transmission, pubkey) — byNode via nodeTxIDs,
 //     the resolved index via its forward-list check, byPathHop via
 //     pathHopResolved (#158).
 func (s *PacketStore) indexResolvedPathHops(tx *StoreTx, pks []string, hopsSeen map[string]bool) {
@@ -2301,7 +2301,90 @@ func (s *PacketStore) indexByNode(tx *StoreTx) bool {
 	return foundNew
 }
 
-// addToByNode adds tx to byNode[pubkey] with dedup via nodeHashes.
+// nodeTxSet is the de-dup set of one byNode list: the IDs of the
+// transmissions byNode[pubkey] holds (#534). A transmission keeps its ID when
+// the content-hash migration (#215) rehashes it, so the set never needs
+// renaming, and the store holds one live transmission per ID (byTxID).
+//
+// IDs are kept as uint32: a map slot of 8 bytes, against 24 for the hash
+// string and bool that keyed the set before and 16 for an int key (the map
+// pads a slot whose value is struct{}). Transmission IDs are SQLite rowids,
+// int64; one that does not fit goes to wide, which stays nil until one does.
+type nodeTxSet struct {
+	ids  map[uint32]struct{}
+	wide map[int]struct{}
+}
+
+func newNodeTxSet() *nodeTxSet { return &nodeTxSet{ids: make(map[uint32]struct{})} }
+
+// newNodeTxIndex returns an empty pubkey → nodeTxSet index.
+func newNodeTxIndex() map[string]*nodeTxSet { return make(map[string]*nodeTxSet) }
+
+// narrowTxID returns id as a uint32 key, and whether it fits in one.
+func narrowTxID(id int) (uint32, bool) { return uint32(id), uint64(id) <= math.MaxUint32 }
+
+func (set *nodeTxSet) has(tx *StoreTx) bool {
+	if set == nil {
+		return false
+	}
+	if k, ok := narrowTxID(tx.ID); ok {
+		_, in := set.ids[k]
+		return in
+	}
+	_, in := set.wide[tx.ID]
+	return in
+}
+
+func (set *nodeTxSet) add(tx *StoreTx) {
+	if k, ok := narrowTxID(tx.ID); ok {
+		set.ids[k] = struct{}{}
+		return
+	}
+	if set.wide == nil {
+		set.wide = make(map[int]struct{})
+	}
+	set.wide[tx.ID] = struct{}{}
+}
+
+func (set *nodeTxSet) remove(tx *StoreTx) {
+	if k, ok := narrowTxID(tx.ID); ok {
+		delete(set.ids, k)
+		return
+	}
+	delete(set.wide, tx.ID)
+}
+
+func (set *nodeTxSet) len() int { return len(set.ids) + len(set.wide) }
+
+// any reports whether match holds for an ID of the set, stopping at the first.
+func (set *nodeTxSet) any(match func(id int) bool) bool {
+	for k := range set.ids {
+		if match(int(k)) {
+			return true
+		}
+	}
+	for id := range set.wide {
+		if match(id) {
+			return true
+		}
+	}
+	return false
+}
+
+// unlistNodeTx removes tx from the de-dup set of pubkey, and the set once it
+// is empty. The caller removes tx from byNode[pubkey]. Must hold s.mu.
+func (s *PacketStore) unlistNodeTx(pubkey string, tx *StoreTx) {
+	set, ok := s.nodeTxIDs[pubkey]
+	if !ok {
+		return
+	}
+	set.remove(tx)
+	if set.len() == 0 {
+		delete(s.nodeTxIDs, pubkey)
+	}
+}
+
+// addToByNode adds tx to byNode[pubkey] with dedup via nodeTxIDs.
 // Returns true if this is a genuinely new node (pubkey not seen before).
 func (s *PacketStore) addToByNode(tx *StoreTx, pubkey string) bool {
 	isNew, _ := s.indexByNodeKey(tx, pubkey)
@@ -2311,14 +2394,16 @@ func (s *PacketStore) addToByNode(tx *StoreTx, pubkey string) bool {
 // indexByNodeKey is addToByNode that also reports whether it added an entry
 // (false: tx was already indexed under pubkey).
 func (s *PacketStore) indexByNodeKey(tx *StoreTx, pubkey string) (isNew, added bool) {
-	isNew = s.nodeHashes[pubkey] == nil
+	set := s.nodeTxIDs[pubkey]
+	isNew = set == nil
 	if isNew {
-		s.nodeHashes[pubkey] = make(map[string]bool)
+		set = newNodeTxSet()
+		s.nodeTxIDs[pubkey] = set
 	}
-	if s.nodeHashes[pubkey][tx.Hash] {
+	if set.has(tx) {
 		return false, false
 	}
-	s.nodeHashes[pubkey][tx.Hash] = true
+	set.add(tx)
 	s.byNode[pubkey] = append(s.byNode[pubkey], tx)
 	return isNew, true
 }
@@ -5552,7 +5637,7 @@ const (
 	storeObsBaseBytes = 176 // StoreObs struct fields + string headers: the heap size class of its 168 bytes (#490)
 	strHdr            = 16  // Go string header (ptr + len) on a 64-bit build; used by GetStoreMemoryBreakdown
 	indexEntryBytes   = 48  // average cost of one index map entry (key + pointer + bucket overhead)
-	numIndexesPerTx   = 5   // byHash, byTxID, byNode, byPayloadType, nodeHashes entries
+	numIndexesPerTx   = 5   // byHash, byTxID, byNode, byPayloadType, nodeTxIDs entries
 	numIndexesPerObs  = 2   // byObsID, byObserver entries
 
 	// Per path hop: byPathHop index entry (pointer + map bucket)
@@ -5571,18 +5656,23 @@ const (
 	// store with 1, 1.9 and 4 resolved keys per tx is 195, 264 and 449 B per
 	// tx at 100k transmissions and 275, 355 and 592 B at 500k (map growth
 	// steps), i.e. 110-170 B per pathHopResolved record plus 85-105 B per
-	// key. These are the midpoints.
-	perResolvedRelayBytes  = 96  // byPathHop slot + pathHopResolved hash (both with append growth) + byNode slot, nodeHashes entry and resolved-pubkey index entry
+	// key. These are the midpoints. #534 keyed the byNode de-dup sets by
+	// transmission ID (a 4-byte key in place of a hash string header and a
+	// bool): the same measurement then gives 53-77 B per key at 100k and 500k
+	// and an unchanged record, so the key allowance dropped by the 31 B the set
+	// entry saves (TestResolvedRelayChargeTracksHeap_534 keeps it in line).
+	perResolvedRelayBytes  = 65  // byPathHop slot + pathHopResolved hash (both with append growth) + byNode slot, nodeTxIDs entry and resolved-pubkey index entry
 	perResolvedRecordBytes = 140 // pathHopResolved map entry: key, slice header, bucket share, first backing array
 
 	// path_json fallback relays (#202), charged per distinct relay a tx is
 	// indexed under by addFallbackRelay. Not measured on its own: derived from
 	// the resolved allowance above by dropping what the fallback does not
 	// create (the byPathHop slot, the pathHopResolved hash and the
-	// resolved-pubkey index entry) and keeping the byNode slot, the nodeHashes
+	// resolved-pubkey index entry) and keeping the byNode slot, the nodeTxIDs
 	// entry and, in place of the hash, the 16-byte pubkey string header in the
-	// record; the record is that of pathHopResolved.
-	perFallbackRelayBytes  = 80  // byNode slot + nodeHashes entry + pubkey header in fallbackByNode (append growth)
+	// record; the record is that of pathHopResolved. 80 before #534, less the
+	// 31 B the set entry saves.
+	perFallbackRelayBytes  = 49  // byNode slot + nodeTxIDs entry + pubkey header in fallbackByNode (append growth)
 	perFallbackRecordBytes = 140 // fallbackByNode map entry: key, slice header, bucket share, first backing array
 
 	// A typical tx is resolved to this many distinct relays. Used by
@@ -5736,7 +5826,7 @@ func (s *PacketStore) evictionCandidateTxIDs() []int {
 }
 
 // EvictStaleWithRP runs eviction using pre-fetched resolved pubkeys.
-// rpBatch may be nil (in which case resolved pubkey cleanup for byNode/nodeHashes is skipped).
+// rpBatch may be nil (in which case resolved pubkey cleanup for byNode/nodeTxIDs is skipped).
 // Must be called under s.mu.Lock.
 func (s *PacketStore) EvictStaleWithRP(rpBatch map[int][]string) int {
 	return s.evictStaleInternal(rpBatch)
@@ -5744,7 +5834,7 @@ func (s *PacketStore) EvictStaleWithRP(rpBatch map[int][]string) int {
 
 // EvictStale is a SQL-free legacy/test entry point without a resolved-pubkey
 // batch. Prefer RunEviction(), which prefetches that cleanup evidence outside
-// the lock; a nil batch skips that portion of byNode/nodeHashes cleanup.
+// the lock; a nil batch skips that portion of byNode/nodeTxIDs cleanup.
 // Must be called under s.mu.Lock.
 func (s *PacketStore) EvictStale() int {
 	return s.evictStaleInternal(nil)
@@ -5845,7 +5935,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 			affectedPayloadTypes[*tx.PayloadType] = struct{}{}
 		}
 
-		// Remove from nodeHashes and collect affected node keys.
+		// Remove from nodeTxIDs and collect affected node keys.
 		// Must mirror indexByNode: process decoded JSON fields AND resolved_path pubkeys.
 		evictedFromNode := make(map[string]bool)
 		if tx.DecodedJSON != "" {
@@ -5853,19 +5943,14 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 			if json.Unmarshal([]byte(tx.DecodedJSON), &decoded) == nil {
 				for _, field := range []string{"pubKey", "destPubKey", "srcPubKey"} {
 					if v, ok := decoded[field].(string); ok && v != "" {
-						if hashes, ok := s.nodeHashes[v]; ok {
-							delete(hashes, tx.Hash)
-							if len(hashes) == 0 {
-								delete(s.nodeHashes, v)
-							}
-						}
+						s.unlistNodeTx(v, tx)
 						affectedNodes[v] = struct{}{}
 						evictedFromNode[v] = true
 					}
 				}
 			}
 		}
-		// Clean up resolved_path pubkeys from byNode/nodeHashes.
+		// Clean up resolved_path pubkeys from byNode/nodeTxIDs.
 		// Uses pre-fetched batch data when available (no SQL under lock).
 		var rpPubkeys []string
 		if rpBatch != nil {
@@ -5875,12 +5960,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 			if pk == "" || evictedFromNode[pk] {
 				continue
 			}
-			if hashes, ok := s.nodeHashes[pk]; ok {
-				delete(hashes, tx.Hash)
-				if len(hashes) == 0 {
-					delete(s.nodeHashes, pk)
-				}
-			}
+			s.unlistNodeTx(pk, tx)
 			affectedNodes[pk] = struct{}{}
 			evictedFromNode[pk] = true
 		}
@@ -5891,12 +5971,7 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 			if evictedFromNode[pk] {
 				continue
 			}
-			if hashes, ok := s.nodeHashes[pk]; ok {
-				delete(hashes, tx.Hash)
-				if len(hashes) == 0 {
-					delete(s.nodeHashes, pk)
-				}
-			}
+			s.unlistNodeTx(pk, tx)
 			affectedNodes[pk] = struct{}{}
 			evictedFromNode[pk] = true
 		}
@@ -10522,23 +10597,23 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 	var regionNodeKeys map[string]bool
 	if region != "" {
 		if regionObs != nil {
-			regionalHashes := make(map[string]bool)
+			regionalTxIDs := make(map[int]struct{})
 			for obsID := range regionObs {
 				obsList := s.byObserver[obsID]
 				for _, o := range obsList {
-					tx := s.byTxID[o.TransmissionID]
-					if tx != nil {
-						regionalHashes[tx.Hash] = true
+					if s.byTxID[o.TransmissionID] != nil {
+						regionalTxIDs[o.TransmissionID] = struct{}{}
 					}
 				}
 			}
 			regionNodeKeys = make(map[string]bool)
-			for pk, hashes := range s.nodeHashes {
-				for h := range hashes {
-					if regionalHashes[h] {
-						regionNodeKeys[pk] = true
-						break
-					}
+			regional := func(id int) bool {
+				_, ok := regionalTxIDs[id]
+				return ok
+			}
+			for pk, set := range s.nodeTxIDs {
+				if set.any(regional) {
+					regionNodeKeys[pk] = true
 				}
 			}
 		}
