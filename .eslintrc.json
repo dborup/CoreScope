@@ -229,6 +229,8 @@
     "getFavorites": "readonly",
     "getHashParams": "readonly",
     "getHealthThresholds": "readonly",
+    "getHealthStatus": "readonly",
+    "getHealthLastHeard": "readonly",
     "getNodeFreshness": "readonly",
     "getNodeStatus": "readonly",
     "getParsedDecoded": "readonly",
