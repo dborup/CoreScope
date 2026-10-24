@@ -94,12 +94,20 @@ async function run() {
     //   (a) `td.col-observer` is hidden (display:none via .col-hidden)
     //   (b) tapping a row opens the panel whose .detail-meta carries the
     //       Observer row + .badge-iata next to the observer name.
+    //
+    // Mobile caps a saved time window above 3 h back to 15 min (#340), so a
+    // plain #/packets list here only had rows while the freshened fixture was
+    // under 15 min old (#567). A ?hash= list suppresses the time window, so
+    // pin a packet heard by exactly one IATA-tagged observer instead.
     const mobile = await browser.newContext({ viewport: { width: 375, height: 812 } });
     const mpage = await mobile.newPage();
     mpage.setDefaultTimeout(15000);
-    await mpage.goto(`${BASE}/#/packets`, { waitUntil: 'domcontentloaded' });
-    await mpage.evaluate(() => localStorage.setItem('meshcore-time-window', '525600'));
-    await mpage.reload({ waitUntil: 'load' });
+    const res = await mpage.request.get(`${BASE}/api/packets?limit=500&groupByHash=true`);
+    assert(res.ok(), `GET /api/packets: HTTP ${res.status()}`);
+    const pinned = ((await res.json()).packets || [])
+      .find(p => p.observation_count === 1 && /^[A-Z]{3}$/.test(p.observer_iata || ''));
+    assert(pinned, 'fixture has no single-observation packet from an IATA-tagged observer');
+    await mpage.goto(`${BASE}/#/packets?hash=${encodeURIComponent(pinned.hash)}`, { waitUntil: 'domcontentloaded' });
     await mpage.waitForSelector('[data-loaded="true"]', { timeout: 20000 });
     await mpage.waitForSelector('table tbody tr:not([id^=vscroll])', { timeout: 15000 });
 
@@ -121,6 +129,9 @@ async function run() {
     const box = await detailIata.boundingBox();
     assert(box && box.width > 0 && box.height > 0,
       `.detail-meta .badge-iata has zero/no dimensions: ${box && (box.width + 'x' + box.height)}`);
+    const detailText = ((await detailIata.textContent()) || '').trim();
+    assert(detailText === pinned.observer_iata,
+      `.detail-meta .badge-iata shows "${detailText}", want the observer's IATA "${pinned.observer_iata}"`);
     await mobile.close();
   });
 
