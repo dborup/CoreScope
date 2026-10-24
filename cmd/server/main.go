@@ -398,7 +398,7 @@ func main() {
 		cfg.AnalyticsRecomputeIntervals(),
 	)
 	defer stopAnalyticsRecomp()
-	log.Printf("[analytics-recompute] background recompute enabled (default=%s)", cfg.AnalyticsDefaultRecomputeInterval())
+	log.Printf("[analytics-recompute] background recompute enabled (default=%s, pauseWhenIdle=%v)", cfg.AnalyticsDefaultRecomputeInterval(), cfg.AnalyticsPauseWhenIdle())
 
 	// #1481 P0-1: background recomputer for the default-shape
 	// /api/analytics/neighbor-graph response (5 min cadence). Reads

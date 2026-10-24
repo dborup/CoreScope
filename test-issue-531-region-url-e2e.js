@@ -39,7 +39,8 @@
  * off*() calls in packets/nodes/live destroy() (4, 5 red); notify after every
  * fresh-load region check (1 red: a second load); drop the hash write-back
  * after a control change (7 red); treat All as a code (8 red: two loads);
- * drop the history.state check in syncFromUrl (#556 Back test red); drop
+ * drop the history.state check in syncFromUrl (#556 Back tests red); drop
+ * noteChoice() from applySelection (the quick-pick Back test red); drop
  * the API-quiet waits in section 2 (2 red with SLOW_API=page:/api/packets:4000
  * or SLOW_API=base:/api/nodes:4000).
  *
@@ -501,6 +502,32 @@ const hashRegions = (page) => page.evaluate(() => new URLSearchParams(location.h
     await page.reload({ waitUntil: 'domcontentloaded' });
     eq(regionOf(await firstRequest(page, m, /\/api\/nodes\?/)), 'OAK', 'first /api/nodes after reload');
     eq(await shown(page, 'nodesRegionFilter'), ['OAK'], 'control after reload');
+    eq(page.__errors, [], 'page errors');
+    await page.context().close();
+  });
+
+  // #556/#416: a quick-pick group is a user choice like a pill click, so it
+  // too stands on Back to an entry whose link says otherwise.
+  await test('#556: fresh #/nodes?region=SJC, Channels, quick-pick group there, Back: the group, not SJC', async () => {
+    const page = await openPage(['SFO']);
+    await page.context().route((u) => u.pathname === '/api/config/regions/groups', (route) =>
+      route.fulfill({ contentType: 'application/json', body: JSON.stringify([{ name: 'Bay', codes: ['OAK', 'SFO'] }]) }));
+    await page.goto(`${BASE}/#/nodes?region=SJC`, { waitUntil: 'domcontentloaded' });
+    eq(await shown(page, 'nodesRegionFilter'), ['SJC'], 'control from the link');
+    await page.waitForTimeout(SETTLE_MS);
+    await goHash(page, '#/channels');
+    eq(await shown(page, 'chRegionFilter'), ['SJC'], 'channels control');
+    await page.waitForTimeout(SETTLE_MS);
+    const sel = '#chRegionFilter [data-region-group="0"]';
+    await page.waitForSelector(sel, { state: 'attached', timeout: 15000 });
+    await page.evaluate((q) => document.querySelector(q).click(), sel);
+    eq((await shown(page, 'chRegionFilter')).slice().sort(), ['OAK', 'SFO'], 'channels control after the group');
+    await page.waitForTimeout(SETTLE_MS);
+    await page.goBack();
+    eq(await page.evaluate(() => location.hash), '#/nodes?region=SJC', 'hash after back');
+    eq((await shown(page, 'nodesRegionFilter')).slice().sort(), ['OAK', 'SFO'], 'control after back');
+    eq((await page.evaluate(() => RegionFilter.getRegionParam())).split(',').sort(), ['OAK', 'SFO'], 'selection after back');
+    eq((await saved(page)).slice().sort(), ['OAK', 'SFO'], 'saved after back');
     eq(page.__errors, [], 'page errors');
     await page.context().close();
   });

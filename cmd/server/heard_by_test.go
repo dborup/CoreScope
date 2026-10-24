@@ -127,11 +127,11 @@ func TestStoreObsLayoutFitsWireRouteInPadding_76(t *testing.T) {
 		t.Skip("layout budget is defined for 64-bit platforms")
 	}
 	var o StoreObs
-	if got := unsafe.Sizeof(o); got != 200 {
-		t.Fatalf("unsafe.Sizeof(StoreObs{}) = %d, want 200: wireRoute must use existing padding", got)
+	if got := unsafe.Sizeof(o); got != 168 {
+		t.Fatalf("unsafe.Sizeof(StoreObs{}) = %d, want 168: wireRoute must use existing padding", got)
 	}
-	if unsafe.Offsetof(o.wireRoute) != unsafe.Offsetof(o.tsParsedOK)+1 {
-		t.Fatalf("wireRoute at %d, want the padding byte after tsParsedOK (%d)", unsafe.Offsetof(o.wireRoute), unsafe.Offsetof(o.tsParsedOK))
+	if unsafe.Offsetof(o.wireRoute) != unsafe.Offsetof(o.tsCache)+8 {
+		t.Fatalf("wireRoute at %d, want the padding byte after tsCache (%d)", unsafe.Offsetof(o.wireRoute), unsafe.Offsetof(o.tsCache)+8)
 	}
 }
 

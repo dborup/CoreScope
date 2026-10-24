@@ -955,17 +955,23 @@ asyncTest('#333 F1 packets region badges show a benign code verbatim (no double 
 });
 
 // Real public/region-filter.js in a sandbox. `regions` is what
-// /api/config/regions returns; `stored` pre-seeds the persisted selection.
+// /api/config/regions returns; `stored` pre-seeds the persisted selection;
+// `groups` (#416) is what /api/config/regions/groups returns.
 async function loadRegionFilter(regions, opts) {
   const store = {};
   if (opts && opts.stored) store['meshcore-region-filter'] = JSON.stringify(opts.stored);
   const el = () => ({ hidden: true, onclick: null, setAttribute() {} });
-  const container = { innerHTML: '', style: {}, onclick: null, querySelector: el };
+  const container = {
+    innerHTML: '', style: {}, onclick: null, querySelector: el,
+    classList: { add() {}, remove() {}, contains() { return false; } },
+  };
   const ctx = {
     window: {},
     document: { addEventListener() {}, removeEventListener() {} },
     localStorage: { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; } },
-    fetch: async () => ({ json: async () => regions }),
+    fetch: async (url) => ({
+      json: async () => (String(url).indexOf('/groups') >= 0 ? ((opts && opts.groups) || []) : regions),
+    }),
     console, setTimeout, clearTimeout,
     escapeHtml, // app.js's real global escaper
   };
@@ -1002,6 +1008,30 @@ asyncTest('#333 F2 region filter dropdown: hostile code + label escaped, trigger
   const trigger = html.match(/<button class="region-dropdown-trigger"[^>]*>([^<]*)<\/button>/);
   assert.ok(trigger, 'trigger button must contain only text: ' + html);
   assert.strictEqual(decodeEntities(trigger[1]), REGION_PAYLOAD + ' ▾', 'dropdownLabel must show the selected code as text');
+});
+
+asyncTest('#416 region quick picks: hostile group name and code escaped in both slots', async () => {
+  const { container } = await loadRegionFilter(
+    { SJC: 'San Jose', [REGION_PAYLOAD]: 'x' },
+    { groups: [{ name: REGION_PAYLOAD, codes: ['SJC', REGION_PAYLOAD] }] });
+  const html = container.innerHTML;
+  assert.ok(html.includes('region-quick-pick'), 'expected a quick pick: ' + html);
+  assertNoXss(html, '#416 region quick picks');
+  // The label is a text slot, the codes a quoted attribute: both decode back
+  // to the exact operator/observer values, so escaping is the only defence.
+  assert.ok(decodeEntities(html).includes('>' + REGION_PAYLOAD + '</button>'),
+    'the group label must show the name as text');
+  const title = html.match(/<button type="button" class="region-quick-pick[^"]*" data-region-group="0" aria-pressed="[a-z]+" title="([^"]*)">/);
+  assert.ok(title, 'the quick pick must carry its codes in a quoted title: ' + html);
+  assert.strictEqual(decodeEntities(title[1]), 'SJC, ' + REGION_PAYLOAD,
+    'the title must list the codes as text');
+});
+
+asyncTest('#416 region quick picks: a benign group name is shown verbatim (no double escape)', async () => {
+  const { container } = await loadRegionFilter(
+    { SJC: 'San Jose', SFO: 'San Francisco' },
+    { groups: [{ name: BENIGN_REGION, codes: ['SJC'] }] });
+  assert.ok(container.innerHTML.includes('>KØB &amp; Æ</button>'), container.innerHTML);
 });
 
 asyncTest('#333 F2 region filter: selecting a hostile code still filters by that exact code', async () => {

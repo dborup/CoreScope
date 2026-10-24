@@ -2000,6 +2000,7 @@ func TestHandleConfigEndpoints(t *testing.T) {
 		"/api/config/cache",
 		"/api/config/client",
 		"/api/config/regions",
+		"/api/config/regions/groups",
 		"/api/config/theme",
 		"/api/config/map",
 	}

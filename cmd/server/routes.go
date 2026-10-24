@@ -77,6 +77,7 @@ type Server struct {
 	// Neighbor affinity graph: background-built, with one synchronous first build.
 	neighborBuildMu sync.Mutex                    // serializes initial and background builds
 	neighborGraph   atomic.Pointer[NeighborGraph] // published snapshot; readers never lock
+	buildGraphFn    func() *NeighborGraph         // test seam: replaces the store scan in buildNeighborGraph
 
 	// #2073 node-detail advert route breakdown, per pubkey
 	// (node_advert_routes_cache.go).
@@ -312,6 +313,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/config/cache", s.handleConfigCache).Methods("GET")
 	r.HandleFunc("/api/config/client", s.handleConfigClient).Methods("GET")
 	r.HandleFunc("/api/config/regions", s.handleConfigRegions).Methods("GET")
+	r.HandleFunc("/api/config/regions/groups", s.handleConfigRegionGroups).Methods("GET")
 	r.HandleFunc("/api/regions/observed", s.handleRegionsObserved).Methods("GET")
 	r.HandleFunc("/api/config/theme", s.handleConfigTheme).Methods("GET")
 	r.HandleFunc("/api/config/map", s.handleConfigMap).Methods("GET")
@@ -770,7 +772,10 @@ func (s *Server) handleGPSSanity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-func (s *Server) handleConfigRegions(w http.ResponseWriter, r *http.Request) {
+// effectiveRegions is the region code → label map the frontend filters by:
+// the configured `regions` entries plus every observer IATA in the database,
+// which stands in for its own label when the operator named none.
+func (s *Server) effectiveRegions() map[string]string {
 	regions := make(map[string]string)
 	for k, v := range s.cfg.Regions {
 		regions[k] = v
@@ -781,7 +786,22 @@ func (s *Server) handleConfigRegions(w http.ResponseWriter, r *http.Request) {
 			regions[c] = c
 		}
 	}
-	writeJSON(w, regions)
+	return regions
+}
+
+func (s *Server) handleConfigRegions(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, s.effectiveRegions())
+}
+
+// handleConfigRegionGroups serves the optional named quick-pick groups (#416)
+// as a sibling of /api/config/regions rather than a field inside it: that
+// endpoint's flat code → label object is a documented contract
+// (docs/api-spec.md, proto/config.proto RegionsResponse) and every existing
+// consumer reads it as one, so the groups get their own path and the map
+// stays untouched. Serves [] when the operator configured none, which is
+// what the region filter needs to render exactly as before.
+func (s *Server) handleConfigRegionGroups(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, regionGroupsForRegions(s.cfg.RegionGroups, s.effectiveRegions()))
 }
 
 func (s *Server) handleConfigTheme(w http.ResponseWriter, r *http.Request) {
@@ -2882,6 +2902,7 @@ func (s *Server) handleObserverClockSkew(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, []ObserverCalibration{})
 		return
 	}
+	setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompObserversClockSkew)) // #492
 	writeJSON(w, s.store.GetObserverCalibrations())
 }
 
@@ -2891,6 +2912,9 @@ func (s *Server) handleFleetClockSkew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	area := r.URL.Query().Get("area")
+	if area == "" {
+		setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompNodesClockSkew)) // #492
+	}
 	writeJSON(w, s.store.GetFleetClockSkew(area))
 }
 
@@ -2916,6 +2940,7 @@ func (s *Server) handleAnalyticsRF(w http.ResponseWriter, r *http.Request) {
 				writeAnalyticsWarmup503(w)
 				return
 			}
+			setAnalyticsSnapshotHeaders(w, rc) // #492
 		}
 		writeJSON(w, s.store.GetAnalyticsRFWithWindow(region, area, window))
 		return
@@ -2966,6 +2991,7 @@ func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request)
 				writeAnalyticsWarmup503(w)
 				return
 			}
+			setAnalyticsSnapshotHeaders(w, rc) // #492
 		}
 		// The store hands out its shared cached result; the filter never
 		// writes to it and returns a filtered copy when anything is hidden.
@@ -3005,6 +3031,7 @@ func (s *Server) handleAnalyticsChannels(w http.ResponseWriter, r *http.Request)
 				writeAnalyticsWarmup503(w)
 				return
 			}
+			setAnalyticsSnapshotHeaders(w, rc) // #492
 		}
 		writeJSON(w, s.store.GetAnalyticsChannelsWithWindow(region, area, window))
 		return
@@ -3043,6 +3070,9 @@ func (s *Server) handleAnalyticsDistance(w http.ResponseWriter, r *http.Request)
 			_, _ = w.Write([]byte(`{"status":"building","retry_after_seconds":5,"detail":"distance index is being computed (lazy build, #1011). Retry after Retry-After seconds."}`))
 			return
 		}
+		if region == "" && area == "" {
+			setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompDistance)) // #492
+		}
 		writeJSON(w, s.store.GetAnalyticsDistance(region, area))
 		return
 	}
@@ -3063,6 +3093,9 @@ func (s *Server) handleAnalyticsHashSizes(w http.ResponseWriter, r *http.Request
 		if s.rejectAnalyticsFilters(w, region, area) {
 			return
 		}
+		if region == "" && area == "" {
+			setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompHashSizes)) // #492
+		}
 		writeJSON(w, s.store.GetAnalyticsHashSizes(region, area))
 		return
 	}
@@ -3082,6 +3115,9 @@ func (s *Server) handleAnalyticsHashCollisions(w http.ResponseWriter, r *http.Re
 		area := r.URL.Query().Get("area")
 		if s.rejectAnalyticsFilters(w, region, area) {
 			return
+		}
+		if region == "" && area == "" {
+			setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompHashCollisions)) // #492
 		}
 		writeJSON(w, s.store.GetAnalyticsHashCollisions(region, area))
 		return

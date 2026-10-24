@@ -56,6 +56,7 @@
 - [GET /api/traces/:hash](#get-apitraceshash)
 - [GET /api/config/theme](#get-apiconfigtheme)
 - [GET /api/config/regions](#get-apiconfigregions)
+- [GET /api/config/regions/groups](#get-apiconfigregionsgroups)
 - [GET /api/config/areas](#get-apiconfigareas)
 - [GET /api/config/areas/polygons](#get-apiconfigareaspolygons)
 - [GET /api/config/client](#get-apiconfigclient)
@@ -1239,14 +1240,22 @@ Returned when the node is unknown or hidden (see Visibility).
 
 ### Response `429`
 
-Returned when the report is **cold** (not cached) and too many other cold
-reports are already scanning the database. At most two cold reports compute at
-once, so a burst of different nodes/windows cannot occupy the read pool and
-slow unrelated endpoints; a cold request queues briefly for a slot and is only
-shed if the limit is still saturated. Warm (cached) responses are never
-affected, and concurrent requests for the *same* node and window still share
-one computation. Nothing is cached for a shed request — retry after
-`Retry-After` seconds and it recomputes normally.
+Returned when the report is **cold** (not cached) and its build cannot be
+admitted. At most two cold reports compute at once; up to eight distinct cold
+build leaders may wait for a slot for up to three seconds without holding a
+database connection while waiting for that slot. Visibility and ranking checks
+can still query the database outside this limiter. A further distinct leader
+gets 429 immediately when the queue is full, before allocating a wait timer.
+An admitted leader gets 429 if
+its wait expires before a slot becomes available. These are fixed internal
+defaults, not operator/customizer settings.
+
+Warm (cached) responses bypass this limiter. Concurrent requests for the
+*same* node and window still share one computation and one queue admission;
+the eight-leader cap does **not** bound all existing singleflight followers.
+Nothing is cached for a shed request — retry after `Retry-After` seconds and
+it recomputes normally. Existing request-cancellation/error and visibility
+behavior is unchanged.
 
 ```
 Retry-After: 2
@@ -2751,6 +2760,56 @@ Available regions (IATA codes) merged from config + DB.
 ```
 
 Returns a flat key-value object.
+
+**Note:** this object is a flat `code → label` map and stays one. Named
+quick-pick groups over these codes are served separately by
+[GET /api/config/regions/groups](#get-apiconfigregionsgroups).
+
+---
+
+## GET /api/config/regions/groups
+
+Optional named quick-pick groups over the region codes from
+[GET /api/config/regions](#get-apiconfigregions), defined in `config.json`
+under `regionGroups` (issue #416). The frontend renders each group as one
+button next to the region filter that selects that group's codes in one
+action.
+
+### Response `200`
+
+```jsonc
+[
+  {
+    "name":  string,    // operator label, e.g. "Bay Area"
+    "codes": [string]   // region codes, e.g. ["SFO", "SJC", "OAK"]
+  }
+]
+```
+
+Returns `[]` when no groups are configured — the region filter then behaves
+exactly as it did before the option existed.
+
+Group names are convenience labels over region codes, **not** verified
+geographic boundaries.
+
+**Normalization and limits.** Config entries are normalized once at startup
+and filtered per request:
+
+| Case | Behaviour |
+| --- | --- |
+| `regionGroups` absent or `[]` | Response is `[]`. |
+| Name blank, or longer than 40 characters | Group dropped, one startup log line. |
+| No codes listed | Group dropped, one startup log line. |
+| More than 24 distinct codes in one group | Group dropped, one startup log line. |
+| More than 12 groups | Groups past the 12th dropped, one startup log line. |
+| Repeated group name (case-insensitive) | First one stands, later ones dropped. |
+| Repeated code within a group | De-duplicated, case-insensitively, first spelling kept. |
+| Code no observer reports | Dropped from the group; a group with no code left is omitted from the response. |
+
+A structural violation drops the whole entry rather than serving a
+truncated code list or a shortened name, because either would mislabel the
+filter the operator asked for. Codes are matched case-insensitively and
+returned in the spelling `GET /api/config/regions` uses.
 
 ---
 

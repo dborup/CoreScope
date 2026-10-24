@@ -64,15 +64,32 @@ func (s *Server) startNeighborGraphRecomputer(interval time.Duration, stop <-cha
 		s.recomputeNeighborGraphCache()
 		t := time.NewTicker(interval)
 		defer t.Stop()
-		for tick := 1; ; tick++ {
-			select {
-			case <-t.C:
-				s.recomputeNeighborGraphCacheTick(tick%every == 0)
-			case <-stop:
-				return
-			}
-		}
+		runNeighborGraphLoop(t.C, stop, every, s.recomputeNeighborGraphCacheTick)
 	}()
+}
+
+// shouldRebuildNeighborGraph reports whether recompute tick (1-based) also
+// rebuilds the graph, given neighborGraphRebuildEvery's cadence. With every ==
+// 1 (the default 300 s interval) every tick rebuilds.
+func shouldRebuildNeighborGraph(tick, every int) bool {
+	if every <= 1 {
+		return true
+	}
+	return tick%every == 0
+}
+
+// runNeighborGraphLoop calls step once per tick until stop closes, telling it
+// whether this tick rebuilds the graph. Split out so tests can drive it with a
+// fake tick channel.
+func runNeighborGraphLoop(ticks <-chan time.Time, stop <-chan struct{}, every int, step func(rebuildGraph bool)) {
+	for tick := 1; ; tick++ {
+		select {
+		case <-ticks:
+			step(shouldRebuildNeighborGraph(tick, every))
+		case <-stop:
+			return
+		}
+	}
 }
 
 // recomputeNeighborGraphCache builds and pre-marshals the default-shape

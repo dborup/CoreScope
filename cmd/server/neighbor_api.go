@@ -98,7 +98,9 @@ func (s *Server) getNeighborGraph() *NeighborGraph {
 }
 
 // rebuildNeighborGraph builds a replacement graph and atomically publishes it.
-// Builds are serialized, but readers retain the previous snapshot while the
+// Builds and their publishes happen under neighborBuildMu, so a build that
+// started earlier can never publish after one that started later. Builds are
+// serialized, but readers retain the previous snapshot while the
 // potentially expensive store scan runs.
 func (s *Server) rebuildNeighborGraph() {
 	if s.store == nil {
@@ -110,6 +112,9 @@ func (s *Server) rebuildNeighborGraph() {
 }
 
 func (s *Server) buildNeighborGraph() *NeighborGraph {
+	if s.buildGraphFn != nil {
+		return s.buildGraphFn() // test seam
+	}
 	if s.store == nil {
 		return NewNeighborGraph()
 	}

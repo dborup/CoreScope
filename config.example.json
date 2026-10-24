@@ -325,6 +325,11 @@
     "OAK": "Oakland, US",
     "MRY": "Monterey, US"
   },
+  "_comment_regionGroups": "Optional (#416). Named quick picks over the region codes above: each group renders as one button next to the region filter that selects exactly those codes in one click. Omit the key, or leave it [], and the region filter behaves exactly as it did before the option existed. These are convenience labels over region codes, NOT verified geographic boundaries. Limits: at most 12 groups, at most 24 distinct codes per group, names at most 40 characters. A group that breaks one of those limits, has no name or lists no code is dropped with one log line at startup — a truncated code list or a shortened name would mislabel the filter, so the whole entry is refused instead. Repeated group names (case-insensitive) keep the first one; repeated codes inside a group are de-duplicated. Codes are matched case-insensitively against the served region list (config entries plus every observer IATA in the database), so a code no observer reports is dropped from the group and a group left with no code is not offered at all — an operator can list an observer that is not up yet without creating a dead button. Served by GET /api/config/regions/groups; the flat GET /api/config/regions map is unchanged.",
+  "regionGroups": [
+    { "name": "Bay Area", "codes": ["SFO", "SJC", "OAK"] },
+    { "name": "Central Coast", "codes": ["MRY"] }
+  ],
   "cacheTTL": {
     "stats": 10,
     "nodeDetail": 300,
@@ -383,7 +388,7 @@
     "maxAgeDays": 5,
     "maxEdgeKm": 500,
     "cacheRecomputeIntervalSeconds": 300,
-    "_comment": "maxAgeDays: neighbor edges older than this many days are pruned on startup and daily. Default 5. maxEdgeKm: geo-implausibility filter — when both endpoints have GPS, edges with haversine distance > maxEdgeKm are rejected at build time to prevent disambiguator self-reinforcement on wide-geo MQTT deployments. Default 500 km (well above any plausible terrestrial LoRa hop). 0 ⇒ use default; set negative to disable the filter. Rejected count surfaces in /api/analytics/neighbor-graph stats. Issue #1228. cacheRecomputeIntervalSeconds: how often the background recomputer refreshes the cached default-shape /api/analytics/neighbor-graph responses (#1481 P0-1). Default 300 (5 min). The graph itself is rebuilt at most once per 5 minutes, so a lower value refreshes the cached responses more often without extra graph-build CPU; a higher value makes the graph as old as the interval. Requests keep the published graph until the next build finishes. Issue #1483, #545."
+    "_comment": "maxAgeDays: neighbor edges older than this many days are pruned on startup and daily. Default 5. maxEdgeKm: geo-implausibility filter — when both endpoints have GPS, edges with haversine distance > maxEdgeKm are rejected at build time to prevent disambiguator self-reinforcement on wide-geo MQTT deployments. Default 500 km (well above any plausible terrestrial LoRa hop). 0 ⇒ use default; set negative to disable the filter. Rejected count surfaces in /api/analytics/neighbor-graph stats. Issue #1228. cacheRecomputeIntervalSeconds: how often the background recomputer refreshes the cached default-shape /api/analytics/neighbor-graph responses (#1481 P0-1). Default 300 (5 min). The graph itself is rebuilt at most once per 5 minutes, so a lower value refreshes the cached responses more often without extra graph-build CPU; a higher value makes the graph older: at most roughly one TTL plus one interval (a non-divisor interval rebuilds every ceil(TTL/interval) ticks, e.g. 90 s gives 360 s). Requests keep the published graph until the next build finishes. Issue #1483, #545."
   },
   "estimatedPositions": {
     "enabled": true,
@@ -439,6 +444,8 @@
 
   "analytics": {
     "defaultIntervalSeconds": 300,
+    "pauseWhenIdle": false,
+    "_comment_pauseWhenIdle": "Issue #492. Opt-in, default false (every analytics snapshot is recomputed on its interval whether read or not). When true, a scheduled recompute is skipped if nothing read that endpoint's default snapshot since the previous recompute, so an instance whose analytics pages are rarely open stops recomputing and allocating for them. Freshness trade-off: the first read after a pause is served the existing snapshot at once — it can be much older than the interval — and wakes one refresh; reads after that see fresh data. While pauseWhenIdle is on, responses served from a snapshot carry X-Analytics-Snapshot (current|stale) and X-Analytics-Snapshot-Age-Seconds, so a stale snapshot is never presented as freshly computed. Startup load, warm-up gates and failed recomputes are unaffected: a recomputer only pauses after a successful pass that started once the startup load finished.",
     "recomputeIntervalSeconds": {
       "topology": 300,
       "rf": 300,

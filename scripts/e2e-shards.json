@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-416-region-quick-picks-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #416 region quick picks on Nodes (pill mode), Packets (dropdown mode) and at 390 px with touch. About 35s locally. No CI duration measured yet; assigned to shard 2, the lowest measured total."
+    },
+    {
       "file": "test-health-status-e2e.js",
       "shard": 2,
       "env": {},
