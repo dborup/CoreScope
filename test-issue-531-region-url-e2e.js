@@ -12,7 +12,9 @@
  *      request carries SJC, the control shows SJC, SJC is saved, and the view
  *      makes the same API requests as a load with SJC already saved.
  *   2. SPA navigation into each of those views with ?region=SJC: the same, one
- *      region-dependent request (no second load), same count as the baseline.
+ *      region-dependent request (no second load), same count as the baseline
+ *      (#556: each step waits for the API to go quiet, not only a fixed
+ *      settle window, so no view's late requests land in another count).
  *   3. Comma lists (trimmed, repeats dropped) and unknown codes, fresh and in
  *      the app; Packets keeps no URL handling of its own (its old setSelected
  *      would save the unknown code again); a link equal to the saved
@@ -27,25 +29,44 @@
  *   7. A change in the control keeps a ?region= in the hash in step with the
  *      selection on every view with a control (replaceState, other
  *      parameters kept), so a stale link value cannot override the choice on
- *      Back or on reload; picking All removes it.
+ *      Back or on reload; picking All removes it. #556: a choice made on a
+ *      later entry also stands on Back/Forward to the link's entry and on
+ *      reload there; a deep link in a new tab still wins.
  *   8. ?region=All in any case means all regions: one unfiltered request.
  *
  * Mutants: drop the RegionFilter.syncFromUrl() call in app.js's navigate()
  * (1, 2, 3, 6 red); restore Packets' own ?region= handling (3 red); drop the
  * off*() calls in packets/nodes/live destroy() (4, 5 red); notify after every
  * fresh-load region check (1 red: a second load); drop the hash write-back
- * after a control change (7 red); treat All as a code (8 red: two loads).
+ * after a control change (7 red); treat All as a code (8 red: two loads);
+ * drop the history.state check in syncFromUrl (#556 Back test red); drop
+ * the API-quiet waits in section 2 (2 red with SLOW_API=page:/api/packets:4000
+ * or SLOW_API=base:/api/nodes:4000).
  *
- * Usage: BASE_URL=http://localhost:13581 node test-issue-531-region-url-e2e.js
+ * Usage: BASE_URL=http://localhost:13581 [ONLY=<regex>] node test-issue-531-region-url-e2e.js
  */
 'use strict';
 const { chromium } = require('playwright');
 
 const BASE = process.env.BASE_URL || 'http://localhost:3000';
 const SETTLE_MS = 2000;
+// #556: SLOW_API=<base|page>:<path>:<ms> delays that API's responses in
+// section 2's baseline or page under test, as a loaded machine does, so a
+// view finishes loading late. Reproduces the count flake on demand, e.g.
+// page:/api/packets:4000 (Packets' late requests) or base:/api/nodes:4000
+// (Live's late requests).
+const SLOW_API = (() => {
+  const m = /^(base|page):([^:]+):(\d+)$/.exec(process.env.SLOW_API || '');
+  return m ? { side: m[1], path: m[2], ms: Number(m[3]) } : null;
+})();
+const slowFor = (side) => (SLOW_API && SLOW_API.side === side ? SLOW_API : null);
+
+// ONLY=<regex> runs the matching tests only (for repeat runs of one section).
+const ONLY = process.env.ONLY ? new RegExp(process.env.ONLY) : null;
 
 let passed = 0, failed = 0;
 async function test(name, fn) {
+  if (ONLY && !ONLY.test(name)) return;
   try { await fn(); passed++; console.log('  ✅ ' + name); }
   catch (err) { failed++; console.log('  ❌ ' + name + ': ' + err.message); }
 }
@@ -68,8 +89,14 @@ let browser;
 
 // A page whose visitor has `saved` as region selection. Records every /api/
 // request and counts the RegionFilter/AreaFilter listeners still registered.
-async function openPage(saved) {
+async function openPage(saved, slow) {
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  if (slow) {
+    await ctx.route((u) => u.pathname === slow.path, async (route) => {
+      await new Promise((r) => setTimeout(r, slow.ms));
+      await route.continue();
+    });
+  }
   await ctx.addInitScript((sel) => {
     // Seeded once per tab, so a reload keeps what the page saved.
     if (!sessionStorage.getItem('__seeded531')) {
@@ -98,7 +125,10 @@ async function openPage(saved) {
   page.__errors = [];
   page.on('pageerror', (e) => page.__errors.push(e.message));
   page.__reqs = [];
-  page.on('request', (r) => { if (r.url().includes('/api/')) page.__reqs.push(r.url()); });
+  page.__open = new Set();
+  page.on('request', (r) => { if (r.url().includes('/api/')) { page.__reqs.push(r.url()); page.__open.add(r); } });
+  page.on('requestfinished', (r) => page.__open.delete(r));
+  page.on('requestfailed', (r) => page.__open.delete(r));
   return page;
 }
 const mark = (page) => page.__reqs.length;
@@ -138,6 +168,21 @@ function apiCounts(page, from) {
     counts[p] = (counts[p] || 0) + 1;
   });
   return counts;
+}
+
+// #556: until no /api/ request is open and none started for QUIET_MS (at
+// most 20s). A fixed settle window alone is not enough on a loaded machine:
+// a view's later requests (Packets' hops and filters after /api/packets,
+// Live's after its node list) then fall on either side of it.
+const QUIET_MS = 1000;
+async function apiIdle(page) {
+  const deadline = Date.now() + 20000;
+  let n = page.__reqs.length, quietFrom = Date.now();
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(100);
+    if (page.__reqs.length !== n || page.__open.size > 0) { n = page.__reqs.length; quietFrom = Date.now(); continue; }
+    if (Date.now() - quietFrom >= QUIET_MS) return;
+  }
 }
 
 async function goHash(page, hash) {
@@ -194,27 +239,31 @@ const hashRegions = (page) => page.evaluate(() => new URLSearchParams(location.h
   for (const v of VIEWS) {
     const from = v.name === 'packets' ? 'nodes' : 'packets';
     await test(`#/${from} → #/${v.name}?region=SJC over saved SFO: first request, one load, API calls`, async () => {
-      const base = await openPage(['SJC']);
+      const base = await openPage(['SJC'], slowFor('base'));
       await base.goto(`${BASE}/#/${from}`, { waitUntil: 'domcontentloaded' });
       await firstRequest(base, 0, view(from).api);
       await base.waitForTimeout(SETTLE_MS);
+      await apiIdle(base);
       let m = mark(base);
       await goHash(base, `#/${v.name}`);
       await firstRequest(base, m, v.api);
       await base.waitForTimeout(SETTLE_MS);
+      await apiIdle(base);
       const want = apiCounts(base, m);
       await base.context().close();
 
-      const page = await openPage(['SFO']);
+      const page = await openPage(['SFO'], slowFor('page'));
       await page.goto(`${BASE}/#/${from}`, { waitUntil: 'domcontentloaded' });
       await firstRequest(page, 0, view(from).api);
       await page.waitForTimeout(SETTLE_MS);
+      await apiIdle(page);
       m = mark(page);
       await goHash(page, `#/${v.name}?region=SJC`);
       const first = await firstRequest(page, m, v.api);
       eq(regionOf(first), 'SJC', 'first ' + v.api + ' region');
       eq(await shown(page, v.control), ['SJC'], 'control');
       await page.waitForTimeout(SETTLE_MS);
+      await apiIdle(page);
       eq(since(page, m, v.api).map(regionOf), since(page, m, v.api).map(() => 'SJC'), 'every request after the link');
       eq(apiCounts(page, m), want, 'API calls vs navigating with SJC saved');
       eq(page.__errors, [], 'page errors');
@@ -422,6 +471,45 @@ const hashRegions = (page) => page.evaluate(() => new URLSearchParams(location.h
     await page.reload({ waitUntil: 'domcontentloaded' });
     eq(await shown(page, 'nodesRegionFilter'), ['OAK'], 'control after reload');
     eq(afterSwitch, '#/nodes?region=OAK', 'hash after the switch');
+    await page.context().close();
+  });
+
+  await test('#556: fresh #/nodes?region=SJC, Channels, OAK there, Back: OAK, not SJC', async () => {
+    const page = await openPage(['SFO']);
+    await page.goto(`${BASE}/#/nodes?region=SJC`, { waitUntil: 'domcontentloaded' });
+    eq(await shown(page, 'nodesRegionFilter'), ['SJC'], 'control from the link');
+    await page.waitForTimeout(SETTLE_MS);
+    await goHash(page, '#/channels');
+    eq(await shown(page, 'chRegionFilter'), ['SJC'], 'channels control');
+    await page.waitForTimeout(SETTLE_MS);
+    await switchRegion(page, 'chRegionFilter', 'SJC', 'OAK');
+    eq(await page.evaluate(() => location.hash), '#/channels', 'channels hash untouched');
+    await page.waitForTimeout(SETTLE_MS);
+    let m = mark(page);
+    await page.goBack();
+    eq(await page.evaluate(() => location.hash), '#/nodes?region=SJC', 'hash after back');
+    eq(await shown(page, 'nodesRegionFilter'), ['OAK'], 'control after back');
+    eq(await page.evaluate(() => RegionFilter.getRegionParam()), 'OAK', 'selection after back');
+    eq(await saved(page), ['OAK'], 'saved after back');
+    await page.waitForTimeout(SETTLE_MS);
+    since(page, m, /\/api\/nodes\?/).forEach((u) => eq(regionOf(u), 'OAK', '/api/nodes after back'));
+    await page.goForward();
+    eq(await shown(page, 'chRegionFilter'), ['OAK'], 'control after forward');
+    await page.goBack();
+    eq(await shown(page, 'nodesRegionFilter'), ['OAK'], 'control after back again');
+    m = mark(page);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    eq(regionOf(await firstRequest(page, m, /\/api\/nodes\?/)), 'OAK', 'first /api/nodes after reload');
+    eq(await shown(page, 'nodesRegionFilter'), ['OAK'], 'control after reload');
+    eq(page.__errors, [], 'page errors');
+    await page.context().close();
+  });
+
+  await test('#556: a deep link in a new tab still wins over the saved choice', async () => {
+    const page = await openPage(['OAK']);
+    await page.goto(`${BASE}/#/nodes?region=SJC`, { waitUntil: 'domcontentloaded' });
+    eq(regionOf(await firstRequest(page, 0, /\/api\/nodes\?/)), 'SJC', 'first /api/nodes');
+    eq(await shown(page, 'nodesRegionFilter'), ['SJC'], 'control');
     await page.context().close();
   });
 
