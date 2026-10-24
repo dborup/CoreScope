@@ -115,6 +115,12 @@ type StoreObs struct {
 	// tx.RouteType. The frame itself is not kept (#881). It fills padding
 	// after tsParsedOK, so StoreObs does not grow.
 	wireRoute uint8
+	// sharedStrs marks which of ObserverID, ObserverName, ObserverIATA and
+	// Direction are canonical copies the store's bounded sharing pool holds
+	// (#489, obs_strings_pool.go), so estimateStoreObsBytes charges only
+	// the bytes this observation owns. It uses the same padding block as
+	// wireRoute, so StoreObs stays 200 bytes.
+	sharedStrs uint8
 }
 
 // ParsedTime returns the parsed Timestamp, caching the result.
@@ -208,6 +214,7 @@ type PacketStore struct {
 	maxTxID          int                        // highest transmission_id in store
 	maxObsID         int                        // highest observation_id in store
 	byObserver       map[string][]*StoreObs     // observer_id → observations
+	obsStrPool       *obsStringPool             // shared observer metadata strings (#489); nil = disabled
 	byNode           map[string][]*StoreTx      // pubkey → transmissions
 	nodeHashes       map[string]map[string]bool // pubkey → Set<hash>
 	byPathHop        map[string][]*StoreTx      // lowercase hop/pubkey → transmissions with that hop in path
@@ -827,6 +834,7 @@ func NewPacketStore(db *DB, cfg *PacketStoreConfig, cacheTTLs ...map[string]inte
 		byTxID:        make(map[int]*StoreTx, 65536),
 		byObsID:       make(map[int]*StoreObs, 65536),
 		byObserver:    make(map[string][]*StoreObs),
+		obsStrPool:    newObsStringPool(),
 		byNode:        make(map[string][]*StoreTx),
 		byPathHop:     make(map[string][]*StoreTx),
 		nodeHashes:    make(map[string]map[string]bool),
@@ -1120,7 +1128,14 @@ func (s *PacketStore) Load() error {
 
 		if obsID.Valid {
 			oid := int(obsID.Int64)
-			obsIDStr := nullStrVal(observerID)
+			// #489: one canonical copy of each observer ID, name, IATA code
+			// and direction, so the observations share them instead of
+			// holding the row scan's own copy each. Interned before the
+			// dedup check so byObserver and the index keys below are the
+			// canonical copies too.
+			om := s.obsStrPool.internObs(nullStrVal(observerID), nullStrVal(observerName),
+				nullStrVal(observerIATA), nullStrVal(direction))
+			obsIDStr := om.observerID
 			obsPJ := nullStrVal(pathJSON)
 
 			// Dedup: skip if same observer + same path already loaded
@@ -1132,10 +1147,11 @@ func (s *PacketStore) Load() error {
 			obs := &StoreObs{
 				ID:             oid,
 				TransmissionID: txID,
-				ObserverID:     obsIDStr,
-				ObserverName:   nullStrVal(observerName),
-				ObserverIATA:   nullStrVal(observerIATA),
-				Direction:      nullStrVal(direction),
+				ObserverID:     om.observerID,
+				ObserverName:   om.observerName,
+				ObserverIATA:   om.observerIATA,
+				Direction:      om.direction,
+				sharedStrs:     om.shared,
 				SNR:            nullFloatPtr(snr),
 				RSSI:           nullFloatPtr(rssi),
 				Score:          nullIntPtr(score),
@@ -1431,7 +1447,12 @@ func (s *PacketStore) loadChunkWhere(where string, qArgs []interface{}, label st
 
 		if obsID.Valid {
 			oid := int(obsID.Int64)
-			obsIDStr := nullStrVal(observerID)
+			// #489: shared observer metadata, as in Load. The background
+			// fill scans and builds its batch outside s.mu, so this never
+			// waits for the pool under the store lock.
+			om := s.obsStrPool.internObs(nullStrVal(observerID), nullStrVal(observerName),
+				nullStrVal(observerIATA), nullStrVal(direction))
+			obsIDStr := om.observerID
 			obsPJ := nullStrVal(pathJSON)
 
 			dup, knownObserver := tx.lookupObservation(obsIDStr, obsPJ)
@@ -1442,10 +1463,11 @@ func (s *PacketStore) loadChunkWhere(where string, qArgs []interface{}, label st
 			obs := &StoreObs{
 				ID:             oid,
 				TransmissionID: txID,
-				ObserverID:     obsIDStr,
-				ObserverName:   nullStrVal(observerName),
-				ObserverIATA:   nullStrVal(observerIATA),
-				Direction:      nullStrVal(direction),
+				ObserverID:     om.observerID,
+				ObserverName:   om.observerName,
+				ObserverIATA:   om.observerIATA,
+				Direction:      om.direction,
+				sharedStrs:     om.shared,
 				SNR:            nullFloatPtr(snr),
 				RSSI:           nullFloatPtr(rssi),
 				Score:          nullIntPtr(score),
@@ -3011,7 +3033,12 @@ func (s *PacketStore) GetPerfStoreStatsTyped() PerfPacketStoreStats {
 // per field. For fields that are inline struct members (RawHex, DecodedJSON,
 // PathJSON, observer strings) that header is ALSO part of storeTxBaseBytes /
 // storeObsBaseBytes, so the per-component totals are a deliberate UPPER BOUND,
-// not additive with TotalTxEstimatedMB. struct/index/map overhead, the neighbor
+// not additive with TotalTxEstimatedMB. ObsStringsMB is the loosest of them
+// since #489: the observer ID, name, IATA code and direction of every
+// observation are canonical copies the store's bounded pool holds, so the
+// bytes it counts per observation are the same few hundred values over and
+// over. TrackedMB (PerfPacketStoreStats) is the figure that reflects the
+// actual retention, pool included (accountedBytes). struct/index/map overhead, the neighbor
 // graph and analytics caches are excluded entirely — which is why the total
 // here sits below goHeapInuseMB.
 func (s *PacketStore) GetStoreMemoryBreakdown() *StoreMemoryBreakdown {
@@ -3287,17 +3314,18 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 
 	// Scan into temp structures
 	type tempRow struct {
-		txID                                                               int
-		rawHex, hash, firstSeen, decodedJSON                               string
-		routeType, payloadType                                             *int
-		obsID                                                              *int
-		observerID, observerName, observerIATA, direction, pathJSON, obsTS string
-		obsRawHex                                                          string
-		resolvedPath                                                       persistedRelayPath
-		scopeName                                                          string
-		routeMask                                                          sql.NullInt64
-		snr, rssi                                                          *float64
-		score                                                              *int
+		txID                                 int
+		rawHex, hash, firstSeen, decodedJSON string
+		routeType, payloadType               *int
+		obsID                                *int
+		strs                                 obsStrings // interned observer metadata (#489)
+		pathJSON, obsTS                      string
+		obsRawHex                            string
+		resolvedPath                         persistedRelayPath
+		scopeName                            string
+		routeMask                            sql.NullInt64
+		snr, rssi                            *float64
+		score                                *int
 	}
 
 	var tempRows []tempRow
@@ -3346,17 +3374,16 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 		}
 
 		tr := tempRow{
-			txID:         txID,
-			rawHex:       nullStrVal(rawHex),
-			hash:         nullStrVal(hash),
-			firstSeen:    nullStrVal(firstSeen),
-			decodedJSON:  nullStrVal(decodedJSON),
-			routeType:    nullIntPtr(routeType),
-			payloadType:  nullIntPtr(payloadType),
-			observerID:   nullStrVal(observerID),
-			observerName: nullStrVal(observerName),
-			observerIATA: nullStrVal(observerIATA),
-			direction:    nullStrVal(direction),
+			txID:        txID,
+			rawHex:      nullStrVal(rawHex),
+			hash:        nullStrVal(hash),
+			firstSeen:   nullStrVal(firstSeen),
+			decodedJSON: nullStrVal(decodedJSON),
+			routeType:   nullIntPtr(routeType),
+			payloadType: nullIntPtr(payloadType),
+			// #489: interned here, while the rows are scanned, so the merge
+			// section below never waits for the sharing pool under s.mu.
+			strs:         s.obsStrPool.internObs(nullStrVal(observerID), nullStrVal(observerName), nullStrVal(observerIATA), nullStrVal(direction)),
 			pathJSON:     nullStrVal(pathJSON),
 			obsTS:        nullStrVal(obsTimestamp),
 			obsRawHex:    nullStrVal(obsRawHex),
@@ -3383,7 +3410,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 	if s.config != nil && len(s.config.Areas) > 0 {
 		ids := make([]string, 0, len(tempRows))
 		for _, row := range tempRows {
-			ids = append(ids, strings.ToLower(strings.TrimSpace(row.observerID)))
+			ids = append(ids, strings.ToLower(strings.TrimSpace(row.strs.observerID)))
 		}
 		observerGPS = s.db.gpsByPubkeysExact(ids)
 	}
@@ -3456,7 +3483,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 
 		if r.obsID != nil {
 			oid := *r.obsID
-			dup, knownObserver := tx.lookupObservation(r.observerID, r.pathJSON)
+			dup, knownObserver := tx.lookupObservation(r.strs.observerID, r.pathJSON)
 			if dup {
 				continue
 			}
@@ -3464,10 +3491,6 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			obs := &StoreObs{
 				ID:             oid,
 				TransmissionID: r.txID,
-				ObserverID:     r.observerID,
-				ObserverName:   r.observerName,
-				ObserverIATA:   r.observerIATA,
-				Direction:      r.direction,
 				SNR:            r.snr,
 				RSSI:           r.rssi,
 				Score:          r.score,
@@ -3475,15 +3498,16 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				Timestamp:      normalizeTimestamp(r.obsTS),
 				wireRoute:      wireRouteFromRawHex(r.obsRawHex),
 			}
+			r.strs.apply(obs)
 
 			// Relay-hop indexes: same input as Load (#158 follow-up).
 			// Decode-window discipline: decode once, feed consumers, never
 			// store on struct.
-			s.indexObservationRelayHops(tx, r.resolvedPath, r.pathJSON, r.observerID, cachedPM, hopsSeen, nil)
+			s.indexObservationRelayHops(tx, r.resolvedPath, r.pathJSON, r.strs.observerID, cachedPM, hopsSeen, nil)
 			// The live broadcast still shows the server's own resolution.
 			var rpForBroadcast []*string
 			if r.pathJSON != "" && r.pathJSON != "[]" && cachedPM != nil {
-				rpForBroadcast = resolvePathForObs(r.pathJSON, r.observerID, tx, cachedPM, cachedGraph)
+				rpForBroadcast = resolvePathForObs(r.pathJSON, r.strs.observerID, tx, cachedPM, cachedGraph)
 			}
 			// Stash rpForBroadcast for later broadcast/persist (keyed by obs ID)
 			if rpForBroadcast != nil {
@@ -3503,8 +3527,8 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 			if oid > s.maxObsID {
 				s.maxObsID = oid
 			}
-			if r.observerID != "" {
-				s.byObserver[r.observerID] = append(s.byObserver[r.observerID], obs)
+			if r.strs.observerID != "" {
+				s.byObserver[r.strs.observerID] = append(s.byObserver[r.strs.observerID], obs)
 			}
 			s.totalObs++
 			s.trackedBytes += estimateStoreObsBytes(obs)
@@ -3743,10 +3767,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 	type obsRow struct {
 		obsID        int
 		txID         int
-		observerID   string
-		observerName string
-		observerIATA string
-		direction    string
+		strs         obsStrings // interned observer metadata (#489)
 		snr, rssi    *float64
 		score        *int
 		pathJSON     string
@@ -3782,12 +3803,13 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		}
 
 		obsRows = append(obsRows, obsRow{
-			obsID:        oid,
-			txID:         txID,
-			observerID:   nullStrVal(observerID),
-			observerName: nullStrVal(observerName),
-			observerIATA: nullStrVal(observerIATA),
-			direction:    nullStrVal(direction),
+			obsID: oid,
+			txID:  txID,
+			// #489: interned while the rows are scanned, before s.mu is
+			// taken below, so the merge never waits for the sharing pool
+			// under the store lock.
+			strs: s.obsStrPool.internObs(nullStrVal(observerID), nullStrVal(observerName),
+				nullStrVal(observerIATA), nullStrVal(direction)),
 			snr:          nullFloatPtr(snr),
 			rssi:         nullFloatPtr(rssi),
 			score:        nullIntPtr(score),
@@ -3834,7 +3856,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		tx.mergeRouteMask(r.routeMask)
 
 		// Dedup by observer + path
-		dup, knownObserver := tx.lookupObservation(r.observerID, r.pathJSON)
+		dup, knownObserver := tx.lookupObservation(r.strs.observerID, r.pathJSON)
 		if dup {
 			continue
 		}
@@ -3842,10 +3864,6 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		obs := &StoreObs{
 			ID:             r.obsID,
 			TransmissionID: r.txID,
-			ObserverID:     r.observerID,
-			ObserverName:   r.observerName,
-			ObserverIATA:   r.observerIATA,
-			Direction:      r.direction,
 			SNR:            r.snr,
 			RSSI:           r.rssi,
 			Score:          r.score,
@@ -3856,14 +3874,15 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			Timestamp: normalizeTimestamp(r.timestamp),
 			wireRoute: wireRouteFromRawHex(r.rawHex),
 		}
+		r.strs.apply(obs)
 
 		// Relay-hop indexes: same input as Load (#158 follow-up).
 		// Decode-window discipline: decode, feed consumers, don't store on struct.
-		s.indexObservationRelayHops(tx, r.resolvedPath, r.pathJSON, r.observerID, pm, hopsSeen, nil)
+		s.indexObservationRelayHops(tx, r.resolvedPath, r.pathJSON, r.strs.observerID, pm, hopsSeen, nil)
 		// The live broadcast still shows the server's own resolution (review item #2).
 		var obsResolvedPath []*string
 		if r.pathJSON != "" && r.pathJSON != "[]" && pm != nil {
-			obsResolvedPath = resolvePathForObs(r.pathJSON, r.observerID, tx, pm, graphRef)
+			obsResolvedPath = resolvePathForObs(r.pathJSON, r.strs.observerID, tx, pm, graphRef)
 		}
 		// Stash for broadcast/persist
 		if obsResolvedPath != nil {
@@ -3884,8 +3903,8 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 		if r.obsID > s.maxObsID {
 			s.maxObsID = r.obsID
 		}
-		if r.observerID != "" {
-			s.byObserver[r.observerID] = append(s.byObserver[r.observerID], obs)
+		if r.strs.observerID != "" {
+			s.byObserver[r.strs.observerID] = append(s.byObserver[r.strs.observerID], obs)
 		}
 		s.totalObs++
 		s.trackedBytes += estimateStoreObsBytes(obs)
@@ -5568,7 +5587,10 @@ func estimateStoreTxBytesTypical(numObs int) int64 {
 	base += hops * perPathHopBytes
 	base += resolvedRelayBytes(typicalResolvedRelays)
 	// Add observation costs
-	obsBase := int64(storeObsBaseBytes) + 30 + 30 + 60 + 25 // observer ID + name + path + timestamp
+	// path + timestamp only: a typical observation's observer ID, name, IATA
+	// and direction are shared through the pool (#489), so they cost it
+	// nothing beyond the string headers storeObsBaseBytes already holds.
+	obsBase := int64(storeObsBaseBytes) + 60 + 25
 	obsBase += int64(numIndexesPerObs * indexEntryBytes)
 	// No per-obs ResolvedPath overhead (#800)
 	base += int64(numObs) * obsBase
@@ -5579,8 +5601,11 @@ func estimateStoreTxBytesTypical(numObs int) int64 {
 // ResolvedPath membership index overhead is tracked separately.
 func estimateStoreObsBytes(obs *StoreObs) int64 {
 	base := int64(storeObsBaseBytes)
-	base += int64(len(obs.PathJSON) + len(obs.ObserverID) + len(obs.ObserverName) +
-		len(obs.ObserverIATA) + len(obs.Direction) + len(obs.RawHex) + len(obs.Timestamp))
+	base += int64(len(obs.PathJSON) + len(obs.RawHex) + len(obs.Timestamp))
+	// #489: the four observer metadata fields are charged only when this
+	// observation owns their bytes. A value the sharing pool holds is charged
+	// once, by the pool itself (accountedBytes).
+	base += ownedObsStringBytes(obs)
 	base += int64(numIndexesPerObs * indexEntryBytes)
 	// ResolvedPath field removed (#800) — no per-obs RP overhead
 	return base
@@ -5609,10 +5634,21 @@ func (s *PacketStore) estimatedMemoryMB() float64 {
 	return s.estMemVal
 }
 
+// accountedBytes is everything the store's self-accounting holds: the
+// per-transmission and per-observation charges (trackedBytes) plus the
+// observer-string sharing pool's own retention (#489). The pool term is never
+// credited by eviction -- the canonical copies outlive the observations that
+// share them -- so it is a floor the memory budget must respect rather than
+// part of what an eviction pass can free.
+// Caller holds s.mu: ingest and eviction update trackedBytes under s.mu.Lock.
+func (s *PacketStore) accountedBytes() int64 {
+	return s.trackedBytes + s.obsStrPool.retainedBytes()
+}
+
 // trackedMemoryMB returns the self-accounted packet store memory in MB.
 // Caller holds s.mu: ingest and eviction update trackedBytes under s.mu.Lock.
 func (s *PacketStore) trackedMemoryMB() float64 {
-	return float64(s.trackedBytes) / 1048576.0
+	return float64(s.accountedBytes()) / 1048576.0
 }
 
 // EvictStale removes packets older than the retention window and/or exceeding
@@ -5634,10 +5670,11 @@ func (s *PacketStore) evictionCandidateTxIDs() []int {
 	if s.maxMemoryMB > 0 {
 		highWatermark := int64(s.maxMemoryMB) * 1048576
 		lowWatermark := int64(float64(highWatermark) * 0.85)
-		if s.trackedBytes > highWatermark && len(s.packets) > 0 {
+		accounted := s.accountedBytes()
+		if accounted > highWatermark && len(s.packets) > 0 {
 			var bytesToEvict int64
 			memCutoff := cutoffIdx
-			for memCutoff < len(s.packets) && (s.trackedBytes-bytesToEvict) > lowWatermark {
+			for memCutoff < len(s.packets) && (accounted-bytesToEvict) > lowWatermark {
 				tx := s.packets[memCutoff]
 				bytesToEvict += s.txChargedBytes(tx)
 				for _, obs := range tx.Observations {
@@ -5703,11 +5740,12 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 	if s.maxMemoryMB > 0 {
 		highWatermark := int64(s.maxMemoryMB) * 1048576
 		lowWatermark := int64(float64(highWatermark) * 0.85)
-		if s.trackedBytes > highWatermark && len(s.packets) > 0 {
+		accounted := s.accountedBytes()
+		if accounted > highWatermark && len(s.packets) > 0 {
 			// Evict from head until trackedBytes would drop below low watermark
 			var bytesToEvict int64
 			memCutoff := cutoffIdx
-			for memCutoff < len(s.packets) && (s.trackedBytes-bytesToEvict) > lowWatermark {
+			for memCutoff < len(s.packets) && (accounted-bytesToEvict) > lowWatermark {
 				tx := s.packets[memCutoff]
 				bytesToEvict += s.txChargedBytes(tx)
 				for _, obs := range tx.Observations {
