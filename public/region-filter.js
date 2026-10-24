@@ -28,6 +28,36 @@
 
   _selected = loadFromStorage();
 
+  // #556: choices made in the control (or by Clear) in this tab, counted in
+  // sessionStorage so the count outlives a reload, as history entries do.
+  // Each history entry whose link ?region= was applied records the count at
+  // that moment in its history.state (as Analytics records its view, #208).
+  var CHOICES_KEY = 'meshcore-region-choices';
+  var LINK_STATE_KEY = 'regionLinkChoices';
+  var _choices = 0;
+  try { _choices = Number(sessionStorage.getItem(CHOICES_KEY)) || 0; } catch (e) { /* storage blocked */ }
+
+  function noteChoice() {
+    _choices++;
+    try { sessionStorage.setItem(CHOICES_KEY, String(_choices)); } catch (e) { /* storage blocked */ }
+  }
+
+  function historyState() {
+    var st = window.history && window.history.state;
+    return st && typeof st === 'object' ? st : null;
+  }
+
+  /** The current entry's history.state with the choice count recorded;
+   *  other keys are kept and the URL is left as it is. */
+  function markLinkApplied() {
+    var st = historyState();
+    if (st && st[LINK_STATE_KEY] === _choices) return;
+    var next = {};
+    if (st) Object.keys(st).forEach(function (k) { next[k] = st[k]; });
+    next[LINK_STATE_KEY] = _choices;
+    try { window.history.replaceState(next, ''); } catch (e) { /* Safari throttles replaceState */ }
+  }
+
   /** Fetch regions from server */
   async function fetchRegions() {
     if (_loaded) return _regions;
@@ -132,10 +162,16 @@
    * regions are loaded unknown codes are dropped, and none left means all
    * regions; before that, fetchRegions() drops them. Listeners hear a genuine
    * change once. Returns whether the selection changed.
+   * #556: an entry whose link was applied before a later choice in the
+   * control keeps that choice on Back/Forward or reload. A new entry (a
+   * link, a first load) has no record, so its link still wins.
    */
   function syncFromUrl(hash) {
     var codes = parseUrlRegions(hash);
     if (!codes) return false;
+    var st = historyState();
+    if (st && typeof st[LINK_STATE_KEY] === 'number' && st[LINK_STATE_KEY] < _choices) return false;
+    markLinkApplied();
     var next = codes.length === 0 ? null : _loaded ? knownCodes(codes) : new Set(codes);
     _urlBeforeLoad = !_loaded;
     if (sameSelection(_selected, next)) return false;
@@ -178,6 +214,7 @@
       }
       if (_selected && _selected.size === codes.length) _selected = null;
     }
+    noteChoice();
     saveToStorage();
     render(container);
     syncUrlRegion();
@@ -311,6 +348,7 @@
   /** Override selected regions (e.g. from URL param). Persists to localStorage and re-renders. */
   function setSelected(codesArray) {
     _selected = (codesArray && codesArray.length > 0) ? new Set(codesArray) : null;
+    noteChoice();
     saveToStorage();
     if (_container) render(_container);
   }
