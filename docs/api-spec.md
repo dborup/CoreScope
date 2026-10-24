@@ -1239,14 +1239,22 @@ Returned when the node is unknown or hidden (see Visibility).
 
 ### Response `429`
 
-Returned when the report is **cold** (not cached) and too many other cold
-reports are already scanning the database. At most two cold reports compute at
-once, so a burst of different nodes/windows cannot occupy the read pool and
-slow unrelated endpoints; a cold request queues briefly for a slot and is only
-shed if the limit is still saturated. Warm (cached) responses are never
-affected, and concurrent requests for the *same* node and window still share
-one computation. Nothing is cached for a shed request — retry after
-`Retry-After` seconds and it recomputes normally.
+Returned when the report is **cold** (not cached) and its build cannot be
+admitted. At most two cold reports compute at once; up to eight distinct cold
+build leaders may wait for a slot for up to three seconds without holding a
+database connection while waiting for that slot. Visibility and ranking checks
+can still query the database outside this limiter. A further distinct leader
+gets 429 immediately when the queue is full, before allocating a wait timer.
+An admitted leader gets 429 if
+its wait expires before a slot becomes available. These are fixed internal
+defaults, not operator/customizer settings.
+
+Warm (cached) responses bypass this limiter. Concurrent requests for the
+*same* node and window still share one computation and one queue admission;
+the eight-leader cap does **not** bound all existing singleflight followers.
+Nothing is cached for a shed request — retry after `Retry-After` seconds and
+it recomputes normally. Existing request-cancellation/error and visibility
+behavior is unchanged.
 
 ```
 Retry-After: 2

@@ -31,13 +31,18 @@ import (
 //     two-tab burst would 429 a user whose database is not under any real
 //     pressure. Our own front end also only auto-retries 503 + Retry-After
 //     (app.js api()), never 429, so an instant refusal surfaces as a failed
-//     page rather than a short wait.
+//     page rather than a short wait. That was the initial evaluation; the
+//     frontend now handles bounded 429 retries too (#530 / #547).
 //   - We therefore queue for a bounded reachColdBuildWait first and only
 //     answer 429 + Retry-After when the limiter is still saturated at the end
 //     of it. Queueing costs an idle HTTP goroutine, not a database
 //     connection, so the pool protection is identical while a transient burst
-//     is absorbed instead of shed. Load shedding still happens — it just
-//     requires sustained saturation rather than an instant of it.
+//     is absorbed instead of shed. At most reachColdWaiterLimit distinct
+//     leaders may wait; a full queue is shed immediately before allocating
+//     another timer. Same-key singleflight followers share their leader's
+//     admission, so this does not bound those pre-existing followers.
+//
+// Queue admission reuses the existing correction in commit 1d2cd99d (#557).
 //
 // This is a per-endpoint cap, not global database admission control: it bounds
 // Reach's own cold work and nothing else. Any broader policy belongs with the
@@ -62,23 +67,28 @@ var (
 // the in-flight scans finishes.
 const reachColdRetryAfterSeconds = 2
 
+// reachColdWaiterLimit is a fixed internal default, not operator/customizer
+// configuration. It bounds distinct leaders waiting for a build slot.
+const reachColdWaiterLimit = 8
+
 // errReachColdBusy is returned by reachColdLimiter.acquire when the limiter
-// stayed saturated for the whole queue wait. The handler maps it to 429 and
-// never caches it (singleflight does not cache errors either), so the next
-// request recomputes normally.
+// has a full queue or stayed saturated for the whole wait. The handler maps
+// it to 429 and never caches it (singleflight does not cache errors either),
+// so the next request recomputes normally.
 var errReachColdBusy = errors.New("reach cold-scan concurrency limit reached")
 
-// reachColdLimiter is a counting semaphore with a bounded queue wait, plus the
-// counters the tests and the perf report read. Usable as a zero value: the
+// reachColdLimiter is a counting semaphore with a bounded queue count/wait,
+// plus counters the tests and the perf report read. Usable as a zero value: the
 // slot channel is built on first use from reachColdBuildLimit, so every
 // Server (including the ones tests assemble by hand) gets the limit without a
 // constructor.
 type reachColdLimiter struct {
-	mu   sync.Mutex
-	sem  chan struct{} // buffered to the limit; one slot per in-flight scan
-	lim  int           // 0 → reachColdBuildLimit
-	wait time.Duration // <=0 → reachColdBuildWait
-	hook func()        // test injection, run just after a slot is taken
+	mu     sync.Mutex
+	sem    chan struct{} // buffered to the limit; one slot per in-flight scan
+	queued chan struct{} // one admission per distinct leader waiting for a slot
+	lim    int           // 0 → reachColdBuildLimit
+	wait   time.Duration // <=0 → reachColdBuildWait
+	hook   func()        // test injection, run just after a slot is taken
 
 	inflight atomic.Int64  // slots currently held
 	peak     atomic.Int64  // high-water mark of inflight
@@ -95,12 +105,12 @@ type reachColdLimiter struct {
 func (l *reachColdLimiter) configure(limit int, wait time.Duration, hook func()) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.lim, l.wait, l.hook, l.sem = limit, wait, hook, nil
+	l.lim, l.wait, l.hook, l.sem, l.queued = limit, wait, hook, nil, nil
 }
 
-// slots returns the (lazily built) slot channel, the queue wait and the
+// slots returns the lazily built slot and queue channels, the wait and the
 // acquire hook.
-func (l *reachColdLimiter) slots() (chan struct{}, time.Duration, func()) {
+func (l *reachColdLimiter) slots() (chan struct{}, chan struct{}, time.Duration, func()) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.sem == nil {
@@ -112,29 +122,39 @@ func (l *reachColdLimiter) slots() (chan struct{}, time.Duration, func()) {
 			n = 1
 		}
 		l.sem = make(chan struct{}, n)
+		l.queued = make(chan struct{}, reachColdWaiterLimit)
 	}
 	w := l.wait
 	if w <= 0 {
 		w = reachColdBuildWait
 	}
-	return l.sem, w, l.hook
+	return l.sem, l.queued, w, l.hook
 }
 
 // acquire takes a slot for one cold Reach build. It returns nil when a slot
 // was taken (the caller MUST release it), ctx.Err() when the request went
-// away while queued, or errReachColdBusy when the limiter stayed saturated
-// for the whole queue wait.
+// away while queued, or errReachColdBusy when the queue is full or the limiter
+// stayed saturated for the whole queue wait.
 func (l *reachColdLimiter) acquire(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	sem, wait, hook := l.slots()
+	sem, queued, wait, hook := l.slots()
 	// Fast path: a free slot is taken without arming a timer.
 	select {
 	case sem <- struct{}{}:
 		l.took(hook)
 		return nil
 	default:
+	}
+	// Bound waiting leaders before allocating a timer. Every exit below gives
+	// back the admission, including promotion to an active scan.
+	select {
+	case queued <- struct{}{}:
+		defer func() { <-queued }()
+	default:
+		l.rejected.Add(1)
+		return errReachColdBusy
 	}
 	t := time.NewTimer(wait)
 	defer t.Stop()
@@ -172,7 +192,7 @@ func (l *reachColdLimiter) took(hook func()) {
 // defers it). Never blocks, so an unbalanced release cannot wedge a request.
 func (l *reachColdLimiter) release() {
 	l.inflight.Add(-1)
-	sem, _, _ := l.slots()
+	sem, _, _, _ := l.slots()
 	select {
 	case <-sem:
 	default:
