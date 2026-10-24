@@ -47,6 +47,10 @@ const (
 	// charge (about 0.7 MB in fact, see obsStringEntryBytes).
 	obsStringPoolMax = 8192
 
+	// obsStringPoolShards is how many independently locked slices the table
+	// is cut into. See obsStringShard for the contention numbers that set it.
+	obsStringPoolShards = 16
+
 	// obsStringEntryBytes is one entry's cost on top of the canonical copy's
 	// own bytes: two string headers in the slot, the slot's share of the
 	// group control word and the table's slack. Measured on Go swiss maps
@@ -72,24 +76,59 @@ const (
 	obsSharedDirection
 )
 
+// obsStringShard is one slice of the table with its own lock. Measured with
+// BenchmarkObsStringPoolHitParallel (140 held values, hits only): on one
+// shared RWMutex a hit costs 9 ns alone, 34 ns with two goroutines on it and
+// 84 ns with ten -- the read lock's own cache line, not the map, is the
+// bottleneck. Over 16 shards it costs 11 ns alone, 11 ns with two and 22 ns
+// with ten, so the cold load, the background fill and live ingest can intern
+// at once without waiting on each other. The 2 ns a shard lookup adds to a
+// serial hit is 24 ms over the 10M calls a 2.5M-observation load makes.
+// The padding keeps one shard's lock off the next one's cache line.
+type obsStringShard struct {
+	mu    sync.RWMutex
+	table map[string]string
+	_     [64 - 32]byte
+}
+
 // obsStringPool is the store's bounded canonical table of observer metadata
 // strings. A nil pool is a valid disabled pool (every value stays unshared),
 // which is what a test store built as &PacketStore{} gets.
 type obsStringPool struct {
-	mu    sync.RWMutex
-	table map[string]string
+	shards [obsStringPoolShards]obsStringShard
+	// count is the number of canonical copies held, across all shards. An
+	// insert reserves its slot here before taking it, so the cap holds
+	// exactly however many shards insert at once.
+	count atomic.Int64
 	// bytes is the pool's own retention: per entry the canonical copy's
-	// content plus obsStringEntryBytes. Written under mu, read without it
-	// by the accounting path, which runs under s.mu.
+	// content plus obsStringEntryBytes.
 	bytes atomic.Int64
-	// interned counts successful shares; full counts the calls the cap sent
-	// back unshared. Diagnostics only (and the saturation test).
-	interned atomic.Int64
-	full     atomic.Int64
+	// full counts the calls the cap sent back unshared. It is only touched
+	// past saturation, so it costs a hit nothing; a per-hit counter would be
+	// a contended cache line on the one path that must stay cheap.
+	full atomic.Int64
 }
 
 func newObsStringPool() *obsStringPool {
-	return &obsStringPool{table: make(map[string]string, 256)}
+	p := &obsStringPool{}
+	for i := range p.shards {
+		p.shards[i].table = make(map[string]string, 16)
+	}
+	return p
+}
+
+// obsStringShardOf picks s's shard. It reads the length and up to four bytes
+// from each end, so a 2-byte direction costs the same as a 64-hex pubkey,
+// and the same value always lands on the same shard -- which is all the
+// sharding needs for correctness. The spread is a performance property only
+// (BenchmarkObsStringPoolHitParallel measures it).
+func obsStringShardOf(s string) uint {
+	h := uint(len(s)) * 2654435761
+	for i := 0; i < 4 && i < len(s); i++ {
+		h = h*31 + uint(s[i])
+		h = h*31 + uint(s[len(s)-1-i])
+	}
+	return h & (obsStringPoolShards - 1)
 }
 
 // retainedBytes is what the pool itself holds. It only grows, and no eviction
@@ -106,40 +145,38 @@ func (p *obsStringPool) entries() int {
 	if p == nil {
 		return 0
 	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return len(p.table)
+	return int(p.count.Load())
 }
 
 // intern returns the canonical copy of s and whether it is shared. A hit
-// takes only the read lock and allocates nothing. The empty string is never
-// interned: it holds no bytes and costs nothing to repeat.
+// takes only its shard's read lock and allocates nothing. The empty string is
+// never interned: it holds no bytes and costs nothing to repeat.
 func (p *obsStringPool) intern(s string) (string, bool) {
 	if p == nil || s == "" {
 		return s, false
 	}
-	p.mu.RLock()
-	c, ok := p.table[s]
-	p.mu.RUnlock()
+	sh := &p.shards[obsStringShardOf(s)]
+	sh.mu.RLock()
+	c, ok := sh.table[s]
+	sh.mu.RUnlock()
 	if ok {
-		p.interned.Add(1)
 		return c, true
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if c, ok := p.table[s]; ok {
-		p.interned.Add(1)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	if c, ok := sh.table[s]; ok {
 		return c, true
 	}
-	if len(p.table) >= obsStringPoolMax {
+	// Reserve the slot before taking it, so the cap is exact.
+	if p.count.Add(1) > obsStringPoolMax {
+		p.count.Add(-1)
 		p.full.Add(1)
 		return s, false
 	}
 	// Clone so a value scanned out of a larger buffer does not pin it.
 	c = strings.Clone(s)
-	p.table[c] = c
+	sh.table[c] = c
 	p.bytes.Add(int64(len(c)) + obsStringEntryBytes)
-	p.interned.Add(1)
 	return c, true
 }
 

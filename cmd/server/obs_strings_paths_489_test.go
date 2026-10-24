@@ -676,7 +676,14 @@ func TestObsStringPoolNeverBlocksStoreWriters_489(t *testing.T) {
 			tc.add(t)
 
 			// Park every would-be interner inside the pool.
-			s.obsStrPool.mu.Lock()
+			for i := range s.obsStrPool.shards {
+				s.obsStrPool.shards[i].mu.Lock()
+			}
+			unpark := func() {
+				for i := range s.obsStrPool.shards {
+					s.obsStrPool.shards[i].mu.Unlock()
+				}
+			}
 			done := make(chan struct{})
 			go func() { defer close(done); tc.run() }()
 
@@ -691,10 +698,10 @@ func TestObsStringPoolNeverBlocksStoreWriters_489(t *testing.T) {
 			select {
 			case <-locked:
 			case <-time.After(10 * time.Second):
-				s.obsStrPool.mu.Unlock()
+				unpark()
 				t.Fatal("a store writer waited on s.mu while an ingest was parked in the sharing pool: the pool is being used under the store lock")
 			}
-			s.obsStrPool.mu.Unlock()
+			unpark()
 			select {
 			case <-done:
 			case <-time.After(30 * time.Second):

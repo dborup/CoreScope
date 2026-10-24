@@ -250,8 +250,8 @@ func TestObsStringPoolRetainedBytes_489(t *testing.T) {
 		t.Fatalf("retainedBytes grew to %d on repeat interning, want %d", got, want)
 	}
 
-	// Upper bound against the real thing: a map[string]string of the same
-	// shape, measured the way obsStringEntryBytes was.
+	// Upper bound against the real thing: the heap a second pool of the same
+	// shape really costs, measured the way obsStringEntryBytes was.
 	keys := make([]string, 2000)
 	for i := range keys {
 		keys[i] = fmt.Sprintf("%064x", i)
@@ -260,16 +260,15 @@ func TestObsStringPoolRetainedBytes_489(t *testing.T) {
 	runtime.GC()
 	runtime.GC()
 	runtime.ReadMemStats(&m0)
-	table := make(map[string]string, 256)
+	measured := newObsStringPool()
 	for _, k := range keys {
-		c := strings.Clone(k)
-		table[c] = c
+		measured.intern(k)
 	}
 	runtime.GC()
 	runtime.GC()
 	runtime.ReadMemStats(&m1)
 	actual := int64(m1.HeapAlloc) - int64(m0.HeapAlloc)
-	runtime.KeepAlive(table)
+	runtime.KeepAlive(measured)
 	runtime.KeepAlive(keys)
 	if actual <= 0 {
 		t.Skipf("heap measurement unusable (%d B)", actual)
