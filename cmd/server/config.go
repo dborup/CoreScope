@@ -497,8 +497,10 @@ type NeighborGraphConfig struct {
 	// responses (#1481 P0-1). The graph itself is rebuilt at most once per
 	// neighborGraphTTL (5 min), so a shorter interval refreshes the cached
 	// responses more often without adding graph-build CPU, while a longer one
-	// makes the graph as old as the interval. Requests keep the published
-	// graph until the next build finishes. 0/missing = default 300 (5 min).
+	// makes the graph older: at most roughly one TTL plus one interval, since
+	// a non-divisor interval rebuilds every ceil(TTL/interval) ticks (90 s
+	// gives a 360 s rebuild period). Requests keep the published graph until
+	// the next build finishes. 0/missing = default 300 (5 min).
 	// #1483, #545.
 	CacheRecomputeIntervalSeconds int `json:"cacheRecomputeIntervalSeconds,omitempty"`
 }

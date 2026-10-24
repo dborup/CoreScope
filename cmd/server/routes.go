@@ -77,6 +77,7 @@ type Server struct {
 	// Neighbor affinity graph: background-built, with one synchronous first build.
 	neighborBuildMu sync.Mutex                    // serializes initial and background builds
 	neighborGraph   atomic.Pointer[NeighborGraph] // published snapshot; readers never lock
+	buildGraphFn    func() *NeighborGraph         // test seam: replaces the store scan in buildNeighborGraph
 
 	// #2073 node-detail advert route breakdown, per pubkey
 	// (node_advert_routes_cache.go).
