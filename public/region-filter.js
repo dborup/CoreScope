@@ -84,7 +84,9 @@
 
   /** #531: the codes in the hash-query `region` parameter (the first one if
    *  repeated), trimmed, without empty entries or repeats. null when there is
-   *  no parameter or it holds no code. */
+   *  no parameter or it holds no code. "All" in any case is the server's
+   *  catch-all (#770): it is dropped, and a parameter holding only that
+   *  gives [] (all regions). */
   function parseUrlRegions(hash) {
     var h = String(hash || '');
     var q = h.indexOf('?');
@@ -99,11 +101,26 @@
     if (raw == null) return null;
     var seen = new Set();
     var codes = [];
+    var all = false;
     raw.split(',').forEach(function (c) {
       c = c.trim();
-      if (c && !seen.has(c.toUpperCase())) { seen.add(c.toUpperCase()); codes.push(c); }
+      if (c.toUpperCase() === 'ALL') all = true;
+      else if (c && !seen.has(c.toUpperCase())) { seen.add(c.toUpperCase()); codes.push(c); }
     });
-    return codes.length > 0 ? codes : null;
+    return codes.length > 0 || all ? codes : null;
+  }
+
+  /** #531: after a change in the control, a `region` parameter already in the
+   *  hash follows the selection (removed for all regions), with replaceState
+   *  and the other parameters kept, so a stale link value cannot override the
+   *  choice on Back or reload. A hash without one is left alone. */
+  function syncUrlRegion() {
+    if (!window.URLState || !window.location || !window.history) return;
+    var hash = window.location.hash;
+    if (!Object.prototype.hasOwnProperty.call(URLState.parseHash(hash).params, 'region')) return;
+    var next = URLState.updateHashParams({ region: getRegionParam() }, hash);
+    if (next === hash) return;
+    try { window.history.replaceState(window.history.state, '', next); } catch (e) { /* Safari throttles replaceState */ }
   }
 
   /**
@@ -111,15 +128,15 @@
    * router calls this after the old page's destroy() and before the new
    * page's init(), so the new page's first region-dependent fetch (Live's
    * early node fetch included) already carries it. No parameter, or one with
-   * no code, leaves the saved selection. Once regions are loaded unknown codes
-   * are dropped, and none left means all regions; before that, fetchRegions()
-   * drops them. Listeners hear a genuine change once. Returns whether the
-   * selection changed.
+   * no code, leaves the saved selection; "All" selects all regions. Once
+   * regions are loaded unknown codes are dropped, and none left means all
+   * regions; before that, fetchRegions() drops them. Listeners hear a genuine
+   * change once. Returns whether the selection changed.
    */
   function syncFromUrl(hash) {
     var codes = parseUrlRegions(hash);
     if (!codes) return false;
-    var next = _loaded ? knownCodes(codes) : new Set(codes);
+    var next = codes.length === 0 ? null : _loaded ? knownCodes(codes) : new Set(codes);
     _urlBeforeLoad = !_loaded;
     if (sameSelection(_selected, next)) return false;
     _selected = next;
@@ -163,6 +180,7 @@
     }
     saveToStorage();
     render(container);
+    syncUrlRegion();
     notify();
   }
 
