@@ -655,7 +655,13 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 
 		if obsID.Valid {
 			oid := int(obsID.Int64)
-			obsIDStr := nullStrVal(observerID)
+			// #489: one canonical copy of each observer ID, name, IATA code
+			// and direction, as in Load. The chunk merge holds s.mu, but the
+			// pool is uncontended here: a chunk brings at most a handful of
+			// values the pool does not already hold.
+			om := s.obsStrPool.internObs(nullStrVal(observerID), nullStrVal(observerName),
+				nullStrVal(observerIATA), nullStrVal(direction))
+			obsIDStr := om.observerID
 			obsPJ := nullStrVal(pathJSON)
 
 			dup, knownObserver := tx.lookupObservation(obsIDStr, obsPJ)
@@ -666,10 +672,11 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 			obs := &StoreObs{
 				ID:             oid,
 				TransmissionID: txID,
-				ObserverID:     obsIDStr,
-				ObserverName:   nullStrVal(observerName),
-				ObserverIATA:   nullStrVal(observerIATA),
-				Direction:      nullStrVal(direction),
+				ObserverID:     om.observerID,
+				ObserverName:   om.observerName,
+				ObserverIATA:   om.observerIATA,
+				Direction:      om.direction,
+				sharedStrs:     om.shared,
 				SNR:            nullFloatPtr(snr),
 				RSSI:           nullFloatPtr(rssi),
 				Score:          nullIntPtr(score),
