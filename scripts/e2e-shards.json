@@ -15,7 +15,7 @@
       "env": { "CHROMIUM_REQUIRE": "1", "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; fresh and SPA ?region= links across five views, listener counts and back/forward. About 2 minutes locally; no CI duration measured yet."
+      "measurementNote": "New suite; fresh and SPA ?region= links across five views, listener counts, back/forward, the hash ?region= after a control change on six views, and ?region=All. About 2.5 minutes locally; no CI duration measured yet."
     },
     {
       "file": "test-page-lifecycle-2248-e2e.js",
