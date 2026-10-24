@@ -33,15 +33,42 @@ func acct113CreateDB(tb testing.TB, dbPath string, n, oldUntil int) {
 	acct113CreateDBOpts(tb, dbPath, n, oldUntil, 99)
 }
 
+// acct113OpenWriter opens the fixture for writing the way the ingestor opens
+// its database: WAL, with a busy timeout. Tests write to the fixture while a
+// loaded store reads it. In WAL a reader never blocks a writer, but a reader
+// can still hold a WAL lock for a moment (the wal-index header check), so a
+// writer without a busy timeout fails on it with SQLITE_BUSY.
+//
+// modernc.org/sqlite applies only _pragma (and _time_format, _txlock) from the
+// DSN. The fixture used to ask for "?_journal_mode=WAL", which it silently
+// ignored: the file stayed in the rollback journal with no busy timeout, and a
+// commit that met the store's schema-healer read failed at once (#567). The
+// pragmas are therefore read back, not trusted.
+func acct113OpenWriter(tb testing.TB, dbPath string) *sql.DB {
+	tb.Helper()
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		tb.Fatal(err)
+	}
+	var mode string
+	var timeout int
+	if err := conn.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil || mode != "wal" {
+		conn.Close()
+		tb.Fatalf("fixture journal_mode = %q (%v), want wal", mode, err)
+	}
+	if err := conn.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil || timeout != 5000 {
+		conn.Close()
+		tb.Fatalf("fixture busy_timeout = %d (%v), want 5000", timeout, err)
+	}
+	return conn
+}
+
 // acct113CreateDBOpts is acct113CreateDB with the resolved_path of every
 // observation limited to its first maxResolved hops (0: left NULL), so the
 // measurement can vary the resolved relays per transmission.
 func acct113CreateDBOpts(tb testing.TB, dbPath string, n, oldUntil, maxResolved int) {
 	tb.Helper()
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
-	if err != nil {
-		tb.Fatal(err)
-	}
+	conn := acct113OpenWriter(tb, dbPath)
 	defer conn.Close()
 	for _, q := range []string{
 		`CREATE TABLE transmissions (id INTEGER PRIMARY KEY, raw_hex TEXT, hash TEXT, first_seen TEXT,
