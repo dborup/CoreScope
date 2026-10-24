@@ -22,7 +22,8 @@ func neighborBackgroundTestStore() *PacketStore {
 func TestNeighborGraphExistingStaleSnapshotDoesNotRebuild(t *testing.T) {
 	old := NewNeighborGraph()
 	old.builtAt = time.Now().Add(-2 * neighborGraphTTL)
-	srv := &Server{store: neighborBackgroundTestStore(), neighborGraph: old}
+	srv := &Server{store: neighborBackgroundTestStore()}
+	srv.neighborGraph.Store(old)
 	if got := srv.getNeighborGraph(); got != old {
 		t.Fatal("request rebuilt an existing stale graph instead of serving it")
 	}
@@ -32,12 +33,12 @@ func TestNeighborGraphTickRebuildsEvenFreshSnapshot(t *testing.T) {
 	old := NewNeighborGraph()
 	old.builtAt = time.Now()
 	srv := &Server{
-		store:         neighborBackgroundTestStore(),
-		neighborGraph: old,
+		store: neighborBackgroundTestStore(),
 		computeNeighborGraphResponseFn: func(int, float64, string, string) NeighborGraphResponse {
 			return NeighborGraphResponse{}
 		},
 	}
+	srv.neighborGraph.Store(old)
 	srv.recomputeNeighborGraphCache()
 	if got := srv.getNeighborGraph(); got == old || len(got.AllEdges()) == 0 {
 		t.Fatal("tick did not replace a fresh graph with a newly built graph")
@@ -50,7 +51,7 @@ func TestNeighborGraphReadersContinueDuringBlockedRebuild(t *testing.T) {
 	srv, _ := setupTestServer(t)
 	old := NewNeighborGraph()
 	old.builtAt = time.Now().Add(-2 * neighborGraphTTL)
-	srv.neighborGraph = old
+	srv.neighborGraph.Store(old)
 	srv.store.InvalidateNodeCache()
 	conn, err := srv.db.conn.Conn(context.Background())
 	if err != nil {
@@ -135,11 +136,11 @@ func TestNeighborGraphConcurrentFirstReadersShareBuild(t *testing.T) {
 func TestNeighborGraphRecomputeWithoutStoreKeepsInjectedGraph(t *testing.T) {
 	injected := NewNeighborGraph()
 	srv := &Server{
-		neighborGraph: injected,
 		computeNeighborGraphResponseFn: func(int, float64, string, string) NeighborGraphResponse {
 			return NeighborGraphResponse{}
 		},
 	}
+	srv.neighborGraph.Store(injected)
 	srv.recomputeNeighborGraphCache()
 	if srv.getNeighborGraph() != injected {
 		t.Fatal("recompute discarded an injected graph without a packet store")
@@ -150,9 +151,9 @@ func TestNeighborGraphFailedRebuildKeepsPublishedSnapshot(t *testing.T) {
 	old := NewNeighborGraph()
 	old.builtAt = time.Now()
 	srv := &Server{
-		store:         ngTestStore(nil, []*StoreTx{nil}), // fault injection: graph build panics
-		neighborGraph: old,
+		store: ngTestStore(nil, []*StoreTx{nil}), // fault injection: graph build panics
 	}
+	srv.neighborGraph.Store(old)
 	srv.recomputeNeighborGraphCache()
 	if got := srv.getNeighborGraph(); got != old {
 		t.Fatal("failed background build replaced the last published graph")
@@ -171,13 +172,12 @@ func BenchmarkNeighborGraphStaleRead30K(b *testing.B) {
 	}
 	old := NewNeighborGraph()
 	old.builtAt = time.Now().Add(-2 * neighborGraphTTL)
-	srv := &Server{store: store, neighborGraph: old}
+	srv := &Server{store: store}
+	srv.neighborGraph.Store(old)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		srv.neighborMu.Lock()
-		srv.neighborGraph = old
-		srv.neighborMu.Unlock()
+		srv.neighborGraph.Store(old)
 		srv.getNeighborGraph()
 	}
 }

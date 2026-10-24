@@ -83,41 +83,30 @@ type GraphStats struct {
 // getNeighborGraph serves the published graph until the background recomputer
 // replaces it. Only an initial request with no graph waits for a build.
 func (s *Server) getNeighborGraph() *NeighborGraph {
-	s.neighborMu.Lock()
-	g := s.neighborGraph
-	s.neighborMu.Unlock()
-	if g != nil {
+	if g := s.neighborGraph.Load(); g != nil {
 		return g
 	}
 
 	s.neighborBuildMu.Lock()
 	defer s.neighborBuildMu.Unlock()
-	s.neighborMu.Lock()
-	g = s.neighborGraph
-	s.neighborMu.Unlock()
-	if g != nil {
+	if g := s.neighborGraph.Load(); g != nil {
 		return g // a concurrent initial request or recomputer built it
 	}
-	g = s.buildNeighborGraph()
-	s.neighborMu.Lock()
-	s.neighborGraph = g
-	s.neighborMu.Unlock()
+	g := s.buildNeighborGraph()
+	s.neighborGraph.Store(g)
 	return g
 }
 
-// rebuildNeighborGraph runs on every recompute tick, not just after the old
-// TTL. Builds are serialized, but readers retain the previous snapshot while
-// the potentially expensive store scan runs outside the pointer mutex.
+// rebuildNeighborGraph builds a replacement graph and atomically publishes it.
+// Builds are serialized, but readers retain the previous snapshot while the
+// potentially expensive store scan runs.
 func (s *Server) rebuildNeighborGraph() {
 	if s.store == nil {
 		return // preserve injected graphs when there is no source to rebuild
 	}
 	s.neighborBuildMu.Lock()
 	defer s.neighborBuildMu.Unlock()
-	g := s.buildNeighborGraph()
-	s.neighborMu.Lock()
-	s.neighborGraph = g
-	s.neighborMu.Unlock()
+	s.neighborGraph.Store(s.buildNeighborGraph())
 }
 
 func (s *Server) buildNeighborGraph() *NeighborGraph {
