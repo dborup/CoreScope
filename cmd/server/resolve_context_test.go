@@ -242,9 +242,7 @@ func TestResolveHopsAPI_WithAffinityContext(t *testing.T) {
 		graph.upsertEdge("c0c0c0c0c0", "dd1aaaaaaa", "dd1", "obs1", nil, time.Now())
 	}
 	graph.builtAt = time.Now()
-	srv.neighborMu.Lock()
-	srv.neighborGraph = graph
-	srv.neighborMu.Unlock()
+	srv.neighborGraph.Store(graph)
 
 	req := httptest.NewRequest("GET", "/api/resolve-hops?hops=dd1&from_node=c0c0c0c0c0", nil)
 	rr := httptest.NewRecorder()
