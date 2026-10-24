@@ -2218,14 +2218,27 @@ type persistedRelayPath struct {
 // before s.mu is taken, so the JSON work does not extend the critical
 // section (#158 follow-up).
 //
-// The result equals extractResolvedPubkeys(unmarshalResolvedPath(s)). It
-// decodes straight into []string (a JSON null becomes "", which is what
-// extractResolvedPubkeys drops) and compacts in place, saving the *string
-// allocated per hop and the second slice on a path that runs once per
-// observation.
+// The result equals extractResolvedPubkeys(unmarshalResolvedPath(s)). The
+// compact form the ingestor writes is scanned in place (#533,
+// scanResolvedPathPubkeys) and each pubkey copied out of the column value,
+// since the store keeps them as index keys. Anything else is decoded
+// straight into []string (a JSON null becomes "", which is what
+// extractResolvedPubkeys drops) and compacted in place, saving the *string
+// allocated per hop and the second slice.
 func decodePersistedRelayPath(resolvedPath string) persistedRelayPath {
 	if resolvedPath == "" {
 		return persistedRelayPath{}
+	}
+	var buf [8]string
+	if scanned, ok := scanResolvedPathPubkeys(buf[:0], resolvedPath); ok {
+		if len(scanned) == 0 {
+			return persistedRelayPath{present: true}
+		}
+		pks := make([]string, len(scanned))
+		for i, pk := range scanned {
+			pks[i] = strings.Clone(pk)
+		}
+		return persistedRelayPath{pubkeys: pks, present: true}
 	}
 	var hops []string
 	if json.Unmarshal([]byte(resolvedPath), &hops) != nil {

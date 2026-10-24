@@ -718,24 +718,22 @@ func (s *PacketStore) resolvedPubkeysForEvictionBatch(txIDs []int) map[int][]str
 			if !rpJSON.Valid || rpJSON.String == "" {
 				continue
 			}
-			rp := unmarshalResolvedPath(rpJSON.String)
-			for _, p := range rp {
-				if p != nil && *p != "" {
-					result[txID] = append(result[txID], *p)
-				}
-			}
+			result[txID] = appendPersistedRelayPubkeys(result[txID], rpJSON.String)
 		}
 		rows.Close()
 	}
 
-	// Deduplicate per-txID
+	// Deduplicate per-txID. The pubkeys point into the scanned rows
+	// (appendPersistedRelayPubkeys); keep a copy of each distinct one,
+	// because evictStale re-assigns s.byNode[pk], which stores pk as the
+	// map key and would otherwise pin the whole row (#533).
 	for txID, pks := range result {
 		seen := make(map[string]bool, len(pks))
 		deduped := pks[:0]
 		for _, pk := range pks {
 			if !seen[pk] {
 				seen[pk] = true
-				deduped = append(deduped, pk)
+				deduped = append(deduped, strings.Clone(pk))
 			}
 		}
 		result[txID] = deduped
