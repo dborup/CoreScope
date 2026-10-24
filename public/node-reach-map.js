@@ -80,13 +80,22 @@
       map._nqBounds = bounds;
     }
 
-    setTimeout(function () { map.invalidateSize(); }, 120);
+    // Deferred size fix; cancelled by destroy() so it never fires on a removed map.
+    var destroyed = false;
+    var sizeTimer = setTimeout(function () {
+      sizeTimer = null;
+      if (!destroyed) map.invalidateSize();
+    }, 120);
 
     return {
       map: map,
       setLinks: setLinks,
       get bounds() { return bounds; },
-      destroy: function () { try { map.remove(); } catch (e) {} }
+      destroy: function () {
+        destroyed = true;
+        if (sizeTimer) { clearTimeout(sizeTimer); sizeTimer = null; }
+        try { map.remove(); } catch (e) {}
+      }
     };
   }
 

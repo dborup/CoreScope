@@ -210,6 +210,8 @@ run test-issue-220-live-filter-readiness.js
 run test-coverage-gate.js
 run test-node-reach-coverage.js
 run test-reach-rank.js
+run test-node-reach-429-retry.js
+run test-node-reach-map-destroy.js
 run test-issue-1107-live-layout.js
 run test-issue-1619-feed-detail-card-draggable.js
 run test-xss-escape-sinks.js

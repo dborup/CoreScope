@@ -140,10 +140,95 @@
     }
   }
 
+  // #530: the Reach GET answers 429 when the server's admission limit is hit.
+  // The Reach view alone retries it (api() never replays a 429): it honours a
+  // positive numeric Retry-After, else waits RETRY_FALLBACK_S, never longer
+  // than RETRY_CAP_S, and gives up after RETRY_MAX retries (1 + 5 requests).
+  var RETRY_FALLBACK_S = 2;
+  var RETRY_CAP_S = 30;
+  var RETRY_MAX = 5;
+
+  // Retry-After header value -> wait in ms. Delta-seconds only (integer or
+  // decimal); anything else, including an HTTP-date, takes the fallback.
+  function parseRetryAfter(raw) {
+    var s = RETRY_FALLBACK_S;
+    if (typeof raw === 'string' && /^\s*\d+(\.\d+)?\s*$/.test(raw)) {
+      var v = parseFloat(raw);
+      if (v > 0) s = v;
+    }
+    return Math.min(s, RETRY_CAP_S) * 1000;
+  }
+
+  // One pending wait at a time (only the current load waits). cancelWait()
+  // ends it early, resolving false, so a superseded load never fires again.
+  var waitTimer = null;
+  var waitResolve = null;
+  function sleep(ms) {
+    return new Promise(function (resolve) {
+      waitResolve = resolve;
+      waitTimer = setTimeout(function () { waitTimer = null; waitResolve = null; resolve(true); }, ms);
+    });
+  }
+  function cancelWait() {
+    if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
+    if (waitResolve) { var r = waitResolve; waitResolve = null; r(false); }
+  }
+
+  // fetchFn() -> Promise. Retries only an HTTP 429 rejection. Resolves
+  // {cancelled:true} as soon as opts.isCurrent() turns false (during a wait or
+  // when a request settles late), so the caller drops the result silently.
+  // opts: isCurrent(), sleep(ms) -> Promise<bool elapsed>, onBusy({attempt,max,delayMs}).
+  async function fetchWithRetry(fetchFn, opts) {
+    for (var attempt = 0; ; attempt++) {
+      var data;
+      try {
+        data = await fetchFn();
+      } catch (e) {
+        if (!opts.isCurrent()) return { cancelled: true };
+        if (!e || e.status !== 429 || attempt >= RETRY_MAX) throw e;
+        var delayMs = parseRetryAfter(e.retryAfter);
+        opts.onBusy({ attempt: attempt + 1, max: RETRY_MAX, delayMs: delayMs });
+        if (!(await opts.sleep(delayMs)) || !opts.isCurrent()) return { cancelled: true };
+        continue;
+      }
+      if (!opts.isCurrent()) return { cancelled: true };
+      return data;
+    }
+  }
+
+  function clearBusy(container) {
+    var old = container.querySelector('.nq-busy');
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+  }
+
+  // Busy/retrying status. First paint swaps the loader text; a window change
+  // keeps the current report and puts the status above it.
+  function showBusy(container, info) {
+    var text = 'Server busy — retrying in ' + Math.ceil(info.delayMs / 1000) + 's (retry ' +
+      info.attempt + ' of ' + info.max + ')…';
+    var el = container.querySelector('.nq-busy');
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'nq-busy';
+      el.setAttribute('role', 'status');
+      var report = container.querySelector('#nq-report');
+      if (report) report.insertBefore(el, report.firstChild);
+      else { container.textContent = ''; el.className = 'nq-load nq-busy'; container.appendChild(el); }
+    }
+    el.textContent = text;
+  }
+
+  function busyErrorHtml() {
+    return '<div id="nq-report"><div class="nq-error">Reach is busy right now — the server limited this request. ' +
+      'Please try again in a minute.<br><button class="btn-primary nq-retry-btn" id="nqRetryBtn">Try again</button></div></div>';
+  }
+
   // isInitial=true shows the centred loader (first paint); time-range changes
   // pass false so the current report stays on screen until the swap (no flash).
   async function load(container, pubkey, days, isInitial) {
     var myGen = ++loadGen;
+    cancelWait(); // a wait belonging to an older load ends now
+    clearBusy(container);
     // Wait for server config so the coverage flag (read just below and in the
     // actions bar markup) is populated even on a direct land on this route — a
     // race that otherwise hides the coverage toggle (#13).
@@ -159,12 +244,24 @@
 
     var d;
     try {
-      d = await api('/nodes/' + encodeURIComponent(pubkey) + '/reach?days=' + days, { ttl: 30000 });
+      d = await fetchWithRetry(function () {
+        return api('/nodes/' + encodeURIComponent(pubkey) + '/reach?days=' + days, { ttl: 30000 });
+      }, {
+        isCurrent: function () { return myGen === loadGen; },
+        sleep: sleep,
+        onBusy: function (info) { showBusy(container, info); }
+      });
     } catch (e) {
       if (myGen !== loadGen) return; // superseded or destroyed mid-flight
+      if (e && e.status === 429) {
+        container.innerHTML = busyErrorHtml();
+        document.getElementById('nqRetryBtn').addEventListener('click', function () { load(container, pubkey, days, true); });
+        return;
+      }
       container.innerHTML = '<div id="nq-report"><div class="nq-error">Failed to load reach: ' + escapeHtml(e.message) + '</div></div>';
       return;
     }
+    if (d && d.cancelled) return; // superseded or destroyed (#530)
     if (myGen !== loadGen) return; // a newer load (or destroy) won the race
     current.data = d;
     var n = d.node;
@@ -297,6 +394,7 @@
 
   function destroy() {
     loadGen++; // invalidate any in-flight load so it won't mutate a foreign container
+    cancelWait();
     if (covHandle) { try { covHandle.off(); } catch (e) {} covHandle = null; }
     if (qmap) { qmap.destroy(); qmap = null; }
     current = null;
@@ -305,5 +403,8 @@
   registerPage('node-reach', { init: init, destroy: destroy });
 
   // Pure helpers, exposed for test-reach-rank.js (vm sandbox).
-  window.NodeReach = { rankValue: rankValue, positionHtml: positionHtml };
+  window.NodeReach = {
+    rankValue: rankValue, positionHtml: positionHtml,
+    parseRetryAfter: parseRetryAfter, fetchWithRetry: fetchWithRetry, sleep: sleep, cancelWait: cancelWait
+  };
 })();
