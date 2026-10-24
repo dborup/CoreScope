@@ -623,10 +623,11 @@ remain subordinate to this operator setting.
 ### Neighbour edge count decay (`neighborEdgeCountHalfLifeDays`)
 
 The ingestor stores one row per neighbour edge in `neighbor_edges`, with a
-count of the receptions that credited it. It now decays these counts once a
-day (#544). Before this, counts only ever grew, so credit that should never
-have been given stayed on active edges for good. One example is MQTT
-bridges' own TX copies before #540.
+count of the receptions that credited it. By default these counts are
+lifetime totals that only ever grow, so credit that should never have been
+given stays on active edges for good. One example is MQTT bridges' own TX
+copies before #540. The ingestor can decay the counts once a day instead
+(#544). Decay is **opt-in** and **irreversible**.
 
 ```json
 {
@@ -634,30 +635,62 @@ bridges' own TX copies before #540.
 }
 ```
 
-- Default `7` (omitted or `0`): once per whole day, every count is
-  multiplied by 0.5^(1/7) and rounded, never below 3, so old credit halves
-  every week. An edge credited *r* times a day settles at about 9.6 × *r*
-  (± 5 from rounding). At this half-life, counts of 5 or less no longer
-  change.
+- Default: disabled (omitted, `0` or negative). Counts only grow, which was
+  the behaviour before #544.
+- `N > 0` enables decay with an N-day half-life: once per whole day, every
+  count is multiplied by 0.5^(1/N) and rounded, never below 3. At `7` (the
+  affinity score's half-life) old credit halves every week, an edge credited
+  *r* times a day settles at about 9.6 × *r* (± 5 from rounding), and counts
+  of 5 or less no longer change.
+- **Irreversible.** Decay overwrites the stored counts. Setting the value
+  back to `0` stops further decay and resets the decay clock, but nothing
+  restores the lifetime counts that were already decayed. Back up the
+  database first if you may want them back.
+- **It changes hop disambiguation.** The hop resolver's affinity tier
+  weights each candidate edge by its count (saturating at 100) and its age.
+  Lifetime counts on long-lived edges are mostly saturated, so affinity
+  effectively ranks them by recency. Decayed counts follow recent traffic,
+  so affinity also ranks by traffic rate. An edge with large old credit can
+  lose a hop to one with a recent burst; resolutions can also fall through
+  to the next tier, or newly resolve. Measure it on a copy first (below).
 - Decay never deletes an edge and never changes `last_seen`. Edge retention
   (`neighborEdgesMaxAgeDays`, default 5 days) still decides which edges
   exist, and Reach still counts the same neighbours.
-- Readers of the stored counts use them as weights: hop disambiguation
-  (affinity), bridge and coverage scores, the count-weighted estimated
-  position, and the GPS sanity check. Those now follow recent traffic
-  instead of lifetime totals. Hop disambiguation requires at least 3
-  credits, and decay never goes below that. The neighbour list and the
-  neighbour graph are built from packets in memory and are not affected.
-- A negative value disables decay. Counts then only grow, which was the
-  behaviour before #544. Disabling also resets the decay clock, so enabling
-  it again starts fresh instead of catching up the disabled days.
+- Other readers of the stored counts use them as weights: bridge and
+  coverage scores, the count-weighted estimated position, and the GPS sanity
+  check. Those then follow recent traffic too. Hop disambiguation requires
+  at least 3 credits, and decay never goes below that. The neighbour list
+  and the neighbour graph are built from packets in memory and are not
+  affected.
 - The decay clock is stored in the database. After downtime the ingestor
   applies each missed day, with the same result as daily runs. The first
-  decay happens one day after the feature first runs. There is no one-off
-  rewrite: an existing lifetime count decays like any other.
+  decay happens one day after decay is first enabled. A stored clock more
+  than one day in the future (the host clock was once wrong) is reset to
+  now instead of stalling decay. There is no one-off rewrite: an existing
+  lifetime count decays like any other.
 
 Only the **ingestor** reads this setting. Restart it after a change. The Go
 server stays read-only and needs no change.
+
+#### Measuring the effect before enabling it
+
+`scripts/neighbor-edge-decay-replay.sh` replays hop resolution on a **copy**
+of a database, with and without decay. It never writes to the source and
+prints counts only:
+
+```sh
+scripts/neighbor-edge-decay-replay.sh /path/to/copy-of-corescope.db
+# DAYS=30 HALF_LIFE=7 HOURS=168 are the defaults
+```
+
+It derives each edge's recent credit rate from the ingestor's own rebuild
+over the retained observations, simulates `DAYS` days of that traffic into
+two databases (decay off, and decay at `HALF_LIFE`), and resolves every
+ambiguous hop of the last `HOURS` hours of packets against both with the
+server's resolvers. For each resolver it reports how many hops kept their
+node, flipped to another node, were lost or were gained. It assumes steady
+traffic at the recent rate, so it estimates the steady state, not a
+specific future day.
 
 ### Large region lists in an external file (`hashRegionsPath`)
 

@@ -17,8 +17,11 @@ import (
 // snapshot before and after decay, built from the shared golden table that
 // cmd/ingestor's decay SQL is tested against:
 //   - the PacketStore graph (loadNeighborEdgesFromDB), which the hop
-//     resolver uses: same edges, same affinity minimum, and a hop that
-//     resolved by affinity never resolves to the other candidate;
+//     resolver uses: same edges and the same affinity minimum. On these
+//     same-age pairs one uniform step cannot flip a resolution, but that
+//     does not hold in general: when credits and decay interleave, a
+//     newer edge can outrank an older one (TestNeighborEdgeDecay_
+//     RecentTrafficFlipsAffinity, review F1);
 //   - reach degree (loadValidDegrees), which only counts edges;
 //   - the count-weighted estimated position (nearestPositionedNeighbor).
 // The neighbour list and neighbour graph APIs are built from in-memory
@@ -108,13 +111,14 @@ func TestNeighborEdgeDecay_SnapshotConsumers(t *testing.T) {
 		}
 	})
 
-	t.Run("hop resolver never switches candidate", func(t *testing.T) {
+	t.Run("hop resolver on same-age pairs after uniform decay", func(t *testing.T) {
 		// Every neighbour shares the hop prefix "b0". For each pair, the
 		// resolver picks by affinity only with >= 3 credits and a 3x score
-		// ratio. One uniform decay step is monotone, so a pair that
-		// resolved to one neighbour never resolves to the other after it;
-		// at most the ratio drops below 3x and the hop falls through to
-		// the next tier, as it would for any two comparably strong edges.
+		// ratio. This only covers two edges of the same age that both went
+		// through the same decay steps without new credits in between:
+		// decay is monotone there, so a resolution can fall through to the
+		// next tier but not move to the other neighbour. With new credits
+		// between steps it can (TestNeighborEdgeDecay_RecentTrafficFlipsAffinity).
 		var nodes []nodeInfo
 		for i := range g.Cases {
 			nodes = append(nodes, nodeInfo{PublicKey: decayNeighbor(i), Name: fmt.Sprintf("N%d", i), Role: "repeater"})

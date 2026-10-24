@@ -121,8 +121,9 @@ type Config struct {
 	NeighborEdgesMaxAgeDays int `json:"neighborEdgesMaxAgeDays,omitempty"`
 
 	// NeighborEdgeCountHalfLifeDays is the half-life of neighbor_edges.count
-	// (#544, neighbor_edge_decay.go). 0 / unset = default 7; negative =
-	// decay disabled (counts only ever grow, the pre-#544 behaviour).
+	// (#544, neighbor_edge_decay.go). Opt-in: 0 / unset / negative = decay
+	// disabled (counts only ever grow, the pre-#544 behaviour). Decay is
+	// irreversible: disabling it again does not restore decayed counts.
 	NeighborEdgeCountHalfLifeDays int `json:"neighborEdgeCountHalfLifeDays,omitempty"`
 
 	// IngestBufferSize caps the in-memory queue (number of MQTT messages) held
@@ -154,12 +155,11 @@ func (c *Config) NeighborEdgesDaysOrDefault() int {
 }
 
 // NeighborEdgeCountHalfLifeDaysOrDefault returns the count half-life in days,
-// or 0 when decay is disabled.
+// or 0 when decay is disabled, which is the default. Decay stays opt-in until
+// its effect on hop disambiguation has been measured on real data (PR #574
+// review; scripts/neighbor-edge-decay-replay.sh).
 func (c *Config) NeighborEdgeCountHalfLifeDaysOrDefault() int {
-	if c == nil || c.NeighborEdgeCountHalfLifeDays == 0 {
-		return 7
-	}
-	if c.NeighborEdgeCountHalfLifeDays < 0 {
+	if c == nil || c.NeighborEdgeCountHalfLifeDays < 0 {
 		return 0
 	}
 	return c.NeighborEdgeCountHalfLifeDays
