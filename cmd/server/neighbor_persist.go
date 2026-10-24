@@ -28,6 +28,11 @@ import (
 // loadNeighborEdgesFromDB loads all edges from the neighbor_edges table
 // and builds an in-memory NeighborGraph. Called on server startup and
 // from the recompNeighborGraph background recomputer (#1287).
+//
+// The persisted count is a lifetime total by default. With the ingestor's
+// opt-in decay (#544, cmd/ingestor/neighbor_edge_decay.go) it is a decayed
+// credit total instead: it halves every neighborEdgeCountHalfLifeDays and
+// never drops below affinityMinObservations (3).
 func loadNeighborEdgesFromDB(conn *sql.DB) *NeighborGraph {
 	g := NewNeighborGraph()
 

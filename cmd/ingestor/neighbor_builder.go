@@ -341,11 +341,21 @@ func (s *Store) buildNeighborEdges() (neighborEdgesBuild, error) {
 		return b, nil
 	}
 
-	// Wrap the whole edge-persist tx under writer-perf instrumentation
-	// (#1340). Slow neighbor-builder ticks (the #1339 root cause) now
-	// show up on /api/perf under component=neighbor_builder.
-	var inserted int
-	err = s.WriterTx("neighbor_builder", func(tx *sql.Tx) error {
+	if err := s.persistNeighborEdges(edges); err != nil {
+		return b, err
+	}
+	b.edges = len(edges)
+	return b, nil
+}
+
+// persistNeighborEdges credits each edge row once: a new pair starts at
+// count 1, an existing pair gains 1 and keeps the later last_seen.
+//
+// The whole edge-persist tx runs under writer-perf instrumentation
+// (#1340). Slow neighbor-builder ticks (the #1339 root cause) show up on
+// /api/perf under component=neighbor_builder.
+func (s *Store) persistNeighborEdges(edges []edgeRow) error {
+	return s.WriterTx("neighbor_builder", func(tx *sql.Tx) error {
 		stmt, err := tx.Prepare(`INSERT INTO neighbor_edges (node_a, node_b, count, last_seen)
 			VALUES (?, ?, 1, ?)
 			ON CONFLICT(node_a, node_b) DO UPDATE SET
@@ -364,14 +374,8 @@ func (s *Store) buildNeighborEdges() (neighborEdgesBuild, error) {
 		if firstErr != nil {
 			return fmt.Errorf("upsert: %w", firstErr)
 		}
-		inserted = len(edges)
 		return nil
 	})
-	if err != nil {
-		return b, err
-	}
-	b.edges = inserted
-	return b, nil
 }
 
 // canonEdge orders the pair so node_a <= node_b (matches the existing
