@@ -635,6 +635,12 @@ type PacketStore struct {
 	// Test-only hook called with "obs-miss", "obs-scan" and "obs-write" as a
 	// cache miss moves through loadObsCounts. Nil in production.
 	statsHook func(stage string)
+	// Concurrent subpathCache misses for one key share one count (#413);
+	// see shareSubpathCount.
+	subpathSF singleflight.Group
+	// Test-only hook called with "miss" and "count" as a subpathCache miss
+	// moves through shareSubpathCount. Nil in production.
+	subpathHook func(stage string)
 
 	// Test-only hook fired at the very start of loadBackgroundChunks
 	// (after the #1809 invariant check). Nil in production. Used by
@@ -10947,22 +10953,9 @@ func (s *PacketStore) GetAnalyticsSubpathsWithWindow(region string, minLen, maxL
 	}
 
 	cacheKey := fmt.Sprintf("%s|%d|%d|%d|w=%s", region, minLen, maxLen, limit, window.CacheKey())
-	s.cacheMu.Lock()
-	if cached, ok := s.subpathCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
-		s.cacheHits++
-		s.cacheMu.Unlock()
-		return cached.data
-	}
-	s.cacheMisses++
-	s.cacheMu.Unlock()
-
-	result := s.computeAnalyticsSubpathsWindowed(region, minLen, maxLen, limit, window)
-
-	s.cacheMu.Lock()
-	putCachedResultLocked(s.subpathCache, cacheKey, &cachedResult{data: result, expiresAt: time.Now().Add(s.rfCacheTTL)})
-	s.cacheMu.Unlock()
-
-	return result
+	return s.loadSubpaths(cacheKey, func() map[string]interface{} {
+		return s.computeAnalyticsSubpathsWindowed(region, minLen, maxLen, limit, window)
+	})
 }
 
 // computeAnalyticsSubpathsWindowed counts the subpaths of the transmissions
@@ -11012,7 +11005,15 @@ func (s *PacketStore) computeAnalyticsSubpathsWindowed(region string, minLen, ma
 
 func (s *PacketStore) GetAnalyticsSubpaths(region string, minLen, maxLen, limit int) map[string]interface{} {
 	cacheKey := fmt.Sprintf("%s|%d|%d|%d", region, minLen, maxLen, limit)
+	return s.loadSubpaths(cacheKey, func() map[string]interface{} {
+		return s.computeAnalyticsSubpaths(region, minLen, maxLen, limit)
+	})
+}
 
+// loadSubpaths returns the subpathCache entry for cacheKey or, on a miss,
+// the result of one count shared by every concurrent caller of cacheKey,
+// which that count stores.
+func (s *PacketStore) loadSubpaths(cacheKey string, count func() map[string]interface{}) map[string]interface{} {
 	s.cacheMu.Lock()
 	if cached, ok := s.subpathCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
 		s.cacheHits++
@@ -11022,13 +11023,44 @@ func (s *PacketStore) GetAnalyticsSubpaths(region string, minLen, maxLen, limit 
 	s.cacheMisses++
 	s.cacheMu.Unlock()
 
-	result := s.computeAnalyticsSubpaths(region, minLen, maxLen, limit)
+	return shareSubpathCount(s, "1:"+cacheKey, func() (map[string]interface{}, bool) {
+		s.cacheMu.Lock()
+		defer s.cacheMu.Unlock()
+		if cached, ok := s.subpathCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
+			return cached.data, true
+		}
+		return nil, false
+	}, func() map[string]interface{} {
+		result := count()
+		s.cacheMu.Lock()
+		putCachedResultLocked(s.subpathCache, cacheKey, &cachedResult{data: result, expiresAt: time.Now().Add(s.rfCacheTTL)})
+		s.cacheMu.Unlock()
+		return result
+	})
+}
 
-	s.cacheMu.Lock()
-	putCachedResultLocked(s.subpathCache, cacheKey, &cachedResult{data: result, expiresAt: time.Now().Add(s.rfCacheTTL)})
-	s.cacheMu.Unlock()
+// shareSubpathCount runs count for a subpathCache miss, once for every
+// concurrent caller of flightKey (#413). A count scans the whole store and
+// allocates about as much as the removed index held, so N overlapping misses
+// must not run N counts (PR #529 review F1). cached checks the cache again
+// inside the flight, so a caller that missed just before an earlier count
+// stored its result uses that result instead of counting again.
+func shareSubpathCount[T any](s *PacketStore, flightKey string, cached func() (T, bool), count func() T) T {
+	s.subpathHookAt("miss")
+	v, _, _ := s.subpathSF.Do(flightKey, func() (interface{}, error) {
+		if v, ok := cached(); ok {
+			return v, nil
+		}
+		s.subpathHookAt("count")
+		return count(), nil
+	})
+	return v.(T)
+}
 
-	return result
+func (s *PacketStore) subpathHookAt(stage string) {
+	if s.subpathHook != nil {
+		s.subpathHook(stage)
+	}
 }
 
 // GetAnalyticsSubpathsBulkWithWindow is the window-aware variant. For a zero
@@ -11059,41 +11091,46 @@ func (s *PacketStore) GetAnalyticsSubpathsBulk(region string, groups []subpathGr
 		return results
 	}
 
-	// Check if all groups are cached.
-	allCached := true
-	cachedResults := make([]map[string]interface{}, len(groups))
-	s.cacheMu.Lock()
+	cacheKeys := make([]string, len(groups))
 	for i, g := range groups {
-		cacheKey := fmt.Sprintf("|%d|%d|%d", g.MinLen, g.MaxLen, g.Limit)
-		if cached, ok := s.subpathCache[cacheKey]; ok && time.Now().Before(cached.expiresAt) {
-			cachedResults[i] = cached.data
-		} else {
-			allCached = false
-			break
-		}
+		cacheKeys[i] = fmt.Sprintf("|%d|%d|%d", g.MinLen, g.MaxLen, g.Limit)
 	}
-	if allCached {
+	// allCached returns the results when every group is cached.
+	allCached := func() ([]map[string]interface{}, bool) {
+		s.cacheMu.Lock()
+		defer s.cacheMu.Unlock()
+		cachedResults := make([]map[string]interface{}, len(groups))
+		for i, key := range cacheKeys {
+			cached, ok := s.subpathCache[key]
+			if !ok || !time.Now().Before(cached.expiresAt) {
+				return nil, false
+			}
+			cachedResults[i] = cached.data
+		}
+		return cachedResults, true
+	}
+	if cachedResults, ok := allCached(); ok {
+		s.cacheMu.Lock()
 		s.cacheHits += int64(len(groups))
 		s.cacheMu.Unlock()
 		return cachedResults
 	}
-	s.cacheMu.Unlock()
 
-	perGroup, totalPaths := s.countSubpathGroups(groups)
-	results := make([]map[string]interface{}, len(groups))
-	for i, g := range groups {
-		results[i] = s.rankSubpaths(perGroup[i], totalPaths, g.Limit)
-	}
+	return shareSubpathCount(s, "n:"+strings.Join(cacheKeys, ";"), allCached, func() []map[string]interface{} {
+		perGroup, totalPaths := s.countSubpathGroups(groups)
+		results := make([]map[string]interface{}, len(groups))
+		for i, g := range groups {
+			results[i] = s.rankSubpaths(perGroup[i], totalPaths, g.Limit)
+		}
 
-	// Cache individual results for future single-key lookups too.
-	s.cacheMu.Lock()
-	for i, g := range groups {
-		cacheKey := fmt.Sprintf("|%d|%d|%d", g.MinLen, g.MaxLen, g.Limit)
-		putCachedResultLocked(s.subpathCache, cacheKey, &cachedResult{data: results[i], expiresAt: time.Now().Add(s.rfCacheTTL)})
-	}
-	s.cacheMu.Unlock()
-
-	return results
+		// Cache individual results for future single-key lookups too.
+		s.cacheMu.Lock()
+		for i, key := range cacheKeys {
+			putCachedResultLocked(s.subpathCache, key, &cachedResult{data: results[i], expiresAt: time.Now().Add(s.rfCacheTTL)})
+		}
+		s.cacheMu.Unlock()
+		return results
+	})
 }
 
 // subpathMaxHops is the longest subpath the unfiltered Route Patterns count,

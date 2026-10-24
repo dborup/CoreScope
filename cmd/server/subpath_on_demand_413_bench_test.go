@@ -1,11 +1,16 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"runtime"
+	"runtime/metrics"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Benchmarks for #413 on 30,000 transmissions over 2,000 nodes
@@ -136,4 +141,69 @@ func BenchmarkLegacySubpathIndex_413(b *testing.B) {
 		b.ReportMetric(float64(len(x.counts)), "keys")
 		b.ReportMetric(float64(entries), "tx-refs")
 	})
+}
+
+// BenchmarkSubpathsColdConcurrent_413 sends n concurrent cold requests for
+// the same key (PR #529 review F1). peak-heap-MB is the highest heap held by
+// live and unswept objects while they run (sampled every 200 µs), counts the
+// number of store counts they ran. Run with -benchtime 1x -count 3.
+func BenchmarkSubpathsColdConcurrent_413(b *testing.B) {
+	s := bench413Store(b)
+	sample := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}}
+	for _, n := range []int{1, 4, 8} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			var counts atomic.Int32
+			s.subpathHook = func(stage string) {
+				if stage == "count" {
+					counts.Add(1)
+				}
+			}
+			defer func() { s.subpathHook = nil }()
+			var peak uint64
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				clearSubpathCache413(s)
+				runtime.GC()
+				stop := make(chan struct{})
+				sampled := make(chan uint64)
+				go func() {
+					var max uint64
+					tick := time.NewTicker(200 * time.Microsecond)
+					defer tick.Stop()
+					for {
+						metrics.Read(sample)
+						if v := sample[0].Value.Uint64(); v > max {
+							max = v
+						}
+						select {
+						case <-stop:
+							sampled <- max
+							return
+						case <-tick.C:
+						}
+					}
+				}()
+				start := make(chan struct{})
+				var wg sync.WaitGroup
+				for j := 0; j < n; j++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						<-start
+						s.GetAnalyticsSubpaths("", 2, 8, 100)
+					}()
+				}
+				b.StartTimer()
+				close(start)
+				wg.Wait()
+				b.StopTimer()
+				close(stop)
+				if p := <-sampled; p > peak {
+					peak = p
+				}
+			}
+			b.ReportMetric(float64(peak)/(1<<20), "peak-heap-MB")
+			b.ReportMetric(float64(counts.Load())/float64(b.N), "counts/op")
+		})
+	}
 }
