@@ -48,6 +48,13 @@ import (
 //   - The time-to-detect tail is reported twice: over the detected incidents,
 //     and over every selected incident with a miss ranked above every finite
 //     value. Only the second can fail on a bot that was never found.
+//   - -real-labels takes the false-alarm arm's ground truth from `label`
+//     instead: real automated senders on real traffic, matched by channel
+//     hash exactly as above (#474 round 4). An episode that matches no
+//     labelled sender is a false alarm; recall is then the real-sender
+//     recall, and the strict count - every episode a false alarm, as round
+//     3 counted - is reported beside it. It is arm A's flag only, so it
+//     combines with none of -labels, -baseline and -bots.
 //   - -bots narrows which incidents the recall and the medians cover, for
 //     example to leave a non-blind sanity-check bot out of the primary
 //     numbers. It never turns a matched episode into a false positive: an
@@ -55,6 +62,10 @@ import (
 //     whether or not that incident was selected.
 //
 // Scoring reads files only: a report, a labels file and nothing else.
+//
+// realSenderPrefix names the incidents built from a real labels file in
+// per_incident: "real-1", "real-2", ... in the file's order.
+const realSenderPrefix = "real-"
 
 // scoreCandidate is the part of a report candidate scoring needs. The report
 // is this tool's own output, so unknown fields are ignored rather than
@@ -130,6 +141,13 @@ type scoreResult struct {
 	// paths they were read from (a path can carry a user or host name).
 	Labels   string `json:"labels"`
 	Baseline string `json:"baseline"`
+	// RealLabels, StrictFalsePositives and StrictFalseAlarmsPerDay are
+	// written only with -real-labels, so every other run's metrics file is
+	// unchanged. The strict figures are round 3's reading of the same
+	// episodes: every one a false alarm, labelled sender or not.
+	RealLabels              string   `json:"real_labels,omitempty"`
+	StrictFalsePositives    *int     `json:"strict_false_positives,omitempty"`
+	StrictFalseAlarmsPerDay *float64 `json:"strict_false_alarms_per_day,omitempty"`
 	// Bots is the -bots filter, empty when every labelled bot counts.
 	Bots     []string `json:"bots"`
 	Episodes int      `json:"episodes"`
@@ -209,6 +227,7 @@ func runScore(args []string, stdout, stderr io.Writer) int {
 	baseline := fs.String("baseline", "", "replay report of the same window without the injection; episodes it already has on the same key are the background's")
 	rule := fs.String("rule", "", "periodic rule name to score (required)")
 	bots := fs.String("bots", "", "comma-separated bot names whose incidents the bars cover; empty means all")
+	realLabelsPath := fs.String("real-labels", "", "real-traffic labels JSON from label: arm A's ground truth (not with -labels, -baseline or -bots)")
 	start := fs.String("start", "", "RFC 3339 start of the evaluation window, inclusive (required)")
 	end := fs.String("end", "", "RFC 3339 end of the evaluation window, exclusive (required)")
 	out := fs.String("out", "", "metrics file (must not exist); default stdout")
@@ -224,6 +243,9 @@ func runScore(args []string, stdout, stderr io.Writer) int {
 	}
 	if *report == "" || *rule == "" {
 		return usageErr(errors.New("-report and -rule are required"))
+	}
+	if *realLabelsPath != "" && (*labels != "" || *baseline != "" || *bots != "") {
+		return usageErr(errors.New("-real-labels is arm A's ground truth: it takes none of -labels, -baseline and -bots"))
 	}
 	var opt struct{ start, end time.Time }
 	var err error
@@ -258,6 +280,20 @@ func runScore(args []string, stdout, stderr io.Writer) int {
 			return fail(err)
 		}
 	}
+	if *realLabelsPath != "" {
+		b, err := os.ReadFile(*realLabelsPath)
+		if err != nil {
+			return fail(err)
+		}
+		rl, err := parseRealLabels(b)
+		if err != nil {
+			return fail(err)
+		}
+		if opt.start.Before(rl.Start) || opt.end.After(rl.End) {
+			return fail(errors.New("real labels: their window does not cover [-start, -end)"))
+		}
+		lab = rl.incidents()
+	}
 	var base []episode
 	if *baseline != "" {
 		bb, err := os.ReadFile(*baseline)
@@ -284,6 +320,9 @@ func runScore(args []string, stdout, stderr io.Writer) int {
 	}
 	if err != nil {
 		return fail(err)
+	}
+	if *realLabelsPath != "" {
+		res.withStrictCount(filepath.Base(*realLabelsPath))
 	}
 	b, err := json.MarshalIndent(res, "", " ")
 	if err != nil {
@@ -342,6 +381,65 @@ func parseInjectLabels(b []byte) (InjectLabels, error) {
 		}
 	}
 	return l, nil
+}
+
+func parseRealLabels(b []byte) (realLabels, error) {
+	var l realLabels
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&l); err != nil {
+		return realLabels{}, fmt.Errorf("real labels: %w", err)
+	}
+	if !onlyJSONValue(dec, b) {
+		return realLabels{}, errors.New("real labels: trailing data")
+	}
+	if !l.Experimental || !l.Real {
+		return realLabels{}, errors.New("real labels: not a real-traffic labels file (experimental, real)")
+	}
+	if l.Start.IsZero() || !l.End.After(l.Start) {
+		return realLabels{}, errors.New("real labels: start and end are required")
+	}
+	if !(l.MinSizeShare > 0 && l.MinSizeShare <= 1) {
+		return realLabels{}, errors.New("real labels: min_size_share must be in (0, 1]")
+	}
+	if err := l.Labelling.validate(); err != nil {
+		return realLabels{}, fmt.Errorf("real labels: %w", err)
+	}
+	for i, s := range l.Senders {
+		if _, err := parseExcludeList(s.Channel); err != nil || s.Channel == "" || strings.Contains(s.Channel, ",") {
+			return realLabels{}, fmt.Errorf("real labels: sender %d: channel %q is not a lower-case hex hash", i, s.Channel)
+		}
+		if s.Start.IsZero() || s.Stop.Before(s.Start) || time.Duration(s.Period) <= 0 ||
+			s.SizeShare < l.MinSizeShare || s.SizeShare > 1 {
+			return realLabels{}, fmt.Errorf("real labels: sender %d is incomplete", i)
+		}
+	}
+	return l, nil
+}
+
+// incidents turns the labelled senders into the incidents score matches
+// against. They carry no stream key, so an episode matches on the channel
+// hash through any route group, and the file's own tolerance applies.
+func (l realLabels) incidents() InjectLabels {
+	out := InjectLabels{Experimental: true, Labelling: l.Labelling, Incidents: []Incident{}}
+	for i, s := range l.Senders {
+		out.Incidents = append(out.Incidents, Incident{Bot: fmt.Sprintf("%s%d", realSenderPrefix, i+1),
+			Channel: s.Channel, Start: s.Start, Stop: s.Stop, Period: s.Period})
+	}
+	return out
+}
+
+// withStrictCount records the real labels' file name and round 3's strict
+// count: every episode a false alarm.
+func (r *scoreResult) withStrictCount(realLabelsName string) {
+	r.RealLabels = realLabelsName
+	n := r.Episodes
+	r.StrictFalsePositives = &n
+	perDay := 0.0
+	if r.Days > 0 {
+		perDay = float64(n) / r.Days
+	}
+	r.StrictFalseAlarmsPerDay = &perDay
 }
 
 // score computes the metrics. labelsPath and baselinePath are reported as

@@ -103,7 +103,9 @@ func TestScoreRealLabelsExcuseOnlyMatchingEpisodes(t *testing.T) {
 			active: 90 * time.Minute, ended: 95 * time.Minute, periodNS: int64(3 * p)},
 		craftedEpisode{id: "at-stop+4P", active: 2*time.Hour + 4*p, ended: 3 * time.Hour, periodNS: int64(p)},
 		craftedEpisode{id: "after-stop+4P", active: 2*time.Hour + 4*p + time.Second, ended: 3 * time.Hour, periodNS: int64(p)},
-		craftedEpisode{id: "wrong-period", active: 100 * time.Minute, ended: 110 * time.Minute, periodNS: int64(99 * time.Second)},
+		// At P = 1 min the k = 1..3 windows of +/- 30 s are contiguous from
+		// 30 s to 210 s; 4P is outside all of them.
+		craftedEpisode{id: "fourth-harmonic", active: 100 * time.Minute, ended: 110 * time.Minute, periodNS: int64(4 * p)},
 		craftedEpisode{id: "other-channel", key: r4Other, active: 70 * time.Minute, ended: 80 * time.Minute, periodNS: int64(p)},
 		craftedEpisode{id: "no-period", active: 75 * time.Minute, ended: 80 * time.Minute},
 	)
@@ -284,6 +286,11 @@ func TestPipelineLabelReplayScoreOnRealShapes(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("score exit %d: %s", code, errs)
 	}
+	if m.StrictFalsePositives == nil {
+		t.Fatal("no strict count")
+	}
+	t.Logf("real senders %d, episodes %d, tp %d, fp %d (%.2f/day), strict %d", m.Incidents, m.Episodes,
+		m.TruePositives, m.FalsePositives, m.FalseAlarmsPerDay, *m.StrictFalsePositives)
 	if m.Incidents != 1 || m.PerIncident[0].Channel != "56" || !m.PerIncident[0].Detected {
 		t.Fatalf("real senders %+v", m.PerIncident)
 	}

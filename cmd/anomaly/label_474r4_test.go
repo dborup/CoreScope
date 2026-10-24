@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -46,9 +47,12 @@ func r4JSONL(t *testing.T, lines []r4Line) string {
 		if hop == "" {
 			hop = "1:0b"
 		}
+		// The whole route is the first hop plus one more hop of its width.
+		width := strings.SplitN(hop, ":", 2)[0]
+		w, _ := strconv.Atoi(width)
 		rec := anomaly.ReplayRecord{ID: fmt.Sprintf("tx%d", i+1), Time: l.at, FinalAt: l.at.Add(30 * time.Second),
 			PayloadType: pt, Channel: l.channel, RouteClass: "flood", RouteKind: "relay",
-			FirstHop: hop, FullRoute: hop + "00", WireBytes: 40, Traffic: "unclassified", Decryption: "unknown"}
+			FirstHop: hop, FullRoute: hop + strings.Repeat("00", w), WireBytes: 40, Traffic: "unclassified", Decryption: "unknown"}
 		if l.payload >= 0 {
 			pb := l.payload
 			rec.PayloadBytes = &pb
@@ -577,5 +581,29 @@ func TestLabelRequiresExplicitFlags(t *testing.T) {
 	}
 	if code := run(append(r4LabelArgs(in), "-out", out), nil, &stdout, &stderr); code != exitFail {
 		t.Errorf("overwrite: exit %d, want %d", code, exitFail)
+	}
+}
+
+// A run's lines are exactly the lines of its own pulses, multi-part parts
+// included: two senders back to back on one hash, each at its own constant
+// size, are two senders at share 1, and neither borrows a line of the
+// other's.
+func TestLabelRunLinesAreItsOwnPulses(t *testing.T) {
+	var lines []r4Line
+	at := injT.Add(time.Hour)
+	for i := 0; i < 10; i++ {
+		lines = append(lines, r4Line{at: at, channel: "7f", payload: 35},
+			r4Line{at: at.Add(20 * time.Second), channel: "7f", payload: 35})
+		at = at.Add(5 * time.Minute)
+	}
+	// 7 min is 1.4 P: no k fits, so the first run ends here.
+	at = at.Add(2 * time.Minute)
+	for i := 0; i < 10; i++ {
+		lines = append(lines, r4Line{at: at, channel: "7f", payload: 51})
+		at = at.Add(5 * time.Minute)
+	}
+	l, _ := r4Label(t, r4JSONL(t, lines))
+	if len(l.Senders) != 2 || l.Senders[0].SizeShare != 1 || l.Senders[1].SizeShare != 1 {
+		t.Fatalf("senders %+v, want two at share 1", l.Senders)
 	}
 }
