@@ -104,6 +104,17 @@ function check(c, m) { if (!c) throw new Error(m); console.log('  ok - ' + m); }
   check(seen.some((u) => /days=14/.test(u)), '14d request issued');
   check((await page.locator('.nq-error').count()) === 0, 'no stale error from the cancelled window');
 
+  // 5. #530 F1 regression: open Reach and switch window at once (no 429, no sleep).
+  console.log('5. immediate window click after open (map destroy race)');
+  await page.unroute(REACH).catch(() => {});
+  for (let i = 0; i < 5; i++) {
+    await page.goto('about:blank');
+    await page.goto(url);
+    await page.waitForSelector('#nqDays', { timeout: 15000 });
+    await page.click('#nqDays button[data-days="30"]');
+    await page.waitForSelector('.nq-head', { timeout: 15000 });
+  }
+  await sleep(300); // let any (cancelled) 120 ms map timer window pass
   check(errors.length === 0, 'no page errors: ' + errors.join('; '));
   console.log('node-reach 429 E2E OK');
   await browser.close();

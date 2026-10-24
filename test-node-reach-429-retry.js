@@ -126,6 +126,22 @@ process.on('unhandledRejection', (r) => unhandled.push(r));
     assert.strictEqual(await q, true, 'uncancelled sleep elapses');
   }
 
+  // --- F2: cancelWait() really calls clearTimeout (no leaked wait timer) ------
+  {
+    const real = { st: sandbox.setTimeout, ct: sandbox.clearTimeout };
+    const set = [], cleared = [];
+    sandbox.setTimeout = (fn, ms) => { const id = real.st(fn, ms); set.push(id); return id; };
+    sandbox.clearTimeout = (id) => { cleared.push(id); return real.ct(id); };
+    const p = NR.sleep(60000);
+    assert.strictEqual(set.length, 1, 'sleep() armed one timer');
+    NR.cancelWait();
+    assert.strictEqual(await p, false);
+    assert.deepStrictEqual(cleared, set, 'cancelWait() cleared exactly the armed timer');
+    NR.cancelWait(); // idempotent: nothing pending, nothing cleared
+    assert.strictEqual(cleared.length, 1, 'no clearTimeout when nothing is pending');
+    sandbox.setTimeout = real.st; sandbox.clearTimeout = real.ct;
+  }
+
   // --- a pending wait ends when the page is destroyed or a new load starts ----
   {
     const page = registered['node-reach'];
