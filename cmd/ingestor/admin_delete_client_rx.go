@@ -99,9 +99,11 @@ func runAdminDeleteClientRx(args []string) int {
 
 // clientRxReadOnlyDSN builds a physically read-only SQLite DSN (VFS-level
 // mode=ro — no writes possible even by a buggy statement), matching the
-// server's handle (cmd/server/db.go).
+// server's handle (cmd/server/db.go): it waits up to 5 s on a lock and
+// leaves the journal mode to OpenStore. modernc.org/sqlite ignores the
+// mattn-style _busy_timeout/_journal_mode this used to pass (#576).
 func clientRxReadOnlyDSN(dbPath string) string {
-	return fmt.Sprintf("file:%s?mode=ro&_journal_mode=WAL&_busy_timeout=5000", dbPath)
+	return fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", dbPath)
 }
 
 // clientRxCoverageCounts returns the per-contributor counts and rx_at range
