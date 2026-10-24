@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"hash/fnv"
 	"log"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -69,20 +70,181 @@ func (s *PacketStore) bestResolvedPathAt(txID, count int, at func(int) resolvedP
 		return rp
 	}
 	paths := s.fetchResolvedPathsForTx(txID)
-	var best []*string
-	bestLen, bestID := -1, 0
-	for i := 0; i < count; i++ {
-		obs := at(i)
-		if rp := paths[obs.id]; rp != nil && pathLen(obs.pathJSON) > bestLen {
-			best, bestLen, bestID = rp, pathLen(obs.pathJSON), obs.id
-		}
-	}
+	best, bestID := longestStoredResolvedPath(count, at, paths)
 	if bestID != 0 {
 		s.lruMu.Lock()
 		s.lruPut(bestID, best)
 		s.lruMu.Unlock()
 	}
 	return best
+}
+
+// longestStoredResolvedPath preserves the scalar helper's first-in-snapshot
+// tie rule. Rows added after the snapshot never become candidates.
+func longestStoredResolvedPath(count int, at func(int) resolvedPathObservation, stored map[int][]*string) ([]*string, int) {
+	var best []*string
+	bestLen, bestID := -1, 0
+	for i := 0; i < count; i++ {
+		obs := at(i)
+		if rp := stored[obs.id]; rp != nil && pathLen(obs.pathJSON) > bestLen {
+			best, bestLen, bestID = rp, pathLen(obs.pathJSON), obs.id
+		}
+	}
+	return best, bestID
+}
+
+const resolvedPathBatchSize = 500 // below SQLite's older 999-bound-variable limit
+
+// loadCanonicalResolvedPathsAt is the batched form of BestAt for /paths.
+// The observation slices are immutable append-only snapshots captured under
+// s.mu. SQL and LRU access happen only after that lock has been released.
+// The supplied clock preserves the existing once-per-request TTL decision.
+func (s *PacketStore) loadCanonicalResolvedPathsAt(snapshots map[int][]*StoreObs, now int64) map[int][]*string {
+	out := make(map[int][]*string, len(snapshots))
+	if s.db == nil || s.db.conn == nil {
+		return out
+	}
+	longestTx := make(map[int]int, len(snapshots))
+	missing := make([]int, 0, len(snapshots))
+	fallback := make([]int, 0)
+	for txID, observations := range snapshots {
+		if len(observations) == 0 {
+			continue
+		}
+		longest, longestLen := observations[0], pathLen(observations[0].PathJSON)
+		for _, obs := range observations[1:] {
+			if l := pathLen(obs.PathJSON); l > longestLen {
+				longest, longestLen = obs, l
+			}
+		}
+		s.lruMu.RLock()
+		rp, cached := s.lruGet(longest.ID, now)
+		s.lruMu.RUnlock()
+		if cached {
+			if rp != nil {
+				out[txID] = rp
+			} else {
+				fallback = append(fallback, txID)
+			}
+			continue
+		}
+		longestTx[longest.ID] = txID
+		missing = append(missing, longest.ID)
+	}
+	sort.Ints(missing)
+	for start := 0; start < len(missing); start += resolvedPathBatchSize {
+		chunk := missing[start:min(start+resolvedPathBatchSize, len(missing))]
+		args := make([]interface{}, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		rows, err := s.db.conn.Query(`SELECT id, resolved_path FROM observations WHERE id IN (?`+strings.Repeat(",?", len(chunk)-1)+`)`, args...)
+		stored := make(map[int][]*string, len(chunk))
+		if err == nil {
+			for rows.Next() {
+				var id int
+				var raw sql.NullString
+				if scanErr := rows.Scan(&id, &raw); scanErr != nil {
+					err = scanErr
+					break
+				}
+				if raw.Valid {
+					stored[id] = unmarshalResolvedPath(raw.String)
+				}
+			}
+			if err == nil {
+				err = rows.Err()
+			}
+			rows.Close()
+		}
+		for _, id := range chunk {
+			txID := longestTx[id]
+			if err != nil {
+				// Retain the scalar error/recovery behavior for a failed batch.
+				if rp := s.fetchResolvedPathForTxBestAt(txID, snapshots[txID], now); rp != nil {
+					out[txID] = rp
+				}
+				continue
+			}
+			rp, present := stored[id]
+			if present {
+				s.lruMu.Lock()
+				s.lruPut(id, rp)
+				s.lruMu.Unlock()
+			}
+			if rp != nil {
+				out[txID] = rp
+			} else {
+				fallback = append(fallback, txID)
+			}
+		}
+	}
+	s.loadFallbackResolvedPathsAt(fallback, snapshots, out, now)
+	return out
+}
+
+func (s *PacketStore) loadFallbackResolvedPathsAt(txIDs []int, snapshots map[int][]*StoreObs, out map[int][]*string, now int64) {
+	sort.Ints(txIDs)
+	for start := 0; start < len(txIDs); start += resolvedPathBatchSize {
+		chunk := txIDs[start:min(start+resolvedPathBatchSize, len(txIDs))]
+		args := make([]interface{}, len(chunk))
+		wanted := make(map[int]int)
+		for i, id := range chunk {
+			args[i] = id
+			for _, obs := range snapshots[id] {
+				wanted[obs.ID] = id
+			}
+		}
+		rows, err := s.db.conn.Query(`SELECT id, transmission_id, resolved_path FROM observations
+			WHERE resolved_path IS NOT NULL AND transmission_id IN (?`+strings.Repeat(",?", len(chunk)-1)+`)`, args...)
+		stored := make(map[int]map[int][]*string, len(chunk))
+		if err == nil {
+			for rows.Next() {
+				var obsID, txID int
+				var raw sql.NullString
+				if scanErr := rows.Scan(&obsID, &txID, &raw); scanErr != nil {
+					err = scanErr
+					break
+				}
+				if !raw.Valid || raw.String == "" {
+					continue
+				}
+				// Historical rows absent from the immutable snapshot cannot
+				// win. Do not decode or retain their paths in this request.
+				if owner, ok := wanted[obsID]; !ok || owner != txID {
+					continue
+				}
+				if stored[txID] == nil {
+					stored[txID] = make(map[int][]*string)
+				}
+				stored[txID][obsID] = unmarshalResolvedPath(raw.String)
+			}
+			if err == nil {
+				err = rows.Err()
+			}
+			rows.Close()
+		}
+		for _, txID := range chunk {
+			if err != nil {
+				if rp := s.fetchResolvedPathForTxBestAt(txID, snapshots[txID], now); rp != nil {
+					out[txID] = rp
+				}
+				continue
+			}
+			obs := snapshots[txID]
+			rp, id := longestStoredResolvedPath(len(obs), func(i int) resolvedPathObservation {
+				return resolvedPathObservation{id: obs[i].ID, pathJSON: obs[i].PathJSON}
+			}, stored[txID])
+			if rp != nil {
+				out[txID] = rp
+				if id != 0 {
+					s.lruMu.Lock()
+					s.lruPut(id, rp)
+					s.lruMu.Unlock()
+				}
+			}
+		}
+	}
 }
 
 // resolvedPubkeyHash computes a fast 64-bit hash for membership index keying.

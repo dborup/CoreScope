@@ -2454,13 +2454,12 @@ func (s *Server) handleNodePaths(w http.ResponseWriter, r *http.Request) {
 	// Falls back to biased re-resolve only when a tx has no persisted
 	// resolved_path (older data / async backfill incomplete); in that case
 	// there's no canonical answer to be consistent with.
-	canonicalRP := make(map[int][]*string, len(candidates))
 	lruNow := s.store.lruNow()
+	canonicalSnapshots := make(map[int][]*StoreObs, len(candidates))
 	for _, tx := range candidates {
-		if rp := s.store.fetchResolvedPathForTxBestAt(tx.ID, observations[tx.ID], lruNow); rp != nil {
-			canonicalRP[tx.ID] = rp
-		}
+		canonicalSnapshots[tx.ID] = observations[tx.ID]
 	}
+	canonicalRP := s.store.loadCanonicalResolvedPathsAt(canonicalSnapshots, lruNow)
 
 	// Deferred exact-pubkey confirmation (see needsConfirm above): only for
 	// hash-index candidates that have no canonical resolved_path, because
