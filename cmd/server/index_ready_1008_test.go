@@ -176,3 +176,18 @@ func TestIssue1008_m7_BothFlagsSetAfterParallelStart(t *testing.T) {
 		t.Error("pathHop flag not set after WaitIndexesReady returned true")
 	}
 }
+
+// loadStoreIndexed loads store and waits for the background path-hop index
+// (#1008), so a test that queries /api/nodes/{pk}/paths right after Load()
+// asserts against the built index instead of racing it into a 503 (#567).
+// WaitIndexesReady wakes on the ready channel; the timeout only bounds a
+// build that never finishes.
+func loadStoreIndexed(t testing.TB, store *PacketStore) {
+	t.Helper()
+	if err := store.Load(); err != nil {
+		t.Fatalf("store.Load: %v", err)
+	}
+	if !store.WaitIndexesReady(30 * time.Second) {
+		t.Fatal("path-hop index not ready within 30s after Load (#1008)")
+	}
+}

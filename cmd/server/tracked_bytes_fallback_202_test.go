@@ -72,10 +72,7 @@ func leak202ByNodeEntries(s *PacketStore) int {
 // leak202Insert adds rows after the store was loaded, as the ingestor would.
 func leak202Insert(t *testing.T, dbPath string, fn func(conn *sql.DB, maxObs int)) {
 	t.Helper()
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := acct113OpenWriter(t, dbPath)
 	defer conn.Close()
 	var maxObs int
 	if err := conn.QueryRow(`SELECT MAX(id) FROM observations`).Scan(&maxObs); err != nil {

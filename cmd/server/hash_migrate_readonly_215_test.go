@@ -47,10 +47,7 @@ func hm215Create(t testing.TB) *hm215DB {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "hm215.db")
 	acct113CreateDBOpts(t, path, 0, 0, 0) // schema + observers obs0..obs3, no rows
-	conn, err := sql.Open("sqlite", path+"?_journal_mode=WAL")
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := acct113OpenWriter(t, path)
 	t.Cleanup(func() { conn.Close() })
 	return &hm215DB{conn: conn, path: path}
 }

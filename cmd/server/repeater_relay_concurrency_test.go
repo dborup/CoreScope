@@ -52,10 +52,14 @@ func TestRepeaterRelayInfoMap_ConcurrentIngestAndEviction(t *testing.T) {
 	var oracleMu sync.Mutex
 	var oracle []map[string]RepeaterRelayInfo
 	round := 0
+	// Node metadata never changes here. Snapshot it once, the way
+	// GetRepeaterRelayInfo does, so the oracle does not depend on whether a
+	// bulk reader has already warmed the node cache (#567).
+	metadata := store.snapshotPathNodes()
 	publishLocked := func() {
 		want := make(map[string]RepeaterRelayInfo, len(keys))
 		for _, key := range keys {
-			want[key] = computeRelayInfoFromEntries(store.collectRelayEntriesLocked(key), 24)
+			want[key] = computeRelayInfoFromEntries(store.collectRelayEntriesLocked(key, metadata), 24)
 		}
 		oracleMu.Lock()
 		oracle = append(oracle, want)
@@ -67,6 +71,12 @@ func TestRepeaterRelayInfoMap_ConcurrentIngestAndEviction(t *testing.T) {
 	}
 	publishLocked()
 	store.mu.Unlock()
+	// The oracle must describe the same relay evidence the bulk reader sees
+	// from round 0 on, or a reader that finishes before round 1 compares
+	// against a different answer (#567).
+	if first := oracle[0]; first[relayA].RelayCount24h == 0 || first[relayB].RelayCount24h == 0 {
+		t.Fatalf("round-0 oracle credits no relay: %+v", first)
+	}
 
 	readRound := func() int {
 		store.mu.RLock()

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"database/sql"
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -396,6 +396,39 @@ func TestEvictionCandidatesMatchWhatIsEvicted_113(t *testing.T) {
 	}
 }
 
+// The fixture's writer must not fail while the server holds a read: a loaded
+// store's schema healer (healSchemaFlags) re-probes this schema every 2 s for
+// its missing optional columns, at any point of the mixed sequence below. In
+// a rollback journal with no busy timeout, a commit that meets that read
+// failed with SQLITE_BUSY (#567).
+func TestAcct113Fixture_ServerReadDoesNotBlockWriter_567(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "acct.db")
+	acct113CreateDB(t, dbPath, 5, 0)
+	store := acct113Load(t, dbPath)
+	conn := acct113OpenWriter(t, dbPath)
+	defer conn.Close()
+
+	reader, err := store.db.conn.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	if _, err := reader.ExecContext(context.Background(), "BEGIN"); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := reader.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM observations`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(`INSERT INTO observations (id, transmission_id, observer_id, observer_name, direction, path_json, timestamp)
+		VALUES (?, 1, 'obs3', 'Delta', 'RX', '["aa"]', ?)`, n+1, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("write during an open server read: %v", err)
+	}
+	if _, err := reader.ExecContext(context.Background(), "COMMIT"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // Insert, extra observations, path changes, resolved relays and eviction in a
 // deterministic mix: the invariant holds after every step, and an emptied
 // store is exactly zero.
@@ -403,10 +436,7 @@ func TestTrackedBytes_MixedSequenceDoesNotDrift_113(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "acct.db")
 	acct113CreateDB(t, dbPath, 200, 0)
 	store := acct113Load(t, dbPath)
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
-	if err != nil {
-		t.Fatal(err)
-	}
+	conn := acct113OpenWriter(t, dbPath)
 	defer conn.Close()
 
 	rng := rand.New(rand.NewSource(113))

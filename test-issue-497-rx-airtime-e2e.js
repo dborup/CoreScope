@@ -137,7 +137,14 @@ async function run() {
   // fires (~300 ms after load): renderTab() replaces the tab's innerHTML and
   // re-fetches the summary, so the grid is briefly empty. A tile found by
   // waitForSelector('.rf-cell') can be gone before a one-shot page.$eval runs.
-  // Locator evaluation waits for the tile to be attached when it is used.
+  // Locator evaluation waits for the tile to be attached when it is used, which
+  // is enough to read text. It is not enough to measure layout: the locator
+  // resolves the tile and runs the function in two round trips, and a rebuild
+  // in between hands the function a detached tile. A detached element has a
+  // zero rect and an empty computed style, which read as
+  // {inside:true, oneLine:false, nowrap:false} in CI (#567). measureTile finds
+  // and measures the tile in one task, and waits until the tile exists.
+  const measureTile = async (fn) => (await page.waitForFunction(fn, overId)).jsonValue();
   await test('RF Health tiles show "RX 1h" next to "TX 1h", RX without warning', async () => {
     await page.goto(`${BASE}/#/analytics?tab=rf-health`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('.rf-cell');
@@ -150,8 +157,9 @@ async function run() {
   await test('360x800: both tile stats stay inside the tile, each on one line', async () => {
     await page.setViewportSize({ width: 360, height: 800 });
     await page.goto(`${BASE}/#/analytics?tab=rf-health`, { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('.rf-cell');
-    const m = await page.locator(`.rf-cell[data-observer="${overId}"]`).evaluate((cell) => {
+    const m = await measureTile((id) => {
+      const cell = document.querySelector(`.rf-cell[data-observer="${CSS.escape(id)}"]`);
+      if (!cell) return null;
       const box = cell.getBoundingClientRect();
       return ['rf-cell-airtime', 'rf-cell-rx-airtime'].map((tid) => {
         const el = cell.querySelector(`[data-testid="${tid}"]`);
@@ -165,8 +173,9 @@ async function run() {
 
   await test('a very narrow tile wraps between stats: no stat overflows or breaks inside itself', async () => {
     await page.goto(`${BASE}/#/analytics?tab=rf-health`, { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('.rf-cell');
-    const m = await page.locator(`.rf-cell[data-observer="${overId}"]`).evaluate((cell) => {
+    const m = await measureTile((id) => {
+      const cell = document.querySelector(`.rf-cell[data-observer="${CSS.escape(id)}"]`);
+      if (!cell) return null;
       cell.style.width = '130px';
       cell.style.boxSizing = 'border-box';
       const box = cell.getBoundingClientRect();
