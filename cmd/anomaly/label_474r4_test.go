@@ -607,3 +607,59 @@ func TestLabelRunLinesAreItsOwnPulses(t *testing.T) {
 		t.Fatalf("senders %+v, want two at share 1", l.Senders)
 	}
 }
+
+// The label window is [-start, -end): a line at exactly -start is
+// considered, a line at exactly -end is out of the window and counted as
+// such.
+func TestLabelWindowIsHalfOpen(t *testing.T) {
+	var lines []r4Line
+	for i := 0; i < 12; i++ {
+		lines = append(lines, r4Line{at: injT.Add(time.Duration(i) * 5 * time.Minute), channel: "56", payload: 35})
+	}
+	lines = append(lines, r4Line{at: injT.Add(r4Week), channel: "56", payload: 35})
+	l, _ := r4Label(t, r4JSONL(t, lines))
+	if l.Considered != 12 || l.SkippedWindow != 1 {
+		t.Fatalf("considered %d, skipped out of window %d; want 12 and 1", l.Considered, l.SkippedWindow)
+	}
+	if len(l.Senders) != 1 || !l.Senders[0].Start.Equal(injT) {
+		t.Fatalf("senders %+v, want one starting at -start", l.Senders)
+	}
+}
+
+// The segment bridge is max_harmonic*max_period + tolerance(max_period),
+// with the pre-registered values 3*1h + max(30 s, 6 min) = 3 h 06 min: a gap
+// of exactly that stays inside a segment, a longer one splits, and a gap
+// between 3 h and 3 h 06 min - inside the tolerance term - never splits.
+func TestLabelSegmentBridgeIncludesTheTolerance(t *testing.T) {
+	l := labellingSpec{PulseMergeGap: dur(time.Minute), MinPeriod: dur(time.Minute), MaxPeriod: dur(time.Hour),
+		MinPulses: 8, MaxHarmonic: 3, ToleranceAbs: dur(30 * time.Second), ToleranceRel: 0.1}
+	bridge := 3*time.Hour + 6*time.Minute
+	for _, c := range []struct {
+		gap  time.Duration
+		want int
+	}{{3*time.Hour + time.Minute, 1}, {bridge, 1}, {bridge + time.Nanosecond, 2}} {
+		t0 := injT.UnixNano()
+		lines := []labelLine{{t: t0, size: 35}, {t: t0 + int64(c.gap), size: 35}}
+		if got := len(segments(lines, l)); got != c.want {
+			t.Errorf("gap %v: %d segments, want %d", c.gap, got, c.want)
+		}
+	}
+}
+
+// The size share counts every line of a run's pulses, multi-part parts
+// included: a train whose pulses each lead with a 32-byte line and follow
+// with a 48-byte part has a share of 0.5, whatever its leading lines say,
+// and is not labelled.
+func TestLabelSizeShareCountsEveryPartOfAPulse(t *testing.T) {
+	var lines []r4Line
+	for i := 0; i < 12; i++ {
+		at := injT.Add(time.Hour + time.Duration(i)*5*time.Minute)
+		lines = append(lines, r4Line{at: at, channel: "7f", payload: 32},
+			r4Line{at: at.Add(20 * time.Second), channel: "7f", payload: 48})
+	}
+	l, _ := r4Label(t, r4JSONL(t, lines))
+	if l.TimingRuns != 1 || l.SizeRejected != 1 || len(l.Senders) != 0 {
+		t.Fatalf("timing runs %d, size rejected %d, senders %+v; want one run rejected on size",
+			l.TimingRuns, l.SizeRejected, l.Senders)
+	}
+}

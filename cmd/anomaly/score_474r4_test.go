@@ -153,20 +153,34 @@ func TestScoreRealSenderRecall(t *testing.T) {
 }
 
 // With no labelled sender, arm A is round 3's: every episode is a false
-// alarm, and the strict count equals it.
+// alarm, and the strict count equals it. The real-sender recall is 0/0 and
+// is left out rather than written as 0.
 func TestScoreRealLabelsWithNoSenderIsTheStrictCount(t *testing.T) {
 	dir := t.TempDir()
 	labels := r4RealLabels(t, dir, 0, 24*time.Hour)
 	report := craftReport(t, dir,
 		craftedEpisode{id: "a", active: time.Hour, ended: 2 * time.Hour, periodNS: int64(time.Minute)},
 		craftedEpisode{id: "b", key: r4Other, active: 3 * time.Hour, ended: 4 * time.Hour, periodNS: int64(time.Minute)})
-	code, m, _, stderr := r4Score(t, report, "-real-labels", labels)
+	code, m, out, stderr := r4Score(t, report, "-real-labels", labels)
 	if code != exitOK {
 		t.Fatalf("exit %d: %s", code, stderr)
 	}
-	if m.FalsePositives != 2 || m.StrictFalsePositives == nil || *m.StrictFalsePositives != 2 || m.Recall != 0 {
+	if m.FalsePositives != 2 || m.StrictFalsePositives == nil || *m.StrictFalsePositives != 2 {
 		t.Fatalf("%+v", m)
 	}
+	if _, ok := r4Fields(t, out)["recall"]; ok {
+		t.Errorf("recall written with no labelled sender: %s", out)
+	}
+}
+
+// r4Fields returns the top-level fields of a metrics file.
+func r4Fields(t *testing.T, out string) map[string]json.RawMessage {
+	t.Helper()
+	var f map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(out), &f); err != nil {
+		t.Fatalf("metrics %q: %v", out, err)
+	}
+	return f
 }
 
 // A run without -real-labels writes exactly the fields it wrote before
@@ -184,6 +198,10 @@ func TestScoreWithoutRealLabelsIsUnchanged(t *testing.T) {
 			if strings.Contains(out, k) {
 				t.Errorf("%v: output carries %q", extra, k)
 			}
+		}
+		// Recall stays written, 0 included, as round 3 wrote it.
+		if _, ok := r4Fields(t, out)["recall"]; !ok {
+			t.Errorf("%v: recall left out: %s", extra, out)
 		}
 	}
 }
