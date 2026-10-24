@@ -2611,18 +2611,13 @@
       const byObservers = [...enriched].sort((a, b) => (b.health.heard.direct - a.health.heard.direct) || (b.health.heard.relay - a.health.heard.relay));
       const byRecent = [...enriched].filter(n => n.health.stats.lastHeard).sort((a, b) => new Date(b.health.stats.lastHeard) - new Date(a.health.stats.lastHeard));
 
-      // Compute network status client-side from loaded nodes using shared getHealthThresholds()
+      // Compute network status client-side from loaded nodes using shared getHealthStatus().
       const now = Date.now();
       let active = 0, degraded = 0, silent = 0;
       nodes.forEach(function(n) {
-        const role = n.role || 'unknown';
-        const th = getHealthThresholds(role);
-        const lastMs = n.last_heard ? new Date(n.last_heard).getTime()
-                     : n.last_seen ? new Date(n.last_seen).getTime()
-                     : 0;
-        const age = lastMs ? (now - lastMs) : Infinity;
-        if (age < th.degradedMs) active++;
-        else if (age < th.silentMs) degraded++;
+        const status = getHealthStatus(n.role, getHealthLastHeard(n), now);
+        if (status === 'healthy') active++;
+        else if (status === 'degraded') degraded++;
         else silent++;
       });
       const totalNodes = nodesResp.total || nodes.length;
@@ -2816,13 +2811,13 @@
 
       const now = Date.now();
       function ageOf(n) {
-        const ms = n.last_heard ? new Date(n.last_heard).getTime() : n.last_seen ? new Date(n.last_seen).getTime() : 0;
+        const heardAt = getHealthLastHeard(n);
+        const ms = heardAt ? new Date(heardAt).getTime() : 0;
         return ms ? now - ms : Infinity;
       }
       function statusOf(n) {
-        const th = (typeof getHealthThresholds === 'function') ? getHealthThresholds(n.role) : { degradedMs: 3600000, silentMs: 86400000 };
-        const age = ageOf(n);
-        return age < th.degradedMs ? 'active' : age < th.silentMs ? 'degraded' : 'silent';
+        const status = getHealthStatus(n.role, getHealthLastHeard(n), now);
+        return status === 'healthy' ? 'active' : status || 'silent';
       }
       const pct = v => (v != null ? (v * 100).toFixed(1) + '%' : '—');
       // #1456: prefer traffic_share_score, fall back to usefulness_score.

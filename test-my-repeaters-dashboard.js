@@ -55,7 +55,13 @@ const fetchAllNodes = async () => { fetchAllNodesCalls++; return { nodes: nodesD
 let clockData = [], graphData = { nodes: [], edges: [] };
 const api = async (p) => (p.indexOf('/nodes/clock-skew') === 0 ? clockData : graphData);
 const CLIENT_TTL = { nodeList: 0, analyticsRF: 0 };
-const getHealthThresholds = () => ({ degradedMs: 3600000, silentMs: 86400000 });
+const roleContext = {
+  Date, console, fetch: async () => ({ json: async () => ({}) }),
+  document: { readyState: 'complete', createElement: () => ({}), head: { appendChild() {} }, getElementById: () => null, addEventListener() {} },
+};
+roleContext.window = roleContext;
+require('node:vm').runInNewContext(fs.readFileSync(path.join(__dirname, 'public/roles.js'), 'utf8'), roleContext);
+const { getHealthStatus, getHealthLastHeard } = roleContext;
 const renderSkewBadge = (sev) => 'CLOCKBADGE:' + sev;
 const currentSkewValue = (cs) => (cs.recentMedianSkewSec != null ? cs.recentMedianSkewSec : cs.medianSkewSec);
 const favStar = (pk) => '<button class="fav-star" data-fav="' + pk + '"></button>';
@@ -66,10 +72,10 @@ const window = { ROLE_COLORS: { repeater: '#3b82f6', room: '#a855f7' }, aaBadgeS
 
 const M = new Function(
   'esc', 'getFavorites', 'RegionFilter', 'AreaFilter', 'fetchAllNodes', 'api', 'CLIENT_TTL',
-  'getHealthThresholds', 'renderSkewBadge', 'currentSkewValue', 'favStar', 'timeAgo', 'bindFavStars', 'window',
+  'getHealthStatus', 'getHealthLastHeard', 'renderSkewBadge', 'currentSkewValue', 'favStar', 'timeAgo', 'bindFavStars', 'window',
   block + '\nreturn { renderMyRepeatersTab, _mrStatusCell, _mrSummaryCard };')(
   esc, getFavorites, RegionFilter, AreaFilter, fetchAllNodes, api, CLIENT_TTL,
-  getHealthThresholds, renderSkewBadge, currentSkewValue, favStar, timeAgo, bindFavStars, window);
+  getHealthStatus, getHealthLastHeard, renderSkewBadge, currentSkewValue, favStar, timeAgo, bindFavStars, window);
 
 function makeEl() { return { _h: '', set innerHTML(v) { this._h = v; }, get innerHTML() { return this._h; } }; }
 const tick = () => new Promise(r => setTimeout(r, 0));
@@ -113,6 +119,21 @@ const tick = () => new Promise(r => setTimeout(r, 0));
   // Status a11y: cell carries TEXT, not colour alone.
   assert(/>Active<\/span>/.test(html) && /<span style="font-size:11px">Silent<\/span>/.test(html),
     'status column shows a text label, not colour alone');
+
+  console.log('\n=== role-aware degradation ===');
+  favorites = ['AA'];
+  nodesData = [{ public_key: 'AA', name: 'Quiet repeater', role: 'repeater', last_seen: new Date(Date.now() - 30 * 3600000).toISOString() }];
+  const quiet = makeEl();
+  await M.renderMyRepeatersTab(quiet);
+  assert(/>Degraded<\/span>/.test(quiet.innerHTML), '30-hour repeater follows 24/72-hour thresholds');
+  // Restore the original fixture for the remaining caching checks.
+  nodesData = [
+    { public_key: 'AA', name: 'Active Rptr', role: 'repeater', last_seen: nowIso, last_heard: nowIso },
+    { public_key: 'BB', name: 'Silent Rptr', role: 'repeater', last_seen: oldIso, last_heard: oldIso },
+  ];
+  favorites = ['AA', 'BB', 'CC'];
+  fetchAllNodesCalls = 0;
+  await M.renderMyRepeatersTab(el);
   // esc(String(value)) regression: a 0-valued summary card renders "0", not "".
   assert(/font-weight:700[^>]*>0<\/div>/.test(html),
     'summary cards render the number 0 (esc(String(0)) not swallowed to empty)');
