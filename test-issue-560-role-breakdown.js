@@ -247,6 +247,71 @@ console.log('\n=== analytics.js: renderNodesTab (integration) ===');
     assert.strictEqual(extractBadge(el._h, 'repeaters'), 0, 'the stale response\'s repeater rows must never have reached the page');
   });
 
+  // =====================================================================
+  // Section C -- CS-Minimax PR#580 round-2 review, finding 2: fetchAllNodes
+  // silently slices to its safetyCap (public/app.js). A truncated node list
+  // must not be presented to the user as a complete population.
+  // =====================================================================
+  console.log('\n=== analytics.js: renderNodesTab surfaces a truncated node list ===');
+
+  await testAsync('shows a truncation notice when fetchAllNodes reports truncated: true', async () => {
+    ctx.fetchAllNodes = async () => ({
+      nodes: [{ public_key: 'p1', role: 'repeater', last_seen: new Date().toISOString() }],
+      counts: {}, total: 1, truncated: true,
+    });
+    ctx.api = async () => [];
+    const el = makeEl();
+    await renderNodesTab(el);
+    assert.ok(/truncat/i.test(el._h), 'a truncated node list must render a visible notice, got: ' + el._h.slice(0, 200));
+  });
+
+  await testAsync('shows no truncation notice when fetchAllNodes reports truncated: false', async () => {
+    ctx.fetchAllNodes = async () => ({
+      nodes: [{ public_key: 'p1', role: 'repeater', last_seen: new Date().toISOString() }],
+      counts: {}, total: 1, truncated: false,
+    });
+    ctx.api = async () => [];
+    const el = makeEl();
+    await renderNodesTab(el);
+    assert.ok(!/truncat/i.test(el._h), 'a complete node list must not render a truncation notice, got: ' + el._h.slice(0, 200));
+  });
+
+  // =====================================================================
+  // Section D -- CS-Minimax PR#580 round-2 review, finding 1: an area-only
+  // filter and a combined region+area filter must both reach fetchAllNodes
+  // -- the unit sandbox previously stubbed AreaFilter.areaQueryString() to
+  // '' and never varied it, so a regression dropping AreaFilter's
+  // contribution to the request (mutant M7) passed the whole suite.
+  // =====================================================================
+  console.log('\n=== analytics.js: renderNodesTab passes area/region+area query to fetchAllNodes ===');
+
+  await testAsync('an area-only filter is included in the fetchAllNodes query', async () => {
+    let recordedQuery = null;
+    ctx.RegionFilter.regionQueryString = () => '';
+    ctx.AreaFilter.areaQueryString = () => '&area=SFBAY';
+    ctx.fetchAllNodes = async (q) => { recordedQuery = q; return { nodes: [], counts: {}, total: 0 }; };
+    ctx.api = async () => [];
+    const el = makeEl();
+    await renderNodesTab(el);
+    assert.ok(recordedQuery && recordedQuery.indexOf('&area=SFBAY') !== -1,
+      'an area-only filter must reach fetchAllNodes\' query, got: ' + recordedQuery);
+    ctx.AreaFilter.areaQueryString = () => '';
+  });
+
+  await testAsync('a combined region+area filter includes BOTH pieces in the fetchAllNodes query', async () => {
+    let recordedQuery = null;
+    ctx.RegionFilter.regionQueryString = () => '&region=MRY';
+    ctx.AreaFilter.areaQueryString = () => '&area=SFBAY';
+    ctx.fetchAllNodes = async (q) => { recordedQuery = q; return { nodes: [], counts: {}, total: 0 }; };
+    ctx.api = async () => [];
+    const el = makeEl();
+    await renderNodesTab(el);
+    assert.ok(recordedQuery && recordedQuery.indexOf('&region=MRY') !== -1 && recordedQuery.indexOf('&area=SFBAY') !== -1,
+      'a combined region+area filter must pass BOTH pieces to fetchAllNodes\' query, got: ' + recordedQuery);
+    ctx.RegionFilter.regionQueryString = () => '';
+    ctx.AreaFilter.areaQueryString = () => '';
+  });
+
   console.log('\n════════════════════════════════════════');
   console.log(`  Role Breakdown (#560): ${passed} passed, ${failed} failed`);
   console.log('════════════════════════════════════════');

@@ -2647,6 +2647,16 @@
       });
       const totalNodes = nodesResp.total || nodes.length;
       const roleCounts = nodeRoleBreakdownCounts(nodes);
+      // #560 follow-up: fetchAllNodes silently slices to its safetyCap
+      // (10000 nodes by default, public/app.js). Total Nodes and the Role
+      // Breakdown below both come from this same `nodes` array, so they stay
+      // mutually consistent even above the cap — but presenting a truncated
+      // population as complete would still be misleading. Surface it rather
+      // than guess whether any given deployment can reach it.
+      const nodesTruncatedNotice = nodesResp.truncated ? `
+        <div role="alert" style="margin-bottom:10px;padding:10px 14px;border:1px solid var(--status-yellow);border-radius:6px;background:var(--bg-secondary,var(--bg))">
+          <strong style="color:var(--status-yellow)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Node list truncated at ${nodes.length.toLocaleString()} rows</strong> — Total Nodes and Role Breakdown below may not reflect the complete filtered population.
+        </div>` : '';
 
       function nodeLink(n) {
         return `<a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">${esc(n.name || n.public_key.slice(0, 12))}</a>`;
@@ -2658,6 +2668,7 @@
       // ROLE_COLORS from shared roles.js
 
       el.innerHTML = `
+        ${nodesTruncatedNotice}
         <div class="analytics-section">
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> Network Status</h3>
           <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:20px">

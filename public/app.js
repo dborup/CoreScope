@@ -411,11 +411,19 @@ function _warmupNotify_1659(active) {
 //   (e.g. '&lastHeard=30d&area=x', '&sortBy=lastSeen&region=y'); pass '' for none.
 // safetyCap: hard ceiling on BOTH pages fetched and nodes returned — the result
 //   is sliced to it (callers like live.js pass their render ceiling here).
-// Returns { nodes, counts, total }: counts is from the first page; total is the
-//   real deduped/capped node count (NOT the server's per-query `total`).
+// Returns { nodes, counts, total, truncated }: counts is from the first page;
+//   total is the real deduped/capped node count (NOT the server's per-query
+//   `total`). truncated is true when `nodes` may not be the complete
+//   population for the query — either the page loop never saw a short page
+//   before hitting safetyCap (so more rows may exist beyond it), or dedup
+//   left more unique rows than safetyCap and the final slice below dropped
+//   some. A caller that presents `nodes` as a complete population (e.g.
+//   analytics.js's Role Breakdown, #560) must check this rather than
+//   silently showing a partial count as whole.
 async function fetchAllNodes(extraQuery = '', { ttl = 0, pageSize = 500, safetyCap = 10000 } = {}) {
   const accumulated = [];
   let counts = {};
+  let stoppedShort = false;
   for (let offset = 0; offset < safetyCap; offset += pageSize) {
     const data = await api(`/nodes?limit=${pageSize}&offset=${offset}${extraQuery}`, { ttl });
     const page = data && Array.isArray(data.nodes) ? data.nodes
@@ -426,7 +434,7 @@ async function fetchAllNodes(extraQuery = '', { ttl = 0, pageSize = 500, safetyC
     // COUNT(*) for the query, but the handler overwrites it with the filtered
     // length under area/geo/blacklist filtering — so we never loop on it, nor
     // surface it; a short page is the reliable end-of-data signal. See #1606.
-    if (page.length < pageSize) break;
+    if (page.length < pageSize) { stoppedShort = true; break; }
   }
   // Dedup by public_key: the sort window (last_seen DESC by default) can shift
   // under concurrent ingest, repeating a row across a page boundary. Rows
@@ -440,7 +448,8 @@ async function fetchAllNodes(extraQuery = '', { ttl = 0, pageSize = 500, safetyC
   // it to the next pageSize multiple), so e.g. live.js's LIVE_MAP_MAX_NODES is
   // honored exactly rather than overshooting by up to pageSize-1.
   const nodes = Array.from(seen.values()).slice(0, safetyCap);
-  return { nodes, counts, total: nodes.length };
+  const truncated = !stoppedShort || seen.size > nodes.length;
+  return { nodes, counts, total: nodes.length, truncated };
 }
 
 function invalidateApiCache(prefix) {

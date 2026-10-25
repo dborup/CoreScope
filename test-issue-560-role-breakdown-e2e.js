@@ -18,6 +18,11 @@
  */
 'use strict';
 const { chromium } = require('playwright');
+const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const net = require('net');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 
@@ -86,6 +91,99 @@ function sumOf(counts) {
   return Object.keys(counts).reduce((a, k) => a + counts[k], 0);
 }
 
+// Order-independent equality for the four known-role count objects --
+// /api/nodes' `counts` and the DOM-parsed Role Breakdown enumerate their
+// keys in different orders, so a JSON.stringify comparison is not safe.
+function sameCounts(a, b) {
+  const keys = ['repeaters', 'rooms', 'companions', 'sensors'];
+  return keys.every((k) => (a[k] || 0) === (b[k] || 0));
+}
+
+// ===== area-only / combined region+area: CS-Minimax PR#580 round-2 review,
+// finding 1. The shared BASE_URL server (and the committed e2e-fixture.db)
+// has no `areas` configured at all, so an area filter cannot be exercised
+// against it. Spin up a SEPARATE, disposable server instance -- a copy of
+// the same migrated fixture, with one test-only area added via -config-dir
+// -- mirroring the private-server pattern already used by
+// test-issue-315-estimated-positions-e2e.js. Requires CORESCOPE_SERVER_BIN
+// and CORESCOPE_MIGRATE_BIN (already set for that suite in e2e-shards.json);
+// skips gracefully when they are not set, e.g. for a quick local run of just
+// this file against BASE_URL.
+async function freePort() {
+  const socket = net.createServer();
+  await new Promise((resolve, reject) => { socket.once('error', reject); socket.listen(0, '127.0.0.1', resolve); });
+  const port = socket.address().port;
+  await new Promise((resolve) => socket.close(resolve));
+  return port;
+}
+
+async function stopChild(child) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const ended = new Promise((resolve) => child.once('exit', resolve));
+  child.kill('SIGTERM');
+  const timer = setTimeout(() => child.kill('SIGKILL'), 5000);
+  await ended;
+  clearTimeout(timer);
+}
+
+async function waitServerHealthy(base, child, getLog) {
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    assert(child.exitCode === null && child.signalCode === null, 'private server exited early: ' + getLog());
+    try {
+      const r = await fetch(base + '/api/healthz');
+      if (r.ok) return;
+    } catch (_) { /* not listening yet */ }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error('private server did not become healthy in time: ' + getLog());
+}
+
+// A bounding box covering 6 of the fixture's 13 MRY-region nodes (all
+// repeaters) plus 43 further nodes outside MRY (38 repeaters, 4 rooms, 1
+// companion) -- chosen by inspecting the committed fixture's real node
+// coordinates, so area-only (49), region-only (13) and the MRY∩SFBAY
+// combination (6) are three genuinely different, non-overlapping-with-
+// unfiltered populations.
+const SFBAY_AREA_CONFIG = { label: 'SF Bay (test)', latMin: 37.7, latMax: 38.0, lonMin: -122.6, lonMax: -122.0 };
+
+async function withPrivateAreaServer(fn) {
+  const serverBin = process.env.CORESCOPE_SERVER_BIN;
+  const migrateBin = process.env.CORESCOPE_MIGRATE_BIN;
+  if (!serverBin || !migrateBin) {
+    console.log('  … SKIP area-only / combined region+area checks (set CORESCOPE_SERVER_BIN and CORESCOPE_MIGRATE_BIN to run them)');
+    return;
+  }
+  const { execFileSync } = require('child_process');
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'corescope-560-e2e-'));
+  let child = null;
+  try {
+    const database = path.join(scratch, 'fixture.db');
+    fs.copyFileSync(path.join(__dirname, 'test-fixtures/e2e-fixture.db'), database);
+    execFileSync(migrateBin, ['-db', database], { stdio: 'pipe' });
+    fs.writeFileSync(path.join(scratch, 'config.json'), JSON.stringify({ areas: { SFBAY: SFBAY_AREA_CONFIG } }));
+    const port = await freePort();
+    const base = 'http://127.0.0.1:' + port;
+    let log = '';
+    child = spawn(serverBin, ['-config-dir', scratch, '-db', database, '-public', path.join(__dirname, 'public'), '-port', String(port)],
+      { cwd: __dirname, stdio: ['ignore', 'pipe', 'pipe'] });
+    child.stdout.on('data', (c) => { log = (log + c).slice(-20000); });
+    child.stderr.on('data', (c) => { log = (log + c).slice(-20000); });
+    await waitServerHealthy(base, child, () => log);
+    await fn(base);
+  } finally {
+    await stopChild(child);
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+async function pickArea(page, key) {
+  await page.waitForSelector('#analyticsAreaFilter .region-dropdown-trigger', { state: 'attached', timeout: 15000 });
+  await page.click('#analyticsAreaFilter .region-dropdown-trigger');
+  await page.waitForSelector('#analyticsAreaFilter [data-area="' + key + '"]', { state: 'attached', timeout: 15000 });
+  await page.click('#analyticsAreaFilter [data-area="' + key + '"]');
+}
+
 (async () => {
   const browser = await chromium.launch();
   try {
@@ -101,6 +199,34 @@ function sumOf(counts) {
       assert(unfilteredTotal > 0, 'Total Nodes must render a positive count, got ' + unfilteredTotal);
       assert(sumOf(unfilteredBreakdown) === unfilteredTotal,
         'unfiltered role-breakdown sum (' + sumOf(unfilteredBreakdown) + ') must equal Total Nodes (' + unfilteredTotal + ')');
+    });
+
+    // CS-Minimax PR#580 round-2 review, finding 4: the suite checked the
+    // breakdown's own internal sum against Total Nodes, but never against
+    // the server's /api/nodes `counts` directly. Unfiltered, these two MUST
+    // agree -- that is the baseline #560 preserves.
+    await step('unfiltered Role Breakdown equals /api/nodes\' own global counts', async () => {
+      const serverCounts = await page.evaluate(() => fetch('/api/nodes?limit=1').then((r) => r.json()).then((d) => d.counts));
+      assert(sameCounts(unfilteredBreakdown, serverCounts),
+        'unfiltered breakdown ' + JSON.stringify(unfilteredBreakdown) + ' must equal /api/nodes counts ' + JSON.stringify(serverCounts));
+    });
+
+    // CS-Minimax PR#580 round-2 review, finding 3: this PR touches no Go,
+    // so the global /api/nodes `counts` contract (an unconditional COUNT(*)
+    // per role, unaffected by region/area filters -- GetAllRoleCounts in
+    // cmd/server/db.go) must still hold. Make that explicit rather than
+    // leaving it implicit in "no Go changed".
+    await step('/api/nodes global counts contract is unaffected by a region filter', async () => {
+      const [plain, mry] = await Promise.all([
+        page.evaluate(() => fetch('/api/nodes?limit=1').then((r) => r.json())),
+        page.evaluate(() => fetch('/api/nodes?limit=1&region=MRY').then((r) => r.json())),
+      ]);
+      for (const key of ['repeaters', 'rooms', 'companions', 'sensors']) {
+        assert(typeof plain.counts[key] === 'number', 'counts.' + key + ' must be a number, got: ' + JSON.stringify(plain.counts));
+      }
+      assert(sameCounts(mry.counts, plain.counts),
+        'global counts must stay the server-wide total under a region filter (this PR only changed the CLIENT-side breakdown): ' +
+        JSON.stringify(mry.counts) + ' vs ' + JSON.stringify(plain.counts));
     });
 
     await step('an MRY region filter: the role breakdown sum equals the Network Status total', async () => {
@@ -144,6 +270,61 @@ function sumOf(counts) {
 
     await step('no page errors were raised', async () => {
       assert(page.__errors.length === 0, 'page errors: ' + page.__errors.join('; '));
+    });
+
+    // CS-Minimax PR#580 round-2 review, finding 1: area-only and combined
+    // region+area coverage, against a private server with one test area.
+    await withPrivateAreaServer(async (base) => {
+      const areaPage = await openPage(browser);
+      let baseTotal;
+      await step('loads the Nodes analytics tab unfiltered on the private area server', async () => {
+        await areaPage.goto(base + '/#/analytics?tab=nodes', { waitUntil: 'domcontentloaded' });
+        await areaPage.waitForSelector('#analyticsContent h3:has-text("Role Breakdown")', { timeout: 15000 });
+        await apiIdle(areaPage);
+        baseTotal = await totalNodesStat(areaPage);
+        assert(baseTotal > 0, 'Total Nodes must render a positive count, got ' + baseTotal);
+      });
+
+      await step('an area-only filter: the role breakdown sum equals the Network Status total, and narrows the unfiltered total', async () => {
+        await pickArea(areaPage, 'SFBAY');
+        await apiIdle(areaPage);
+        await areaPage.waitForFunction((want) => {
+          const card = Array.from(document.querySelectorAll('.analytics-stat-card')).find((c) => /Total Nodes/.test(c.textContent));
+          const m = card && /(\d+)/.exec(card.textContent);
+          return !!m && Number(m[1]) !== want;
+        }, baseTotal, { timeout: 15000 });
+
+        const total = await totalNodesStat(areaPage);
+        const breakdown = await roleBreakdown(areaPage);
+        assert(total !== baseTotal, 'the SFBAY area must narrow Total Nodes from the unfiltered ' + baseTotal + ', got ' + total);
+        assert(sumOf(breakdown) === total,
+          'area-only role-breakdown sum (' + sumOf(breakdown) + ') must equal the Network Status total (' + total + ')');
+      });
+
+      await step('a combined region+area filter narrows further, and the breakdown sum still equals the total', async () => {
+        await pickRegion(areaPage, 'MRY');
+        await apiIdle(areaPage);
+        await areaPage.waitForFunction(() => {
+          const card = Array.from(document.querySelectorAll('.analytics-stat-card')).find((c) => /Total Nodes/.test(c.textContent));
+          return !!card && !/^\s*$/.test(card.textContent);
+        }, { timeout: 15000 });
+
+        const total = await totalNodesStat(areaPage);
+        const breakdown = await roleBreakdown(areaPage);
+        // MRY ∩ SFBAY is exactly 6 of the fixture's known nodes, all
+        // repeaters (verified directly against the Go server's own
+        // /api/nodes?area=SFBAY&region=MRY response while building this
+        // fixture area -- see SFBAY_AREA_CONFIG above).
+        assert(total === 6, 'MRY ∩ SFBAY must be exactly 6 nodes in this fixture, got ' + total);
+        assert(sumOf(breakdown) === total,
+          'combined region+area role-breakdown sum (' + sumOf(breakdown) + ') must equal the Network Status total (' + total + ')');
+        assert(breakdown.repeaters === 6, 'all 6 MRY ∩ SFBAY nodes are repeaters in this fixture, got ' + breakdown.repeaters);
+      });
+
+      await step('no page errors were raised on the private area server', async () => {
+        assert(areaPage.__errors.length === 0, 'page errors: ' + areaPage.__errors.join('; '));
+      });
+      await areaPage.close();
     });
   } finally {
     await browser.close();
