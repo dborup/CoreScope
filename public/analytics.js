@@ -428,7 +428,7 @@
     'rf-health': ['range', 'observer', 'from', 'to'],
     collisions: ['section'],
     hashsizes: [HASHSTATS_MB_FILTER.param, HASHSTATS_MB_SORT.param, HASHSTATS_MB_DIR.param],
-    scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param, 'saq', 'sap'],
+    scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param, 'saq', 'sap', 'sav', 'scope'],
     wardriving: [WARDRIVING_WINDOW.param],
   };
 
@@ -5324,11 +5324,11 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(
           el.querySelectorAll('[data-win]').forEach(function(b) { b.classList.toggle('active', b.dataset.win === w); });
           load(w);
         },
-        onState: function(query, page) {
-          var parts = location.hash.split('?'); var params = new URLSearchParams(parts[1] || '');
-          if (query) params.set('saq', query); else params.delete('saq');
-          if (page) params.set('sap', String(page)); else params.delete('sap');
-          history.replaceState(history.state, '', parts[0] + (params.toString() ? '?' + params.toString() : ''));
+        // #414 — the transport view counts only observers in the global region selection.
+        region: function() { return window.RegionFilter && RegionFilter.getRegionParam ? RegionFilter.getRegionParam() : ''; },
+        onState: function(query, page, view, scope) {
+          var region = view === 'transport' && window.RegionFilter && RegionFilter.getRegionParam ? RegionFilter.getRegionParam() : '';
+          history.replaceState(history.state, '', window.ScopeAudit.hashWithState(location.hash, query, page, view, scope, region));
         }
       }) : null;
       _scopeAuditView = auditView;

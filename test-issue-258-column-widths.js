@@ -68,6 +68,7 @@ const ctx = {
   setTimeout: () => {}, clearTimeout: () => {}, setInterval: () => {}, clearInterval: () => {},
   fetch: () => Promise.resolve({ json: () => Promise.resolve({}) }),
   performance: { now: () => Date.now() },
+  getComputedStyle: (el) => ({ position: el.style.position || 'static' }),
   localStorage: {
     getItem: (k) => (k in store ? store[k] : null),
     setItem: (k, v) => { store[k] = String(v); },
