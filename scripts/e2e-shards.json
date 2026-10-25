@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-595-packets-filter-races-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #595 Packets node filter pick (slow press, late search response) and observer filter re-fetch with stale-response guard. Held responses via route interception, no sleeps. About 15s locally; no CI duration measured yet. Assigned to shard 1."
+    },
+    {
       "file": "test-issue-262-mymesh-observer-e2e.js",
       "shard": 1,
       "env": { "CHROMIUM_REQUIRE": "1" },
