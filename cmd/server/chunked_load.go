@@ -427,8 +427,7 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 	// PR #1643 R1 munger #1: cold load uses unique_prefix-only gate, so
 	// the neighbor graph is no longer consulted here (affinity-tier
 	// resolution against ≤168h-old observations would silently mis-attribute).
-	nodeSnapshot := s.snapshotPathNodes()
-	relayPM := nodeSnapshot.pm
+	relayPM := s.snapshotPathNodes().pm
 	var coldLoadAmbiguousHopsSkipped int
 
 	for {
@@ -529,7 +528,10 @@ func (s *PacketStore) LoadChunked(chunkSize int) error {
 		return s.packets[i].FirstSeen < s.packets[j].FirstSeen
 	})
 	s.buildPathHopIndex()
-	s.buildDistanceIndex(nodeSnapshot)
+	// The distance index is built lazily on the first
+	// /api/analytics/distance request, as in legacy Load() (#1011). Built
+	// here it held s.mu for the whole build and did not mark the index
+	// built for the lazy gate, so that first request built it again (#558).
 	if s.hotStartupHours > 0 {
 		s.oldestLoaded = hotCutoffStr
 	} else if len(s.packets) > 0 {
