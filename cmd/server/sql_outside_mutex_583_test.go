@@ -433,7 +433,8 @@ func TestNoSQLUnderNonStoreMutexes_583(t *testing.T) {
 		srcs[f] = string(b)
 	}
 	hits, regions := findSQLUnderLock(t, srcs, isNonStoreMu583)
-	if regions < 6 {
+	// Four on master (one per lock site), seven since #583 split them.
+	if regions < 4 {
 		t.Fatalf("found only %d sections of the #583 mutexes; the scan no longer recognises the locking code", regions)
 	}
 	for _, h := range hits {
