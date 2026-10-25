@@ -93,7 +93,7 @@ type Server struct {
 	scopeStatsCachedAt map[string]time.Time
 
 	// Cached /api/scope-audit response — per-window, recomputed at most once every 30s
-	scopeAudit scopeAuditCache
+	scopeAudit scopeAuditCache[ScopeAuditResponse]
 
 	// Cached /api/analytics/wardriving response — per-window, recomputed at most once every 30s
 	wardrivingStatsMu       sync.Mutex
