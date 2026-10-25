@@ -12,6 +12,7 @@
   // A range selection or a new visit invalidates every result from the
   // previous load, including battery and hop requests started by it.
   let loadSequence = 0;
+  let titleVisit = -1; // PageTitle token of the current visit (#563)
 
   function destroyCharts() {
     charts.forEach(c => { try { c.destroy(); } catch {} });
@@ -54,6 +55,7 @@
     if (!isCurrent()) return;
 
     const n = data.node;
+    if (window.PageTitle) window.PageTitle.setEntity(n.name || n.public_key.slice(0, 12), titleVisit);
     const s = data.computedStats;
     const nodeName = escapeHtml(n.name || n.public_key.slice(0, 12));
 
@@ -573,6 +575,7 @@
       container.innerHTML = '<div style="padding:40px;text-align:center">Invalid analytics URL</div>';
       return;
     }
+    titleVisit = window.PageTitle ? window.PageTitle.visit() : -1;
     const pubkey = routeParam.slice(0, -'/analytics'.length);
     loadAnalytics(container, pubkey, 7);
   }

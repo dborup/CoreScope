@@ -265,6 +265,7 @@
     if (myGen !== loadGen) return; // a newer load (or destroy) won the race
     current.data = d;
     var n = d.node;
+    if (window.PageTitle) window.PageTitle.setEntity(n.name || n.pubkey.slice(0, 12), titleVisit);
     var nodeName = escapeHtml(n.name || n.pubkey.slice(0, 12));
     var imp = d.importance || {};
     var twoWay = d.links.filter(function (l) { return l.bidir; });
@@ -384,7 +385,10 @@
     wireTimeRange(container, pubkey);
   }
 
+  var titleVisit = -1; // PageTitle token of the current visit (#563)
+
   function init(container, routeParam) {
+    titleVisit = window.PageTitle ? window.PageTitle.visit() : -1;
     if (!routeParam || !routeParam.endsWith('/reach')) {
       container.innerHTML = '<div class="nq-load">Invalid reach URL</div>';
       return;

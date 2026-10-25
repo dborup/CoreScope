@@ -2184,6 +2184,16 @@
       ]
     },
     {
+      "file": "test-e2e-563-route-titles.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; route-aware tab titles (#563) on Live, Channels, Analytics, node Reach/Analytics, delayed customised theme and a late node response. About 25s locally; no CI duration measured yet. Assigned to shard 1, the shard with the fewest suites."
+    },
+    {
       "file": "test-e2e-532-route-hop-count.js",
       "shard": 1,
       "env": {
