@@ -42,23 +42,9 @@ func RouteTypeFromHeader(header byte) int {
 // RouteTypeFromRawHex returns the route type of a hex-encoded frame's header
 // byte. ok is false when the header byte is missing or not valid hex.
 func RouteTypeFromRawHex(rawHex string) (routeType int, ok bool) {
-	if len(rawHex) < 2 {
+	header, ok := hexByteAt(rawHex, 0)
+	if !ok {
 		return 0, false
-	}
-	var header byte
-	for _, c := range []byte(rawHex[:2]) {
-		var v byte
-		switch {
-		case c >= '0' && c <= '9':
-			v = c - '0'
-		case c >= 'a' && c <= 'f':
-			v = c - 'a' + 10
-		case c >= 'A' && c <= 'F':
-			v = c - 'A' + 10
-		default:
-			return 0, false
-		}
-		header = header<<4 | v
 	}
 	return RouteTypeFromHeader(header), true
 }

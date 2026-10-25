@@ -164,10 +164,11 @@
   }
 
   // Hash-size badge for nodes whose adverts disagree on it: path_len's upper
-  // two bits of the stored frame (byte 1), as before.
+  // two bits of the stored frame. #594: rawPathLenByte (app.js) reads path_len
+  // behind the 4 transport-code bytes on routes 0/3, not at byte 1.
   function hashSizeBadge(p) {
     if (p.payload_type !== 4 || !p.raw_hex) return '';
-    var pb = parseInt(String(p.raw_hex).slice(2, 4), 16);
+    var pb = rawPathLenByte(String(p.raw_hex));
     if (!(pb & 0x3F)) return '';
     var hs = ((pb >> 6) & 0x3) + 1;
     return ' <span class="badge advert-hs-badge hs-' + hs + '">' + hs + 'B</span>';
