@@ -63,6 +63,15 @@ type pauseHarness struct {
 	r      *analyticsRecomputer
 	tk     *manualRecomputeTicker
 	events chan string
+
+	logMu sync.Mutex
+	log   []string // every loop event and tick, in order; printed if the test fails
+}
+
+func (h *pauseHarness) record(ev string) {
+	h.logMu.Lock()
+	h.log = append(h.log, ev)
+	h.logMu.Unlock()
 }
 
 // newPauseHarness builds an unstarted recomputer whose compute is fn
@@ -77,7 +86,14 @@ func newPauseHarness(t *testing.T, name string, pause bool, fn func(pass int64) 
 	})
 	h.r.pauseWhenIdle = pause
 	h.r.newTicker = func(string, time.Duration) recomputeTicker { return h.tk }
-	h.r.onLoopEvent = func(ev string) { h.events <- ev }
+	h.r.onLoopEvent = func(ev string) { h.record(ev); h.events <- ev }
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.logMu.Lock()
+			defer h.logMu.Unlock()
+			t.Logf("%s: loop events before failure: %v", name, h.log)
+		}
+	})
 	return h
 }
 
@@ -104,6 +120,7 @@ func (h *pauseHarness) tick() string {
 	h.t.Helper()
 	select {
 	case h.tk.c <- time.Now():
+		h.record("tick-sent")
 	case <-time.After(pauseTestDeadline):
 		h.t.Fatalf("%s: loop did not accept a tick", h.r.name)
 	}
@@ -121,6 +138,46 @@ func (h *pauseHarness) expectTick(want string) {
 	h.t.Helper()
 	if got := h.tick(); got != want {
 		h.t.Fatalf("%s: tick event = %q, want %q", h.r.name, got, want)
+	}
+}
+
+// wakeWinsRace forces the worst interleaving of a Load that wakes a paused
+// recomputer: the wake pass stores its snapshot before that Load fetches
+// one (#610). Only for passes that succeed and are not gated.
+func (h *pauseHarness) wakeWinsRace() {
+	h.r.testHookLoad = func() {
+		old := h.r.cache.Load()
+		deadline := time.Now().Add(pauseTestDeadline)
+		for h.r.cache.Load() == old {
+			if time.Now().After(deadline) {
+				h.t.Errorf("%s: wake pass did not store a snapshot", h.r.name)
+				return
+			}
+			time.Sleep(50 * time.Microsecond)
+		}
+	}
+}
+
+// peek returns the stored snapshot without counting as a read, so it can
+// never wake a paused recomputer.
+func (h *pauseHarness) peek() interface{} {
+	if snap, _ := h.r.cache.Load().(*recomputerSnapshot); snap != nil {
+		return snap.v
+	}
+	return nil
+}
+
+// wakeRead is the one read that wakes a paused recomputer. Whether that
+// Load returns the old or the refreshed snapshot depends on scheduling, so
+// its value is not asserted; the harness waits for the wake pass and checks
+// that exactly one ran. Assert snapshots with peek before and after.
+func (h *pauseHarness) wakeRead() {
+	h.t.Helper()
+	before := h.r.ComputeRuns()
+	h.r.Load()
+	h.expect("kick-run")
+	if got := h.r.ComputeRuns(); got != before+1 {
+		h.t.Fatalf("%s: ComputeRuns = %d after the wake read, want %d", h.r.name, got, before+1)
 	}
 }
 
@@ -427,9 +484,15 @@ func TestPauseWhenIdle_FirstComputationNeverPauses(t *testing.T) {
 	h.expectTick("tick-run") // pass 4 succeeds
 	h.r.cache.Load()         // not a read: only Load counts
 	h.expectTick("tick-skip")
-	if v := h.r.Load(); v != int64(4) {
+	h.wakeWinsRace()
+	if v := h.peek(); v != int64(4) {
 		t.Fatalf("snapshot = %v, want pass 4", v)
 	}
+	h.wakeRead() // the read wakes the paused recomputer: pass 5
+	if v := h.peek(); v != int64(5) {
+		t.Fatalf("snapshot after the wake = %v, want pass 5", v)
+	}
+	h.noPendingEvent()
 }
 
 // Until a successful pass starts after the startup load, unread ticks keep
@@ -491,9 +554,15 @@ func TestPauseWhenIdle_FailedComputationRecovers(t *testing.T) {
 			fail.Store(false)
 			h.expectTick("tick-run") // recovers
 			h.expectTick("tick-skip")
-			if v := h.r.Load(); v != int64(5) {
+			h.wakeWinsRace()
+			if v := h.peek(); v != int64(5) {
 				t.Fatalf("snapshot = %v, want pass 5", v)
 			}
+			h.wakeRead()
+			if v := h.peek(); v != int64(6) {
+				t.Fatalf("snapshot after the wake = %v, want pass 6", v)
+			}
+			h.noPendingEvent()
 		})
 	}
 }

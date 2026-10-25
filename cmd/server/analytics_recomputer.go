@@ -77,6 +77,7 @@ type analyticsRecomputer struct {
 	// Test hooks; nil in production.
 	onLoopEvent         func(event string)
 	testHookPauseWindow func()
+	testHookLoad        func() // Load, after the read is counted and before the snapshot is fetched
 
 	// Stats (atomic).
 	computeRuns   atomic.Int64
@@ -377,6 +378,9 @@ func (r *analyticsRecomputer) markRead() {
 // holds is returned while the refresh runs.
 func (r *analyticsRecomputer) Load() interface{} {
 	r.markRead()
+	if r.testHookLoad != nil {
+		r.testHookLoad()
+	}
 	snap, _ := r.cache.Load().(*recomputerSnapshot)
 	if snap == nil {
 		return nil
