@@ -294,6 +294,12 @@ jobs:
           node scripts/check-css-vars.js
           node scripts/test-check-css-vars.js
 
+      - name: Lint sqlite3 CLI busy timeout (issue #606)
+        run: |
+          set -e
+          node scripts/check-sqlite3-busy-timeout.js
+          node scripts/test-check-sqlite3-busy-timeout.js
+
       - name: Run JS unit tests (test-all.sh)
         # One list: test-all.sh runs every unit file and prints a summary of
         # the failed ones; the step fails if any file fails (#174).
