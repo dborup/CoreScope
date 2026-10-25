@@ -357,7 +357,7 @@ func heardBySchemas() map[string]*openAPISchema {
 				"directObservers": direct,
 				"relayObservers":  relay,
 				"recentPackets":   {Type: "array", Items: &openAPISchema{Type: "object"}, Description: "Newest 20 transmissions, observations stripped."},
-				"activity24h":     {Type: "object", Description: "24 rolling one-hour buckets of the node's transmissions."},
+				"activity24h":     {Type: "object", Description: "The rolling 24-hour window of the node's transmissions: 24 one-hour buckets, windowStart/windowEnd, coverageStart and complete, plus previous {windowStart, windowEnd, count, complete} — the equally long window before it, for a like-for-like comparison only (#304). A window is complete only when the in-memory history is proven to cover all of it; an incomplete window is a lower bound, never a quiet period."},
 			},
 		},
 		"BulkHealthEntry": {

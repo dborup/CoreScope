@@ -23,14 +23,23 @@ const end = new Date(now).toISOString();
 const start = new Date(now - 24 * 3600000).toISOString();
 // #384: a fixed advert age so the card's "· last …" text is pinned.
 const advert33m = new Date(now - 33 * 60000).toISOString();
-const activity = (complete = true) => ({
-  windowStart: start, windowEnd: end, coverageStart: complete ? start : new Date(now - 8 * 3600000).toISOString(), complete,
+// #304 remainder: `previous` is the 24h window before the rolling one, the
+// only baseline the card may compare against, and only when both windows are
+// fully covered.
+const prevStart = new Date(now - 48 * 3600000).toISOString();
+const activity = (complete = true, previous = { windowStart: prevStart, windowEnd: start, count: 28, complete: true }) => ({
+  windowStart: start, windowEnd: end, coverageStart: complete ? prevStart : new Date(now - 8 * 3600000).toISOString(), complete,
   buckets: Array.from({ length: 24 }, (_, i) => ({
     start: new Date(now - (24 - i) * 3600000).toISOString(),
     end: new Date(now - (23 - i) * 3600000).toISOString(),
     count: i === 3 ? 35 : 0,
   })),
+  previous,
 });
+// An own advert older than the infra degraded threshold (24h): on its own it
+// cannot carry an Active badge, so a 24h-fresh lastHeard can only come from
+// attributed relay evidence.
+const advertStale = new Date(now - 30 * 3600000).toISOString();
 
 async function render(page, responses, width, height) {
   await page.setViewportSize({ width, height });
@@ -43,7 +52,7 @@ async function render(page, responses, width, height) {
   await page.goto(ORIGIN + '/');
   await page.addStyleTag({ path: path.join(ROOT, 'style.css') });
   await page.addStyleTag({ path: path.join(ROOT, 'home.css') });
-  for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js']) await page.addScriptTag({ path: path.join(ROOT, file) });
+  for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js', 'my-mesh-activity.js']) await page.addScriptTag({ path: path.join(ROOT, file) });
   await page.evaluate((data) => {
     window.removeEventListener('hashchange', navigate);
     window.fixturePages = {};
@@ -82,16 +91,16 @@ async function render(page, responses, width, height) {
       // carry advert-interval estimates with pending, complete and missing
       // route-mask backfill; repeater 3 has no estimate at all (#352).
       const specs = [
-        { role: 'repeater', observers: names.map(observer_name => ({ observer_name })), activity: activity(),
+        { role: 'repeater', observers: names.map((observer_name, i) => ({ observer_name, packetCount: i === 0 ? 30 : 0 })), activity: activity(),
           backfill: { status: 'pending', remaining: 15 },
           intervals: {
             zero_hop: { status: 'estimated', interval_s: 7200, samples: 5, last_advert: advert33m, confidence: 'medium' },
             flood: { status: 'too_few', interval_s: null, samples: 2, last_advert: end },
           } },
-        { role: 'repeater', observers: [{ observer_name: 'One' }], activity: activity(false),
+        { role: 'repeater', observers: [{ observer_name: 'One' }], activity: activity(false), stats: { lastAdvert: advertStale },
           backfill: { status: 'complete', remaining: 0 },
           intervals: { zero_hop: { status: 'none_observed', samples: 0 }, flood: { status: 'irregular', samples: 5 } } },
-        { role: 'repeater', observers: [], activity: undefined,
+        { role: 'repeater', observers: [], activity: undefined, stats: { lastAdvert: null, avgSnr: 7, avgHops: null },
           intervals: { zero_hop: { status: 'estimated', interval_s: 3600, samples: 4 }, flood: { status: 'too_few', samples: 1 } } },
         { role: 'repeater', observers: [{ observer_name: CLIP }], activity: activity(false) },
         { role: 'client', observers: [{ observer_name: CLIP }, { observer_name: 'Shorty' }], activity: activity(false) },
@@ -100,7 +109,8 @@ async function render(page, responses, width, height) {
         { role: 'client', observers: [{ observer_name: 'Shorty' }, ...SHORT_WIDE.map(observer_name => ({ observer_name }))], activity: activity(false) },
       ];
       const data = Object.fromEntries(specs.map((spec, i) => [`/nodes/${KEYS[i]}/health?include=advertIntervals`, {
-        node: { name: `Node ${i}`, role: spec.role }, stats: { lastHeard: end, packetsToday: 2 },
+        node: { name: `Node ${i}`, role: spec.role },
+        stats: Object.assign({ lastHeard: end, lastAdvert: end, avgSnr: -3.25, avgHops: 10 }, spec.stats),
         directObservers: spec.observers, recentPackets: [], activity24h: spec.activity,
         advertRouteBackfill: spec.backfill, advertIntervals: spec.intervals,
       }]));
@@ -143,6 +153,101 @@ async function render(page, responses, width, height) {
       assert.match(await cards.nth(3).locator('.mnc-advert-cadence').innerText(), /unavailable/i);
       assert.equal(await cards.nth(3).locator('.mnc-advert-provisional').count(), 0);
       assert.equal(await cards.nth(4).locator('.mnc-advert-cadence').count(), 0, 'non-repeater card must not show advert intervals');
+      // ── #304 remainder: traffic, SNR attribution and status evidence ──
+      // Card 0: fully covered window, own advert as fresh as the newest
+      // evidence. Card 1: 8h coverage only and an own advert 30h old, so
+      // the Active badge can only rest on attributed relay evidence.
+      // Card 2: no rolling window, no own advert, no direct observer.
+      await page.mouse.move(0, 0); // keep :hover off the border-colour probe
+      const labels = async i => (await cards.nth(i).locator('.mnc-metrics .mnc-lbl').allInnerTexts()).map(t => t.replace(/\s+/g, ' ').trim());
+      const vals = async i => (await cards.nth(i).locator('.mnc-metrics .mnc-val').allInnerTexts()).map(t => t.trim());
+      assert.deepEqual(await labels(0), ['Transmissions · 24 h', 'Direct observers', 'Direct SNR · 30 receptions']);
+      assert.deepEqual(await vals(0), ['35 +25%', '51', '-3.3 dB']);
+      assert.deepEqual(await labels(1), ['Transmissions · 24 h', 'Direct observers', 'Direct SNR']);
+      assert.deepEqual(await vals(1), ['≥ 35', '1', '-3.3 dB'], 'an incomplete window is a lower bound, and an unknown sample size prints no n=');
+      assert.deepEqual(await vals(2), ['—', '0', '—'], 'no window and no direct attribution render em dashes, not zeroes');
+      // The calendar-day counter and the bare hop average are gone from the
+      // headline metrics, and no metric carries a quality verdict or colour.
+      const metricText = (await page.locator('.mnc-metrics').allInnerTexts()).join(' ');
+      assert.ok(!/today/i.test(metricText), 'no "Packets today" left: ' + metricText);
+      assert.ok(!/avg hops/i.test(metricText), 'Avg hops must move into the details');
+      assert.ok(!/excellent|\bgood\b|marginal|\bpoor\b/i.test(metricText), 'no SNR verdict: ' + metricText);
+      assert.equal(await page.locator('.mnc-metrics .mnc-val[style]').count(), 0, 'no verdict colour on a metric value');
+      // The previous-period comparison is like-for-like or absent: the inline
+      // chip only appears for two complete windows with a non-zero baseline,
+      // and its full wording is in the evidence disclosure either way.
+      assert.equal(await cards.nth(0).locator('.mnc-metric-sub').innerText(), '+25%');
+      assert.match(await cards.nth(0).locator('.mnc-metric-sub').getAttribute('title'), /^\+25% vs previous 24 h — /);
+      for (const i of [1, 2]) {
+        assert.equal(await cards.nth(i).locator('.mnc-metric-sub').count(), 0, `card ${i} must not show a comparison chip`);
+      }
+
+      // The badge: a confident own-advert green, and an attributed match that
+      // is deliberately NOT green — dot, wording and card accent.
+      assert.equal(await cards.nth(0).locator('.mnc-status .status-ok').count(), 1);
+      assert.equal(await cards.nth(0).locator('.mnc-status use').getAttribute('href'), '/icons/phosphor-sprite.svg#ph-circle-fill');
+      assert.equal((await cards.nth(0).locator('.mnc-status-text').innerText()).replace(/\s+/g, ' ').trim().split(' · ')[0], 'Active');
+      for (const i of [1, 2]) {
+        assert.equal(await cards.nth(i).locator('.mnc-status .status-ok').count(), 0, `card ${i} must not show a confident green`);
+        assert.equal(await cards.nth(i).locator('.mnc-status .status-warn').count(), 1, `card ${i} must show the provisional dot`);
+        assert.equal(await cards.nth(i).locator('.mnc-status use').getAttribute('href'), '/icons/phosphor-sprite.svg#ph-circle');
+        assert.match(await cards.nth(i).locator('.mnc-status-text').innerText(), /Active · relay-attributed/);
+        assert.equal(await cards.nth(i).evaluate(el => el.classList.contains('evidence-relay')), true);
+      }
+      const probe = await page.evaluate(() => {
+        const root = getComputedStyle(document.documentElement);
+        const resolve = name => {
+          const el = document.createElement('div');
+          el.style.color = root.getPropertyValue(name);
+          document.body.appendChild(el);
+          const value = getComputedStyle(el).color;
+          el.remove();
+          return value;
+        };
+        return { green: resolve('--status-green'), yellow: resolve('--status-yellow') };
+      });
+      const accents = await cards.evaluateAll(els => els.map(el => getComputedStyle(el).borderLeftColor));
+      assert.equal(accents[0], probe.green, 'an own-advert Active card keeps the green accent');
+      assert.equal(accents[1], probe.yellow, 'an attributed Active card must not keep the green accent');
+      assert.notEqual(probe.green, probe.yellow);
+
+      // The evidence disclosure: compact by default, reachable by keyboard
+      // and touch, and it must not navigate to the health panel.
+      const ev = cards.nth(1).locator('.mnc-evidence');
+      assert.equal(await ev.evaluate(el => el.open), false, 'the disclosure starts closed so the card stays compact');
+      assert.equal(await ev.locator('.mnc-evidence-row').first().isVisible(), false);
+      await ev.locator('summary').focus();
+      await page.keyboard.press('Enter');
+      assert.equal(await ev.evaluate(el => el.open), true, 'Enter on the summary must open it');
+      assert.equal(await page.locator('#homeHealth.visible').count(), 0, 'opening the evidence must not open the health panel');
+      const rows = async i => (await cards.nth(i).locator('.mnc-evidence-row').allInnerTexts()).map(t => t.replace(/\s+/g, ' ').trim());
+      const [advert1, relay1, window1, trend1, hops1] = await rows(1);
+      assert.match(advert1, /^Last own advert 1d ago$/);
+      assert.match(relay1, /^Last attributed relay activity \d+s ago$/);
+      assert.match(window1, /^Counting window .+ to .+ \(coverage incomplete\)$/);
+      assert.equal(trend1, 'Change vs previous 24 h no comparable 24 h history');
+      assert.match(hops1, /^Avg observed path length 10 hops$/);
+      assert.match(await cards.nth(1).locator('.mnc-evidence-note').first().innerText(), /prefix/i);
+      await cards.nth(0).locator('.mnc-evidence summary').click();
+      const [advert0, relay0, window0, trend0] = await rows(0);
+      assert.match(advert0, /^Last own advert \d+s ago$/);
+      assert.equal(relay0, 'Last attributed relay activity none newer than the last own advert');
+      assert.ok(!/coverage incomplete/.test(window0), window0);
+      assert.equal(trend0, 'Change vs previous 24 h +25% vs previous 24 h');
+      assert.match(await cards.nth(0).locator('.mnc-evidence-note').first().innerText(), /own advert/i);
+      await cards.nth(2).locator('.mnc-evidence summary').click();
+      const [advert2, , , , hops2] = await rows(2);
+      assert.equal(advert2, 'Last own advert none observed');
+      assert.equal(hops2, 'Avg observed path length —');
+      assert.equal(await page.locator('#homeHealth.visible').count(), 0);
+      if (width < 500) {
+        await cards.nth(3).locator('.mnc-evidence summary').tap();
+        assert.equal(await cards.nth(3).locator('.mnc-evidence').evaluate(el => el.open), true, 'touch must open the disclosure');
+        assert.equal(await page.locator('#homeHealth.visible').count(), 0, 'a tap on the summary must not navigate');
+        await cards.nth(3).locator('.mnc-evidence summary').tap();
+      }
+      for (const i of [0, 1, 2]) await cards.nth(i).locator('.mnc-evidence summary').click();
+
       const heights = await cards.evaluateAll(els => els.map(el => el.getBoundingClientRect().height));
       assert(heights[0] < 350, `repeater card too tall: ${heights[0]} at ${width}px`);
       const open = large.locator('.mnc-view-all');

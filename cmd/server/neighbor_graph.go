@@ -271,6 +271,15 @@ func BuildFromStoreWithLog(store *PacketStore, enableLog bool) *NeighborGraph {
 
 // BuildFromStoreWithOptions constructs the neighbor graph with explicit options.
 func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborGraph {
+	// Use cached nodes+PM (avoids DB call if cache is fresh).
+	allNodes, pm := store.getCachedNodesAndPM()
+	return buildFromStoreWithNodes(store, opts, allNodes, pm)
+}
+
+// buildFromStoreWithNodes is BuildFromStoreWithOptions with the node list and
+// prefix map already read (getCachedNodesAndPM, which may query SQL). It runs
+// no SQL itself, so a caller can hold a build mutex across it (#583).
+func buildFromStoreWithNodes(store *PacketStore, opts BuildOptions, allNodes []nodeInfo, pm *prefixMap) *NeighborGraph {
 	g := NewNeighborGraph()
 	g.maxEdgeKm = opts.MaxEdgeKm
 	if opts.EnableLog {
@@ -289,10 +298,6 @@ func BuildFromStoreWithOptions(store *PacketStore, opts BuildOptions) *NeighborG
 		packets[i] = graphTx{tx: tx, observations: tx.Observations}
 	}
 	store.mu.RUnlock()
-
-	// Build prefix map for candidate resolution.
-	// Use cached nodes+PM (avoids DB call if cache is fresh).
-	allNodes, pm := store.getCachedNodesAndPM()
 
 	// Index node geo for upsertEdge geo-sanity checks (issue #1228).
 	geo := make(map[string]nodeGeoInfo, len(allNodes))

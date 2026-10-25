@@ -509,7 +509,10 @@
   border-radius: 6px; padding: 10px 12px; background: var(--surface-2);
 }
 
-.mnc-metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 12px; }
+/* #304: three metrics (rolling-24h traffic, direct observers, direct SNR);
+   the hop average moved into the evidence disclosure. Three columns at every
+   width keeps them on ONE row, which pays for the disclosure summary line. */
+.mnc-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px; }
 .mnc-metric { text-align: center; }
 .mnc-val { font: 700 1rem var(--font); color: var(--text); }
 .mnc-lbl { font-size: .65rem; color: var(--text-muted); margin-top: 2px; }
@@ -535,6 +538,22 @@
 .mnc-advert-row strong { min-width: 5.5em; }
 .mnc-advert-provisional { color: var(--status-yellow); font-size: .7rem; }
 .mnc-advert-note { color: var(--text-muted); font-size: .68rem; }
+
+/* #304 — status evidence and metric scope.
+   The disclosure is closed by default so the card stays compact, and it is a
+   native <details>, which is reachable by keyboard and by touch (a title
+   tooltip is neither). A status badge that rests only on an attributed relay
+   hash prefix must not read as a confident green, so the accent drops to the
+   provisional colour; every colour here is a theme variable. */
+.mnc-evidence { font-size: .72rem; line-height: 1.35; color: var(--text-muted); margin: -12px 0 6px; padding-left: 28px; }
+.mnc-evidence > summary { cursor: pointer; color: var(--accent); width: fit-content; min-height: 24px; display: flex; align-items: center; padding-right: 8px; }
+.mnc-evidence > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.mnc-evidence-row { display: flex; flex-wrap: wrap; gap: .35em; line-height: 1.4; }
+.mnc-evidence-row strong { color: var(--text); font-weight: 600; }
+.mnc-evidence-note { margin: 2px 0 4px; line-height: 1.4; }
+.mnc-metric-sub { font-size: .62rem; font-weight: 400; color: var(--text-muted); }
+.health-metric .mnc-metric-sub { display: block; margin-top: 2px; }
+.my-node-card.healthy.evidence-relay { border-left-color: var(--status-yellow); }
 
 .mnc-spark { margin-bottom: 8px; }
 .home-spark-unavailable { font-size: .7rem; color: var(--text-muted); }
@@ -567,7 +586,6 @@
 /* Responsive */
 @media (max-width: 640px) {
   .my-nodes-grid { grid-template-columns: 1fr; padding: 0 12px 16px; }
-  .mnc-metrics { grid-template-columns: repeat(2, 1fr); }
   .mnc-remove { opacity: 1; }
   /* #262 — one column on a phone: the nowrap traffic label would otherwise
      squeeze the status rows below their own text width. */

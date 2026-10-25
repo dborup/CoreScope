@@ -356,41 +356,81 @@ type RouteMaskBackfillStatus struct {
 // 496,798-transmission staging copy), but health endpoints are polled.
 var routeMaskStatusTTL = 30 * time.Second
 
+// routeMaskBackfillStatus returns the cached status, refreshing it when the
+// TTL ran out. No query runs under routeMaskStatusMu (#583): /api/healthz
+// polls this, and with busy_timeout a query can wait seconds. While one
+// caller refreshes, the others get the previous status; with none yet they
+// wait for that refresh.
 func (db *DB) routeMaskBackfillStatus() RouteMaskBackfillStatus {
 	db.routeMaskStatusMu.Lock()
-	defer db.routeMaskStatusMu.Unlock()
-	if time.Now().Before(db.routeMaskStatusExp) {
-		return db.routeMaskStatus
+	st := db.routeMaskStatus
+	serve := db.routeMaskStatusOK && (db.routeMaskStatusRefreshing || time.Now().Before(db.routeMaskStatusExp))
+	db.routeMaskStatusMu.Unlock()
+	if serve {
+		return st
 	}
-	db.routeMaskStatus = db.computeRouteMaskBackfillStatus()
+	v, _, _ := db.routeMaskStatusLoad.Do("status", func() (interface{}, error) {
+		return db.refreshRouteMaskBackfillStatus(), nil
+	})
+	return v.(RouteMaskBackfillStatus)
+}
+
+// refreshRouteMaskBackfillStatus reads and caches the status. A failed read
+// is not cached: it returns the last good status, or pending without one.
+func (db *DB) refreshRouteMaskBackfillStatus() RouteMaskBackfillStatus {
+	db.routeMaskStatusMu.Lock()
+	if db.routeMaskStatusOK && time.Now().Before(db.routeMaskStatusExp) {
+		st := db.routeMaskStatus
+		db.routeMaskStatusMu.Unlock()
+		return st // a refresh that ended after our check stored it
+	}
+	db.routeMaskStatusRefreshing = true
+	db.routeMaskStatusMu.Unlock()
+
+	st, err := db.computeRouteMaskBackfillStatus()
+
+	db.routeMaskStatusMu.Lock()
+	defer db.routeMaskStatusMu.Unlock()
+	db.routeMaskStatusRefreshing = false
+	if err != nil {
+		if db.routeMaskStatusOK {
+			return db.routeMaskStatus
+		}
+		return RouteMaskBackfillStatus{Status: "pending"}
+	}
+	db.routeMaskStatus, db.routeMaskStatusOK = st, true
 	db.routeMaskStatusExp = time.Now().Add(routeMaskStatusTTL)
-	return db.routeMaskStatus
+	return st
 }
 
 // computeRouteMaskBackfillStatus decides the status from the database itself,
 // never from a flag that could claim completion early: "complete" requires
-// that no transmission has route_mask IS NULL.
-func (db *DB) computeRouteMaskBackfillStatus() RouteMaskBackfillStatus {
+// that no transmission has route_mask IS NULL. err is a failed query.
+func (db *DB) computeRouteMaskBackfillStatus() (RouteMaskBackfillStatus, error) {
 	pending := RouteMaskBackfillStatus{Status: "pending"}
 	if !db.hasRouteMask() {
-		return pending
+		return pending, nil
 	}
 	var hasIndex int
 	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`,
-		dbschema.RouteMaskPendingIndex).Scan(&hasIndex); err != nil || hasIndex == 0 {
-		return pending
+		dbschema.RouteMaskPendingIndex).Scan(&hasIndex); err != nil {
+		return pending, err
+	}
+	if hasIndex == 0 {
+		return pending, nil
 	}
 	var remaining int64
 	if err := db.conn.QueryRow(`SELECT COUNT(*) FROM transmissions WHERE route_mask IS NULL`).Scan(&remaining); err != nil {
-		return pending
+		return pending, err
 	}
 	if remaining == 0 {
-		return RouteMaskBackfillStatus{Status: "complete", Remaining: &remaining}
+		return RouteMaskBackfillStatus{Status: "complete", Remaining: &remaining}, nil
 	}
+	// No row, or no _async_migrations table, means the backfill is not running.
 	var asyncStatus string
 	db.conn.QueryRow(`SELECT status FROM _async_migrations WHERE name = ?`, dbschema.RouteMaskBackfillMigration).Scan(&asyncStatus)
 	if asyncStatus == "pending_async" {
-		return RouteMaskBackfillStatus{Status: "backfilling", Remaining: &remaining}
+		return RouteMaskBackfillStatus{Status: "backfilling", Remaining: &remaining}, nil
 	}
-	return RouteMaskBackfillStatus{Status: "pending", Remaining: &remaining}
+	return RouteMaskBackfillStatus{Status: "pending", Remaining: &remaining}, nil
 }

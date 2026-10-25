@@ -198,9 +198,22 @@ func lockScanRecv(d *ast.FuncDecl) string {
 	return ""
 }
 
+// isStoreMu412 matches PacketStore.mu: s.store.mu, store.mu, or s.mu in a
+// PacketStore method.
+func isStoreMu412(x ast.Expr, recv string) bool {
+	s := lockScanExpr(x)
+	return s == "s.store.mu" || s == "store.mu" || (s == "s.mu" && recv == "PacketStore")
+}
+
 // findSQLUnderStoreLock returns one line per call made inside a store.mu
 // section that reaches SQL, and the number of sections it found.
 func findSQLUnderStoreLock(t *testing.T, srcs map[string]string) (hits []string, regions int) {
+	t.Helper()
+	return findSQLUnderLock(t, srcs, isStoreMu412)
+}
+
+// findSQLUnderLock is findSQLUnderStoreLock for the mutexes isLock matches.
+func findSQLUnderLock(t *testing.T, srcs map[string]string, isLock func(x ast.Expr, recv string) bool) (hits []string, regions int) {
 	t.Helper()
 	fset := token.NewFileSet()
 	type fn struct {
@@ -294,11 +307,8 @@ func findSQLUnderStoreLock(t *testing.T, srcs map[string]string) (hits []string,
 		return strings.Join(out, " -> ")
 	}
 
-	isStoreMu := func(x ast.Expr, recv string) bool {
-		s := lockScanExpr(x)
-		return s == "s.store.mu" || s == "store.mu" || (s == "s.mu" && recv == "PacketStore")
-	}
-	isUnlock := func(st ast.Stmt) bool {
+	// isUnlock reports whether st unlocks the mutex lock names.
+	isUnlock := func(st ast.Stmt, lock string) bool {
 		es, ok := st.(*ast.ExprStmt)
 		if !ok {
 			return false
@@ -308,7 +318,7 @@ func findSQLUnderStoreLock(t *testing.T, srcs map[string]string) (hits []string,
 			return false
 		}
 		s := lockScanExpr(c.Fun)
-		return strings.HasSuffix(s, "mu.RUnlock") || strings.HasSuffix(s, "mu.Unlock")
+		return s == lock+".RUnlock" || s == lock+".Unlock"
 	}
 
 	for k, f := range funcs {
@@ -331,12 +341,12 @@ func findSQLUnderStoreLock(t *testing.T, srcs map[string]string) (hits []string,
 					continue
 				}
 				se, ok := c.Fun.(*ast.SelectorExpr)
-				if !ok || (se.Sel.Name != "RLock" && se.Sel.Name != "Lock") || !isStoreMu(se.X, f.recv) {
+				if !ok || (se.Sel.Name != "RLock" && se.Sel.Name != "Lock") || !isLock(se.X, f.recv) {
 					continue
 				}
 				end := b.End() // a deferred unlock holds it to the end of the block
 				for _, st2 := range b.List[i+1:] {
-					if isUnlock(st2) {
+					if isUnlock(st2, lockScanExpr(se.X)) {
 						end = st2.Pos()
 						break
 					}

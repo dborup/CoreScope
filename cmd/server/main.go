@@ -628,7 +628,7 @@ func main() {
 		// then returns immediately.
 		stopPingScoreHistory()
 
-		// 4. Close database (release SQLite WAL lock)
+		// 4. Close database (its read-only connections; #583: no checkpoint)
 		if err := dbClose(); err != nil {
 			log.Printf("[server] DB close error: %v", err)
 		}

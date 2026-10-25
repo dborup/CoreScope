@@ -60,7 +60,7 @@ func TestRouteMask_RunningServerPicksUpBackfilledMasks(t *testing.T) {
 
 	// The backfill fills the legacy row: its frames show flood and zero-hop.
 	rmExec(t, db, `UPDATE transmissions SET route_mask = 6 WHERE id = 3`)
-	if st := db.computeRouteMaskBackfillStatus(); st.Status != "complete" {
+	if st := rmStatus(t, db); st.Status != "complete" {
 		t.Fatalf("database status = %+v, want complete", st)
 	}
 	if st := s.routeMaskBackfillStatus(); st.Status != "backfilling" || st.Remaining == nil || *st.Remaining != 1 {

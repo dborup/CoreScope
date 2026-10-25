@@ -341,17 +341,24 @@
         const obs = heard.direct;
         observerLists.set(mn.pubkey, heard);
 
-        const heardAt = getHealthLastHeard(node, stats);
-        const status = getHealthStatus(node.role, heardAt) || 'silent';
-        const statusCls = status === 'healthy' ? 'status-ok' : status === 'degraded' ? 'status-warn' : 'status-err';
-        const statusDot = '<span class="' + statusCls + '" aria-label="' + status + '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span>';
-        const statusText = status === 'healthy' ? 'Active' : status === 'degraded' ? 'Degraded' : 'Silent';
+        // #304 point 3: ONE evidence model drives the badge, its wording and
+        // the disclosure below. It reuses the shared liveness rules (roles.js,
+        // #539) and reports a badge that rests only on an attributed relay
+        // hash prefix as attributed, never as a confident green.
+        const ev = MyMeshActivity.statusEvidence({ node, stats });
+        const status = ev.status;
+        const heardAt = ev.heardAt;
+        const statusDot = '<span class="' + ev.cls + '" aria-label="' + escapeAttr(ev.text) +
+          '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#' + ev.glyph + '"/></svg></span>';
         const name = node.name || mn.name || truncate(mn.pubkey, 12);
 
-        // SNR quality label
-        const snrVal = stats.avgSnr;
-        const snrLabel = snrVal != null ? (snrVal > 10 ? 'Excellent' : snrVal > 0 ? 'Good' : snrVal > -5 ? 'Marginal' : 'Poor') : null;
-        const snrColor = snrVal != null ? (snrVal > 10 ? 'var(--status-green)' : snrVal > 0 ? 'var(--accent)' : snrVal > -5 ? 'var(--status-yellow)' : 'var(--status-red)') : '#6b7280';
+        // #304 points 4 and 5: every headline number states what it covers.
+        // No SNR quality verdict and no verdict colour: the mean describes
+        // the observer links that proved a direct reception, not this node's
+        // signal quality (#76).
+        const snr = MyMeshActivity.snr(stats, obs);
+        const traffic = MyMeshActivity.traffic24h(h.activity24h);
+        const trend = MyMeshActivity.compare24h(h.activity24h);
 
         const sparkHtml = buildSparkline(h.activity24h);
         const isRepeater = String(node.role || '').toLowerCase() === 'repeater';
@@ -373,7 +380,7 @@
           : `<span class="text-muted" title="${escapeAttr(HeardBy.EMPTY_DIRECT_TIP)}">none proven</span>`;
         const relayCount = heard.relay.length ? ` · <span class="mnc-relay-count" title="${escapeAttr(HeardBy.RELAY_TIP)}">${heard.relay.length} via relay</span>` : '';
 
-        return `<div class="my-node-card ${status}${observer ? ' is-observer' : ''}" data-key="${mn.pubkey}" tabindex="0" role="button">
+        return `<div class="my-node-card ${status} evidence-${ev.source}${observer ? ' is-observer' : ''}" data-key="${mn.pubkey}" tabindex="0" role="button">
           <div class="mnc-header">
             <div class="mnc-status">${statusDot}</div>
             <div class="mnc-name">${escapeHtml(name)}</div>
@@ -381,25 +388,22 @@
             <div class="mnc-role">${node.role || '?'}</div>
             <button class="mnc-remove" data-key="${mn.pubkey}" title="Remove from My Mesh" aria-label="Remove ${escapeAttr(name)} from My Mesh"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
           </div>
-          <div class="mnc-status-text">${statusText}${heardAt ? ' · ' + timeAgo(heardAt) : ''}</div>
+          <div class="mnc-status-text">${escapeHtml(ev.text)}${heardAt ? ' · ' + timeAgo(heardAt) : ''}</div>
+          ${renderMyMeshEvidence(ev, h.activity24h, stats)}
           ${observerPanelHtml(observer)}
           ${observer ? `<div class="mnc-section-lbl">${escapeHtml(MyMeshObservers.NODE_SECTION_LABEL)}</div>` : ''}
           <div class="mnc-metrics">
-            <div class="mnc-metric">
-              <div class="mnc-val">${stats.packetsToday ?? 0}</div>
-              <div class="mnc-lbl">Packets today</div>
+            <div class="mnc-metric" title="${escapeAttr(traffic.tip)}">
+              <div class="mnc-val">${escapeHtml(traffic.value)}${trend.short ? ` <span class="mnc-metric-sub" title="${escapeAttr(trend.text + ' — ' + trend.tip)}">${escapeHtml(trend.short)}</span>` : ''}</div>
+              <div class="mnc-lbl">${escapeHtml(traffic.label)}</div>
             </div>
             <div class="mnc-metric" title="${escapeAttr(HeardBy.DIRECT_TIP)}">
               <div class="mnc-val">${obs.length}</div>
               <div class="mnc-lbl">Direct observers</div>
             </div>
-            <div class="mnc-metric" title="${escapeAttr(HeardBy.SNR_TIP)}">
-              <div class="mnc-val" style="color:${snrColor}">${snrVal != null ? Number(snrVal).toFixed(1) + ' dB' : '—'}</div>
-              <div class="mnc-lbl">Direct SNR${snrLabel ? ' · ' + snrLabel : ''}</div>
-            </div>
-            <div class="mnc-metric">
-              <div class="mnc-val">${stats.avgHops != null ? stats.avgHops.toFixed(1) : '—'}</div>
-              <div class="mnc-lbl">Avg hops</div>
+            <div class="mnc-metric" title="${escapeAttr(snr.tip)}">
+              <div class="mnc-val">${escapeHtml(snr.value)}</div>
+              <div class="mnc-lbl">${escapeHtml(snr.label)}</div>
             </div>
           </div>
           ${heardTotal ? `<div class="mnc-observers"><strong title="${escapeAttr(HeardBy.DIRECT_TIP)}">Heard directly by:</strong> ${directNames}${relayCount} <button type="button" class="mnc-btn mnc-view-all" data-action="observers" data-key="${escapeAttr(mn.pubkey)}" aria-label="Show all ${heardTotal} observer names for ${escapeAttr(name)}"${hiddenObservers > 0 ? '' : ' hidden'}>${observerBtnText}</button></div>` : ''}
@@ -482,7 +486,10 @@
     // Card click → health
     grid.querySelectorAll('.my-node-card').forEach(card => {
       const handler = (e) => {
-        if (e.target.closest('.mnc-remove') || e.target.closest('.mnc-btn')) return;
+        // #304: the evidence disclosure is part of the card, so a click on
+        // its summary (or on the text it reveals) must toggle it instead of
+        // navigating to the health panel.
+        if (e.target.closest('.mnc-remove') || e.target.closest('.mnc-btn') || e.target.closest('.mnc-evidence')) return;
         loadHealth(card.dataset.key);
       };
       card.addEventListener('click', handler);
@@ -492,7 +499,7 @@
         // below. Bail out before it runs, the same target check `handler`
         // already uses for the click case, so the button still fires its
         // own click via the browser's native keyboard activation.
-        if (e.target.closest('.mnc-remove') || e.target.closest('.mnc-btn')) return;
+        if (e.target.closest('.mnc-remove') || e.target.closest('.mnc-btn') || e.target.closest('.mnc-evidence')) return;
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handler(e); }
       });
     });
@@ -576,6 +583,28 @@
     dialog.showModal();
   }
 
+  // #304 point 3/5: the evidence behind the badge and the two numbers that
+  // need their sample scope spelled out, in a native <details> so the card
+  // stays compact and the explanation is reachable by keyboard AND touch —
+  // a title tooltip is neither. Timestamps are rendered separately, never
+  // merged: "last own advert" is the node's own transmission, "last
+  // attributed relay activity" is other traffic whose observed path named
+  // this node, and it is only reported when it is newer than that advert.
+  function renderMyMeshEvidence(ev, activity, stats) {
+    const hops = MyMeshActivity.hops(stats);
+    const trend = MyMeshActivity.compare24h(activity);
+    const row = (label, value, tip) =>
+      `<div class="mnc-evidence-row"${tip ? ` title="${escapeAttr(tip)}"` : ''}><strong>${escapeHtml(label)}</strong> <span>${escapeHtml(value)}</span></div>`;
+    return `<details class="mnc-evidence"><summary>${escapeHtml(MyMeshActivity.EVIDENCE_SUMMARY)}</summary>` +
+      row(MyMeshActivity.ADVERT_ROW_LABEL, ev.advertText || timeAgo(ev.advertAt)) +
+      row(MyMeshActivity.RELAY_ROW_LABEL, ev.relayText || timeAgo(ev.relayAt)) +
+      `<div class="mnc-evidence-note">${escapeHtml(ev.explanation)}</div>` +
+      row(MyMeshActivity.WINDOW_ROW_LABEL, MyMeshActivity.windowText(activity), MyMeshActivity.TRAFFIC_TIP) +
+      row(MyMeshActivity.COMPARE_ROW_LABEL, trend.text, trend.tip) +
+      row(hops.label, hops.value, hops.tip) +
+      '</details>';
+  }
+
   function renderMyMeshAdvertIntervals(intervals, backfill) {
     const row = (label, estimate) => {
       if (!estimate) return `<div class="mnc-advert-row"><strong>${label}</strong> unavailable</div>`;
@@ -606,10 +635,11 @@
 
   function buildSparkline(activity) {
     const label = '<div class="home-spark-label">Node-associated transmissions · last 24h</div>';
-    const buckets = activity?.buckets;
-    const valid = activity?.complete === true && Array.isArray(buckets) && buckets.length === 24 &&
-      buckets.every(b => Number.isInteger(b.count) && b.count >= 0 && Number.isFinite(Date.parse(b.start)) && Number.isFinite(Date.parse(b.end)));
-    if (!valid) return label + '<div class="home-spark-unavailable">Activity unavailable: 24h history incomplete</div>';
+    // #304: one shared shape check for the rolling window (MyMeshActivity),
+    // so the sparkline and the 24h traffic count can never disagree about
+    // whether the hourly counts are usable.
+    const buckets = MyMeshActivity.buckets(activity);
+    if (!buckets || activity.complete !== true) return label + '<div class="home-spark-unavailable">Activity unavailable: 24h history incomplete</div>';
     const max = Math.max(1, ...buckets.map(b => b.count));
     const bars = buckets.map(b => {
       const height = Math.max(2, Math.round((b.count / max) * 24));
@@ -653,28 +683,36 @@
       const heard = HeardBy.lists(h);
       const claimed = isMyNode(pubkey);
 
-      const heardAt = getHealthLastHeard(node, stats);
-      const status = getHealthStatus(node.role, heardAt) || 'silent';
-      const color = status === 'healthy' ? 'green' : status === 'degraded' ? 'yellow' : 'red';
-      const statusMsg = heardAt ? `Last heard ${timeAgo(heardAt)}` : 'No confirmed activity in the current window';
+      // #304: the panel reads the same evidence model as the cards, so the
+      // badge, the SNR attribution and the traffic window cannot drift apart
+      // between the two views.
+      const ev = MyMeshActivity.statusEvidence({ node, stats });
+      const heardAt = ev.heardAt;
+      const status = ev.status;
+      const color = ev.confident && status === 'healthy' ? 'green' : status === 'silent' ? 'red' : 'yellow';
+      const statusMsg = (heardAt ? `Last heard ${timeAgo(heardAt)}` : 'No confirmed activity in the current window') +
+        (ev.source === 'relay' ? ' · ' + MyMeshActivity.ATTRIBUTED_SUFFIX : '');
 
-      const snrVal = stats.avgSnr;
-      const snrLabel = snrVal != null ? (snrVal > 10 ? 'Excellent' : snrVal > 0 ? 'Good' : snrVal > -5 ? 'Marginal' : 'Poor') : '';
+      const snr = MyMeshActivity.snr(stats, heard.direct);
+      const traffic = MyMeshActivity.traffic24h(h.activity24h);
+      const trend = MyMeshActivity.compare24h(h.activity24h);
+      const hops = MyMeshActivity.hops(stats);
 
       card.innerHTML = `
         <div class="health-banner ${color}">
-          <span class="${status === 'healthy' ? 'status-ok' : status === 'degraded' ? 'status-warn' : 'status-err'}" aria-label="${status}">${status === 'healthy' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg>' : status === 'degraded' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x-circle"/></svg>'}</span>
+          <span class="${ev.cls}" aria-label="${escapeAttr(ev.text)}">${ev.confident && status === 'healthy' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg>' : status === 'silent' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x-circle"/></svg>' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>'}</span>
           <span><strong>${escapeHtml(node.name || truncate(pubkey, 16))}</strong> — ${statusMsg}</span>
           ${!claimed ? `<button class="health-claim" data-key="${pubkey}" data-name="${escapeAttr(node.name || '')}">+ Add to My Mesh</button>` : ''}
         </div>
         <div class="health-body">
           <div class="health-metrics">
-            <div class="health-metric"><div class="val">${stats.packetsToday ?? '—'}</div><div class="lbl">Packets Today</div></div>
+            <div class="health-metric" title="${escapeAttr(traffic.tip)}"><div class="val">${escapeHtml(traffic.value)}</div><div class="lbl">${escapeHtml(traffic.label)}</div><div class="mnc-metric-sub" title="${escapeAttr(trend.tip)}">${escapeHtml(trend.text)}</div></div>
             <div class="health-metric" title="${escapeAttr(HeardBy.DIRECT_TIP)}"><div class="val">${heard.direct.length}</div><div class="lbl">Direct observers</div></div>
             <div class="health-metric"><div class="val">${heardAt ? timeAgo(heardAt) : '—'}</div><div class="lbl">Last seen</div></div>
-            <div class="health-metric" title="${escapeAttr(HeardBy.SNR_TIP)}"><div class="val">${snrVal != null ? Number(snrVal).toFixed(1) + ' dB' : '—'}</div><div class="lbl">Direct SNR${snrLabel ? ' · ' + snrLabel : ''}</div></div>
-            <div class="health-metric"><div class="val">${stats.avgHops != null ? stats.avgHops.toFixed(1) : '—'}</div><div class="lbl">Avg Hops</div></div>
+            <div class="health-metric" title="${escapeAttr(snr.tip)}"><div class="val">${escapeHtml(snr.value)}</div><div class="lbl">${escapeHtml(snr.label)}</div></div>
+            <div class="health-metric" title="${escapeAttr(hops.tip)}"><div class="val">${escapeHtml(hops.value)}</div><div class="lbl">${escapeHtml(hops.label)}</div></div>
           </div>
+          ${renderMyMeshEvidence(ev, h.activity24h, stats)}
           ${heard.direct.length || heard.relay.length ? `<div class="health-observers"><strong title="${escapeAttr(HeardBy.DIRECT_TIP)}">Heard directly by:</strong> ${heard.direct.length ? heard.direct.map(o => escapeHtml(HeardBy.observerName(o))).join(', ') : `<span class="text-muted" title="${escapeAttr(HeardBy.EMPTY_DIRECT_TIP)}">none proven</span>`}</div>` : ''}
           ${heard.relay.length ? `<div class="health-observers"><strong title="${escapeAttr(HeardBy.RELAY_TIP)}">Heard via relay by:</strong> ${heard.relay.map(o => escapeHtml(HeardBy.observerName(o))).join(', ')}</div>` : ''}
           ${hasLocation ? '<div class="health-map" id="healthMap"></div>' : ''}

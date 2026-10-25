@@ -31,6 +31,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/meshcore-analyzer/channelregistry"
+	"golang.org/x/sync/singleflight"
 )
 
 // approvedCacheTTL bounds how stale GET /api/channels' approvedChannels can
@@ -118,6 +119,13 @@ type channelProposalService struct {
 
 	approvedMu sync.Mutex
 	approved   *approvedSnapshot
+	// The approved list is read outside approvedMu (#583), one refresh at a
+	// time: while it runs, other callers get the previous snapshot, and with
+	// none they wait for it (approvedLoad). Guarded by approvedMu.
+	refreshing        bool
+	refreshStartedAt  time.Time
+	refreshOverlapped bool // a newer decision completed during the read: do not cache it
+	approvedLoad      singleflight.Group
 
 	builtinMu sync.Mutex
 	builtin   *builtinNamesCache
@@ -197,37 +205,78 @@ func (p *channelProposalService) refundSubmission() {
 // the TTL ran out. The snapshot is immutable once built: callers may read it
 // after the lock is released but must never write to it. nil means no
 // database or no snapshot could be read yet.
+//
+// The refresh runs no SQL under approvedMu (#583): with busy_timeout a read
+// can wait seconds, and GET /api/channels and request-status polls
+// (noteDecision) take this mutex. An expired snapshot is still served to
+// everyone but the caller that refreshes it.
 func (p *channelProposalService) snapshot(ctx context.Context) *approvedSnapshot {
 	if p == nil || p.db == nil {
 		return nil
 	}
 	p.approvedMu.Lock()
-	defer p.approvedMu.Unlock()
-	now := p.now()
-	if p.approved == nil || now.After(p.approved.expires) {
-		names, notApproved, err := p.readProposalNames(ctx)
-		switch {
-		case err == nil:
-			chans := make([]ApprovedChannel, len(names))
-			for i, n := range names {
-				chans[i] = ApprovedChannel{Name: n, Hash: n}
-			}
-			p.approved = &approvedSnapshot{
-				channels: chans,
-				hidden:   p.hiddenNames(notApproved),
-				builtAt:  now,
-				expires:  now.Add(approvedCacheTTL),
-			}
-		case p.approved == nil:
-			log.Printf("[channel-proposals] listing approved channels failed: %v", err)
-			return nil
-		default:
-			// Keep serving the last good snapshot; retry after another TTL.
-			log.Printf("[channel-proposals] listing approved channels failed, serving cached list: %v", err)
-			p.approved.expires = now.Add(approvedCacheTTL)
-		}
+	cur := p.approved
+	serve := cur != nil && (p.refreshing || !p.now().After(cur.expires))
+	p.approvedMu.Unlock()
+	if serve {
+		return cur
 	}
-	return p.approved
+	// Shared by every caller waiting on this flight, so one request's
+	// cancellation must not fail it for the others.
+	ctx = context.WithoutCancel(ctx)
+	v, _, _ := p.approvedLoad.Do("approved", func() (interface{}, error) {
+		return p.refreshApproved(ctx), nil
+	})
+	return v.(*approvedSnapshot)
+}
+
+// refreshApproved reads the approved list and stores the new snapshot,
+// unless a decision newer than the read completed meanwhile (noteDecision).
+// On an error it keeps serving the last good snapshot.
+func (p *channelProposalService) refreshApproved(ctx context.Context) *approvedSnapshot {
+	p.approvedMu.Lock()
+	now := p.now()
+	if cur := p.approved; cur != nil && !now.After(cur.expires) {
+		p.approvedMu.Unlock()
+		return cur // a refresh that ended after our check stored it
+	}
+	p.refreshing, p.refreshStartedAt, p.refreshOverlapped = true, now, false
+	p.approvedMu.Unlock()
+
+	names, notApproved, err := p.readProposalNames(ctx)
+	var hidden map[string]bool
+	if err == nil {
+		hidden = p.hiddenNames(notApproved)
+	}
+
+	p.approvedMu.Lock()
+	defer p.approvedMu.Unlock()
+	p.refreshing = false
+	switch {
+	case err == nil:
+		chans := make([]ApprovedChannel, len(names))
+		for i, n := range names {
+			chans[i] = ApprovedChannel{Name: n, Hash: n}
+		}
+		snap := &approvedSnapshot{
+			channels: chans,
+			hidden:   hidden,
+			builtAt:  now,
+			expires:  now.Add(approvedCacheTTL),
+		}
+		if !p.refreshOverlapped {
+			p.approved = snap
+		}
+		return snap
+	case p.approved == nil:
+		log.Printf("[channel-proposals] listing approved channels failed: %v", err)
+		return nil
+	default:
+		// Keep serving the last good snapshot; retry after another TTL.
+		log.Printf("[channel-proposals] listing approved channels failed, serving cached list: %v", err)
+		p.approved.expires = now.Add(approvedCacheTTL)
+		return p.approved
+	}
 }
 
 // readProposalNames reads the approved names and the not-approved channels
@@ -333,6 +382,10 @@ func (p *channelProposalService) noteDecision(st channelregistry.RequestStatus) 
 	defer p.approvedMu.Unlock()
 	if p.approved != nil && st.CompletedAt > p.approved.builtAt.UnixMilli() {
 		p.approved = nil
+	}
+	// A refresh reading right now may have missed this decision.
+	if p.refreshing && st.CompletedAt > p.refreshStartedAt.UnixMilli() {
+		p.refreshOverlapped = true
 	}
 }
 

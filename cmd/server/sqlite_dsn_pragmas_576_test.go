@@ -258,7 +258,8 @@ func dsn576ScanIgnoredParams(t *testing.T, dir string) []string {
 	return bad
 }
 
-// No DSN in cmd/server, cmd/ingestor or internal/* (production or test
+// No DSN in cmd/server, cmd/ingestor, the SQLite CLIs (cmd/anomaly,
+// cmd/decrypt, cmd/migrate, #583) or internal/* (production or test
 // fixture) may use a parameter modernc ignores: a fixture that asks for WAL
 // and silently runs in the rollback journal with no busy timeout is how
 // #567's SQLITE_BUSY flake came about.
@@ -267,8 +268,15 @@ func TestDSNsUseModerncPragmaSyntax_576(t *testing.T) {
 	if err != nil || len(internal) == 0 {
 		t.Fatalf("no internal/* packages found (%v)", err)
 	}
+	cmds := []string{".", "../ingestor", "../anomaly", "../decrypt", "../migrate"}
+	for _, dir := range cmds {
+		// A renamed command must not silently drop out of the scan.
+		if goFiles, _ := filepath.Glob(filepath.Join(dir, "*.go")); len(goFiles) == 0 {
+			t.Fatalf("%s has no .go files: the scan list is stale", dir)
+		}
+	}
 	var bad []string
-	for _, dir := range append([]string{".", "../ingestor"}, internal...) {
+	for _, dir := range append(cmds, internal...) {
 		if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 			continue
 		}
