@@ -29,10 +29,12 @@ class Element {
   querySelectorAll() { let result = []; this.children.forEach(c => { if (c.dataset.win) result.push(c); result.push(...c.querySelectorAll()); }); return result; }
 }
 function descendants(el) { return [el, ...el.children.flatMap(descendants)]; }
-function fixture(apiFn, hash = '#/analytics?tab=scopes&sub=audit') {
+function fixture(apiFn, hash = '#/analytics?tab=scopes&sub=audit', region) {
   const doc = {createElement: tag => new Element(tag, doc)};
   const container = new Element('div', doc); let writes = [];
-  const controller = audit.mount(container, {api: apiFn, hash: () => hash, onWindow() {}, onState: (...v) => writes.push(v)});
+  const options = {api: apiFn, hash: () => hash, onWindow() {}, onState: (...v) => writes.push(v)};
+  if (region) options.region = region;
+  const controller = audit.mount(container, options);
   return {container, controller, writes, byId: id => descendants(container).find(e => e.id === id)};
 }
 const row = {publicKey: 'a'.repeat(64), name: '<img src=x onerror=alert(1)>', configuredScope: '#alpha', declaredScopes: ['#alpha'], declarationAgeSeconds: '7200', observedScopes: [{name: '#alpha', count: '3'}], unscopedObserved: '1', forwarded: '4', status: 'consistent'};
@@ -75,4 +77,73 @@ const row = {publicKey: 'a'.repeat(64), name: '<img src=x onerror=alert(1)>', co
   const pending = late.controller.load('1h'); late.controller.destroy(); resolves[2]({rows: [row]}); await pending;
   assert.strictEqual(late.byId('scope-audit-rows').children.length, 0);
   console.log('Scope Audit DOM, bounded rendering, search, XSS and lifecycle tests passed');
+  await transportTests();
 })().catch(err => { console.error(err); process.exitCode = 1; });
+
+// #414 — transport-carrier view.
+async function transportTests() {
+  const t = audit.stateFromHash('#/analytics?tab=scopes&sub=audit&sav=transport&scope=%23dk&swin=7d');
+  assert.strictEqual(t.view, 'transport');
+  assert.strictEqual(t.scope, 'dk', 'leading # is dropped');
+  assert.strictEqual(audit.stateFromHash('#/analytics?sav=other&scope=DK').view, 'declared');
+  assert.strictEqual(audit.stateFromHash('#/analytics?sav=transport&scope=DK').scope, 'DK', 'scope names keep their case (firmware strcmp)');
+  assert.strictEqual(audit.transportPath({window: '7d', scope: 'dk'}, 'CPH,ARN'), '/scope-audit/transport?window=7d&scope=dk&region=CPH%2CARN');
+  assert.strictEqual(audit.transportPath({window: '24h', scope: ''}, ''), '/scope-audit/transport?window=24h');
+  const evidence = ['carrier', 'not-seen-carrying', 'ambiguous', 'incomplete', 'low-evidence', 'no-scope-traffic', 'forwarding'];
+  evidence.forEach(e => {
+    const label = audit.transportEvidence({evidence: e}, 'dk', 5);
+    assert(label.title && !/misconfig|fault|wrong/i.test(label.title + label.detail), 'evidence never claims a fault: ' + e);
+  });
+  assert(/not a configuration finding/.test(audit.transportEvidence({evidence: 'not-seen-carrying'}, 'dk', 5).detail));
+  assert(/Fewer than 5/.test(audit.transportEvidence({evidence: 'low-evidence'}, 'dk', 5).detail));
+  assert.strictEqual(audit.searchTransportRows([{name: 'x', observedScopes: [{name: 'alpha'}]}, {name: 'y', declaration: {declaredScopes: ['beta']}}], 'beta').length, 1);
+
+  const never = {publicKey: 'b'.repeat(64), name: '<b>never</b>', role: 'repeater', declaration: null, forwarded: 9, carrier: 0, nonCarrier: 9,
+    unscoped: 9, unknownScope: 0, observedScopes: [], ambiguousHops: 0, ambiguousScopeHops: 0, evidence: 'not-seen-carrying'};
+  const declared = {publicKey: 'c'.repeat(64), name: 'declared', role: 'repeater', declaration: {configuredScope: '', declaredScopes: [], declaresScope: false},
+    forwarded: 6, carrier: 6, nonCarrier: 0, unscoped: 0, observedScopes: [{name: 'dk', count: 6}], evidence: 'carrier'};
+  const response = {window: '24h', scope: 'dk', region: ['CPH'], minForwarded: 5, rows: [never, declared],
+    summary: {total: 2, carrier: 1, notSeenCarrying: 1, neverQueried: 1, declared: 1},
+    population: {transmissions: 15, observations: 20, scopeTransmissions: 6, ambiguousHops: 3, regionObservers: 1},
+    coverage: {oldestObservation: '2026-10-25T10:00:00Z', complete: false}, scopes: [{name: 'dk', count: 6}, {name: 'eu', count: 2}]};
+  let calls = [], region = 'CPH';
+  const f = fixture(async path => { calls.push(path); return response; }, '#/analytics?tab=scopes&sub=audit&sav=transport&scope=dk', () => region);
+  await f.controller.load('24h');
+  assert.deepStrictEqual(calls, ['/scope-audit/transport?window=24h&scope=dk&region=CPH'], 'transport view sends scope and the global region');
+  const text = f.container.textContent;
+  assert(text.includes('Never asked') && text.includes('not the same as an empty declaration'), 'never asked is worded apart from empty');
+  assert(text.includes('Empty declaration'), 'empty declaration shown');
+  assert(text.includes('<b>never</b>') && !descendants(f.container).some(e => e.tagName === 'b'), 'names stay text');
+  assert(text.includes('1 carrying dk') && text.includes('1 not seen carrying') && text.includes('1 never asked'), 'summary counts: ' + text);
+  assert(text.includes('1 observer in CPH'), 'region population stated');
+  assert(text.includes('not fully covered'), 'incomplete capture stated');
+  assert(text.includes('never a configuration fault'), 'limitations text present');
+  assert.strictEqual(f.byId('scope-audit-scope').value, 'dk');
+  const options = descendants(f.byId('scope-audit-scope-list')).filter(e => e.tagName === 'option').map(e => e.value);
+  assert.deepStrictEqual(options, ['dk', 'eu'], 'scope suggestions come from the population');
+  // Region change reloads with the new region; declared view never sends one.
+  region = 'ARN'; await f.controller.load('24h');
+  assert(calls.at(-1).endsWith('region=ARN'));
+  const scopeInput = f.byId('scope-audit-scope'); scopeInput.value = '#eu'; await scopeInput.handlers.change();
+  assert.strictEqual(calls.at(-1), '/scope-audit/transport?window=24h&scope=eu&region=ARN');
+  assert.deepStrictEqual(f.writes.at(-1).slice(2), ['transport', 'eu'], 'view and scope are written to the URL');
+  const declaredBtn = descendants(f.container).find(e => e.dataset.auditView === 'declared');
+  await declaredBtn.handlers.click();
+  assert.strictEqual(calls.at(-1), '/scope-audit?window=24h', 'declared view keeps its own contract');
+  assert.strictEqual(f.writes.at(-1)[2], 'declared');
+  assert(f.byId('scope-audit-scope-label').hidden, 'scope box hidden in the declared view');
+  // A stale transport response cannot overwrite the declared view.
+  let resolves = [];
+  const race = fixture(() => new Promise(r => resolves.push(r)), '#/analytics?tab=scopes&sub=audit&sav=transport&scope=dk');
+  const first = race.controller.load('24h');
+  race.controller.syncState('#/analytics?tab=scopes&sub=audit');
+  const second = race.controller.load('24h');
+  resolves[1]({rows: [], summary: {total: 0}}); await second;
+  resolves[0](response); await first;
+  assert(!race.container.textContent.includes('Never asked'), 'stale transport rows ignored');
+  const css = require('fs').readFileSync(__dirname + '/public/style.css', 'utf8');
+  const block = css.slice(css.indexOf('/* #414 scope transport */'));
+  assert(block.length > 30 && /@media \(max-width: ?640px\)/.test(block), 'mobile layout rule present');
+  assert(!/#[0-9a-fA-F]{3,8}\b/.test(block.split('/* end #414 */')[0].replace(/\/\*[\s\S]*?\*\//g, '')), 'transport CSS uses variables only');
+  console.log('Scope Audit transport view tests passed');
+}

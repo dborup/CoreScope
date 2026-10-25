@@ -78,5 +78,61 @@ module.exports = async function scopeAuditE2E({page, BASE, assert, test}) {
       await page.locator('#scopes-panel-audit').getByRole('button', {name: 'Refresh', exact: true}).click();
       await page.waitForSelector('#scope-audit-rows tr');
     });
+    // #414 — transport-carrier view. The API smoke runs against the real fixture server.
+    await test('Scope Audit transport: API answers with the region-filtered contract', async () => {
+      const res = await page.request.get(`${BASE}/api/scope-audit/transport?window=7d&region=sjc`);
+      assert(res.status() === 200, 'transport endpoint status ' + res.status());
+      const body = await res.json();
+      assert(Array.isArray(body.rows) && Array.isArray(body.scopes), 'rows and scopes are arrays');
+      assert(JSON.stringify(body.region) === '["SJC"]' && typeof body.population.regionObservers === 'number', 'region is normalised and echoed');
+      assert(body.summary.total === body.rows.length, 'summary counts the rows served');
+      const bad = await page.request.get(`${BASE}/api/scope-audit/transport?window=2d`);
+      assert(bad.status() === 400, 'invalid window rejected');
+    });
+    await test('Scope Audit transport: deep link, scope, region, limitations and 390px layout', async () => {
+      const transportPattern = '**/api/scope-audit/transport*';
+      const transportCalls = [];
+      const never = {publicKey: 'b'.repeat(64), name: 'Never asked relay with a long name that must wrap', role: 'repeater', declaration: null, forwarded: 9, carrier: 0, nonCarrier: 9, unscoped: 9, unknownScope: 0, observedScopes: [], ambiguousHops: 0, ambiguousScopeHops: 0, legacyObservations: 0, evidence: 'not-seen-carrying'};
+      const carrier = {publicKey: 'c'.repeat(64), name: '<img src=x onerror="window.transportXss=1">', role: 'repeater', declaration: {configuredScope: '#dk', declaredScopes: ['dk'], declaresScope: true}, forwarded: 6, carrier: 6, nonCarrier: 0, unscoped: 0, unknownScope: 0, observedScopes: [{name: 'dk', count: 6}], ambiguousHops: 2, evidence: 'carrier'};
+      await page.route(transportPattern, route => {
+        const url = new URL(route.request().url());
+        transportCalls.push(url);
+        const scope = url.searchParams.get('scope') || '';
+        return route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({window: url.searchParams.get('window'), scope, region: url.searchParams.get('region') ? [url.searchParams.get('region')] : [], minForwarded: 5, rows: [never, carrier],
+          summary: {total: 2, carrier: 1, notSeenCarrying: 1, neverQueried: 1, declared: 1}, population: {transmissions: 15, observations: 20, scopeTransmissions: 6, ambiguousHops: 2, regionObservers: 1},
+          coverage: {oldestObservation: '2026-01-01T00:00:00Z', complete: true}, scopes: [{name: 'dk', count: 6}, {name: 'eu', count: 1}]})});
+      });
+      const viewport = page.viewportSize();
+      try {
+        await page.setViewportSize({width: 390, height: 844});
+        await page.goto(`${BASE}/#/analytics?tab=scopes&sub=audit&sav=transport&swin=24h&scope=dk&region=SJC`, {waitUntil: 'domcontentloaded'});
+        await page.reload({waitUntil: 'domcontentloaded'});
+        await page.waitForSelector('#scope-audit-rows tr');
+        const first = transportCalls.at(-1);
+        assert(first.searchParams.get('scope') === 'dk' && first.searchParams.get('region') === 'SJC', 'deep link restores scope and region: ' + first);
+        const text = await page.locator('#scopes-panel-audit').innerText();
+        assert(text.includes('Never asked') && text.includes('not the same as an empty declaration'), 'never asked is worded apart from empty');
+        assert(text.includes('never a configuration fault') && text.includes('Not seen carrying dk'), 'limitations and evidence wording shown');
+        assert(text.includes('1 observer in SJC'), 'region population shown');
+        assert(await page.evaluate(() => !window.transportXss) && await page.locator('#scope-audit-rows img').count() === 0, 'names stay text');
+        const layout = await page.evaluate(() => ({page: document.documentElement.scrollWidth <= window.innerWidth + 1,
+          cards: getComputedStyle(document.querySelector('#scope-audit-rows td')).display === 'block',
+          // Stacked cells use the card's width, not a squeezed table column.
+          wide: document.querySelector('#scope-audit-rows td').getBoundingClientRect().width >= window.innerWidth * 0.75}));
+        assert(layout.page && layout.cards && layout.wide, '390px layout must stack rows without page overflow: ' + JSON.stringify(layout));
+        await page.fill('#scope-audit-scope', '#eu');
+        await page.press('#scope-audit-scope', 'Enter');
+        await page.waitForFunction(() => location.hash.includes('scope=eu'));
+        assert(transportCalls.at(-1).searchParams.get('scope') === 'eu', 'scope change reaches the endpoint');
+        assert(page.url().includes('sav=transport') && page.url().includes('region=SJC'), 'transport link is shareable');
+        await page.locator('#scopes-panel-audit [data-audit-view="declared"]').click();
+        await page.waitForFunction(() => !location.hash.includes('sav=') && !location.hash.includes('scope='));
+        await page.waitForSelector('#scope-audit-rows tr');
+        assert(await page.locator('#scope-audit-scope-label').isHidden(), 'scope box hidden in the declared view');
+      } finally {
+        if (viewport) await page.setViewportSize(viewport);
+        await page.unroute(transportPattern);
+      }
+    });
   } finally { await page.unroute(pattern); page.off('request', statsListener); }
 };

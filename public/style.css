@@ -6002,6 +6002,23 @@ body.embed #app.app-fixed {
 #scopes-panel-audit .scope-audit-table th:nth-child(5) { width:25%; }
 #scopes-panel-audit .scope-audit-table th,
 #scopes-panel-audit .scope-audit-table td { white-space:normal; overflow:visible; text-overflow:clip; overflow-wrap:anywhere; vertical-align:top; }
+/* #414 scope transport */
+#scope-audit-intro p { margin:0 0 6px; }
+.scope-audit-controls [hidden] { display:none; }
+.scope-audit-selected { border-color:var(--accent); color:var(--accent); }
+@media (max-width: 640px) {
+  #scopes-panel-audit .scope-transport-table { min-width:0; table-layout:auto; }
+  #scopes-panel-audit .scope-transport-table thead { display:none; }
+  #scopes-panel-audit .scope-transport-table,
+  #scopes-panel-audit .scope-transport-table tbody,
+  #scopes-panel-audit .scope-transport-table tr,
+  #scopes-panel-audit .scope-transport-table td { display:block; width:auto; }
+  #scopes-panel-audit .scope-transport-table tr { border-bottom:1px solid var(--border); padding:6px 0; }
+  #scopes-panel-audit .scope-transport-table td { border:0; padding:2px 4px; max-width:none; }
+  #scopes-panel-audit .scope-transport-table td::before { content:attr(data-label); display:block; font-size:0.8em; color:var(--text-muted); }
+  .scope-audit-controls input { width:100%; }
+}
+/* end #414 */
 
 /* Regions map: an observed-relay footprint, deliberately distinct from RF coverage. */
 .regions-page { display: flex; flex-direction: column; height: 100%; min-height: 420px; padding: 16px; gap: 8px; }

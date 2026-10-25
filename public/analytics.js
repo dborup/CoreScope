@@ -428,7 +428,7 @@
     'rf-health': ['range', 'observer', 'from', 'to'],
     collisions: ['section'],
     hashsizes: [HASHSTATS_MB_FILTER.param, HASHSTATS_MB_SORT.param, HASHSTATS_MB_DIR.param],
-    scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param, 'saq', 'sap'],
+    scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param, 'saq', 'sap', 'sav', 'scope'],
     wardriving: [WARDRIVING_WINDOW.param],
   };
 
@@ -5324,10 +5324,17 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(
           el.querySelectorAll('[data-win]').forEach(function(b) { b.classList.toggle('active', b.dataset.win === w); });
           load(w);
         },
-        onState: function(query, page) {
+        // #414 — the transport view counts only observers in the global region selection.
+        region: function() { return window.RegionFilter && RegionFilter.getRegionParam ? RegionFilter.getRegionParam() : ''; },
+        onState: function(query, page, view, scope) {
           var parts = location.hash.split('?'); var params = new URLSearchParams(parts[1] || '');
           if (query) params.set('saq', query); else params.delete('saq');
           if (page) params.set('sap', String(page)); else params.delete('sap');
+          if (view === 'transport') params.set('sav', view); else params.delete('sav');
+          if (view === 'transport' && scope) params.set('scope', scope); else params.delete('scope');
+          // A shared transport link carries its region; RegionFilter keeps a present region= in sync (#531).
+          var region = view === 'transport' && window.RegionFilter && RegionFilter.getRegionParam ? RegionFilter.getRegionParam() : '';
+          if (region) params.set('region', region);
           history.replaceState(history.state, '', parts[0] + (params.toString() ? '?' + params.toString() : ''));
         }
       }) : null;
