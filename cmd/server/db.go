@@ -741,6 +741,12 @@ type PacketQuery struct {
 	Channel            string // channel_hash filter (#812). Plain names like "#test"/"public" or "enc_<HEX>" for encrypted
 	Order              string // ASC or DESC
 	ExpandObservations bool   // when true, include observation sub-maps in txToMap output
+
+	// AreaNodes is Area resolved to its member pubkeys (resolveAreaNodes /
+	// areaMemberSet) — the DB layer has no config.Areas. nil applies no area
+	// filter, exactly like the in-memory path's nil set for an unknown or
+	// empty area (#569).
+	AreaNodes map[string]bool
 }
 
 // PacketResult wraps paginated packet list.
@@ -1074,7 +1080,31 @@ func (db *DB) buildTransmissionWhere(q PacketQuery) ([]string, []interface{}) {
 		}
 		args = append(args, q.Region)
 	}
+	if len(q.AreaNodes) > 0 {
+		// #569: same originator contract as filterPacketsPrepared — the
+		// decoded ADVERT pubkey, which the ingestor copies into the indexed
+		// from_pubkey column (#1143). One bound JSON array regardless of the
+		// member count; the plan probes idx_transmissions_from_pubkey once
+		// per member instead of parsing decoded_json per row.
+		where = append(where, "t.from_pubkey IN (SELECT value FROM json_each(?))")
+		args = append(args, areaMembersJSON(q.AreaNodes))
+	}
 	return where, args
+}
+
+// areaMembersJSON encodes an area member set as a sorted JSON array for
+// json_each. "" is dropped: the in-memory path never matches an empty
+// originator, and "" is the from_pubkey backfill's no-pubkey sentinel.
+func areaMembersJSON(members map[string]bool) string {
+	keys := make([]string, 0, len(members))
+	for pk, ok := range members {
+		if ok && pk != "" {
+			keys = append(keys, pk)
+		}
+	}
+	sort.Strings(keys)
+	b, _ := json.Marshal(keys)
+	return string(b)
 }
 
 func (db *DB) resolveNodePubkey(nodeIDOrName string) string {
