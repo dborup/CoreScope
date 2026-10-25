@@ -1398,6 +1398,14 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 		q.Route = &t
 	}
 
+	if s.store == nil && q.Area != "" {
+		// #569: no store to resolve the area — resolve it here so the
+		// direct DB query filters exactly as the store would.
+		if entry, ok := s.cfg.Areas[q.Area]; ok {
+			q.AreaNodes = areaMemberSet(s.db, entry)
+		}
+	}
+
 	if r.URL.Query().Get("groupByHash") == "true" {
 		var result *PacketResult
 		var err error

@@ -2494,6 +2494,11 @@ func (s *PacketStore) QueryPackets(q PacketQuery) *PacketResult {
 		needsSQL := (q.Since != "" && q.Since < oldest) ||
 			(q.Until != "" && q.Until < oldest)
 		if needsSQL {
+			// #569: carry the same cached area membership the in-memory
+			// filter uses, so SQL history applies it before COUNT/LIMIT.
+			if q.Area != "" {
+				q.AreaNodes = s.resolveAreaNodes(q.Area)
+			}
 			if result, err := s.db.QueryPackets(q); err == nil {
 				return result
 			} else {
@@ -2570,6 +2575,11 @@ func (s *PacketStore) QueryGroupedPackets(q PacketQuery) *PacketResult {
 		needsSQL := (q.Since != "" && q.Since < oldest) ||
 			(q.Until != "" && q.Until < oldest)
 		if needsSQL {
+			// #569: carry the same cached area membership the in-memory
+			// filter uses, so SQL history applies it before COUNT/LIMIT.
+			if q.Area != "" {
+				q.AreaNodes = s.resolveAreaNodes(q.Area)
+			}
 			if result, err := s.db.QueryGroupedPackets(q); err == nil {
 				return result
 			} else {
@@ -4555,14 +4565,7 @@ func (s *PacketStore) resolveAreaNodes(areaKey string) map[string]bool {
 	s.areaNodeMu.RUnlock()
 
 	// Slow path: query the DB outside any lock, then write back under Lock.
-	pks, err := s.db.GetNodePubkeysInArea(entry)
-	var m map[string]bool
-	if err == nil && len(pks) > 0 {
-		m = make(map[string]bool, len(pks))
-		for _, pk := range pks {
-			m[pk] = true
-		}
-	}
+	m := areaMemberSet(s.db, entry)
 
 	s.areaNodeMu.Lock()
 	// Re-check in case another goroutine already refreshed while we queried.
@@ -4573,6 +4576,22 @@ func (s *PacketStore) resolveAreaNodes(areaKey string) map[string]bool {
 		m = s.areaNodeCache[areaKey]
 	}
 	s.areaNodeMu.Unlock()
+	return m
+}
+
+// areaMemberSet returns the pubkeys of positioned nodes inside entry, or nil
+// when there are none (or the lookup fails) — nil means "no area filter".
+// Shared by the store's cached resolveAreaNodes and the store-less handler
+// path so both SQL and in-memory queries see one membership contract.
+func areaMemberSet(db *DB, entry AreaEntry) map[string]bool {
+	pks, err := db.GetNodePubkeysInArea(entry)
+	if err != nil || len(pks) == 0 {
+		return nil
+	}
+	m := make(map[string]bool, len(pks))
+	for _, pk := range pks {
+		m[pk] = true
+	}
 	return m
 }
 
