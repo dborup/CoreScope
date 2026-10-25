@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -222,6 +224,13 @@ func TestRegionPlacement488_Config(t *testing.T) {
 			regionPlacementSettings{Mode: regionModeHeard, Params: regionPlacementParams{MaxHops: regionPlacementHopSlots - 1, Lifetime: def.Params.Lifetime}}},
 		{"negative values", `{"regionPlacement": {"maxHops": -1, "lifetimeDays": -5, "persistSpanHours": -2}}`,
 			regionPlacementSettings{Mode: regionModeHeard, Params: regionPlacementParams{MaxHops: 0, Lifetime: def.Params.Lifetime}}},
+		{"lifetimeDays past what a Duration holds", `{"regionPlacement": {"lifetimeDays": 9999999999}}`,
+			regionPlacementSettings{Mode: regionModeHeard, Params: regionPlacementParams{MaxHops: 3, Lifetime: regionPlacementMaxLifetimeDays * 24 * time.Hour}}},
+		{"persistSpanHours past what a Duration holds", `{"regionPlacement": {"persistSpanHours": 9999999999999}}`,
+			regionPlacementSettings{Mode: regionModeHeard, Params: regionPlacementParams{MaxHops: 3, Lifetime: def.Params.Lifetime, PersistSpan: regionPlacementMaxPersistSpanHours * time.Hour}}},
+		{"at the clamp is kept", fmt.Sprintf(`{"regionPlacement": {"lifetimeDays": %d, "persistSpanHours": %d}}`, regionPlacementMaxLifetimeDays, regionPlacementMaxPersistSpanHours),
+			regionPlacementSettings{Mode: regionModeHeard, Params: regionPlacementParams{MaxHops: 3,
+				Lifetime: regionPlacementMaxLifetimeDays * 24 * time.Hour, PersistSpan: regionPlacementMaxPersistSpanHours * time.Hour}}},
 		{"unknown mode keeps heard", `{"regionPlacement": {"mode": "guess"}}`, def},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -316,4 +325,39 @@ func TestRegionPlacement488_ServerUsesConfiguredMode(t *testing.T) {
 	}
 	p.cmd.Process.Signal(syscall.SIGTERM)
 	p.waitExit(t, 30*time.Second)
+}
+
+// TestRegionPlacement488_ConfigWarnings: every value the block drops or
+// clamps is logged, like maxHops (#612 review F4, F5).
+func TestRegionPlacement488_ConfigWarnings(t *testing.T) {
+	for _, tc := range []struct{ name, js, want string }{
+		{"negative persistSpanHours", `{"regionPlacement": {"persistSpanHours": -2}}`, "regionPlacement.persistSpanHours -2 is negative"},
+		{"negative lifetimeDays", `{"regionPlacement": {"lifetimeDays": -5}}`, "regionPlacement.lifetimeDays -5 is negative"},
+		{"lifetimeDays too large", `{"regionPlacement": {"lifetimeDays": 9999999999}}`, "regionPlacement.lifetimeDays 9999999999 is above"},
+		{"persistSpanHours too large", `{"regionPlacement": {"persistSpanHours": 9999999999999}}`, "regionPlacement.persistSpanHours 9999999999999 is above"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			log.SetOutput(&buf)
+			defer log.SetOutput(os.Stderr)
+			var cfg Config
+			if err := json.Unmarshal([]byte(tc.js), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			cfg.RegionPlacementSettings()
+			if !strings.Contains(buf.String(), tc.want) {
+				t.Errorf("log %q does not contain %q", buf.String(), tc.want)
+			}
+		})
+	}
+}
+
+// TestRegionPlacement488_DryRunSweepIncludesSix: the sweep leaves no cap
+// value out between 0 and 7 (#612 review F6).
+func TestRegionPlacement488_DryRunSweepIncludesSix(t *testing.T) {
+	for h := 0; h <= 7; h++ {
+		if !slices.Contains(regionDryRunSweep, h) {
+			t.Errorf("regionDryRunSweep %v is missing maxHops %d", regionDryRunSweep, h)
+		}
+	}
 }

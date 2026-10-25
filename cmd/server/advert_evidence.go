@@ -8,8 +8,9 @@ type advertEvidence struct {
 	// code is 1 + the packetpath.AdvertKind, or 0 when no frame was stored.
 	code uint8
 	// hops is the relay count of an AdvertRelayed frame: at most 63, the
-	// largest count a path byte holds, so it fits a byte (review N2 on
-	// #609: the fewest-hops fallback needs it).
+	// largest count a path byte holds, so it fits a byte. Kept for the
+	// M3/M4 API and UI milestones; nothing reads it yet (the M2 aggregate
+	// classifies in SQL and never goes through StoreObs).
 	hops uint8
 }
 

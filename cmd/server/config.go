@@ -1748,6 +1748,13 @@ type RegionPlacementConfig struct {
 	PersistSpanHours *int `json:"persistSpanHours,omitempty"`
 }
 
+// Upper bounds that keep time.Duration from overflowing (it holds about
+// 106,751 days): 100 years of lifetime, and the same span in hours.
+const (
+	regionPlacementMaxLifetimeDays     = 36500
+	regionPlacementMaxPersistSpanHours = regionPlacementMaxLifetimeDays * 24
+)
+
 // RegionPlacementSettings resolves the regionPlacement block, logging and
 // replacing values it cannot use.
 func (c *Config) RegionPlacementSettings() regionPlacementSettings {
@@ -1772,13 +1779,27 @@ func (c *Config) RegionPlacementSettings() regionPlacementSettings {
 	}
 	if rp.LifetimeDays != nil {
 		if *rp.LifetimeDays >= 0 {
-			out.Params.Lifetime = time.Duration(*rp.LifetimeDays) * 24 * time.Hour
+			days := min(*rp.LifetimeDays, regionPlacementMaxLifetimeDays)
+			if days != *rp.LifetimeDays {
+				log.Printf("[config] regionPlacement.lifetimeDays %d is above %d; using %d",
+					*rp.LifetimeDays, regionPlacementMaxLifetimeDays, days)
+			}
+			out.Params.Lifetime = time.Duration(days) * 24 * time.Hour
 		} else {
 			log.Printf("[config] regionPlacement.lifetimeDays %d is negative; using the default", *rp.LifetimeDays)
 		}
 	}
-	if rp.PersistSpanHours != nil && *rp.PersistSpanHours > 0 {
-		out.Params.PersistSpan = time.Duration(*rp.PersistSpanHours) * time.Hour
+	if rp.PersistSpanHours != nil {
+		if *rp.PersistSpanHours >= 0 {
+			hours := min(*rp.PersistSpanHours, regionPlacementMaxPersistSpanHours)
+			if hours != *rp.PersistSpanHours {
+				log.Printf("[config] regionPlacement.persistSpanHours %d is above %d; using %d",
+					*rp.PersistSpanHours, regionPlacementMaxPersistSpanHours, hours)
+			}
+			out.Params.PersistSpan = time.Duration(hours) * time.Hour
+		} else {
+			log.Printf("[config] regionPlacement.persistSpanHours %d is negative; using the default", *rp.PersistSpanHours)
+		}
 	}
 	return out
 }
