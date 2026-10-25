@@ -121,10 +121,10 @@ type StoreObs struct {
 	// wireRoute, so StoreObs stays 168 bytes (#490).
 	sharedStrs uint8
 	// advertEv is what this observation's own frame says about an ADVERT's
-	// originator (packetpath.ClassifyAdvertFrame, #488): 1 + AdvertKind, or
-	// 0 when no frame was stored (a legacy row, see advertHearing). It
-	// takes one more padding byte, so StoreObs stays 168 bytes.
-	advertEv uint8
+	// originator (packetpath.ClassifyAdvertFrame, #488), see
+	// advertEvidence. It takes two more padding bytes, so StoreObs stays
+	// 168 bytes.
+	advertEv advertEvidence
 }
 
 // tsCache holds tsCacheNotParsed until the first ParsedTime call, then one

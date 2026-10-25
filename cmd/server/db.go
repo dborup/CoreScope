@@ -139,6 +139,21 @@ type DB struct {
 	// membership scan, before the query; a non-nil error fails that refresh
 	// the way a failing scan does.
 	nodeRegionQueryHook func() error
+
+	// Direct-evidence region placement (#488 M2, region_placement.go).
+	// regionPlacement is set once at startup, before the first request.
+	// regionAgg is the global evidence aggregate, owned by the refresh
+	// that holds regionAggMu; readers only ever see regionSnap, an
+	// immutable snapshot swapped in after each refresh.
+	regionPlacement   regionPlacementSettings
+	regionAggMu       sync.Mutex
+	regionAgg         *regionEvidenceAgg
+	regionAggBuilt    time.Time
+	regionSnap        atomic.Pointer[regionPlacementSnapshot]
+	regionPlacementSF singleflight.Group
+	// regionPlacementScanHook (test seam, nil in production) runs before
+	// every aggregate scan, full or delta; a non-nil error fails that scan.
+	regionPlacementScanHook func(full bool) error
 	// identityNamesQueryHook (#410, test seam, nil in production) runs once
 	// per real hidden-name lookup query, right before it executes, with the
 	// lower-case keys it looks up.

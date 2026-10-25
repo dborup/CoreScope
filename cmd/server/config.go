@@ -266,6 +266,11 @@ type Config struct {
 	// listed", nothing more.
 	RegionGroups []RegionGroup `json:"regionGroups,omitempty"`
 
+	// RegionPlacement selects the rule behind /api/nodes?region= (#488 M2).
+	// Optional: absent keeps today's rule ("heard"). Read once at startup;
+	// see RegionPlacementSettings for the defaults and bounds.
+	RegionPlacement *RegionPlacementConfig `json:"regionPlacement,omitempty"`
+
 	Roles            map[string]interface{} `json:"roles"`
 	HealthThresholds *HealthThresholds      `json:"healthThresholds"`
 	Map              map[string]interface{} `json:"map"`
@@ -1721,4 +1726,30 @@ func (c *Config) AnalyticsRecomputeIntervals() AnalyticsRecomputeIntervals {
 	out.NodesClockSkew = get("nodesClockSkew")
 	out.AdvertIntervals = get("advertIntervals")
 	return out
+}
+
+// RegionPlacementConfig is the optional regionPlacement block (#488 M2).
+// Every field defaults to today's behaviour; the values are meant for the
+// customizer in a later milestone (AGENTS.md rule 8).
+type RegionPlacementConfig struct {
+	// Mode is "heard" (default: a node is in every region whose observers
+	// heard any of its adverts) or "placed" (direct evidence first, then
+	// the capped fewest-hops fallback, else no region).
+	Mode string `json:"mode,omitempty"`
+	// MaxHops caps the fewest-hops fallback. Default 3, bounded to
+	// 0..regionPlacementHopSlots-1.
+	MaxHops *int `json:"maxHops,omitempty"`
+	// LifetimeDays is the evidence window, anchored at the node's own
+	// newest hearing. Default 30; 0 = no window (all retained history).
+	LifetimeDays *int `json:"lifetimeDays,omitempty"`
+	// PersistSpanHours turns on the transient-region rule: direct regions
+	// whose evidence spans less than this are dropped when another direct
+	// region's evidence spans at least this. Default 0 = off (deferred).
+	PersistSpanHours *int `json:"persistSpanHours,omitempty"`
+}
+
+// RegionPlacementSettings resolves the regionPlacement block, logging and
+// replacing values it cannot use.
+func (c *Config) RegionPlacementSettings() regionPlacementSettings {
+	return regionPlacementSettings{}
 }
