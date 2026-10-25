@@ -310,11 +310,14 @@ func (s *Server) buildScopeTransportScanContext(ctx context.Context, key scopeTr
 		return kind
 	}
 	seen := make(map[string]bool)
+	// Legacy-frame dedup lives in its own set: a scope may be named "legacy",
+	// so no key shape in seen is safe from a scope name.
+	seenLegacy := make(map[string]bool)
 	txKinds := make(map[string]bool)
 	flood := false
 	ambCounts := make(map[string]map[string]int)
 	err = s.scanScopeEvidence(ctx, scan.since, now, observers, pm, scopeEvidenceSink{
-		tx: func() { clear(seen); clear(txKinds); flood = false },
+		tx: func() { clear(seen); clear(seenLegacy); clear(txKinds); flood = false },
 		obs: func(kind string, legacy bool) {
 			if !flood {
 				flood = true
@@ -355,8 +358,8 @@ func (s *Server) buildScopeTransportScanContext(ctx context.Context, key scopeTr
 				seen[relay] = true
 				acc.forwarded++
 			}
-			if legacy && !seen[relay+"|legacy"] {
-				seen[relay+"|legacy"] = true
+			if legacy && !seenLegacy[relay] {
+				seenLegacy[relay] = true
 				acc.legacy++
 			}
 			if evidence := relay + "|" + kind; !seen[evidence] {

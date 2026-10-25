@@ -588,3 +588,43 @@ func TestScopeTransportCountsEachTransmissionOnce(t *testing.T) {
 		t.Fatalf("population=%+v", r.Population)
 	}
 }
+
+// A scope literally named "legacy" must not share a dedup key with the
+// per-transmission legacy-frame marker (review finding 1).
+func TestScopeTransportScopeNamedLegacyDoesNotCollideWithLegacyMarker(t *testing.T) {
+	f := transportFixture(t)
+	legacy := "legacy"
+	f.node(transportPKA, "relay", nil)
+	f.forward(6, 0, &legacy, `["a10000"]`, 1, f.now)
+	if _, err := f.s.db.conn.Exec(`UPDATE observations SET raw_hex=NULL`); err != nil {
+		t.Fatal(err)
+	}
+	r := f.mustGet("window=24h&scope=legacy")
+	a := transportRows(r)[transportPKA]
+	if a.Carrier == nil || *a.Carrier != 6 || *a.NonCarrier != 0 || a.LegacyObservations != 6 {
+		t.Fatalf("row=%+v", a)
+	}
+	if len(a.ObservedScopes) != 1 || a.ObservedScopes[0].Name != "legacy" || a.ObservedScopes[0].Count != 6 {
+		t.Fatalf("observedScopes=%+v", a.ObservedScopes)
+	}
+	if *r.Population.ScopeTransmissions != 6 {
+		t.Fatalf("population=%+v", r.Population)
+	}
+}
+
+// One headerless transmission heard through a looped path and by a second
+// listener is one legacy observation for the repeater (review finding 2).
+func TestScopeTransportLegacyObservationsCountedOncePerTransmission(t *testing.T) {
+	f := transportFixture(t)
+	dk := "dk"
+	f.node(transportPKA, "relay", nil)
+	f.forward(1, 0, &dk, `["a10000","b2","a10000"]`, 1, f.now)
+	f.observe(f.tx, `["a10000"]`, "0001020304", 2, f.now)
+	if _, err := f.s.db.conn.Exec(`UPDATE observations SET raw_hex=NULL`); err != nil {
+		t.Fatal(err)
+	}
+	a := transportRows(f.mustGet("window=24h&scope=dk"))[transportPKA]
+	if a.LegacyObservations != 1 || a.Forwarded != 1 {
+		t.Fatalf("row=%+v", a)
+	}
+}
