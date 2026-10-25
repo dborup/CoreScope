@@ -22,18 +22,19 @@
 //
 // For Dijkstra we need a DISTANCE (lower = better) not an affinity
 // (higher = better): cost = 1/weight. That conversion (plus the
-// epsilon/non-finite-weight filtering and self-loop/dedup handling) now lives
-// in the shared weightedDistanceAdjacency helper (graph_weighted.go), used by
-// both this axis and Coverage so they see byte-identical graph structure;
-// ComputeBridgeScores no longer builds the adjacency by hand.
+// epsilon/non-finite-weight filtering and self-loop/dedup handling) lives
+// in the shared indexedDistanceGraph (graph_weighted.go), used by both this
+// axis and Coverage so they see byte-identical graph structure.
+//
+// Issue #561: the per-source state (distance, path count, dependency,
+// predecessor lists, heap) lives in one brandesWorkspace of flat,
+// vertex-indexed slices that is reset for every source instead of
+// allocating string-keyed maps per source.
 //
 // (1) Brandes, "A Faster Algorithm for Betweenness Centrality" (2001).
 package main
 
-import (
-	"container/heap"
-	"math"
-)
+import "math"
 
 // BridgeEdge is the algorithm-facing edge tuple consumed by
 // ComputeBridgeScores. Endpoints A and B are pubkeys (case preserved
@@ -67,119 +68,98 @@ const bridgeMinWeightEpsilon = 1e-9
 // Pure (no global state, no locks); safe to call concurrently.
 // Cost: O(V · (E + V log V)).
 func ComputeBridgeScores(edges []BridgeEdge) map[string]float64 {
-	// 1. Build the distance adjacency (cost = 1/weight) — shared with the
-	//    Coverage axis (graph_weighted.go) so both see identical structure.
-	adj := weightedDistanceAdjacency(edges)
-	if len(adj) == 0 {
+	g := newIndexedDistanceGraph(edges)
+	n := g.numVertices()
+	if n == 0 {
 		return map[string]float64{}
 	}
 
-	nodes := make([]string, 0, len(adj))
-	for n := range adj {
-		nodes = append(nodes, n)
+	// Brandes outer loop: one Dijkstra-based single-source shortest-path
+	// computation per source vertex, accumulating dependencies into bc.
+	bc := make([]float64, n)
+	var ws brandesWorkspace
+	for s := 0; s < n; s++ {
+		ws.accumulate(g, int32(s), bc)
 	}
 
-	bc := make(map[string]float64, len(nodes))
-	for _, n := range nodes {
-		bc[n] = 0
+	// Undirected graphs double-count each (s,t) pair, so halve. Then
+	// normalize by max so scores live in [0, 1]; if max is 0 (clique or
+	// single edge) everything stays at zero.
+	for i := range bc {
+		bc[i] /= 2.0
+	}
+	normalizeByMax(bc)
+	return g.scoreMap(bc)
+}
+
+// brandesWorkspace extends the Dijkstra workspace with Brandes' path counts
+// (sigma), dependencies (delta), settle order (stack) and predecessor lists.
+// A vertex's predecessors are distinct neighbors, so they are stored in its
+// own CSR row of predBuf: pred(w) = predBuf[off[w] : off[w]+predLen[w]].
+type brandesWorkspace struct {
+	ssspWorkspace
+	sigma, delta []float64
+	stack        []int32
+	predBuf      []int32 // len 2E, parallel to the graph's nbr
+	predLen      []int32
+}
+
+func (ws *brandesWorkspace) reset(g *indexedDistanceGraph, src int32) {
+	ws.ssspWorkspace.reset(g, src)
+	n := g.numVertices()
+	ws.sigma = resized(ws.sigma, n)
+	ws.delta = resized(ws.delta, n)
+	ws.predLen = resized(ws.predLen, n)
+	ws.predBuf = resized(ws.predBuf, len(g.nbr))
+	for i := 0; i < n; i++ {
+		ws.sigma[i] = 0
+		ws.delta[i] = 0
+		ws.predLen[i] = 0
+	}
+	ws.stack = ws.stack[:0]
+	ws.sigma[src] = 1
+}
+
+// accumulate runs one Brandes single-source pass from src and adds the
+// resulting dependencies of every other vertex into bc.
+func (ws *brandesWorkspace) accumulate(g *indexedDistanceGraph, src int32, bc []float64) {
+	ws.reset(g, src)
+	dist, sigma, delta := ws.dist, ws.sigma, ws.delta
+	for len(ws.heap) > 0 {
+		v := ws.heap.pop().node
+		if ws.settled[v] {
+			continue
+		}
+		ws.settled[v] = true
+		ws.stack = append(ws.stack, v)
+
+		for k := g.off[v]; k < g.off[v+1]; k++ {
+			w := g.nbr[k]
+			alt := dist[v] + g.cost[k]
+			if alt < dist[w]-1e-12 {
+				dist[w] = alt
+				sigma[w] = sigma[v]
+				ws.predBuf[g.off[w]] = v
+				ws.predLen[w] = 1
+				ws.heap.push(distHeapItem{node: w, dist: alt})
+			} else if math.Abs(alt-dist[w]) <= 1e-12 {
+				sigma[w] += sigma[v]
+				ws.predBuf[g.off[w]+ws.predLen[w]] = v
+				ws.predLen[w]++
+			}
+		}
 	}
 
-	// 2. Brandes outer loop: one Dijkstra-based single-source shortest
-	//    path computation per source vertex.
-	for _, s := range nodes {
-		stack := make([]string, 0, len(nodes))
-		pred := make(map[string][]string, len(nodes))
-		sigma := make(map[string]float64, len(nodes))
-		dist := make(map[string]float64, len(nodes))
-		for _, n := range nodes {
-			sigma[n] = 0
-			dist[n] = math.Inf(1)
-		}
-		sigma[s] = 1
-		dist[s] = 0
-
-		pq := &bridgePQ{}
-		heap.Init(pq)
-		heap.Push(pq, bridgePQItem{node: s, dist: 0})
-
-		visited := make(map[string]bool, len(nodes))
-		for pq.Len() > 0 {
-			top := heap.Pop(pq).(bridgePQItem)
-			v := top.node
-			if visited[v] {
-				continue
-			}
-			visited[v] = true
-			stack = append(stack, v)
-
-			for w, edgeDist := range adj[v] {
-				alt := dist[v] + edgeDist
-				if alt < dist[w]-1e-12 {
-					dist[w] = alt
-					sigma[w] = sigma[v]
-					pred[w] = append(pred[w][:0], v)
-					heap.Push(pq, bridgePQItem{node: w, dist: alt})
-				} else if math.Abs(alt-dist[w]) <= 1e-12 {
-					sigma[w] += sigma[v]
-					pred[w] = append(pred[w], v)
-				}
-			}
-		}
-
-		// 3. Back-propagation: walk the stack in reverse order.
-		delta := make(map[string]float64, len(nodes))
-		for i := len(stack) - 1; i >= 0; i-- {
-			w := stack[i]
-			for _, v := range pred[w] {
-				if sigma[w] == 0 {
-					continue
-				}
+	// Back-propagation: walk the stack in reverse settle order.
+	for i := len(ws.stack) - 1; i >= 0; i-- {
+		w := ws.stack[i]
+		if sigma[w] != 0 {
+			for _, v := range ws.predBuf[g.off[w] : g.off[w]+ws.predLen[w]] {
 				delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w])
 			}
-			if w != s {
-				bc[w] += delta[w]
-			}
+		}
+		if w != src {
+			bc[w] += delta[w]
 		}
 	}
-
-	// 4. Undirected graphs double-count each (s,t) pair, so halve.
-	for k := range bc {
-		bc[k] /= 2.0
-	}
-
-	// 5. Normalize by max so scores live in [0, 1]. If max is 0
-	//    (clique or single edge) we leave everything at zero.
-	maxBC := 0.0
-	for _, v := range bc {
-		if v > maxBC {
-			maxBC = v
-		}
-	}
-	if maxBC > 0 {
-		for k, v := range bc {
-			bc[k] = v / maxBC
-		}
-	}
-	return bc
-}
-
-// ─── min-heap for Dijkstra ─────────────────────────────────────────────────────
-
-type bridgePQItem struct {
-	node string
-	dist float64
-}
-
-type bridgePQ []bridgePQItem
-
-func (h bridgePQ) Len() int            { return len(h) }
-func (h bridgePQ) Less(i, j int) bool  { return h[i].dist < h[j].dist }
-func (h bridgePQ) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *bridgePQ) Push(x interface{}) { *h = append(*h, x.(bridgePQItem)) }
-func (h *bridgePQ) Pop() interface{} {
-	old := *h
-	n := len(old)
-	it := old[n-1]
-	*h = old[:n-1]
-	return it
 }
