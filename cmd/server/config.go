@@ -1651,7 +1651,8 @@ func (c *Config) IsObserverBlacklisted(id string) bool {
 //
 // RecomputeIntervalSeconds keys (all optional):
 //
-//	topology, rf, distance, channels, hashCollisions, hashSizes, roles, observersClockSkew, nodesClockSkew
+//	topology, rf, distance, channels, hashCollisions, hashSizes, roles, observersClockSkew, nodesClockSkew,
+//	advertIntervals (#245 M2)
 type AnalyticsConfig struct {
 	DefaultIntervalSeconds   int            `json:"defaultIntervalSeconds,omitempty"`
 	RecomputeIntervalSeconds map[string]int `json:"recomputeIntervalSeconds,omitempty"`
@@ -1718,5 +1719,6 @@ func (c *Config) AnalyticsRecomputeIntervals() AnalyticsRecomputeIntervals {
 	out.Roles = get("roles")
 	out.ObserversClockSkew = get("observersClockSkew")
 	out.NodesClockSkew = get("nodesClockSkew")
+	out.AdvertIntervals = get("advertIntervals")
 	return out
 }

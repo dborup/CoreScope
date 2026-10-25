@@ -243,6 +243,7 @@
                  Placed after Clock Health (clock-skew posture is shown per-role
                  inside this tab) and before Prefix Tool (utility tabs trail). -->
             <button class="tab-btn" data-tab="roles">Roles</button>
+            <button class="tab-btn" data-tab="advert-intervals">Advert Intervals</button>
             <button class="tab-btn" data-tab="scopes">Scopes</button>
             <button class="tab-btn" data-tab="foreign-traffic">Foreign Traffic</button>
             <button class="tab-btn" data-tab="wardriving">Wardriving</button>
@@ -256,7 +257,7 @@
       </div>`;
 
     // Tabs where the area filter is meaningful (transmitter GPS attribution)
-    const AREA_FILTER_TABS = new Set(['overview', 'rf', 'topology', 'hashsizes', 'collisions', 'nodes', 'my-repeaters', 'repeater-metrics', 'clock-health']);
+    const AREA_FILTER_TABS = new Set(['overview', 'rf', 'topology', 'hashsizes', 'collisions', 'nodes', 'my-repeaters', 'repeater-metrics', 'clock-health', 'advert-intervals']);
 
     function setAreaFilterVisibility(tab) {
       const el = document.getElementById('analyticsAreaFilter');
@@ -604,6 +605,7 @@
       case 'rf-health': await renderRFHealthTab(el); break;
       case 'clock-health': await renderClockHealthTab(el); break;
       case 'roles': await renderRolesTab(el); break;
+      case 'advert-intervals': await renderAdvertIntervalsTab(el); break;
       case 'prefix-tool': await renderPrefixTool(el); break;
       case 'scopes': await renderScopesTab(el); break;
       case 'foreign-traffic': await renderForeignTrafficTab(el); break;
@@ -7562,6 +7564,25 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(
   // Renders distribution of node roles + per-role clock-skew posture.
   // Auto-refreshes every 60s while the Roles tab is active (matches the
   // behavior of the former standalone roles-page.js).
+  // #245 M2 — Advert Intervals: mesh-wide estimated flood / zero-hop advert
+  // intervals (advert-interval-analytics.js renders, the server computes
+  // once per analytics cycle). Region and area filters apply; only the
+  // newest request renders, so a slow answer for an old filter cannot
+  // replace a newer one.
+  let _advertIntervalsGen = 0;
+  async function renderAdvertIntervalsTab(el) {
+    const myGen = ++_advertIntervalsGen;
+    el.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading advert intervals…</div>';
+    try {
+      const data = await api(withQuery('/analytics/advert-intervals', RegionFilter.regionQueryString() + AreaFilter.areaQueryString()), { ttl: CLIENT_TTL.analyticsRF });
+      if (myGen !== _advertIntervalsGen || _currentTab !== 'advert-intervals') return;
+      el.innerHTML = window.AdvertIntervalAnalytics.render(data);
+    } catch (err) {
+      if (myGen !== _advertIntervalsGen) return;
+      el.innerHTML = '<div class="text-center" style="color:var(--status-red);padding:40px">Failed to load advert intervals: ' + esc(String(err.message || err)) + '</div>';
+    }
+  }
+
   async function renderRolesTab(el) {
     el.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading roles…</div>';
     await _renderRolesTabBody(el);

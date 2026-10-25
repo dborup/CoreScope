@@ -160,6 +160,11 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "from", Description: "RFC3339 start; if from or to is given, window is ignored (an unparseable value leaves that bound open)", Type: "string"},
 				{Name: "to", Description: "RFC3339 end; if from or to is given, window is ignored (an unparseable value leaves that bound open)", Type: "string"},
 			}},
+		"GET /api/analytics/advert-intervals": {Summary: "Mesh-wide estimated advert intervals", Description: "#245 M2: the flood and zero-hop advert intervals the nodes run with, estimated per node exactly as node detail's advertIntervals (include=advertRoutes) - the newest 20 flood and 20 zero-hop adverts, the same classifier and estimator, snapped to the firmware's settable values (flood.advert.interval whole hours 3-168, advert.interval even minutes 60-240 or the 2-minute new-install default). Counts only nodes in the node list with at least one ADVERT; hidden identities are left out. Distributions (buckets) hold medium and high confidence estimates; low confidence, irregular, too few and not observed are counted beside them. No zero-hop adverts means the zero-hop interval is 0 (off) or no observer hears the node directly, so it is reported as not observed. Computed once per analytics cycle by a background pass over the database (config analytics.recomputeIntervalSeconds.advertIntervals, #492 pauseWhenIdle applies to it); every request, filtered or not, is answered from that snapshot.", Tag: "analytics", Response: schemaRef("AdvertIntervalAnalyticsResponse"),
+			QueryParams: []paramMeta{
+				{Name: "region", Description: "Comma-separated region (IATA) codes: only nodes whose sampled adverts an observer in one of them heard.", Type: "string"},
+				{Name: "area", Description: "Configured area key: only nodes whose position lies in the area (unknown key: 400).", Type: "string"},
+			}},
 		"GET /api/scope-audit": {Summary: "Declared versus observed forwarding scopes", Description: "Observer-confirmed scope declarations compared with collision-safe flood path evidence. Missing observations are not proof of a configuration error. Unknown scopes, ambiguous hops, absent observations, and declarations older than seven days make evidence incomplete. Observer scope lists may be truncated without a completeness flag. Cached 30 seconds for each of three supported windows; identity visibility is applied live.", Tag: "analytics", QueryParams: []paramMeta{{Name: "window", Description: "Observation window: 1h, 24h (default), or 7d", Type: "string"}}},
 		"GET /api/analytics/wardriving": {Summary: "Wardriving channel analytics", Description: "Activity/entry-point/coverage/signal/session analytics for the #wardriving channel (or another channel via ?channel=): message volume over time, top senders, path[0] entry-point hash-prefix tallies (resolve names via /api/resolve-hops), per-observer coverage (not the sender's — MeshMapper's wardriving messages normally carry an anonymous session token, not live GPS; each observer's coordinates prefer its own real node position, falling back to its configured IATA/region code's centroid only when no real position is known, with positionSource (\"real\"/\"iata\"/\"none\") marking which applies — #381), average SNR/RSSI over the same time buckets as the activity series, each sender's messages grouped into distinct sessions/runs (split on a 15-minute gap, each with an AirtimeMs field — LoRa Time-on-Air × distinct relaying repeaters, same formula as the Overview tab's Relay Airtime Share, omitted in DB-only mode), and any senders who explicitly shared their own position (some clients append plaintext \"<lat>,<lon>\" after the token — a deliberate choice by that sender, confirmed empirically, not something CoreScope infers). Cached 30s per window+channel.", Tag: "analytics",
 			QueryParams: []paramMeta{
@@ -440,6 +445,100 @@ func nodeAdvertRouteSchemas() map[string]*openAPISchema {
 			Properties: map[string]*openAPISchema{
 				"status":    {Type: "string", Enum: []string{"pending", "backfilling", "complete"}},
 				"remaining": {Type: "integer", Nullable: true, Description: "Rows still without a mask; null when it cannot be counted cheaply."},
+			},
+		},
+	}
+}
+
+// advertIntervalAnalyticsSchemas documents GET /api/analytics/advert-intervals
+// (#245 M2).
+func advertIntervalAnalyticsSchemas() map[string]*openAPISchema {
+	zero := 0
+	count := func(desc string) *openAPISchema {
+		return &openAPISchema{Type: "integer", Minimum: &zero, Description: desc}
+	}
+	str := &openAPISchema{Type: "string"}
+	summary := openAPIRef("AdvertIntervalClassSummary")
+	groups := func(desc string) *openAPISchema {
+		return &openAPISchema{Type: "array", Items: openAPIRef("AdvertIntervalGroup"), Description: desc}
+	}
+	return map[string]*openAPISchema{
+		"AdvertIntervalAnalyticsResponse": {
+			Type:        "object",
+			Description: "Mesh-wide estimated advert intervals (#245 M2), see GET /api/analytics/advert-intervals.",
+			Properties: map[string]*openAPISchema{
+				"window":            {Type: "integer", Description: "Most adverts per class and node estimated from (20, as node detail)."},
+				"min_confidence":    {Type: "string", Enum: []string{advertConfidenceMedium}, Description: "Least confidence an estimate needs to be in buckets."},
+				"nodes":             count("Nodes counted (after the region/area filter)."),
+				"flood":             summary,
+				"zero_hop":          summary,
+				"by_role":           groups("Per normalized role (empty: unknown), largest first."),
+				"by_region":         groups("Per region of the observers that heard the node's sampled adverts, largest first; a node heard in two regions counts in both, one heard by no observer with a region under \"unknown\"."),
+				"regions_truncated": {Type: "boolean", Description: "true when by_region holds only the 50 largest regions."},
+				"outliers":          {Type: "array", Items: openAPIRef("AdvertIntervalOutlier"), Description: "Most frequent first (median_gap_s ascending), at most 50."},
+				"outliers_total":    count("All outlier rows before the limit."),
+				"flood_re_arm":      openAPIRef("AdvertIntervalFloodReArm"),
+				"scan":              openAPIRef("AdvertIntervalScanInfo"),
+			},
+		},
+		"AdvertIntervalClassSummary": {
+			Type:        "object",
+			Description: "One route class: every counted node is in exactly one of estimated, low_confidence, irregular, too_few and not_observed (node detail's status and confidence).",
+			Properties: map[string]*openAPISchema{
+				"estimated":      count("Medium or high confidence estimates; these are in buckets."),
+				"low_confidence": count("Estimates with low confidence."),
+				"irregular":      count("Enough adverts, but no interval fits."),
+				"too_few":        count("Fewer than 3 adverts."),
+				"not_observed":   count("No adverts of the class. For zero-hop: off, or no observer in direct range."),
+				"buckets":        {Type: "array", Items: openAPIRef("AdvertIntervalBucket"), Description: "By interval_s ascending."},
+			},
+		},
+		"AdvertIntervalBucket": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"interval_s": {Type: "integer", Description: "The snapped firmware value, or an estimate outside the settable range rounded to the hour (flood) or minute (zero-hop)."},
+				"snapped":    {Type: "boolean", Description: "false for estimates outside the settable range."},
+				"nodes":      count(""),
+			},
+		},
+		"AdvertIntervalGroup": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"key":      {Type: "string", Description: "Role, or region code (\"unknown\": no observer with a region)."},
+				"nodes":    count(""),
+				"flood":    summary,
+				"zero_hop": summary,
+			},
+		},
+		"AdvertIntervalOutlier": {
+			Type:        "object",
+			Description: "A node advertising more often than the class's shortest timer setting allows (median gap of its sampled adverts under 3 h flood or 60 min zero-hop, less 10 %: manual or scripted adverts, a reboot loop, other firmware), or with a zero-hop estimate at the 2-minute new-install default. One row per node and class.",
+			Properties: map[string]*openAPISchema{
+				"public_key":   str,
+				"name":         str,
+				"role":         str,
+				"regions":      {Type: "array", Items: &openAPISchema{Type: "string"}},
+				"class":        {Type: "string", Enum: []string{advertClassFlood, advertClassZeroHop}},
+				"reason":       {Type: "string", Enum: []string{advertOutlierFloodFast, advertOutlierZeroHopFast, advertOutlierZeroHopDefault}},
+				"median_gap_s": {Type: "integer", Description: "Median gap between the class's sampled adverts, in seconds."},
+				"samples":      count("Adverts the class estimate used."),
+				"interval_s":   {Type: "integer", Nullable: true, Description: "The class estimate (AdvertIntervalEstimate.interval_s)."},
+			},
+		},
+		"AdvertIntervalFloodReArm": {
+			Type:        "object",
+			Description: "A flood advert re-arms the zero-hop timer (MeshCore examples/simple_repeater/MyMesh.cpp:1294-1306), which shapes the zero-hop reading (#247 review F7/N4). Both counts compare medium/high estimates only.",
+			Properties: map[string]*openAPISchema{
+				"zero_hop_paced_by_flood":   count("Zero-hop estimate equal to the flood interval (within 10 %): with zero-hop Z < flood F <= 2Z every zero-hop gap is F, so the setting is between F/2 and F."),
+				"zero_hop_maybe_suppressed": count("Zero-hop not observed and flood interval at most 240 min: with advert.interval >= flood the zero-hop timer never fires."),
+			},
+		},
+		"AdvertIntervalScanInfo": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"generated_at": {Type: "string", Description: "RFC3339 time of the pass the response comes from."},
+				"rows":         count("ADVERT rows the pass read."),
+				"truncated":    {Type: "boolean", Description: "true when the pass stopped at its row cap (1000000, newest first)."},
 			},
 		},
 	}
@@ -1009,6 +1108,9 @@ func componentSchemas() map[string]interface{} {
 		Properties:  map[string]*openAPISchema{"error": {Type: "string"}},
 	}
 	for name, schema := range nodeAdvertRouteSchemas() {
+		schemas[name] = schema
+	}
+	for name, schema := range advertIntervalAnalyticsSchemas() {
 		schemas[name] = schema
 	}
 	for name, schema := range regionsObservedSchemas() {

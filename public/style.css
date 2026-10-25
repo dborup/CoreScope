@@ -3476,6 +3476,17 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .obs-table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .obs-table-scroll .obs-table { min-width: 0; }
 
+/* #245 M2 — Analytics → Advert Intervals (advert-interval-analytics.js) */
+.ai-note { margin: 0 0 12px; font-size: 13px; }
+.ai-dist { display: flex; flex-direction: column; gap: 6px; }
+.ai-dist-row { display: grid; grid-template-columns: minmax(80px, max-content) 1fr minmax(32px, max-content); align-items: center; gap: 8px; font-size: 13px; }
+.ai-dist-bar { display: block; height: 10px; border-radius: 5px; overflow: hidden; background: var(--border); }
+.ai-dist-fill { display: block; height: 100%; background: var(--accent); }
+.ai-dist-count { text-align: right; font-weight: var(--fw-medium); }
+.ai-class-counts { margin-top: 10px; font-size: 12px; }
+.ai-rearm-row { font-size: 13px; margin: 4px 0; }
+/* end #245 M2 */
+
 /* #206 — Analytics/Compare tables scroll wrappers on mobile */
 .analytics-table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .analytics-table-scroll .analytics-table,

@@ -432,6 +432,7 @@ type AnalyticsRecomputeIntervals struct {
 	Roles                time.Duration
 	ObserversClockSkew   time.Duration
 	NodesClockSkew       time.Duration
+	AdvertIntervals      time.Duration // #245 M2
 
 	// PauseWhenIdle is applied to every recomputer (#492,
 	// AnalyticsConfig.PauseWhenIdle).
@@ -515,6 +516,10 @@ func (s *PacketStore) StartAnalyticsRecomputers(defaultInterval time.Duration, o
 		"nodes-clock-skew", pickInterval(ov.NodesClockSkew, defaultInterval),
 		func() interface{} { return s.computeFleetClockSkew() },
 	)
+	s.recompAdvertIntervals = newAnalyticsRecomputer(
+		"advert-intervals", pickInterval(ov.AdvertIntervals, defaultInterval),
+		func() interface{} { return s.computeAdvertIntervalAnalytics() },
+	)
 	// computeAnalyticsRoles reads the nodes-clock-skew snapshot
 	// (GetFleetClockSkew): with pauseWhenIdle a paused clock-skew is
 	// refreshed before roles computes (#492).
@@ -583,6 +588,6 @@ func (s *PacketStore) analyticsRecomputersLocked() []*analyticsRecomputer {
 		s.recompRF, s.recompTopology, s.recompChannels,
 		s.recompDistance, s.recompHashCollisions, s.recompHashSizes,
 		s.recompObserversClockSkew, s.recompNodesClockSkew,
-		s.recompRoles,
+		s.recompRoles, s.recompAdvertIntervals,
 	}
 }
