@@ -1197,6 +1197,7 @@ func (s *PacketStore) Load() error {
 				PathJSON:       obsPJ,
 				Timestamp:      normalizeTimestamp(nullStrVal(obsTimestamp)),
 				wireRoute:      wireRouteFromRawHex(obsRawHex.String),
+				advertEv:       advertEvidenceFromRawHex(obsRawHex.String),
 			}
 
 			// Decode-window: feed the relay-hop indexes, don't store on struct.
@@ -1513,6 +1514,7 @@ func (s *PacketStore) loadChunkWhere(where string, qArgs []interface{}, label st
 				PathJSON:       obsPJ,
 				Timestamp:      normalizeTimestamp(nullStrVal(obsTimestamp)),
 				wireRoute:      wireRouteFromRawHex(obsRawHex.String),
+				advertEv:       advertEvidenceFromRawHex(obsRawHex.String),
 			}
 
 			tx.mergeObservedPathHashSize(obsPJ)
@@ -3644,6 +3646,7 @@ func (s *PacketStore) IngestNewFromDB(sinceID, limit int) ([]map[string]interfac
 				PathJSON:       r.pathJSON,
 				Timestamp:      normalizeTimestamp(r.obsTS),
 				wireRoute:      wireRouteFromRawHex(r.obsRawHex),
+				advertEv:       advertEvidenceFromRawHex(r.obsRawHex),
 			}
 			r.strs.apply(obs)
 
@@ -4020,6 +4023,7 @@ func (s *PacketStore) IngestNewObservations(sinceObsID, limit int) []map[string]
 			// == "". Live-polled observations must not re-introduce the dup.
 			Timestamp: normalizeTimestamp(r.timestamp),
 			wireRoute: wireRouteFromRawHex(r.rawHex),
+			advertEv:  advertEvidenceFromRawHex(r.rawHex),
 		}
 		r.strs.apply(obs)
 
@@ -4642,23 +4646,10 @@ func iataMatchesRegion(iata, regionParam string) bool {
 	return false
 }
 
-// computeNodeHomeRegions returns a pubkey → IATA map deriving each node's
-// HOME region from zero-hop DIRECT adverts. A zero-hop direct advert is the
-// most authoritative location signal because the path byte is set locally on
-// the originating radio and the packet has not been relayed: the observer
-// that hears it is necessarily within direct RF range of the originator.
-//
-// When a node has zero-hop direct adverts heard by observers from multiple
-// regions, the most-frequently-observed region wins (geographic plurality).
-//
-// Caller must hold s.mu (read or write). Returns empty map (not nil) if no
-// observers are loaded or no zero-hop direct adverts have been seen.
-//
-// #804: feeds analytics region-attribution so a multi-byte repeater whose
-// flood adverts get relayed across regions is still attributed to its home.
+// observerIATAs returns observer id → normalised IATA. The observers table
+// is small (≪ packets), so a single DB read is acceptable; resolveRegionObservers
+// does similar. Callers read it before taking s.mu (no SQL under the lock).
 func (s *PacketStore) observerIATAs() map[string]string {
-	// Build observer → IATA map. observers table is small (≪ packets), so a
-	// single DB read here is acceptable; resolveRegionObservers does similar.
 	obsIATA := make(map[string]string, 64)
 	if s.db != nil {
 		if observers, err := s.db.GetObservers(); err == nil {
@@ -4672,67 +4663,95 @@ func (s *PacketStore) observerIATAs() map[string]string {
 	return obsIATA
 }
 
-// computeNodeHomeRegions reads only the locked store and an immutable observer
-// snapshot prepared before taking s.mu.
+// advertPubKey is the originator key in an ADVERT's decoded JSON.
+type advertPubKey struct {
+	PubKey    string `json:"pubKey"`
+	PublicKey string `json:"public_key"`
+}
+
+// homeRegionTally counts one node's direct hearings per region: verified
+// ones (the observation's own frame) and legacy fallback ones (no frame,
+// path_json '[]').
+type homeRegionTally struct {
+	verified, fallback map[string]int
+}
+
+// computeNodeHomeRegions returns a pubkey → IATA map deriving each node's
+// HOME region from ADVERT observations heard directly from the originator's
+// own transmission (#804). Each observation is classified by its own frame
+// (packetpath.ClassifyAdvert, #488): hash count 0 on FLOOD, TRANSPORT_FLOOD
+// or DIRECT is direct; a TRANSPORT_DIRECT {0,0} contact re-share locates the
+// sharing companion, not the advertised node, and never counts. The
+// transmission's first-copy frame does not decide for its other
+// observations, since every copy shares the content hash.
+//
+// An observation without a frame of its own (a legacy row) counts an
+// explicit '[]' path only as fallback: it places a node that has no verified
+// direct hearing anywhere and never outranks one. A missing path is unknown.
+// Among the chosen tier the most-observed region wins, ties go to the
+// lexically smallest code.
+//
+// It reads only the locked store and an immutable observer snapshot prepared
+// before taking s.mu; caller holds s.mu (read or write). Returns an empty
+// map (not nil) if no observers are loaded or no node has direct evidence.
 func (s *PacketStore) computeNodeHomeRegions(obsIATA map[string]string) map[string]string {
 	if len(obsIATA) == 0 {
 		return map[string]string{}
 	}
-
-	// Tally zero-hop direct ADVERT region observations per pubkey.
-	type tally struct {
-		counts map[string]int
-	}
-	per := make(map[string]*tally, 256)
+	per := make(map[string]*homeRegionTally, 256)
 
 	for _, tx := range s.packets {
-		if tx.PayloadType == nil || *tx.PayloadType != PayloadADVERT {
+		if tx.PayloadType == nil || *tx.PayloadType != PayloadADVERT || tx.DecodedJSON == "" {
 			continue
 		}
-		if tx.DecodedJSON == "" {
-			continue
-		}
-		// #594: TRANSPORT_DIRECT carries its path byte at offset 5, behind
-		// the 4 transport-code bytes; PathByte applies the offset.
-		routeType, pathByte, ok := packetpath.PathByte(tx.RawHex)
-		if !ok || (routeType != RouteDirect && routeType != RouteTransportDirect) {
-			continue
-		}
-		if pathByte&0x3F != 0 {
-			continue
-		}
-
-		var d map[string]interface{}
-		if json.Unmarshal([]byte(tx.DecodedJSON), &d) != nil {
-			continue
-		}
-		pk, _ := d["pubKey"].(string)
-		if pk == "" {
-			pk, _ = d["public_key"].(string)
-		}
-		if pk == "" {
-			continue
-		}
-
+		var t *homeRegionTally
 		for _, obs := range tx.Observations {
 			iata := obsIATA[obs.ObserverID]
 			if iata == "" {
 				continue
 			}
-			t := per[pk]
-			if t == nil {
-				t = &tally{counts: map[string]int{}}
-				per[pk] = t
+			h := obs.advertHearing()
+			if h.Kind != packetpath.AdvertDirect {
+				continue
 			}
-			t.counts[iata]++
+			if t == nil {
+				// Decode the key only for adverts with direct evidence.
+				var d advertPubKey
+				if json.Unmarshal([]byte(tx.DecodedJSON), &d) != nil {
+					break
+				}
+				pk := d.PubKey
+				if pk == "" {
+					pk = d.PublicKey
+				}
+				if pk == "" {
+					break
+				}
+				if t = per[pk]; t == nil {
+					t = &homeRegionTally{}
+					per[pk] = t
+				}
+			}
+			counts := &t.fallback
+			if h.Verified {
+				counts = &t.verified
+			}
+			if *counts == nil {
+				*counts = map[string]int{}
+			}
+			(*counts)[iata]++
 		}
 	}
 
 	out := make(map[string]string, len(per))
 	for pk, t := range per {
+		counts := t.verified
+		if len(counts) == 0 {
+			counts = t.fallback
+		}
 		var bestIATA string
 		bestCount := 0
-		for iata, n := range t.counts {
+		for iata, n := range counts {
 			if n > bestCount || (n == bestCount && iata < bestIATA) {
 				bestCount = n
 				bestIATA = iata

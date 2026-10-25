@@ -690,6 +690,7 @@ func (s *PacketStore) scanAndMergeChunk(rows *sql.Rows, relayPM *prefixMap, cold
 				// and its header route feeds wireRoute (#76).
 				Timestamp: normalizeTimestamp(nullStrVal(obsTimestamp)),
 				wireRoute: wireRouteFromRawHex(obsRawHex.String),
+				advertEv:  advertEvidenceFromRawHex(obsRawHex.String),
 			}
 
 			// Same relay-hop indexing as Load and live ingest (see
