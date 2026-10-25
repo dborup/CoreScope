@@ -3,7 +3,7 @@
 // ingestor and is not built into any image.
 //
 //	corescope-anomaly export -db PATH [-immutable] -start T -end T -settle D -max-rows N -out FILE
-//	    [-backlog-silence D -backlog-span D]
+//	    [-backlog-silence D -backlog-span D | -late-window D -late-min-rows N -late-share F -late-gap D]
 //	corescope-anomaly replay -config FILE -input FILE|- -start T -end T -max-line-bytes N [-out FILE]
 //	corescope-anomaly keys -input FILE|- -payload-type N -top N [-exclude-channels LIST] -max-keys N -max-line-bytes N [-out FILE]
 //	corescope-anomaly inject -spec FILE -input FILE|- -out FILE -labels FILE -max-injected N -max-line-bytes N
@@ -38,7 +38,7 @@ import (
 
 const usage = `usage:
   corescope-anomaly export -db PATH [-immutable] -start RFC3339 -end RFC3339 -settle DURATION -max-rows N -out FILE
-      [-backlog-silence DURATION -backlog-span DURATION]
+      [-backlog-silence DURATION -backlog-span DURATION | -late-window DURATION -late-min-rows N -late-share F -late-gap DURATION]
   corescope-anomaly replay -config FILE -input FILE|- -start RFC3339 -end RFC3339 -max-line-bytes N [-out FILE]
   corescope-anomaly keys -input FILE|- -payload-type N -top N [-exclude-channels LIST] -max-keys N -max-line-bytes N [-out FILE]
   corescope-anomaly inject -spec FILE -input FILE|- -out FILE -labels FILE -max-injected N -max-line-bytes N

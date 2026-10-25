@@ -104,11 +104,15 @@ func backlogScenario() []blTx {
 	return txs
 }
 
-func buildBacklogFixture(t *testing.T) *fixtureDB {
+func buildBacklogFixture(t *testing.T) *fixtureDB { return buildFixtureOf(t, backlogScenario()) }
+
+// buildFixtureOf inserts each transmission as a one-hop flood GRP_TXT or
+// ADVERT with its observations.
+func buildFixtureOf(t *testing.T, txs []blTx) *fixtureDB {
 	f := newFixtureDB(t, false)
 	grp := grpPayload(0x0a, 20)
 	adv := make([]byte, 100)
-	for i, x := range backlogScenario() {
+	for i, x := range txs {
 		payload := grp
 		if x.pt == 4 {
 			payload = adv
