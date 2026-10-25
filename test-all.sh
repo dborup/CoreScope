@@ -67,6 +67,7 @@ run test-page-title-563.js
 run test-node-adverts.js
 run test-heard-by.js
 run test-issue-262-mymesh-observer.js
+run test-issue-304-my-mesh-metrics.js
 run test-issue-254-affinity-debug-toggle.js
 run test-issue-258-column-widths.js
 run test-issue-259-nodes-esc-listener.js

@@ -96,6 +96,14 @@ const server = http.createServer((req, res) => {
         healthThresholds: { infraDegradedMs: 2 * HOUR, infraSilentMs: 6 * HOUR, nodeDegradedMs: HOUR, nodeSilentMs: 24 * HOUR },
       } }));
       const expected = f => mode.custom ? f.custom : f.want;
+      // #304: the badge now names the evidence behind it. A fixture with no
+      // own advert — the confirmed-relay case and the legacy directory
+      // fallback — can only be attributed, so its label carries the suffix;
+      // a fixture with no identity-safe activity at all has nothing to
+      // attribute and keeps the plain label.
+      const STATUS_LABEL = { healthy: 'Active', degraded: 'Degraded', silent: 'Silent' };
+      const expectedLabel = f => STATUS_LABEL[expected(f)] +
+        (!f.unknown && !f.invalid && (f.relay || f.legacy) ? ' · relay-attributed' : '');
       await page.goto(origin + '/#/home', { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(n => document.querySelectorAll('#myNodesGrid .my-node-card').length === n, fixtures.length);
       assert.equal(await page.locator('html').getAttribute('data-theme'), mode.theme, 'requested theme is applied'); checks++;
@@ -107,7 +115,9 @@ const server = http.createServer((req, res) => {
         await card.locator('.mnc-name').click();
         const banner = page.locator('#homeHealth .health-banner');
         await page.waitForFunction(name => document.querySelector('#homeHealth .health-banner')?.textContent.includes(name), f.name);
-        assert.equal(await banner.locator('[aria-label]').first().getAttribute('aria-label'), expected(f), f.name + ': health detail'); checks++;
+        assert.equal(await banner.locator('[aria-label]').first().getAttribute('aria-label'), expectedLabel(f), f.name + ': health detail'); checks++;
+        assert.ok((await card.locator('.mnc-status .ph-icon use').getAttribute('href')).endsWith(
+          !f.unknown && !f.invalid && (f.relay || f.legacy) ? '#ph-circle' : '#ph-circle-fill'), f.name + ': evidence glyph'); checks++;
         if (f.unknown || f.invalid) {
           assert.match(await banner.innerText(), /No confirmed activity in the current window/); checks++;
         }

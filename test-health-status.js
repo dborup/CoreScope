@@ -6,6 +6,10 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const source = fs.readFileSync(path.join(__dirname, 'public/roles.js'), 'utf8');
+// #304: the My Mesh and Home-health decision blocks now go through the
+// shared evidence helper, which reads these very thresholds. It is loaded
+// into the SAME context, so the blocks below still execute the real rules.
+const activitySource = fs.readFileSync(path.join(__dirname, 'public/my-mesh-activity.js'), 'utf8');
 const HOUR = 3600000;
 const NOW = Date.UTC(2026, 9, 24, 12);
 let passed = 0;
@@ -17,6 +21,7 @@ async function load(config = {}) {
   };
   ctx.window = ctx;
   vm.runInNewContext(source, ctx);
+  vm.runInNewContext(activitySource, ctx);
   await ctx.MeshConfigReady;
   return ctx;
 }
@@ -78,17 +83,17 @@ function check(label, fn) {
 
   // Execute the actual decision blocks, not hand-copied equivalents. Browser
   // tests cover their surrounding asynchronous/DOM wiring and visible labels.
-  const callArgs = ['node', 'stats', 'h', 'n', 'getHealthLastHeard', 'getHealthStatus'];
+  const callArgs = ['node', 'stats', 'h', 'n', 'getHealthLastHeard', 'getHealthStatus', 'MyMeshActivity'];
   function decision(file, start, end, returned) {
     const src = fs.readFileSync(path.join(__dirname, 'public', file), 'utf8');
     const from = src.indexOf(start), to = src.indexOf(end, from);
     assert.ok(from >= 0 && to > from, 'production decision block exists in ' + file);
     const fn = new Function(...callArgs, 'timeAgo', src.slice(from, to) + '\nreturn ' + returned + ';');
-    return (...values) => fn(...values, () => 'synthetic age');
+    return (...values) => fn(...values, r.MyMeshActivity, () => 'synthetic age');
   }
   const blocks = [
-    ['My Mesh', decision('home.js', 'const heardAt = getHealthLastHeard(node, stats);', 'const statusCls', 'status')],
-    ['Home health', decision('home.js', 'const heardAt = getHealthLastHeard(node, stats);\n      const status', 'const snrVal', 'status')],
+    ['My Mesh', decision('home.js', 'const ev = MyMeshActivity.statusEvidence({ node, stats });', 'const statusDot', 'status')],
+    ['Home health', decision('home.js', 'const ev = MyMeshActivity.statusEvidence({ node, stats });\n      const heardAt', 'const snr = MyMeshActivity.snr', 'status')],
     ['Favorites', decision('app.js', 'const heardAt = getHealthLastHeard(h.node, h.stats);', 'return \'<a href=', 'statusLabel')],
     ['Live', decision('live.js', 'const status = getHealthStatus(', 'let html =', 'status')],
   ];

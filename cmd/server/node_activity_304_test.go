@@ -347,3 +347,156 @@ func BenchmarkNodeActivity24h30K(b *testing.B) {
 		}
 	}
 }
+
+// TestNodeActivityPrevious24hWindowAndCoverage covers the #304 traffic
+// requirement: a previous-period comparison needs a like-for-like window and
+// must never read a missing history as a quiet one. The previous window is
+// the 24 hours immediately before the rolling window, and it is Complete only
+// when the proven coverage reaches its own start.
+func TestNodeActivityPrevious24hWindowAndCoverage(t *testing.T) {
+	now := time.Date(2026, 10, 7, 13, 17, 0, 0, time.UTC)
+	start := now.Add(-24 * time.Hour)
+	prevStart := start.Add(-24 * time.Hour)
+
+	full := newNodeActivity24h(now, prevStart)
+	if full.Previous.WindowStart != prevStart.Format(time.RFC3339Nano) || full.Previous.WindowEnd != full.WindowStart {
+		t.Fatalf("previous window must abut the rolling window: %+v", full.Previous)
+	}
+	if !full.Previous.Complete || !full.Complete {
+		t.Fatalf("coverage back to the previous window start proves both windows: %+v", full)
+	}
+
+	// One nanosecond short of the previous window start: the current window
+	// stays complete, the previous one cannot be compared.
+	short := newNodeActivity24h(now, prevStart.Add(time.Nanosecond))
+	if !short.Complete || short.Previous.Complete {
+		t.Fatalf("coverage after the previous start must not claim it: %+v", short)
+	}
+
+	// 24h coverage only: the previous window is unknown, not zero.
+	cur := newNodeActivity24h(now, start)
+	if !cur.Complete || cur.Previous.Complete || cur.Previous.Count != 0 {
+		t.Fatalf("24h coverage must leave the previous window incomparable: %+v", cur)
+	}
+
+	// No coverage evidence at all: neither window is complete.
+	if unknown := newNodeActivity24h(now, time.Time{}); unknown.Complete || unknown.Previous.Complete {
+		t.Fatalf("unknown coverage must not complete either window: %+v", unknown)
+	}
+}
+
+// TestNodeActivityPrevious24hCountsOnlyItsOwnWindow pins the counting
+// semantics and the boundaries of the two windows, including the cheap
+// string pre-filter: a transmission in the previous window must reach
+// Previous.Count and must never land in an hourly bucket.
+func TestNodeActivityPrevious24hCountsOnlyItsOwnWindow(t *testing.T) {
+	now := time.Date(2026, 10, 7, 13, 17, 0, 500_000_000, time.UTC) // fractional now
+	start := now.Add(-24 * time.Hour)
+	prevStart := start.Add(-24 * time.Hour)
+	a := newNodeActivity24h(now, prevStart)
+
+	for _, ts := range []time.Time{
+		prevStart,                   // inclusive previous start
+		prevStart.Add(time.Hour),    // inside previous
+		start.Add(-time.Nanosecond), // last instant of previous
+	} {
+		a.add(&StoreTx{FirstSeen: ts.Format(time.RFC3339Nano)})
+	}
+	a.add(&StoreTx{FirstSeen: prevStart.Add(-time.Nanosecond).Format(time.RFC3339Nano)}) // before both
+	a.add(&StoreTx{FirstSeen: start.Format(time.RFC3339Nano)})                           // first bucket
+	a.add(&StoreTx{FirstSeen: now.Add(-time.Minute).Format(time.RFC3339Nano)})           // last bucket
+	a.add(&StoreTx{FirstSeen: now.Format(time.RFC3339Nano)})                             // exclusive end
+	a.add(&StoreTx{FirstSeen: "not a timestamp"})
+
+	if a.Previous.Count != 3 {
+		t.Fatalf("previous count=%d, want 3", a.Previous.Count)
+	}
+	if a.Buckets[0].Count != 1 || a.Buckets[23].Count != 1 {
+		t.Fatalf("buckets[0]=%d [23]=%d, want 1 each", a.Buckets[0].Count, a.Buckets[23].Count)
+	}
+	total := 0
+	for _, b := range a.Buckets {
+		total += b.Count
+	}
+	if total != 2 {
+		t.Fatalf("rolling window total=%d, want 2 (previous-window rows must not be bucketed)", total)
+	}
+
+	// A stamp inside the previous start's own second survives the string
+	// pre-filter, which compares against a bound truncated to whole seconds
+	// (the same fraction-width trap as #351 F6), and the exact bounds check
+	// then places it. 100ms after a .5s window start is in the window;
+	// 100ms before it is in neither.
+	second := newNodeActivity24h(now, prevStart)
+	second.add(&StoreTx{FirstSeen: prevStart.Add(100 * time.Millisecond).Format(time.RFC3339Nano)})
+	second.add(&StoreTx{FirstSeen: prevStart.Add(-100 * time.Millisecond).Format(time.RFC3339Nano)})
+	if second.Previous.Count != 1 {
+		t.Fatalf("previous boundary second mishandled: %+v", second.Previous)
+	}
+}
+
+// TestNodeHealthPrevious24hThroughJSON proves the comparison baseline reaches
+// the client through the real endpoint payload, with the node's own
+// transmissions split across the two windows.
+func TestNodeHealthPrevious24hThroughJSON(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	const pubkey = "aabbccdd11223355"
+	now := time.Date(2026, 10, 7, 13, 17, 0, 0, time.UTC)
+	start := now.Add(-24 * time.Hour)
+	prevStart := start.Add(-24 * time.Hour)
+	packets := []*StoreTx{
+		{ID: 1, FirstSeen: prevStart.Format(time.RFC3339), ObservationCount: 2},
+		{ID: 2, FirstSeen: prevStart.Add(3 * time.Hour).Format(time.RFC3339), ObservationCount: 1},
+		{ID: 3, FirstSeen: start.Add(time.Hour).Format(time.RFC3339), ObservationCount: 1},
+		{ID: 4, FirstSeen: prevStart.Add(-time.Hour).Format(time.RFC3339), ObservationCount: 1},
+	}
+	srv.store.mu.Lock()
+	srv.store.byNode[pubkey] = packets
+	srv.store.loaded = true
+	srv.store.retentionHours = 168
+	srv.store.oldestLoaded = prevStart.Add(-2 * time.Hour).Format(time.RFC3339)
+	srv.store.retainedHistoryFrom = prevStart.Add(-2 * time.Hour)
+	srv.store.packets = []*StoreTx{{ID: 100, FirstSeen: srv.store.oldestLoaded}}
+	srv.store.backgroundLoadDone.Store(true)
+	srv.store.mu.Unlock()
+
+	health, err := srv.store.GetNodeHealth(pubkey, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(health)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Activity24h struct {
+			Complete bool               `json:"complete"`
+			Buckets  []NodeActivityHour `json:"buckets"`
+			Previous struct {
+				WindowStart string `json:"windowStart"`
+				WindowEnd   string `json:"windowEnd"`
+				Count       int    `json:"count"`
+				Complete    bool   `json:"complete"`
+			} `json:"previous"`
+		} `json:"activity24h"`
+	}
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Activity24h.Complete || !body.Activity24h.Previous.Complete {
+		t.Fatalf("both windows must be complete: %s", encoded)
+	}
+	if body.Activity24h.Previous.Count != 2 {
+		t.Fatalf("previous count=%d, want 2", body.Activity24h.Previous.Count)
+	}
+	if body.Activity24h.Previous.WindowEnd != body.Activity24h.Buckets[0].Start {
+		t.Fatalf("previous window must end where the rolling window starts: %s", encoded)
+	}
+	rolling := 0
+	for _, b := range body.Activity24h.Buckets {
+		rolling += b.Count
+	}
+	if rolling != 1 {
+		t.Fatalf("rolling total=%d, want 1", rolling)
+	}
+}
