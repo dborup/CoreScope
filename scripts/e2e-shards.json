@@ -34,6 +34,14 @@
       "measurementNote": "New suite; fresh and SPA ?region= links across five views, listener counts, back/forward, the hash ?region= after a control change on six views, and ?region=All. About 2.5 minutes locally; no CI duration measured yet."
     },
     {
+      "file": "test-issue-560-role-breakdown-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #560 Analytics -> Nodes Role Breakdown computed from the filtered rows, not the server's global /api/nodes counts -- an MRY region filter's role-breakdown sum must equal the Network Status total, and must differ from the unfiltered repeaters count. About 5s locally; no CI duration measured yet; assigned to shard 2, the lowest measured total."
+    },
+    {
       "file": "test-page-lifecycle-2248-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },

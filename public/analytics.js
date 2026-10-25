@@ -2587,7 +2587,31 @@
     }
   }
 
+  // #560 — mirrors the role set and pluralized keys of GetAllRoleCounts
+  // (cmd/server/db.go), but tallies the rows the caller already loaded
+  // instead of querying the whole `nodes` table, so the breakdown describes
+  // the same region/area-filtered population as the Network Status counts
+  // rendered above it. Single bounded O(n) pass; no network call. Roles
+  // outside the known set (including "observer" and missing/unrecognized
+  // values) are not tallied, matching GetAllRoleCounts' existing omission of
+  // them from the breakdown today.
+  const NODE_ROLE_BREAKDOWN_KEYS = { repeater: 'repeaters', room: 'rooms', companion: 'companions', sensor: 'sensors' };
+  function nodeRoleBreakdownCounts(nodes) {
+    const counts = { repeaters: 0, rooms: 0, companions: 0, sensors: 0 };
+    (nodes || []).forEach(n => {
+      const key = NODE_ROLE_BREAKDOWN_KEYS[n && n.role];
+      if (key) counts[key]++;
+    });
+    return counts;
+  }
+
+  // Bumped on every call and checked after the await below so a late
+  // response from a superseded filter/tab change can never overwrite a
+  // newer render (mirrors the _channelRenderGen / _distanceGen pattern
+  // already used elsewhere in this file).
+  let _nodesTabGen = 0;
   async function renderNodesTab(el) {
+    const myGen = ++_nodesTabGen;
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading node analytics…</div>';
     try {
       const rq = RegionFilter.regionQueryString() + AreaFilter.areaQueryString();
@@ -2595,6 +2619,7 @@
         fetchAllNodes('&sortBy=lastSeen' + rq, { ttl: CLIENT_TTL.nodeList }),
         api('/nodes/bulk-health?limit=50' + rq, { ttl: CLIENT_TTL.analyticsRF })
       ]);
+      if (myGen !== _nodesTabGen) return; // superseded by a newer filter/tab change
       const nodes = nodesResp.nodes || nodesResp;
       const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
       const myKeys = new Set(myNodes.map(n => n.pubkey));
@@ -2621,7 +2646,7 @@
         else silent++;
       });
       const totalNodes = nodesResp.total || nodes.length;
-      const roleCounts = nodesResp.counts || {};
+      const roleCounts = nodeRoleBreakdownCounts(nodes);
 
       function nodeLink(n) {
         return `<a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="analytics-link">${esc(n.name || n.public_key.slice(0, 12))}</a>`;
@@ -2742,6 +2767,7 @@
           </table>
         </div>`;
     } catch (e) {
+      if (myGen !== _nodesTabGen) return;
       el.innerHTML = `<div style="padding:40px;text-align:center;color:#ff6b6b">Failed to load node analytics: ${esc(e.message)}</div>`;
     }
   }
@@ -3403,6 +3429,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(
     window._analyticsHopDepthTimeSeriesChartHtml = hopDepthTimeSeriesChartHtml;
     window._analyticsHopDepthLookupByPubkey = hopDepthLookupByPubkey;
     window._analyticsBridgeRepeaterPubkeySet = bridgeRepeaterPubkeySet;
+    window._analyticsNodeRoleBreakdownCounts = nodeRoleBreakdownCounts;
+    window._analyticsRenderNodesTab = renderNodesTab;
   }
 
   // ─── Neighbor Graph Tab ─────────────────────────────────────────────────────
