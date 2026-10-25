@@ -10,8 +10,19 @@ const path = require('path');
 const vm = require('vm');
 
 const src = fs.readFileSync(path.join(__dirname, 'public', 'node-adverts.js'), 'utf8');
-const ctx = { window: {}, console };
+const noop = () => {};
+// app.js comes first, as in index.html: the hash-size badge reads the frame's
+// path byte through its rawPathLenByte (#594). These stubs only let it load.
+const ctx = {
+  window: { addEventListener: noop }, console, addEventListener: noop, location: { hash: '' },
+  fetch: () => Promise.resolve({ json: () => ({}) }), setTimeout: noop, clearTimeout: noop, setInterval: noop, clearInterval: noop,
+  document: { readyState: 'complete', addEventListener: noop, getElementById: () => null, querySelector: () => null, querySelectorAll: () => [], createElement: () => ({}), head: { appendChild: noop } },
+  localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+};
 vm.createContext(ctx);
+for (const f of ['payload-labels.js', 'app.js']) {
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', f), 'utf8'), ctx, { filename: f });
+}
 vm.runInContext(src, ctx, { filename: 'node-adverts.js' });
 const NA = ctx.window.NodeAdverts;
 
@@ -248,6 +259,21 @@ test('existing badges and signal readouts are kept', () => {
   assert.ok(full.includes('node-activity-item'));
   const pane = NA.render(d, opts({ variant: 'pane', roleColor: 'var(--role-repeater)' }));
   assert.ok(pane.includes('advert-entry') && pane.includes('advert-dot') && pane.includes('badge-obs'));
+});
+
+// #594 (port of upstream Kpa-clawbot/CoreScope#2234): the badge reads path_len
+// behind the 4 transport-code bytes on routes 0/3 (firmware
+// docs/packet_format.md, src/Packet.cpp Packet::readFrom), not at byte 1.
+test('hash-size badge reads the path byte at the offset of the frame route', () => {
+  const badges = (raw) => {
+    const d = detail({ recentAdverts: [row(9, 'flood', { raw_hex: raw })] });
+    return (panel(NA.render(d, opts({ hashSizeInconsistent: true })), 'all').match(/advert-hs-badge hs-\d/g) || []).join(',');
+  };
+  assert.strictEqual(badges('1141EEFFDEADBEEF'), 'advert-hs-badge hs-2', 'route 1: path byte 0x41 at offset 1');
+  assert.strictEqual(badges('10AABBCCDD41EEFFDEADBEEF'), 'advert-hs-badge hs-2', 'route 0: path byte 0x41 at offset 5, not code byte 0xAA');
+  assert.strictEqual(badges('1201EEDEADBEEF'), 'advert-hs-badge hs-1', 'route 2: path byte 0x01 at offset 1');
+  assert.strictEqual(badges('1301BBCCDD00DEADBEEF'), '', 'route 3 zero-hop: path byte 0x00 at offset 5, not code byte 0x01');
+  assert.strictEqual(badges('13'), '', 'no path byte, no badge');
 });
 
 // PR #97 review P3: every node-controlled or caller-supplied value that
