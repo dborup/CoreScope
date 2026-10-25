@@ -91,6 +91,7 @@ func main() {
 		publicDir     string
 		pollMs        int
 		wsHistoryFile string
+		regionDryRun  bool
 	)
 
 	flag.StringVar(&configDir, "config-dir", ".", "Directory containing config.json")
@@ -99,6 +100,7 @@ func main() {
 	flag.StringVar(&publicDir, "public", "public", "Directory to serve static files from")
 	flag.IntVar(&pollMs, "poll-ms", 1000, "SQLite poll interval for WebSocket broadcast (ms)")
 	flag.StringVar(&wsHistoryFile, "ws-history-file", "", "WebSocket history file (default: beside packet database; off disables persistence)")
+	flag.BoolVar(&regionDryRun, "region-placement-dryrun", false, "Print the read-only #488 region placement report for -db and the regionPlacement config, then exit")
 	flag.Parse()
 
 	// Load config
@@ -164,6 +166,12 @@ func main() {
 
 	// Resolve DB path
 	resolvedDB := cfg.ResolveDBPath(configDir)
+	if regionDryRun {
+		if err := runRegionPlacementDryRun(resolvedDB, cfg.RegionPlacementSettings(), os.Stdout); err != nil {
+			log.Fatalf("[region-placement] dry-run: %v", err)
+		}
+		return
+	}
 	log.Printf("[config] port=%d db=%s public=%s", cfg.Port, resolvedDB, publicDir)
 	if len(cfg.NodeBlacklist) > 0 {
 		log.Printf("[config] nodeBlacklist: %d node(s) will be hidden from API", len(cfg.NodeBlacklist))
@@ -178,6 +186,12 @@ func main() {
 	database, err := OpenDB(resolvedDB)
 	if err != nil {
 		log.Fatalf("[db] failed to open %s: %v", resolvedDB, err)
+	}
+	database.regionPlacement = cfg.RegionPlacementSettings()
+	if database.regionPlacement.Mode != regionModeHeard {
+		log.Printf("[config] regionPlacement: mode=%s maxHops=%d lifetime=%v persistSpan=%v",
+			database.regionPlacement.Mode, database.regionPlacement.Params.MaxHops,
+			database.regionPlacement.Params.Lifetime, database.regionPlacement.Params.PersistSpan)
 	}
 	var dbCloseOnce sync.Once
 	dbClose := func() error {

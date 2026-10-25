@@ -184,12 +184,13 @@ func TestNodeHomeRegions488_VerifiedPluralityAndTie(t *testing.T) {
 
 // Every path that materialises an observation records its frame's advert
 // class: cold Load, chunked load, loadChunk, IngestNewFromDB,
-// IngestNewObservations. advertEv is 0 without a frame, else 1+kind.
+// IngestNewObservations. advertEv.code is 0 without a frame, else 1+kind;
+// advertEv.hops keeps a relayed frame's hop count (#488 M2, review N2).
 func TestAdvertEvidence_SetOnEveryObservationPath_488(t *testing.T) {
-	snapshot := func(s *PacketStore) map[int]uint8 {
+	snapshot := func(s *PacketStore) map[int]advertEvidence {
 		s.mu.RLock()
 		defer s.mu.RUnlock()
-		out := map[int]uint8{}
+		out := map[int]advertEvidence{}
 		for _, tx := range s.packets {
 			for _, o := range tx.Observations {
 				out[o.ID] = o.advertEv
@@ -197,7 +198,7 @@ func TestAdvertEvidence_SetOnEveryObservationPath_488(t *testing.T) {
 		}
 		return out
 	}
-	ev := func(k packetpath.AdvertKind) uint8 { return uint8(k) + 1 }
+	ev := func(k packetpath.AdvertKind) advertEvidence { return advertEvidence{code: uint8(k) + 1} }
 	db := routeMaskServerDB(t)
 	now := time.Now().UTC()
 	fs := now.Add(-time.Hour).Format(time.RFC3339)
@@ -209,7 +210,10 @@ func TestAdvertEvidence_SetOnEveryObservationPath_488(t *testing.T) {
 	rmInsertObs(t, db, 3, 2, 1, `["A1"]`, "1101a1aabb", ts)
 	rmInsertTx(t, db, 3, "legacy", 2, nil, fs)
 	rmInsertObs(t, db, 4, 3, 2, `[]`, "", ts)
-	want := map[int]uint8{1: ev(packetpath.AdvertDirect), 2: ev(packetpath.AdvertShared), 3: ev(packetpath.AdvertRelayed), 4: 0}
+	relayed := func(hops uint8) advertEvidence {
+		return advertEvidence{code: uint8(packetpath.AdvertRelayed) + 1, hops: hops}
+	}
+	want := map[int]advertEvidence{1: ev(packetpath.AdvertDirect), 2: ev(packetpath.AdvertShared), 3: relayed(1), 4: {}}
 
 	load := NewPacketStore(db, nil)
 	if err := load.Load(); err != nil {
@@ -234,8 +238,9 @@ func TestAdvertEvidence_SetOnEveryObservationPath_488(t *testing.T) {
 	load.IngestNewFromDB(3, 100)
 	rmInsertObs(t, db, 6, 2, 2, `["A1","A2"]`, "1202a1a2aabb", live.Unix())
 	rmInsertObs(t, db, 7, 2, 1, `[]`, "", live.Unix())
+	rmInsertObs(t, db, 8, 2, 2, `["A1","A2","A3"]`, "1103a1a2a3aabb", live.Unix())
 	load.IngestNewObservations(5, 100)
-	want[5], want[6], want[7] = ev(packetpath.AdvertDirect), ev(packetpath.AdvertUnknown), 0
+	want[5], want[6], want[7], want[8] = ev(packetpath.AdvertDirect), ev(packetpath.AdvertUnknown), advertEvidence{}, relayed(3)
 	if got := snapshot(load); !reflect.DeepEqual(got, want) {
 		t.Fatalf("live ingest: advertEv %v, want %v", got, want)
 	}

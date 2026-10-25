@@ -121,10 +121,10 @@ type StoreObs struct {
 	// wireRoute, so StoreObs stays 168 bytes (#490).
 	sharedStrs uint8
 	// advertEv is what this observation's own frame says about an ADVERT's
-	// originator (packetpath.ClassifyAdvertFrame, #488): 1 + AdvertKind, or
-	// 0 when no frame was stored (a legacy row, see advertHearing). It
-	// takes one more padding byte, so StoreObs stays 168 bytes.
-	advertEv uint8
+	// originator (packetpath.ClassifyAdvertFrame, #488), see
+	// advertEvidence. It takes two more padding bytes, so StoreObs stays
+	// 168 bytes.
+	advertEv advertEvidence
 }
 
 // tsCache holds tsCacheNotParsed until the first ParsedTime call, then one
@@ -9505,10 +9505,13 @@ func (s *PacketStore) computeAnalyticsHashSizes(region, area string) map[string]
 	allNodes, pm := s.getCachedNodesAndPM()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	// #804: derive each node's HOME region from zero-hop direct adverts (the
-	// most authoritative location signal — those packets cannot have been
-	// relayed). When non-empty, multi-byte node attribution prefers this
-	// over observer-region. Falls back to observer-region when unknown.
+	// #804: derive each node's HOME region from ADVERT observations heard
+	// directly from the originator's own transmission, classified by each
+	// observation's own frame (#488): zero-hop FLOOD, TRANSPORT_FLOOD and
+	// DIRECT adverts count; TRANSPORT_DIRECT {0,0} contact re-shares never
+	// do; a legacy '[]' row without a frame is fallback only. When
+	// non-empty, multi-byte node attribution prefers this over
+	// observer-region. Falls back to observer-region when unknown.
 	nodeHomeRegion := s.computeNodeHomeRegions(obsIATA)
 	attributionMethod := "observer"
 	if region != "" && len(nodeHomeRegion) > 0 {

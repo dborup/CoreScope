@@ -268,9 +268,14 @@ func (db *DB) refreshNodeRegion(key string, codes []string) (*nodeRegionEntry, e
 
 	var e *nodeRegionEntry
 	var err error
-	if prev == nil || prev.rebuildDue() {
+	switch {
+	case db.regionPlacement.Mode == regionModePlaced:
+		// #488 M2: cut from the global placement aggregate, which keeps its
+		// own watermark and rebuild clock (region_placement.go).
+		e, err = db.placedNodeRegion(ctx, codes)
+	case prev == nil || prev.rebuildDue():
 		e, err = db.buildNodeRegion(ctx, key, codes)
-	} else {
+	default:
 		e, err = db.extendNodeRegion(ctx, key, codes, prev)
 	}
 	if err != nil {
