@@ -63,6 +63,14 @@ func newReachIntegrationDB(t *testing.T, obsPath string) (*DB, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return seedReachIntegrationDB(t, conn, obsPath)
+}
+
+// seedReachIntegrationDB creates and fills the schema above on an
+// already-open connection, so a test can supply one on a fault-injecting
+// driver instead of the plain one (#593 F3).
+func seedReachIntegrationDB(t *testing.T, conn *sql.DB, obsPath string) (*DB, string) {
+	t.Helper()
 	n := pk64("01fa") // target — unique 2-byte token "01fa"
 	a := pk64("aabb") // predecessor → we hear A
 	b := pk64("ccdd") // successor → B hears us

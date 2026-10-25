@@ -630,9 +630,9 @@ func TestGetAllNodes_FirstSeenSchemaFallback(t *testing.T) {
 	defer db.conn.Close()
 
 	store := NewPacketStore(db, nil)
-	nodes := store.getAllNodes()
-	if len(nodes) != 1 {
-		t.Fatalf("expected 1 row from fallback rung, got %d", len(nodes))
+	nodes, ok := store.getAllNodes()
+	if !ok || len(nodes) != 1 {
+		t.Fatalf("expected 1 row from fallback rung, got %d (ok=%v)", len(nodes), ok)
 	}
 	n := nodes[0]
 	if n.PublicKey != "BBBB2222" {
