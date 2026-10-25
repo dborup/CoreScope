@@ -364,6 +364,12 @@ jobs:
       - name: ShellCheck decode-backfill measurement scripts (issue #380)
         run: shellcheck scripts/decode-backfill-estimate.sh scripts/test-decode-backfill-estimate.sh
 
+      - name: Resolved-path route-repair measurement script unit tests (issue #289)
+        run: bash scripts/test-resolved-path-route-repair-estimate.sh
+
+      - name: ShellCheck resolved-path route-repair measurement scripts (issue #289)
+        run: shellcheck scripts/resolved-path-route-repair-estimate.sh scripts/test-resolved-path-route-repair-estimate.sh
+
       - name: QA blacklist script unit tests (issues #1977, #83)
         run: bash qa/scripts/test-blacklist-sql.sh
 

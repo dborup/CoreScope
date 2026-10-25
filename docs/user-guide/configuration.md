@@ -161,6 +161,26 @@ Once per ingestor start, observations stored with `resolved_path = NULL` are res
 | `resolvedPathBackfill.batchSize` | `500` | Rows per batch; `0` means the default |
 | `resolvedPathBackfill.pauseMs` | `250` | Milliseconds between batches; `0` means the default, so the pause cannot be turned off (minimum `1`) |
 
+### Resolved-path route-type repair (ingestor, opt-in)
+
+A one-off repair of `observations.resolved_path` rows that the batch readers wrote before [#308](https://github.com/Kpa-clawbot/CoreScope/issues/308) using the **transmission's first** route type instead of each reception's own. DIRECT and FLOOD receptions of the same payload share one `transmissions` row, so a reception carrying the other route family was resolved with the wrong rule: a DIRECT reception under a FLOOD transmission was anchored on the observer and stored a relay the observer never heard the packet from, and a FLOOD reception under a DIRECT transmission got no anchor and stayed `NULL`.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `resolvedPathRouteRepair.enabled` | `false` | Run the one-off repair. Off unless set: the pass rewrites values in place. |
+
+> **Take a database snapshot before enabling this.** The rewrite is in place and
+> the previous value is kept nowhere. A row the pass clears back to `NULL` sits
+> below the resolved-path backfill's watermark, which never revisits a row it has
+> passed, so **a clear is permanent** without that snapshot. Setting `enabled`
+> back to `false` stops any further repair but undoes nothing.
+
+**Measure first.** `scripts/resolved-path-route-repair-estimate.sh /path/to/snapshot.db` prints the candidate counts, split by bug direction, and the estimated cost of one pass. It is read-only (the database is opened through an `immutable=1` URI) but should still be pointed at a snapshot copy rather than a live file.
+
+The pass walks `observations.id` from 0 to the newest row at its start — which is how it reaches `NULL` rows below the backfill's watermark — in bounded windows, resolving outside any lock and committing each window's rewrites together with the new watermark. It runs once per database, recorded in `_async_migrations`, and resumes from its watermark after a crash or a restart. A row is rewritten only when the route type changes the resolved answer **and** the stored value is exactly what the pre-#308 rule produces, so values written by live ingest (which has always used the frame's own route type) are read and left alone. Progress and the repaired/cleared counts are in the `resolved_path_route_repair_state` table. The server sees the rewritten values after its next restart.
+
+A recorded migration is never re-run. An ingestor rolled back to a pre-#308 build writes new wrong rows that this pass will not revisit; re-arming means clearing its `_async_migrations` row by hand.
+
 ## Channel decryption
 
 | Field | Description |

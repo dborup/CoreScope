@@ -532,6 +532,16 @@ func main() {
 		defer stopResolvedPathBackfill()
 	}
 
+	// #289 M2: repair resolved_path rows the pre-#308 backfill wrote with the
+	// transmission's first route type, once per database. Opt-in: the pass
+	// overwrites values in place and keeps no copy, so it waits for
+	// resolvedPathRouteRepair.enabled (PR #590 review F3). Same placement as
+	// the backfill above (it needs the same primed index and graph) and the
+	// same shutdown: cancelled here, resumed from its watermark next start.
+	routeRepairCtx, stopResolvedPathRouteRepair := context.WithCancel(context.Background())
+	defer stopResolvedPathRouteRepair()
+	store.StartResolvedPathRouteRepair(routeRepairCtx, cfg.ResolvedPathRouteRepairEnabled())
+
 	// #380: re-decode historical enc_<HEX> GRP_TXT rows and unknown-scoped
 	// transport rows whenever the effective key set grows (config/SIGHUP,
 	// approved shared channels, approved region scopes). Same placement as

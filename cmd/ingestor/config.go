@@ -141,6 +141,12 @@ type Config struct {
 	// observations.resolved_path rows (#188, resolved_path_backfill.go).
 	ResolvedPathBackfill *ResolvedPathBackfillConfig `json:"resolvedPathBackfill,omitempty"`
 
+	// ResolvedPathRouteRepair opts into the one-off repair of
+	// observations.resolved_path rows written with the transmission's first
+	// route type (#289 M2, resolved_path_route_repair.go). Off by default: it
+	// overwrites values in place and keeps no copy of the previous ones.
+	ResolvedPathRouteRepair *ResolvedPathRouteRepairConfig `json:"resolvedPathRouteRepair,omitempty"`
+
 	// DecodeBackfill tunes the re-decoding of historical rows after the
 	// effective channel/region key set grows (#380, decode_backfill.go).
 	DecodeBackfill *DecodeBackfillConfig `json:"decodeBackfill,omitempty"`
