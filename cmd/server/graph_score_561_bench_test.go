@@ -10,6 +10,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"testing"
 	"time"
@@ -107,13 +108,15 @@ func BenchmarkGraphScore561_Warmup(b *testing.B) {
 }
 
 // neighborGraphFromBridgeEdges materializes edges as a NeighborGraph via the
-// production upsert path. Each edge is observed affinitySaturationCount times
-// by one observer so its Score(now)·Confidence() is a positive constant.
+// production upsert path. Each edge is observed round(weight·saturation)
+// times (at least once) by one observer, so Score(now)·Confidence() follows
+// the input weight quantized to 1/affinitySaturationCount.
 func neighborGraphFromBridgeEdges(edges []BridgeEdge, now time.Time) *NeighborGraph {
 	g := NewNeighborGraph()
 	snr := 5.0
 	for _, e := range edges {
-		for i := 0; i < affinitySaturationCount; i++ {
+		n := int(math.Round(math.Min(e.Weight, 1) * affinitySaturationCount))
+		for i := 0; i < max(n, 1); i++ {
 			g.upsertEdge(e.A, e.B, e.B[:2], "obs-561", &snr, now)
 		}
 	}

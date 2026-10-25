@@ -16,6 +16,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand"
 	"os"
@@ -243,7 +244,8 @@ func graphScore561Fixtures() map[string][]BridgeEdge {
 		"invalid-and-boundary": {be("a", "b", 1), be("b", "c", 1), be("a", "a", 1),
 			be("", "c", 1), be("c", " ", 1), be("a", "c", 0), be("a", "c", -1),
 			be("a", "c", math.NaN()), be("a", "c", math.Inf(1)), be("a", "c", math.Inf(-1)),
-			be("a", "c", 0.999e-9), be("c", "d", 1e-9), be("d", "e", 4), be("e", "f", 2)},
+			be("a", "c", 0.999e-9), be("c", "zz", 0.999e-9), be("c", "d", 1e-9),
+			be("d", "e", 4), be("e", "f", 2)},
 		"case-and-space": {be(" AbC ", "dEf", 1), be("def", "GHI", 0.5), be("ghi ", "abc", 0.25),
 			be("ghi", "jkl", 1)},
 		"grid-4x4":       gridEdges(4, 4),
@@ -377,18 +379,26 @@ func permuteEdges(edges []BridgeEdge, rng *rand.Rand) []BridgeEdge {
 
 // TestGraphScore561_DeterministicAcrossRunsAndPermutations: identical graphs
 // must produce bit-identical scores regardless of repetition or input order.
+// The tie-weighted graph matters: with many equal shortest paths, Brandes'
+// fractional dependencies are summed in an order set by vertex numbering.
 func TestGraphScore561_DeterministicAcrossRunsAndPermutations(t *testing.T) {
-	edges := syntheticBridgeEdges(120, 480, 7)
-	refBridge := ComputeBridgeScores(edges)
-	refCov := ComputeCoverageScores(edges)
-	rng := rand.New(rand.NewSource(561))
-	for i := 0; i < 12; i++ {
-		in := edges
-		if i%2 == 1 {
-			in = permuteEdges(edges, rng)
-		}
-		assertScoresBitwise(t, "bridge", ComputeBridgeScores(in), refBridge)
-		assertScoresBitwise(t, "coverage", ComputeCoverageScores(in), refCov)
+	for name, edges := range map[string][]BridgeEdge{
+		"continuous": syntheticBridgeEdges(120, 480, 7),
+		"ties":       tieWeightedRandomEdges(90, 300, 7),
+	} {
+		t.Run(name, func(t *testing.T) {
+			refBridge := ComputeBridgeScores(edges)
+			refCov := ComputeCoverageScores(edges)
+			rng := rand.New(rand.NewSource(561))
+			for i := 0; i < 12; i++ {
+				in := edges
+				if i%2 == 1 {
+					in = permuteEdges(edges, rng)
+				}
+				assertScoresBitwise(t, "bridge", ComputeBridgeScores(in), refBridge)
+				assertScoresBitwise(t, "coverage", ComputeCoverageScores(in), refCov)
+			}
+		})
 	}
 }
 
@@ -455,22 +465,138 @@ func TestGraphScore561_ConcurrentComputations(t *testing.T) {
 
 // ─── allocation budget ───────────────────────────────────────────────────────
 
-// TestGraphScore561_AllocationBudget bounds allocations per computation to
-// O(V + E) — independent of the V·E all-sources work. Before #561 the
-// map-per-source implementation allocated ~1.4M (bridge) / ~1.1M (coverage)
-// objects on the 600/2000 graph; the budget below is 4·(V+E) = 10 400.
+// TestGraphScore561_AllocationBudget bounds allocations per computation below
+// V/2 on a 600/2000 graph: any allocation made once per source vertex costs
+// at least V and fails, so per-computation state must be O(V+E) slices that
+// are reused across sources. Before #561 the map-per-source implementation
+// allocated ~1.46M (bridge) / ~1.11M (coverage) objects here.
 func TestGraphScore561_AllocationBudget(t *testing.T) {
 	if testing.Short() {
 		t.Skip("allocation budget runs a 600/2000 all-sources computation")
 	}
 	const v, e = 600, 2000
 	edges := syntheticBridgeEdges(v, e, 561)
-	budget := float64(4 * (v + e))
+	budget := float64(v / 2)
 	if got := testing.AllocsPerRun(2, func() { _ = ComputeBridgeScores(edges) }); got > budget {
-		t.Errorf("ComputeBridgeScores: %.0f allocs/op, budget %.0f (O(V+E))", got, budget)
+		t.Errorf("ComputeBridgeScores: %.0f allocs/op, budget %.0f (< 1 per source)", got, budget)
 	}
 	if got := testing.AllocsPerRun(2, func() { _ = ComputeCoverageScores(edges) }); got > budget {
-		t.Errorf("ComputeCoverageScores: %.0f allocs/op, budget %.0f (O(V+E))", got, budget)
+		t.Errorf("ComputeCoverageScores: %.0f allocs/op, budget %.0f (< 1 per source)", got, budget)
+	}
+}
+
+// ─── reusable workspace isolation ────────────────────────────────────────────
+
+// poisonBrandesWorkspace fills every reusable slot with garbage that a
+// missing reset would turn into wrong scores (or an out-of-row index).
+func poisonBrandesWorkspace(ws *brandesWorkspace) {
+	for i := range ws.dist {
+		ws.dist[i], ws.sigma[i], ws.delta[i] = -1, math.NaN(), math.NaN()
+		ws.settled[i] = true
+		ws.predLen[i] = 1
+	}
+	for i := range ws.predBuf {
+		ws.predBuf[i] = 0
+	}
+	ws.stack = append(ws.stack, 0)
+	ws.heap = append(ws.heap, distHeapItem{node: 0, dist: -1})
+}
+
+func bridgeRawWith(g *indexedDistanceGraph, ws *brandesWorkspace, poison bool) []float64 {
+	bc := make([]float64, g.numVertices())
+	for s := range bc {
+		ws.accumulate(g, int32(s), bc)
+		if poison {
+			poisonBrandesWorkspace(ws)
+		}
+	}
+	return bc
+}
+
+func coverageRawWith(g *indexedDistanceGraph, ws *ssspWorkspace, poison bool) []float64 {
+	out := make([]float64, g.numVertices())
+	for s := range out {
+		out[s] = ws.harmonicReach(g, int32(s))
+		if poison {
+			for i := range ws.dist {
+				ws.dist[i], ws.settled[i] = -1, true
+			}
+			ws.heap = append(ws.heap, distHeapItem{node: 0, dist: -1})
+		}
+	}
+	return out
+}
+
+func assertRawBitwise(t *testing.T, label string, got, want []float64) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: len %d, want %d", label, len(got), len(want))
+	}
+	for i := range want {
+		if math.Float64bits(got[i]) != math.Float64bits(want[i]) {
+			t.Fatalf("%s: [%d] = %.17g, want %.17g", label, i, got[i], want[i])
+		}
+	}
+}
+
+// TestGraphScore561_WorkspaceReuseIsStateless reuses ONE workspace across
+// sources and across graphs of different sizes (shrink and grow), poisoning
+// it after every source, and requires bit-identical results to a fresh
+// workspace per graph — and, so that a reset bug shared by both cannot pass,
+// the fresh result must match the independent oracle.
+func TestGraphScore561_WorkspaceReuseIsStateless(t *testing.T) {
+	inputs := [][]BridgeEdge{
+		syntheticBridgeEdges(120, 400, 11),
+		graphScore561Fixtures()["diamond-tie"],
+		graphScore561Fixtures()["disconnected"],
+		syntheticBridgeEdges(200, 900, 12),
+	}
+	var bws brandesWorkspace
+	var cws ssspWorkspace
+	for round := 0; round < 2; round++ {
+		for i, edges := range inputs {
+			g := newIndexedDistanceGraph(edges)
+			var freshB brandesWorkspace
+			var freshC ssspWorkspace
+			wantB, wantC := bridgeRawWith(g, &freshB, false), coverageRawWith(g, &freshC, false)
+			assertRawBitwise(t, fmt.Sprintf("bridge graph %d round %d", i, round),
+				bridgeRawWith(g, &bws, true), wantB)
+			assertRawBitwise(t, fmt.Sprintf("coverage graph %d round %d", i, round),
+				coverageRawWith(g, &cws, true), wantC)
+			if round == 0 {
+				normalizeByMax(wantB)
+				normalizeByMax(wantC)
+				assertScoresClose(t, fmt.Sprintf("fresh bridge graph %d vs oracle", i), g.scoreMap(wantB), oracleBridge(edges))
+				assertScoresClose(t, fmt.Sprintf("fresh coverage graph %d vs oracle", i), g.scoreMap(wantC), oracleCoverage(edges))
+			}
+		}
+	}
+}
+
+// TestGraphScore561_IndexedGraphStructure pins the CSR build: sorted ids,
+// symmetric rows sorted by neighbor, cheapest duplicate kept, invalid edges
+// dropped.
+func TestGraphScore561_IndexedGraphStructure(t *testing.T) {
+	g := newIndexedDistanceGraph(graphScore561Fixtures()["duplicates"])
+	if fmt.Sprint(g.keys) != "[a b c]" {
+		t.Fatalf("keys = %v, want [a b c]", g.keys)
+	}
+	type arc struct {
+		from, to string
+		cost     float64
+	}
+	var got []arc
+	for v := range g.keys {
+		for k := g.off[v]; k < g.off[v+1]; k++ {
+			got = append(got, arc{g.keys[v], g.keys[g.nbr[k]], g.cost[k]})
+		}
+	}
+	want := []arc{{"a", "b", 1}, {"a", "c", 4}, {"b", "a", 1}, {"b", "c", 1}, {"c", "a", 4}, {"c", "b", 1}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("arcs = %v, want %v", got, want)
+	}
+	if g := newIndexedDistanceGraph(graphScore561Fixtures()["invalid-and-boundary"]); fmt.Sprint(g.keys) != "[a b c d e f]" {
+		t.Fatalf("invalid-and-boundary keys = %v, want [a b c d e f]", g.keys)
 	}
 }
 
