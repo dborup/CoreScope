@@ -59,6 +59,16 @@ func resolveBuildTime() string {
 	return "unknown"
 }
 
+// Graceful-shutdown bounds (#577). shutdownDrainTimeout caps the HTTP drain;
+// shutdownTimeout caps the whole sequence main waits for after the listener
+// closes. It stays below the compose files' 30 s stop_grace_period, so the
+// server reports a hung shutdown itself before the runtime's SIGKILL.
+// Variables so the process tests can shorten them.
+var (
+	shutdownDrainTimeout = 15 * time.Second
+	shutdownTimeout      = 25 * time.Second
+)
+
 func main() {
 	// pprof profiling — off by default; the bind address, and the port that
 	// must stay distinct from the ingestor's, are resolved in one place so
@@ -570,8 +580,8 @@ func main() {
 			stopAnalyticsRecomp()
 		}
 
-		// 2. Gracefully drain HTTP connections (up to 15s)
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		// 2. Gracefully drain HTTP connections (up to shutdownDrainTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
 		defer cancel()
 		if err := httpServer.Shutdown(ctx); err != nil {
 			log.Printf("[server] HTTP shutdown error: %v", err)
