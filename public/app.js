@@ -2718,6 +2718,8 @@ function makeColumnsResizable(tableSelector, storageKey) {
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
+    // Anchor the handle to static headers without overriding sticky headers.
+    if (getComputedStyle(th).position === 'static') th.style.position = 'relative';
     th.appendChild(handle);
   });
   } // end addResizeHandles
