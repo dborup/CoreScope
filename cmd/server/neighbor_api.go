@@ -87,12 +87,13 @@ func (s *Server) getNeighborGraph() *NeighborGraph {
 		return g
 	}
 
+	in := s.readNeighborBuildInputs() // SQL, before neighborBuildMu (#583)
 	s.neighborBuildMu.Lock()
 	defer s.neighborBuildMu.Unlock()
 	if g := s.neighborGraph.Load(); g != nil {
 		return g // a concurrent initial request or recomputer built it
 	}
-	g := s.buildNeighborGraph()
+	g := s.buildNeighborGraph(in)
 	s.neighborGraph.Store(g)
 	return g
 }
@@ -101,17 +102,35 @@ func (s *Server) getNeighborGraph() *NeighborGraph {
 // Builds and their publishes happen under neighborBuildMu, so a build that
 // started earlier can never publish after one that started later. Builds are
 // serialized, but readers retain the previous snapshot while the
-// potentially expensive store scan runs.
+// potentially expensive store scan runs. The node list is read from SQL
+// before the mutex (#583), so no build waits behind another's query.
 func (s *Server) rebuildNeighborGraph() {
 	if s.store == nil {
 		return // preserve injected graphs when there is no source to rebuild
 	}
+	in := s.readNeighborBuildInputs()
 	s.neighborBuildMu.Lock()
 	defer s.neighborBuildMu.Unlock()
-	s.neighborGraph.Store(s.buildNeighborGraph())
+	s.neighborGraph.Store(s.buildNeighborGraph(in))
 }
 
-func (s *Server) buildNeighborGraph() *NeighborGraph {
+// neighborBuildInputs is the part of a graph build that may query SQL: the
+// cached node list and prefix map.
+type neighborBuildInputs struct {
+	nodes []nodeInfo
+	pm    *prefixMap
+}
+
+func (s *Server) readNeighborBuildInputs() neighborBuildInputs {
+	if s.buildGraphFn != nil || s.store == nil {
+		return neighborBuildInputs{}
+	}
+	nodes, pm := s.store.getCachedNodesAndPM()
+	return neighborBuildInputs{nodes: nodes, pm: pm}
+}
+
+// buildNeighborGraph builds a graph from the store and in; it runs no SQL.
+func (s *Server) buildNeighborGraph(in neighborBuildInputs) *NeighborGraph {
 	if s.buildGraphFn != nil {
 		return s.buildGraphFn() // test seam
 	}
@@ -123,7 +142,7 @@ func (s *Server) buildNeighborGraph() *NeighborGraph {
 		opts.EnableLog = s.cfg.DebugAffinity
 		opts.MaxEdgeKm = s.cfg.NeighborMaxEdgeKm()
 	}
-	return BuildFromStoreWithOptions(s.store, opts)
+	return buildFromStoreWithNodes(s.store, opts, in.nodes, in.pm)
 }
 
 // ─── Handlers ──────────────────────────────────────────────────────────────────

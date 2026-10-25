@@ -93,10 +93,14 @@ type DB struct {
 	hasClientDeclaredRegionsFlag   schemaFlag    // client_declared_regions table (#126) -- read via hasClientDeclaredRegions()
 	schemaHealerStop               chan struct{} // closed by Close() to stop healSchemaFlags; nil if OpenDB never started it
 
-	// route_mask backfill status cache (#89), see route_mask.go.
-	routeMaskStatusMu  sync.Mutex
-	routeMaskStatus    RouteMaskBackfillStatus
-	routeMaskStatusExp time.Time
+	// route_mask backfill status cache (#89), see route_mask.go. Its queries
+	// run outside routeMaskStatusMu (#583).
+	routeMaskStatusMu         sync.Mutex
+	routeMaskStatus           RouteMaskBackfillStatus
+	routeMaskStatusOK         bool // routeMaskStatus was read successfully
+	routeMaskStatusExp        time.Time
+	routeMaskStatusRefreshing bool
+	routeMaskStatusLoad       singleflight.Group
 
 	// Channel list caches (60s TTL, #762): keyed by normalized region, with
 	// concurrent misses coalesced into one query per key (#109). See
@@ -280,13 +284,13 @@ func (db *DB) Close() error {
 	if db.schemaHealerStop != nil {
 		close(db.schemaHealerStop)
 	}
-	// Checkpoint WAL before closing to release lock cleanly for new processes
-	if _, err := db.conn.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		log.Printf("[db] WAL checkpoint error: %v", err)
-	} else {
-		log.Println("[db] WAL checkpoint complete")
-	}
-	return db.conn.Close()
+	// No WAL checkpoint: the connection is mode=ro (#1283), and a read-only
+	// handle cannot checkpoint. With busy_timeout it would first wait up to
+	// 5 s for an in-flight ingestor write transaction, then fail (#583).
+	// Checkpointing is the ingestor's job.
+	err := db.conn.Close()
+	log.Println("[db] closed")
+	return err
 }
 
 // detectSchema checks if the observations table uses v3 schema (observer_idx).

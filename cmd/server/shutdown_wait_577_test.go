@@ -104,8 +104,8 @@ func assertLogOrder(t *testing.T, out string, lines ...string) {
 	}
 }
 
-// The server's DB close logs this prefix whatever the checkpoint's outcome.
-const dbClosedLog = "[db] WAL checkpoint"
+// The server's DB close logs this once its read-only connections are closed.
+const dbClosedLog = "[db] closed"
 
 // assertDBReleased asserts that the writer (the ingestor's role) can
 // checkpoint the whole WAL and truncate it: no reader lock or snapshot of

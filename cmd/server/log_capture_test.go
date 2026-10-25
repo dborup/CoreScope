@@ -13,7 +13,7 @@ import (
 // each other under outMu, but nothing orders a write against the harness's
 // own read -- and goroutines routinely outlive the test that started them:
 // OpenDB's healSchemaFlags, the two background index builds Load() starts,
-// runDistanceIndexBuild, (*DB).Close's WAL checkpoint, the recomputers. Such
+// runDistanceIndexBuild, (*DB).Close's log line, the recomputers. Such
 // a goroutine can land in a *later* test's capture.
 //
 // logCapture closes the hazard twice over:

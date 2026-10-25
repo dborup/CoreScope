@@ -263,7 +263,11 @@ func TestRelayAirtimeShare_MixedAdvertCountsOnceOnMixedRow(t *testing.T) {
 
 func rmStatus(t *testing.T, db *DB) RouteMaskBackfillStatus {
 	t.Helper()
-	return db.computeRouteMaskBackfillStatus()
+	st, err := db.computeRouteMaskBackfillStatus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
 }
 
 func TestRouteMaskBackfillStatus_NeverReportsFalseComplete(t *testing.T) {
@@ -297,7 +301,7 @@ func TestRouteMaskBackfillStatus_NeverReportsFalseComplete(t *testing.T) {
 
 func TestRouteMaskBackfillStatus_OldSchemaIsPending(t *testing.T) {
 	db := setupTestDB(t) // no route_mask column
-	if st := db.computeRouteMaskBackfillStatus(); st.Status != "pending" || st.Remaining != nil {
+	if st := rmStatus(t, db); st.Status != "pending" || st.Remaining != nil {
 		t.Fatalf("old schema: %+v, want pending with unknown remaining", st)
 	}
 }
