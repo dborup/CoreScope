@@ -39,6 +39,7 @@ const (
 	ltQuiet    = 81004 // silent, then first to hear a real storm (the #473 loss)
 	ltSkew     = 81005 // clock 167 s behind: its rows look early, everyone else's late
 	ltIsolated = 81006 // silent, then a real storm nobody else hears
+	ltAgain    = 81007 // delivers Drain's outage transmissions once more, an hour later
 )
 
 // ltGroup names the part of the scenario a transmission belongs to.
@@ -78,7 +79,10 @@ func lateScenario() []ltTx {
 		obs := []blObs{{ltA, 0}, {ltB, time.Second}}
 		switch {
 		case m >= 5 && m < 45:
-			obs = append(obs, blObs{ltDrain, blAt(ltMin(45, m-5)).Sub(at)})
+			// a later delivery by another observer does not hide that A
+			// and B heard it long before Drain: only observations before
+			// t + gap count
+			obs = append(obs, blObs{ltDrain, blAt(ltMin(45, m-5)).Sub(at)}, blObs{ltAgain, blAt(ltMin(105, m-5)).Sub(at)})
 		case m != 45:
 			obs = append(obs, blObs{ltDrain, 2 * time.Second})
 		}

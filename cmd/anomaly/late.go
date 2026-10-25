@@ -93,11 +93,12 @@ func (o exportOptions) validateLate() error {
 
 // lateQuery selects the observer, time and elsewhere time e (NULL when
 // there is none) of every observation in [?1, ?2), in time order, at most
-// ?3 rows; ?4 is the gap in seconds.
+// ?3 rows; ?4 is the gap in seconds. "<>" is never true for a NULL
+// observer, so rows without one are never "another observer".
 const lateQuery = `SELECT o.observer_idx, o.timestamp,
   (SELECT MAX(p.timestamp) FROM observations p
    WHERE p.transmission_id = o.transmission_id AND p.timestamp < o.timestamp + ?4
-     AND p.observer_idx IS NOT NULL AND p.observer_idx <> o.observer_idx)
+     AND p.observer_idx <> o.observer_idx)
 FROM observations o
 WHERE o.timestamp >= ?1 AND o.timestamp < ?2
 ORDER BY o.timestamp, o.id
