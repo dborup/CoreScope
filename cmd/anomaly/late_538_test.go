@@ -304,6 +304,8 @@ func TestExportLateDeliveryIsInvariantUnderObserverRenaming(t *testing.T) {
 	for _, q := range []string{
 		`UPDATE observations SET observer_idx = 900000 - observer_idx WHERE observer_idx IS NOT NULL`,
 		`UPDATE observations SET observer_idx = CASE observer_idx WHEN 818999 THEN 7 WHEN 818997 THEN 3 ELSE observer_idx END`,
+		// a shift by an odd number: every index changes parity
+		`UPDATE observations SET observer_idx = observer_idx + 1000001 WHERE observer_idx IS NOT NULL`,
 	} {
 		if _, err := f.db.Exec(q); err != nil {
 			t.Fatal(err)
@@ -314,7 +316,7 @@ func TestExportLateDeliveryIsInvariantUnderObserverRenaming(t *testing.T) {
 		}
 	}
 	var n int
-	f.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE observer_idx IN (3, 7)`).Scan(&n)
+	f.db.QueryRow(`SELECT COUNT(*) FROM observations WHERE observer_idx IN (1000004, 1000008)`).Scan(&n)
 	if n == 0 {
 		t.Fatal("the renaming touched no rows")
 	}
