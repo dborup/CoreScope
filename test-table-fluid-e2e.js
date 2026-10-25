@@ -55,6 +55,38 @@ function expectHidden(pageName, w) {
 
   console.log(`\n=== #1056 fluid tables E2E against ${BASE} ===`);
 
+  for (const width of [1250, 375]) {
+    await step(`#596: analytics resize handles stay on their headers at ${width}px`, async () => {
+      const ctx = await browser.newContext({ viewport: { width, height: 900 } });
+      try {
+        await ctx.addInitScript(() => {
+          window.addEventListener('theme-refresh', () => { window.__columnResizeThemeReady = true; }, { once: true });
+        });
+        const page = await ctx.newPage();
+        await page.goto(BASE + '/#/analytics?tab=nodes', { waitUntil: 'domcontentloaded' });
+        // The initial theme-refresh re-renders the tab; measure the final render.
+        await page.waitForFunction(() => window.__columnResizeThemeReady &&
+          document.querySelector('#analyticsContent .analytics-table .col-resize-handle'));
+        const geometry = await page.evaluate(() => ({
+          overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          handles: Array.from(document.querySelectorAll('#analyticsContent .col-resize-handle')).map(handle => {
+            const header = handle.parentElement;
+            const h = header.getBoundingClientRect(), r = handle.getBoundingClientRect();
+            return { anchored: handle.offsetParent === header, height: r.height,
+              top: r.top - h.top, edge: r.left + r.width / 2 - h.right };
+          }),
+        }));
+        assert(geometry.handles.length > 0, 'expected analytics resize handles');
+        assert(geometry.handles.every(h => h.anchored), 'resize handle has the page as its containing block');
+        assert(geometry.handles.every(h => h.height > 0 && Math.abs(h.top) <= 2 && Math.abs(h.edge) <= 2),
+          'resize handles must follow the header edge: ' + JSON.stringify(geometry.handles));
+        assert(geometry.overflow <= 1, `analytics page overflows by ${geometry.overflow}px`);
+      } finally {
+        await ctx.close();
+      }
+    });
+  }
+
   for (const vp of VIEWPORTS) {
     const ctx = await browser.newContext({ viewport: { width: vp.w, height: vp.h } });
     const page = await ctx.newPage();
