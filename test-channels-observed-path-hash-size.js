@@ -107,7 +107,7 @@ const ctx = {
   // '59C0' -> 3, a width the real helper reports as unknown), so the merge
   // assertions below would have passed against a contract nothing ships.
   senderPathHashSize: loadAppHelper('senderPathHashSize',
-    ['isTransportRoute', 'getPathLenOffset', 'pathHashSizeFromByte', 'senderPathHashSize']),
+    ['isTransportRoute', 'getPathLenOffset', 'rawPathLenByte', 'pathHashSizeFromByte', 'senderPathHashSize']),
   // #353: the shared 1-byte warn decision + markup, also the real app.js code.
   renderPathHashSize: loadAppHelper('renderPathHashSize',
     ['escapeHtml', 'pathHashSizeValue', 'isPathHashSizeWarn', 'renderPathHashSize']),

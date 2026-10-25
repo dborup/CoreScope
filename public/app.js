@@ -39,16 +39,39 @@ function pathHashSizeFromByte(pathByte, routeType, headerByte) {
   const size = (pathByte >> 6) + 1;
   return size <= 3 ? size : null;
 }
+/**
+ * #594: a raw frame's path_length byte, read at the offset its own header
+ * byte's route implies (getPathLenOffset; firmware src/Packet.cpp
+ * Packet::readFrom), or null when the header or path byte is missing or not hex.
+ */
+function rawPathLenByte(rawHex) {
+  if (typeof rawHex !== 'string' || !/^[0-9a-f]{2}/i.test(rawHex)) return null;
+  const offset = getPathLenOffset(parseInt(rawHex.slice(0, 2), 16) & 0x03) * 2;
+  const pathHex = rawHex.slice(offset, offset + 2);
+  return /^[0-9a-f]{2}$/i.test(pathHex) ? parseInt(pathHex, 16) : null;
+}
+/**
+ * #594: byte offset of a raw frame's payload: header, the 4 transport-code
+ * bytes on routes 0/3, path_length, then hash_count x hash_size path bytes
+ * (firmware docs/packet_format.md). null when the frame does not decode the way
+ * Packet::readFrom accepts it: no path byte, the reserved 4-byte hash size or a
+ * path over MAX_PATH_SIZE (64) bytes (Packet::isValidPathLen), or no payload.
+ */
+function rawPayloadOffset(rawHex) {
+  const pathByte = rawPathLenByte(rawHex);
+  if (pathByte == null) return null;
+  const hashSize = (pathByte >> 6) + 1;
+  const pathBytes = (pathByte & 0x3F) * hashSize;
+  if (hashSize === 4 || pathBytes > 64) return null;
+  const offset = getPathLenOffset(parseInt(rawHex.slice(0, 2), 16) & 0x03) + 1 + pathBytes;
+  return offset < Math.floor(rawHex.length / 2) ? offset : null;
+}
 /** Sender-selected path-hash width in this frame, or null when not encoded. */
 function senderPathHashSize(rawHex) {
-  if (typeof rawHex !== 'string' || !/^[0-9a-f]{2}/i.test(rawHex)) return null;
+  const pathByte = rawPathLenByte(rawHex);
+  if (pathByte == null) return null;
   const header = parseInt(rawHex.slice(0, 2), 16);
-  const route = header & 0x03;
-  const offset = getPathLenOffset(route) * 2;
-  const pathHex = rawHex.slice(offset, offset + 2);
-  if (!/^[0-9a-f]{2}$/i.test(pathHex)) return null;
-  const pathByte = parseInt(pathHex, 16);
-  return pathHashSizeFromByte(pathByte, route, header);
+  return pathHashSizeFromByte(pathByte, header & 0x03, header);
 }
 /**
  * #353: the ONE decision for "this path-hash width reads as a warning". A

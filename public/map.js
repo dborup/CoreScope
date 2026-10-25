@@ -1553,7 +1553,8 @@
       const inferredType = decoded.type || PAYLOAD_TYPE_MAP[pkt.payload_type] || 'OTHER';
       // Try to peek at raw_hex bytes to extract src/destHash when decoded is empty.
       // TXT_MSG/REQ/RESPONSE/ANON_REQ all have the same wire layout:
-      //   byte0=route+type, byte1=path_len, then path bytes, then destHash + srcHash + encrypted body.
+      //   header, [4 transport-code bytes on routes 0/3], path_len, path bytes,
+      //   then destHash + srcHash + encrypted body.
       // ANON_REQ doesn't have a srcHash byte (sender is anonymous), only destHash.
       let inferredSrc = decoded.srcHash || null;
       let inferredDst = decoded.destHash || null;
@@ -1561,14 +1562,13 @@
       if ((!inferredSrc || !inferredDst) && chosen.raw_hex && TYPES_WITH_DST_SRC.indexOf(pkt.payload_type) >= 0) {
         try {
           const hex = chosen.raw_hex;
-          // MeshCore wire max for path length is 64 hops. Cap defensively:
-          // a crafted ingest packet with pathLen=200 would slice random body
-          // bytes into the srcHash/destHash UI fields. Guard before use.
-          const pathLen = parseInt(hex.slice(2, 4), 16);
-          if (!Number.isFinite(pathLen) || pathLen < 0 || pathLen > 64) {
-            throw new Error('pathLen out of range: ' + pathLen);
-          }
-          const destOff = 4 + pathLen * 2;
+          // #594: rawPayloadOffset (app.js) reads path_len behind the transport
+          // codes and rejects a path the firmware would not accept, so a crafted
+          // path_len cannot slice random body bytes into the srcHash/destHash
+          // UI fields.
+          const payOff = rawPayloadOffset(hex);
+          if (payOff == null) throw new Error('raw_hex does not decode');
+          const destOff = payOff * 2;
           if (hex.length >= destOff + 2) {
             inferredDst = inferredDst || hex.slice(destOff, destOff + 2).toUpperCase();
             // ANON_REQ has no srcHash
@@ -1579,16 +1579,14 @@
         } catch (_) {}
       }
       // GRP_TXT: channel_hash byte sits right after path bytes in raw_hex.
-      // Layout: byte0=route+type, byte1=path_len, path bytes, channel_hash, encrypted body.
+      // Layout: header, [transport codes], path_len, path bytes, channel_hash, encrypted body.
       let inferredChannelHash = decoded.channelHashHex || null;
       if (!inferredChannelHash && chosen.raw_hex && pkt.payload_type === 5) {
         try {
           const hex = chosen.raw_hex;
-          const pathLen = parseInt(hex.slice(2, 4), 16);
-          if (!Number.isFinite(pathLen) || pathLen < 0 || pathLen > 64) {
-            throw new Error('pathLen out of range: ' + pathLen);
-          }
-          const chOff = 4 + pathLen * 2;
+          const payOff = rawPayloadOffset(hex);
+          if (payOff == null) throw new Error('raw_hex does not decode');
+          const chOff = payOff * 2;
           if (hex.length >= chOff + 2) {
             inferredChannelHash = hex.slice(chOff, chOff + 2).toUpperCase();
           }

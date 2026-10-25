@@ -2300,6 +2300,43 @@ console.log('\n=== app.js: computeBreakdownRanges ===');
     assert.strictEqual(ctx.senderPathHashSize('15'), null);
   });
 
+  // #594 (port of upstream Kpa-clawbot/CoreScope#2234): path_length follows
+  // the 4 transport-code bytes on routes 0/3 (firmware docs/packet_format.md;
+  // src/Packet.cpp Packet::readFrom, src/Packet.h hasTransportCodes()). One
+  // golden frame per route type; each transport frame's first code byte
+  // differs from its path byte, so reading offset 1 returns the wrong byte.
+  test('rawPathLenByte reads path_length at the offset the header route implies', () => {
+    assert.strictEqual(ctx.rawPathLenByte('10AABBCCDD41EEDEADBEEF'), 0x41); // route 0, offset 5
+    assert.strictEqual(ctx.rawPathLenByte('1141EEDEADBEEF'), 0x41); // route 1, offset 1
+    assert.strictEqual(ctx.rawPathLenByte('1200DEADBEEF'), 0x00); // route 2, offset 1
+    assert.strictEqual(ctx.rawPathLenByte('13AABBCCDD00DEADBEEF'), 0x00); // route 3, offset 5
+    assert.strictEqual(ctx.rawPathLenByte('13aabbccdd80deadbeef'), 0x80);
+    assert.strictEqual(ctx.rawPathLenByte('13AABBCCDD'), null);
+    assert.strictEqual(ctx.rawPathLenByte('11ZZ'), null);
+    assert.strictEqual(ctx.rawPathLenByte('11'), null);
+    assert.strictEqual(ctx.rawPathLenByte(''), null);
+    assert.strictEqual(ctx.rawPathLenByte(null), null);
+  });
+
+  test('rawPayloadOffset skips header, transport codes and hash_count x hash_size path bytes', () => {
+    // route 0: header + 4 codes + path_len 0x41 (one 2-byte hop) → payload at 8.
+    assert.strictEqual(ctx.rawPayloadOffset('10AABBCCDD41EEFF' + '42'), 8);
+    // route 1: path_len 0x02 (two 1-byte hops) → payload at 4.
+    assert.strictEqual(ctx.rawPayloadOffset('1102AABB' + '42'), 4);
+    // route 2: zero hops → payload at 2.
+    assert.strictEqual(ctx.rawPayloadOffset('1200' + '42'), 2);
+    // route 3: path_len 0x82 (two 3-byte hops) → payload at 6 + 6 = 12.
+    assert.strictEqual(ctx.rawPayloadOffset('13AABBCCDD82' + '111111222222' + '42'), 12);
+    // Firmware Packet::isValidPathLen: hash size 4 is reserved, path at most
+    // MAX_PATH_SIZE (64) bytes; Packet::readFrom needs a payload byte.
+    assert.strictEqual(ctx.rawPayloadOffset('11C1AABBCCDD42'), null);
+    assert.strictEqual(ctx.rawPayloadOffset('1160' + 'AA'.repeat(64) + '42'), 66); // 32 x 2 = 64 bytes
+    assert.strictEqual(ctx.rawPayloadOffset('1161' + 'AA'.repeat(66) + '42'), null); // 33 x 2 = 66 bytes
+    assert.strictEqual(ctx.rawPayloadOffset('1102AABB'), null);
+    assert.strictEqual(ctx.rawPayloadOffset('13AABBCCDD'), null);
+    assert.strictEqual(ctx.rawPayloadOffset(undefined), null);
+  });
+
   function findRange(ranges, label) {
     return ranges.find(r => r.label === label);
   }
