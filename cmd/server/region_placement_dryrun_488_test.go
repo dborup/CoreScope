@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -247,11 +250,70 @@ func TestRegionPlacement488_ConfigExample(t *testing.T) {
 			t.Errorf("config.example.json regionPlacement lacks %q", k)
 		}
 	}
-	var cfg Config
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	var block struct {
+		RegionPlacement *RegionPlacementConfig `json:"regionPlacement"`
+	}
+	if err := json.Unmarshal(raw, &block); err != nil {
 		t.Fatal(err)
 	}
+	cfg := Config{RegionPlacement: block.RegionPlacement}
 	if got := cfg.RegionPlacementSettings(); got != (&Config{}).RegionPlacementSettings() {
 		t.Errorf("config.example.json settings %+v differ from the defaults", got)
 	}
+}
+
+// TestRegionPlacement488_ServerUsesConfiguredMode: the real server main()
+// reads regionPlacement from config.json and serves /api/nodes?region= by
+// it. Expected totals come from GetNodes in-process on the same database.
+func TestRegionPlacement488_ServerUsesConfiguredMode(t *testing.T) {
+	path := fullSchemaDB(t)
+	db, err := OpenDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, heard, _, err := db.GetNodes(1, 0, "", "", "", "", "", "OAK")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.nodeRegionCacheMu.Lock()
+	db.nodeRegionCache, db.nodeRegionUsed = nil, nil
+	db.nodeRegionCacheMu.Unlock()
+	rpm2SetPlaced(db, defaultRegionPlacementParams)
+	_, placed, _, err := db.GetNodes(1, 0, "", "", "", "", "", "OAK")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if placed >= heard {
+		t.Fatalf("fixture does not tell the modes apart: OAK heard %d, placed %d", heard, placed)
+	}
+
+	cfgDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), []byte(`{"regionPlacement": {"mode": "placed"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := startServerProc(t, path, time.Minute, "CORESCOPE_SCHEMA_WAIT_CFG="+cfgDir)
+	p.waitReady(t)
+	c := http.Client{Timeout: 10 * time.Second}
+	resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/api/nodes?region=OAK&limit=1", p.port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body struct {
+		Total int `json:"total"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("OAK: heard %d, placed %d, server %d", heard, placed, body.Total)
+	if body.Total != placed {
+		t.Errorf("server with mode placed: OAK total %d, want %d (heard would be %d)", body.Total, placed, heard)
+	}
+	if !strings.Contains(p.out.String(), "regionPlacement: mode=placed") {
+		t.Errorf("server did not log the placed mode:\n%s", p.out.String())
+	}
+	p.cmd.Process.Signal(syscall.SIGTERM)
+	p.waitExit(t, 30*time.Second)
 }

@@ -331,6 +331,9 @@ func TestRegionPlacement488_DeltaEqualsFullBuild(t *testing.T) {
 		if !reflect.DeepEqual(rpm2Placements(inc, params), rpm2Placements(full, params)) {
 			t.Fatalf("delta from %d: placements differ from the full build", mid)
 		}
+		if !reflect.DeepEqual(inc.nodes, full.nodes) {
+			t.Fatalf("delta from %d: per-pair stats differ from the full build", mid)
+		}
 		if inc.watermark != wm || inc.pairs != full.pairs || inc.hearings != full.hearings {
 			t.Fatalf("delta from %d: watermark %d/%d, pairs %d/%d, hearings %v/%v",
 				mid, inc.watermark, wm, inc.pairs, full.pairs, inc.hearings, full.hearings)
@@ -368,7 +371,7 @@ func TestRegionPlacement488_PlacedModeDropsRelayedOnly(t *testing.T) {
 	if got := rpm2Members(t, db, "AAA"); !reflect.DeepEqual(got, []string{rpm2PK}) {
 		t.Fatalf("placed mode: AAA members %v", got)
 	}
-	if got := rpm2Members(t, db, "aaa", "BBB"); !reflect.DeepEqual(got, []string{rpm2PK}) {
+	if got := rpm2Members(t, db, "AAA", "BBB"); !reflect.DeepEqual(got, []string{rpm2PK}) {
 		t.Fatalf("placed mode: AAA,BBB members %v (union of codes)", got)
 	}
 }

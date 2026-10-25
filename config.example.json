@@ -330,6 +330,13 @@
     { "name": "Bay Area", "codes": ["SFO", "SJC", "OAK"] },
     { "name": "Central Coast", "codes": ["MRY"] }
   ],
+  "regionPlacement": {
+    "_comment": "Optional (server, #488). Which nodes /api/nodes?region= returns. mode: \"heard\" (default, today's rule) puts a node in every region whose observers heard any of its adverts, so flooded adverts list distant nodes too. \"placed\" uses direct evidence first: a node is in every region that heard its own transmission (hash count 0 on the observation's own frame; contact re-shares never count), else in the regions that heard it in the fewest relays up to maxHops, else in no region (it stays in the unfiltered list). A legacy row without a stored frame counts an explicit [] path only as a 0-hop fallback. This is an inference from reception, not a verified location. maxHops: cap of the relayed fallback, 0-7, default 3. lifetimeDays: evidence older than this before the node's own newest hearing is ignored, default 30, 0 = no window. persistSpanHours: when set, a region whose direct hearings span less than this is dropped if another region's span at least this (one-off long-distance reception); default 0 = off. Read at startup. Before switching to placed, run the read-only dry-run on a copy of the database: corescope-server -db <copy> -config-dir <dir> -region-placement-dryrun prints counts per basis and region and the unplaced share for several maxHops values, and exits. These values are meant for the customizer in a later release.",
+    "mode": "heard",
+    "maxHops": 3,
+    "lifetimeDays": 30,
+    "persistSpanHours": 0
+  },
   "cacheTTL": {
     "stats": 10,
     "nodeDetail": 300,

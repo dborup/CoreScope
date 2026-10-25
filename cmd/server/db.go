@@ -145,14 +145,15 @@ type DB struct {
 	// regionAgg is the global evidence aggregate, owned by the refresh
 	// that holds regionAggMu; readers only ever see regionSnap, an
 	// immutable snapshot swapped in after each refresh.
-	regionPlacement   regionPlacementSettings
-	regionAggMu       sync.Mutex
-	regionAgg         *regionEvidenceAgg
-	regionAggBuilt    time.Time
-	regionSnap        atomic.Pointer[regionPlacementSnapshot]
-	regionPlacementSF singleflight.Group
-	// regionPlacementScanHook (test seam, nil in production) runs before
-	// every aggregate scan, full or delta; a non-nil error fails that scan.
+	regionPlacement regionPlacementSettings
+	regionAggMu     sync.Mutex
+	regionAgg       *regionEvidenceAgg
+	regionAggBuilt  time.Time
+	regionSnap      atomic.Pointer[regionPlacementSnapshot]
+	// regionPlacementScanHook (test seam, nil in production) runs at the
+	// end of every aggregate scan, full or delta, after its rows were
+	// folded in; a non-nil error fails that scan the way an error part-way
+	// through the rows does.
 	regionPlacementScanHook func(full bool) error
 	// identityNamesQueryHook (#410, test seam, nil in production) runs once
 	// per real hidden-name lookup query, right before it executes, with the

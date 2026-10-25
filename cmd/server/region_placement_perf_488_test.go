@@ -215,6 +215,14 @@ func rpm2PerfReport(t *testing.T, path string, deltaRows int64) {
 	rows.Close()
 	wm := rpm2MaxID(t, db)
 	lo := max(wm-deltaRows, 0)
+	// Second delta window: deltaRows ending at the newest ADVERT
+	// observation, so every scanned row is classified (the worst case).
+	var advHi int64
+	if err := db.conn.QueryRow(`SELECT COALESCE(MAX(o.id), 0) FROM observations o
+		JOIN transmissions t ON t.id = o.transmission_id WHERE t.payload_type = ?`, payloadTypeAdvert).Scan(&advHi); err != nil {
+		t.Fatal(err)
+	}
+	advLo := max(advHi-deltaRows, 0)
 
 	clearEntries := func() {
 		db.nodeRegionCacheMu.Lock()
@@ -251,6 +259,13 @@ func rpm2PerfReport(t *testing.T, path string, deltaRows int64) {
 			}
 		}
 	})
+	heardAdvScan := rpm2Median(func() {
+		for _, r := range regions {
+			if _, err := db.scanNodeRegionKeys(ctx, []string{r}, advLo, advHi, true, map[string]struct{}{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
 	clearEntries()
 	h0 := rpm2Heap()
 	serveAll()
@@ -267,19 +282,23 @@ func rpm2PerfReport(t *testing.T, path string, deltaRows int64) {
 	placeOnly := rpm2Median(func() { newRegionPlacementSnapshot(agg, defaultRegionPlacementParams, time.Now()) })
 	// The delta re-folds the same tail rows each run: the stats merge by
 	// min/max, so the placement work is the same as for new rows.
-	placedDelta := rpm2Median(func() {
-		d := newRegionEvidenceAgg()
-		if _, err := db.scanRegionEvidence(ctx, lo, wm, true, d); err != nil {
-			t.Fatal(err)
-		}
-		agg.merge(d)
-		snap := newRegionPlacementSnapshot(agg, defaultRegionPlacementParams, time.Now())
-		for _, r := range regions {
-			if _, err := newNodeRegionEntry(snap.members([]string{r}), wm, time.Now()); err != nil {
+	placedDeltaOver := func(lo, hi int64) time.Duration {
+		return rpm2Median(func() {
+			d := newRegionEvidenceAgg()
+			if _, err := db.scanRegionEvidence(ctx, lo, hi, true, d); err != nil {
 				t.Fatal(err)
 			}
-		}
-	})
+			agg.merge(d)
+			snap := newRegionPlacementSnapshot(agg, defaultRegionPlacementParams, time.Now())
+			for _, r := range regions {
+				if _, err := newNodeRegionEntry(snap.members([]string{r}), hi, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+	placedDelta := placedDeltaOver(lo, wm)
+	placedAdvDelta := placedDeltaOver(advLo, advHi)
 	pairs, nodes := agg.pairs, len(agg.nodes)
 	agg = nil
 	clearPlaced()
@@ -288,9 +307,10 @@ func rpm2PerfReport(t *testing.T, path string, deltaRows int64) {
 	placedHeap := int64(rpm2Heap()) - int64(h1)
 
 	t.Logf("%s: %d observations, %d regions, %d nodes, %d (node, region) pairs", filepath.Base(path), wm, len(regions), nodes, pairs)
-	t.Logf("heard  cold %v | warm %v | delta refresh (%d obs) %v | heap %d KiB",
-		heardCold.Round(time.Microsecond), heardWarm, deltaRows, heardDelta.Round(time.Microsecond), heardHeap/1024)
-	t.Logf("placed cold %v | warm %v | delta scan+merge+placement+entries (%d obs) %v | placement only %v | heap %d KiB",
+	t.Logf("heard  cold %v | warm %v | delta refresh, newest %d obs %v | delta scan, %d advert obs %v | heap %d KiB",
+		heardCold.Round(time.Microsecond), heardWarm, deltaRows, heardDelta.Round(time.Microsecond),
+		deltaRows, heardAdvScan.Round(time.Microsecond), heardHeap/1024)
+	t.Logf("placed cold %v | warm %v | delta scan+merge+placement+entries, newest %d obs %v, %d advert obs %v | placement only %v | heap %d KiB",
 		placedCold.Round(time.Microsecond), placedWarm, deltaRows, placedDelta.Round(time.Microsecond),
-		placeOnly.Round(time.Microsecond), placedHeap/1024)
+		deltaRows, placedAdvDelta.Round(time.Microsecond), placeOnly.Round(time.Microsecond), placedHeap/1024)
 }

@@ -1751,5 +1751,34 @@ type RegionPlacementConfig struct {
 // RegionPlacementSettings resolves the regionPlacement block, logging and
 // replacing values it cannot use.
 func (c *Config) RegionPlacementSettings() regionPlacementSettings {
-	return regionPlacementSettings{}
+	out := regionPlacementSettings{Mode: regionModeHeard, Params: defaultRegionPlacementParams}
+	rp := c.RegionPlacement
+	if rp == nil {
+		return out
+	}
+	switch mode := strings.ToLower(strings.TrimSpace(rp.Mode)); mode {
+	case "", regionModeHeard:
+	case regionModePlaced:
+		out.Mode = regionModePlaced
+	default:
+		log.Printf("[config] regionPlacement.mode %q is not heard or placed; using heard", rp.Mode)
+	}
+	if rp.MaxHops != nil {
+		out.Params.MaxHops = min(max(*rp.MaxHops, 0), regionPlacementHopSlots-1)
+		if out.Params.MaxHops != *rp.MaxHops {
+			log.Printf("[config] regionPlacement.maxHops %d is outside 0..%d; using %d",
+				*rp.MaxHops, regionPlacementHopSlots-1, out.Params.MaxHops)
+		}
+	}
+	if rp.LifetimeDays != nil {
+		if *rp.LifetimeDays >= 0 {
+			out.Params.Lifetime = time.Duration(*rp.LifetimeDays) * 24 * time.Hour
+		} else {
+			log.Printf("[config] regionPlacement.lifetimeDays %d is negative; using the default", *rp.LifetimeDays)
+		}
+	}
+	if rp.PersistSpanHours != nil && *rp.PersistSpanHours > 0 {
+		out.Params.PersistSpan = time.Duration(*rp.PersistSpanHours) * time.Hour
+	}
+	return out
 }
