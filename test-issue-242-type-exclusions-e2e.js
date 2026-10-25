@@ -149,10 +149,10 @@ const fixture = [...Array.from({length: 1000}, (_, i) => packet(i + 1, 11)), pac
     console.log('PASS: departed view request cannot overwrite remounted packet view');
 
     // A shared URL may name a time window the dropdown carries no option for
-    // (?timeWindow=240), which leaves the select blank. The refetches added
+    // (?timeWindow=240; desktop width, as mobile caps it at 3 h), which leaves the select blank. The refetches added
     // here must keep that window; reading the blank value as Number('')===0
     // would silently widen every refetch to All time.
-    const customCtx = await browser.newContext({ viewport: {width: 1024, height: 900} });
+    const customCtx = await browser.newContext({ viewport: {width: 1400, height: 900} });
     const customPage = await customCtx.newPage();
     const customErrors = [];
     customPage.on('pageerror', error => customErrors.push(error.message));
