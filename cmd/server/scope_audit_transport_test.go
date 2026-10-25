@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/mux"
 )
 
 // Distinct three-byte prefixes, so every fixture hop resolves uniquely
@@ -246,9 +248,15 @@ func TestScopeTransportEvidenceClassification(t *testing.T) {
 			t.Errorf("%s: got %q want %q", c.name, got, c.want)
 		}
 	}
-	for _, label := range []string{"carrier", "ambiguous", "incomplete", "no-scope-traffic", "low-evidence", "not-seen-carrying", "forwarding"} {
-		if strings.Contains(label, "misconfig") {
-			t.Fatal("transport evidence must never claim misconfiguration")
+	// Over every input combination the outcome stays an evidence label; none
+	// is a configuration verdict.
+	allowed := map[string]bool{"carrier": true, "ambiguous": true, "incomplete": true, "no-scope-traffic": true, "low-evidence": true, "not-seen-carrying": true}
+	for fw := 0; fw <= scopeTransportMinForwarded+1; fw++ {
+		for mask := 0; mask < 32; mask++ {
+			bit := func(i int) int { return mask >> i & 1 }
+			if got := classifyScopeTransport(fw, bit(0)*fw, bit(1), bit(2), bit(3), bit(4)); !allowed[got] {
+				t.Fatalf("classify(%d, %05b)=%q", fw, mask, got)
+			}
 		}
 	}
 }
@@ -360,7 +368,11 @@ func TestScopeTransportValidationCoverageAndLegacyFrames(t *testing.T) {
 	if _, err := f.s.db.conn.Exec(`UPDATE observations SET raw_hex=NULL WHERE transmission_id=?`, f.tx); err != nil {
 		t.Fatal(err)
 	}
-	for _, q := range []string{"window=2d", "region=" + strings.Repeat("A,", scopeTransportMaxRegionCodes+1)} {
+	codes := make([]string, scopeTransportMaxRegionCodes+1)
+	for i := range codes {
+		codes[i] = fmt.Sprintf("R%02d", i)
+	}
+	for _, q := range []string{"window=2d", "region=" + strings.Join(codes, ","), "scope=*", "scope=" + strings.Repeat("x", scopeTransportMaxScopeLen+1)} {
 		if _, code, _ := f.get(q); code != 400 {
 			t.Fatalf("%s status=%d", q, code)
 		}
@@ -405,7 +417,8 @@ func TestScopeTransportDoesNotTakePacketStoreLock(t *testing.T) {
 func TestScopeTransportRoutedAndDocumented(t *testing.T) {
 	f := transportFixture(t)
 	f.node(transportPKA, "relay", nil)
-	_, router := setupTestServer(t)
+	router := mux.NewRouter()
+	f.s.RegisterRoutes(router)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest("GET", "/api/scope-audit/transport?window=1h", nil))
 	if w.Code != 200 {
