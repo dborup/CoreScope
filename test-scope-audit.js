@@ -136,11 +136,13 @@ async function transportTests() {
   let resolves = [];
   const race = fixture(() => new Promise(r => resolves.push(r)), '#/analytics?tab=scopes&sub=audit&sav=transport&scope=dk');
   const first = race.controller.load('24h');
+  // The view switches back before the transport answer lands, with no new load yet.
   race.controller.syncState('#/analytics?tab=scopes&sub=audit');
+  resolves[0](response); await first;
+  assert(!/Never asked|seen forwarding/.test(race.container.textContent), 'stale transport rows and summary ignored');
   const second = race.controller.load('24h');
   resolves[1]({rows: [], summary: {total: 0}}); await second;
-  resolves[0](response); await first;
-  assert(!race.container.textContent.includes('Never asked'), 'stale transport rows ignored');
+  assert(race.container.textContent.includes('No confirmed observer declarations'), 'declared view renders its own answer');
   const css = require('fs').readFileSync(__dirname + '/public/style.css', 'utf8');
   const block = css.slice(css.indexOf('/* #414 scope transport */'));
   assert(block.length > 30 && /@media \(max-width: ?640px\)/.test(block), 'mobile layout rule present');

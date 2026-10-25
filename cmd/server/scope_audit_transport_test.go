@@ -547,3 +547,44 @@ func BenchmarkScopeTransportRetainedHeap(b *testing.B) {
 		runtime.KeepAlive(scan)
 	}
 }
+
+// One transmission heard twice through the same shared prefix, once as plain
+// flood and once carrying dk: the dk evidence must survive deduplication, or
+// the candidates would be judged as not carrying dk.
+func TestScopeTransportAmbiguousHopKeepsEveryScopeKind(t *testing.T) {
+	f := transportFixture(t)
+	dk, eu := "dk", "eu"
+	f.node(transportPKC, "collides-1", nil)
+	f.node("c3ffff0000000000000000000000000000000000000000000000000000000000", "collides-2", nil)
+	f.forward(6, 0, &eu, `["c30000"]`, 1, f.now)
+	f.forward(1, 0, &dk, `["c3"]`, 1, f.now)
+	if _, err := f.s.db.conn.Exec(`UPDATE observations SET raw_hex='01' WHERE transmission_id=?`, f.tx); err != nil {
+		t.Fatal(err)
+	}
+	f.observe(f.tx, `["c3"]`, "0001020304", 1, f.now)
+	// A second listener of the same dk frame is the same evidence, counted once.
+	f.observe(f.tx, `["c3"]`, "0001020304", 2, f.now)
+	r := f.mustGet("window=24h&scope=dk")
+	c := transportRows(r)[transportPKC]
+	if c.Evidence != "ambiguous" || *c.AmbiguousScopeHops != 1 || c.AmbiguousHops != 2 || r.Population.AmbiguousHops != 2 {
+		t.Fatalf("row=%+v population=%+v", c, r.Population)
+	}
+}
+
+// Transmission-level deduplication: several listeners and a looped path are
+// one transmission for the repeater and for the population.
+func TestScopeTransportCountsEachTransmissionOnce(t *testing.T) {
+	f := transportFixture(t)
+	dk := "dk"
+	f.node(transportPKA, "relay", nil)
+	f.forward(1, 0, &dk, `["a10000","b2","a10000"]`, 1, f.now)
+	f.observe(f.tx, `["a10000"]`, "0001020304", 2, f.now)
+	r := f.mustGet("window=24h&scope=dk")
+	a := transportRows(r)[transportPKA]
+	if a.Forwarded != 1 || *a.Carrier != 1 || *a.NonCarrier != 0 || len(a.ObservedScopes) != 1 || a.ObservedScopes[0].Count != 1 {
+		t.Fatalf("row=%+v", a)
+	}
+	if r.Population.Transmissions != 1 || r.Population.Observations != 2 || *r.Population.ScopeTransmissions != 1 {
+		t.Fatalf("population=%+v", r.Population)
+	}
+}
