@@ -215,7 +215,8 @@ func (tx *StoreTx) ParsedDecoded() map[string]interface{} {
 //     QueryGroupedPackets cache.
 //
 //  5. regionObsMu   (sync.Mutex)  — guards the region→observer mapping
-//     cache (regionObsCache, regionObsCacheTime).
+//     cache (regionObsCache, regionObsCacheTime). Never held across the
+//     query that fills it (#583).
 //
 //  6. hashSizeInfoMu (sync.Mutex)  — guards the cached hash-size-info
 //     result (hashSizeInfoCache). Acquired independently or
@@ -339,6 +340,7 @@ type PacketStore struct {
 	regionObsMu        sync.Mutex
 	regionObsCache     map[string]map[string]bool
 	regionObsCacheTime time.Time
+	regionObsLoad      singleflight.Group // one query per cold region (#583)
 	// Cached area key → node pubkey set (30s per-key TTL)
 	areaNodeMu         sync.RWMutex
 	areaNodeCache      map[string]map[string]bool
@@ -4458,45 +4460,57 @@ func (s *PacketStore) transmissionsForObserver(observerIDs string, from []*Store
 }
 
 // resolveRegionObservers returns a set of observer IDs for a given IATA region.
-// Results are cached for 30 seconds to avoid repeated DB queries.
+// Results are cached for 30 seconds to avoid repeated DB queries. The query
+// runs outside regionObsMu (#583): a cold region does not hold up requests
+// for other regions, and concurrent misses for one region share one query
+// (singleflight). A failed query returns nil and is not cached, so a
+// transient SQLITE_BUSY cannot empty a region filter for the whole TTL.
 // Uses its own mutex (regionObsMu) so callers holding s.mu won't deadlock.
 func (s *PacketStore) resolveRegionObservers(region string) map[string]bool {
-	s.regionObsMu.Lock()
-	defer s.regionObsMu.Unlock()
-
-	if s.regionObsCache != nil && time.Since(s.regionObsCacheTime) < 30*time.Second {
-		if m, ok := s.regionObsCache[region]; ok {
-			return m
-		}
-		return s.fetchAndCacheRegionObs(region)
-	}
-	// Cache expired — rebuild.
-	s.regionObsCache = make(map[string]map[string]bool)
-	s.regionObsCacheTime = time.Now()
-
-	// Fetch for the requested region and cache it.
-	return s.fetchAndCacheRegionObs(region)
-}
-
-// fetchAndCacheRegionObs fetches observer IDs for a region from the DB and stores in cache.
-// Caller must hold regionObsMu.
-func (s *PacketStore) fetchAndCacheRegionObs(region string) map[string]bool {
-	if m, ok := s.regionObsCache[region]; ok {
+	if m, ok := s.cachedRegionObs(region); ok {
 		return m
 	}
-	// Bound the map before storing a new region key (#370).
-	s.evictRegionObsLocked(region)
-	ids, err := s.db.GetObserverIdsForRegion(region)
-	if err != nil || len(ids) == 0 {
-		s.regionObsCache[region] = nil
-		return nil
+	v, _, _ := s.regionObsLoad.Do(region, func() (interface{}, error) {
+		if m, ok := s.cachedRegionObs(region); ok {
+			return m, nil // a flight that ended after our miss stored it
+		}
+		ids, err := s.db.GetObserverIdsForRegion(region)
+		if err != nil {
+			return map[string]bool(nil), nil
+		}
+		var m map[string]bool
+		if len(ids) > 0 {
+			m = make(map[string]bool, len(ids))
+			for _, id := range ids {
+				m[id] = true
+			}
+		}
+		s.regionObsMu.Lock()
+		s.regionObsWindowLocked()
+		s.evictRegionObsLocked(region) // bound the map before a new key (#370)
+		s.regionObsCache[region] = m
+		s.regionObsMu.Unlock()
+		return m, nil
+	})
+	return v.(map[string]bool)
+}
+
+// cachedRegionObs returns the cached observer set for region, if any.
+func (s *PacketStore) cachedRegionObs(region string) (map[string]bool, bool) {
+	s.regionObsMu.Lock()
+	defer s.regionObsMu.Unlock()
+	s.regionObsWindowLocked()
+	m, ok := s.regionObsCache[region]
+	return m, ok
+}
+
+// regionObsWindowLocked starts a new 30 s cache window when the current one
+// expired: every region is queried again. Caller holds regionObsMu.
+func (s *PacketStore) regionObsWindowLocked() {
+	if s.regionObsCache == nil || time.Since(s.regionObsCacheTime) >= 30*time.Second {
+		s.regionObsCache = make(map[string]map[string]bool)
+		s.regionObsCacheTime = time.Now()
 	}
-	m := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		m[id] = true
-	}
-	s.regionObsCache[region] = m
-	return m
 }
 
 // resolveEntryPointArea approximates a sender's area from their entry-point

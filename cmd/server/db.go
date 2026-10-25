@@ -93,10 +93,14 @@ type DB struct {
 	hasClientDeclaredRegionsFlag   schemaFlag    // client_declared_regions table (#126) -- read via hasClientDeclaredRegions()
 	schemaHealerStop               chan struct{} // closed by Close() to stop healSchemaFlags; nil if OpenDB never started it
 
-	// route_mask backfill status cache (#89), see route_mask.go.
-	routeMaskStatusMu  sync.Mutex
-	routeMaskStatus    RouteMaskBackfillStatus
-	routeMaskStatusExp time.Time
+	// route_mask backfill status cache (#89), see route_mask.go. Its queries
+	// run outside routeMaskStatusMu (#583).
+	routeMaskStatusMu         sync.Mutex
+	routeMaskStatus           RouteMaskBackfillStatus
+	routeMaskStatusOK         bool // routeMaskStatus was read successfully
+	routeMaskStatusExp        time.Time
+	routeMaskStatusRefreshing bool
+	routeMaskStatusLoad       singleflight.Group
 
 	// Channel list caches (60s TTL, #762): keyed by normalized region, with
 	// concurrent misses coalesced into one query per key (#109). See

@@ -170,7 +170,7 @@ func TestConfigNeighborMaxEdgeKm(t *testing.T) {
 func TestBuildNeighborGraphWiresMaxEdgeKm(t *testing.T) {
 	edges := func(cfg *Config) (int, uint64) {
 		srv := &Server{store: followupStore(), cfg: cfg}
-		g := srv.buildNeighborGraph()
+		g := srv.buildNeighborGraph(srv.readNeighborBuildInputs())
 		return len(g.AllEdges()), g.RejectedEdgesGeoFar
 	}
 	if n, rej := edges(&Config{NeighborGraph: &NeighborGraphConfig{MaxEdgeKm: 10}}); n != 0 || rej == 0 {
@@ -190,11 +190,11 @@ func TestBuildNeighborGraphWiresMaxEdgeKm(t *testing.T) {
 // F6: Config.DebugAffinity enables the build's disambiguation log.
 func TestBuildNeighborGraphWiresDebugAffinity(t *testing.T) {
 	on := &Server{store: followupStore(), cfg: &Config{DebugAffinity: true}}
-	if on.buildNeighborGraph().logFn == nil {
+	if on.buildNeighborGraph(on.readNeighborBuildInputs()).logFn == nil {
 		t.Error("DebugAffinity=true did not enable build logging")
 	}
 	off := &Server{store: followupStore(), cfg: &Config{}}
-	if off.buildNeighborGraph().logFn != nil {
+	if off.buildNeighborGraph(off.readNeighborBuildInputs()).logFn != nil {
 		t.Error("DebugAffinity=false enabled build logging")
 	}
 }
