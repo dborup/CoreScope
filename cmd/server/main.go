@@ -563,6 +563,7 @@ func main() {
 	// could arrive first and take Go's default action (exit -1, no shutdown).
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	shutdownDone := make(chan struct{}) // closed once the whole sequence below has run (#577)
 	go func() {
 		sig := <-sigCh
 		log.Printf("[server] received %v, shutting down...", sig)
@@ -612,17 +613,10 @@ func main() {
 		//
 		// This explicit call is NOT redundant with the plain
 		// `defer stopPingScoreHistory()` declared at Start time: that
-		// defer only runs on the MAIN goroutine, once
-		// httpServer.ListenAndServe() returns below and main() begins
-		// unwinding -- but ListenAndServe() returns as soon as
-		// Shutdown() closes the listener (near the START of step 2
-		// above), essentially concurrently with the REST of this
-		// goroutine's own steps, including its own explicit dbClose()
-		// call a few lines down. Without this explicit call, THIS
-		// goroutine's dbClose() would have no ordering guarantee
-		// relative to the worker's shutdown at all -- the main-goroutine
-		// defer runs on a different goroutine and provides no
-		// happens-before relationship with this one. Calling it here,
+		// defer only runs on the MAIN goroutine, once main() unwinds
+		// after this goroutine has closed shutdownDone (#577) -- that
+		// is, after this goroutine's own dbClose() a few lines down, so
+		// it cannot order the worker's shutdown before it. Calling it here,
 		// in this goroutine's own program order before its own
 		// dbClose(), is what actually guarantees the required
 		// cancel → active Cycle finishes → ticker stopped (if created) →
@@ -639,6 +633,7 @@ func main() {
 			log.Printf("[server] DB close error: %v", err)
 		}
 		log.Println("[server] shutdown complete")
+		close(shutdownDone)
 	}()
 
 	log.Printf("[server] CoreScope (Go) listening on http://localhost:%d", cfg.Port)
@@ -660,6 +655,17 @@ func main() {
 
 	if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("[server] %v", err)
+	}
+	// #577: ListenAndServe returns ErrServerClosed as soon as Shutdown closes
+	// the listener, before the drain, the hub close, the history worker stop
+	// and dbClose have run. Returning here would exit mid-sequence, so wait
+	// for the shutdown goroutine, bounded so a hung step cannot hold the
+	// process until the runtime's SIGKILL.
+	select {
+	case <-shutdownDone:
+	case <-time.After(shutdownTimeout):
+		log.Printf("[server] shutdown did not complete within %v; exiting", shutdownTimeout)
+		os.Exit(1) // skips main's deferred stops: one of them may be what hangs
 	}
 }
 
