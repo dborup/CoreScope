@@ -32,9 +32,10 @@ corescope-anomaly export -db /snap/meshcore.db -immutable \
   names, public keys, observer columns, SNR/RSSI or resolved paths. A line
   carries payload type, the 1-byte channel hash (group payloads), route class,
   first hop and full route (hop prefixes as on the wire), frame and payload
-  size. The only exception is the optional
-  [ingest-backlog flag](#ingest-backlog-flag-optional-473). It reads
-  `observations.observer_idx` inside the export and writes a boolean only.
+  size. The only exceptions are the optional
+  [ingest-backlog flag](#ingest-backlog-flag-optional-473) and
+  [late-delivery flag](#late-delivery-flag-optional-538). They read
+  `observations.observer_idx` inside the export and write a boolean only.
 - **Opaque IDs.** A line's `id` is the export's own number: `tx1`, `tx2`, … in
   the order each transmission's first row is read. It is not the content hash,
   which would join the line to every CoreScope instance that heard the packet
@@ -88,6 +89,49 @@ data over that whole lookback, because before its first observation every
 observer would look reconnected. A lookback that starts earlier is refused.
 The summary adds `ingest_backlog` with the scan's row counts and the number
 of flagged events.
+
+### Late-delivery flag (optional, #538)
+
+```sh
+corescope-anomaly export ... -late-window 1m -late-min-rows 10 -late-share 0.5 -late-gap 2m
+```
+
+The four flags go together (window and gap whole seconds in (0, 1h], min rows
+in 1..1048576, share in (0, 1]); there are no defaults, and without them the
+output is unchanged. They cannot be combined with the `-backlog-*` flags. They
+set the same `"ingest_backlog": true`, so a rate rule's
+`exclude_ingest_backlog` reads them unchanged. The flag marks the events of an
+observer burst that delivers transmissions the rest of the network reported
+minutes earlier: a queue sent on reconnect and stamped at delivery.
+
+- **Already seen.** For a row of observer O at time `t`, `e` is the latest
+  observation of the same transmission by another observer before
+  `t + gap`. The row is already seen when there is one and its delay
+  `d = t - e` is at least `-late-gap`: others heard it at least the gap
+  before, and none of them within the gap.
+- **Late burst.** Bins are epoch-aligned and `-late-window` wide. O's bin k is
+  a late burst when O's rows in bins k-1, k and k+1 number at least
+  `-late-min-rows`, at least `-late-share` of them are already seen, and the
+  delays of the already-seen rows span at least `-late-gap`. The spread keeps
+  an observer whose clock runs behind by a constant offset from looking late.
+- **Flag.** An event is flagged when its first observation (the one that sets
+  its `time`) is a row of O in a late burst of O. Rows with a NULL
+  `observer_idx` are never flagged.
+
+Unlike the #473 flag, it needs no silence: a real storm that an often-quiet
+observer hears first is not flagged, because the other observers hear the
+same transmissions within seconds or not at all.
+
+**Key-free.** As for the #473 flag: `observer_idx` stays in memory, the flag
+is the only change to a line, and the output is byte-identical when observers
+are renamed.
+
+**Cost.** One more index range scan on `observations.timestamp` over
+`[start - settle - 2 window, end + settle + 2 window)`, under the same
+`-max-rows` cap, with one index search per row over its transmission's
+observations. Memory holds one entry per (observer, bin) with rows, capped.
+The summary adds `late_delivery` with the scan's row counts, the rows already
+seen and the number of flagged events.
 
 Events are built by `anomaly.Normalizer`. An observation is route evidence
 when it lies at most `-settle` after the transmission's first observation.
@@ -159,8 +203,9 @@ rules accept two optional fields:
   hex (`["81"]`). Leaving it out excludes nothing. See
   [Excluded channels](#excluded-channels).
 
-Rate rules accept the optional `exclude_ingest_backlog` (#473). With `true`,
-the rule ignores lines with `"ingest_backlog": true`: they are not counted in
+Rate rules accept the optional `exclude_ingest_backlog` (#473; the #538 flag
+sets the same field). With `true`, the rule ignores lines with
+`"ingest_backlog": true`: they are not counted in
 its window, never trigger it and do not keep its episodes open. Leaving it out
 means `false`, and then the flag changes nothing.
 

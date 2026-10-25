@@ -28,7 +28,7 @@ import (
 // time and the row IDs that join it to its transmission; never the content
 // hash, decoded_json, channel names, public keys, observer columns,
 // SNR/RSSI or resolved paths (except observer_idx for the opt-in backlog
-// flag, which only a boolean leaves). A line's id is the export's own
+// and late-delivery flags, which only a boolean leaves). A line's id is the export's own
 // number (see txNumbering). Bounded: one index range scan on observations.timestamp
 // over [start - settle, end + settle) with a hard -max-rows cap; per row a
 // primary-key lookup and one index search; memory is bounded by the caps
@@ -44,7 +44,9 @@ import (
 // the ingest time where the ingestor falls back to it (resolveRxTime).
 //
 // With -backlog-silence and -backlog-span the export also flags events
-// whose first observation follows a silence of its observer (backlog.go).
+// whose first observation follows a silence of its observer (backlog.go);
+// with the -late-* flags instead, events that an observer delivered in a
+// burst of transmissions others heard minutes earlier (late.go).
 
 const (
 	maxExportSpan   = 31 * 24 * time.Hour
@@ -69,6 +71,11 @@ type exportOptions struct {
 	// BacklogSilence and BacklogSpan enable the ingest-backlog flag
 	// (backlog.go); both or neither, 0 is off.
 	BacklogSilence, BacklogSpan time.Duration
+	// LateWindow, LateMinRows, LateShare and LateGap enable the
+	// late-delivery flag (late.go); all or none, 0 is off.
+	LateWindow, LateGap time.Duration
+	LateMinRows         int
+	LateShare           float64
 }
 
 func (o exportOptions) validate() error {
@@ -88,7 +95,10 @@ func (o exportOptions) validate() error {
 	case o.MaxRows <= 0 || o.MaxRows > maxExportRows:
 		return fmt.Errorf("-max-rows must be in 1..%d", maxExportRows)
 	}
-	return o.validateBacklog()
+	if err := o.validateBacklog(); err != nil {
+		return err
+	}
+	return o.validateLate()
 }
 
 // exportSummary counts rows and events; it holds no values from the data.
@@ -112,6 +122,8 @@ type exportSummary struct {
 	Normalizer       anomaly.NormalizerStats `json:"normalizer"`
 	// IngestBacklog is set only when the backlog flag is enabled.
 	IngestBacklog *backlogSummary `json:"ingest_backlog,omitempty"`
+	// LateDelivery is set only when the late-delivery flag is enabled.
+	LateDelivery *lateSummary `json:"late_delivery,omitempty"`
 }
 
 // openReadOnly opens path with SQLite's mode=ro: the connection cannot
@@ -157,7 +169,7 @@ func openSQLite(path, params string) (*sql.DB, error) {
 // ?3 seconds after the first observation of their transmission, in arrival
 // order, at most ?4 rows. ownRaw selects observations.raw_hex, which older
 // databases lack; observer adds observations.observer_idx for the backlog
-// flag.
+// or late-delivery flag.
 func exportQuery(ownRaw, observer bool) string {
 	raw, obs := "NULL", ""
 	if ownRaw {
@@ -206,15 +218,29 @@ func exportRecords(opt exportOptions, w io.Writer) (exportSummary, error) {
 	if err != nil {
 		return sum, err
 	}
-	var backlog *backlogTracker
-	if opt.backlog() {
+	// flag sets Observation.IngestBacklog; flaggedEvents counts the events
+	var flag interface {
+		flagged(observer sql.NullInt64, ts int64) bool
+	}
+	var flaggedEvents *int
+	switch {
+	case opt.backlog():
 		sum.IngestBacklog = &backlogSummary{}
-		if backlog, err = scanBacklog(db, opt, sum.IngestBacklog); err != nil {
+		b, err := scanBacklog(db, opt, sum.IngestBacklog)
+		if err != nil {
 			return sum, err
 		}
+		flag, flaggedEvents = b, &sum.IngestBacklog.EventsFlagged
+	case opt.late():
+		sum.LateDelivery = &lateSummary{}
+		l, err := scanLate(db, opt, sum.LateDelivery)
+		if err != nil {
+			return sum, err
+		}
+		flag, flaggedEvents = l, &sum.LateDelivery.EventsFlagged
 	}
 	ids := newTxNumbering(int64(opt.Settle/time.Second), exportMaxPending)
-	rows, err := db.Query(exportQuery(ownRaw, backlog != nil), opt.Start.Add(-opt.Settle).Unix(), opt.End.Add(opt.Settle).Unix(),
+	rows, err := db.Query(exportQuery(ownRaw, flag != nil), opt.Start.Add(-opt.Settle).Unix(), opt.End.Add(opt.Settle).Unix(),
 		int64(opt.Settle/time.Second), opt.MaxRows+1)
 	if err != nil {
 		return sum, err
@@ -243,7 +269,7 @@ func exportRecords(opt exportOptions, w io.Writer) (exportSummary, error) {
 			}
 			sum.EventsWritten++
 			if e.IngestBacklog {
-				sum.IngestBacklog.EventsFlagged++
+				*flaggedEvents++
 			}
 		}
 		return nil
@@ -254,7 +280,7 @@ func exportRecords(opt exportOptions, w io.Writer) (exportSummary, error) {
 		}
 		var r obsRow
 		dest := []interface{}{&r.id, &r.ts, &r.pathJSON, &r.ownRaw, &r.tx, &r.txRaw}
-		if backlog != nil {
+		if flag != nil {
 			dest = append(dest, &r.observer)
 		}
 		if err := rows.Scan(dest...); err != nil {
@@ -275,8 +301,8 @@ func exportRecords(opt exportOptions, w io.Writer) (exportSummary, error) {
 		if note.pathUnknown {
 			sum.PathUnknown++
 		}
-		if backlog != nil {
-			o.IngestBacklog = backlog.flagged(r.observer, r.ts)
+		if flag != nil {
+			o.IngestBacklog = flag.flagged(r.observer, r.ts)
 		}
 		if err := emit(norm.Add(o).Events); err != nil {
 			return sum, err
@@ -297,7 +323,7 @@ type obsRow struct {
 	id, ts, tx       int64
 	pathJSON, ownRaw sql.NullString
 	txRaw            string
-	observer         sql.NullInt64 // read only for the backlog flag
+	observer         sql.NullInt64 // read only for the backlog or late-delivery flag
 }
 
 // txNumbering gives each transmission an id of the export's own: "tx" and
@@ -505,6 +531,10 @@ func runExport(args []string, stderr io.Writer) int {
 	out := fs.String("out", "", "output JSON Lines file; must not exist (required)")
 	silence := fs.Duration("backlog-silence", 0, "with -backlog-span: an observation with no observation of its observer in this long before it is a reconnect (optional, no default)")
 	spn := fs.Duration("backlog-span", 0, "with -backlog-silence: flag events first heard by an observer within this long after its reconnect (optional, no default)")
+	lateWindow := fs.Duration("late-window", 0, "with the other -late-* flags: bin width of an observer's late burst (optional, no default)")
+	lateMinRows := fs.Int("late-min-rows", 0, "with the other -late-* flags: rows a late burst holds at least (optional, no default)")
+	lateShare := fs.Float64("late-share", 0, "with the other -late-* flags: share of a late burst's rows that are already seen, (0, 1] (optional, no default)")
+	lateGap := fs.Duration("late-gap", 0, "with the other -late-* flags: a row is already seen when another observer heard its transmission this long before (optional, no default)")
 	if err := fs.Parse(args); err != nil {
 		return exitUsage
 	}
@@ -516,7 +546,8 @@ func runExport(args []string, stderr io.Writer) int {
 		return usageErr(errors.New("unexpected arguments"))
 	}
 	opt := exportOptions{DB: *dbPath, Settle: *settle, MaxRows: *maxRows, Immutable: *immutable,
-		BacklogSilence: *silence, BacklogSpan: *spn}
+		BacklogSilence: *silence, BacklogSpan: *spn,
+		LateWindow: *lateWindow, LateMinRows: *lateMinRows, LateShare: *lateShare, LateGap: *lateGap}
 	var err error
 	if opt.Start, err = parseTime("start", *start); err != nil {
 		return usageErr(err)
