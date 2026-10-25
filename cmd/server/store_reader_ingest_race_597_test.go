@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -71,7 +73,14 @@ func apiGETRoutes597(t *testing.T, router *mux.Router) []string {
 }
 
 func TestEveryAPIReaderConcurrentIngest597(t *testing.T) {
-	const readers, reads, hashReads, maxIngests, seedObs = 2, 4, 12, 100, 300
+	const readers, reads, hashReads, seedObs = 2, 4, 6, 50
+	// Ingest is paced to the reads: while a read is in flight the writer
+	// adds an observation at most every ingestGap, and at most ingestsPerRead
+	// per read started. Each read then overlaps ingest for its whole run,
+	// while the observation lists stay bounded: an unpaced writer outruns
+	// the readers (the race detector makes them slow), so the lists, and
+	// each read of them, grow without bound.
+	const ingestsPerRead, ingestGap = 10, 50 * time.Microsecond
 
 	srv, router := setupTestServer(t)
 	routes := apiGETRoutes597(t, router)
@@ -80,9 +89,6 @@ func TestEveryAPIReaderConcurrentIngest597(t *testing.T) {
 		t.Fatalf("found only %d GET /api routes; the router walk no longer sees them", len(routes))
 	}
 	txs := storeTxs470(srv.store)
-	if len(txs) == 0 {
-		t.Fatal("test server has no transmissions")
-	}
 	if len(txs) < 2 {
 		t.Fatal("test server needs a transmission to keep and one to rehash")
 	}
@@ -96,42 +102,69 @@ func TestEveryAPIReaderConcurrentIngest597(t *testing.T) {
 		hashes[i] = tx.Hash
 	}
 	movable := len(txs) - 1
-	ingest := ingestInto470(srv.store, txs, "obs1")
-	// Give the transmission the hash routes read plenty of observations, so
-	// an unlocked read of them spans a long loop and a write lands in it. A
-	// hash route that read three observations without s.mu would otherwise
-	// finish before the writer's next write.
-	for k := 0; k < seedObs; k++ {
-		ingest(1_000_002 + len(txs)*k - (1_000_002 % len(txs))) // n%len(txs)==0: txs[0]
+	now := time.Now().UTC()
+	obsSeq := 0
+	ingest := func(tx *StoreTx) {
+		obsSeq++
+		applyObservation470(srv.store, tx, &StoreObs{
+			ID: 300000 + obsSeq, TransmissionID: tx.ID, ObserverID: "obs1",
+			PathJSON: fmt.Sprintf(`["aa","bb","%04x"]`, obsSeq), Timestamp: now.Add(time.Duration(obsSeq) * time.Millisecond).Format(time.RFC3339Nano),
+		})
 	}
-	migrations := 0
-	write := func(n int) {
-		// Ingest stops growing the observation lists past maxIngests, so
-		// a slow reader (the race detector makes them slow) never faces a
-		// list that grows without bound while it runs; the migration
-		// keeps writing.
-		if n%2 == 0 && n <= 2*maxIngests {
-			ingest(n)
-			return
-		}
-		// Rehash to a new hash and back (txs[0] stays put, see stableHash).
-		i := 1 + migrations%movable
-		h := hashes[i]
-		if migrations/movable%2 == 0 {
-			h += "97"
-		}
-		migrations++
-		applyHashMigration470(srv.store, txs[i], h)
+	// Give the transmission the hash routes read enough observations that an
+	// unlocked read of them spans a loop, so the writer's writes land in it.
+	for k := 0; k < seedObs; k++ {
+		ingest(txs[0])
 	}
 
 	for _, tpl := range routes {
 		path := raceSweepPath597(tpl, stableHash)
 		n := reads
-		if strings.Contains(tpl, "{hash}") || strings.HasPrefix(tpl, "/api/packets/{id}") {
-			n = hashReads // hash lookups only race in a narrow window
+		// Hash routes read txs[0], so ingest goes there: a write to any
+		// other transmission cannot race their read of txs[0]'s
+		// observations.
+		hashRoute := strings.Contains(tpl, "{hash}") || strings.HasPrefix(tpl, "/api/packets/{id}")
+		if hashRoute {
+			n = hashReads // each read of txs[0] gives the writer another window
+		}
+		var started, inflight atomic.Int64
+		ingests, migrations, selfMigrate := 0, 0, false
+		var lastIngest time.Time
+		write := func(int) {
+			if inflight.Load() > 0 && int64(ingests) < ingestsPerRead*started.Load() && time.Since(lastIngest) >= ingestGap {
+				tx := txs[ingests%len(txs)]
+				if hashRoute {
+					tx = txs[0]
+				}
+				ingests++
+				lastIngest = time.Now()
+				ingest(tx)
+				return
+			}
+			if hashRoute {
+				selfMigrate = !selfMigrate
+				if selfMigrate {
+					// Migrate txs[0] to the hash it has: that writes each
+					// of its observations, and its list does not grow, so
+					// these writes can go on for the whole read.
+					applyHashMigration470(srv.store, txs[0], stableHash)
+					return
+				}
+			}
+			// Rehash to a new hash and back (txs[0] keeps its hash).
+			i := 1 + migrations%movable
+			h := hashes[i]
+			if migrations/movable%2 == 0 {
+				h += "97"
+			}
+			migrations++
+			applyHashMigration470(srv.store, txs[i], h)
 		}
 		t.Run(tpl, func(t *testing.T) {
 			raceIngest470(t, readers, n, 2*len(txs), func(r, i int) error {
+				started.Add(1)
+				inflight.Add(1)
+				defer inflight.Add(-1)
 				// Recompute the analytics instead of serving them from the
 				// cache, which would hide the computation from the writer.
 				srv.store.invalidateCachesFor(cacheInvalidation{eviction: true})
