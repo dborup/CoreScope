@@ -803,7 +803,7 @@
     var br = effectiveConfig.branding;
     if (br) {
       if (br.siteName) {
-        setInstanceTitle(br.siteName);
+        window.setInstanceTitle(br.siteName);
         _setBrandAlt(br.siteName);
         var brandEl = document.querySelector('.brand-text');
         if (brandEl) brandEl.textContent = br.siteName;
@@ -2406,7 +2406,7 @@
             _setBrandAlt(inp.value);
             var el = document.querySelector('.brand-text');
             if (el) el.textContent = inp.value;
-            setInstanceTitle(inp.value);
+            window.setInstanceTitle(inp.value);
           }
           if (section === 'branding' && key === 'logoUrl') {
             _setBrandLogoUrl(inp.value || '', null);
@@ -2762,7 +2762,7 @@
         _setBrandAlt(overrides.branding.siteName);
         var brandEl = document.querySelector('.brand-text');
         if (brandEl) brandEl.textContent = overrides.branding.siteName;
-        setInstanceTitle(overrides.branding.siteName);
+        window.setInstanceTitle(overrides.branding.siteName);
       }
       if (overrides.branding.logoUrl) {
         _setBrandLogoUrl(overrides.branding.logoUrl, overrides.branding.siteName || null);
