@@ -39,6 +39,11 @@ import (
 //     sets the event's time) is a row of O in a late burst (O, its bin).
 //     Rows with a NULL observer are never flagged.
 //
+// Limits (README, late_limits_538_test.go): observers that drain a common
+// outage together are each other's peer and are never flagged; the share
+// counts queue-only rows, so a large queue after a short outage is missed;
+// two clocks behind by different offsets can pass the spread at any share.
+//
 // The observer is read as observations.observer_idx and used only inside
 // the export, as a map key and for "another observer"; only the boolean
 // leaves, so the output does not change when observers are renamed.
@@ -171,7 +176,9 @@ func (l *lateTracker) see(observer, ts int64, elsewhere sql.NullInt64) (bool, er
 }
 
 // flagged reports whether an observation of observer at ts lies in a late
-// burst of that observer.
+// burst of that observer. The share bound is in floating point: exact for
+// shares that are multiples of 1/2^k (0.5), while for example 0.07 * 100
+// rounds above 7.
 func (l *lateTracker) flagged(observer sql.NullInt64, ts int64) bool {
 	if !observer.Valid {
 		return false

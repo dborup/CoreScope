@@ -122,6 +122,35 @@ Unlike the #473 flag, it needs no silence: a real storm that an often-quiet
 observer hears first is not flagged, because the other observers hear the
 same transmissions within seconds or not at all.
 
+**Limits.** These are properties of the definition, pinned in
+`late_limits_538_test.go` at window 1m, min rows 10, share 0.5 and gap 2m:
+
+- A **common-cause outage is never flagged.** When two or more observers lose
+  the same uplink or broker and drain the same outage together, each queued
+  row has a peer, the other draining observer, seconds away. That peer is
+  the latest other observation before `t + gap`, so no row is already seen.
+  One observer draining a 40-min outage is flagged (25 of 25, 40 of 40); two
+  or three draining it together are not (0).
+- **Recall falls for large queues after short outages.** The share counts the
+  queued rows only the draining observer heard, so a queue is flagged only
+  when at least as many shared rows older than the gap come with it. A queue
+  of 40 GRP_TXT, delivered in order at 5 rows/s: 40 of 40 flagged after a 20-
+  or 40-min outage with 6 shared rows a minute; 0 of 40 after 3-10 min; 0 of
+  40 after 3-40 min with 1 shared row a minute.
+- **A share does not protect against skewed clocks.** Two observers whose
+  clocks run behind by different offsets give another observer's rows two
+  different delays. Their spread can exceed the gap: a storm of 40 GRP_TXT
+  heard by O and, a third each, by two observers 3 and 7 min behind marks
+  the 13 events O heard first, at share 0.5.
+- An outage shorter than about 2 gap is never flagged: already-seen delays are
+  at least the gap and must spread over at least the gap.
+- A queue from an observer that overlaps no other observer, or a queue that
+  keeps its receive times, is not flagged.
+- The share is compared as `seen >= share * rows` in floating point, so a few
+  bounds that are exact in decimal are missed (share 0.07 with 7 of 100 rows
+  seen is not a burst). Shares that are multiples of 1/2^k, such as 0.5, are
+  exact.
+
 **Key-free.** As for the #473 flag: `observer_idx` stays in memory, the flag
 is the only change to a line, and the output is byte-identical when observers
 are renamed.
