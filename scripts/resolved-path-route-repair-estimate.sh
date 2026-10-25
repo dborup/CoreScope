@@ -16,7 +16,9 @@
 # numbers. Two further approximations, on any input:
 #   - the candidate count is the SQL prefilter the pass uses, which is a
 #     superset: the pass re-checks each row in Go with the #289/#308 helper and
-#     writes only the rows whose route type actually changes the resolve;
+#     writes only a row whose route type actually changes the resolve AND whose
+#     stored value is exactly what the pre-#308 rule produces, so the repaired
+#     count is normally well below the candidate count printed here;
 #   - the scan rate is the BenchmarkResolvedPathRouteRepairPass_289 figure
 #     below, measured warm-cache on a synthetic database. It is not a
 #     measurement of this host or of cold disk I/O.
@@ -74,23 +76,55 @@ else
 fi
 echo
 
-# Candidates, split by bug direction. Both use the pass's own prefilter: the
-# route family is bit 1 of the low nibble of the frame's header byte, i.e. of
-# raw_hex's second character, and (route_type & 2) is the transmission's.
+# Candidates, split by bug direction: which route family the frame's own header
+# carries. That is bit 1 of the low nibble of the header byte, i.e. of
+# raw_hex's second character, and (route_type & 2) is the transmission's — the
+# pass's own prefilter. Bit 1 alone separates the families, because the
+# transport types (0 and 3) share bit 0 with the other family's non-transport
+# type.
+#
+# Each direction is then split by whether the row carries a stored path, which
+# is a different question from the direction and is reported inside it: a
+# DIRECT-frame row can be NULL (the resolve found nothing) and a FLOOD-frame
+# row can carry a stored value (PR #590 review F6). A stored value is not by
+# itself a defect either: live ingest has always used the frame's own route
+# type, so a mismatched row may well hold a correct ingest value, and the pass
+# rewrites a row only when its stored value is exactly what the pre-#308 rule
+# produces (PR #590 review F1). One query, so this is a single scan.
 HDR_CAND=0
-HDR_NULL=0
+HDR_DIR=0
+HDR_DIR_NULL=0
+HDR_FLOOD=0
+HDR_FLOOD_NULL=0
+HDR_BAD=0
 MASK_CAND=0
 if [ "$RAW_COL" = "1" ]; then
-	HDR="length(o.raw_hex) >= 2
-		AND ((instr('0123456789abcdef', lower(substr(o.raw_hex, 2, 1))) - 1) & 2) != (COALESCE(t.route_type, -1) & 2)
-		AND COALESCE(o.path_json, '') NOT IN ('', '[]')"
-	HDR_CAND=$(q "SELECT COUNT(*) FROM observations o JOIN transmissions t ON t.id = o.transmission_id WHERE $HDR;")
-	HDR_NULL=$(q "SELECT COUNT(*) FROM observations o JOIN transmissions t ON t.id = o.transmission_id WHERE $HDR AND o.resolved_path IS NULL;")
+	SPLIT=$(q "SELECT COUNT(*),
+			COALESCE(SUM(CASE WHEN hex_ok > 0 AND hdr_fam != 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN hex_ok > 0 AND hdr_fam != 0 AND rp IS NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN hex_ok > 0 AND hdr_fam  = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN hex_ok > 0 AND hdr_fam  = 0 AND rp IS NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN hex_ok = 0 THEN 1 ELSE 0 END), 0)
+		FROM (
+			SELECT instr('0123456789abcdef', lower(substr(o.raw_hex, 2, 1))) AS hex_ok,
+				((instr('0123456789abcdef', lower(substr(o.raw_hex, 2, 1))) - 1) & 2) AS hdr_fam,
+				o.resolved_path AS rp
+			FROM observations o JOIN transmissions t ON t.id = o.transmission_id
+			WHERE length(o.raw_hex) >= 2
+				AND ((instr('0123456789abcdef', lower(substr(o.raw_hex, 2, 1))) - 1) & 2) != (COALESCE(t.route_type, -1) & 2)
+				AND COALESCE(o.path_json, '') NOT IN ('', '[]')
+		);")
+	IFS='|' read -r HDR_CAND HDR_DIR HDR_DIR_NULL HDR_FLOOD HDR_FLOOD_NULL HDR_BAD <<EOF
+$SPLIT
+EOF
 fi
 echo "candidates: frame header disagrees with t.route_type"
 echo "  rows:              $HDR_CAND"
-echo "  of those NULL:     $HDR_NULL (FLOOD read as DIRECT; never revisited by the #188 backfill)"
-echo "  of those stored:   $((HDR_CAND - HDR_NULL)) (DIRECT read as FLOOD; may carry a wrong relay)"
+echo "  DIRECT frame under a FLOOD transmission (may carry a wrong relay)"
+echo "    rows:            $HDR_DIR (stored $((HDR_DIR - HDR_DIR_NULL)), NULL $HDR_DIR_NULL)"
+echo "  FLOOD frame under a DIRECT transmission (never revisited by the #188 backfill)"
+echo "    rows:            $HDR_FLOOD (stored $((HDR_FLOOD - HDR_FLOOD_NULL)), NULL $HDR_FLOOD_NULL)"
+echo "  unparseable header: $HDR_BAD (counted in neither direction; the pass re-checks these in Go)"
 echo
 
 if [ "$RAW_COL" = "1" ] && [ "$MASK_COL" = "1" ]; then

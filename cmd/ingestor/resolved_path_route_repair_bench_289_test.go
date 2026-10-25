@@ -49,7 +49,14 @@ var obsBench289 = []string{
 // makes it a repair candidate. Every other observation carries a frame of the
 // transmission's own family, so the SQL prefilter drops it without the pass
 // reading the row.
-func seedRepairBenchDB(b *testing.B, store *Store) (candidates int) {
+//
+// The mixed transmissions alternate between the two route families, so both
+// repair directions are measured (PR #590 review F7): a candidate under a
+// FLOOD transmission has a stored relay the pass clears, and one under a
+// DIRECT transmission is a NULL row that gains a path. A cleared row writes
+// a NULL and a repaired row writes a 66-byte JSON array, so the two are not
+// the same amount of work inside the write transaction.
+func seedRepairBenchDB(b *testing.B, store *Store) (cleared, repaired int) {
 	b.Helper()
 	if repairBenchObsPerTx > len(obsBench289) {
 		b.Fatalf("repairBenchObsPerTx = %d, only %d observers are seeded", repairBenchObsPerTx, len(obsBench289))
@@ -96,24 +103,40 @@ func seedRepairBenchDB(b *testing.B, store *Store) (candidates int) {
 		for i := 0; i < txCount; i++ {
 			mask := sql.NullInt64{Int64: floodMask289, Valid: true}
 			mixed := i%3 == 0
+			// Half the mixed transmissions have a DIRECT first reception, so
+			// their candidates are the direction that gains a path.
+			direct := mixed && (i/3)%2 == 1
+			txRoute, ownFrame, ownStored := routeFlood188, floodFrame289, rp289(c3a)
 			if mixed {
 				mask = sql.NullInt64{Int64: mixedMask289, Valid: true}
 			}
-			res, err := insTx.Exec(fmt.Sprintf("bench289-%d", i), routeFlood188, mask)
+			if direct {
+				// A DIRECT transmission: its own receptions resolve to
+				// nothing, as a DIRECT ["c3"] has no observer anchor.
+				txRoute, ownFrame, ownStored = routeDirect188, directFrame289, ""
+			}
+			res, err := insTx.Exec(fmt.Sprintf("bench289-%d", i), txRoute, mask)
 			if err != nil {
 				return fmt.Errorf("transmission %d: %w", i, err)
 			}
 			txID, _ := res.LastInsertId()
 			for j := 0; j < repairBenchObsPerTx; j++ {
 				rows++
-				frame := floodFrame289
+				frame, stored := ownFrame, ownStored
 				if mixed && rows%repairBenchCandidateEvery == 0 {
-					// A DIRECT reception the pre-#308 backfill anchored on the
-					// observer: the pass must clear the stored relay.
-					frame = directFrame289
-					candidates++
+					if direct {
+						// A FLOOD reception the pre-#308 backfill read as
+						// DIRECT: the row stayed NULL and gains c3a.
+						frame, stored = floodFrame289, ""
+						repaired++
+					} else {
+						// A DIRECT reception the pre-#308 backfill anchored on
+						// the observer: the pass clears the stored relay.
+						frame, stored = directFrame289, rp289(c3a)
+						cleared++
+					}
 				}
-				if _, err := insObs.Exec(txID, obsIdx[j], ts190+int64(rows), frame, rp289(c3a)); err != nil {
+				if _, err := insObs.Exec(txID, obsIdx[j], ts190+int64(rows), frame, nilIfEmpty(stored)); err != nil {
 					return fmt.Errorf("observation %d: %w", rows, err)
 				}
 			}
@@ -123,9 +146,9 @@ func seedRepairBenchDB(b *testing.B, store *Store) (candidates int) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	b.Logf("seeded %d transmissions / %d observations (%d candidates) in %s",
-		txCount, rows, candidates, time.Since(start).Round(time.Second))
-	return candidates
+	b.Logf("seeded %d transmissions / %d observations (%d candidates: %d to clear, %d to repair) in %s",
+		txCount, rows, cleared+repaired, cleared, repaired, time.Since(start).Round(time.Second))
+	return cleared, repaired
 }
 
 // BenchmarkResolvedPathRouteRepairPass_289 runs the whole pass once over the
@@ -137,7 +160,7 @@ func BenchmarkResolvedPathRouteRepairPass_289(b *testing.B) {
 			dbPath := filepath.Join(b.TempDir(), "ingest.db")
 			store := backfillFixture188(b, dbPath, true)
 			defer store.Close()
-			wantCandidates := seedRepairBenchDB(b, store)
+			wantCleared, wantRepaired := seedRepairBenchDB(b, store)
 			primeIndexAndGraph188(b, store)
 			store.Checkpoint()
 			if fi, err := os.Stat(dbPath); err == nil {
@@ -161,13 +184,17 @@ func BenchmarkResolvedPathRouteRepairPass_289(b *testing.B) {
 			if err != nil || st == nil {
 				b.Fatalf("state: %v", err)
 			}
-			if int(st.Cleared) != wantCandidates {
-				b.Fatalf("cleared %d rows, want the %d seeded candidates", st.Cleared, wantCandidates)
+			if wantCleared == 0 || wantRepaired == 0 {
+				b.Fatalf("the mix must measure both directions: %d to clear, %d to repair", wantCleared, wantRepaired)
+			}
+			if int(st.Cleared) != wantCleared || int(st.Repaired) != wantRepaired {
+				b.Fatalf("%d cleared / %d repaired, want the seeded %d / %d",
+					st.Cleared, st.Repaired, wantCleared, wantRepaired)
 			}
 			w := writerStatsAgg.get(resolvedPathRouteRepairComponent).snapshot()
 			perRow := float64(elapsed.Nanoseconds()) / float64(st.Ceiling)
-			b.Logf("pass over %d observations: %s wall (%.0f ns/observation), %d candidates, %d cleared, %d batches",
-				st.Ceiling, elapsed.Round(time.Millisecond), perRow, st.Candidates, st.Cleared, w.Count-before.Count)
+			b.Logf("pass over %d observations: %s wall (%.0f ns/observation), %d candidates, %d cleared, %d repaired, %d batches",
+				st.Ceiling, elapsed.Round(time.Millisecond), perRow, st.Candidates, st.Cleared, st.Repaired, w.Count-before.Count)
 			b.Logf("writer hold ms: p50 %.1f p95 %.1f p99 %.1f max %.1f over %d transactions (window %d, batch %d)",
 				w.HoldMsP50, w.HoldMsP95, w.HoldMsP99, w.HoldMsMax, w.Count-before.Count,
 				resolvedPathRouteRepairIDWindow, resolvedPathRouteRepairBatchSize)

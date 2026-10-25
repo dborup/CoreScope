@@ -82,8 +82,10 @@ type repairCase289 struct {
 	id      int64
 }
 
-// Both bug directions, the route_mask fallback, the rows that must not change,
-// and the mismatch whose answer does not depend on the route type.
+// Both bug directions (the plain and the transport route types), the
+// route_mask fallback, the rows that must not change, the drifted live-ingest
+// rows that must not change either, and the mismatch whose answer does not
+// depend on the route type.
 func repairCases289() []repairCase289 {
 	return []repairCase289{
 		// #289 direction 1: a DIRECT reception anchored on the observer stored
@@ -99,6 +101,24 @@ func repairCases289() []repairCase289 {
 		{name: "no frame, mixed mask, FLOOD transmission", txRoute: routeFlood188, mask: mask289(mixedMask289),
 			rawHex: "", path: `["c3"]`, stored: rp289(c3a), want: ""},
 
+		// The same two directions with the transport route types, which differ
+		// from the other family's non-transport type in bit 1 only
+		// (PR #590 review F4).
+		{name: "TRANSPORT_DIRECT frame under a FLOOD transmission", txRoute: routeFlood188, mask: mask289(mixedMask289),
+			rawHex: transportDirectFrame289, path: `["c3"]`, stored: rp289(c3a), want: ""},
+		{name: "TRANSPORT_FLOOD frame under a DIRECT transmission", txRoute: routeDirect188, mask: mask289(mixedMask289),
+			rawHex: transportFloodFrame289, path: `["c3"]`, stored: "", want: rp289(c3a)},
+
+		// Drifted live-ingest rows (PR #590 review F1): the family mismatch is
+		// real, but the stored value is not what the pre-#308 rule produces
+		// today, so the row was not written by that rule. Live ingest has
+		// always used the frame's own route type, so these are correct values
+		// resolved against an older graph, and the pass must leave them alone.
+		{name: "DIRECT frame under a FLOOD transmission, drifted stored relay", txRoute: routeFlood188,
+			mask: mask289(mixedMask289), rawHex: directFrame289, path: `["c3"]`, stored: rp289(c3b), want: rp289(c3b)},
+		{name: "FLOOD frame under a DIRECT transmission, drifted stored relay", txRoute: routeDirect188,
+			mask: mask289(mixedMask289), rawHex: floodFrame289, path: `["c3"]`, stored: rp289(c3b), want: rp289(c3b)},
+
 		// Not candidates: the frame header and t.route_type agree.
 		{name: "FLOOD frame under a FLOOD transmission", txRoute: routeFlood188, mask: mask289(floodMask289),
 			rawHex: floodFrame289, path: `["c3"]`, stored: rp289(c3a), want: rp289(c3a)},
@@ -112,11 +132,15 @@ func repairCases289() []repairCase289 {
 		{name: "no frame, NULL mask", txRoute: routeFlood188, mask: sql.NullInt64{},
 			rawHex: "", path: `["c3"]`, stored: rp289(c3a), want: rp289(c3a)},
 
-		// A candidate whose answer does not depend on the route type: ["c355"]
-		// names c3a uniquely either way. Its stored value is stale for some
-		// other reason, which is not #289, so the pass leaves it alone.
+		// Candidates whose answer does not depend on the route type: ["c355"]
+		// names c3a uniquely either way. One has a stored value that is stale
+		// for some other reason, which is not #289; the other already holds
+		// the answer. Neither is written — the second one would be a write of
+		// the value the row already has.
 		{name: "DIRECT frame under a FLOOD transmission, unique 2-byte hop", txRoute: routeFlood188,
 			mask: mask289(mixedMask289), rawHex: directFrame289, path: `["c355"]`, stored: rp289(c3b), want: rp289(c3b)},
+		{name: "DIRECT frame under a FLOOD transmission, unique 2-byte hop, already correct", txRoute: routeFlood188,
+			mask: mask289(mixedMask289), rawHex: directFrame289, path: `["c355"]`, stored: rp289(c3a), want: rp289(c3a)},
 	}
 }
 
@@ -175,11 +199,11 @@ func TestResolvedPathRouteRepair_RepairsBothDirections_289(t *testing.T) {
 	if st.Watermark < st.Ceiling {
 		t.Fatalf("watermark %d did not reach the ceiling %d", st.Watermark, st.Ceiling)
 	}
-	if st.Repaired != 1 || st.Cleared != 2 {
-		t.Fatalf("state = %d repaired, %d cleared; want 1 repaired (the NULL flood row) and 2 cleared (the two wrong relays)", st.Repaired, st.Cleared)
+	if st.Repaired != 2 || st.Cleared != 3 {
+		t.Fatalf("state = %d repaired, %d cleared; want 2 repaired (the two NULL flood rows) and 3 cleared (the three wrong relays)", st.Repaired, st.Cleared)
 	}
-	if st.Candidates != 4 {
-		t.Fatalf("candidates = %d, want 4 (three defects plus the route-type-independent row)", st.Candidates)
+	if st.Candidates != 9 {
+		t.Fatalf("candidates = %d, want 9 (five defects, two drifted rows and two route-type-independent rows)", st.Candidates)
 	}
 }
 
@@ -408,7 +432,7 @@ func TestResolvedPathRouteRepair_RunsOnceAsAnAsyncMigration_289(t *testing.T) {
 	setResolvedPath289(t, store, id, rp289(c3a))
 	primeIndexAndGraph188(t, store)
 
-	store.StartResolvedPathRouteRepair(context.Background())
+	store.StartResolvedPathRouteRepair(context.Background(), true)
 	store.WaitForAsyncMigrations()
 
 	if status, err := store.AsyncMigrationStatus(resolvedPathRouteRepairMigration); err != nil || status != "done" {
@@ -419,9 +443,159 @@ func TestResolvedPathRouteRepair_RunsOnceAsAnAsyncMigration_289(t *testing.T) {
 	}
 
 	resetRepairWatermark289(t, store)
-	store.StartResolvedPathRouteRepair(context.Background())
+	store.StartResolvedPathRouteRepair(context.Background(), true)
 	store.WaitForAsyncMigrations()
 	if st := repairState289(t, store); st.Watermark != 0 {
 		t.Fatalf("watermark = %d, want 0: a migration recorded done must not run again", st.Watermark)
+	}
+}
+
+// PR #590 review F1. A family mismatch is not by itself a #289 defect: live
+// ingest has always resolved with the frame's own route type, so most
+// mismatched rows were written correctly by ingest. When the neighbour graph
+// or the prefix index has drifted since, today's answer differs from the
+// stored one, and rewriting the row would destroy a correct value. The pass
+// therefore writes only a row whose stored value is exactly what the pre-#308
+// rule produces today.
+//
+// Both rows below are the reviewer's repro on the #188 fixture: live ingest
+// resolved them to c3b when c3b was the only "c3" node, and the edge that now
+// picks c3a was added later.
+func TestResolvedPathRouteRepair_LeavesDriftedLiveIngestRowsUntouched_289(t *testing.T) {
+	store := backfillFixture188(t, filepath.Join(t.TempDir(), "ingest.db"), true)
+	defer store.Close()
+	// A DIRECT reception under a FLOOD transmission. Today DIRECT resolves to
+	// nothing and the pre-#308 FLOOD rule to c3a, so an unguarded pass clears
+	// the row.
+	drifted1 := seedObservation289(t, store, routeFlood188, mask289(mixedMask289), directFrame289, `["c3"]`, ts190)
+	setResolvedPath289(t, store, drifted1, rp289(c3b))
+	// A FLOOD reception under a DIRECT transmission. Today the flood rule
+	// resolves to c3a, so an unguarded pass overwrites the stored c3b.
+	drifted2 := seedObservation289(t, store, routeDirect188, mask289(mixedMask289), floodFrame289, `["c3"]`, ts190+1)
+	setResolvedPath289(t, store, drifted2, rp289(c3b))
+	primeIndexAndGraph188(t, store)
+
+	runRepair289(t, store)
+
+	for _, c := range []struct {
+		name string
+		id   int64
+	}{
+		{"a DIRECT reception whose stored relay is not what the pre-#308 rule gives", drifted1},
+		{"a FLOOD reception whose stored relay is not what the pre-#308 rule gives", drifted2},
+	} {
+		rp := resolvedPathOf188(t, store, c.id)
+		if !rp.Valid || rp.String != rp289(c3b) {
+			t.Errorf("%s: resolved_path = %v, want the untouched %s", c.name, rp, rp289(c3b))
+		}
+	}
+	st := repairState289(t, store)
+	if st.Repaired != 0 || st.Cleared != 0 {
+		t.Fatalf("state = %d repaired, %d cleared; want 0/0: neither row carries the value the pre-#308 rule produces", st.Repaired, st.Cleared)
+	}
+	if st.Candidates != 2 {
+		t.Fatalf("candidates = %d, want 2: both rows are read and then left alone", st.Candidates)
+	}
+	if st.Watermark < st.Ceiling {
+		t.Fatalf("watermark %d did not reach the ceiling %d", st.Watermark, st.Ceiling)
+	}
+}
+
+// PR #590 review F3. The pass overwrites data in place and keeps no copy of
+// the previous value, so it must not run on the first boot of any build that
+// contains it: it is opt-in, and an absent or empty block leaves it off.
+func TestResolvedPathRouteRepairEnabled_OptIn_289(t *testing.T) {
+	var nilCfg *Config
+	for _, c := range []struct {
+		name string
+		cfg  *Config
+		want bool
+	}{
+		{"nil config", nilCfg, false},
+		{"no block", &Config{}, false},
+		{"empty block", &Config{ResolvedPathRouteRepair: &ResolvedPathRouteRepairConfig{}}, false},
+		{"enabled: false", &Config{ResolvedPathRouteRepair: &ResolvedPathRouteRepairConfig{Enabled: false}}, false},
+		{"enabled: true", &Config{ResolvedPathRouteRepair: &ResolvedPathRouteRepairConfig{Enabled: true}}, true},
+	} {
+		if got := c.cfg.ResolvedPathRouteRepairEnabled(); got != c.want {
+			t.Errorf("%s: ResolvedPathRouteRepairEnabled() = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// The switch reaches the scheduler: with the repair off, nothing is recorded
+// in _async_migrations, no state table is written and the defect row keeps the
+// value the pre-#308 backfill left. Turning it on repairs the same row.
+func TestResolvedPathRouteRepair_NotScheduledWhenDisabled_289(t *testing.T) {
+	store := backfillFixture188(t, filepath.Join(t.TempDir(), "ingest.db"), true)
+	defer store.Close()
+	id := seedObservation289(t, store, routeFlood188, mask289(mixedMask289), directFrame289, `["c3"]`, ts190)
+	setResolvedPath289(t, store, id, rp289(c3a))
+	primeIndexAndGraph188(t, store)
+
+	store.StartResolvedPathRouteRepair(context.Background(), false)
+	store.WaitForAsyncMigrations()
+
+	if status, err := store.AsyncMigrationStatus(resolvedPathRouteRepairMigration); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("migration status = %q, err = %v; want no recorded run", status, err)
+	}
+	st, err := store.ResolvedPathRouteRepairState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st != nil {
+		t.Fatalf("state row = %+v, want none: a disabled repair must not write", st)
+	}
+	if rp := resolvedPathOf188(t, store, id); !rp.Valid || rp.String != rp289(c3a) {
+		t.Fatalf("resolved_path = %v, want the untouched %s", rp, rp289(c3a))
+	}
+
+	store.StartResolvedPathRouteRepair(context.Background(), true)
+	store.WaitForAsyncMigrations()
+	if status, err := store.AsyncMigrationStatus(resolvedPathRouteRepairMigration); err != nil || status != "done" {
+		t.Fatalf("migration status = %q, %v; want done once the operator opts in", status, err)
+	}
+	if rp := resolvedPathOf188(t, store, id); rp.Valid {
+		t.Fatalf("resolved_path = %s, want NULL once the repair is enabled", rp.String)
+	}
+}
+
+// PR #590 review F5. The loop's gate can pass and the snapshot stop being
+// usable before the batch reads it (a graph rebuild publishes an empty graph
+// between the two). That batch writes nothing and reports
+// errResolvedPathBackfillNotReady; the loop must retry the same watermark
+// rather than fail the migration. The batch's readiness check is a seam so the
+// race does not have to be won for real.
+func TestResolvedPathRouteRepair_RetriesABatchThatSeesAColdSnapshot_289(t *testing.T) {
+	store := backfillFixture188(t, filepath.Join(t.TempDir(), "ingest.db"), true)
+	defer store.Close()
+	id := seedObservation289(t, store, routeDirect188, mask289(mixedMask289), floodFrame289, `["c3"]`, ts190)
+	primeIndexAndGraph188(t, store)
+
+	checks := 0
+	old := resolvedPathRouteRepairBatchReady
+	resolvedPathRouteRepairBatchReady = func(s *Store, idx prefixIndex, graph *NeighborGraph) bool {
+		checks++
+		if checks == 1 {
+			return false // the snapshot went cold after the loop's gate passed
+		}
+		return old(s, idx, graph)
+	}
+	t.Cleanup(func() { resolvedPathRouteRepairBatchReady = old })
+
+	runRepair289(t, store)
+
+	if checks < 2 {
+		t.Fatalf("the batch ran %d time(s), want a retry after the not-ready batch", checks)
+	}
+	if rp := resolvedPathOf188(t, store, id); !rp.Valid || rp.String != rp289(c3a) {
+		t.Fatalf("resolved_path = %v, want %s from the retried batch", rp, rp289(c3a))
+	}
+	st := repairState289(t, store)
+	if st.Watermark < st.Ceiling {
+		t.Fatalf("watermark %d did not reach the ceiling %d", st.Watermark, st.Ceiling)
+	}
+	if st.Repaired != 1 {
+		t.Fatalf("state = %d repaired, want 1 from the retried batch", st.Repaired)
 	}
 }

@@ -44,21 +44,32 @@ import (
 //
 // What it writes. For each candidate the pass resolves the hops twice with the
 // current graph and index: once with the observation's own route type (`want`)
-// and once with t.route_type (`had`, what the pre-#308 reader produced). It
-// writes only when
+// and once with t.route_type (`had`, what the pre-#308 reader would produce
+// now). It writes only when
 //
 //  1. the two differ — so a row whose answer does not depend on the route type
 //     is left alone even if its stored value is stale for some other reason
 //     (that is not #289, and rewriting it would turn this pass into an
 //     unbounded re-resolve of history); and
-//  2. the stored value is not already `want` — so a row live ingest resolved
-//     correctly, and a row an earlier run of this pass already repaired, is
-//     not written again.
+//  2. the stored value is exactly `had` — the signature of a row the pre-#308
+//     rule wrote. A family mismatch on its own is not that signature: live
+//     ingest has always resolved with the frame's own route type, so most
+//     mismatched rows hold a correct ingest value, which differs from today's
+//     `had` as soon as the graph or the prefix index has drifted. Those rows
+//     are read and left alone, and so is a row an earlier run of this pass
+//     already repaired, whose stored value is `want` (PR #590 review F1).
 //
 // `want` may be empty, and then the row is set back to NULL: that is the
 // repair for a DIRECT reception stored with a wrong relay. Every UPDATE is
 // guarded on the value the batch read, so a row live ingest rewrote in the
 // meantime keeps ingest's value and a repeated batch is a no-op.
+//
+// The residual the two conditions cannot cover: a row whose stored value is
+// both a correct ingest value and exactly what the pre-#308 rule produces
+// today. Nothing in the database distinguishes the two writers, so such a row
+// is rewritten. It is also the case where the rewrite is least harmful — the
+// stored value is the one the buggy rule gives — but it is not free, and it is
+// why the rollback section asks for a snapshot.
 //
 // Bounds and resume (the #89 / #380 shape):
 //   - the pass needs the primed prefix index and a post-build neighbour graph
@@ -85,6 +96,26 @@ const (
 	resolvedPathRouteRepairMigration = "resolved_path_route_type_repair_v1"
 )
 
+// ResolvedPathRouteRepairConfig is the opt-in switch for the repair
+// (PR #590 review F3). The pass overwrites observations.resolved_path in
+// place and keeps no copy of the previous value, so it must not run on the
+// first boot of a build that happens to contain it: an operator turns it on
+// deliberately, after taking a database snapshot. Rows it cleared to NULL are
+// below the #188 backfill's watermark and are never revisited, so the
+// snapshot is the only way back.
+//
+// AGENTS.md rule 8: a customizer entry for this switch, and for the three
+// bounds below, is a follow-up and not part of this PR.
+type ResolvedPathRouteRepairConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// ResolvedPathRouteRepairEnabled reports whether the one-off #289 M2 repair
+// may run. Default false: an absent or empty block leaves it off.
+func (c *Config) ResolvedPathRouteRepairEnabled() bool {
+	return c != nil && c.ResolvedPathRouteRepair != nil && c.ResolvedPathRouteRepair.Enabled
+}
+
 // Bounds. Package vars so tests can drive the multi-batch loop with a few
 // rows; customizer candidates later (AGENTS.md rule 8), like the #188
 // backfill's batchSize/pauseMs.
@@ -101,17 +132,34 @@ var (
 	// resolvedPathRouteRepairPreWriteHook is a test seam, nil in production:
 	// called after a batch has resolved its rows and before it writes them.
 	resolvedPathRouteRepairPreWriteHook func()
+
+	// resolvedPathRouteRepairBatchReady is the batch's own readiness check,
+	// re-run because the loop's gate can pass and the snapshot stop being
+	// usable before the batch reads it. A variable so the #590 F5 test can
+	// make one batch see a cold snapshot without winning that race for real.
+	resolvedPathRouteRepairBatchReady = func(s *Store, idx prefixIndex, graph *NeighborGraph) bool {
+		return s.resolvedPathBackfillReady(idx, graph)
+	}
 )
 
 // resolvedPathRouteRepairProgressEvery logs progress every N batches.
 const resolvedPathRouteRepairProgressEvery = 50
 
-// StartResolvedPathRouteRepair schedules the repair as an async migration.
-// Call it after the neighbour-edges builder is running, next to the #188
-// backfill: the pass needs that builder's graph and must not delay boot.
-// Cancelling ctx stops it at the next statement; it is then recorded as
-// unfinished and resumes from its watermark on the next start.
-func (s *Store) StartResolvedPathRouteRepair(ctx context.Context) {
+// StartResolvedPathRouteRepair schedules the repair as an async migration when
+// the operator has opted in (resolvedPathRouteRepair.enabled). Call it after
+// the neighbour-edges builder is running, next to the #188 backfill: the pass
+// needs that builder's graph and must not delay boot. Cancelling ctx stops it
+// at the next statement; it is then recorded as unfinished and resumes from
+// its watermark on the next start.
+//
+// With enabled false nothing is scheduled and nothing is recorded in
+// _async_migrations, so turning the switch on later still runs the pass.
+func (s *Store) StartResolvedPathRouteRepair(ctx context.Context, enabled bool) {
+	if !enabled {
+		log.Printf("[%s] disabled: set resolvedPathRouteRepair.enabled to run the one-off #289 repair (take a database snapshot first: it overwrites resolved_path in place)",
+			resolvedPathRouteRepairComponent)
+		return
+	}
 	// PREFLIGHT: async=true reason="#289 M2 one-off repair: windowed scan of observations joined to transmissions with batched rewrites; must not block ingestor boot"
 	if err := s.RunAsyncMigration(ctx, resolvedPathRouteRepairMigration, s.repairResolvedPathRouteTypes); err != nil {
 		log.Printf("[%s] scheduling %s failed: %v", resolvedPathRouteRepairComponent, resolvedPathRouteRepairMigration, err)
@@ -333,7 +381,7 @@ var resolvedPathRouteRepairCandidateSQL = fmt.Sprintf(`(
 func (s *Store) resolvedPathRouteRepairBatch(ctx context.Context, st *ResolvedPathRouteRepairState) (resolvedPathRouteRepairBatchResult, error) {
 	var b resolvedPathRouteRepairBatchResult
 	graph, idx := s.neighborGraph.load(), s.prefixIdx.load()
-	if !s.resolvedPathBackfillReady(idx, graph) {
+	if !resolvedPathRouteRepairBatchReady(s, idx, graph) {
 		return b, errResolvedPathBackfillNotReady
 	}
 	windowEnd := st.Watermark + resolvedPathRouteRepairIDWindow
@@ -403,11 +451,24 @@ func (s *Store) resolvedPathRouteRepairBatch(ctx context.Context, st *ResolvedPa
 			from = strings.ToLower(r.fromPubkey)
 		}
 		want := marshalResolvedPath(resolvedPathRouteRepairResolve(hops, from, r.observerID, rt, graph, idx))
-		// What the pre-#308 reader produced for this row with today's graph.
-		// When the route type does not change the answer, the stored value is
-		// not a #289 defect and this pass leaves it alone.
+		// What the pre-#308 reader would produce for this row with today's
+		// graph. Two conditions have to hold before the row is rewritten:
+		//
+		//   - want != had: the route type actually changes the answer. A
+		//     candidate whose answer is route-type-independent is not a #289
+		//     defect, and rewriting it would turn this into an unbounded
+		//     re-resolve of history.
+		//   - r.stored == had: the stored value is exactly what the pre-#308
+		//     rule produces, which is the signature of the defect. A family
+		//     mismatch alone is not: live ingest has always used the frame's
+		//     own route type, so most mismatched rows were written correctly
+		//     by ingest, and when the graph or the index has drifted since,
+		//     today's answer differs from theirs. Requiring the stored value
+		//     to match `had` leaves those rows — and a row an earlier run
+		//     already repaired, whose stored value is `want` — alone
+		//     (PR #590 review F1).
 		had := marshalResolvedPath(resolvedPathRouteRepairResolve(hops, from, r.observerID, r.txRoute, graph, idx))
-		if want == had || r.stored == want {
+		if want == had || r.stored != had {
 			continue
 		}
 		updates = append(updates, update{r.id, want, r.stored})

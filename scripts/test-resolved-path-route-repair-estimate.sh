@@ -49,7 +49,19 @@ INSERT INTO observations (transmission_id, observer_idx, path_json, timestamp, r
 	-- not candidates: no frame, mixed mask but a DIRECT tx; single-family mask.
 	(2, 3, '["c3"]', 8, NULL, NULL),
 	(3, 1, '["c3"]', 9, NULL, '["c355"]'),
-	(4, 1, '["c3"]', 10, NULL, NULL);
+	(4, 1, '["c3"]', 10, NULL, NULL),
+	-- The split is by header family, not by NULL/stored (PR #590 review F6):
+	-- a DIRECT-frame candidate that is NULL, and a FLOOD-frame candidate that
+	-- carries a stored path.
+	(1, 6, '["c3"]', 11, '1601c3', NULL),
+	(2, 4, '["c3"]', 12, '1501c3', '["c355"]'),
+	-- The transport route types, 3 (17) and 0 (14): they differ from the other
+	-- family's non-transport type in bit 1 only (PR #590 review F4).
+	(1, 7, '["c3"]', 13, '1701c3', '["c355"]'),
+	(2, 5, '["c3"]', 14, '1401c3', NULL),
+	-- An unparseable header: reported on its own, because the pass re-checks
+	-- it in Go rather than trusting the prefilter's family bit.
+	(1, 8, '["c3"]', 15, 'zz01c3', NULL);
 SQL
 # Drop the journal the seeding created, so the read-only assertion below is
 # about this script and not about sqlite3's own write.
@@ -62,15 +74,20 @@ OUT=$("$SCRIPT" "$DB")
 expect() {
 	if printf '%s' "$OUT" | grep -qE "$1"; then ok "$2"; else fail "$2 (pattern: $1)"; fi
 }
-expect '^  rows:              10$' "10 observations counted"
-expect '^  max id \(scan end\): 10$' "the scan end is MAX(observations.id)"
-expect '^  with a frame:      6$' "6 rows carry a frame"
-expect '^  rows:              3$' "3 header candidates counted (both directions)"
-expect '^  of those NULL:     1 ' "1 header candidate is a NULL row"
-expect '^  of those stored:   2 ' "2 header candidates carry a stored path"
+expect '^  rows:              15$' "15 observations counted"
+expect '^  max id \(scan end\): 15$' "the scan end is MAX(observations.id)"
+expect '^  with a frame:      11$' "11 rows carry a frame"
+expect '^  rows:              8$' "8 header candidates counted (both directions)"
+# The split is by header family first. Each bucket mixes NULL and stored rows,
+# so a NULL/non-NULL split could not produce these four numbers.
+expect '^  DIRECT frame under a FLOOD transmission' "the first direction is labelled by header family"
+expect '^    rows:            4 \(stored 3, NULL 1\)$' "4 DIRECT-frame candidates: 3 stored, 1 NULL"
+expect '^  FLOOD frame under a DIRECT transmission' "the second direction is labelled by header family"
+expect '^    rows:            3 \(stored 1, NULL 2\)$' "3 FLOOD-frame candidates: 1 stored, 2 NULL"
+expect '^  unparseable header: 1 ' "the unparseable header is reported on its own"
 expect '^  rows:              1$' "1 route_mask candidate counted"
 expect 'recorded run:        none' "no recorded run on a fresh database"
-expect '  candidate rows:    4$' "candidate total is header + route_mask"
+expect '  candidate rows:    9$' "candidate total is header + route_mask"
 expect 'total wall clock' "an estimate is printed"
 
 # Read-only: no journal files, and the database byte-identical.
