@@ -264,5 +264,13 @@
     });
   }
 
-  root.NodeAdverts = { parseTab: parseTab, hashWithTab: hashWithTab, render: render, bind: bind };
+  /** An interval in the unit of its class's setting: flood hours, zero-hop minutes (#245 M2 reuses it). */
+  function formatInterval(seconds, key) {
+    for (var i = 0; i < INTERVAL_CLASSES.length; i++) {
+      if (INTERVAL_CLASSES[i].key === key) return fmtInterval(Number(seconds), INTERVAL_CLASSES[i]);
+    }
+    return '';
+  }
+
+  root.NodeAdverts = { parseTab: parseTab, hashWithTab: hashWithTab, render: render, bind: bind, formatInterval: formatInterval };
 })(typeof window !== 'undefined' ? window : this);

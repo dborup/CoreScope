@@ -83,6 +83,7 @@ const ROUTES = [
   '/analytics?tab=foreign-traffic',
   '/analytics?tab=wardriving',
   '/analytics?tab=areas',
+  '/analytics?tab=advert-intervals', // #245 M2
   '/audio-lab',
   '/reach-rank',                    // Reach leaderboard (reach-rank.js)
 ];
@@ -101,6 +102,7 @@ const REGISTERED_ANALYTICS_TABS = [
   'subpaths', 'nodes', 'distance', 'neighbor-graph', 'rf-health',
   'clock-health', 'roles', 'prefix-tool', 'scopes', 'my-repeaters',
   'repeater-metrics', 'foreign-traffic', 'wardriving', 'areas',
+  'advert-intervals',
 ];
 
 const THEMES = ['dark', 'light'];

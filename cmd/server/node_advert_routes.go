@@ -139,18 +139,26 @@ func countAdvertRoutes(entries []advertRouteEntry, now time.Time, windowHours fl
 // "+payload_type = ?" matches exactly the rows "payload_type = ?" does.
 // Parameters: floor, flood route type, pubkey, payload type.
 func nodeAdvertScanSQL(hasRouteMask bool) string {
-	mask := "NULL"
-	if hasRouteMask {
-		mask = fmt.Sprintf("route_mask & %d", packetpath.RouteMaskAll)
-	}
 	return fmt.Sprintf(`SELECT id,
-			CASE WHEN route_type IN (%d, %d, %d, %d) THEN CAST(route_type AS INTEGER) END,
 			%s,
 			COALESCE(first_seen, ''), COALESCE(hash, ''),
 			COALESCE(first_seen >= ?, 0), COALESCE(route_type = ?, 0)
 		FROM transmissions WHERE from_pubkey = ? AND +payload_type = ?
-		ORDER BY id DESC`,
-		RouteTransportFlood, RouteFlood, RouteDirect, RouteTransportDirect, mask)
+		ORDER BY id DESC`, advertRouteClassColumnsSQL(hasRouteMask))
+}
+
+// advertRouteClassColumnsSQL selects the two classifier inputs of
+// classifyAdvertRouteRow, normalized as nodeAdvertScanSQL describes: the
+// route_type (one of the four route values, else NULL) and the route bits
+// of route_mask (NULL without the column). Shared with the mesh-wide advert
+// interval scan (#245 M2) so both classify an advert the same way.
+func advertRouteClassColumnsSQL(hasRouteMask bool) string {
+	mask := "NULL"
+	if hasRouteMask {
+		mask = fmt.Sprintf("route_mask & %d", packetpath.RouteMaskAll)
+	}
+	return fmt.Sprintf(`CASE WHEN route_type IN (%d, %d, %d, %d) THEN CAST(route_type AS INTEGER) END,
+			%s`, RouteTransportFlood, RouteFlood, RouteDirect, RouteTransportDirect, mask)
 }
 
 // nodeAdvertScan is what one pass over a node's ADVERT rows yields: the ids

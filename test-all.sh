@@ -65,6 +65,7 @@ run test-important-links-byte-filter.js
 run test-url-state.js
 run test-page-title-563.js
 run test-node-adverts.js
+run test-advert-interval-analytics.js
 run test-heard-by.js
 run test-issue-262-mymesh-observer.js
 run test-issue-304-my-mesh-metrics.js

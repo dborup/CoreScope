@@ -132,22 +132,32 @@ func advertIntervalSamples(rows NodeAdvertRows) []advertIntervalSample {
 	out := make([]advertIntervalSample, 0, len(rows))
 	for _, r := range rows {
 		fs, _ := r["first_seen"].(string)
-		heard, ok := parseRelayTS(fs)
-		if !ok {
-			continue
+		dj, _ := r["decoded_json"].(string)
+		if s, ok := advertIntervalSampleOf(fs, dj); ok {
+			out = append(out, s)
 		}
-		s := advertIntervalSample{heard: heard}
-		if dj, _ := r["decoded_json"].(string); dj != "" {
-			var d struct {
-				Timestamp int64 `json:"timestamp"`
-			}
-			if json.Unmarshal([]byte(dj), &d) == nil {
-				s.senderTS = d.Timestamp
-			}
-		}
-		out = append(out, s)
 	}
 	return out
+}
+
+// advertIntervalSampleOf reads one advert's first_seen and decoded advert
+// timestamp; shared by node detail (advertIntervalSamples) and the
+// mesh-wide analytics scan (#245 M2) so both read an advert the same way.
+func advertIntervalSampleOf(firstSeen, decodedJSON string) (advertIntervalSample, bool) {
+	heard, ok := parseRelayTS(firstSeen)
+	if !ok {
+		return advertIntervalSample{}, false
+	}
+	s := advertIntervalSample{heard: heard}
+	if decodedJSON != "" {
+		var d struct {
+			Timestamp int64 `json:"timestamp"`
+		}
+		if json.Unmarshal([]byte(decodedJSON), &d) == nil {
+			s.senderTS = d.Timestamp
+		}
+	}
+	return s, true
 }
 
 // advertIntervalCandidateOK is whether the class's timer can run at about

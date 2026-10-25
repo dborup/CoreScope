@@ -2354,6 +2354,103 @@ Hash size analysis across the network.
 
 ---
 
+## GET /api/analytics/advert-intervals
+
+Mesh-wide estimated advert intervals (#245 M2, Analytics → Advert
+Intervals): which flood and zero-hop advert intervals the nodes run with,
+by role and by region, how many show no adverts of a class, and which
+advertise more often than the firmware's timers allow.
+
+Each node is estimated exactly as node detail's `advertIntervals` (see
+[Estimated advert intervals](#estimated-advert-intervals)): the newest 20
+flood and 20 zero-hop adverts, the same route classifier, the same
+estimator, snapped to the firmware's settable values (`flood.advert.interval`
+whole hours 3–168, `advert.interval` even minutes 60–240 or the 2-minute
+new-install default; MeshCore `src/helpers/CommonCLI.cpp:486-505`,
+`examples/simple_repeater/MyMesh.cpp:903`).
+
+- **Who is counted.** Nodes in the node list with at least one ADVERT.
+  Hidden identities (node or observer blacklist, hidden-name prefix) are
+  left out.
+- **Distributions.** `buckets` hold medium and high confidence estimates.
+  Every counted node is in exactly one of `estimated`, `low_confidence`,
+  `irregular`, `too_few` and `not_observed` per class.
+- **Not observed.** A zero-hop advert is only recorded when an observer
+  hears it directly, so no zero-hop adverts means the zero-hop interval is
+  0 (off) *or* no observer is in direct range.
+- **Regions.** A node's regions are the regions (IATA) of the observers
+  that heard its sampled adverts. A node heard in two regions counts in both
+  `by_region` groups; one heard by no observer with a region is `unknown`.
+  `?region=` keeps nodes heard in one of the codes.
+- **Outliers** (`outliers`, most frequent first, at most 50): the median gap
+  between the class's sampled adverts is under the class's shortest setting
+  less 10 % (flood 3 h, zero-hop 60 min) — manual or scripted adverts, a
+  reboot loop, other firmware — or the zero-hop estimate is the 2-minute
+  new-install default.
+- **Flood re-arm** (`flood_re_arm`). A flood advert re-arms the zero-hop
+  timer (`examples/simple_repeater/MyMesh.cpp:1294-1306`).
+  `zero_hop_paced_by_flood` counts zero-hop estimates equal to the flood
+  interval (zero-hop Z < flood F ≤ 2Z gives every zero-hop gap F, so the
+  setting is between F/2 and F). `zero_hop_maybe_suppressed` counts nodes
+  with no zero-hop adverts and a flood interval of at most 240 min, where
+  `advert.interval` ≥ flood never fires.
+- **Cost.** One background pass per analytics cycle
+  (`analytics.recomputeIntervalSeconds.advertIntervals`, default the
+  analytics default; `analytics.pauseWhenIdle` applies). It reads the
+  database only, never the packet store lock: every ADVERT row's classifier
+  columns newest first (at most 1,000,000 rows, `scan.truncated`), then
+  `decoded_json` and the observers of the kept adverts only. Every request,
+  filtered or not, is answered from that snapshot; a filter re-aggregates
+  the cached per-node rows, O(nodes).
+- **Thresholds.** The minimum confidence, the outlier rule and limit and
+  the estimator's own thresholds are hardcoded; they are candidates for the
+  customizer.
+
+### Query Parameters
+
+| Param    | Type   | Default | Description |
+|----------|--------|---------|-------------|
+| `region` | string | —       | Comma-separated IATA codes: nodes whose sampled adverts an observer in one of them heard |
+| `area`   | string | —       | Area key: nodes positioned in the area (unknown key: `400`) |
+
+### Response `200`
+
+```jsonc
+{
+  "window": 20,                    // adverts per class and node estimated from
+  "min_confidence": "medium",      // least confidence in buckets
+  "nodes": number,
+  "flood":    ClassSummary,
+  "zero_hop": ClassSummary,
+  "by_role":   [ { "key": string, "nodes": number, "flood": ClassSummary, "zero_hop": ClassSummary } ],
+  "by_region": [ { "key": string, "nodes": number, "flood": ClassSummary, "zero_hop": ClassSummary } ],
+  "regions_truncated": boolean,    // by_region holds the 50 largest only
+  "outliers": [
+    {
+      "public_key": string, "name": string, "role": string, "regions": [string],
+      "class": "flood" | "zero_hop",
+      "reason": "flood_faster_than_settable" | "zero_hop_faster_than_settable" | "zero_hop_new_install_default",
+      "median_gap_s": number, "samples": number, "interval_s": number | null
+    }
+  ],
+  "outliers_total": number,
+  "flood_re_arm": { "zero_hop_paced_by_flood": number, "zero_hop_maybe_suppressed": number },
+  "scan": { "generated_at": string (ISO), "rows": number, "truncated": boolean }
+}
+
+// ClassSummary
+{
+  "estimated": number,             // medium/high, in buckets
+  "low_confidence": number,
+  "irregular": number,
+  "too_few": number,               // under 3 adverts
+  "not_observed": number,          // no adverts of the class
+  "buckets": [ { "interval_s": number, "snapped": boolean, "nodes": number } ]  // interval_s ascending
+}
+```
+
+---
+
 ## GET /api/analytics/hash-collisions
 
 Hash collision analysis — packets where the same hash was used by multiple different nodes (ambiguous routing).

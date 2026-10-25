@@ -268,7 +268,8 @@ func recomputerByName(s *PacketStore) map[string]*analyticsRecomputer {
 	defer s.analyticsRecomputerMu.RUnlock()
 	out := map[string]*analyticsRecomputer{}
 	for _, rc := range []*analyticsRecomputer{s.recompTopology, s.recompRF, s.recompDistance, s.recompChannels,
-		s.recompHashCollisions, s.recompHashSizes, s.recompRoles, s.recompObserversClockSkew, s.recompNodesClockSkew} {
+		s.recompHashCollisions, s.recompHashSizes, s.recompRoles, s.recompObserversClockSkew, s.recompNodesClockSkew,
+		s.recompAdvertIntervals} {
 		out[rc.name] = rc
 	}
 	return out
