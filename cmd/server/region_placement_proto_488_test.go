@@ -35,6 +35,11 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -79,15 +84,83 @@ type rp488Evidence struct {
 // rp488ClassifyAdvert classifies one ADVERT observation, preferring the
 // observation's own raw bytes over path_json.
 func rp488ClassifyAdvert(obsRaw, pathJSON sql.NullString) rp488Evidence {
-	return rp488Evidence{} // stub: red commit
+	if obsRaw.Valid && strings.TrimSpace(obsRaw.String) != "" {
+		return rp488ClassifyRaw(obsRaw.String)
+	}
+	return rp488ClassifyPathJSON(pathJSON)
 }
 
 func rp488ClassifyRaw(rawHex string) rp488Evidence {
-	return rp488Evidence{} // stub: red commit
+	unknown := rp488Evidence{Kind: rp488Unknown, Verified: true}
+	buf, err := hex.DecodeString(strings.TrimSpace(rawHex))
+	if err != nil || len(buf) < 2 {
+		return unknown
+	}
+	header := buf[0]
+	if int(header>>2)&0x0F != PayloadADVERT {
+		return unknown
+	}
+	route := int(header & 0x03)
+	off := 1
+	codesZero := false
+	if route == RouteTransportFlood || route == RouteTransportDirect {
+		if len(buf) < off+4 {
+			return unknown
+		}
+		codesZero = buf[1]|buf[2]|buf[3]|buf[4] == 0
+		off += 4
+	}
+	if off >= len(buf) {
+		return unknown
+	}
+	pathByte := buf[off]
+	off++
+	size := int(pathByte>>6) + 1
+	count := int(pathByte & 0x3F)
+	if size == 4 || count*size > 64 {
+		return unknown // Packet::isValidPathLen
+	}
+	if off+count*size >= len(buf) {
+		return unknown // truncated: no payload after the path
+	}
+	switch route {
+	case RouteFlood, RouteTransportFlood:
+		if count == 0 {
+			return rp488Evidence{Kind: rp488Direct, Verified: true}
+		}
+		return rp488Evidence{Kind: rp488Relayed, Hops: count, Verified: true}
+	case RouteDirect:
+		if count == 0 {
+			return rp488Evidence{Kind: rp488Direct, Verified: true}
+		}
+		return unknown
+	default: // RouteTransportDirect
+		if count == 0 && codesZero {
+			return rp488Evidence{Kind: rp488Shared, Verified: true}
+		}
+		// No current firmware path sends a TRANSPORT_DIRECT advert other
+		// than a contact share, so its origin is not provable either way.
+		return unknown
+	}
 }
 
 func rp488ClassifyPathJSON(p sql.NullString) rp488Evidence {
-	return rp488Evidence{} // stub: red commit
+	unknown := rp488Evidence{Kind: rp488Unknown}
+	if !p.Valid {
+		return unknown
+	}
+	s := strings.TrimSpace(p.String)
+	if s == "" || s == "null" {
+		return unknown
+	}
+	var hops []string
+	if json.Unmarshal([]byte(s), &hops) != nil {
+		return unknown
+	}
+	if len(hops) == 0 {
+		return rp488Evidence{Kind: rp488Direct}
+	}
+	return rp488Evidence{Kind: rp488Relayed, Hops: len(hops)}
 }
 
 // rp488HopSlots bounds the per-pair state: hop counts 0..rp488HopSlots-1 keep
@@ -107,12 +180,34 @@ type rp488Stats struct {
 }
 
 func (s *rp488Stats) add(ts int64, ev rp488Evidence) {
-	// stub: red commit
+	switch ev.Kind {
+	case rp488Direct:
+		s.LastAt[0] = max(s.LastAt[0], ts)
+		if s.DirectFirst == 0 || ts < s.DirectFirst {
+			s.DirectFirst = ts
+		}
+	case rp488Relayed:
+		if ev.Hops < 1 {
+			s.Unknown++ // the classifier never yields this; keep slot 0 direct-only
+		} else if ev.Hops < rp488HopSlots {
+			s.LastAt[ev.Hops] = max(s.LastAt[ev.Hops], ts)
+		} else {
+			s.Far++
+		}
+	case rp488Shared:
+		s.Shared++
+	default:
+		s.Unknown++
+	}
 }
 
 // newest is the newest hearing with a usable hop count.
 func (s *rp488Stats) newest() int64 {
-	return 0 // stub: red commit
+	var n int64
+	for _, ts := range s.LastAt {
+		n = max(n, ts)
+	}
+	return n
 }
 
 // rp488Agg is the global evidence table: one entry per (node, region) pair
@@ -148,8 +243,47 @@ func (a *rp488Agg) add(pk, region string, ts int64, ev rp488Evidence) {
 // observer with a region, into agg. Same joins as scanNodeRegionKeys, plus
 // the per-observation path and raw bytes the classifier needs.
 func rp488ScanAgg(ctx context.Context, db *DB, lo, hi int64, delta bool, agg *rp488Agg) (int, error) {
-	agg.Watermark = max(agg.Watermark, hi) // stub: red commit
-	return 0, nil
+	joinCond := "obs.rowid = o.observer_idx"
+	if !db.isV3() {
+		joinCond = "obs.id = o.observer_id"
+	}
+	join := "JOIN"
+	if delta {
+		join = "CROSS JOIN"
+	}
+	rawCol := "NULL"
+	if db.hasObsRawHex() {
+		rawCol = "o.raw_hex"
+	}
+	q := fmt.Sprintf(`SELECT t.from_pubkey, UPPER(TRIM(obs.iata)), o.timestamp, o.path_json, %[3]s
+		FROM observations o
+		%[1]s transmissions t ON t.id = o.transmission_id
+		%[1]s observers obs ON %[2]s
+		WHERE t.payload_type = ?
+		AND t.from_pubkey IS NOT NULL
+		AND obs.iata IS NOT NULL AND TRIM(obs.iata) != ''
+		AND o.id > ? AND o.id <= ?`, join, joinCond, rawCol)
+	rows, err := db.conn.QueryContext(ctx, q, PayloadADVERT, lo, hi)
+	if err != nil {
+		return 0, fmt.Errorf("rp488 scan: %w", err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var pk, region string
+		var ts int64
+		var path, raw sql.NullString
+		if err := rows.Scan(&pk, &region, &ts, &path, &raw); err != nil {
+			return n, fmt.Errorf("rp488 scan: %w", err)
+		}
+		agg.add(pk, region, ts, rp488ClassifyAdvert(raw, path))
+		n++
+	}
+	if err := rows.Err(); err != nil {
+		return n, err
+	}
+	agg.Watermark = max(agg.Watermark, hi)
+	return n, nil
 }
 
 type rp488Params struct {
@@ -196,7 +330,50 @@ type rp488Placement struct {
 // regions outrank transient ones), then the fewest-hops fallback up to
 // MaxHops (all tied regions), else unknown.
 func rp488Place(perRegion map[string]*rp488Stats, p rp488Params) rp488Placement {
-	return rp488Placement{} // stub: red commit
+	unknown := rp488Placement{Basis: rp488BasisUnknown, Hops: -1}
+	var nodeLast int64
+	for _, s := range perRegion {
+		nodeLast = max(nodeLast, s.newest())
+	}
+	if nodeLast == 0 {
+		return unknown
+	}
+	ws := nodeLast - int64(p.Lifetime/time.Second)
+
+	var direct, persistent, transient []string
+	for r, s := range perRegion {
+		if s.LastAt[0] == 0 || s.LastAt[0] < ws {
+			continue
+		}
+		direct = append(direct, r)
+		if s.LastAt[0]-max(s.DirectFirst, ws) >= int64(p.PersistSpan/time.Second) {
+			persistent = append(persistent, r)
+		} else {
+			transient = append(transient, r)
+		}
+	}
+	if len(direct) > 0 {
+		out := rp488Placement{Basis: rp488BasisDirect, Regions: direct}
+		if len(persistent) > 0 && len(transient) > 0 {
+			out.Regions, out.Transient = persistent, transient
+		}
+		sort.Strings(out.Regions)
+		sort.Strings(out.Transient)
+		return out
+	}
+	for h := 1; h <= p.MaxHops && h < rp488HopSlots; h++ {
+		var tied []string
+		for r, s := range perRegion {
+			if s.LastAt[h] != 0 && s.LastAt[h] >= ws {
+				tied = append(tied, r)
+			}
+		}
+		if len(tied) > 0 {
+			sort.Strings(tied)
+			return rp488Placement{Basis: rp488BasisFewest, Regions: tied, Hops: h}
+		}
+	}
+	return unknown
 }
 
 // rp488Placements places every node in agg.
@@ -211,5 +388,19 @@ func rp488Placements(agg *rp488Agg, p rp488Params) map[string]rp488Placement {
 // rp488Members returns the sorted pubkeys placed in any of codes: what
 // /api/nodes?region= would return under the candidate rule.
 func rp488Members(pl map[string]rp488Placement, codes []string) []string {
-	return nil // stub: red commit
+	want := make(map[string]bool, len(codes))
+	for _, c := range codes {
+		want[c] = true
+	}
+	var out []string
+	for pk, p := range pl {
+		for _, r := range p.Regions {
+			if want[r] {
+				out = append(out, pk)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }

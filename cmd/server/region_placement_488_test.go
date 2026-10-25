@@ -194,6 +194,23 @@ func TestRP488_PlaceRule(t *testing.T) {
 	}
 }
 
+// TestRP488_MembersUnionOfCodes: ?region=A,B returns each node once, placed
+// in either region; a transient region alone does not make a member.
+func TestRP488_MembersUnionOfCodes(t *testing.T) {
+	pl := map[string]rp488Placement{
+		"n1": {Basis: rp488BasisDirect, Regions: []string{"AAA", "BBB"}},
+		"n2": {Basis: rp488BasisFewest, Regions: []string{"BBB"}, Hops: 2},
+		"n3": {Basis: rp488BasisDirect, Regions: []string{"CCC"}, Transient: []string{"AAA"}},
+		"n4": {Basis: rp488BasisUnknown, Hops: -1},
+	}
+	if got, want := rp488Members(pl, []string{"AAA", "BBB"}), []string{"n1", "n2"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("members(AAA,BBB) = %v, want %v", got, want)
+	}
+	if got := rp488Members(pl, []string{"DDD"}); len(got) != 0 {
+		t.Errorf("members(DDD) = %v, want none", got)
+	}
+}
+
 func TestRP488_StatsAreBounded(t *testing.T) {
 	s := &rp488Stats{}
 	for i := 0; i < 10_000; i++ {
@@ -205,6 +222,12 @@ func TestRP488_StatsAreBounded(t *testing.T) {
 	// The struct is fixed-size: one pair costs the same after 10k hearings.
 	if got := len(s.LastAt); got != rp488HopSlots {
 		t.Fatalf("LastAt grew to %d", got)
+	}
+	// Slot 0 is direct-only: a malformed "relayed at 0 hops" is unknown.
+	z := &rp488Stats{}
+	z.add(42, rp488Ev(rp488Relayed, 0))
+	if z.LastAt[0] != 0 || z.Unknown != 1 {
+		t.Fatalf("relayed at 0 hops reached the direct slot: %+v", z)
 	}
 }
 
