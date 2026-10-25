@@ -691,7 +691,7 @@
       const status = ev.status;
       const color = ev.confident && status === 'healthy' ? 'green' : status === 'silent' ? 'red' : 'yellow';
       const statusMsg = (heardAt ? `Last heard ${timeAgo(heardAt)}` : 'No confirmed activity in the current window') +
-        (ev.confident ? '' : ' · ' + MyMeshActivity.ATTRIBUTED_SUFFIX);
+        (ev.source === 'relay' ? ' · ' + MyMeshActivity.ATTRIBUTED_SUFFIX : '');
 
       const snr = MyMeshActivity.snr(stats, heard.direct);
       const traffic = MyMeshActivity.traffic24h(h.activity24h);

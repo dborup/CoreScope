@@ -161,7 +161,7 @@ async function render(page, responses, width, height) {
       await page.mouse.move(0, 0); // keep :hover off the border-colour probe
       const labels = async i => (await cards.nth(i).locator('.mnc-metrics .mnc-lbl').allInnerTexts()).map(t => t.replace(/\s+/g, ' ').trim());
       const vals = async i => (await cards.nth(i).locator('.mnc-metrics .mnc-val').allInnerTexts()).map(t => t.trim());
-      assert.deepEqual(await labels(0), ['Transmissions · 24 h', 'Direct observers', 'Direct SNR · n=30']);
+      assert.deepEqual(await labels(0), ['Transmissions · 24 h', 'Direct observers', 'Direct SNR · 30 receptions']);
       assert.deepEqual(await vals(0), ['35 +25%', '51', '-3.3 dB']);
       assert.deepEqual(await labels(1), ['Transmissions · 24 h', 'Direct observers', 'Direct SNR']);
       assert.deepEqual(await vals(1), ['≥ 35', '1', '-3.3 dB'], 'an incomplete window is a lower bound, and an unknown sample size prints no n=');

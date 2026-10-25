@@ -120,6 +120,20 @@ const server = http.createServer((req, res) => {
           !f.unknown && !f.invalid && (f.relay || f.legacy) ? '#ph-circle' : '#ph-circle-fill'), f.name + ': evidence glyph'); checks++;
         if (f.unknown || f.invalid) {
           assert.match(await banner.innerText(), /No confirmed activity in the current window/); checks++;
+          // #304 F1: no evidence means nothing was attributed to the node.
+          assert.ok(!/relay-attributed/.test(await banner.innerText()), f.name + ': no attribution claim without evidence'); checks++;
+        }
+        // #304 F2: relay-attributed evidence must never paint the panel as a
+        // confident green, whatever the badge says; own-advert Active stays green.
+        const attributed = !f.unknown && !f.invalid && (f.relay || f.legacy);
+        const bannerCls = (await banner.getAttribute('class')).split(/\s+/);
+        const bannerIcon = await banner.locator('.ph-icon use').first().getAttribute('href');
+        if (attributed) {
+          assert.ok(!bannerCls.includes('green'), f.name + ': attributed banner is not green'); checks++;
+          assert.ok(!bannerIcon.endsWith('#ph-check-circle'), f.name + ': attributed banner has no check icon'); checks++;
+          assert.match(await banner.innerText(), /relay-attributed/, f.name + ': attributed banner says so'); checks++;
+        } else if (expected(f) === 'healthy') {
+          assert.ok(bannerCls.includes('green') && bannerIcon.endsWith('#ph-check-circle'), f.name + ': own-advert Active is green'); checks++;
         }
       }
       if (mode.width > 768) {

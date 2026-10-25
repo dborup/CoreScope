@@ -172,11 +172,34 @@ test('the direct SNR mean carries no quality verdict and no verdict colour', () 
 test('the SNR label states the sample scope it was averaged over', () => {
   const snr = MMA.snr({ avgSnr: -3.25 }, [{ packetCount: 30 }, { packetCount: 12 }]);
   assert.strictEqual(snr.samples, 42);
-  assert.strictEqual(snr.label, 'Direct SNR · n=42');
+  assert.strictEqual(snr.label, 'Direct SNR · 42 receptions');
   assert.strictEqual(snr.value, '-3.3 dB');
   assert.match(snr.tip, /direct reception/i);
   assert.match(snr.tip, /observer/i, 'the tip must say the value is measured at the observer');
   assert.match(snr.tip, /not .*(radio quality|signal quality|health)/i);
+});
+
+test('the SNR tip does not claim the count is the SNR sample (F3)', () => {
+  const snr = MMA.snr({ avgSnr: -3.25 }, [{ packetCount: 30 }]);
+  assert.ok(!/\bn is\b|\bn=/.test(snr.tip + snr.label), 'no "n" that implies the SNR sample');
+  assert.match(snr.tip, /direct receptions?/i);
+  assert.match(snr.tip, /(only|fewer|not every|some).{0,80}SNR|SNR.{0,80}(only|fewer|not every|some)/i,
+    'the tip must say the mean covers only receptions that carry an SNR');
+});
+
+test('the traffic tip names only what the payload counts (F4)', () => {
+  assert.ok(!/confident/i.test(MMA.TRAFFIC_TIP), 'path attribution is resolved, not always confident');
+  assert.match(MMA.TRAFFIC_TIP, /resolved path/i);
+  assert.ok(!/\bbelow\b/i.test(MMA.TRAFFIC_TIP), 'the window row is not below the metric on the card');
+});
+
+test('a payload without a boolean complete flag is a lower bound, not an exact total (F5)', () => {
+  for (const c of [undefined, null, 'true', 1]) {
+    const a = Object.assign(activity({ counts: { 3: 4 } }), { complete: c });
+    const t = MMA.traffic24h(a);
+    assert.strictEqual(t.exact, false, String(c));
+    assert.strictEqual(t.value, '≥ 4', String(c));
+  }
 });
 
 test('an SNR with no direct attribution behind it is not presented at all', () => {

@@ -61,15 +61,15 @@
   // ─── point 4: SNR ───
   var SNR_LABEL = 'Direct SNR';
   var SNR_TIP = 'Mean SNR over the receptions that prove a direct reception of this node’s own transmission (see Heard By), ' +
-    'measured by the receiving observer. n is how many such receptions the mean covers. It describes those observer links, ' +
-    'not this node’s own signal quality or device health, and the direct attribution can rest on a wire hash prefix.';
+    'measured by the receiving observer. The count shown is all direct receptions; the mean covers only those that carry an SNR value, which can be fewer. ' +
+    'It describes those observer links, not this node’s own signal quality or device health, and the direct attribution can rest on a wire hash prefix.';
   var SNR_EMPTY_TIP = 'No observation proves a direct reception of this node’s own transmission, so there is no SNR that belongs to it. ' +
     'Any other copy carries the signal of whichever node the observer actually heard.';
 
   // ─── point 5: traffic ───
   var TRAFFIC_LABEL = 'Transmissions · 24 h';
-  var TRAFFIC_TIP = 'Distinct transmissions associated with this node in the rolling 24-hour window below: its own, ' +
-    'those addressed to it, and those whose observed path confidently names it. It is not a count of what this node forwarded, ' +
+  var TRAFFIC_TIP = 'Distinct transmissions associated with this node in the rolling 24-hour window: its own, ' +
+    'those addressed to it, and those whose resolved path names it. It is not a count of what this node forwarded, ' +
     'and repeated observations of one transmission count once.';
   var TRAFFIC_PARTIAL_TIP = 'The in-memory history does not cover the whole window, so this is a lower bound (≥) over an incomplete window, not a total.';
   var TRAFFIC_UNAVAILABLE_TIP = 'The rolling window is unavailable for this node, so no 24-hour count is shown. An unknown window is not a quiet one.';
@@ -173,7 +173,7 @@
       available: available,
       value: available ? value.toFixed(1) + ' dB' : UNKNOWN_VALUE,
       samples: samples,
-      label: available && samples > 0 ? SNR_LABEL + ' · n=' + count(samples) : SNR_LABEL,
+      label: available && samples > 0 ? SNR_LABEL + ' · ' + count(samples) + ' receptions' : SNR_LABEL,
       tip: available ? SNR_TIP : SNR_EMPTY_TIP
     };
   }

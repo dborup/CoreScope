@@ -348,6 +348,29 @@ func BenchmarkNodeActivity24h30K(b *testing.B) {
 	}
 }
 
+// BenchmarkNodeActivity24h30KSpread7d is the review-F6 companion: rows spread
+// over seven days, so most of them fall outside both windows and the
+// 24-48 h band the previous-window comparison admits is actually exercised.
+func BenchmarkNodeActivity24h30KSpread7d(b *testing.B) {
+	now := time.Date(2026, 10, 7, 13, 17, 0, 0, time.UTC)
+	const week = 7 * 24 * 60
+	packets := make([]*StoreTx, 30000)
+	for i := range packets {
+		packets[i] = &StoreTx{ID: i + 1, FirstSeen: now.Add(-time.Duration(i*week/len(packets)) * time.Minute).Format(time.RFC3339)}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		a := newNodeActivity24h(now, now.Add(-49*time.Hour))
+		for _, tx := range packets {
+			a.add(tx)
+		}
+		if a.Buckets[23].Count == 0 || a.Previous.Count == 0 {
+			b.Fatal("both windows must see rows")
+		}
+	}
+}
+
 // TestNodeActivityPrevious24hWindowAndCoverage covers the #304 traffic
 // requirement: a previous-period comparison needs a like-for-like window and
 // must never read a missing history as a quiet one. The previous window is
