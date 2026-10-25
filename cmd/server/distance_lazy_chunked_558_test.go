@@ -120,11 +120,21 @@ func TestLoadChunkedPathHopIndexReadyAtStartup558(t *testing.T) {
 	if !store.WaitIndexesReady(0) {
 		t.Fatal("WaitIndexesReady(0) = false after LoadChunked")
 	}
+	// The chunk merge only adds resolved-pubkey keys; the raw-hop keys come
+	// from the post-load buildPathHopIndex. Every one must be there.
 	store.mu.RLock()
-	n := len(store.byPathHop)
-	store.mu.RUnlock()
-	if n == 0 {
-		t.Fatal("byPathHop is empty after LoadChunked: the path-hop index was not built")
+	defer store.mu.RUnlock()
+	raw := make(map[string][]*StoreTx)
+	for _, tx := range store.packets {
+		addTxToPathHopIndex(raw, tx)
+	}
+	if len(raw) == 0 {
+		t.Fatal("fixture has no raw path hops; the check below would be vacuous")
+	}
+	for key, txs := range raw {
+		if got := len(store.byPathHop[key]); got < len(txs) {
+			t.Fatalf("byPathHop[%q] holds %d transmissions after LoadChunked, want at least %d: the path-hop index was not built", key, got, len(txs))
+		}
 	}
 }
 
