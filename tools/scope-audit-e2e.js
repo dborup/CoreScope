@@ -125,6 +125,16 @@ module.exports = async function scopeAuditE2E({page, BASE, assert, test}) {
         await page.waitForFunction(() => location.hash.includes('scope=eu'));
         assert(transportCalls.at(-1).searchParams.get('scope') === 'eu', 'scope change reaches the endpoint');
         assert(page.url().includes('sav=transport') && page.url().includes('region=SJC'), 'transport link is shareable');
+        // A region chosen in the transport view reaches the shareable link even when the link had none.
+        await page.evaluate(() => localStorage.removeItem('meshcore-region-filter'));
+        await page.goto(`${BASE}/#/analytics?tab=scopes&sub=audit&sav=transport&swin=24h&scope=dk`, {waitUntil: 'domcontentloaded'});
+        await page.reload({waitUntil: 'domcontentloaded'});
+        await page.waitForSelector('#scope-audit-rows tr');
+        assert(!page.url().includes('region='), 'precondition: link without region');
+        await page.waitForSelector('#analyticsRegionFilter [data-region="SJC"]', {state: 'attached'});
+        await page.evaluate(() => document.querySelector('#analyticsRegionFilter [data-region="SJC"]').click());
+        await page.waitForFunction(() => location.hash.includes('sav=transport') && /[?&]region=SJC/.test(location.hash));
+        assert(transportCalls.at(-1).searchParams.get('region') === 'SJC', 'region change reaches the endpoint');
         await page.locator('#scopes-panel-audit [data-audit-view="declared"]').click();
         await page.waitForFunction(() => !location.hash.includes('sav=') && !location.hash.includes('scope='));
         await page.waitForSelector('#scope-audit-rows tr');

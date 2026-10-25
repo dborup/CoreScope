@@ -139,6 +139,7 @@
       rowNodes.forEach(function(cached) { cached.el.remove(); }); rowNodes.clear(); rows = [];
       summary.textContent = ''; population.textContent = '';
       scopeLabel.hidden = state.view !== 'transport';
+      container.classList.toggle('scope-audit-transport', state.view === 'transport');
       viewButtons.forEach(function(b) { b.classList.toggle('active', b.dataset.auditView === state.view); });
     }
     function save() { options.onState(state.query, state.page, state.view, state.scope); }
@@ -269,6 +270,7 @@
       var token = ++generation;
       if (!active) return;
       var transport = state.view === 'transport';
+      if (transport) save(); // a changed global region reaches the shareable link
       message.textContent = 'Loading scope audit…'; delete message.dataset.loaded;
       try {
         var path = transport ? transportPath(state, regionParam()) : '/scope-audit?window=' + encodeURIComponent(state.window);
@@ -293,7 +295,18 @@
     applyView();
     return { load: load, syncState: function(hash) { clearTimeout(searchTimer); state = stateFromHash(hash); generation++; input.value = state.query; scopeInput.value = state.scope; applyView(); render(); }, setActive: function(value) { active = value; generation++; }, destroy: function() { active = false; generation++; clearTimeout(searchTimer); } };
   }
-  var exported = { mount: mount, windowValue: windowValue, stateFromHash: stateFromHash, searchRows: searchRows, searchTransportRows: searchTransportRows, declarationAge: declarationAge, assessment: assessment,
+  // Hash after a view-state change. Transport-only params are dropped in the declared view;
+  // a present region= is written back so a copied transport link carries it (#531 syncs only a present region=).
+  function hashWithState(hash, query, page, view, scope, region) {
+    var parts = String(hash || '').split('?'); var params = new URLSearchParams(parts[1] || '');
+    if (query) params.set('saq', query); else params.delete('saq');
+    if (page) params.set('sap', String(page)); else params.delete('sap');
+    if (view === 'transport') params.set('sav', view); else params.delete('sav');
+    if (view === 'transport' && scope) params.set('scope', scope); else params.delete('scope');
+    if (view === 'transport' && region) params.set('region', region);
+    return parts[0] + (params.toString() ? '?' + params.toString() : '');
+  }
+  var exported = { mount: mount, hashWithState: hashWithState, windowValue: windowValue, stateFromHash: stateFromHash, searchRows: searchRows, searchTransportRows: searchTransportRows, declarationAge: declarationAge, assessment: assessment,
     normalizeScope: normalizeScope, transportPath: transportPath, transportEvidence: transportEvidence, pageSize: PAGE_SIZE };
   if (typeof module !== 'undefined' && module.exports) module.exports = exported;
   else root.ScopeAudit = exported;

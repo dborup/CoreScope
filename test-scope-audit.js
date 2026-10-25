@@ -16,7 +16,7 @@ assert.strictEqual(audit.assessment({forwarded: '4', staleDeclaration: true, wil
 assert.strictEqual(audit.assessment({forwarded: '0', status: 'consistent'}), 'No forwarding evidence');
 // Minimal DOM tracks node identity and treats innerHTML writes as a test failure.
 class Element {
-  constructor(tag, doc) { this.tagName = tag; this.ownerDocument = doc; this.children = []; this.dataset = {}; this.handlers = {}; this._text = ''; this.isConnected = true; this.classList = { toggle() {} }; }
+  constructor(tag, doc) { this.tagName = tag; this.ownerDocument = doc; this.children = []; this.dataset = {}; this.handlers = {}; this._text = ''; this.isConnected = true; this.classes = new Set(); this.classList = { toggle: (c, on) => { if (on) this.classes.add(c); else this.classes.delete(c); } }; }
   set textContent(v) { this._text = String(v); this.children = []; }
   get textContent() { return this._text + this.children.map(c => c.textContent).join(''); }
   set innerHTML(v) { throw new Error('Unsafe HTML sink'); }
@@ -127,6 +127,9 @@ async function transportTests() {
   const scopeInput = f.byId('scope-audit-scope'); scopeInput.value = '#eu'; await scopeInput.handlers.change();
   assert.strictEqual(calls.at(-1), '/scope-audit/transport?window=24h&scope=eu&region=ARN');
   assert.deepStrictEqual(f.writes.at(-1).slice(2), ['transport', 'eu'], 'view and scope are written to the URL');
+  const w0 = f.writes.length; region = 'OAK'; await f.controller.load('24h');
+  assert(f.writes.length > w0 && f.writes.at(-1)[2] === 'transport', 'a region change rewrites the transport link state');
+  assert(f.container.classes.has('scope-audit-transport'), 'transport class set on the container');
   const declaredBtn = descendants(f.container).find(e => e.dataset.auditView === 'declared');
   await declaredBtn.handlers.click();
   assert.strictEqual(calls.at(-1), '/scope-audit?window=24h', 'declared view keeps its own contract');
@@ -143,8 +146,21 @@ async function transportTests() {
   const second = race.controller.load('24h');
   resolves[1]({rows: [], summary: {total: 0}}); await second;
   assert(race.container.textContent.includes('No confirmed observer declarations'), 'declared view renders its own answer');
+  // Region changes reach the shareable link (review finding 3): load() re-writes the state in the transport view only.
+  assert(!f.container.classes.has('scope-audit-transport'), 'transport class cleared in the declared view');
+  const declaredWrites = f.writes.length;
+  await f.controller.load('24h');
+  assert.strictEqual(f.writes.length, declaredWrites, 'declared view load does not rewrite the hash');
+  const base = '#/analytics?tab=scopes&sub=audit&sav=transport&scope=dk&saq=x';
+  assert.strictEqual(audit.hashWithState(base, 'x', 0, 'transport', 'dk', 'OAK,SJC'), '#/analytics?tab=scopes&sub=audit&sav=transport&scope=dk&saq=x&region=OAK%2CSJC', 'transport view writes region=');
+  assert.strictEqual(audit.hashWithState(base + '&region=SJC', 'x', 0, 'transport', 'dk', 'OAK'), '#/analytics?tab=scopes&sub=audit&sav=transport&scope=dk&saq=x&region=OAK', 'region= is replaced');
+  assert(!/region=/.test(audit.hashWithState(base, 'x', 0, 'transport', 'dk', '')), 'no region, none written');
+  assert(!/region=|scope=|sav=/.test(audit.hashWithState(base + '&region=SJC', '', 0, 'declared', '', 'SJC').replace('&region=SJC', '')), 'declared view drops transport params');
+  assert(!/region=/.test(audit.hashWithState('#/analytics?tab=scopes&sub=audit', '', 0, 'declared', '', 'SJC')), 'declared view never adds region=');
+  assert(/ScopeAudit\.hashWithState/.test(require('fs').readFileSync(__dirname + '/public/analytics.js', 'utf8')), 'analytics onState uses the tested helper');
   const css = require('fs').readFileSync(__dirname + '/public/style.css', 'utf8');
   const block = css.slice(css.indexOf('/* #414 scope transport */'));
+  assert(/\.scope-audit-transport \.scope-audit-controls input \{ width:100%/.test(block) && !/\n\s*\.scope-audit-controls input/.test(block), '640px width rule limited to the transport view');
   assert(block.length > 30 && /@media \(max-width: ?640px\)/.test(block), 'mobile layout rule present');
   assert(!/#[0-9a-fA-F]{3,8}\b/.test(block.split('/* end #414 */')[0].replace(/\/\*[\s\S]*?\*\//g, '')), 'transport CSS uses variables only');
   console.log('Scope Audit transport view tests passed');

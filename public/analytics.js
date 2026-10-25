@@ -5327,15 +5327,8 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(
         // #414 — the transport view counts only observers in the global region selection.
         region: function() { return window.RegionFilter && RegionFilter.getRegionParam ? RegionFilter.getRegionParam() : ''; },
         onState: function(query, page, view, scope) {
-          var parts = location.hash.split('?'); var params = new URLSearchParams(parts[1] || '');
-          if (query) params.set('saq', query); else params.delete('saq');
-          if (page) params.set('sap', String(page)); else params.delete('sap');
-          if (view === 'transport') params.set('sav', view); else params.delete('sav');
-          if (view === 'transport' && scope) params.set('scope', scope); else params.delete('scope');
-          // A shared transport link carries its region; RegionFilter keeps a present region= in sync (#531).
           var region = view === 'transport' && window.RegionFilter && RegionFilter.getRegionParam ? RegionFilter.getRegionParam() : '';
-          if (region) params.set('region', region);
-          history.replaceState(history.state, '', parts[0] + (params.toString() ? '?' + params.toString() : ''));
+          history.replaceState(history.state, '', window.ScopeAudit.hashWithState(location.hash, query, page, view, scope, region));
         }
       }) : null;
       _scopeAuditView = auditView;

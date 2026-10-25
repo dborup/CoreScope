@@ -6016,7 +6016,7 @@ body.embed #app.app-fixed {
   #scopes-panel-audit .scope-transport-table tr { border-bottom:1px solid var(--border); padding:6px 0; }
   #scopes-panel-audit .scope-transport-table td { border:0; padding:2px 4px; max-width:none; }
   #scopes-panel-audit .scope-transport-table td::before { content:attr(data-label); display:block; font-size:0.8em; color:var(--text-muted); }
-  .scope-audit-controls input { width:100%; }
+  .scope-audit-transport .scope-audit-controls input { width:100%; }
 }
 /* end #414 */
 
