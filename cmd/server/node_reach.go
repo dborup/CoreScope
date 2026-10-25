@@ -708,12 +708,23 @@ func (s *Server) computeNodeReach(ctx context.Context, pubkey string, days int) 
 	if s.store == nil || s.db == nil || s.db.conn == nil {
 		return NodeReachResponse{}, false, nil
 	}
-	nodeMap := s.buildNodeInfoMap()
+	// An incomplete lookup table (interrupted node-cache load, or an
+	// interrupted observers enrichment) is a backend failure, not a node
+	// with no neighbours: returning it as ok would cache a report with
+	// missing links or blanked observer names for the full response TTL,
+	// outliving the DB's recovery (#593 round-2 review F2/F3).
+	nodeMap, mapOK := s.buildNodeInfoMapOK()
+	if !mapOK {
+		return NodeReachResponse{}, false, errors.New("reach: node lookup table incomplete (interrupted read)")
+	}
 	self, found := nodeMap[pubkey]
 	if !found {
 		return NodeReachResponse{}, false, nil
 	}
-	_, pm := s.store.getCachedNodesAndPM()
+	_, pm, pmOK := s.store.getCachedNodesAndPMOK()
+	if !pmOK {
+		return NodeReachResponse{}, false, errors.New("reach: node snapshot unavailable (interrupted read)")
+	}
 	tokens := reliableTokens(pubkey, pm)
 
 	since := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour)

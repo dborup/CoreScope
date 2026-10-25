@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -501,13 +502,31 @@ func observerList(m map[string]bool) []string {
 
 // buildNodeInfoMap returns a map of lowercase pubkey → nodeInfo for name/role lookups.
 func (s *Server) buildNodeInfoMap() map[string]nodeInfo {
+	m, _ := s.buildNodeInfoMapOK()
+	return m
+}
+
+// buildNodeInfoMapOK is buildNodeInfoMap with the completeness of the map
+// reported. ok=false means part of it could not be read: the shared node
+// cache had nothing complete to serve, or the observers enrichment query
+// failed or was interrupted mid-iteration. That second case is the local
+// analogue of the upstream reachNodeScopes root cause (#593, upstream 2277):
+// a follow-up query in the same build whose error silently becomes empty
+// strings, so a Reach report with blanked observer names would be cached for
+// the full 5-minute TTL and keep being served after the DB recovered
+// (round-2 review F3).
+//
+// Callers that cache what they derive from the map must use this variant and
+// fail the build; the endpoints that render it live keep using
+// buildNodeInfoMap, where a degraded name is preferable to a 500.
+func (s *Server) buildNodeInfoMapOK() (map[string]nodeInfo, bool) {
 	if s.store == nil {
-		return nil
+		return nil, false
 	}
 	// FirstSeen is folded into getAllNodes (and therefore into the 30s
 	// node cache) so callers like /api/nodes/{pk}/reach get the field
 	// without a per-request SELECT — fixes #1627 r3 regression.
-	nodes, _ := s.store.getCachedNodesAndPM()
+	nodes, _, ok := s.store.getCachedNodesAndPMOK()
 	m := make(map[string]nodeInfo, len(nodes))
 	for _, n := range nodes {
 		m[strings.ToLower(n.PublicKey)] = n
@@ -515,24 +534,38 @@ func (s *Server) buildNodeInfoMap() map[string]nodeInfo {
 
 	// Enrich observer-only nodes: if an observer pubkey isn't already in the
 	// map (i.e. it's not also a repeater/companion), add it with role "observer".
-	if s.db != nil {
+	if s.db != nil && s.db.conn != nil {
 		rows, err := s.db.conn.Query("SELECT id, name FROM observers")
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var id, name string
-				if rows.Scan(&id, &name) != nil {
-					continue
-				}
-				key := strings.ToLower(id)
-				if _, exists := m[key]; !exists {
-					m[key] = nodeInfo{PublicKey: id, Name: name, Role: "observer"}
-				}
+		if err != nil {
+			log.Printf("[neighbors] buildNodeInfoMap observers query failed: %v", err)
+			return m, false
+		}
+		defer rows.Close()
+		// A row that won't Scan is malformed, not an interruption: the
+		// observers table admits a NULL name, and reach_rank.go's roster
+		// scan is pinned to skipping those too. Counted so it isn't silent.
+		var skipped int
+		for rows.Next() {
+			var id, name string
+			if rows.Scan(&id, &name) != nil {
+				skipped++
+				continue
 			}
+			key := strings.ToLower(id)
+			if _, exists := m[key]; !exists {
+				m[key] = nodeInfo{PublicKey: id, Name: name, Role: "observer"}
+			}
+		}
+		if skipped > 0 {
+			log.Printf("[neighbors] buildNodeInfoMap discarded %d malformed observers rows", skipped)
+		}
+		if err := rows.Err(); err != nil {
+			log.Printf("[neighbors] buildNodeInfoMap observers iteration failed: %v", err)
+			return m, false
 		}
 	}
 
-	return m
+	return m, ok
 }
 
 // dedupPrefixEntries merges unresolved prefix entries with resolved pubkey entries

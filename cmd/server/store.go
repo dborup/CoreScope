@@ -7833,12 +7833,19 @@ func (s *PacketStore) logSchemaDegradationOnce(msg string) {
 	}
 }
 
-// getAllNodes returns every row of the nodes table, or ok=false if the scan
-// was interrupted partway (a Scan or iteration error) — never a silently
-// truncated slice. A genuine mid-scan DB error (lock contention, I/O) must
-// not be mistaken for "no more rows": rows.Next() ends the loop the same way
-// either way, so only checking rows.Err() (and each Scan's own error) after
-// the loop tells them apart (#593, port of upstream #2277).
+// getAllNodes returns every row of the nodes table, or ok=false if the read
+// was interrupted — never a silently truncated slice. A genuine mid-scan DB
+// error (lock contention, I/O) must not be mistaken for "no more rows":
+// rows.Next() ends the loop the same way either way, so only rows.Err()
+// after the loop tells them apart (#593, port of upstream #2277).
+//
+// ok=false means the read failed: the deepest schema rung's Query errored,
+// or rows.Err() reported an interruption. A row that fails to Scan is a
+// different thing — a malformed row (nodes.public_key is a bare TEXT
+// PRIMARY KEY, so SQLite admits one NULL, and a non-numeric lat/lon fails
+// the same way). Those are skipped, logged and counted the way scanReachRows
+// already discards malformed rows, so one bad row cannot permanently disable
+// the shared node cache for every caller (round-2 review F1).
 func (s *PacketStore) getAllNodes() ([]nodeInfo, bool) {
 	// Schema probe: try richest → leanest. Logs a one-shot warning at each
 	// rung when we fall back to a thinner schema so operators see that a
@@ -7871,6 +7878,7 @@ func (s *PacketStore) getAllNodes() ([]nodeInfo, bool) {
 	}
 	defer rows.Close()
 	var nodes []nodeInfo
+	var skipped int // malformed rows discarded — surfaced below so schema/ingest bugs aren't silent
 	for rows.Next() {
 		var pk string
 		var name, role sql.NullString
@@ -7889,8 +7897,8 @@ func (s *PacketStore) getAllNodes() ([]nodeInfo, bool) {
 			scanErr = rows.Scan(&pk, &name, &role, &lat, &lon)
 		}
 		if scanErr != nil {
-			log.Printf("[store] getAllNodes scan failed: %v", scanErr)
-			return nil, false
+			skipped++
+			continue
 		}
 		n := nodeInfo{PublicKey: pk, Name: nullStrVal(name), Role: nullStrVal(role)}
 		if hasFirstSeen && firstSeen.Valid {
@@ -7912,6 +7920,9 @@ func (s *PacketStore) getAllNodes() ([]nodeInfo, bool) {
 			n.ObservationCount = int(advertCount.Int64)
 		}
 		nodes = append(nodes, n)
+	}
+	if skipped > 0 {
+		log.Printf("[store] getAllNodes discarded %d malformed nodes rows (kept %d)", skipped, len(nodes))
 	}
 	if err := rows.Err(); err != nil {
 		log.Printf("[store] getAllNodes iteration failed: %v", err)
@@ -8000,22 +8011,36 @@ func buildPrefixMap(nodes []nodeInfo) *prefixMap {
 // Call WITHOUT s.mu: cold/expired reads wait for SQL. A request keeps its
 // snapshot even if invalidated concurrently, but never republishes it then.
 func (s *PacketStore) getCachedNodesAndPM() ([]nodeInfo, *prefixMap) {
+	nodes, pm, _ := s.getCachedNodesAndPMOK()
+	return nodes, pm
+}
+
+// getCachedNodesAndPMOK is getCachedNodesAndPM with the completeness of the
+// returned snapshot reported. ok=false means the refresh failed and there was
+// no complete snapshot to fall back on (a cold start), so what comes back is
+// the empty-but-valid fallback rather than the whole nodes table. Callers
+// that cache what they derive from it — Reach, whose response cache has a
+// 5-minute TTL — must treat that as a backend failure instead of publishing
+// a report with no links in it (round-2 review F2). The many callers that
+// cannot act on a failure keep using getCachedNodesAndPM.
+func (s *PacketStore) getCachedNodesAndPMOK() ([]nodeInfo, *prefixMap, bool) {
 	s.cacheMu.Lock()
 	if s.nodeCache != nil && time.Since(s.nodeCacheTime) < 30*time.Second {
 		nodes, pm := s.nodeCache, s.nodePM
 		s.cacheMu.Unlock()
-		return nodes, pm
+		return nodes, pm, true
 	}
 	s.cacheMu.Unlock()
 
 	type nodeSnapshot struct {
 		nodes []nodeInfo
 		pm    *prefixMap
+		ok    bool
 	}
 	v, _, _ := s.nodeCacheLoad.Do("nodes", func() (interface{}, error) {
 		s.cacheMu.Lock()
 		if s.nodeCache != nil && time.Since(s.nodeCacheTime) < 30*time.Second {
-			out := nodeSnapshot{s.nodeCache, s.nodePM}
+			out := nodeSnapshot{s.nodeCache, s.nodePM, true}
 			s.cacheMu.Unlock()
 			return out, nil
 		}
@@ -8033,11 +8058,14 @@ func (s *PacketStore) getCachedNodesAndPM() ([]nodeInfo, *prefixMap) {
 			// On a cold start (nothing cached yet) stalePM is nil: every
 			// caller of getCachedNodesAndPM relies on a non-nil *prefixMap,
 			// so fall back to buildPrefixMap's empty-but-valid map, same as
-			// the pre-fix behaviour for a genuinely empty nodes table.
+			// the pre-fix behaviour for a genuinely empty nodes table — and
+			// report ok=false, since that map is a placeholder, not the node
+			// table (round-2 review F2/F4). Nothing is published either way,
+			// so the next call retries.
 			if staleNodes == nil && stalePM == nil {
-				return nodeSnapshot{nil, buildPrefixMap(nil)}, nil
+				return nodeSnapshot{nil, buildPrefixMap(nil), false}, nil
 			}
-			return nodeSnapshot{staleNodes, stalePM}, nil
+			return nodeSnapshot{staleNodes, stalePM, true}, nil
 		}
 		pm := buildPrefixMap(nodes)
 		// Issue #1290: exclude observers that advertised `repeat:off` from
@@ -8059,10 +8087,10 @@ func (s *PacketStore) getCachedNodesAndPM() ([]nodeInfo, *prefixMap) {
 			s.nodeCacheTime = time.Now()
 		}
 		s.cacheMu.Unlock()
-		return nodeSnapshot{nodes, pm}, nil
+		return nodeSnapshot{nodes, pm, true}, nil
 	})
 	out := v.(nodeSnapshot)
-	return out.nodes, out.pm
+	return out.nodes, out.pm, out.ok
 }
 
 // InvalidateNodeCache forces the next getCachedNodesAndPM call to rebuild.
