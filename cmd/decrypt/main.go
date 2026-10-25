@@ -466,7 +466,9 @@ init();
 	return []byte(b.String())
 }
 
-// openReadOnly opens the CoreScope database for reading.
+// openReadOnly opens the CoreScope database read-only. modernc.org/sqlite
+// applies query parameters only to a "file:" name: without the prefix
+// mode=ro is dropped and a missing file is created (#583).
 func openReadOnly(path string) (*sql.DB, error) {
-	return sql.Open("sqlite", path+"?mode=ro")
+	return sql.Open("sqlite", "file:"+path+"?mode=ro")
 }
