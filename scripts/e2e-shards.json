@@ -26,6 +26,14 @@
       "measurementNote": "New suite; local synthetic API server, default and configured role thresholds across desktop and mobile. No CI duration measured yet."
     },
     {
+      "file": "test-issue-559-packets-all-time-e2e.js",
+      "shard": 2,
+      "env": { "CHROMIUM_REQUIRE": "1", "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; desktop All time across selection, reload, grouping and a shared link, invalid and empty values, and the mobile cap. A few minutes locally; no CI duration measured yet."
+    },
+    {
       "file": "test-issue-531-region-url-e2e.js",
       "shard": 2,
       "env": { "CHROMIUM_REQUIRE": "1", "BASE_URL": "$BASE_URL" },

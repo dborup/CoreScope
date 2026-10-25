@@ -2076,6 +2076,51 @@ console.log('\n=== #242 server-side type exclusions ===');
   test('pinned hash bypasses both exclusions', () => assert.strictEqual(params({hash:'ABC', type:'5'}, true).get('excludeTypes'), null));
 }
 
+console.log('\n=== packets.js: time-window normalisation (#559) ===');
+{
+  const api = loadPacketsSandbox()._packetsTestAPI;
+  const norm = (raw, mobile) => api.normalizeTimeWindow(raw, mobile);
+  test('normalizeTimeWindow is exported', () => assert.strictEqual(typeof api.normalizeTimeWindow, 'function'));
+  test('desktop: explicit 0 and "0" mean All time', () => {
+    assert.strictEqual(norm(0, false), 0);
+    assert.strictEqual(norm('0', false), 0);
+  });
+  test('desktop: missing, empty and blank values take the 15 minute default, not All time', () => {
+    for (const raw of [null, undefined, '', '  ']) assert.strictEqual(norm(raw, false), 15, JSON.stringify(raw));
+  });
+  test('desktop: garbage and negative values take the default', () => {
+    for (const raw of ['abc', '-5', -1, NaN, Infinity, '1e999', 'null', {}, [], true]) {
+      assert.strictEqual(norm(raw, false), 15, String(raw));
+    }
+  });
+  test('desktop: positive windows are kept, as numbers', () => {
+    for (const m of [15, 30, 60, 180, 360, 720, 1440]) {
+      assert.strictEqual(norm(m, false), m);
+      assert.strictEqual(norm(String(m), false), m);
+    }
+  });
+  test('mobile: All time (0) is never allowed', () => {
+    assert.strictEqual(norm(0, true), 15);
+    assert.strictEqual(norm('0', true), 15);
+  });
+  test('mobile: windows above 180 minutes fall back to 15; 180 and below are kept', () => {
+    assert.strictEqual(norm(181, true), 15);
+    assert.strictEqual(norm('1440', true), 15);
+    assert.strictEqual(norm(180, true), 180);
+    assert.strictEqual(norm('60', true), 60);
+  });
+  test('mobile: missing, empty and garbage values take the default', () => {
+    for (const raw of [null, undefined, '', 'abc', '-1']) assert.strictEqual(norm(raw, true), 15, JSON.stringify(raw));
+  });
+  test('buildPacketsQuery writes an explicit All time (0) to the URL', () => {
+    assert.ok(api.buildPacketsQuery(0, '', true).replace(/^\?/, '').split('&').includes('timeWindow=0'));
+  });
+  test('buildPacketsQuery omits the default and writes other windows', () => {
+    assert.ok(!/timeWindow/.test(api.buildPacketsQuery(15, '', true)));
+    assert.ok(api.buildPacketsQuery(60, '', true).replace(/^\?/, '').split('&').includes('timeWindow=60'));
+  });
+}
+
 testChannelDestinations().then(() => {
   console.log(`\n${'='.repeat(40)}`);
   console.log(`packets.js tests: ${passed} passed, ${failed} failed, ${knownBugs} known bug(s) still failing`);

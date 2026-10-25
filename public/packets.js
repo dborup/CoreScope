@@ -860,9 +860,22 @@
   }
   const isMobile = window.innerWidth <= 1024;
   const PACKET_LIMIT = isMobile ? 1000 : 50000;
-  let savedTimeWindowMin = Number(localStorage.getItem('meshcore-time-window'));
-  if (!Number.isFinite(savedTimeWindowMin) || savedTimeWindowMin <= 0) savedTimeWindowMin = 15;
-  if (isMobile && savedTimeWindowMin > 180) savedTimeWindowMin = 15;
+  // The one place a time-window value (saved choice, link, dropdown) becomes
+  // minutes. 0 is All time: only an explicit 0 on desktop. Missing, empty or
+  // invalid input must not reach Number(), where '' and null are 0.
+  // Mobile has no All time and caps windows above 3 h (#340).
+  function normalizeTimeWindow(raw, mobile) {
+    var DEFAULT_MIN = 15;
+    if (raw === null || raw === undefined) return DEFAULT_MIN;
+    if (typeof raw !== 'number' && typeof raw !== 'string') return DEFAULT_MIN;
+    if (typeof raw === 'string' && raw.trim() === '') return DEFAULT_MIN;
+    var n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) return DEFAULT_MIN;
+    if (n === 0) return mobile ? DEFAULT_MIN : 0;
+    if (mobile && n > 180) return DEFAULT_MIN;
+    return n;
+  }
+  let savedTimeWindowMin = normalizeTimeWindow(localStorage.getItem('meshcore-time-window'), isMobile);
   let totalCount = 0;
   let expandedHashes = new Set();
   // Heuristic names are global prefix guesses. The current APIs combine
@@ -898,7 +911,7 @@
 
   function buildPacketsQuery(timeWindowMin, regionParam, skipHash) {
     var parts = [];
-    if (timeWindowMin && timeWindowMin !== DEFAULT_TIME_WINDOW) parts.push('timeWindow=' + timeWindowMin);
+    if (timeWindowMin !== DEFAULT_TIME_WINDOW) parts.push('timeWindow=' + timeWindowMin);
     if (regionParam) parts.push('region=' + encodeURIComponent(regionParam));
     if (!skipHash && filters.hash) parts.push('hash=' + encodeURIComponent(filters.hash));
     if (filters.node) parts.push('node=' + encodeURIComponent(filters.node));
@@ -1433,10 +1446,11 @@
 
     // Read URL params (router strips query from routeParam; read from location.hash)
     var _initUrlParams = getHashParams();
-    var _urlTimeWindow = Number(_initUrlParams.get('timeWindow'));
-    if (Number.isFinite(_urlTimeWindow) && _urlTimeWindow > 0) {
-      savedTimeWindowMin = _urlTimeWindow;
-      localStorage.setItem('meshcore-time-window', String(_urlTimeWindow));
+    if (_initUrlParams.has('timeWindow')) {
+      // A link states its window: 0 is All time on desktop, anything empty or
+      // invalid is the default, and mobile limits apply as for a saved value.
+      savedTimeWindowMin = normalizeTimeWindow(_initUrlParams.get('timeWindow'), isMobile);
+      localStorage.setItem('meshcore-time-window', String(savedTimeWindowMin));
     }
     var _urlHash = _initUrlParams.get('hash');
     if (_urlHash) filters.hash = _urlHash;
@@ -1811,11 +1825,11 @@
     const container = document.getElementById('pktLeft');
     if (container) container.setAttribute('data-loaded', 'false');
     try {
-      // Shared URLs may use a window not present in the dropdown. Its empty
-      // value must not become Number('')=0 and silently widen a refetch.
-      const selectedWindowValue = document.getElementById('fTimeWindow')?.value;
-      const selectedWindow = selectedWindowValue ? Number(selectedWindowValue) : NaN;
-      const windowMin = Number.isFinite(selectedWindow) ? selectedWindow : savedTimeWindowMin;
+      // savedTimeWindowMin is the normalised window and is kept in step with the
+      // dropdown by its change handler. The dropdown itself is not read: before
+      // init sets it, it still holds 15, and a window from a link that is not
+      // one of its options reads as '' (#559).
+      const windowMin = savedTimeWindowMin;
       const params = buildPacketsParams({
         filters,
         hideControl,
@@ -2352,9 +2366,8 @@
     const fTimeWindow = document.getElementById('fTimeWindow');
     fTimeWindow.value = String(savedTimeWindowMin);
     fTimeWindow.addEventListener('change', () => {
-      savedTimeWindowMin = Number(fTimeWindow.value);
-      if (!Number.isFinite(savedTimeWindowMin) || savedTimeWindowMin <= 0) savedTimeWindowMin = 15;
-      localStorage.setItem('meshcore-time-window', fTimeWindow.value);
+      savedTimeWindowMin = normalizeTimeWindow(fTimeWindow.value, isMobile);
+      localStorage.setItem('meshcore-time-window', String(savedTimeWindowMin));
       updatePacketsUrl();
       loadPackets();
     });
@@ -4731,6 +4744,7 @@
       _calcVisibleRange,
       buildPacketsParams,
       buildPacketsQuery,
+      normalizeTimeWindow,
       applyObserverFilter,
       readHideControlPref,
       filterHiddenControl,

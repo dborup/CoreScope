@@ -2236,7 +2236,7 @@ console.log('\n=== compare.js: comparePacketSets ===');
       pktRight: { addEventListener() {}, classList: { add() {}, remove() {}, contains() { return false; } }, innerHTML: '' },
     };
     ctx.document.getElementById = (id) => {
-      if (id === 'fTimeWindow') return null; // Simulate first fetch before filter controls are rendered
+      if (id === 'fTimeWindow') return staleControlValue === undefined ? null : { value: staleControlValue, addEventListener() {} }; // Simulate first fetch before filter controls are rendered
       return dom[id] || null;
     };
     ctx.document.addEventListener = () => {};
@@ -3518,8 +3518,9 @@ console.log('\n=== channels.js: encrypted channel without key shows lock message
 // ===== PACKETS.JS: savedTimeWindowMin default guard =====
 console.log('\n=== packets.js: savedTimeWindowMin defaults ===');
 {
-  async function captureInitialPacketsRequest(storageValue, innerWidth) {
+  async function captureInitialPacketsRequest(storageValue, innerWidth, urlQuery, staleControlValue) {
     const ctx = makeSandbox();
+    if (urlQuery) ctx.location.hash = '#/packets?' + urlQuery;
     const apiCalls = [];
     if (storageValue !== undefined) ctx.localStorage.setItem('meshcore-time-window', storageValue);
     ctx.window.localStorage = ctx.localStorage;
@@ -3528,7 +3529,7 @@ console.log('\n=== packets.js: savedTimeWindowMin defaults ===');
       pktRight: { addEventListener() {}, classList: { add() {}, remove() {}, contains() { return false; } }, innerHTML: '' },
     };
     ctx.document.getElementById = (id) => {
-      if (id === 'fTimeWindow') return null;
+      if (id === 'fTimeWindow') return staleControlValue === undefined ? null : { value: staleControlValue, addEventListener() {} };
       return dom[id] || null;
     };
     ctx.document.addEventListener = () => {};
@@ -3570,12 +3571,56 @@ console.log('\n=== packets.js: savedTimeWindowMin defaults ===');
     assert.ok(deltaMin > 10 && deltaMin < 25, `expected default ~15m window, got ${deltaMin.toFixed(2)}m`);
   });
 
-  test('savedTimeWindowMin defaults to 15 when localStorage returns "0"', async () => {
+  test('desktop: saved "0" is All time, so the request has no since (#559)', async () => {
     const r = await captureInitialPacketsRequest('0', 1366);
+    assert.strictEqual(r.params.get('since'), null, 'All time must not send since');
+    assert.strictEqual(r.params.get('limit'), '50000');
+  });
+
+  test('desktop: a not-yet-initialised dropdown (still 15) does not override saved All time (#559)', async () => {
+    const r = await captureInitialPacketsRequest('0', 1366, undefined, '15');
+    assert.strictEqual(r.params.get('since'), null);
+  });
+
+  test('desktop: empty saved value keeps the 15 minute default (#559)', async () => {
+    const r = await captureInitialPacketsRequest('', 1366);
     const since = r.params.get('since');
-    assert.ok(since, 'initial packets request should include since parameter');
+    assert.ok(since, 'an empty saved value must not become All time');
     const deltaMin = (Date.now() - Date.parse(since)) / 60000;
     assert.ok(deltaMin > 10 && deltaMin < 25, `expected default ~15m window, got ${deltaMin.toFixed(2)}m`);
+  });
+
+  test('desktop: ?timeWindow=0 in the link is All time (#559)', async () => {
+    const r = await captureInitialPacketsRequest('60', 1366, 'timeWindow=0');
+    assert.strictEqual(r.params.get('since'), null);
+  });
+
+  test('desktop: empty or invalid ?timeWindow= gives the 15 minute default, never All time (#559)', async () => {
+    for (const q of ['timeWindow=', 'timeWindow=abc', 'timeWindow=-5']) {
+      for (const saved of ['60', undefined]) {
+        const r = await captureInitialPacketsRequest(saved, 1366, q);
+        const since = r.params.get('since');
+        assert.ok(since, q + ' must not become All time');
+        const deltaMin = (Date.now() - Date.parse(since)) / 60000;
+        assert.ok(deltaMin > 10 && deltaMin < 25, `${q}: expected default ~15m, got ${deltaMin.toFixed(2)}m`);
+      }
+    }
+  });
+
+  test('desktop: no ?timeWindow= keeps the saved window (#559)', async () => {
+    const r = await captureInitialPacketsRequest('60', 1366, 'region=SJC');
+    const deltaMin = (Date.now() - Date.parse(r.params.get('since'))) / 60000;
+    assert.ok(deltaMin > 45 && deltaMin < 75, `expected saved ~60m, got ${deltaMin.toFixed(2)}m`);
+  });
+
+  test('mobile: ?timeWindow=0 and oversized link windows obey the mobile cap (#559)', async () => {
+    for (const q of ['timeWindow=0', 'timeWindow=1440']) {
+      const r = await captureInitialPacketsRequest('60', 375, q);
+      const since = r.params.get('since');
+      assert.ok(since, q + ' must not be All time on mobile');
+      const deltaMin = (Date.now() - Date.parse(since)) / 60000;
+      assert.ok(deltaMin > 10 && deltaMin < 25, `${q}: expected capped ~15m, got ${deltaMin.toFixed(2)}m`);
+    }
   });
 
   test('savedTimeWindowMin preserves valid value (60)', async () => {
@@ -5909,8 +5954,8 @@ console.log('\n=== packets.js: buildPacketsQuery ===');
     test('buildPacketsQuery: timeWindow + region', () => {
       assert.strictEqual(buildPacketsQuery(30, 'US-SFO,US-LAX'), '?timeWindow=30&region=US-SFO%2CUS-LAX');
     });
-    test('buildPacketsQuery: timeWindow=0 treated as default', () => {
-      assert.strictEqual(buildPacketsQuery(0, ''), '');
+    test('buildPacketsQuery: timeWindow=0 is All time and stays in the URL (#559)', () => {
+      assert.strictEqual(buildPacketsQuery(0, ''), '?timeWindow=0');
     });
   } else {
     console.log('  ⚠️ buildPacketsQuery not exposed — skipping');
