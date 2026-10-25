@@ -121,7 +121,7 @@ LIMITATIONS
 	key := channel.DeriveKey(ch)
 	chHash := channel.ChannelHash(key)
 
-	db, err := sql.Open("sqlite", *dbPath+"?mode=ro")
+	db, err := openReadOnly(*dbPath)
 	if err != nil {
 		log.Fatalf("Failed to open database: %v", err)
 	}
@@ -464,4 +464,9 @@ init();
 </html>`)
 
 	return []byte(b.String())
+}
+
+// openReadOnly opens the CoreScope database for reading.
+func openReadOnly(path string) (*sql.DB, error) {
+	return sql.Open("sqlite", path+"?mode=ro")
 }
