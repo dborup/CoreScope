@@ -94,6 +94,8 @@ type Server struct {
 
 	// Cached /api/scope-audit response — per-window, recomputed at most once every 30s
 	scopeAudit scopeAuditCache[ScopeAuditResponse]
+	// Cached /api/scope-audit/transport scans — per window and observer region, bounded
+	scopeTransport scopeAuditCache[scopeTransportScan]
 
 	// Cached /api/analytics/wardriving response — per-window, recomputed at most once every 30s
 	wardrivingStatsMu       sync.Mutex
