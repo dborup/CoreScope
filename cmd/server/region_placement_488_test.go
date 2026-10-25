@@ -127,6 +127,10 @@ func TestRegionPlacement488_PlaceRule(t *testing.T) {
 			rpm2Cat(rpm2Daily("AAA", -100, -60, rpm2Direct), rpm2Daily("BBB", -19, 0, rpm2Direct)), def, direct("BBB")},
 		{"lifetime 0 keeps all history",
 			rpm2Cat(rpm2Daily("AAA", -100, -60, rpm2Direct), rpm2Daily("BBB", -19, 0, rpm2Direct)), noWindow, direct("AAA", "BBB")},
+		// F1 (#612 review): with no window, relayed-only evidence must not
+		// satisfy within() through an unheard (zero) direct timestamp.
+		{"lifetime 0: relayed-only regions are not direct",
+			rpm2Cat(rpm2Daily("AAA", 0, 3, rpm2Hop(1)), rpm2Daily("BBB", 0, 3, rpm2Hop(3))), noWindow, fewest(1, "AAA")},
 		{"stale fallback does not outrank a fresher, longer one",
 			rpm2Cat(rpm2Daily("AAA", -100, -60, rpm2Hop(1)), rpm2Daily("BBB", -10, 0, rpm2Hop(3))), def, fewest(3, "BBB")},
 		{"direct anywhere beats a closer-looking fallback here",

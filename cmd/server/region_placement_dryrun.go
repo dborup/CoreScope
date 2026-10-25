@@ -18,7 +18,7 @@ import (
 // on. It names no node: no public key, no name, no observer.
 
 // regionDryRunSweep are the maxHops values the report compares.
-var regionDryRunSweep = []int{0, 1, 2, 3, 4, 5, 7}
+var regionDryRunSweep = []int{0, 1, 2, 3, 4, 5, 6, 7}
 
 // regionBasisCounts counts nodes per placement basis.
 type regionBasisCounts struct {
