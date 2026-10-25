@@ -7833,7 +7833,13 @@ func (s *PacketStore) logSchemaDegradationOnce(msg string) {
 	}
 }
 
-func (s *PacketStore) getAllNodes() []nodeInfo {
+// getAllNodes returns every row of the nodes table, or ok=false if the scan
+// was interrupted partway (a Scan or iteration error) — never a silently
+// truncated slice. A genuine mid-scan DB error (lock contention, I/O) must
+// not be mistaken for "no more rows": rows.Next() ends the loop the same way
+// either way, so only checking rows.Err() (and each Scan's own error) after
+// the loop tells them apart (#593, port of upstream #2277).
+func (s *PacketStore) getAllNodes() ([]nodeInfo, bool) {
 	// Schema probe: try richest → leanest. Logs a one-shot warning at each
 	// rung when we fall back to a thinner schema so operators see that a
 	// column is missing and the new tiebreak features are degraded. See
@@ -7858,7 +7864,7 @@ func (s *PacketStore) getAllNodes() []nodeInfo {
 				rows, err = s.db.conn.Query("SELECT public_key, name, role, lat, lon FROM nodes")
 				hasLastSeen = false
 				if err != nil {
-					return nil
+					return nil, false
 				}
 			}
 		}
@@ -7872,14 +7878,19 @@ func (s *PacketStore) getAllNodes() []nodeInfo {
 		var lastSeen sql.NullString
 		var advertCount sql.NullInt64
 		var firstSeen sql.NullString
+		var scanErr error
 		if hasFirstSeen {
-			rows.Scan(&pk, &name, &role, &lat, &lon, &lastSeen, &advertCount, &firstSeen)
+			scanErr = rows.Scan(&pk, &name, &role, &lat, &lon, &lastSeen, &advertCount, &firstSeen)
 		} else if hasAdvertCount {
-			rows.Scan(&pk, &name, &role, &lat, &lon, &lastSeen, &advertCount)
+			scanErr = rows.Scan(&pk, &name, &role, &lat, &lon, &lastSeen, &advertCount)
 		} else if hasLastSeen {
-			rows.Scan(&pk, &name, &role, &lat, &lon, &lastSeen)
+			scanErr = rows.Scan(&pk, &name, &role, &lat, &lon, &lastSeen)
 		} else {
-			rows.Scan(&pk, &name, &role, &lat, &lon)
+			scanErr = rows.Scan(&pk, &name, &role, &lat, &lon)
+		}
+		if scanErr != nil {
+			log.Printf("[store] getAllNodes scan failed: %v", scanErr)
+			return nil, false
 		}
 		n := nodeInfo{PublicKey: pk, Name: nullStrVal(name), Role: nullStrVal(role)}
 		if hasFirstSeen && firstSeen.Valid {
@@ -7902,7 +7913,11 @@ func (s *PacketStore) getAllNodes() []nodeInfo {
 		}
 		nodes = append(nodes, n)
 	}
-	return nodes
+	if err := rows.Err(); err != nil {
+		log.Printf("[store] getAllNodes iteration failed: %v", err)
+		return nil, false
+	}
+	return nodes, true
 }
 
 type prefixMap struct {
@@ -8005,8 +8020,25 @@ func (s *PacketStore) getCachedNodesAndPM() ([]nodeInfo, *prefixMap) {
 			return out, nil
 		}
 		gen := s.nodeCacheGen
+		staleNodes, stalePM := s.nodeCache, s.nodePM
 		s.cacheMu.Unlock()
-		nodes := s.getAllNodes()
+		nodes, ok := s.getAllNodes()
+		if !ok {
+			// A mid-scan failure (lock contention, I/O, interrupted read)
+			// must not replace a complete cached snapshot with a partial or
+			// empty one — every consumer (buildNodeInfoMap, Reach's path-hash
+			// resolver) would then silently lose nodes until the next
+			// successful refresh. Keep serving whatever was cached, stale or
+			// not, and let the next call retry (#593, port of upstream #2277).
+			// On a cold start (nothing cached yet) stalePM is nil: every
+			// caller of getCachedNodesAndPM relies on a non-nil *prefixMap,
+			// so fall back to buildPrefixMap's empty-but-valid map, same as
+			// the pre-fix behaviour for a genuinely empty nodes table.
+			if staleNodes == nil && stalePM == nil {
+				return nodeSnapshot{nil, buildPrefixMap(nil)}, nil
+			}
+			return nodeSnapshot{staleNodes, stalePM}, nil
+		}
 		pm := buildPrefixMap(nodes)
 		// Issue #1290: exclude observers that advertised `repeat:off` from
 		// the path-hop candidate set. Failure is non-fatal — we log via the
@@ -9803,8 +9835,10 @@ type twoByteCellInfo struct {
 }
 
 func (s *PacketStore) computeHashCollisions(region, area string) map[string]interface{} {
-	// Get all nodes from DB
-	nodes := s.getAllNodes()
+	// Get all nodes from DB. A mid-scan failure degrades to an empty list
+	// here (best-effort analytics, not cached), same as the old deepest
+	// schema-failure case.
+	nodes, _ := s.getAllNodes()
 	hashInfo := s.GetNodeHashSizeInfo()
 
 	// If region is specified, filter to only nodes seen by regional observers
@@ -10467,8 +10501,9 @@ func (s *PacketStore) computeMultiByteCapability(adopterHashSizes map[string]int
 	// Get hash size info from adverts (has its own locking)
 	hashInfo := s.GetNodeHashSizeInfo()
 
-	// Get all nodes for name/role lookup
-	allNodes := s.getAllNodes()
+	// Get all nodes for name/role lookup. A mid-scan failure degrades to an
+	// empty list here (best-effort analytics, not cached).
+	allNodes, _ := s.getAllNodes()
 	nodeByPK := make(map[string]nodeInfo, len(allNodes))
 	for _, n := range allNodes {
 		nodeByPK[n.PublicKey] = n
