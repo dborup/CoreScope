@@ -280,13 +280,13 @@ func (db *DB) Close() error {
 	if db.schemaHealerStop != nil {
 		close(db.schemaHealerStop)
 	}
-	// Checkpoint WAL before closing to release lock cleanly for new processes
-	if _, err := db.conn.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
-		log.Printf("[db] WAL checkpoint error: %v", err)
-	} else {
-		log.Println("[db] WAL checkpoint complete")
-	}
-	return db.conn.Close()
+	// No WAL checkpoint: the connection is mode=ro (#1283), and a read-only
+	// handle cannot checkpoint. With busy_timeout it would first wait up to
+	// 5 s for an in-flight ingestor write transaction, then fail (#583).
+	// Checkpointing is the ingestor's job.
+	err := db.conn.Close()
+	log.Println("[db] closed")
+	return err
 }
 
 // detectSchema checks if the observations table uses v3 schema (observer_idx).

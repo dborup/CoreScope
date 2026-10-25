@@ -16,7 +16,7 @@ import (
 // nothing orders a write against the harness's own read. Plenty of goroutines
 // log at moments the test does not control -- OpenDB's healSchemaFlags, the
 // two background index builds Load() starts, runDistanceIndexBuild,
-// (*DB).Close's WAL checkpoint, the recomputers -- and one left over from an
+// (*DB).Close's log line, the recomputers -- and one left over from an
 // earlier test can write into a later test's capture.
 //
 // The hazard is reproduced here without a store: one goroutine logs reject
