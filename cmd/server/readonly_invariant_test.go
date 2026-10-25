@@ -29,6 +29,9 @@ func TestServerSourceHasNoCachedRWCalls(t *testing.T) {
 		regexp.MustCompile(`\bcachedRW\s*\(`),
 		regexp.MustCompile(`mode=rw`),
 		regexp.MustCompile(`sql\.Open\([^)]*\?[^)]*_journal_mode=WAL[^)]*\)`),
+		// Setting a journal mode takes a write lock; WAL is the
+		// ingestor's to set (#576).
+		regexp.MustCompile(`_pragma=journal_mode`),
 		// The node directory is ingestor-owned; the server opens mode=ro
 		// since #1289 and may never write it.
 		//
@@ -147,7 +150,7 @@ func TestServerDBConnIsReadOnly(t *testing.T) {
 // Kept in *_test.go so it does NOT add any write capability to the
 // production server binary.
 func bootstrapMinimalDB(path string) error {
-	dsn := fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000", path)
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)", path)
 	rw, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return err

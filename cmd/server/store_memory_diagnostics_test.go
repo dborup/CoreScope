@@ -95,7 +95,7 @@ func TestObsRawHexNotRetainedOnLoad(t *testing.T) {
 	const txHex = "deadbeefcafe"
 	const obsHex = "c0ffee0102" // distinct from txHex: proves we DON'T keep it
 
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -119,7 +119,7 @@ func bn534Data(numTx, numNodes, numObs int, seed int64) []bn534Tx {
 // match) plus a nodes table GetBulkHealth reads.
 func bn534WriteDB(tb testing.TB, dbPath string, txs []bn534Tx, numNodes int) {
 	tb.Helper()
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		tb.Fatal(err)
 	}

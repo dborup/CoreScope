@@ -206,9 +206,14 @@ func (db *DB) ingestCols() ingestCols {
 	}
 }
 
-// OpenDB opens a read-only SQLite connection with WAL mode.
+// OpenDB opens a read-only SQLite connection. Each pooled connection waits
+// up to 5 s on a lock instead of failing with SQLITE_BUSY. It does not set
+// the journal mode: that takes a write lock, and the ingestor already keeps
+// the file in WAL (#1283). modernc.org/sqlite applies only _pragma (and
+// _time_format, _txlock) from a DSN; the _busy_timeout/_journal_mode this
+// used to pass were ignored, leaving busy_timeout=0 (#576).
 func OpenDB(path string) (*DB, error) {
-	dsn := fmt.Sprintf("file:%s?mode=ro&_journal_mode=WAL&_busy_timeout=5000", path)
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", path)
 	conn, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -736,6 +741,12 @@ type PacketQuery struct {
 	Channel            string // channel_hash filter (#812). Plain names like "#test"/"public" or "enc_<HEX>" for encrypted
 	Order              string // ASC or DESC
 	ExpandObservations bool   // when true, include observation sub-maps in txToMap output
+
+	// AreaNodes is Area resolved to its member pubkeys (resolveAreaNodes /
+	// areaMemberSet) — the DB layer has no config.Areas. nil applies no area
+	// filter, exactly like the in-memory path's nil set for an unknown or
+	// empty area (#569).
+	AreaNodes map[string]bool
 }
 
 // PacketResult wraps paginated packet list.
@@ -1069,7 +1080,31 @@ func (db *DB) buildTransmissionWhere(q PacketQuery) ([]string, []interface{}) {
 		}
 		args = append(args, q.Region)
 	}
+	if len(q.AreaNodes) > 0 {
+		// #569: same originator contract as filterPacketsPrepared — the
+		// decoded ADVERT pubkey, which the ingestor copies into the indexed
+		// from_pubkey column (#1143). One bound JSON array regardless of the
+		// member count; the plan probes idx_transmissions_from_pubkey once
+		// per member instead of parsing decoded_json per row.
+		where = append(where, "t.from_pubkey IN (SELECT value FROM json_each(?))")
+		args = append(args, areaMembersJSON(q.AreaNodes))
+	}
 	return where, args
+}
+
+// areaMembersJSON encodes an area member set as a sorted JSON array for
+// json_each. "" is dropped: the in-memory path never matches an empty
+// originator, and "" is the from_pubkey backfill's no-pubkey sentinel.
+func areaMembersJSON(members map[string]bool) string {
+	keys := make([]string, 0, len(members))
+	for pk, ok := range members {
+		if ok && pk != "" {
+			keys = append(keys, pk)
+		}
+	}
+	sort.Strings(keys)
+	b, _ := json.Marshal(keys)
+	return string(b)
 }
 
 func (db *DB) resolveNodePubkey(nodeIDOrName string) string {

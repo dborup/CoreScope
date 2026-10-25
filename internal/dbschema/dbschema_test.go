@@ -13,11 +13,16 @@ import (
 // minimalDB bootstraps a SQLite DB with just enough tables for the
 // ensure_* helpers to run against, but WITHOUT any of the optional
 // columns that dbschema.Apply is responsible for ensuring.
+//
+// The file is in the rollback journal. It always was: the DSN used to ask
+// for _journal_mode=WAL, which modernc.org/sqlite ignores (#576).
+// TestAssertReady_BusyProbeIsTransient depends on it, because only there
+// does a writer's EXCLUSIVE lock block readers.
 func minimalDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "schema.db")
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?_journal_mode=WAL")
+	db, err := sql.Open("sqlite", "file:"+dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

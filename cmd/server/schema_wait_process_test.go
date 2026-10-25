@@ -35,6 +35,14 @@ func TestSchemaWaitServerProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defaultSchemaWaitPolicy = schemaWaitPolicy{Initial: 20 * time.Millisecond, Max: 200 * time.Millisecond, Factor: 1.5, Deadline: deadline, LogEvery: 500 * time.Millisecond}
+	// Optional shutdown bounds for the #577 process tests.
+	for env, v := range map[string]*time.Duration{"CORESCOPE_SHUTDOWN_DRAIN": &shutdownDrainTimeout, "CORESCOPE_SHUTDOWN_TIMEOUT": &shutdownTimeout} {
+		if s := os.Getenv(env); s != "" {
+			if *v, err = time.ParseDuration(s); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	os.Args = []string{"corescope-server",
 		"-config-dir", os.Getenv("CORESCOPE_SCHEMA_WAIT_CFG"),
 		"-db", os.Getenv("CORESCOPE_SCHEMA_WAIT_DB"),
@@ -78,7 +86,8 @@ type serverProc struct {
 	err  error
 }
 
-func startServerProc(t *testing.T, dbPath string, deadline time.Duration) *serverProc {
+// env adds NAME=value entries to the child's environment.
+func startServerProc(t *testing.T, dbPath string, deadline time.Duration, env ...string) *serverProc {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -97,6 +106,7 @@ func startServerProc(t *testing.T, dbPath string, deadline time.Duration) *serve
 		"CORESCOPE_SCHEMA_WAIT_DB="+dbPath,
 		"CORESCOPE_SCHEMA_WAIT_PUBLIC="+pub,
 		fmt.Sprintf("CORESCOPE_SCHEMA_WAIT_PORT=%d", port))
+	p.cmd.Env = append(p.cmd.Env, env...)
 	p.cmd.Stdout, p.cmd.Stderr = p.out, p.out
 	if err := p.cmd.Start(); err != nil {
 		t.Fatal(err)

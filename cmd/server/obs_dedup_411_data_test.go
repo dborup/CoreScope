@@ -122,7 +122,7 @@ func obs411Data(n, adversarial, oldUntil int, seed int64) []obs411Tx {
 // obs411Schema is the acct113 schema (observer_id column, resolved_path).
 func obs411Create(tb testing.TB, dbPath string) *sql.DB {
 	tb.Helper()
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		tb.Fatal(err)
 	}

@@ -44,7 +44,7 @@ func TestStartupLoadIndexesResolvedPathAfterSchemaGate_184(t *testing.T) {
 				}
 			}
 
-			conn, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_journal_mode=WAL&_busy_timeout=5000")
+			conn, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
 			if err != nil {
 				t.Fatal(err)
 			}

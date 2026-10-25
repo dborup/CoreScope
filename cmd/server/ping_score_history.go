@@ -310,8 +310,8 @@ func DefaultPingScoreHistoryPath(mainDBPath string) string {
 //
 // Corruption handling: if the file already exists, it is FIRST inspected
 // through a physically read-only connection (SQLite URI mode=ro, no
-// _journal_mode=WAL parameter -- so opening for inspection cannot itself
-// change the journal mode or create/modify -wal/-shm side files). If
+// journal-mode pragma -- so opening for inspection cannot itself change the
+// journal mode or create/modify -wal/-shm side files). If
 // PRAGMA integrity_check fails on that connection, Open returns a
 // *PingScoreHistoryCorruptError and touches NOTHING on disk: no rename, no
 // delete, no replacement file. Recovering from this is a separate,
@@ -442,15 +442,21 @@ func openExistingPingScoreHistoryStore(path string) (*PingScoreHistoryStore, err
 
 // openPingScoreHistoryConn opens a *sql.DB against path. writable=false
 // uses SQLite's URI mode=ro (physically read-only at the VFS level, no
-// _journal_mode parameter -- cannot change the journal mode or create/
-// touch -wal/-shm side files). writable=true is the ONLY DSN shape that
-// enables WAL and permits writes.
+// journal-mode pragma -- cannot change the journal mode). writable=true is
+// the ONLY DSN shape that permits writes. Both wait up to 5 s on a lock.
+//
+// The file stays in the rollback journal. The writable DSN used to ask for
+// _journal_mode=WAL, which modernc.org/sqlite ignores (it applies only
+// _pragma, _time_format and _txlock), so the store never ran in WAL. It
+// is not switched to WAL now: a single connection gains nothing from it,
+// and on a WAL file the mode=ro inspection open would create a -wal side
+// file (#576).
 func openPingScoreHistoryConn(path string, writable bool) (*sql.DB, error) {
 	var dsn string
 	if writable {
-		dsn = fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=5000", path)
+		dsn = fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", path)
 	} else {
-		dsn = fmt.Sprintf("file:%s?mode=ro&_busy_timeout=5000", path)
+		dsn = fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", path)
 	}
 	conn, err := sql.Open("sqlite", dsn)
 	if err != nil {

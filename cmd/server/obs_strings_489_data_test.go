@@ -173,7 +173,7 @@ func obs489MaxObsID(txs []obs489Tx) int {
 // fork instances run) and the observer pool.
 func obs489Create(tb testing.TB, dbPath string) *sql.DB {
 	tb.Helper()
-	conn, err := sql.Open("sqlite", dbPath+"?_journal_mode=WAL")
+	conn, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		tb.Fatal(err)
 	}

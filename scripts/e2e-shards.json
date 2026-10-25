@@ -42,6 +42,14 @@
       "measurementNote": "New suite; #560 Analytics -> Nodes Role Breakdown computed from the filtered rows, not the server's global /api/nodes counts -- an MRY region filter's role-breakdown sum must equal the Network Status total, and must differ from the unfiltered repeaters count; also an unfiltered-vs-server counts-contract check, and (round-2 review) an area-only and combined region+area check against a private, disposable server instance with one test-only area configured via -config-dir, since the shared BASE_URL server/fixture has none. About 15s locally; no CI duration measured yet; assigned to shard 2, the lowest measured total."
     },
     {
+      "file": "test-issue-562-battery-badge-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; intercepted battery responses, four statuses plus hostile voltage, light/dark, desktop/mobile, icon bounds. No CI duration measured yet."
+    },
+    {
       "file": "test-page-lifecycle-2248-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
