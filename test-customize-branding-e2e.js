@@ -57,7 +57,8 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     }, inp);
     await page.waitForTimeout(400);
     const title = await page.title();
-    assert(title === 'MyMeshTest', 'document.title should update live, got: ' + title);
+    // #563: the tab title is "<View> · <instance>"; the instance name is the last part.
+    assert(title === 'MyMeshTest' || title.endsWith(' · MyMeshTest'), 'document.title should update live, got: ' + title);
   });
 
   await step('siteName persists to cs-theme-overrides.branding.siteName', async () => {

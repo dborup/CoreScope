@@ -1506,6 +1506,8 @@ function navigate() {
     pages[currentPage].destroy();
   }
   currentPage = basePage;
+  // #563: one title owner; also clears any previous page's entity label.
+  if (window.PageTitle) window.PageTitle.setRoute(basePage);
   // #531: a link's ?region= is the selection before the new page fetches
   // anything. After destroy(), so the old page's listeners are gone.
   if (window.RegionFilter) RegionFilter.syncFromUrl(location.hash);

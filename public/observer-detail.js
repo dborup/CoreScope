@@ -47,6 +47,7 @@ window.ObserverDetailNaiveBanner = {
   let charts = [];
   let currentDays = 7;
   let currentId = null;
+  let titleVisit = -1; // PageTitle token of the current visit (#563)
 
   function destroyCharts() {
     charts.forEach(c => { try { c.destroy(); } catch {} });
@@ -71,6 +72,7 @@ window.ObserverDetailNaiveBanner = {
 
   function init(app, routeParam) {
     currentId = routeParam;
+    titleVisit = window.PageTitle ? window.PageTitle.visit() : -1;
     if (!currentId) {
       app.innerHTML = '<div class="text-center text-muted" style="padding:40px">No observer ID specified.</div>';
       return;
@@ -372,6 +374,7 @@ window.ObserverDetailNaiveBanner = {
 
     const title = document.getElementById('obsTitle');
     if (title) title.textContent = obs.name || obs.id.substring(0, 16) + '…';
+    if (window.PageTitle) window.PageTitle.setEntity(obs.name || obs.id.substring(0, 16), titleVisit);
 
     // SECURITY (OBS-1, post-#1537 sweep): every MQTT-controlled string from
     // the observer's `status` topic (extractObserverMeta) must be escaped at

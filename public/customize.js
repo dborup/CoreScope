@@ -1106,7 +1106,7 @@
           _v1SetBrandAlt(inp.value);
           var brandEl = document.querySelector('.brand-text');
           if (brandEl) brandEl.textContent = inp.value;
-          document.title = inp.value;
+          window.setInstanceTitle(inp.value);
         }
         if (inp.dataset.key === 'branding.logoUrl') {
           // Swap the navbar logo: empty → restore inline default; URL → <img>.
@@ -1555,7 +1555,7 @@
             _v1SetBrandAlt(userTheme.branding.siteName);
             const brandEl = document.querySelector('.brand-text');
             if (brandEl) brandEl.textContent = userTheme.branding.siteName;
-            document.title = userTheme.branding.siteName;
+            window.setInstanceTitle(userTheme.branding.siteName);
           }
           if (userTheme.branding.logoUrl) {
             _v1SetBrandLogoUrl(userTheme.branding.logoUrl);

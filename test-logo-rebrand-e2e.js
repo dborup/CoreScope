@@ -242,7 +242,8 @@ async function main() {
     if (!overrideState.src || !/override=1/.test(overrideState.src)) {
       fail(`customizer logoUrl override did not propagate to navbar img (src=${overrideState.src} hasV2=${overrideState.hasV2} ovStored=${overrideState.ovStored})`);
     }
-    if (overrideState.title !== 'OverrideSite') {
+    // #563: the tab title is "<View> · <instance>"; the instance name is the last part.
+    if (overrideState.title !== 'OverrideSite' && !overrideState.title.endsWith(' · OverrideSite')) {
       fail(`customizer siteName override did not update document.title (got: ${overrideState.title})`);
     }
     console.log('  ✅ customizer branding.siteName + branding.logoUrl overrides still apply post-rebrand');
