@@ -13,7 +13,7 @@ import (
 // Keeping it checked out makes the next query wait in database/sql rather
 // than relying on a sleep or on a test double which never executes the query.
 func TestStoreSQLDoesNotHoldPacketLock412(t *testing.T) {
-	for _, name := range []string{"hash", "transmission", "observation", "observations", "packets", "expanded", "multi-node", "grouped", "node-filter", "region-cold", "region-expired", "area-cold", "area-expired", "nodes-cold", "nodes-expired", "health", "bulk-health", "subpaths", "channels"} {
+	for _, name := range []string{"hash", "transmission", "observation", "observations", "packets", "expanded", "multi-node", "grouped", "node-filter", "region-cold", "region-expired", "area-cold", "area-expired", "nodes-cold", "nodes-expired", "health", "bulk-health", "subpaths", "channels", "grouped-region", "grouped-area", "channel-list-region", "encrypted-channels-region", "analytics-channels-region", "analytics-rf-region", "subpaths-windowed-region"} {
 		t.Run(name, func(t *testing.T) {
 			srv, _ := setupTestServer(t)
 			txID := seedConfirmTx(t, srv, "sql_unlocked_412", `["aa","bb"]`, `["aabbccdd11223344","eeff00112233aabb"]`)
@@ -71,6 +71,23 @@ func TestStoreSQLDoesNotHoldPacketLock412(t *testing.T) {
 				request = func() { store.computeAnalyticsSubpaths("SJC", 2, 8, 10) }
 			case "channels":
 				request = func() { store.GetChannelMessages("public", 10, 0, "SJC") }
+			// #597 (upstream 2247): every other region/area caller resolves
+			// its set before s.mu, as QueryPackets does above.
+			case "grouped-region":
+				request = func() { store.QueryGroupedPackets(PacketQuery{Region: "SJC", Limit: 1}) }
+			case "grouped-area":
+				store.config = &Config{Areas: map[string]AreaEntry{"TEST": {Label: "Test", Polygon: [][2]float64{{0, 0}, {1, 0}, {1, 1}, {0, 1}}}}}
+				request = func() { store.QueryGroupedPackets(PacketQuery{Area: "TEST", Limit: 1}) }
+			case "channel-list-region":
+				request = func() { store.GetChannels("SJC") }
+			case "encrypted-channels-region":
+				request = func() { store.GetEncryptedChannels("SJC") }
+			case "analytics-channels-region":
+				request = func() { store.computeAnalyticsChannels("SJC", "", TimeWindow{}) }
+			case "analytics-rf-region":
+				request = func() { store.computeAnalyticsRF("SJC", "", TimeWindow{}) }
+			case "subpaths-windowed-region":
+				request = func() { store.computeAnalyticsSubpathsWindowed("SJC", 2, 8, 10, TimeWindow{}) }
 			}
 			connection, err := srv.db.conn.Conn(context.Background())
 			if err != nil {
