@@ -649,8 +649,14 @@ func TestAdvertIntervalAnalytics_OutsideStoreLock(t *testing.T) {
 }
 
 // Perf proof (AGENTS.md rule 0): a filtered request aggregates the cached
-// rows of a 5000-node mesh well inside a request budget.
+// rows of a 5000-node mesh, most of them outliers, well inside a request
+// budget: 25 ms (about 4 ms measured), 250 ms under -race (about 56 ms
+// measured with -race -cover, as CI runs it).
 func TestAdvertIntervalAnalytics_AggregatePerf(t *testing.T) {
+	budget := 25 * time.Millisecond
+	if raceBuild {
+		budget = 250 * time.Millisecond
+	}
 	rows := aaPerfRows(5000)
 	keep := advertIntervalFilter("R03", nil)
 	start := time.Now()
@@ -661,8 +667,8 @@ func TestAdvertIntervalAnalytics_AggregatePerf(t *testing.T) {
 	}
 	per := time.Since(start) / (2 * n)
 	t.Logf("aggregate 5000 nodes: %v per call", per)
-	if per > 50*time.Millisecond {
-		t.Fatalf("aggregate 5000 nodes took %v per call, budget 50ms", per)
+	if per > budget {
+		t.Fatalf("aggregate 5000 nodes took %v per call, budget %v", per, budget)
 	}
 }
 

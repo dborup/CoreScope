@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/heap"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -333,6 +334,7 @@ func countFloodReArm(acc *AdvertIntervalFloodReArm, r *advertIntervalNodeRow) {
 func aggregateAdvertIntervals(rows []advertIntervalNodeRow, keep func(*advertIntervalNodeRow) bool) AdvertIntervalAnalyticsResponse {
 	resp := emptyAdvertIntervalAnalytics()
 	var flood, zeroHop advertIntervalClassAcc
+	var outliers advertOutlierHeap
 	byRole := map[string]*advertIntervalGroupAcc{}
 	byRegion := map[string]*advertIntervalGroupAcc{}
 	group := func(m map[string]*advertIntervalGroupAcc, k string) *advertIntervalGroupAcc {
@@ -358,27 +360,56 @@ func aggregateAdvertIntervals(rows []advertIntervalNodeRow, keep func(*advertInt
 		for _, reg := range r.regions {
 			group(byRegion, reg).add(r)
 		}
-		resp.Outliers = append(resp.Outliers, advertIntervalOutliers(r)...)
+		for _, o := range advertIntervalOutliers(r) {
+			resp.OutliersTotal++
+			outliers.push(o, advertIntervalOutlierLimit)
+		}
 		countFloodReArm(&resp.FloodReArm, r)
 	}
 	resp.Flood, resp.ZeroHop = flood.summary(), zeroHop.summary()
 	resp.ByRole, _ = advertIntervalGroups(byRole, 0)
 	resp.ByRegion, resp.RegionsTruncated = advertIntervalGroups(byRegion, advertIntervalRegionLimit)
-	sort.Slice(resp.Outliers, func(i, j int) bool {
-		oi, oj := resp.Outliers[i], resp.Outliers[j]
-		if oi.MedianGapS != oj.MedianGapS {
-			return oi.MedianGapS < oj.MedianGapS
-		}
-		if oi.PublicKey != oj.PublicKey {
-			return oi.PublicKey < oj.PublicKey
-		}
-		return oi.Class < oj.Class
-	})
-	resp.OutliersTotal = len(resp.Outliers)
-	if len(resp.Outliers) > advertIntervalOutlierLimit {
-		resp.Outliers = resp.Outliers[:advertIntervalOutlierLimit]
-	}
+	resp.Outliers = append(resp.Outliers, outliers...)
+	sort.Slice(resp.Outliers, func(i, j int) bool { return advertOutlierBefore(resp.Outliers[i], resp.Outliers[j]) })
 	return resp
+}
+
+// advertOutlierBefore orders outliers most frequent first (median gap
+// ascending), then by key and class.
+func advertOutlierBefore(a, b AdvertIntervalOutlier) bool {
+	if a.MedianGapS != b.MedianGapS {
+		return a.MedianGapS < b.MedianGapS
+	}
+	if a.PublicKey != b.PublicKey {
+		return a.PublicKey < b.PublicKey
+	}
+	return a.Class < b.Class
+}
+
+// advertOutlierHeap keeps the first limit outliers in advertOutlierBefore
+// order: a max-heap on that order, so a mesh full of outliers costs
+// O(n log limit) and limit entries, not a sort of all of them.
+type advertOutlierHeap []AdvertIntervalOutlier
+
+func (h advertOutlierHeap) Len() int            { return len(h) }
+func (h advertOutlierHeap) Less(i, j int) bool  { return advertOutlierBefore(h[j], h[i]) }
+func (h advertOutlierHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
+func (h *advertOutlierHeap) Push(x interface{}) { *h = append(*h, x.(AdvertIntervalOutlier)) }
+func (h *advertOutlierHeap) Pop() interface{} {
+	old := *h
+	o := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return o
+}
+
+func (h *advertOutlierHeap) push(o AdvertIntervalOutlier, limit int) {
+	switch {
+	case h.Len() < limit:
+		heap.Push(h, o)
+	case advertOutlierBefore(o, (*h)[0]):
+		(*h)[0] = o
+		heap.Fix(h, 0)
+	}
 }
 
 // advertIntervalFilter keeps rows heard in one of the comma-separated
