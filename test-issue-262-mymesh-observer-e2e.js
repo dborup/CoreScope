@@ -30,18 +30,22 @@ const HOSTILE = '"><img src=x onerror=alert(1)>';
 
 const now = Date.now();
 const iso = msAgo => new Date(now - msAgo).toISOString();
+// #304: the rolling window carries a known total (276 = 0+1+...+23) and a
+// complete previous window, so the node metric the assertions read is the
+// node's own 24h transmission count, never the observer's reported traffic.
 const activity = () => ({
-  windowStart: iso(24 * 3600000), windowEnd: iso(0), coverageStart: iso(24 * 3600000), complete: true,
+  windowStart: iso(24 * 3600000), windowEnd: iso(0), coverageStart: iso(48 * 3600000), complete: true,
   buckets: Array.from({ length: 24 }, (_, i) => ({ start: iso((24 - i) * 3600000), end: iso((23 - i) * 3600000), count: i })),
+  previous: { windowStart: iso(48 * 3600000), windowEnd: iso(24 * 3600000), count: 230, complete: true },
 });
 
 // Node health, one entry per card. Card 3 is "Dokk1 Lab": NOT an observer,
 // even though the observer list holds a device called "Dokk1 Lab Meshview".
 const health = {
-  [KEY_OBS]: { node: { name: 'Hub North', role: 'repeater' }, stats: { lastHeard: iso(60000), packetsToday: 77, avgSnr: 6, avgHops: 1.5 } },
-  [KEY_PLAIN]: { node: { name: 'Plain Relay', role: 'repeater' }, stats: { lastHeard: iso(60000), packetsToday: 12, avgSnr: 2, avgHops: 2 } },
-  [KEY_ROOM]: { node: { name: 'Chat Room', role: 'room' }, stats: { lastHeard: iso(60000), packetsToday: 4, avgSnr: 1, avgHops: 3 } },
-  [KEY_DOKK]: { node: { name: 'Dokk1 Lab', role: 'repeater' }, stats: { lastHeard: iso(60000), packetsToday: 9, avgSnr: 0, avgHops: 2 } },
+  [KEY_OBS]: { node: { name: 'Hub North', role: 'repeater' }, stats: { lastHeard: iso(60000), lastAdvert: iso(60000), packetsToday: 77, avgSnr: 6, avgHops: 1.5 } },
+  [KEY_PLAIN]: { node: { name: 'Plain Relay', role: 'repeater' }, stats: { lastHeard: iso(60000), lastAdvert: iso(60000), packetsToday: 12, avgSnr: 2, avgHops: 2 } },
+  [KEY_ROOM]: { node: { name: 'Chat Room', role: 'room' }, stats: { lastHeard: iso(60000), lastAdvert: iso(60000), packetsToday: 4, avgSnr: 1, avgHops: 3 } },
+  [KEY_DOKK]: { node: { name: 'Dokk1 Lab', role: 'repeater' }, stats: { lastHeard: iso(60000), lastAdvert: iso(60000), packetsToday: 9, avgSnr: 0, avgHops: 2 } },
 };
 
 const observersPayload = {
@@ -75,7 +79,7 @@ async function render(page, { observersFail = false, holdObservers = false } = {
   // observers.js is loaded for real so the card's status uses the observers
   // page's own classifier (window.observerHealthStatus, #1552/#1563) rather
   // than a threshold invented for the home page.
-  for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js', 'observers.js']) {
+  for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js', 'my-mesh-activity.js', 'observers.js']) {
     await page.addScriptTag({ path: path.join(ROOT, file) });
   }
   await page.evaluate((data) => {
@@ -192,8 +196,8 @@ async function render(page, { observersFail = false, holdObservers = false } = {
       assert.deepEqual(await obsCard.locator('.mnc-section-lbl').evaluateAll(els => els.map(e => e.textContent)),
         ['Observer reporting', 'Node activity']);
       assert.deepEqual(await obsCard.locator('.mnc-section-lbl').allInnerTexts(), ['OBSERVER REPORTING', 'NODE ACTIVITY']);
-      assert.equal(await obsCard.locator('.mnc-metrics .mnc-lbl').first().innerText(), 'Packets today');
-      assert.equal(await obsCard.locator('.mnc-metrics .mnc-val').first().innerText(), '77');
+      assert.equal(await obsCard.locator('.mnc-metrics .mnc-lbl').first().innerText(), 'Transmissions · 24 h');
+      assert.equal(await obsCard.locator('.mnc-metrics .mnc-val').first().innerText(), '276 +20%');
       assert.match(await obsCard.locator('.mnc-spark').innerText(), /Node-associated transmissions.*last 24h/);
       assert.equal(await plainCard.locator('.mnc-section-lbl').count(), 0, 'a non-observer card gains no section labels');
       // The observer metric must not sit inside the node metric grid.
@@ -264,7 +268,7 @@ async function render(page, { observersFail = false, holdObservers = false } = {
       assert.equal(await page.locator('[data-action="observer"]').count(), 0);
       // Every card still renders, with its node data intact.
       assert.equal(await page.locator('.my-node-card').count(), KEYS.length);
-      assert.equal(await cards.nth(0).locator('.mnc-metrics .mnc-val').first().innerText(), '77');
+      assert.equal(await cards.nth(0).locator('.mnc-metrics .mnc-val').first().innerText(), '276 +20%');
       assert.equal(await page.locator('.my-node-card.is-observer').count(), 0);
 
       assert.deepEqual(errors, []);

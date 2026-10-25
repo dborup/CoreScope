@@ -126,7 +126,7 @@ async function newHarness(browser) {
   // assertion depends on, among others `box-sizing: border-box`.
   await page.addStyleTag({ path: path.join(PUB, 'style.css') });
   await page.addStyleTag({ path: path.join(PUB, 'home.css') });
-  for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js']) await page.addScriptTag({ path: path.join(PUB, file) });
+  for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js', 'my-mesh-activity.js']) await page.addScriptTag({ path: path.join(PUB, file) });
   await page.evaluate(() => {
     // No nav shell / other pages exist in this fixture, so the real router
     // (wired to hashchange at app.js load time) would null-deref walking
@@ -487,7 +487,7 @@ function cardFor(page, pubkey) {
       return route.fulfill({ contentType: 'text/html', body: '<html><body><main id="fixture"></main></body></html>' });
     });
     await page.goto(ORIGIN + '/');
-    for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js']) await page.addScriptTag({ path: path.join(PUB, file) });
+    for (const file of ['app.js', 'roles.js', 'heard-by.js', 'my-mesh-observers.js', 'my-mesh-activity.js']) await page.addScriptTag({ path: path.join(PUB, file) });
     await page.evaluate(() => {
       window.removeEventListener('hashchange', navigate);
       window.fixturePages = {};
