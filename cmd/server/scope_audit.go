@@ -62,59 +62,98 @@ type ScopeAuditResponse struct {
 	AmbiguousHops int               `json:"ambiguousHops"`
 	Rows          []ScopeAuditRow   `json:"rows"`
 }
-type scopeAuditCacheEntry struct {
-	response *ScopeAuditResponse
+
+// scopeAuditCacheDefaultMax bounds a cache whose max is unset: the declared
+// audit has exactly three keys (its windows).
+const scopeAuditCacheDefaultMax = 3
+
+type scopeAuditCacheEntry[T any] struct {
+	response *T
 	at       time.Time
 }
-type scopeAuditCache struct {
+
+// scopeAuditCache is a TTL cache with singleflight and at most max entries.
+type scopeAuditCache[T any] struct {
 	mu      sync.Mutex
-	entries map[string]scopeAuditCacheEntry
+	entries map[string]scopeAuditCacheEntry[T]
 	sf      singleflight.Group
+	max     int
 	// recheckHook, if non-nil, runs once after the outer cache miss and
 	// before entering singleflight. Tests use it to land a concurrent fill
 	// in that gap and prove the recheck inside Do reuses it instead of
 	// rebuilding; nil (zero overhead) in production.
 	recheckHook func()
+	// buildHook, if non-nil, runs before every build. Tests count builds.
+	buildHook func()
 }
 
-func (c *scopeAuditCache) get(window string) *ScopeAuditResponse {
+func (c *scopeAuditCache[T]) get(key string) *T {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	e, ok := c.entries[window]
+	e, ok := c.entries[key]
 	if ok && time.Since(e.at) < scopeAuditTTL {
 		return e.response
 	}
 	return nil
 }
 
+// storeLocked inserts key, first evicting expired entries and then the oldest
+// one while the cache is full, so keys from request parameters stay bounded.
+func (c *scopeAuditCache[T]) storeLocked(key string, response *T, now time.Time) {
+	limit := c.max
+	if limit <= 0 {
+		limit = scopeAuditCacheDefaultMax
+	}
+	if c.entries == nil {
+		c.entries = make(map[string]scopeAuditCacheEntry[T], limit)
+	}
+	if _, exists := c.entries[key]; !exists && len(c.entries) >= limit {
+		for k, e := range c.entries {
+			if now.Sub(e.at) >= scopeAuditTTL {
+				delete(c.entries, k)
+			}
+		}
+		for len(c.entries) >= limit {
+			oldest := ""
+			for k, e := range c.entries {
+				if oldest == "" || e.at.Before(c.entries[oldest].at) {
+					oldest = k
+				}
+			}
+			delete(c.entries, oldest)
+		}
+	}
+	c.entries[key] = scopeAuditCacheEntry[T]{response: response, at: now}
+}
+
 // load rechecks after entering singleflight so a concurrent cache fill is shared.
-func (c *scopeAuditCache) load(window string, build func() (*ScopeAuditResponse, error)) (*ScopeAuditResponse, error) {
-	if cached := c.get(window); cached != nil {
+func (c *scopeAuditCache[T]) load(key string, build func() (*T, error)) (*T, error) {
+	if cached := c.get(key); cached != nil {
 		return cached, nil
 	}
 	if c.recheckHook != nil {
 		c.recheckHook()
 	}
-	value, err, _ := c.sf.Do(window, func() (interface{}, error) {
-		if cached := c.get(window); cached != nil {
+	value, err, _ := c.sf.Do(key, func() (interface{}, error) {
+		if cached := c.get(key); cached != nil {
 			return cached, nil
+		}
+		if c.buildHook != nil {
+			c.buildHook()
 		}
 		response, err := build()
 		if err != nil {
 			return nil, err
 		}
 		c.mu.Lock()
-		if c.entries == nil {
-			c.entries = make(map[string]scopeAuditCacheEntry, 3)
-		}
-		c.entries[window] = scopeAuditCacheEntry{response: response, at: time.Now()}
+		c.storeLocked(key, response, time.Now())
 		c.mu.Unlock()
 		return response, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return value.(*ScopeAuditResponse), nil
+	return value.(*T), nil
 }
 
 func scopeAuditDuration(window string) time.Duration {
@@ -158,95 +197,128 @@ func (s *Server) buildScopeAudit(window string, now time.Time) (*ScopeAuditRespo
 	return s.buildScopeAuditContext(ctx, window, now)
 }
 
-// One node snapshot and one streaming observation query, never a scan per node.
-// Complexity is O(nodes + observed path hops + distinct ambiguous-prefix
-// candidates), with token resolution memoized. Dedup sets hold one transmission
-// at a time because SQL orders by t.id. The response/cache has at most 3 windows.
-func (s *Server) buildScopeAuditContext(ctx context.Context, window string, now time.Time) (*ScopeAuditResponse, error) {
-	if !s.db.hasConfiguredScope() || !s.db.hasScopeName() {
-		return nil, fmt.Errorf("scope audit requires configured_scope and scope_name; run ingestor migrations")
+// scopeAuditNode is one row of the node snapshot both audit views read.
+// scope is NULL when the node was never asked for a declaration.
+type scopeAuditNode struct {
+	info  nodeInfo
+	scope sql.NullString
+	at    string
+}
+
+// scopeAuditNodes reads the node snapshot with one bulk query. Undeclared and
+// hidden nodes are included: they belong to the hop-collision universe, and
+// visibility is applied only when a finished result is served (cache hits
+// included). Without the configured_scope column every node is undeclared.
+func (s *Server) scopeAuditNodes(ctx context.Context) ([]scopeAuditNode, error) {
+	cols := "configured_scope,COALESCE(configured_scope_at,'')"
+	if !s.db.hasConfiguredScope() {
+		cols = "NULL,''"
 	}
-	resp := &ScopeAuditResponse{Window: window, GeneratedAt: now.UTC().Format(time.RFC3339), Since: now.Add(-scopeAuditDuration(window)).UTC().Format(time.RFC3339), Rows: []ScopeAuditRow{}}
-	rows, err := s.db.conn.QueryContext(ctx, `SELECT public_key,COALESCE(name,''),COALESCE(role,''),configured_scope,COALESCE(configured_scope_at,'') FROM nodes ORDER BY public_key`)
+	rows, err := s.db.conn.QueryContext(ctx, `SELECT public_key,COALESCE(name,''),COALESCE(role,''),`+cols+` FROM nodes ORDER BY public_key`)
 	if err != nil {
 		return nil, err
 	}
-	nodes := []nodeInfo{}
-	targets := make(map[string]*scopeAuditAccumulator)
+	defer rows.Close()
+	nodes := []scopeAuditNode{}
 	for rows.Next() {
-		var pk, name, role, at string
-		var scope sql.NullString
-		if err = rows.Scan(&pk, &name, &role, &scope, &at); err != nil {
-			rows.Close()
+		var n scopeAuditNode
+		if err := rows.Scan(&n.info.PublicKey, &n.info.Name, &n.info.Role, &n.scope, &n.at); err != nil {
 			return nil, err
 		}
-		pk = strings.ToLower(pk)
-		// Include undeclared and hidden nodes in the collision universe. Visibility is
-		// applied only when serving the finished result, including cache hits.
-		nodes = append(nodes, nodeInfo{PublicKey: pk, Name: name, Role: role})
-		if !scope.Valid {
-			continue
-		}
-		declared, wild := declaredAuditScopes(scope.String)
-		row := ScopeAuditRow{PublicKey: pk, Name: name, Role: role, ConfiguredScope: scope.String, ConfiguredScopeAt: at, DeclaredScopes: declared, AllowsUnscoped: wild, ObservedScopes: []ScopeAuditCount{}, NotObserved: []string{}, UndeclaredObserved: []string{}, StaleDeclaration: true}
-		if stamp, e := parseAnyRFC3339(at); e == nil && !stamp.After(now) {
-			age := int64(now.Sub(stamp).Seconds())
-			row.DeclarationAgeSeconds = &age
-			row.StaleDeclaration = now.Sub(stamp) > scopeAuditDeclarationMaxAge
-		}
-		targets[pk] = &scopeAuditAccumulator{row: row, counts: make(map[string]int)}
+		n.info.PublicKey = strings.ToLower(n.info.PublicKey)
+		nodes = append(nodes, n)
 	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return nil, err
+	return nodes, rows.Err()
+}
+
+// scopeAuditPrefixMap builds the collision-safe hop resolver input and
+// respects listener-only identities just as the normal relay attribution does.
+func (s *Server) scopeAuditPrefixMap(nodes []scopeAuditNode) (*prefixMap, error) {
+	infos := make([]nodeInfo, len(nodes))
+	for i, n := range nodes {
+		infos[i] = n.info
 	}
-	// With no confirmed declaration there is nothing to compare.
-	if len(targets) == 0 {
-		return resp, nil
-	}
-	pm := buildPrefixMap(nodes)
-	resolve := newRelayTokenResolver(pm)
-	// Respect listener-only identities just as the normal relay attribution does.
+	pm := buildPrefixMap(infos)
 	listeners, err := s.db.GetNonRelayObserverPubkeys()
 	if err != nil {
 		return nil, err
 	}
 	pm.markNonRelay(listeners)
+	return pm, nil
+}
+
+// scopeDeclarationAge returns a declaration's age and whether it is stale:
+// older than scopeAuditDeclarationMaxAge, unparseable or future-dated.
+func scopeDeclarationAge(at string, now time.Time) (*int64, bool) {
+	stamp, err := parseAnyRFC3339(at)
+	if err != nil || stamp.After(now) {
+		return nil, true
+	}
+	age := int64(now.Sub(stamp).Seconds())
+	return &age, now.Sub(stamp) > scopeAuditDeclarationMaxAge
+}
+
+// scopeEvidenceSink receives one window scan in transmission order: tx at
+// every new transmission, obs once per flood observation and hop once per raw
+// path hop. kind is "*" for unscoped flood, "" for scope evidence that cannot
+// be trusted (unknown, or the observation's own transport code differs from
+// the canonical frame's) and otherwise the normalised scope name. key is the
+// confirmed relay key, or "" when token does not resolve to exactly one relay.
+// legacy marks an observation stored without its own frame header.
+type scopeEvidenceSink struct {
+	tx  func()
+	obs func(kind string, legacy bool)
+	hop func(key, token, kind string, legacy bool)
+}
+
+// scanScopeEvidence is the one streaming observation query both audit views
+// share, never a scan per node. observers, when non-nil, restricts the scan to
+// those observer keys (observers.rowid on v3, observers.id on v2). The query
+// runs on the read-only connection and never touches PacketStore.mu.
+func (s *Server) scanScopeEvidence(ctx context.Context, since, until time.Time, observers []interface{}, pm *prefixMap, sink scopeEvidenceSink) error {
+	resolve := newRelayTokenResolver(pm)
 	rawCol := "''"
 	if s.db.hasObsRawHex() {
 		rawCol = "COALESCE(o.raw_hex,'')"
+	}
+	var sinceArg, untilArg interface{} = since.Unix(), until.Unix()
+	if !s.db.isV3() {
+		sinceArg, untilArg = since.UTC().Format(time.RFC3339), until.UTC().Format(time.RFC3339)
+	}
+	args := []interface{}{sinceArg, untilArg}
+	observerClause := ""
+	if observers != nil {
+		// Unary + keeps the plan on the timestamp window: the observer index
+		// would read every observation those observers ever made.
+		col := "+o.observer_idx"
+		if !s.db.isV3() {
+			col = "o.observer_id"
+		}
+		observerClause = " AND " + col + " IN (" + strings.TrimSuffix(strings.Repeat("?,", len(observers)), ",") + ")"
+		args = append(args, observers...)
 	}
 	// Observation timestamps, rather than first_seen, include retransmissions
 	// heard inside the selected window even when their payload was first seen earlier.
 	// substr retains only header/transport bytes, avoiding loading full raw frames.
 	query := `SELECT t.id,t.route_type,t.scope_name,substr(t.raw_hex,1,10),COALESCE(o.path_json,''),substr(` + rawCol + `,1,10)
  FROM transmissions t JOIN observations o ON o.transmission_id=t.id
- WHERE o.timestamp >= ? AND o.timestamp <= ? ORDER BY t.id`
-	var sinceArg, untilArg interface{} = now.Add(-scopeAuditDuration(window)).Unix(), now.Unix()
-	if !s.db.isV3() {
-		sinceArg, untilArg = resp.Since, resp.GeneratedAt
-	}
-	obs, err := s.db.conn.QueryContext(ctx, query, sinceArg, untilArg)
+ WHERE o.timestamp >= ? AND o.timestamp <= ?` + observerClause + ` ORDER BY t.id`
+	obs, err := s.db.conn.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer obs.Close()
 	lastID := -1
-	seen := make(map[string]bool)
-	ambSeen := make(map[string]bool)
-	ambCounts := make(map[string]int)
 	for obs.Next() {
 		var id int
 		var route sql.NullInt64
 		var scope sql.NullString
 		var canonical, path, raw string
 		if err = obs.Scan(&id, &route, &scope, &canonical, &path, &raw); err != nil {
-			return nil, err
+			return err
 		}
 		if id != lastID {
-			clear(seen)
-			clear(ambSeen)
+			sink.tx()
 			lastID = id
 		}
 		effectiveRoute := int(route.Int64)
@@ -269,26 +341,72 @@ func (s *Server) buildScopeAuditContext(ctx context.Context, window string, now 
 		} else if !scope.Valid || kind == "" || len(raw) > 0 && (len(raw) < 6 || len(canonical) < 6 || !strings.EqualFold(raw[2:6], canonical[2:6])) {
 			kind = ""
 		}
+		legacy := raw == ""
+		if sink.obs != nil {
+			sink.obs(kind, legacy)
+		}
 		visitPathJSONHops(path, func(token string) bool {
 			if len(resolve.cache) >= 4096 {
 				clear(resolve.cache)
 			}
-			key := resolve.key(token)
+			sink.hop(resolve.key(token), strings.ToLower(token), kind, legacy)
+			return true
+		})
+	}
+	return obs.Err()
+}
+
+// Complexity is O(nodes + observed path hops + distinct ambiguous-prefix
+// candidates), with token resolution memoized. Dedup sets hold one transmission
+// at a time because SQL orders by t.id. The response/cache has at most 3 windows.
+func (s *Server) buildScopeAuditContext(ctx context.Context, window string, now time.Time) (*ScopeAuditResponse, error) {
+	if !s.db.hasConfiguredScope() || !s.db.hasScopeName() {
+		return nil, fmt.Errorf("scope audit requires configured_scope and scope_name; run ingestor migrations")
+	}
+	since := now.Add(-scopeAuditDuration(window))
+	resp := &ScopeAuditResponse{Window: window, GeneratedAt: now.UTC().Format(time.RFC3339), Since: since.UTC().Format(time.RFC3339), Rows: []ScopeAuditRow{}}
+	nodes, err := s.scopeAuditNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	targets := make(map[string]*scopeAuditAccumulator)
+	for _, n := range nodes {
+		if !n.scope.Valid {
+			continue
+		}
+		declared, wild := declaredAuditScopes(n.scope.String)
+		row := ScopeAuditRow{PublicKey: n.info.PublicKey, Name: n.info.Name, Role: n.info.Role, ConfiguredScope: n.scope.String, ConfiguredScopeAt: n.at, DeclaredScopes: declared, AllowsUnscoped: wild, ObservedScopes: []ScopeAuditCount{}, NotObserved: []string{}, UndeclaredObserved: []string{}}
+		row.DeclarationAgeSeconds, row.StaleDeclaration = scopeDeclarationAge(n.at, now)
+		targets[n.info.PublicKey] = &scopeAuditAccumulator{row: row, counts: make(map[string]int)}
+	}
+	// With no confirmed declaration there is nothing to compare.
+	if len(targets) == 0 {
+		return resp, nil
+	}
+	pm, err := s.scopeAuditPrefixMap(nodes)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	ambSeen := make(map[string]bool)
+	ambCounts := make(map[string]int)
+	err = s.scanScopeEvidence(ctx, since, now, nil, pm, scopeEvidenceSink{
+		tx: func() { clear(seen); clear(ambSeen) },
+		hop: func(key, token, kind string, legacy bool) {
 			if key == "" {
-				token = strings.ToLower(token)
 				if len(pm.m[token]) > 1 && !ambSeen[token] {
 					ambSeen[token] = true
 					ambCounts[token]++
 					resp.AmbiguousHops++
 				}
-				return true
+				return
 			}
 			target := targets[key]
 			if target == nil {
-				return true
+				return
 			}
 			// Legacy observations lack their own header; retain the evidence caveat.
-			if raw == "" {
+			if legacy {
 				target.row.IncompleteEvidence = true
 			}
 			// Same target/content transmission is counted once, even when observed by
@@ -300,7 +418,7 @@ func (s *Server) buildScopeAuditContext(ctx context.Context, window string, now 
 			}
 			evidence := key + "|" + kind
 			if seen[evidence] {
-				return true
+				return
 			}
 			seen[evidence] = true
 			switch kind {
@@ -311,10 +429,9 @@ func (s *Server) buildScopeAuditContext(ctx context.Context, window string, now 
 			default:
 				target.counts[kind]++
 			}
-			return true
-		})
-	}
-	if err = obs.Err(); err != nil {
+		},
+	})
+	if err != nil {
 		return nil, err
 	}
 	// Expand collided tokens only once, after aggregation. A collision on an

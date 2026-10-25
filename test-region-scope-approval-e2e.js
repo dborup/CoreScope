@@ -134,7 +134,7 @@ async function main() {
     });
     return { ingestor, server };
   }
-  const sql = (statement) => execFileSync('sqlite3', [env.db, statement], { encoding: 'utf8' }).trim();
+  const sql = (statement) => execFileSync('sqlite3', ['-cmd', '.timeout 5000', env.db, statement], { encoding: 'utf8' }).trim();
   // null while the transmission is not stored yet; '' when stored unknown-scoped.
   const scopeOf = (raw) => {
     const out = sql("SELECT '[' || COALESCE(scope_name, '<null>') || ']' FROM transmissions WHERE upper(raw_hex) = '" + raw + "'");

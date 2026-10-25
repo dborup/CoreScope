@@ -379,7 +379,7 @@ async function main() {
       // this message after the revoke below, so a hidden channel is only
       // hidden from the list, never emptied.
       const sql = "INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, channel_hash) VALUES ('EEFF', 'e2e251history0001', '2024-01-01T00:00:00Z', 1, 5, '{\"type\":\"CHAN\",\"channel\":\"" + NAME + "\",\"text\":\"alice: hello\",\"sender\":\"alice\"}', '" + NAME + "')";
-      execFileSync('sqlite3', [env.db, sql]);
+      execFileSync('sqlite3', ['-cmd', '.timeout 5000', env.db, sql]);
     });
 
     await step('restart: the approval survives restarting ingestor and server', async () => {
