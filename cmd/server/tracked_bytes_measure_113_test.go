@@ -40,7 +40,7 @@ func acct113CreateDB(tb testing.TB, dbPath string, n, oldUntil int) {
 // writer without a busy timeout fails on it with SQLITE_BUSY.
 //
 // modernc.org/sqlite applies only _pragma (and _time_format, _txlock) from the
-// DSN. The fixture used to ask for "?_journal_mode=WAL", which it silently
+// DSN. The fixture used to ask for _journal_mode=WAL, which it silently
 // ignored: the file stayed in the rollback journal with no busy timeout, and a
 // commit that met the store's schema-healer read failed at once (#567). The
 // pragmas are therefore read back, not trusted.

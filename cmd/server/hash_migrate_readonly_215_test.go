@@ -281,7 +281,7 @@ func (c *recordingConnector) Driver() driver.Driver { return c.drv }
 // DSN as OpenDB) on a connection that records every statement.
 func hm215OpenRecording(t testing.TB, d *hm215DB) (*PacketStore, *stmtLog) {
 	t.Helper()
-	dsn := fmt.Sprintf("file:%s?mode=ro&_journal_mode=WAL&_busy_timeout=5000", d.path)
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", d.path)
 	probe, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatal(err)

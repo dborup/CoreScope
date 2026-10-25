@@ -206,9 +206,14 @@ func (db *DB) ingestCols() ingestCols {
 	}
 }
 
-// OpenDB opens a read-only SQLite connection with WAL mode.
+// OpenDB opens a read-only SQLite connection. Each pooled connection waits
+// up to 5 s on a lock instead of failing with SQLITE_BUSY. It does not set
+// the journal mode: that takes a write lock, and the ingestor already keeps
+// the file in WAL (#1283). modernc.org/sqlite applies only _pragma (and
+// _time_format, _txlock) from a DSN; the _busy_timeout/_journal_mode this
+// used to pass were ignored, leaving busy_timeout=0 (#576).
 func OpenDB(path string) (*DB, error) {
-	dsn := fmt.Sprintf("file:%s?mode=ro&_journal_mode=WAL&_busy_timeout=5000", path)
+	dsn := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", path)
 	conn, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err

@@ -67,7 +67,7 @@ func TestPerf_GenerateRegionDB_176(t *testing.T) {
 	if err := os.RemoveAll(path); err != nil {
 		t.Fatal(err)
 	}
-	conn, err := sql.Open("sqlite", "file:"+path+"?_journal_mode=WAL&_synchronous=OFF")
+	conn, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(OFF)")
 	if err != nil {
 		t.Fatal(err)
 	}
