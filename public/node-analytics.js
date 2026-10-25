@@ -329,6 +329,36 @@
     }
   }
 
+  // Battery status badge (#562). Fixed icon + label are built with explicit
+  // DOM; the API-derived voltage is only ever a text node (never parsed as HTML).
+  const BATTERY_STATUS = {
+    ok: { cls: 'status-ok', icon: 'ph-battery-high', label: 'OK' },
+    low: { cls: 'status-warn', icon: 'ph-warning', label: 'Low' },
+    critical: { cls: 'status-err', icon: 'ph-battery-low', label: 'Critical' },
+  };
+  function renderBatteryBadge(badge, data) {
+    const st = (data && BATTERY_STATUS[data.status]) || { cls: 'status-muted', icon: null, label: 'No data' };
+    badge.className = 'battery-status-badge ' + st.cls;
+    badge.style.color = '';
+    const kids = [];
+    if (st.icon) {
+      const NS = 'http://www.w3.org/2000/svg';
+      const svg = document.createElementNS(NS, 'svg');
+      svg.setAttribute('class', 'ph-icon');
+      svg.setAttribute('aria-hidden', 'true');
+      const use = document.createElementNS(NS, 'use');
+      use.setAttribute('href', '/icons/phosphor-sprite.svg#' + st.icon);
+      svg.appendChild(use);
+      kids.push(svg, document.createTextNode(' '));
+    }
+    const label = document.createElement('span');
+    label.className = 'battery-status-label';
+    label.textContent = st.label;
+    kids.push(label);
+    if (data && data.latest_mv) kids.push(document.createTextNode(' · ' + data.latest_mv + ' mV'));
+    badge.replaceChildren(...kids);
+  }
+
   async function loadBatteryChart(pubkey, days, isCurrent) {
     let data;
     try {
@@ -346,16 +376,7 @@
     const samples = (data && data.samples) || [];
     const thr = (data && data.thresholds) || { low_mv: 3300, critical_mv: 3000 };
 
-    if (badge) {
-      const STATUS_COLOR = { ok: '#51cf66', low: '#fcc419', critical: '#ff6b6b', unknown: 'var(--text-muted)' };
-      const label = data && data.status === 'ok' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-battery-high"/></svg> OK'
-        : data && data.status === 'low' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> Low'
-        : data && data.status === 'critical' ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-battery-low"/></svg> Critical'
-        : 'No data';
-      const mv = data && data.latest_mv ? ' · ' + data.latest_mv + ' mV' : '';
-      badge.textContent = label + mv;
-      badge.style.color = STATUS_COLOR[(data && data.status) || 'unknown'];
-    }
+    if (badge) renderBatteryBadge(badge, data);
 
     if (!ctx || samples.length === 0) {
       if (ctx) ctx.style.display = 'none';

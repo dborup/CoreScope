@@ -45,7 +45,7 @@ const MIN_USE_REFS = {
   'packets.js': 18,
   'live.js': 15,
   'map.js': 10,
-  'node-analytics.js': 4,
+  'node-analytics.js': 1, // #562: battery badge icons are built via createElementNS (see test-issue-562-battery-badge.js)
   'traces.js': 1,
   'perf.js': 9,
   'audio-lab.js': 5,

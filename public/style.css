@@ -3621,6 +3621,10 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
    groups) being added between the card and the chart media. */
 .analytics-chart-card svg,
 .analytics-chart-card canvas { max-width: 100%; height: auto; display: block; }
+/* #562 — the battery badge icon keeps the shared icon size; the chart-media
+   rule above (height:auto, display:block) must not stretch it. Scoped to the
+   badge so chart SVG responsiveness is unchanged. */
+.analytics-chart-card .battery-status-badge .ph-icon { display: inline-block; width: 16px; height: 16px; max-width: none; }
 .analytics-chart-card h4 { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); margin-bottom: 4px; }
 .analytics-chart-desc { font-size: 10px; color: var(--text-muted); margin-bottom: 8px; font-style: italic; }
 .analytics-heatmap { display: grid; grid-template-columns: 40px repeat(24, 1fr); gap: 2px; }
