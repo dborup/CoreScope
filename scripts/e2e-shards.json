@@ -10,6 +10,14 @@
       "measurementNote": "New suite; #262 My Mesh observer identity, status, traffic, navigation and unavailable state at 1280 px and 390 px. Fully stubbed (no BASE_URL server). About 6s locally; no CI duration measured yet. Assigned to shard 1, the shard with the fewest suites."
     },
     {
+      "file": "test-issue-245-advert-interval-analytics-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #245 M2 Analytics -> Advert Intervals: API, deep link, tab URL, region link, dark theme and 390 px. Needs seed-245-advert-intervals.sql. About 10s locally; no CI duration measured yet. Assigned to shard 2, the lowest measured total."
+    },
+    {
       "file": "test-issue-416-region-quick-picks-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },

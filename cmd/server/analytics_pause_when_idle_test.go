@@ -203,8 +203,8 @@ func TestPauseWhenIdle_ReachesEveryRecomputer(t *testing.T) {
 		s := NewPacketStore(db, nil)
 		stop := s.StartAnalyticsRecomputers(time.Hour, AnalyticsRecomputeIntervals{PauseWhenIdle: on})
 		fields := storeRecomputerFields(t, s)
-		if len(fields) != 9 {
-			t.Fatalf("expected 9 analytics recomputer fields, found %d: %v", len(fields), fields)
+		if len(fields) != 10 {
+			t.Fatalf("expected 10 analytics recomputer fields, found %d: %v", len(fields), fields)
 		}
 		s.analyticsRecomputerMu.RLock()
 		listed := s.analyticsRecomputersLocked()
@@ -684,6 +684,8 @@ func TestPauseWhenIdle_SnapshotHeaders(t *testing.T) {
 		{"/api/analytics/roles", "recompRoles", "roles", nil},
 		{"/api/observers/clock-skew", "recompObserversClockSkew", "observers-clock-skew", nil},
 		{"/api/nodes/clock-skew", "recompNodesClockSkew", "nodes-clock-skew", []string{"area=fyn"}},
+		// #245 M2: filtered shapes also read the snapshot, so none is listed.
+		{"/api/analytics/advert-intervals", "recompAdvertIntervals", "advert-intervals", nil},
 	}
 	names := make([]string, 0, len(endpoints))
 	for _, e := range endpoints {

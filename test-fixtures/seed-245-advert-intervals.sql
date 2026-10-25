@@ -75,3 +75,76 @@ INSERT INTO observations (transmission_id, observer_idx, direction, snr, rssi, s
   (-245022, 1, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
   (-245023, 1, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
   (-245024, 1, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER));
+
+-- #245 M2 (test-issue-245-advert-interval-analytics-e2e.js): three more
+-- repeaters for Analytics -> Advert Intervals, without positions so no area
+-- or map test sees them. Region = the observers' IATA (observer rowids of the
+-- migrated fixture: 2 and 5 SJC, 3 OAK; the M1 nodes above are heard by 1, OAK).
+-- Expected on /api/analytics/advert-intervals:
+--   "Zero-hop Default E2E" (...03, SJC): zero-hop every 2 min x8 -> 120 s,
+--       high, the new-install default -> outlier zero_hop_new_install_default;
+--       flood every 47 h x4 -> 169200, medium.
+--   "Fast Flood E2E" (...04, OAK): flood every 10 min x6 -> irregular (no
+--       timer runs that fast), median gap 600 -> outlier flood_faster_than_settable.
+--   "Short Flood E2E" (...05, SJC): flood every 3 h x8 -> 10800, high; no
+--       zero-hop -> counted in flood_re_arm.zero_hop_maybe_suppressed.
+INSERT INTO nodes (public_key, name, role, last_seen, first_seen, advert_count) VALUES
+  ('245e2e0000000000000000000000000000000000000000000000000000000003', 'Zero-hop Default E2E', 'repeater', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-10 minutes'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-8 days'), 8),
+  ('245e2e0000000000000000000000000000000000000000000000000000000004', 'Fast Flood E2E', 'repeater', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-10 minutes'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-8 days'), 8),
+  ('245e2e0000000000000000000000000000000000000000000000000000000005', 'Short Flood E2E', 'repeater', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-10 minutes'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-8 days'), 8);
+
+INSERT INTO transmissions (id, raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json, channel_hash, from_pubkey, route_mask) VALUES
+  (-245101, '1200e2e20101', 'e2e245m2adv0001', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-10 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Zero-hop Default E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000003","timestamp":' || (CAST(strftime('%s', 'now', '-10 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000003', 4),
+  (-245102, '1200e2e20102', 'e2e245m2adv0002', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-12 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Zero-hop Default E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000003","timestamp":' || (CAST(strftime('%s', 'now', '-12 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000003', 4),
+  (-245103, '1200e2e20103', 'e2e245m2adv0003', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-14 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Zero-hop Default E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000003","timestamp":' || (CAST(strftime('%s', 'now', '-14 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000003', 4),
+  (-245104, '1200e2e20104', 'e2e245m2adv0004', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-16 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Zero-hop Default E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000003","timestamp":' || (CAST(strftime('%s', 'now', '-16 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000003', 4),
+  (-245105, '1200e2e20105', 'e2e245m2adv0005', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-18 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Zero-hop Default E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000003","timestamp":' || (CAST(strftime('%s', 'now', '-18 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000003', 4),
+  (-245106, '1200e2e20106', 'e2e245m2adv0006', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-20 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Zero-hop Default E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000003","timestamp":' || (CAST(strftime('%s', 'now', '-20 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000003', 4),
+  (-245107, '1200e2e20107', 'e2e245m2adv0007', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-22 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Zero-hop Default E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000003","timestamp":' || (CAST(strftime('%s', 'now', '-22 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000003', 4),
+  (-245108, '1200e2e20108', 'e2e245m2adv0008', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-24 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Zero-hop Default E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000003","timestamp":' || (CAST(strftime('%s', 'now', '-24 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000003', 4),
+  (-245109, '1100e2e20109', 'e2e245m2adv0009', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1 hours'), 1, 4, 0, '{"type":"ADVERT","name":"Zero-hop Default E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000003","timestamp":' || (CAST(strftime('%s', 'now', '-1 hours') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000003', 2),
+  (-245110, '1100e2e2010a', 'e2e245m2adv0010', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-48 hours'), 1, 4, 0, '{"type":"ADVERT","name":"Zero-hop Default E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000003","timestamp":' || (CAST(strftime('%s', 'now', '-48 hours') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000003', 2),
+  (-245111, '1100e2e2010b', 'e2e245m2adv0011', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-95 hours'), 1, 4, 0, '{"type":"ADVERT","name":"Zero-hop Default E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000003","timestamp":' || (CAST(strftime('%s', 'now', '-95 hours') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000003', 2),
+  (-245112, '1100e2e2010c', 'e2e245m2adv0012', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-142 hours'), 1, 4, 0, '{"type":"ADVERT","name":"Zero-hop Default E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000003","timestamp":' || (CAST(strftime('%s', 'now', '-142 hours') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000003', 2),
+  (-245113, '1100e2e2010d', 'e2e245m2adv0013', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-5 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Fast Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000004","timestamp":' || (CAST(strftime('%s', 'now', '-5 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000004', 2),
+  (-245114, '1100e2e2010e', 'e2e245m2adv0014', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-15 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Fast Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000004","timestamp":' || (CAST(strftime('%s', 'now', '-15 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000004', 2),
+  (-245115, '1100e2e2010f', 'e2e245m2adv0015', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-25 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Fast Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000004","timestamp":' || (CAST(strftime('%s', 'now', '-25 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000004', 2),
+  (-245116, '1100e2e20110', 'e2e245m2adv0016', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-35 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Fast Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000004","timestamp":' || (CAST(strftime('%s', 'now', '-35 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000004', 2),
+  (-245117, '1100e2e20111', 'e2e245m2adv0017', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-45 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Fast Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000004","timestamp":' || (CAST(strftime('%s', 'now', '-45 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000004', 2),
+  (-245118, '1100e2e20112', 'e2e245m2adv0018', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-55 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Fast Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000004","timestamp":' || (CAST(strftime('%s', 'now', '-55 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000004', 2),
+  (-245119, '1100e2e20113', 'e2e245m2adv0019', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-2 hours'), 1, 4, 0, '{"type":"ADVERT","name":"Short Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000005","timestamp":' || (CAST(strftime('%s', 'now', '-2 hours') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000005', 2),
+  (-245120, '1100e2e20114', 'e2e245m2adv0020', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-5 hours'), 1, 4, 0, '{"type":"ADVERT","name":"Short Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000005","timestamp":' || (CAST(strftime('%s', 'now', '-5 hours') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000005', 2),
+  (-245121, '1100e2e20115', 'e2e245m2adv0021', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-8 hours'), 1, 4, 0, '{"type":"ADVERT","name":"Short Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000005","timestamp":' || (CAST(strftime('%s', 'now', '-8 hours') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000005', 2),
+  (-245122, '1100e2e20116', 'e2e245m2adv0022', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-11 hours'), 1, 4, 0, '{"type":"ADVERT","name":"Short Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000005","timestamp":' || (CAST(strftime('%s', 'now', '-11 hours') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000005', 2),
+  (-245123, '1100e2e20117', 'e2e245m2adv0023', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-14 hours'), 1, 4, 0, '{"type":"ADVERT","name":"Short Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000005","timestamp":' || (CAST(strftime('%s', 'now', '-14 hours') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000005', 2),
+  (-245124, '1100e2e20118', 'e2e245m2adv0024', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-17 hours'), 1, 4, 0, '{"type":"ADVERT","name":"Short Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000005","timestamp":' || (CAST(strftime('%s', 'now', '-17 hours') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000005', 2),
+  (-245125, '1100e2e20119', 'e2e245m2adv0025', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-20 hours'), 1, 4, 0, '{"type":"ADVERT","name":"Short Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000005","timestamp":' || (CAST(strftime('%s', 'now', '-20 hours') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000005', 2),
+  (-245126, '1100e2e2011a', 'e2e245m2adv0026', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-23 hours'), 1, 4, 0, '{"type":"ADVERT","name":"Short Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000005","timestamp":' || (CAST(strftime('%s', 'now', '-23 hours') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000005', 2);
+
+INSERT INTO observations (transmission_id, observer_idx, direction, snr, rssi, score, path_json, timestamp) VALUES
+  (-245101, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245102, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245103, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245104, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245105, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245106, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245107, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245108, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245109, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245110, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245111, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245112, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245113, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245114, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245115, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245116, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245117, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245118, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245119, 5, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245120, 5, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245121, 5, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245122, 5, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245123, 5, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245124, 5, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245125, 5, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245126, 5, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER));

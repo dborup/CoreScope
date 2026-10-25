@@ -13,7 +13,7 @@ import (
 )
 
 // measurePauseWhenIdle backs TestPauseWhenIdle_Measure (#492): on a copy of
-// test-fixtures/e2e-fixture.db it runs the nine analytics recomputers at a
+// test-fixtures/e2e-fixture.db it runs every analytics recomputer at a
 // short interval for a fixed window, once per (pauseWhenIdle, traffic)
 // pair, and prints compute passes, allocations, process CPU and read
 // latency. "visible" reads every default-shape snapshot once per interval
