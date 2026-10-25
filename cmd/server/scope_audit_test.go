@@ -252,7 +252,7 @@ func BenchmarkScopeAudit30KPackets2KNodes(b *testing.B) {
 }
 
 func TestScopeAuditCacheSingleflightExpiryAndErrors(t *testing.T) {
-	var cache scopeAuditCache
+	var cache scopeAuditCache[ScopeAuditResponse]
 	var fills atomic.Int32
 	start := make(chan struct{})
 	release := make(chan struct{})
@@ -426,11 +426,11 @@ func TestScopeAuditListenerOnlyNodeExcludedFromForwardedCount(t *testing.T) {
 // a fill that lands in the gap between the outer miss and entering singleflight
 // must be reused instead of triggering a redundant rebuild.
 func TestScopeAuditCacheRecheckInsideSingleflightReusesConcurrentFill(t *testing.T) {
-	var cache scopeAuditCache
+	var cache scopeAuditCache[ScopeAuditResponse]
 	want := &ScopeAuditResponse{Window: "fresh-from-concurrent-fill"}
 	cache.recheckHook = func() {
 		cache.mu.Lock()
-		cache.entries = map[string]scopeAuditCacheEntry{"24h": {response: want, at: time.Now()}}
+		cache.entries = map[string]scopeAuditCacheEntry[ScopeAuditResponse]{"24h": {response: want, at: time.Now()}}
 		cache.mu.Unlock()
 	}
 	var built bool

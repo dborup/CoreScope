@@ -93,7 +93,9 @@ type Server struct {
 	scopeStatsCachedAt map[string]time.Time
 
 	// Cached /api/scope-audit response — per-window, recomputed at most once every 30s
-	scopeAudit scopeAuditCache
+	scopeAudit scopeAuditCache[ScopeAuditResponse]
+	// Cached /api/scope-audit/transport scans — per window and observer region, bounded
+	scopeTransport scopeAuditCache[scopeTransportScan]
 
 	// Cached /api/analytics/wardriving response — per-window, recomputed at most once every 30s
 	wardrivingStatsMu       sync.Mutex
@@ -217,6 +219,9 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 		buildTime: resolveBuildTime(),
 
 		estimatedPositionsDisabled: !cfg.estimatedPositionsEnabled(),
+
+		// Keys come from request parameters (window × region), so bound them.
+		scopeTransport: scopeAuditCache[scopeTransportScan]{max: scopeTransportCacheMax},
 	}
 }
 
@@ -334,6 +339,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/stats", s.handleStats).Methods("GET")
 	r.HandleFunc("/api/scope-stats", s.handleScopeStats).Methods("GET")
 	r.HandleFunc("/api/scope-audit", s.handleScopeAudit).Methods("GET")
+	r.HandleFunc("/api/scope-audit/transport", s.handleScopeTransport).Methods("GET")
 	r.HandleFunc("/api/analytics/hop-depth", s.handleHopDepthAnalytics).Methods("GET")
 	r.HandleFunc("/api/analytics/observer-comparison", s.handleObserverComparison).Methods("GET")
 	r.HandleFunc("/api/analytics/wardriving", s.handleWardrivingStats).Methods("GET")
