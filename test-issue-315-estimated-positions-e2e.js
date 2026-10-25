@@ -252,11 +252,11 @@ async function browserChecks(browser, base, enabled, mode, assets, shots) {
     const database = path.join(scratch, 'synthetic.db');
     // Copy only the tracked fixture's schema: none of its real mesh records
     // enter this suite. Migrations remain owned by the dedicated Go binary.
-    const schema = execFileSync('sqlite3', [path.join(ROOT, 'test-fixtures/e2e-fixture.db'),
+    const schema = execFileSync('sqlite3', ['-cmd', '.timeout 5000', path.join(ROOT, 'test-fixtures/e2e-fixture.db'),
       "SELECT sql || ';' FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, rowid"]);
-    execFileSync('sqlite3', [database], { input: schema });
+    execFileSync('sqlite3', ['-cmd', '.timeout 5000', database], { input: schema });
     execFileSync(migrateBin, ['-db', database], { stdio: 'pipe' });
-    execFileSync('sqlite3', [database], { input: fs.readFileSync(path.join(ROOT, 'test-fixtures/seed-315-estimated-positions.sql')) });
+    execFileSync('sqlite3', ['-cmd', '.timeout 5000', database], { input: fs.readFileSync(path.join(ROOT, 'test-fixtures/seed-315-estimated-positions.sql')) });
     browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH || undefined });
     for (const mode of ['default', 'enabled', 'disabled']) {
       const enabled = mode !== 'disabled';
