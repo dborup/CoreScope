@@ -81,7 +81,7 @@ func rp488Homes(t *testing.T, db *DB) map[string]string {
 	return store.computeNodeHomeRegions(obsIATA)
 }
 
-const rp488Payload = "aabbccddeeff0011"
+const rp488HomePayload = "aabbccddeeff0011"
 
 // TestRP488_CurrentHomeRegionParsing (flipped from the characterization in
 // draft PR #601): a TRANSPORT_DIRECT {0,0} contact re-share is not the
@@ -89,9 +89,9 @@ const rp488Payload = "aabbccddeeff0011"
 // are direct evidence (path byte at offset 5 on the transport route).
 func TestRP488_CurrentHomeRegionParsing(t *testing.T) {
 	db := rp488HomeDB(t)
-	shared := "130000000000" + rp488Payload
-	floodZero := "1100" + rp488Payload
-	transportFloodZero := "101a2b3c4d00" + rp488Payload
+	shared := "130000000000" + rp488HomePayload
+	floodZero := "1100" + rp488HomePayload
+	transportFloodZero := "101a2b3c4d00" + rp488HomePayload
 	rp488Advert(t, db, "cccc000000000003", shared, rp488Hear{1, "[]", shared})
 	rp488Advert(t, db, "dddd000000000004", floodZero, rp488Hear{2, "[]", floodZero})
 	rp488Advert(t, db, "eeee000000000005", transportFloodZero, rp488Hear{3, "[]", transportFloodZero})
@@ -114,10 +114,10 @@ func TestRP488_CurrentHomeRegionParsing(t *testing.T) {
 // by its own frame.
 func TestNodeHomeRegions488_PerObservationFrame(t *testing.T) {
 	db := rp488HomeDB(t)
-	direct := "1200" + rp488Payload
-	floodZero := "1100" + rp488Payload
-	relayed := "1102a1a2" + rp488Payload
-	shared := "130000000000" + rp488Payload
+	direct := "1200" + rp488HomePayload
+	floodZero := "1100" + rp488HomePayload
+	relayed := "1102a1a2" + rp488HomePayload
+	shared := "130000000000" + rp488HomePayload
 
 	// First copy says zero-hop DIRECT, but the only observation heard it
 	// after two relays.
@@ -132,7 +132,7 @@ func TestNodeHomeRegions488_PerObservationFrame(t *testing.T) {
 	rp488Advert(t, db, "dddd000000000004", relayed, rp488Hear{2, "[]", relayed})
 	// A DIRECT advert with a path counts the hops still to go (Mesh.cpp
 	// removeSelfFromPath), not the hops travelled: no evidence.
-	rp488Advert(t, db, "eeee000000000005", "1202a1a2"+rp488Payload, rp488Hear{3, `["A1","A2"]`, "1202a1a2" + rp488Payload})
+	rp488Advert(t, db, "eeee000000000005", "1202a1a2"+rp488HomePayload, rp488Hear{3, `["A1","A2"]`, "1202a1a2" + rp488HomePayload})
 
 	got := rp488Homes(t, db)
 	want := map[string]string{"bbbb000000000002": "BBB", "cccc000000000003": "AAA"}
@@ -146,7 +146,7 @@ func TestNodeHomeRegions488_PerObservationFrame(t *testing.T) {
 // node that has no verified direct hearing, and never outranks one.
 func TestNodeHomeRegions488_LegacyEmptyPathIsFallbackOnly(t *testing.T) {
 	db := rp488HomeDB(t)
-	floodZero := "1100" + rp488Payload
+	floodZero := "1100" + rp488HomePayload
 	// One verified zero-hop hearing in AAA, three legacy '[]' rows in BBB/CCC.
 	rp488Advert(t, db, "aaaa000000000001", floodZero,
 		rp488Hear{1, "[]", floodZero}, rp488Hear{2, "[]", nil}, rp488Hear{3, "[]", nil}, rp488Hear{4, "[]", nil})
@@ -159,7 +159,7 @@ func TestNodeHomeRegions488_LegacyEmptyPathIsFallbackOnly(t *testing.T) {
 	// A verified re-share does not make the legacy fallback lose: the
 	// share is no evidence at all.
 	rp488Advert(t, db, "dddd000000000004", floodZero,
-		rp488Hear{1, "[]", "130000000000" + rp488Payload}, rp488Hear{2, "[]", nil})
+		rp488Hear{1, "[]", "130000000000" + rp488HomePayload}, rp488Hear{2, "[]", nil})
 
 	got := rp488Homes(t, db)
 	want := map[string]string{"aaaa000000000001": "AAA", "bbbb000000000002": "CCC", "dddd000000000004": "BBB"}
@@ -172,7 +172,7 @@ func TestNodeHomeRegions488_LegacyEmptyPathIsFallbackOnly(t *testing.T) {
 // lexically smallest code (unchanged #804 rule).
 func TestNodeHomeRegions488_VerifiedPluralityAndTie(t *testing.T) {
 	db := rp488HomeDB(t)
-	f := "1100" + rp488Payload
+	f := "1100" + rp488HomePayload
 	rp488Advert(t, db, "aaaa000000000001", f, rp488Hear{1, "[]", f}, rp488Hear{3, "[]", f}, rp488Hear{4, "[]", f})
 	rp488Advert(t, db, "bbbb000000000002", f, rp488Hear{3, "[]", f}, rp488Hear{2, "[]", f})
 	got := rp488Homes(t, db)
