@@ -109,6 +109,7 @@ test('surfaces ALL nodes past the 500 server cap (1200 > 500)', async () => {
   assert.strictEqual(out.nodes.length, 1200, 'expected all 1200 nodes, got ' + out.nodes.length);
   assert.strictEqual(out.total, 1200, 'total must be the real deduped count, not the clamped per-page total');
   assert.strictEqual(m.calls.length, 3, 'expected 3 pages (500+500+200), got ' + m.calls.length);
+  assert.strictEqual(out.truncated, false, 'a short final page means the population is complete, not truncated');
 });
 
 test('stops on a short page rather than the unreliable server total', async () => {
@@ -120,6 +121,7 @@ test('stops on a short page rather than the unreliable server total', async () =
   const out = await ctx.fetchAllNodes('');
   assert.strictEqual(out.nodes.length, 1000);
   assert.strictEqual(m.calls.length, 3, 'expected one extra empty page after two full pages');
+  assert.strictEqual(out.truncated, false, 'a trailing empty page means the population is complete, not truncated');
 });
 
 test('dedups a public_key repeated across a page boundary', async () => {
@@ -165,6 +167,36 @@ test('safetyCap is a hard node-count ceiling (no pageSize overshoot)', async () 
   const out = await ctx.fetchAllNodes('', { safetyCap: 800 });
   assert.strictEqual(out.nodes.length, 800, 'safetyCap must cap returned nodes exactly, got ' + out.nodes.length);
   assert.strictEqual(out.total, 800, 'total must equal the capped count');
+  assert.strictEqual(out.truncated, true, 'the real 5000-node population exceeds the 800 safetyCap, so the result must say so');
+});
+
+// #560 follow-up: a caller presenting `nodes` as the complete filtered
+// population (analytics.js's Role Breakdown) must be able to tell when it
+// is not — see the two `truncated` assertions above for the "complete"
+// cases. This covers the two ways `truncated` must come back true.
+test('truncated is true when the page loop hits safetyCap without ever seeing a short page', async () => {
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/app.js');
+  // 10000 nodes, safetyCap=1000, pageSize=500: every fetched page (0, 500)
+  // is a full 500-row page, so the loop never learns the real population is
+  // far larger than what it returned.
+  const m = makeNodesFetch(10000, 500);
+  ctx.fetch = m.fetch;
+  const out = await ctx.fetchAllNodes('', { safetyCap: 1000 });
+  assert.strictEqual(out.nodes.length, 1000);
+  assert.strictEqual(out.truncated, true, 'every page fetched was full, so more rows may exist beyond safetyCap');
+});
+
+test('truncated is false when the real population exactly fits under safetyCap', async () => {
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/app.js');
+  // 1000 nodes, safetyCap well above it: the loop sees a short (0-length)
+  // page before ever approaching the cap, so the population is complete.
+  const m = makeNodesFetch(1000, 500);
+  ctx.fetch = m.fetch;
+  const out = await ctx.fetchAllNodes('', { safetyCap: 10000 });
+  assert.strictEqual(out.nodes.length, 1000);
+  assert.strictEqual(out.truncated, false, 'a short page was seen well under safetyCap, so the population is complete');
 });
 
 test('rows missing public_key are NOT collapsed into one', async () => {
