@@ -24,7 +24,8 @@ import (
 // ageNodeRegionEntry rewrites the cached entry for key with its refresh and
 // build times pushed back, so a test can stand where a 30-second-old or
 // 30-minute-old entry stands without waiting. The entry is immutable once
-// stored, so this stores a copy.
+// stored, so this stores a copy. Since #618 an entry is a cut of the active
+// region index, whose ages are the data's, so the index is aged with it.
 func ageNodeRegionEntry(t *testing.T, db *DB, key string, refreshedAgo, builtAgo time.Duration) *nodeRegionEntry {
 	t.Helper()
 	prev := db.getNodeRegionEntry(key)
@@ -37,7 +38,26 @@ func ageNodeRegionEntry(t *testing.T, db *DB, key string, refreshedAgo, builtAgo
 		aged.built = time.Now().Add(-builtAgo)
 	}
 	db.setNodeRegionEntry(key, &aged)
+	ix, _ := db.activeRegionIndex()
+	ageRegionIndex(ix, refreshedAgo, builtAgo)
 	return &aged
+}
+
+// ageRegionIndex pushes ix's snapshot refresh back by refreshedAgo and, when
+// builtAgo > 0, its last full build back by builtAgo (making a rebuild due
+// once that reaches nodeRegionRebuildInterval). The snapshot is immutable,
+// so this stores a copy.
+func ageRegionIndex(ix *regionIndex, refreshedAgo, builtAgo time.Duration) {
+	if s := ix.snap.Load(); s != nil {
+		c := *s
+		c.refreshed = time.Now().Add(-refreshedAgo)
+		ix.snap.Store(&c)
+	}
+	if builtAgo > 0 {
+		ix.mu.Lock()
+		ix.built = time.Now().Add(-builtAgo)
+		ix.mu.Unlock()
+	}
 }
 
 // waitForNodeRegionRefresh waits for the background refresh kicked by a

@@ -135,26 +135,22 @@ type DB struct {
 	nodeRegionTick    int64
 	nodeRegionSF      singleflight.Group
 	nodeRegionFullMu  sync.Mutex
-	// nodeRegionQueryHook (test seam, nil in production) runs once per real
-	// membership scan, before the query; a non-nil error fails that refresh
-	// the way a failing scan does.
+	// nodeRegionColdMu serialises the per-set builds requests run while
+	// the region index warms up (buildNodeRegionCold).
+	nodeRegionColdMu sync.Mutex
+	// nodeRegionQueryHook (test seam, nil in production) runs once per
+	// per-set refresh, before it reads the region index; a non-nil error
+	// fails that refresh the way a failing scan does.
 	nodeRegionQueryHook func() error
 
-	// Direct-evidence region placement (#488 M2, region_placement.go).
-	// regionPlacement is set once at startup, before the first request.
-	// regionAgg is the global evidence aggregate, owned by the refresh
-	// that holds regionAggMu; readers only ever see regionSnap, an
-	// immutable snapshot swapped in after each refresh.
+	// Global region indexes the per-set entries are cut from (#618,
+	// region_index.go): one per region rule, the heard rule's and the
+	// direct-evidence placement's (#488 M2, region_placement.go).
+	// regionPlacement is set once at startup, before the first request,
+	// and selects the one served.
 	regionPlacement regionPlacementSettings
-	regionAggMu     sync.Mutex
-	regionAgg       *regionEvidenceAgg
-	regionAggBuilt  time.Time
-	regionSnap      atomic.Pointer[regionPlacementSnapshot]
-	// regionPlacementScanHook (test seam, nil in production) runs at the
-	// end of every aggregate scan, full or delta, after its rows were
-	// folded in; a non-nil error fails that scan the way an error part-way
-	// through the rows does.
-	regionPlacementScanHook func(full bool) error
+	regionHeard     regionIndex
+	regionPlaced    regionIndex
 	// identityNamesQueryHook (#410, test seam, nil in production) runs once
 	// per real hidden-name lookup query, right before it executes, with the
 	// lower-case keys it looks up.
@@ -1266,10 +1262,10 @@ func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortB
 	}
 
 	// The region filter is served from the bounded membership cache in
-	// nodes_region_cache.go: the IN (...) observation join is evaluated there
-	// once per region set, not twice per request (COUNT(*) and the page).
-	// #38's from_pubkey contract — and the trap that comes with it — lives
-	// with the query, in scanNodeRegionKeys.
+	// nodes_region_cache.go, cut from the per-IATA region index
+	// (region_index.go) rather than evaluated twice per request (COUNT(*)
+	// and the page). #38's from_pubkey contract — and the trap that comes
+	// with it — lives with the query, in scanHeardRegions.
 	if codes := normalizeRegionCodes(region); len(codes) > 0 {
 		keysJSON, err := db.nodeRegionKeysJSON(codes)
 		if err != nil {
