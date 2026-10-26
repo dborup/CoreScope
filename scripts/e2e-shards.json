@@ -1768,6 +1768,16 @@
       ]
     },
     {
+      "file": "test-issue-614-version-notice-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 12
+    },
+    {
       "file": "test-issue-111-drawer-version-e2e.js",
       "shard": 3,
       "env": {

@@ -1059,7 +1059,12 @@ function connectWS() {
   ws = sock;
   wsLastFrameAt = Date.now(); // from creation: a stuck handshake is caught too
   wsWatchdogTimer = setTimeout(checkWSLiveness, WS_STALE_MS);
-  sock.onopen = () => Logo.setConnected(true);
+  sock.onopen = () => {
+    Logo.setConnected(true);
+    // A deploy restarts the server, so a reconnect is a cheap moment to
+    // check for a new version (#614, see version-notice.js).
+    window.dispatchEvent(new Event('corescope:ws-open'));
+  };
   sock.onclose = () => {
     if (ws !== sock) return;
     clearTimeout(wsWatchdogTimer);

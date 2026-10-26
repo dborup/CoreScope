@@ -44,10 +44,11 @@ async function page(browser, viewport, errors) {
   console.log('\n=== #111 nav-drawer version footer against ' + BASE + ' ===');
 
   for (const vp of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }, { width: 800, height: 900 }, { width: 1280, height: 480 }]) {
-    await step(`${vp.width}x${vp.height}: footer inside the drawer, below a reachable route list; one request`, async () => {
+    await step(`${vp.width}x${vp.height}: footer inside the drawer, below a reachable route list; one request in total`, async () => {
       const { ctx, p, health } = await page(browser, vp, errors);
       try {
-        assert(health.length === 0, health.length + ' /api/health requests before the drawer was opened');
+        // #614: version-notice.js reads the baseline at load; the drawer reuses it.
+        assert(health.length <= 1, health.length + ' /api/health requests before the drawer was opened');
         await p.evaluate(() => window.__navDrawer.open());
         await p.waitForTimeout(400);
         const r = await p.evaluate(() => {
@@ -88,7 +89,7 @@ async function page(browser, viewport, errors) {
     try {
       await p.evaluate(() => { window.__navDrawer.open(); window.__navDrawer.open(); });
       await p.waitForTimeout(400);
-      assert(health.length === 0, health.length + ' requests at 700px');
+      assert(health.length <= 1, health.length + ' requests at 700px (the page-load baseline only)');
     } finally { await ctx.close(); }
   });
 
