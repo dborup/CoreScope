@@ -178,6 +178,13 @@ test('nav-drawer.js exposes the shared health reader and the notice uses it', as
   await flush();
   assert.deepStrictEqual(b.calls.slice(), ['/api/health'], 'baseline read at load');
 });
+test('readOnce shares one request between the baseline and the drawer footer', async () => {
+  const b = load([H('aaa')]);
+  await flush();
+  await b.win.CoreHealth.readOnce();
+  await b.win.CoreHealth.readOnce();
+  assert.strictEqual(b.calls.length, 1);
+});
 test('page load reads the baseline once and shows nothing', async () => {
   const b = load([H('aaa')]);
   await flush();

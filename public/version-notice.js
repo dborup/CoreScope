@@ -82,11 +82,11 @@
         hide);
       document.body.appendChild(banner);
     }
-    function check(force) {
+    function check(baseline) {
       var now = Date.now();
-      if (!force && !shouldCheck(now, lastCheck, MIN_GAP_MS)) return;
+      if (!baseline && !shouldCheck(now, lastCheck, MIN_GAP_MS)) return;
       lastCheck = now;
-      reader.read().then(function (h) {
+      (baseline ? reader.readOnce() : reader.read()).then(function (h) {
         var r = decide(state, h);
         state = r.state;
         if (r.notify) show();
