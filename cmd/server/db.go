@@ -136,8 +136,8 @@ type DB struct {
 	nodeRegionTick    int64
 	nodeRegionSF      singleflight.Group
 	nodeRegionFullMu  sync.Mutex
-	// nodeRegionColdMu serialises the per-set builds requests run while
-	// the region index warms up (buildNodeRegionCold).
+	// nodeRegionColdMu serialises the per-set builds cold requests fall
+	// back to while the region index build fails (coldNodeRegion).
 	nodeRegionColdMu sync.Mutex
 	// nodeRegionQueryHook (test seam, nil in production) runs once per
 	// per-set refresh, before it reads the region index; a non-nil error

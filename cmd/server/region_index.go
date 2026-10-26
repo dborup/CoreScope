@@ -36,9 +36,9 @@ import (
 // a refresh, so no request queues behind a full rebuild once a snapshot
 // exists. StartRegionIndexWarmer builds the index right after startup and
 // keeps refreshing it, so the full scans run there and not under a request.
-// A request that arrives before the first snapshot races its own per-set
-// build against the index build (coldNodeRegion), so it does not wait for
-// the all-codes scan when its own set's scan is the shorter one.
+// A request that arrives before the first snapshot waits for the build
+// already in flight, so it waits at most the rest of the warmup; it runs a
+// per-set build of its own only if that build fails (coldNodeRegion).
 //
 // Everything is read from SQLite on the server's read-only handle; nothing
 // touches the in-memory packet store or its lock.
@@ -73,9 +73,10 @@ type regionIndexSpec struct {
 	label   string
 	scan    func(ctx context.Context, lo, hi int64, delta bool, agg *regionEvidenceAgg) (int, error)
 	regions func(perRegion map[string]*regionEvidenceStats) []string
-	// perSet builds one region set on its own, for a request that arrives
-	// before the index's first snapshot (coldNodeRegion); nil when the rule
-	// has no per-set form (placement needs every region's evidence).
+	// perSet builds one region set on its own, the fallback for a request
+	// that arrives before the index's first snapshot when the index build
+	// fails (coldNodeRegion); nil when the rule has no per-set form
+	// (placement needs every region's evidence).
 	perSet func(ctx context.Context, codes []string) (*nodeRegionEntry, error)
 }
 
@@ -183,56 +184,30 @@ func (db *DB) currentRegionIndex(ctx context.Context, ix *regionIndex, spec regi
 
 // coldNodeRegion serves a region set that a caller waits for before ix has
 // published its first snapshot (the warmup still running, or failing). It
-// waits for the index build — starting it if nobody has — and meanwhile
-// runs the set's own per-set build, the scan every cold request ran before
-// #618, and returns whichever finishes first. Where one region's observers
-// hold a small share of the history the per-set build can finish well
-// before the all-codes one (the planner drives it from those observers);
-// where it cannot, the index build wins. The two share the machine while
-// both run, so the winner is slower than it would be alone. A per-set build
-// that lost is abandoned (buildNodeRegionCold); the index build is shared,
-// so it runs on.
+// waits for the index build — the warmer's, or one it starts — so a cold
+// request waits at most the rest of the warmup and adds no scan that would
+// slow the one build every region set is served from. Only when that build
+// fails does it fall back to the set's own per-set build, the scan every
+// cold request ran before #618, so a failing index does not turn
+// /api/nodes?region= into a 500. Fallbacks are serialised by
+// nodeRegionColdMu, so a burst of cold sets holds one pooled connection for
+// a full scan, and one that queued while a retry (the warmer's next tick, or
+// another request) published the index is cut from it instead.
 func (db *DB) coldNodeRegion(ctx context.Context, ix *regionIndex, spec regionIndexSpec, codes []string) (*nodeRegionEntry, error) {
-	type indexResult struct {
-		s   *regionMembershipSnapshot
-		err error
+	s, err := db.regionIndexFlight(ctx, ix, spec)
+	if err == nil {
+		return s.entry(codes)
 	}
-	type setResult struct {
-		e   *nodeRegionEntry
-		err error
+	db.nodeRegionColdMu.Lock()
+	defer db.nodeRegionColdMu.Unlock()
+	if s := ix.snap.Load(); s != nil {
+		return s.entry(codes)
 	}
-	idx := make(chan indexResult, 1)
-	go func() {
-		// Detached: a request that wins with its per-set build must not
-		// cancel a build it started for everyone.
-		ctx, cancel := context.WithTimeout(context.Background(), nodeRegionRebuildInterval)
-		defer cancel()
-		s, err := db.regionIndexFlight(ctx, ix, spec)
-		idx <- indexResult{s, err}
-	}()
-	setCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	set := make(chan setResult, 1)
-	go func() {
-		e, err := spec.perSet(setCtx, codes)
-		set <- setResult{e, err}
-	}()
-	var errs []error
-	for idx != nil || set != nil {
-		select {
-		case r := <-idx:
-			if r.err == nil {
-				return r.s.entry(codes)
-			}
-			errs, idx = append(errs, r.err), nil
-		case r := <-set:
-			if r.err == nil {
-				return r.e, nil
-			}
-			errs, set = append(errs, r.err), nil
-		}
+	e, setErr := spec.perSet(ctx, codes)
+	if setErr != nil {
+		return nil, errors.Join(err, setErr)
 	}
-	return nil, errors.Join(errs...)
+	return e, nil
 }
 
 // regionIndexFlight runs one refresh of ix, or waits for the one in flight.

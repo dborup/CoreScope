@@ -39,10 +39,11 @@ import (
 // the ages of the data. A request that has to wait for an entry (a new
 // region set, or one past nodeRegionMaxStale) is cut from any snapshot
 // younger than nodeRegionMaxStale at once. Only a cold start waits — for
-// the index's first build or the set's own per-set build, whichever
-// finishes first — and concurrent requests share both (the #1910
-// singleflight pattern, as channelsSF). StartRegionIndexWarmer runs the
-// index build right after startup and keeps the index refreshed.
+// the index's first build, which the warmer already has in flight, or the
+// set's own per-set build if that index build fails — and concurrent
+// requests share it (the #1910 singleflight pattern, as channelsSF).
+// StartRegionIndexWarmer runs the index build right after startup and keeps
+// the index refreshed.
 //
 // Two bounds make that safe to expose to a query parameter (AGENTS.md rule 0,
 // "no unbounded data structures"):
@@ -258,9 +259,9 @@ func (db *DB) nodeRegionKeysJSON(codes []string) (string, error) {
 // waits on) a stale index is refreshed first; without it (a caller is
 // waiting) any snapshot younger than nodeRegionMaxStale is cut at once and
 // the index refresh runs in the background (currentRegionIndex), and before
-// the first snapshot exists the set's own build races the index build
-// (coldNodeRegion). It runs
-// inside nodeRegionSF, so at most one refresh per key is in flight.
+// the first snapshot exists it waits for the index build, falling back to
+// the set's own build only if that fails (coldNodeRegion). It runs inside
+// nodeRegionSF, so at most one refresh per key is in flight.
 // Failures are logged here because a background refresh has no caller to
 // report to; the previous entry stays in place.
 func (db *DB) refreshNodeRegion(key string, codes []string, waitIndex bool) (*nodeRegionEntry, error) {
@@ -315,22 +316,11 @@ func (db *DB) maxObservationID(ctx context.Context) (int64, error) {
 	return wm, nil
 }
 
-// buildNodeRegionCold is the per-set build a request runs while the region
-// index has no snapshot yet (coldNodeRegion): the full scan every cold
-// region set ran before #618. These builds are serialised, as they were
-// then, so a burst of cold sets holds one pooled connection besides the
-// index build's. ctx ending means the build is no longer wanted: a build
-// still queued gives up, one already scanning finishes under the same
-// timeout as the index build rather than be interrupted (an interrupted
-// query costs its pooled connection).
+// buildNodeRegionCold is the per-set build a request falls back to when the
+// region index has no snapshot and its build failed (coldNodeRegion, which
+// serialises these builds under nodeRegionColdMu): the full scan every cold
+// region set ran before #618.
 func (db *DB) buildNodeRegionCold(ctx context.Context, codes []string) (*nodeRegionEntry, error) {
-	db.nodeRegionColdMu.Lock()
-	defer db.nodeRegionColdMu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return nil, err // the index build won while this one queued
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nodeRegionRebuildInterval)
-	defer cancel()
 	if db.nodeRegionPerSetHook != nil {
 		db.nodeRegionPerSetHook()
 	}
@@ -343,7 +333,7 @@ func (db *DB) buildNodeRegionCold(ctx context.Context, codes []string) (*nodeReg
 	if err := db.scanNodeRegionKeys(ctx, codes, wm, set); err != nil {
 		return nil, err
 	}
-	log.Printf("[nodes-region] %s: per-set build while the index warms up, %d nodes in %v (obs id <= %d)",
+	log.Printf("[nodes-region] %s: per-set build, the index build failed, %d nodes in %v (obs id <= %d)",
 		nodeRegionKey(codes), len(set), time.Since(start).Round(time.Millisecond), wm)
 	return newNodeRegionEntry(set, wm, time.Now(), start)
 }
