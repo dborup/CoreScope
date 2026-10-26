@@ -123,7 +123,7 @@ func (s *Store) submitChannelProposal(ctx context.Context, cmd channelregistry.C
 		// above — which is what makes resubmission idempotent across a
 		// crash-and-retry, the same way plain submit is idempotent via id.
 		res, err := tx.ExecContext(ctx,
-			`UPDATE channel_proposals SET status = 'pending', created_at = ?, reviewed_at = NULL WHERE id = ? AND status = 'revoked'`,
+			`UPDATE channel_proposals SET status = 'pending', created_at = ?, reviewed_at = NULL, approved_by = NULL WHERE id = ? AND status = 'revoked'`,
 			created, existing.ID)
 		if err != nil {
 			return channelregistry.Proposal{}, err
@@ -143,6 +143,7 @@ func (s *Store) submitChannelProposal(ctx context.Context, cmd channelregistry.C
 	}
 	status := channelregistry.StatusPending
 	var reviewedAt *int64
+	var approvedBy sql.NullString // NULL unless approved (#616)
 	if autoApprove {
 		var approved int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_proposals WHERE status = 'approved'`).Scan(&approved); err != nil {
@@ -153,10 +154,11 @@ func (s *Store) submitChannelProposal(ctx context.Context, cmd channelregistry.C
 		}
 		status = channelregistry.StatusApproved
 		reviewedAt = &nowMs
+		approvedBy = sql.NullString{String: channelregistry.ApprovedByAuto, Valid: true}
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO channel_proposals (id, name, status, created_at, reviewed_at) VALUES (?, ?, ?, ?, ?)`,
-		cmd.RequestID, name, status, created, reviewedAt); err != nil {
+		`INSERT INTO channel_proposals (id, name, status, created_at, reviewed_at, approved_by) VALUES (?, ?, ?, ?, ?, ?)`,
+		cmd.RequestID, name, status, created, reviewedAt, approvedBy); err != nil {
 		return channelregistry.Proposal{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -201,10 +203,16 @@ func (s *Store) reviewChannelProposal(ctx context.Context, id, source, target st
 		}
 	}
 	// reviewed_at is reused as "last status-change timestamp" for revoke too,
-	// same as it already is for approve/reject.
+	// same as it already is for approve/reject. Every decision here is an
+	// administrator's: approve records 'admin', reject and revoke clear
+	// approved_by (#616).
+	var approvedBy sql.NullString
+	if target == channelregistry.StatusApproved {
+		approvedBy = sql.NullString{String: channelregistry.ApprovedByAdmin, Valid: true}
+	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE channel_proposals SET status = ?, reviewed_at = ? WHERE id = ? AND status = ?`,
-		target, nowMs, id, source); err != nil {
+		`UPDATE channel_proposals SET status = ?, reviewed_at = ?, approved_by = ? WHERE id = ? AND status = ?`,
+		target, nowMs, approvedBy, id, source); err != nil {
 		return channelregistry.Proposal{}, err
 	}
 	if err := tx.Commit(); err != nil {

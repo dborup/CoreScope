@@ -2572,6 +2572,7 @@ func TestHealSchemaFlagsStopsOnceAllTrue(t *testing.T) {
 	db.hasLastSeenFlag.forceTrue()
 	db.hasRouteMaskFlag.forceTrue()
 	db.hasClientDeclaredRegionsFlag.forceTrue()
+	db.hasProposalApprovedByFlag.forceTrue()
 	db.schemaHealerStop = make(chan struct{})
 
 	done := make(chan struct{})

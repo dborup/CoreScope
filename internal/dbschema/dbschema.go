@@ -1259,11 +1259,72 @@ func ensureChannelProposalsTable(rw *sql.DB, logf Logger) error {
 	if _, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_channel_proposals_status ON channel_proposals(status, created_at)`); err != nil {
 		return fmt.Errorf("create idx_channel_proposals_status: %w", err)
 	}
+	return ensureChannelProposalsApprovedBy(rw, logf)
+}
+
+// autoApprovalWindowMs is how soon after its submission an approval counts as
+// the auto-approve policy when approved_by is inferred: auto-approval stamps
+// reviewed_at in the same command that inserts the row (reviewed_at -
+// created_at is the queue latency, well under a second), an administrator
+// needs at least the round trip through the review dialog.
+const autoApprovalWindowMs = 60000
+
+// approvedByColumnDDL is the approved_by column (#616): 'auto' or 'admin'
+// while approved, NULL otherwise. Written only by the ingestor
+// (cmd/ingestor/channel_proposals.go).
+const approvedByColumnDDL = `approved_by TEXT NULL CHECK(approved_by IN ('auto','admin'))`
+
+// ensureChannelProposalsApprovedBy adds channel_proposals.approved_by when it
+// is missing and classifies every approved row that has no value: those
+// approved before the column existed, and those an older ingestor approved
+// after a rollback (it does not know the column). The value is INFERRED from
+// the timestamps — under autoApprovalWindowMs between submission and approval
+// is 'auto', anything slower 'admin' — while the ingestor writes it exactly
+// from then on. Column and classification commit in one transaction, and a
+// second run finds nothing to do (no NULL approved rows) and logs nothing.
+//
+// Deliberately NOT part of AssertReady: like the table itself it is optional
+// for the server, which detects it through a self-healing schema flag
+// (cmd/server/db.go detectSchema), so a new server keeps working against a
+// database an older ingestor migrated, and an older server ignores it.
+func ensureChannelProposalsApprovedBy(rw *sql.DB, logf Logger) error {
+	tx, err := rw.Begin()
+	if err != nil {
+		return fmt.Errorf("begin channel_proposals.approved_by: %w", err)
+	}
+	defer tx.Rollback()
+	has, err := tableHasColumn(tx, "channel_proposals", "approved_by")
+	if err != nil {
+		return fmt.Errorf("probe channel_proposals.approved_by: %w", err)
+	}
+	if !has {
+		if _, err := tx.Exec(`ALTER TABLE channel_proposals ADD COLUMN ` + approvedByColumnDDL); err != nil {
+			return fmt.Errorf("add channel_proposals.approved_by: %w", err)
+		}
+	}
+	res, err := tx.Exec(`UPDATE channel_proposals
+		SET approved_by = CASE WHEN reviewed_at - created_at < ? THEN 'auto' ELSE 'admin' END
+		WHERE status = 'approved' AND approved_by IS NULL`, autoApprovalWindowMs)
+	if err != nil {
+		return fmt.Errorf("classify channel_proposals.approved_by: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("classify channel_proposals.approved_by: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit channel_proposals.approved_by: %w", err)
+	}
+	if !has || n > 0 {
+		logf("[dbschema] channel_proposals.approved_by: column added=%v, %d approved row(s) classified from timestamps (inferred)", !has, n)
+	}
 	return nil
 }
 
 // channelProposalsDDL is the current channel_proposals definition under the
 // given table name. status includes 'revoked' (an approval an admin undid).
+// approved_by (#616) is not part of it: ensureChannelProposalsApprovedBy adds
+// it to every table, new, old or rebuilt, so there is one path to test.
 func channelProposalsDDL(table string) string {
 	return `CREATE TABLE IF NOT EXISTS ` + table + ` (
 		id TEXT PRIMARY KEY,
