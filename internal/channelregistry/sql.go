@@ -115,8 +115,18 @@ func ListAllNames(ctx context.Context, db *sql.DB, limit int) ([]string, error) 
 
 // ListProposals returns proposals, newest first, optionally filtered by
 // status ("" for all). A missing table yields an empty result.
-func ListProposals(ctx context.Context, db *sql.DB, status string, limit int) ([]Proposal, error) {
-	query := `SELECT id, name, status, created_at, reviewed_at FROM channel_proposals`
+//
+// withApprovedBy also reads approved_by (#616) into Proposal.ApprovedBy. The
+// caller passes true only once it has seen the column (the server's schema
+// flag): an older ingestor's database does not have it. The value is
+// reported for approved rows only, so a stale one an older ingestor left
+// behind when it rejected or revoked the row never shows.
+func ListProposals(ctx context.Context, db *sql.DB, status string, limit int, withApprovedBy bool) ([]Proposal, error) {
+	query := `SELECT id, name, status, created_at, reviewed_at`
+	if withApprovedBy {
+		query += `, CASE WHEN status = 'approved' THEN approved_by END`
+	}
+	query += ` FROM channel_proposals`
 	args := []interface{}{}
 	if status != "" {
 		query += ` WHERE status = ?`
@@ -134,7 +144,7 @@ func ListProposals(ctx context.Context, db *sql.DB, status string, limit int) ([
 	defer rows.Close()
 	out := []Proposal{}
 	for rows.Next() {
-		p, err := scanProposal(rows)
+		p, err := scanProposal(rows, withApprovedBy)
 		if err != nil {
 			return nil, err
 		}
@@ -148,7 +158,7 @@ func ListProposals(ctx context.Context, db *sql.DB, status string, limit int) ([
 func GetProposal(ctx context.Context, db *sql.DB, id string) (p Proposal, found bool, err error) {
 	row := db.QueryRowContext(ctx,
 		`SELECT id, name, status, created_at, reviewed_at FROM channel_proposals WHERE id = ?`, id)
-	p, err = scanProposal(row)
+	p, err = scanProposal(row, false)
 	if err == sql.ErrNoRows || IsMissingTable(err) {
 		return Proposal{}, false, nil
 	}
@@ -162,15 +172,23 @@ type scanner interface {
 	Scan(dest ...interface{}) error
 }
 
-func scanProposal(s scanner) (Proposal, error) {
+// scanProposal reads the columns ListProposals and GetProposal select; with
+// withApprovedBy one more, approved_by, follows reviewed_at.
+func scanProposal(s scanner, withApprovedBy bool) (Proposal, error) {
 	var p Proposal
 	var reviewed sql.NullInt64
-	if err := s.Scan(&p.ID, &p.Name, &p.Status, &p.CreatedAt, &reviewed); err != nil {
+	var approvedBy sql.NullString
+	dest := []interface{}{&p.ID, &p.Name, &p.Status, &p.CreatedAt, &reviewed}
+	if withApprovedBy {
+		dest = append(dest, &approvedBy)
+	}
+	if err := s.Scan(dest...); err != nil {
 		return Proposal{}, err
 	}
 	if reviewed.Valid {
 		v := reviewed.Int64
 		p.ReviewedAt = &v
 	}
+	p.ApprovedBy = approvedBy.String
 	return p, nil
 }

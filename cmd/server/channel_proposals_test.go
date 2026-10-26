@@ -50,7 +50,7 @@ func newProposalServer(t *testing.T, apiKey string, pc *channelregistry.Config, 
 	cfg := &Config{Port: 3000, APIKey: apiKey, ChannelProposals: pc}
 	srv := NewServer(db, cfg, NewHub())
 	ps := &proposalServer{t: t, srv: srv, clock: time.UnixMilli(1_700_000_000_000)}
-	srv.proposals = newChannelProposalService(cfg, db.conn, filepath.Join(t.TempDir(), channelregistry.QueueDirName))
+	srv.proposals = newChannelProposalService(cfg, db.conn, filepath.Join(t.TempDir(), channelregistry.QueueDirName), db.hasProposalApprovedBy)
 	srv.proposals.now = func() time.Time { return ps.clock }
 	ps.svc = srv.proposals
 	ps.queue = srv.proposals.queue

@@ -268,7 +268,7 @@ func TestChannelProposalRetention(t *testing.T) {
 	}
 	f.runner.Prune(context.Background())
 	var names []string
-	got, err := channelregistry.ListProposals(context.Background(), f.store.db, "", 0)
+	got, err := channelregistry.ListProposals(context.Background(), f.store.db, "", 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestChannelProposalMissingTableReadsEmpty(t *testing.T) {
 	if n, err := f.runner.LoadApproved(context.Background()); err != nil || n != 0 {
 		t.Fatalf("LoadApproved on missing table = %d, %v", n, err)
 	}
-	list, err := channelregistry.ListProposals(context.Background(), f.store.db, "", 0)
+	list, err := channelregistry.ListProposals(context.Background(), f.store.db, "", 0, false)
 	if err != nil || len(list) != 0 {
 		t.Fatalf("ListProposals on missing table = %v, %v", list, err)
 	}
@@ -652,7 +652,7 @@ func TestChannelProposalResubmitAfterRevokeLandsPendingWithSameID(t *testing.T) 
 
 	// Replay of the exact same resubmission request (e.g. after a crash
 	// before its result was written) must be idempotent: same id, no new row.
-	pending, err := channelregistry.ListProposals(context.Background(), f.store.db, "", 0)
+	pending, err := channelregistry.ListProposals(context.Background(), f.store.db, "", 0, false)
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("listing before replay: %v, %v", pending, err)
 	}
@@ -792,7 +792,7 @@ func TestChannelProposalRevokeRetention(t *testing.T) {
 	}
 	f.runner.Prune(context.Background())
 	var names []string
-	got, err := channelregistry.ListProposals(context.Background(), f.store.db, "", 0)
+	got, err := channelregistry.ListProposals(context.Background(), f.store.db, "", 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}

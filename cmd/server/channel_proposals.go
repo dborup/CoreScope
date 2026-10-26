@@ -113,6 +113,9 @@ type channelProposalService struct {
 	queue   *channelregistry.Queue // nil when there is no database path
 	db      *sql.DB                // read-only; nil without a database
 	now     func() time.Time
+	// hasApprovedBy reports whether channel_proposals.approved_by exists
+	// (#616): the server's self-healing schema flag, nil without a database.
+	hasApprovedBy func() bool
 
 	rateMu sync.Mutex
 	recent []time.Time // accepted submissions in the last hour, oldest first
@@ -131,7 +134,7 @@ type channelProposalService struct {
 	builtin   *builtinNamesCache
 }
 
-func newChannelProposalService(cfg *Config, db *sql.DB, queueDir string) *channelProposalService {
+func newChannelProposalService(cfg *Config, db *sql.DB, queueDir string, hasApprovedBy func() bool) *channelProposalService {
 	var pc *channelregistry.Config
 	strongKey := false
 	if cfg != nil {
@@ -139,9 +142,10 @@ func newChannelProposalService(cfg *Config, db *sql.DB, queueDir string) *channe
 		strongKey = cfg.APIKey != "" && !IsWeakAPIKey(cfg.APIKey)
 	}
 	svc := &channelProposalService{
-		limits: pc.Limits(),
-		db:     db,
-		now:    time.Now,
+		limits:        pc.Limits(),
+		db:            db,
+		now:           time.Now,
+		hasApprovedBy: hasApprovedBy,
 	}
 	if queueDir != "" {
 		svc.queue = channelregistry.NewQueue(queueDir)
@@ -161,14 +165,16 @@ func (s *Server) channelProposals() *channelProposalService {
 			return
 		}
 		var conn *sql.DB
+		var hasApprovedBy func() bool
 		queueDir := ""
 		if s.db != nil {
 			conn = s.db.conn
+			hasApprovedBy = s.db.hasProposalApprovedBy
 			if s.db.path != "" {
 				queueDir = channelregistry.QueueDir(s.db.path)
 			}
 		}
-		s.proposals = newChannelProposalService(s.cfg, conn, queueDir)
+		s.proposals = newChannelProposalService(s.cfg, conn, queueDir, hasApprovedBy)
 	})
 	return s.proposals
 }
@@ -554,7 +560,8 @@ func (s *Server) handleAdminChannelProposals(w http.ResponseWriter, r *http.Requ
 	resp := ChannelProposalListResponse{Proposals: []AdminChannelProposal{}, Enabled: p.enabled}
 	if p.db != nil {
 		limit := p.limits.MaxPending + p.limits.MaxApproved + p.limits.MaxQueuedRequests
-		list, err := channelregistry.ListProposals(r.Context(), p.db, status, limit)
+		withApprovedBy := p.hasApprovedBy != nil && p.hasApprovedBy()
+		list, err := channelregistry.ListProposals(r.Context(), p.db, status, limit, withApprovedBy)
 		if err != nil {
 			log.Printf("[channel-proposals] admin list failed: %v", err)
 			writeError(w, http.StatusInternalServerError, "could not list suggestions")

@@ -298,8 +298,35 @@
     state.suggestShow = show;
   }
 
-  // ── Admin dialog (#/channels?view=proposals) ───────────────────────────
-  var FILTERS = [['pending', 'Pending'], ['approved', 'Approved'], ['rejected', 'Rejected'], ['revoked', 'Revoked']];
+  // ── Admin dialog (#/channels?view=proposals[&filter=…]) ────────────────
+  // [key, label]. The first four are server statuses; 'auto' (#616) is the
+  // approved list narrowed client-side to approvedBy === 'auto' (bounded by
+  // maxApproved, so no extra endpoint).
+  var FILTERS = [['pending', 'Pending'], ['approved', 'Approved'], ['rejected', 'Rejected'], ['revoked', 'Revoked'],
+    ['auto', 'Auto-approved']];
+  var APPROVED_BY_NOTE = {
+    auto: 'Approved automatically by the auto-approve policy',
+    admin: 'Approved by an administrator'
+  };
+
+  // A filter key from the URL, or 'pending' for anything unknown.
+  function parseFilter(v) {
+    for (var i = 0; i < FILTERS.length; i++) if (FILTERS[i][0] === v) return v;
+    return 'pending';
+  }
+  function filterStatus(filter) { return filter === 'auto' ? 'approved' : filter; }
+  function filterProposals(items, filter) {
+    if (filter !== 'auto') return items;
+    return items.filter(function (p) { return p.status === 'approved' && p.approvedBy === 'auto'; });
+  }
+  function filterLabel(filter) {
+    for (var i = 0; i < FILTERS.length; i++) if (FILTERS[i][0] === filter) return FILTERS[i][1];
+    return filter;
+  }
+  // Deep link of the dialog; the default filter keeps the plain link.
+  function proposalsHash(filter) {
+    return '#/channels?view=proposals' + (filter && filter !== 'pending' ? '&filter=' + encodeURIComponent(filter) : '');
+  }
 
   function adminEl() { return document.getElementById('chProposalsAdmin'); }
   function confirmEl() { return document.getElementById('chProposalsConfirm'); }
@@ -402,11 +429,11 @@
     if (!list) return;
     list.setAttribute('aria-busy', 'true');
     var filter = state.adminFilter;
-    request('GET', '/admin/channel-proposals?status=' + encodeURIComponent(filter), { admin: true }).then(function (data) {
+    request('GET', '/admin/channel-proposals?status=' + encodeURIComponent(filterStatus(filter)), { admin: true }).then(function (data) {
       if (!state || state.adminFilter !== filter || !document.getElementById('chProposalsList')) return;
-      var items = (data && Array.isArray(data.proposals)) ? data.proposals : [];
+      var items = filterProposals((data && Array.isArray(data.proposals)) ? data.proposals : [], filter);
       list.innerHTML = items.length ? items.map(renderAdminRow).join('') :
-        '<li class="ch-proposals-empty">No ' + esc(filter) + ' suggestions.</li>';
+        '<li class="ch-proposals-empty">No ' + esc(filterLabel(filter).toLowerCase()) + ' suggestions.</li>';
       list.setAttribute('aria-busy', 'false');
       if (data && data.enabled === false && filter === 'pending') {
         adminStatus('Public suggestions are currently closed; existing ones can still be reviewed.', 'info');
@@ -430,7 +457,7 @@
       // Approved rows additionally get a Remove (revoke) action, guarded by
       // a confirmation step (see openConfirm) before anything is sent.
       actions = '<div class="ch-proposals-actions">' +
-          '<span class="ch-proposals-state" data-state="approved">approved</span>' +
+          '<span class="ch-proposals-state" data-state="approved">approved</span>' + renderApprovedBy(p) +
           '<button type="button" class="ch-modal-btn-secondary ch-proposals-remove" data-proposals-decide="revoke"' +
           ' data-proposal-id="' + esc(p.id) + '" data-proposal-name="' + esc(p.name) + '"' +
           (p.builtIn === true ? ' data-proposal-builtin="true"' : '') +
@@ -448,6 +475,15 @@
     return '<li class="ch-proposals-item" data-proposal-id="' + esc(p.id) + '"' + (p.builtIn === true ? ' data-builtin="true"' : '') + '>' +
       '<div class="ch-proposals-main"><span class="ch-proposals-name">' + esc(p.name) + '</span>' + builtin + renderNearDuplicate(p) +
       '<span class="ch-proposals-meta">' + when + '</span></div>' + actions + '</li>';
+  }
+
+  // "auto" / "admin" badge of an approved row (#616). Only the two known
+  // values render, and only as constant markup: nothing from the field
+  // itself reaches the HTML.
+  function renderApprovedBy(p) {
+    var by = p.status === 'approved' && Object.prototype.hasOwnProperty.call(APPROVED_BY_NOTE, p.approvedBy) ? p.approvedBy : '';
+    if (!by) return '';
+    return '<span class="ch-proposals-by" data-approved-by="' + by + '" title="' + APPROVED_BY_NOTE[by] + '">' + by + '</span>';
   }
 
   // Other proposals / built-in names that differ from p only by letter case.
@@ -616,6 +652,8 @@
         b.setAttribute('aria-pressed', b === f ? 'true' : 'false');
       });
       adminStatus('');
+      // Keep the deep link in step without re-running the page's init.
+      if (/[?&]view=proposals\b/.test(location.hash)) history.replaceState(null, '', proposalsHash(state.adminFilter));
       loadAdminList();
       return;
     }
@@ -677,7 +715,7 @@
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
-  // mount({root, suggestSection, view, onApproved, onRevoked}) is called from the
+  // mount({root, suggestSection, view, filter, onApproved, onRevoked}) is called from the
   // Channels page init; unmount() from its destroy, which also stops polling.
   function mount(opts) {
     unmount();
@@ -687,7 +725,7 @@
       onRevoked: opts.onRevoked,
       notifiedApprovals: new Set(),
       cleanups: [],
-      adminFilter: 'pending'
+      adminFilter: parseFilter(opts.filter)
     };
     state.suggestPoller = createPoller({
       fetchStatus: statusOf,
@@ -732,6 +770,10 @@
     MAX_NAME_BYTES: MAX_NAME_BYTES,
     MAX_POLL_ATTEMPTS: MAX_POLL_ATTEMPTS,
     FILTERS: FILTERS,
+    parseFilter: parseFilter,
+    filterStatus: filterStatus,
+    filterProposals: filterProposals,
+    proposalsHash: proposalsHash,
     GO_SPACE_CODEPOINTS: GO_SPACE_CODEPOINTS,
     trimGoSpace: trimGoSpace,
     normalizeName: normalizeName,

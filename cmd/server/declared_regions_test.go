@@ -220,7 +220,7 @@ func TestHealSchemaFlagsLatchesDeclaredRegionsTable(t *testing.T) {
 	mustExecDB(t, db, declaredRegionsDDL)
 	for _, f := range []*schemaFlag{&db.isV3Flag, &db.hasResolvedPathFlag, &db.hasObsRawHexFlag, &db.hasScopeNameFlag,
 		&db.hasDefaultScopeFlag, &db.hasConfiguredScopeFlag, &db.hasDefaultScopeConfirmedAtFlag,
-		&db.hasMultibyteSupColsFlag, &db.hasLastSeenFlag, &db.hasRouteMaskFlag} {
+		&db.hasMultibyteSupColsFlag, &db.hasLastSeenFlag, &db.hasRouteMaskFlag, &db.hasProposalApprovedByFlag} {
 		f.forceTrue()
 	}
 	db.schemaHealerStop = make(chan struct{})

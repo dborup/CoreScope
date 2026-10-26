@@ -1279,6 +1279,7 @@
         root: app,
         suggestSection: document.getElementById('chSuggestSection'),
         view: _initUrlParams.get('view'),
+        filter: _initUrlParams.get('filter'),
         // Called once per approval, from the admin decision or, with
         // auto-approval, from the suggest form's poller (#232).
         onApproved: refreshChannelList,

@@ -16,6 +16,14 @@ func ValidStatus(s string) bool {
 	return s == StatusPending || s == StatusApproved || s == StatusRejected || s == StatusRevoked
 }
 
+// Who approved a channel, as stored in channel_proposals.approved_by (#616).
+// NULL while the proposal is not approved. Values from before the column
+// existed are inferred from the timestamps (see internal/dbschema).
+const (
+	ApprovedByAuto  = "auto"  // the autoApprove policy approved a new name
+	ApprovedByAdmin = "admin" // an administrator approved it
+)
+
 // Request states reported by GET /api/channel-proposals/requests/{id}.
 // "queued" means the ingestor has not picked the request up yet; the other
 // states are the outcome it wrote back.
@@ -48,6 +56,10 @@ type Proposal struct {
 	Status     string `json:"status"`
 	CreatedAt  int64  `json:"createdAt"`
 	ReviewedAt *int64 `json:"reviewedAt,omitempty"`
+	// ApprovedBy is ApprovedByAuto or ApprovedByAdmin for an approved
+	// proposal, read only where the caller asks for it (ListProposals) and
+	// the column exists; empty otherwise.
+	ApprovedBy string `json:"approvedBy,omitempty"`
 }
 
 // Command is what the server writes into the queue. For OpSubmit, Name is set

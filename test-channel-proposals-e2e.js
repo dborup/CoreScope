@@ -562,6 +562,65 @@ async function main() {
       assert.ok(!pendingNames.includes(AUTO_NAME), 'new auto-approved suggestion remains pending');
     });
 
+    // #616: who approved a channel. AUTO_NAME was auto-approved above; an
+    // admin now approves NAME's pending re-suggestion.
+    await step('#616: the admin list reports approvedBy auto and admin', async () => {
+      const adminHeaders = { 'X-API-Key': API_KEY };
+      const pending = await (await fetch(env.base + '/api/admin/channel-proposals?status=pending', { headers: adminHeaders })).json();
+      const row = (pending.proposals || []).find((p) => p.name === NAME);
+      assert.ok(row, 'NAME must be pending before the admin approval');
+      const res = await fetch(env.base + '/api/admin/channel-proposals/' + row.id + '/approve', { method: 'POST', headers: adminHeaders });
+      assert.strictEqual(res.status, 202);
+      const by = await waitFor('admin approval applied', async () => {
+        const list = await (await fetch(env.base + '/api/admin/channel-proposals?status=approved', { headers: adminHeaders })).json();
+        const m = {};
+        for (const p of list.proposals || []) m[p.name] = p.approvedBy;
+        return m[NAME] ? m : null;
+      });
+      assert.strictEqual(by[NAME], 'admin');
+      assert.strictEqual(by[AUTO_NAME], 'auto');
+    });
+
+    const autoRow = `.ch-proposals-item:has(.ch-proposals-name:text-is("${AUTO_NAME}"))`;
+    const adminRow = `.ch-proposals-item:has(.ch-proposals-name:text-is("${NAME}"))`;
+    await step('#616: filter=auto deep link shows only auto-approved channels with an auto badge', async () => {
+      const page = await ctxAdmin.newPage();
+      page.setDefaultTimeout(TIMEOUT);
+      watch(page, 'admin616');
+      await page.goto(env.base + '/#/channels?view=proposals&filter=auto');
+      await page.waitForSelector('#chProposalsKey');
+      await page.fill('#chProposalsKey', API_KEY);
+      await page.keyboard.press('Enter');
+      await page.waitForSelector(autoRow + ' .ch-proposals-by[data-approved-by="auto"]');
+      assert.strictEqual(await page.locator(adminRow).count(), 0, 'an admin-approved channel is listed under Auto-approved');
+      assert.strictEqual(await page.getAttribute('[data-proposals-filter="auto"]', 'aria-pressed'), 'true');
+      assert.strictEqual(await page.evaluate(() => location.hash), '#/channels?view=proposals&filter=auto');
+      await page.click('[data-proposals-filter="approved"]');
+      await page.waitForSelector(adminRow + ' .ch-proposals-by[data-approved-by="admin"]');
+      await page.waitForSelector(autoRow + ' .ch-proposals-by[data-approved-by="auto"]');
+      assert.strictEqual(await page.evaluate(() => location.hash), '#/channels?view=proposals&filter=approved');
+      await page.click('[data-proposals-filter="auto"]');
+      await page.waitForSelector(adminRow, { state: 'detached' });
+      assert.strictEqual(await page.evaluate(() => location.hash), '#/channels?view=proposals&filter=auto');
+      await page.close();
+    });
+
+    await step('#616: mobile: the Auto-approved filter and badge fit 390px', async () => {
+      await pageMobile.goto(env.base + '/#/channels');
+      await pageMobile.goto(env.base + '/#/channels?view=proposals&filter=auto');
+      await pageMobile.reload();
+      await pageMobile.waitForSelector('#chProposalsKey');
+      await pageMobile.fill('#chProposalsKey', API_KEY);
+      await pageMobile.tap('#chProposalsKeyForm button[type="submit"]');
+      await pageMobile.waitForSelector(autoRow + ' .ch-proposals-by[data-approved-by="auto"]');
+      const overflow = await pageMobile.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      assert.ok(overflow <= 0, 'horizontal overflow ' + overflow + 'px');
+      for (const sel of ['[data-proposals-filter="auto"]', autoRow + ' .ch-proposals-by']) {
+        const box = await pageMobile.locator(sel).boundingBox();
+        assert.ok(box && box.x >= 0 && box.x + box.width <= 390, sel + ' exceeds the viewport: ' + JSON.stringify(box));
+      }
+    });
+
     await step('no uncaught page errors', async () => {
       assert.deepStrictEqual(pageErrors, []);
     });
