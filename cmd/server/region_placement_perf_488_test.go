@@ -153,11 +153,12 @@ func TestPerf_RegionPlacementM2Generate_488(t *testing.T) {
 }
 
 // TestPerf_RegionPlacementM2_488 times, on one database, medians of 7:
-//   - heard: cold build of every region (each set scans separately), warm
+//   - heard: cold build of every region (one shared index since #618), warm
 //     hit, delta refresh over the last N observations;
 //   - placed: cold global aggregate + placements serving every region,
 //     placement-only recompute, delta scan + merge + recompute, warm hit;
-//   - heap of the four heard entries vs the aggregate and its snapshot.
+//   - heap of the heard index and its entries vs the placement aggregate
+//     and its snapshot.
 func TestPerf_RegionPlacementM2_488(t *testing.T) {
 	path := os.Getenv("CORESCOPE_PERF_488_DB")
 	if path == "" {
@@ -229,13 +230,15 @@ func rpm2PerfReport(t *testing.T, path string, deltaRows int64) {
 		db.nodeRegionCache, db.nodeRegionUsed = nil, nil
 		db.nodeRegionCacheMu.Unlock()
 	}
-	clearPlaced := func() {
+	clearIndex := func(ix *regionIndex) {
 		clearEntries()
-		db.regionAggMu.Lock()
-		db.regionAgg = nil
-		db.regionAggMu.Unlock()
-		db.regionSnap.Store(nil)
+		ix.mu.Lock()
+		ix.agg = nil
+		ix.mu.Unlock()
+		ix.snap.Store(nil)
 	}
+	clearHeard := func() { clearIndex(&db.regionHeard) }
+	clearPlaced := func() { clearIndex(&db.regionPlaced) }
 	serveAll := func() {
 		for _, r := range regions {
 			if _, err := db.nodeRegionKeysJSON([]string{r}); err != nil {
@@ -246,40 +249,45 @@ func rpm2PerfReport(t *testing.T, path string, deltaRows int64) {
 
 	// heard (today)
 	db.regionPlacement = regionPlacementSettings{Mode: regionModeHeard, Params: defaultRegionPlacementParams}
-	heardCold := rpm2Median(func() { clearEntries(); serveAll() })
+	heardCold := rpm2Median(func() { clearHeard(); serveAll() })
 	heardWarm := rpm2Median(serveAll)
+	// #618: every region is cut from one heard index, so a delta is one
+	// scan past the index's watermark for all of them.
 	heardDelta := rpm2Median(func() {
+		db.regionHeard.mu.Lock()
+		db.regionHeard.agg.watermark = lo
+		db.regionHeard.mu.Unlock()
+		ageRegionIndex(&db.regionHeard, 2*nodeRegionFreshTTL, 0)
 		for _, r := range regions {
 			key := nodeRegionKey([]string{r})
 			e := *db.getNodeRegionEntry(key)
-			e.watermark, e.refreshed = lo, time.Now().Add(-2*nodeRegionFreshTTL)
+			e.refreshed = time.Now().Add(-2 * nodeRegionFreshTTL)
 			db.setNodeRegionEntry(key, &e)
-			if _, err := db.refreshNodeRegion(key, []string{r}); err != nil {
+			if _, err := db.refreshNodeRegion(key, []string{r}, true); err != nil {
 				t.Fatal(err)
 			}
 		}
 	})
 	heardAdvScan := rpm2Median(func() {
-		for _, r := range regions {
-			if _, err := db.scanNodeRegionKeys(ctx, []string{r}, advLo, advHi, true, map[string]struct{}{}); err != nil {
-				t.Fatal(err)
-			}
+		if _, err := db.scanHeardRegions(ctx, advLo, advHi, true, newRegionEvidenceAgg()); err != nil {
+			t.Fatal(err)
 		}
 	})
-	clearEntries()
+	clearHeard()
 	h0 := rpm2Heap()
 	serveAll()
 	heardHeap := int64(rpm2Heap()) - int64(h0)
-	clearEntries()
+	clearHeard()
 
 	// placed
 	rpm2SetPlaced(db, defaultRegionPlacementParams)
 	placedCold := rpm2Median(func() { clearPlaced(); serveAll() })
 	placedWarm := rpm2Median(serveAll)
-	db.regionAggMu.Lock()
-	agg := db.regionAgg
-	db.regionAggMu.Unlock()
-	placeOnly := rpm2Median(func() { newRegionPlacementSnapshot(agg, defaultRegionPlacementParams, time.Now()) })
+	db.regionPlaced.mu.Lock()
+	agg := db.regionPlaced.agg
+	db.regionPlaced.mu.Unlock()
+	placedSpec := db.placedRegionSpec()
+	placeOnly := rpm2Median(func() { newRegionMembershipSnapshot(agg, placedSpec, time.Now()) })
 	// The delta re-folds the same tail rows each run: the stats merge by
 	// min/max, so the placement work is the same as for new rows.
 	placedDeltaOver := func(lo, hi int64) time.Duration {
@@ -289,9 +297,9 @@ func rpm2PerfReport(t *testing.T, path string, deltaRows int64) {
 				t.Fatal(err)
 			}
 			agg.merge(d)
-			snap := newRegionPlacementSnapshot(agg, defaultRegionPlacementParams, time.Now())
+			snap := newRegionMembershipSnapshot(agg, placedSpec, time.Now())
 			for _, r := range regions {
-				if _, err := newNodeRegionEntry(snap.members([]string{r}), hi, time.Now()); err != nil {
+				if _, err := snap.entry([]string{r}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -307,7 +315,7 @@ func rpm2PerfReport(t *testing.T, path string, deltaRows int64) {
 	placedHeap := int64(rpm2Heap()) - int64(h1)
 
 	t.Logf("%s: %d observations, %d regions, %d nodes, %d (node, region) pairs", filepath.Base(path), wm, len(regions), nodes, pairs)
-	t.Logf("heard  cold %v | warm %v | delta refresh, newest %d obs %v | delta scan, %d advert obs %v | heap %d KiB",
+	t.Logf("heard  cold %v | warm %v | delta refresh, newest %d obs %v | delta scan, %d advert obs %v (all regions, one scan) | heap %d KiB",
 		heardCold.Round(time.Microsecond), heardWarm, deltaRows, heardDelta.Round(time.Microsecond),
 		deltaRows, heardAdvScan.Round(time.Microsecond), heardHeap/1024)
 	t.Logf("placed cold %v | warm %v | delta scan+merge+placement+entries, newest %d obs %v, %d advert obs %v | placement only %v | heap %d KiB",

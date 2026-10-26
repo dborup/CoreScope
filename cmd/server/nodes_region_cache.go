@@ -23,18 +23,27 @@ import (
 // each evaluation took ~10s, and fetchAllNodes() pages at 500, so a single
 // open Nodes or Map tab kept a 2-vCPU host busy.
 //
-// Membership only grows as observations arrive, so it is cached per region
-// set with an observations.id watermark:
+// Since #618 an entry is cut from the global heard index (region_index.go):
+// one shared scan of the observation history grouped by observer IATA, so a
+// region set is the union of its codes' member lists, not a full scan of its
+// own. Entries keep their ages and the stale-while-revalidate contract:
 //   - fresh (< nodeRegionFreshTTL): served as-is;
-//   - stale: served as-is while ONE background refresh scans only
-//     observations with id > watermark (a rowid range, milliseconds);
-//   - every nodeRegionRebuildInterval the refresh is a full rebuild instead,
-//     so retention pruning, observer IATA changes and late from_pubkey
-//     backfills are picked up.
+//   - stale: served as-is while ONE background refresh re-cuts it from the
+//     index, refreshing the index first — a delta scan of observations with
+//     id > watermark (a rowid range, milliseconds);
+//   - every nodeRegionRebuildInterval the index refresh is a full rebuild
+//     instead, so retention pruning, observer IATA changes and late
+//     from_pubkey backfills are picked up.
 //
-// Only the first request for a region set waits on a full scan, and
-// concurrent first requests share it (the #1910 singleflight pattern, as
-// channelsSF).
+// An entry carries the ages of the snapshot it was cut from, so those are
+// the ages of the data. A request that has to wait for an entry (a new
+// region set, or one past nodeRegionMaxStale) is cut from any snapshot
+// younger than nodeRegionMaxStale at once. Only a cold start waits — for
+// the index's first build, which the warmer already has in flight, or the
+// set's own per-set build if that index build fails — and concurrent
+// requests share it (the #1910 singleflight pattern, as channelsSF).
+// StartRegionIndexWarmer runs the index build right after startup and keeps
+// the index refreshed.
 //
 // Two bounds make that safe to expose to a query parameter (AGENTS.md rule 0,
 // "no unbounded data structures"):
@@ -45,6 +54,10 @@ import (
 //   - an entry older than nodeRegionMaxStale is not served blind: the caller
 //     waits for its refresh, so the ages promised above are the ages
 //     actually served even when refreshes keep failing.
+//
+// The index itself is bounded by the distinct (node, region) pairs in the
+// retained history: a few thousand nodes times the regions each was heard
+// in, never by the number of hearings.
 
 const (
 	nodeRegionFreshTTL        = 30 * time.Second
@@ -63,11 +76,11 @@ const (
 	// nodeRegionMaxStale bounds the age of a served entry. Below it a stale
 	// entry is served while one refresh runs in the background — the fast
 	// path every page uses. At or above it the caller waits for the refresh,
-	// which is a full rebuild at this age, so the documented bounds hold:
-	// without the wait a refresh that keeps failing serves membership of
-	// unbounded age with only a log line to show it. The cost is that the
-	// first region request after nodeRegionMaxStale with no region traffic
-	// pays one full scan, exactly as a cold start does.
+	// so the documented bounds hold: without the wait a refresh that keeps
+	// failing serves membership of unbounded age with only a log line to
+	// show it. The wait is a re-cut from the index, which the warmer keeps
+	// younger than this; only an index that is itself this old (its
+	// refreshes failing) makes the caller wait for a scan.
 	nodeRegionMaxStale = nodeRegionRebuildInterval
 )
 
@@ -78,23 +91,19 @@ var errNodeRegionFlightResult = errors.New("unexpected node region flight result
 // nodeRegionEntry is immutable once stored: refreshes build a new entry, so
 // readers can use one without holding nodeRegionCacheMu.
 type nodeRegionEntry struct {
-	keys      []string // sorted from_pubkeys heard in the region set
+	keys      []string // sorted from_pubkeys that are members of the region set
 	keysJSON  string   // keys as a JSON array, bound to json_each(?)
 	watermark int64    // max observations.id covered by keys
 	refreshed time.Time
-	built     time.Time // last full rebuild
+	built     time.Time // the index's last full rebuild
 }
 
 func (e *nodeRegionEntry) fresh() bool {
 	return time.Since(e.refreshed) < nodeRegionFreshTTL
 }
 
-func (e *nodeRegionEntry) rebuildDue() bool {
-	return time.Since(e.built) >= nodeRegionRebuildInterval
-}
-
 // newNodeRegionEntry snapshots set into an entry.
-func newNodeRegionEntry(set map[string]struct{}, watermark int64, built time.Time) (*nodeRegionEntry, error) {
+func newNodeRegionEntry(set map[string]struct{}, watermark int64, refreshed, built time.Time) (*nodeRegionEntry, error) {
 	keys := make([]string, 0, len(set))
 	for k := range set {
 		keys = append(keys, k)
@@ -108,7 +117,7 @@ func newNodeRegionEntry(set map[string]struct{}, watermark int64, built time.Tim
 		keys:      keys,
 		keysJSON:  string(buf),
 		watermark: watermark,
-		refreshed: time.Now(),
+		refreshed: refreshed,
 		built:     built,
 	}, nil
 }
@@ -210,16 +219,16 @@ func (db *DB) nodeRegionKeysJSON(codes []string) (string, error) {
 			// DoChan dedups against an in-flight refresh for the same key,
 			// and its buffered result channel may be left unread.
 			db.nodeRegionSF.DoChan(key, func() (any, error) {
-				return db.refreshNodeRegion(key, codes)
+				return db.refreshNodeRegion(key, codes, true)
 			})
 			return e.keysJSON, nil
 		}
 		// Past nodeRegionMaxStale the entry is too old to serve blind, so
-		// wait for the refresh (a full rebuild at this age). A refresh that
-		// fails still falls back to the stale entry: an outage of the
-		// observation scan must not turn /api/nodes?region= into a 500.
+		// wait for a re-cut from the index. A refresh that fails still falls
+		// back to the stale entry: an outage of the observation scan must
+		// not turn /api/nodes?region= into a 500.
 		v, err, _ := db.nodeRegionSF.Do(key, func() (any, error) {
-			return db.refreshNodeRegion(key, codes)
+			return db.refreshNodeRegion(key, codes, false)
 		})
 		if err != nil {
 			log.Printf("[nodes-region] %s: serving entry %v old, refresh failed: %v",
@@ -233,7 +242,7 @@ func (db *DB) nodeRegionKeysJSON(codes []string) (string, error) {
 	}
 
 	v, err, _ := db.nodeRegionSF.Do(key, func() (any, error) {
-		return db.refreshNodeRegion(key, codes)
+		return db.refreshNodeRegion(key, codes, false)
 	})
 	if err != nil {
 		return "", err
@@ -245,12 +254,17 @@ func (db *DB) nodeRegionKeysJSON(codes []string) (string, error) {
 	return e.keysJSON, nil
 }
 
-// refreshNodeRegion brings the cache entry for key up to date and stores it:
-// a delta scan past the watermark when an entry exists and is not due a
-// rebuild, a full scan otherwise. It runs inside nodeRegionSF, so at most one
-// refresh per key is in flight. Failures are logged here because a background
-// refresh has no caller to report to; the previous entry stays in place.
-func (db *DB) refreshNodeRegion(key string, codes []string) (*nodeRegionEntry, error) {
+// refreshNodeRegion re-cuts the cache entry for key from the active region
+// index and stores it. With waitIndex (a background refresh, which nobody
+// waits on) a stale index is refreshed first; without it (a caller is
+// waiting) any snapshot younger than nodeRegionMaxStale is cut at once and
+// the index refresh runs in the background (currentRegionIndex), and before
+// the first snapshot exists it waits for the index build, falling back to
+// the set's own build only if that fails (coldNodeRegion). It runs inside
+// nodeRegionSF, so at most one refresh per key is in flight.
+// Failures are logged here because a background refresh has no caller to
+// report to; the previous entry stays in place.
+func (db *DB) refreshNodeRegion(key string, codes []string, waitIndex bool) (*nodeRegionEntry, error) {
 	prev := db.getNodeRegionEntry(key)
 	if prev != nil && prev.fresh() {
 		return prev, nil // a flight that finished just before this one got here
@@ -266,17 +280,16 @@ func (db *DB) refreshNodeRegion(key string, codes []string) (*nodeRegionEntry, e
 	ctx, cancel := context.WithTimeout(context.Background(), nodeRegionRebuildInterval)
 	defer cancel()
 
+	ix, spec := db.activeRegionIndex()
 	var e *nodeRegionEntry
 	var err error
-	switch {
-	case db.regionPlacement.Mode == regionModePlaced:
-		// #488 M2: cut from the global placement aggregate, which keeps its
-		// own watermark and rebuild clock (region_placement.go).
-		e, err = db.placedNodeRegion(ctx, codes)
-	case prev == nil || prev.rebuildDue():
-		e, err = db.buildNodeRegion(ctx, key, codes)
-	default:
-		e, err = db.extendNodeRegion(ctx, key, codes, prev)
+	if !waitIndex && spec.perSet != nil && ix.snap.Load() == nil {
+		e, err = db.coldNodeRegion(ctx, ix, spec, codes)
+	} else {
+		var s *regionMembershipSnapshot
+		if s, err = db.currentRegionIndex(ctx, ix, spec, waitIndex); err == nil {
+			e, err = s.entry(codes)
+		}
 	}
 	if err != nil {
 		err = fmt.Errorf("nodes-region %s: %w", key, err)
@@ -285,60 +298,6 @@ func (db *DB) refreshNodeRegion(key string, codes []string) (*nodeRegionEntry, e
 	}
 	db.setNodeRegionEntry(key, e)
 	return e, nil
-}
-
-// buildNodeRegion scans the full observation history for the region set.
-// Full builds are serialised across region sets: each holds a pooled
-// connection for seconds on a large database, and entries built together at
-// startup fall due together.
-func (db *DB) buildNodeRegion(ctx context.Context, key string, codes []string) (*nodeRegionEntry, error) {
-	db.nodeRegionFullMu.Lock()
-	defer db.nodeRegionFullMu.Unlock()
-
-	wm, err := db.maxObservationID(ctx)
-	if err != nil {
-		return nil, err
-	}
-	start := time.Now()
-	set := make(map[string]struct{})
-	if _, err := db.scanNodeRegionKeys(ctx, codes, 0, wm, false, set); err != nil {
-		return nil, err
-	}
-	log.Printf("[nodes-region] %s: full build, %d nodes in %v (obs id <= %d)",
-		key, len(set), time.Since(start).Round(time.Millisecond), wm)
-	return newNodeRegionEntry(set, wm, start)
-}
-
-// extendNodeRegion adds nodes heard since prev's watermark.
-func (db *DB) extendNodeRegion(
-	ctx context.Context, key string, codes []string, prev *nodeRegionEntry,
-) (*nodeRegionEntry, error) {
-	wm, err := db.maxObservationID(ctx)
-	if err != nil {
-		return nil, err
-	}
-	set := make(map[string]struct{}, len(prev.keys))
-	for _, k := range prev.keys {
-		set[k] = struct{}{}
-	}
-	start := time.Now()
-	added := 0
-	if wm > prev.watermark {
-		added, err = db.scanNodeRegionKeys(ctx, codes, prev.watermark, wm, true, set)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if added == 0 {
-		// Same membership: keep the encoded keys, advance the watermark.
-		e := *prev
-		e.watermark = max(wm, prev.watermark)
-		e.refreshed = time.Now()
-		return &e, nil
-	}
-	log.Printf("[nodes-region] %s: +%d nodes from obs %d..%d in %v",
-		key, added, prev.watermark+1, wm, time.Since(start).Round(time.Millisecond))
-	return newNodeRegionEntry(set, wm, prev.built)
 }
 
 // maxObservationID pins the upper bound of a scan. The ingestor is the single
@@ -357,91 +316,70 @@ func (db *DB) maxObservationID(ctx context.Context) (int64, error) {
 	return wm, nil
 }
 
+// buildNodeRegionCold is the per-set build a request falls back to when the
+// region index has no snapshot and its build failed (coldNodeRegion, which
+// serialises these builds under nodeRegionColdMu): the full scan every cold
+// region set ran before #618.
+func (db *DB) buildNodeRegionCold(ctx context.Context, codes []string) (*nodeRegionEntry, error) {
+	if db.nodeRegionPerSetHook != nil {
+		db.nodeRegionPerSetHook()
+	}
+	wm, err := db.maxObservationID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	start := time.Now()
+	set := make(map[string]struct{})
+	if err := db.scanNodeRegionKeys(ctx, codes, wm, set); err != nil {
+		return nil, err
+	}
+	log.Printf("[nodes-region] %s: per-set build, the index build failed, %d nodes in %v (obs id <= %d)",
+		nodeRegionKey(codes), len(set), time.Since(start).Round(time.Millisecond), wm)
+	return newNodeRegionEntry(set, wm, time.Now(), start)
+}
+
 // scanNodeRegionKeys adds to set every ADVERT from_pubkey observed by an
-// observer in codes with lo < observations.id <= hi, returning how many were
-// new. For a delta scan the join order is forced (CROSS JOIN) to drive from
-// the observations rowid range; left to the planner, sqlite_stat1 (#2058)
-// makes it start from the region's observers and walk their whole history.
-func (db *DB) scanNodeRegionKeys(
-	ctx context.Context, codes []string, lo, hi int64, delta bool, set map[string]struct{},
-) (int, error) {
+// observer in codes with 0 < observations.id <= hi: the heard rule for one
+// region set, as master built it, left to the planner, which can drive it
+// from the set's own observers. Keep both id bounds: without the lower one
+// the planner walks observations by rowid instead (2.5x slower on the #176
+// perf database). Only fixed fragments and "?" placeholders are formatted
+// in; every value is bound. scanHeardRegions carries the from_pubkey
+// contract.
+func (db *DB) scanNodeRegionKeys(ctx context.Context, codes []string, hi int64, set map[string]struct{}) error {
 	placeholders := make([]string, len(codes))
 	args := []any{payloadTypeAdvert}
 	for i, c := range codes {
 		placeholders[i] = "?"
 		args = append(args, c)
 	}
-	args = append(args, lo, hi)
-
+	args = append(args, int64(0), hi)
 	joinCond := "obs.rowid = o.observer_idx"
 	if !db.isV3() {
 		joinCond = "obs.id = o.observer_id"
 	}
-	join := "JOIN"
-	if delta {
-		join = "CROSS JOIN"
-	}
-	// Only fixed fragments and "?" placeholders are formatted in; every value
-	// is bound.
-	//
-	// #1143 / PR #38: from_pubkey is a dedicated column the ingestor fills at
-	// write time for ADVERT rows, so this lookup does not have to
-	// JSON_EXTRACT and parse decoded_json for every candidate row. Measured
-	// against a live 4.9GB database, 9 interleaved rounds so concurrent
-	// ingest cannot bias one variant: 934ms -> 835ms median (1.12x) for a
-	// single-region filter, identical result set both ways. The win is purely
-	// the avoided JSON parse — EXPLAIN QUERY PLAN is byte-identical before
-	// and after, both driving off idx_transmissions_payload_type. Despite the
-	// column being indexed, idx_transmissions_from_pubkey does not
-	// participate in this plan at all.
-	//
-	// THE TRAP, for whoever touches this next: from_pubkey is only written
-	// for ADVERTs that actually carry a pubkey — see the guard in
-	// cmd/ingestor/db.go. A NULL here drops out of IN (...) silently, so a
-	// write path that fills decoded_json but forgets from_pubkey would cost
-	// nodes from this filter with no error to notice. That is safe today only
-	// because it is measured to be: on live staging 25 of 62104 ADVERTs have
-	// NULL from_pubkey, and all 25 have no pubKey in decoded_json either —
-	// nothing is lost, because there was never a pubkey to record. A COALESCE
-	// fallback to JSON_EXTRACT was measured and rejected: it rescued 0 rows,
-	// and it parses decoded_json again for every NULL row, so one corrupt
-	// ADVERT that the backfill has not reached yet fails the whole query with
-	// "malformed JSON" (a 500 on /api/nodes?region=). Behind this cache that
-	// is worse, not better: the failed refresh leaves the cached entry stale
-	// for every later request too. Its speed is not the reason: on a 4.3GB
-	// synthetic DB it times within noise of from_pubkey. If you add a new
-	// write path for transmissions, populate from_pubkey there rather than
-	// reintroducing a per-row JSON parse here. nodes_region_from_pubkey_test.go
-	// locks the result set against the JSON_EXTRACT expression;
-	// TestBackfillFromPubkey_* in cmd/ingestor locks the backfill's half of
-	// the contract.
 	q := fmt.Sprintf(`SELECT DISTINCT t.from_pubkey
 		FROM observations o
-		%[1]s transmissions t ON t.id = o.transmission_id
-		%[1]s observers obs ON %[2]s
+		JOIN transmissions t ON t.id = o.transmission_id
+		JOIN observers obs ON %[1]s
 		WHERE t.payload_type = ?
 		AND t.from_pubkey IS NOT NULL
-		AND UPPER(TRIM(obs.iata)) IN (%[3]s)
-		AND o.id > ? AND o.id <= ?`, join, joinCond, strings.Join(placeholders, ","))
-
+		AND UPPER(TRIM(obs.iata)) IN (%[2]s)
+		AND o.id > ? AND o.id <= ?`, joinCond, strings.Join(placeholders, ","))
 	rows, err := db.conn.QueryContext(ctx, q, args...)
 	if err != nil {
-		return 0, fmt.Errorf("scan region keys: %w", err)
+		return fmt.Errorf("scan region keys: %w", err)
 	}
 	defer rows.Close()
-	added := 0
 	for rows.Next() {
 		var pk string
 		if err := rows.Scan(&pk); err != nil {
-			return added, fmt.Errorf("scan region keys: %w", err)
+			return fmt.Errorf("scan region keys: %w", err)
 		}
-		if _, ok := set[pk]; !ok {
-			set[pk] = struct{}{}
-			added++
-		}
+		set[pk] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
-		return added, fmt.Errorf("scan region keys: %w", err)
+		return fmt.Errorf("scan region keys: %w", err)
 	}
-	return added, nil
+	return nil
 }

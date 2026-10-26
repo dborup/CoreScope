@@ -278,18 +278,14 @@ func rpm2Members(t testing.TB, db *DB, codes ...string) []string {
 // path does in the background.
 func rpm2Refresh(t testing.TB, db *DB, codes ...string) []string {
 	t.Helper()
-	if s := db.regionSnap.Load(); s != nil {
-		c := *s
-		c.refreshed = time.Now().Add(-2 * nodeRegionFreshTTL)
-		db.regionSnap.Store(&c)
-	}
+	ageRegionIndex(&db.regionPlaced, 2*nodeRegionFreshTTL, 0)
 	key := nodeRegionKey(codes)
 	if e := db.getNodeRegionEntry(key); e != nil {
 		c := *e
 		c.refreshed = time.Now().Add(-2 * nodeRegionFreshTTL)
 		db.setNodeRegionEntry(key, &c)
 	}
-	e, err := db.refreshNodeRegion(key, codes)
+	e, err := db.refreshNodeRegion(key, codes, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,15 +296,13 @@ func rpm2Refresh(t testing.TB, db *DB, codes ...string) []string {
 
 // rpm2RebuildDue makes the aggregate's next refresh a full rebuild.
 func rpm2RebuildDue(db *DB) {
-	db.regionAggMu.Lock()
-	db.regionAggBuilt = time.Now().Add(-2 * nodeRegionRebuildInterval)
-	db.regionAggMu.Unlock()
+	ageRegionIndex(&db.regionPlaced, 0, 2*nodeRegionRebuildInterval)
 }
 
 // rpm2CountScans installs the scan hook and returns the full/delta counters.
 func rpm2CountScans(db *DB) (full, delta *atomic.Int32) {
 	full, delta = &atomic.Int32{}, &atomic.Int32{}
-	db.regionPlacementScanHook = func(isFull bool) error {
+	db.regionPlaced.scanHook = func(isFull bool) error {
 		if isFull {
 			full.Add(1)
 		} else {
@@ -357,7 +351,7 @@ func TestRegionPlacement488_DefaultModeIsHeard(t *testing.T) {
 	if got := rpm2Members(t, db, "BBB"); !reflect.DeepEqual(got, []string{rpm2PK}) {
 		t.Fatalf("default mode: BBB members %v, want the relayed-only node (heard rule)", got)
 	}
-	if db.regionSnap.Load() != nil || full.Load()+delta.Load() != 0 {
+	if db.regionPlaced.snap.Load() != nil || full.Load()+delta.Load() != 0 {
 		t.Fatalf("default mode built the placement aggregate (%d full, %d delta scans)", full.Load(), delta.Load())
 	}
 }
@@ -403,7 +397,7 @@ func TestRegionPlacement488_NewObservationCanRemoveRegion(t *testing.T) {
 	if full.Load() != 1 || delta.Load() != 1 {
 		t.Errorf("scans: %d full, %d delta; want 1 full (cold) and 1 delta (the refresh)", full.Load(), delta.Load())
 	}
-	if s := db.regionSnap.Load(); s == nil || s.watermark != rpm2MaxID(t, db) {
+	if s := db.regionPlaced.snap.Load(); s == nil || s.watermark != rpm2MaxID(t, db) {
 		t.Errorf("snapshot watermark not advanced: %+v", s)
 	}
 }
@@ -496,7 +490,7 @@ func TestRegionPlacement488_StartupSingleflight(t *testing.T) {
 	rpm2Insert(t, db, "bbbb000000000002", 2, 2, rpm2T0, rpm2Str("1100aabbccdd"), rpm2Str("[]"))
 	release := make(chan struct{})
 	var full, delta atomic.Int32
-	db.regionPlacementScanHook = func(isFull bool) error {
+	db.regionPlaced.scanHook = func(isFull bool) error {
 		if isFull {
 			full.Add(1)
 		} else {
@@ -546,32 +540,30 @@ func TestRegionPlacement488_FailedDeltaLeavesAggregateIntact(t *testing.T) {
 	rpm2Insert(t, db, rpm2PK, 1, 1, rpm2T0, rpm2Str("1101a1aabbccdd"), rpm2Str(`["A1"]`))
 	rpm2Members(t, db, "AAA")
 	rpm2Insert(t, db, rpm2PK, 2, 2, rpm2T0+60, rpm2Str("1200aabbccdd"), rpm2Str("[]"))
-	db.regionPlacementScanHook = func(bool) error { return errors.New("injected scan failure") }
+	db.regionPlaced.scanHook = func(bool) error { return errors.New("injected scan failure") }
 	key := nodeRegionKey([]string{"AAA"})
 	if e := db.getNodeRegionEntry(key); e != nil {
 		c := *e
 		c.refreshed = time.Now().Add(-2 * nodeRegionFreshTTL)
 		db.setNodeRegionEntry(key, &c)
 	}
-	s := *db.regionSnap.Load()
-	s.refreshed = time.Now().Add(-2 * nodeRegionFreshTTL)
-	db.regionSnap.Store(&s)
-	if _, err := db.refreshNodeRegion(key, []string{"AAA"}); err == nil {
+	ageRegionIndex(&db.regionPlaced, 2*nodeRegionFreshTTL, 0)
+	if _, err := db.refreshNodeRegion(key, []string{"AAA"}, true); err == nil {
 		t.Fatal("refresh with a failing scan reported success")
 	}
-	db.regionAggMu.Lock()
-	wm, pairs := db.regionAgg.watermark, db.regionAgg.pairs
-	db.regionAggMu.Unlock()
+	db.regionPlaced.mu.Lock()
+	wm, pairs := db.regionPlaced.agg.watermark, db.regionPlaced.agg.pairs
+	db.regionPlaced.mu.Unlock()
 	if wm != 1 || pairs != 1 {
 		t.Fatalf("failed delta changed the aggregate: watermark %d, pairs %d", wm, pairs)
 	}
-	db.regionPlacementScanHook = nil
+	db.regionPlaced.scanHook = nil
 	if got := rpm2Refresh(t, db, "AAA"); len(got) != 0 {
 		t.Fatalf("after recovery: AAA members %v, want none", got)
 	}
-	db.regionAggMu.Lock()
-	inc := db.regionAgg
-	db.regionAggMu.Unlock()
+	db.regionPlaced.mu.Lock()
+	inc := db.regionPlaced.agg
+	db.regionPlaced.mu.Unlock()
 	fresh := rpm2Scan(t, db, 0, rpm2MaxID(t, db), nil)
 	if inc.pairs != fresh.pairs || inc.hearings != fresh.hearings ||
 		!reflect.DeepEqual(rpm2Placements(inc, defaultRegionPlacementParams), rpm2Placements(fresh, defaultRegionPlacementParams)) {
@@ -601,9 +593,9 @@ func TestRegionPlacement488_BoundedMemory(t *testing.T) {
 		hearAll(rpm2T0 + int64(round)*3600)
 		rpm2Refresh(t, db, "AAA")
 	}
-	db.regionAggMu.Lock()
-	agg := db.regionAgg
-	db.regionAggMu.Unlock()
+	db.regionPlaced.mu.Lock()
+	agg := db.regionPlaced.agg
+	db.regionPlaced.mu.Unlock()
 	if agg.pairs != 15 || len(agg.nodes) != 5 {
 		t.Fatalf("aggregate grew with hearings: %d pairs, %d nodes; want 15 and 5", agg.pairs, len(agg.nodes))
 	}
@@ -611,7 +603,7 @@ func TestRegionPlacement488_BoundedMemory(t *testing.T) {
 		t.Fatalf("hearing counters %v, want %d hearings in all", agg.hearings, seq)
 	}
 	members := 0
-	for _, keys := range db.regionSnap.Load().byRegion {
+	for _, keys := range db.regionPlaced.snap.Load().byRegion {
 		members += len(keys)
 	}
 	if members > agg.pairs {
@@ -686,9 +678,9 @@ func TestRegionPlacement488_SyntheticAccuracy(t *testing.T) {
 	for _, pk := range placedWrong {
 		t.Errorf("placed %s: got %v, want %v", pk, placed[pk], truth[pk])
 	}
-	db.regionAggMu.Lock()
-	pl := rpm2Placements(db.regionAgg, params)
-	db.regionAggMu.Unlock()
+	db.regionPlaced.mu.Lock()
+	pl := rpm2Placements(db.regionPlaced.agg, params)
+	db.regionPlaced.mu.Unlock()
 	for pk, want := range transient {
 		if !reflect.DeepEqual(pl[pk].Transient, want) {
 			t.Errorf("placed %s transient %v, want %v", pk, pl[pk].Transient, want)

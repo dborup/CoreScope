@@ -413,6 +413,12 @@ func main() {
 	stopEviction := store.StartEvictionTicker()
 	defer stopEviction()
 
+	// #618: build the per-IATA region index for /api/nodes?region= in the
+	// background and keep it refreshed, so no request pays the full history
+	// scan. It reads SQLite only, never the PacketStore or its lock.
+	stopRegionIndex := database.StartRegionIndexWarmer()
+	defer stopRegionIndex()
+
 	// Steady-state analytics recomputers (issue #1240). Replaces the
 	// on-request compute-then-cache pattern for the default (region="",
 	// zero-window) analytics queries with a background refresh loop so
@@ -594,6 +600,9 @@ func main() {
 		if stopAnalyticsRecomp != nil {
 			stopAnalyticsRecomp()
 		}
+		// 1d. Stop the region index warmer (#618) for the same reason: it
+		// cancels a scan in flight and returns once the goroutine has.
+		stopRegionIndex()
 
 		// 2. Gracefully drain HTTP connections (up to shutdownDrainTimeout)
 		ctx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)

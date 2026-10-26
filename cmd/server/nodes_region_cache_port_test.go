@@ -90,7 +90,7 @@ func TestNodeRegionCacheDeltaFollowsFromPubkeyContract_176(t *testing.T) {
 	}
 
 	ageNodeRegionEntry(t, db, "SJC", 2*nodeRegionFreshTTL, 0)
-	if _, err := db.refreshNodeRegion("SJC", []string{"SJC"}); err != nil {
+	if _, err := db.refreshNodeRegion("SJC", []string{"SJC"}, true); err != nil {
 		t.Fatalf("delta refresh over a corrupt ADVERT: %v", err)
 	}
 	keys := db.getNodeRegionEntry("SJC").keysJSON
@@ -117,7 +117,8 @@ func TestNodeRegionCachePortFullRebuildDropsPrunedRegion(t *testing.T) {
 	aged.refreshed = time.Now().Add(-2 * nodeRegionFreshTTL)
 	aged.built = time.Now().Add(-2 * nodeRegionRebuildInterval)
 	db.setNodeRegionEntry("SJC", &aged)
-	if _, err := db.refreshNodeRegion("SJC", []string{"SJC"}); err != nil {
+	ageRegionIndex(&db.regionHeard, 2*nodeRegionFreshTTL, 2*nodeRegionRebuildInterval)
+	if _, err := db.refreshNodeRegion("SJC", []string{"SJC"}, true); err != nil {
 		t.Fatal(err)
 	}
 	nodes, total, _, err := db.GetNodes(10, 0, "", "", "", "", "", "SJC")

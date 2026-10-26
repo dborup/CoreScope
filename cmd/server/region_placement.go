@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"math"
 	"sort"
 	"time"
@@ -36,15 +35,13 @@ import (
 //
 // Placement needs every region's evidence for a node at once (direct
 // evidence anywhere decides whether the fallback applies here), so it is
-// computed from ONE global aggregate rather than per region set. The
-// aggregate keeps the heard cache's machinery: an observations.id
-// watermark, delta scans past it, a full rebuild every
-// nodeRegionRebuildInterval (retention pruning, observer region edits and
-// late from_pubkey backfills change rows below the watermark), the per-set
-// singleflight and the same fresh/stale ages. Unlike the heard rule,
-// placement is not monotone — a new direct hearing removes fallback
-// regions — so every refresh re-derives the placements instead of
-// extending them.
+// computed from ONE global aggregate rather than per region set: the
+// region index in region_index.go, which the heard rule shares since #618
+// (watermark, delta scans, periodic full rebuild, singleflight, warmer).
+// Placement is not monotone — a new direct hearing removes fallback
+// regions — so every refresh re-derives the placements from the aggregate
+// instead of extending them; the heard rule's do the same, which costs one
+// pass over the pairs.
 //
 // Everything is read from SQLite on the server's read-only handle; nothing
 // touches the PacketStore or its lock.
@@ -236,10 +233,10 @@ func (a *regionEvidenceAgg) merge(d *regionEvidenceAgg) {
 
 // scanRegionEvidence folds every ADVERT observation with lo < id <= hi,
 // heard by an observer with a region, into agg, and raises agg's watermark
-// to hi. Same scope as scanNodeRegionKeys (so a placed region is always a
+// to hi. Same scope as scanHeardRegions (so a placed region is always a
 // heard one), plus the per-observation frame and path the classifier needs.
 // A delta scan forces the join order to drive from the rowid range, as
-// scanNodeRegionKeys explains.
+// scanHeardRegions explains.
 func (db *DB) scanRegionEvidence(ctx context.Context, lo, hi int64, delta bool, agg *regionEvidenceAgg) (int, error) {
 	joinCond, tsCol := "obs.rowid = o.observer_idx", "o.timestamp"
 	if !db.isV3() {
@@ -256,7 +253,7 @@ func (db *DB) scanRegionEvidence(ctx context.Context, lo, hi int64, delta bool, 
 		rawCol = "o.raw_hex"
 	}
 	// Only fixed fragments are formatted in; every value is bound. See
-	// scanNodeRegionKeys for the from_pubkey contract.
+	// scanHeardRegions for the from_pubkey contract.
 	q := fmt.Sprintf(`SELECT t.from_pubkey, UPPER(TRIM(obs.iata)), %[3]s, o.path_json, %[4]s
 		FROM observations o
 		%[1]s transmissions t ON t.id = o.transmission_id
@@ -280,11 +277,6 @@ func (db *DB) scanRegionEvidence(ctx context.Context, lo, hi int64, delta bool, 
 		}
 		agg.add(pk, region, ts.Int64, packetpath.ClassifyAdvert(raw.String, path.String))
 		n++
-	}
-	if db.regionPlacementScanHook != nil {
-		if err := db.regionPlacementScanHook(!delta); err != nil {
-			return n, err
-		}
 	}
 	if err := rows.Err(); err != nil {
 		return n, fmt.Errorf("scan region evidence: %w", err)
@@ -351,118 +343,4 @@ func placeNode(perRegion map[string]*regionEvidenceStats, p regionPlacementParam
 		}
 	}
 	return unknown
-}
-
-// regionPlacementSnapshot is the immutable result of one aggregate refresh:
-// the region → members index the per-set cache entries are cut from.
-type regionPlacementSnapshot struct {
-	byRegion  map[string][]string // sorted pubkeys placed in each region
-	watermark int64
-	refreshed time.Time
-	built     time.Time // the aggregate's last full build
-}
-
-// newRegionPlacementSnapshot places every node in agg. It shares the
-// pubkey strings with agg, so the index costs one slice slot per placed
-// membership (at most agg.pairs).
-func newRegionPlacementSnapshot(agg *regionEvidenceAgg, p regionPlacementParams, built time.Time) *regionPlacementSnapshot {
-	byRegion := make(map[string][]string)
-	for pk, per := range agg.nodes {
-		for _, r := range placeNode(per, p).Regions {
-			byRegion[r] = append(byRegion[r], pk)
-		}
-	}
-	for _, keys := range byRegion {
-		sort.Strings(keys)
-	}
-	return &regionPlacementSnapshot{byRegion: byRegion, watermark: agg.watermark, refreshed: time.Now(), built: built}
-}
-
-// members is the set of nodes placed in any of codes.
-func (s *regionPlacementSnapshot) members(codes []string) map[string]struct{} {
-	set := make(map[string]struct{})
-	for _, c := range codes {
-		for _, pk := range s.byRegion[c] {
-			set[pk] = struct{}{}
-		}
-	}
-	return set
-}
-
-// currentRegionPlacement returns a snapshot no older than
-// nodeRegionFreshTTL, refreshing the aggregate when needed. It is called
-// from a per-set refresh (already deduplicated per region set by
-// nodeRegionSF), so it never runs on a request a cached entry can serve.
-// Refreshes for different region sets coalesce on regionAggMu: the first
-// builds, the ones queued behind it find no rows past its watermark and
-// only re-stamp its snapshot.
-func (db *DB) currentRegionPlacement(ctx context.Context) (*regionPlacementSnapshot, error) {
-	if s := db.regionSnap.Load(); s != nil && time.Since(s.refreshed) < nodeRegionFreshTTL {
-		return s, nil
-	}
-	return db.refreshRegionPlacement(ctx)
-}
-
-// refreshRegionPlacement brings the aggregate up to date — a full build when
-// there is none or one is due, else a delta past the watermark scanned into
-// a separate aggregate and merged only on success — and publishes a new
-// snapshot. A failed refresh leaves the aggregate and the published
-// snapshot as they were.
-func (db *DB) refreshRegionPlacement(ctx context.Context) (*regionPlacementSnapshot, error) {
-	db.regionAggMu.Lock()
-	defer db.regionAggMu.Unlock()
-	params := db.regionPlacement.Params
-	if db.regionAgg == nil || time.Since(db.regionAggBuilt) >= nodeRegionRebuildInterval {
-		// Full builds share nodeRegionFullMu with the heard cache's, so at
-		// most one full observation scan holds a pooled connection.
-		db.nodeRegionFullMu.Lock()
-		defer db.nodeRegionFullMu.Unlock()
-		wm, err := db.maxObservationID(ctx)
-		if err != nil {
-			return nil, err
-		}
-		start := time.Now()
-		agg := newRegionEvidenceAgg()
-		if _, err := db.scanRegionEvidence(ctx, 0, wm, false, agg); err != nil {
-			return nil, err
-		}
-		db.regionAgg, db.regionAggBuilt = agg, start
-		s := newRegionPlacementSnapshot(agg, params, start)
-		db.regionSnap.Store(s)
-		log.Printf("[nodes-region] placement: full build, %d nodes, %d (node, region) pairs in %v (obs id <= %d)",
-			len(agg.nodes), agg.pairs, time.Since(start).Round(time.Millisecond), wm)
-		return s, nil
-	}
-	wm, err := db.maxObservationID(ctx)
-	if err != nil {
-		return nil, err
-	}
-	agg := db.regionAgg
-	if wm <= agg.watermark {
-		prev := db.regionSnap.Load()
-		s := *prev
-		s.refreshed = time.Now()
-		db.regionSnap.Store(&s)
-		return &s, nil
-	}
-	delta := newRegionEvidenceAgg()
-	if _, err := db.scanRegionEvidence(ctx, agg.watermark, wm, true, delta); err != nil {
-		return nil, err
-	}
-	agg.merge(delta)
-	s := newRegionPlacementSnapshot(agg, params, db.regionAggBuilt)
-	db.regionSnap.Store(s)
-	return s, nil
-}
-
-// placedNodeRegion cuts the entry for one region set from the current
-// placement snapshot. The entry's age and stale-while-revalidate handling
-// stay those of nodeRegionKeysJSON; its membership is re-derived on every
-// refresh, never extended.
-func (db *DB) placedNodeRegion(ctx context.Context, codes []string) (*nodeRegionEntry, error) {
-	s, err := db.currentRegionPlacement(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return newNodeRegionEntry(s.members(codes), s.watermark, s.built)
 }
