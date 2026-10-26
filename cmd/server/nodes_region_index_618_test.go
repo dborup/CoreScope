@@ -12,15 +12,18 @@ package main
 //     periodic rebuild keep their #176 semantics;
 //   - the background warmer builds the index before the first request,
 //     keeps it from ageing past nodeRegionMaxStale, and needs no PacketStore;
-//   - a cold request (no snapshot yet) is served by whichever finishes
-//     first, the index build or its own per-set build; identical sets
-//     share one build, per-set builds are serialised, and a request never
+//   - a cold request (no snapshot yet) waits for the index build in
+//     flight and runs its own per-set build only if that build fails;
+//     identical sets share one refresh, per-set fallbacks are serialised
+//     and give way to an index published meanwhile, and a request never
 //     queues behind a running rebuild when a usable snapshot exists;
+//   - an idle refresh re-stamps the snapshot without scanning;
 //   - memory grows with distinct (node, region) pairs only.
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -492,12 +495,21 @@ func TestNodeRegionIndex618_WarmerStopDoesNotWaitForForeignFlight(t *testing.T) 
 	}
 }
 
+// idx618CountPerSet counts the per-set builds cold requests run.
+func idx618CountPerSet(db *DB) *atomic.Int32 {
+	n := &atomic.Int32{}
+	db.nodeRegionPerSetHook = func() { n.Add(1) }
+	return n
+}
+
+var errIdx618Scan = errors.New("idx618: injected scan failure")
+
 // TestNodeRegionIndex618_ColdRequestsDuringWarmup: requests that arrive
-// while the warmup's full scan is still running (here: held) do not wait
-// for it — each is served by its own per-set build, the scan a cold request
-// ran before #618 — and identical sets share one build. None starts an
-// index scan of its own, and once the warmup lands every new set is a cut
-// of it.
+// while the warmup's full scan is still running (here: held) wait for that
+// build and are served by it as soon as it lands — at most the rest of the
+// warmup. None runs a per-set build of its own (it would compete with the
+// one build that serves every set) or starts an index scan of its own, and
+// identical sets share one refresh.
 func TestNodeRegionIndex618_ColdRequestsDuringWarmup(t *testing.T) {
 	db := rpm2EmptyTestDB(t)
 	rpm2SeedScenario(t, db.conn, 1, rpm2T0)
@@ -519,31 +531,34 @@ func TestNodeRegionIndex618_ColdRequestsDuringWarmup(t *testing.T) {
 	}
 	var refreshes atomic.Int32
 	db.nodeRegionQueryHook = func() error { refreshes.Add(1); return nil }
+	perSet := idx618CountPerSet(db)
 	stop := db.startRegionIndexWarmer(time.Hour)
 	defer stop()
 	<-entered
-	// A row the held build did not cover; the per-set builds start later
-	// and must include it.
-	s := &rpm2Seeder{t: t, exec: db.conn, seq: 1 << 21}
-	s.directAdvert("dd99000000000001", rpm2T0, s.obs(3, 0))
 
 	sets := []string{"AAA", "AAA", "aaa", "BBB,CCC", "CCC,BBB", "DDD"}
 	got := make([][]string, len(sets))
+	var served atomic.Int32
 	var wg sync.WaitGroup
 	for i, region := range sets {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			got[i] = idx618Keys(t, db, region)
+			served.Add(1)
 		}()
 	}
-	served := make(chan struct{})
-	go func() { wg.Wait(); close(served) }()
+	time.Sleep(100 * time.Millisecond)
+	if n := served.Load(); n != 0 {
+		t.Errorf("%d cold requests were served before the warmup's build landed (%d per-set builds)", n, perSet.Load())
+	}
+	releaseAll()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
 	select {
-	case <-served:
+	case <-done:
 	case <-time.After(5 * time.Second):
-		releaseAll()
-		t.Fatal("cold requests waited for the warmup's build")
+		t.Fatal("cold requests were not served once the warmup's build landed")
 	}
 	for i, region := range sets {
 		if want := idx618PerSetKeys(t, db, normalizeRegionCodes(region)); !slices.Equal(got[i], want) {
@@ -551,32 +566,27 @@ func TestNodeRegionIndex618_ColdRequestsDuringWarmup(t *testing.T) {
 		}
 	}
 	if n := refreshes.Load(); n != 3 {
-		t.Errorf("%d per-set refreshes for 3 distinct sets; identical sets must share one", n)
+		t.Errorf("%d refreshes for 3 distinct sets; identical sets must share one", n)
+	}
+	if n := perSet.Load(); n != 0 {
+		t.Errorf("%d per-set builds during warmup, want 0: cold requests wait for the index build", n)
 	}
 	if full.Load() != 1 || delta.Load() != 0 {
 		t.Fatalf("during warmup: %d full and %d delta index scans, want only the warmup's", full.Load(), delta.Load())
 	}
-
-	releaseAll()
-	waitForHeardIndex(t, db, 1)
-	// Cut from the warmup's (fresh) snapshot, which predates the DDD row;
-	// the next refresh extends it, within nodeRegionFreshTTL.
-	want := slices.DeleteFunc(idx618PerSetKeys(t, db, []string{"BBB", "DDD"}),
-		func(pk string) bool { return pk == "dd99000000000001" })
-	if got := idx618Keys(t, db, "BBB,DDD"); !slices.Equal(got, want) {
+	if got, want := idx618Keys(t, db, "BBB,DDD"), idx618PerSetKeys(t, db, []string{"BBB", "DDD"}); !slices.Equal(got, want) {
 		t.Errorf("BBB,DDD after warmup: %v, want %v", got, want)
 	}
-	if full.Load() != 1 || delta.Load() != 0 {
-		t.Fatalf("a new set after warmup scanned: %d full, %d delta", full.Load(), delta.Load())
+	if full.Load() != 1 || delta.Load() != 0 || perSet.Load() != 0 {
+		t.Fatalf("a new set after warmup scanned: %d full, %d delta, %d per-set", full.Load(), delta.Load(), perSet.Load())
 	}
 }
 
-// TestNodeRegionIndex618_ColdRequestTakesIndexWhenFirst: the other side of
-// the race — when the index build finishes before the set's per-set build
-// (held here), the request is served from the index and does not wait for
-// its per-set build. Concurrent cold requests for different sets share the
-// one index build.
-func TestNodeRegionIndex618_ColdRequestTakesIndexWhenFirst(t *testing.T) {
+// TestNodeRegionIndex618_ColdRequestsShareOneIndexBuild: with no warmer,
+// concurrent cold requests for different sets start one index build between
+// them and are all cut from it; none needs a per-set build (held here, so
+// one that did would never return).
+func TestNodeRegionIndex618_ColdRequestsShareOneIndexBuild(t *testing.T) {
 	db := rpm2EmptyTestDB(t)
 	rpm2SeedScenario(t, db.conn, 1, rpm2T0)
 	full, delta := idx618CountScans(db)
@@ -600,7 +610,7 @@ func TestNodeRegionIndex618_ColdRequestTakesIndexWhenFirst(t *testing.T) {
 	case <-served:
 	case <-time.After(5 * time.Second):
 		unlock()
-		t.Fatal("cold requests waited for their per-set builds although the index was built")
+		t.Fatal("cold requests waited for per-set builds although the index was built")
 	}
 	unlock()
 	for i, region := range sets {
@@ -613,18 +623,114 @@ func TestNodeRegionIndex618_ColdRequestTakesIndexWhenFirst(t *testing.T) {
 	}
 }
 
-// TestNodeRegionIndex618_ColdPerSetBuildsAreSerialised: the per-set builds
-// cold requests run take nodeRegionColdMu, as master's per-set builds took
-// nodeRegionFullMu, so a burst of cold sets holds one pooled connection
-// besides the index build's (the pool is 4).
+// TestNodeRegionIndex618_ColdRequestFallsBackWhenIndexFails: while the index
+// build fails, a cold request is served by its own per-set build — the scan
+// every cold request ran before #618 — instead of a 500. Once the index
+// builds, new sets are cut from it again.
+func TestNodeRegionIndex618_ColdRequestFallsBackWhenIndexFails(t *testing.T) {
+	db := rpm2EmptyTestDB(t)
+	rpm2SeedScenario(t, db.conn, 1, rpm2T0)
+	perSet := idx618CountPerSet(db)
+	var failing atomic.Bool
+	failing.Store(true)
+	db.regionHeard.scanHook = func(bool) error {
+		if failing.Load() {
+			return errIdx618Scan
+		}
+		return nil
+	}
+	for _, region := range []string{"AAA", "BBB,CCC"} {
+		want := idx618PerSetKeys(t, db, normalizeRegionCodes(region))
+		if got := idx618Keys(t, db, region); !slices.Equal(got, want) {
+			t.Errorf("%q with the index failing: %v, want %v", region, got, want)
+		}
+	}
+	if n := perSet.Load(); n != 2 {
+		t.Errorf("%d per-set builds for 2 cold sets with the index failing, want 2", n)
+	}
+	if db.regionHeard.snap.Load() != nil {
+		t.Fatal("a failing index build published a snapshot")
+	}
+	failing.Store(false)
+	if got, want := idx618Keys(t, db, "DDD"), idx618PerSetKeys(t, db, []string{"DDD"}); !slices.Equal(got, want) {
+		t.Errorf("DDD after the index recovered: %v, want %v", got, want)
+	}
+	if n := perSet.Load(); n != 2 {
+		t.Errorf("a cold set after the index recovered ran a per-set build (%d in all)", n)
+	}
+}
+
+// TestNodeRegionIndex618_QueuedFallbackTakesRecoveredIndex: per-set
+// fallbacks are serialised, so a burst of cold sets after an index failure
+// queues. A fallback still queued when a retry (the warmer's next tick)
+// has published the index is cut from it instead of running its full scan.
+func TestNodeRegionIndex618_QueuedFallbackTakesRecoveredIndex(t *testing.T) {
+	db := rpm2EmptyTestDB(t)
+	rpm2SeedScenario(t, db.conn, 1, rpm2T0)
+	perSet := idx618CountPerSet(db)
+	var failing atomic.Bool
+	failing.Store(true)
+	var failed atomic.Int32
+	db.regionHeard.scanHook = func(bool) error {
+		if failing.Load() {
+			failed.Add(1)
+			return errIdx618Scan
+		}
+		return nil
+	}
+	db.nodeRegionColdMu.Lock() // a fallback is already running
+	var unlockOnce sync.Once
+	unlock := func() { unlockOnce.Do(db.nodeRegionColdMu.Unlock) }
+	defer unlock()
+	sets := []string{"AAA", "BBB,CCC"}
+	got := make([][]string, len(sets))
+	var wg sync.WaitGroup
+	for i, region := range sets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got[i] = idx618Keys(t, db, region)
+		}()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for failed.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if failed.Load() == 0 {
+		t.Fatal("the cold requests never tried the index build")
+	}
+	time.Sleep(50 * time.Millisecond) // let them queue for the fallback
+	failing.Store(false)
+	if _, err := db.regionIndexFlight(context.Background(), &db.regionHeard, db.heardRegionSpec()); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued cold requests were not served")
+	}
+	for i, region := range sets {
+		if want := idx618PerSetKeys(t, db, normalizeRegionCodes(region)); !slices.Equal(got[i], want) {
+			t.Errorf("%q: %v, want %v", region, got[i], want)
+		}
+	}
+	if n := perSet.Load(); n != 0 {
+		t.Errorf("%d queued fallbacks ran a per-set build after the index was published, want 0", n)
+	}
+}
+
+// TestNodeRegionIndex618_ColdPerSetBuildsAreSerialised: the per-set
+// fallbacks cold requests run while the index build fails take
+// nodeRegionColdMu, as master's per-set builds took nodeRegionFullMu, so a
+// burst of cold sets holds one pooled connection for a full scan (the pool
+// is 4).
 func TestNodeRegionIndex618_ColdPerSetBuildsAreSerialised(t *testing.T) {
 	db := rpm2EmptyTestDB(t)
 	rpm2SeedScenario(t, db.conn, 1, rpm2T0)
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	releaseAll := func() { releaseOnce.Do(func() { close(release) }) }
-	defer releaseAll()
-	db.regionHeard.scanHook = func(bool) error { <-release; return nil }
+	db.regionHeard.scanHook = func(bool) error { return errIdx618Scan }
 	db.nodeRegionColdMu.Lock()
 	var unlockOnce sync.Once
 	unlock := func() { unlockOnce.Do(db.nodeRegionColdMu.Unlock) }
@@ -645,6 +751,36 @@ func TestNodeRegionIndex618_ColdPerSetBuildsAreSerialised(t *testing.T) {
 	}
 	unlock()
 	wg.Wait()
+}
+
+// TestNodeRegionIndex618_IdleRefreshReStampsIndex: on a database with no new
+// observations a refresh (one warmer tick) finds nothing past the watermark
+// and scans nothing, but re-stamps the snapshot, so an idle index never ages
+// past nodeRegionMaxStale and requests never start waiting on refreshes.
+func TestNodeRegionIndex618_IdleRefreshReStampsIndex(t *testing.T) {
+	db := rpm2EmptyTestDB(t)
+	rpm2SeedScenario(t, db.conn, 1, rpm2T0)
+	full, delta := idx618CountScans(db)
+	stop := db.startRegionIndexWarmer(time.Hour)
+	defer stop()
+	wm := rpm2MaxID(t, db)
+	waitForHeardIndex(t, db, wm)
+	idx618AgeIndex(db, nodeRegionMaxStale, 0)
+	s, err := db.regionIndexFlight(context.Background(), &db.regionHeard, db.heardRegionSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for what, snap := range map[string]*regionMembershipSnapshot{"returned": s, "published": db.regionHeard.snap.Load()} {
+		if age := time.Since(snap.refreshed); age >= nodeRegionFreshTTL {
+			t.Errorf("idle refresh: %s snapshot is %v old, want re-stamped", what, age.Round(time.Second))
+		}
+		if snap.watermark != wm {
+			t.Errorf("idle refresh: %s snapshot watermark %d, want %d", what, snap.watermark, wm)
+		}
+	}
+	if full.Load() != 1 || delta.Load() != 0 {
+		t.Fatalf("idle refresh scanned: %d full (want the warmup's 1), %d delta", full.Load(), delta.Load())
+	}
 }
 
 // TestNodeRegionIndex618_RequestsDoNotQueueBehindRebuild: while a full
@@ -951,11 +1087,8 @@ func TestPerf_NodeRegionIndex618(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	// A cold request (no snapshot yet: warmup still running, or no warmer)
-	// for the largest single code and for every code: the race between
-	// the index build and the set's own per-set build. Each run waits for
-	// the background index build, and a losing per-set build, to finish
-	// before the next starts; only the request is timed.
+	// A cold request with no warmer, for the largest single code and for
+	// every code: it starts the index build and waits for it.
 	largest, largestN := codes[0], -1
 	for _, c := range codes {
 		if n := len(snap.byRegion[c]); n > largestN {
@@ -971,17 +1104,42 @@ func TestPerf_NodeRegionIndex618(t *testing.T) {
 				t.Fatal(err)
 			}
 			d[i] = time.Since(start)
-			for db.regionHeard.snap.Load() == nil {
-				time.Sleep(time.Millisecond)
-			}
-			db.nodeRegionColdMu.Lock()
-			db.nodeRegionColdMu.Unlock()
 		}
 		slices.Sort(d)
 		return d[runs/2]
 	}
 	coldOne, coldAll := coldFirst([]string{largest}), coldFirst(codes)
 	perSetOne := median(func() { idx618PerSetKeys(t, db, []string{largest}) })
+	// A cold request for the largest code that arrives at 0/25/50/75 % of
+	// the warmer's build: it waits for that build, so its latency is the
+	// rest of the warmup ("remaining": the build's landing minus the
+	// arrival), never a second scan.
+	type duringWarmup struct{ pct, latency, remaining, landed time.Duration }
+	var warmup []duringWarmup
+	for _, pct := range []time.Duration{0, 25, 50, 75} {
+		lat, rem, land := make([]time.Duration, runs), make([]time.Duration, runs), make([]time.Duration, runs)
+		for i := range lat {
+			clear()
+			t0 := time.Now()
+			stop := db.startRegionIndexWarmer(time.Hour)
+			time.Sleep(cold * pct / 100)
+			arrive := time.Now()
+			if _, err := db.nodeRegionKeysJSON([]string{largest}); err != nil {
+				t.Fatal(err)
+			}
+			lat[i] = time.Since(arrive)
+			s := db.regionHeard.snap.Load()
+			stop()
+			if s == nil {
+				t.Fatal("request served before the warmup's snapshot")
+			}
+			land[i], rem[i] = s.refreshed.Sub(t0), s.refreshed.Sub(arrive)
+		}
+		for _, d := range [][]time.Duration{lat, rem, land} {
+			slices.Sort(d)
+		}
+		warmup = append(warmup, duringWarmup{pct, lat[runs/2], rem[runs/2], land[runs/2]})
+	}
 	clear()
 	h0 := rpm2Heap()
 	if _, err := db.refreshRegionIndex(context.Background(), &db.regionHeard, db.heardRegionSpec()); err != nil {
@@ -995,8 +1153,13 @@ func TestPerf_NodeRegionIndex618(t *testing.T) {
 	t.Logf("%s: %d observations, %d regions, %d nodes, %d (node, region) pairs", filepath.Base(path), wm, len(codes), nodes, pairs)
 	t.Logf("per-set builds, %d sets (%d singles + 3 groups), summed: %v", len(sets), len(codes), perSet.Round(time.Millisecond))
 	t.Logf("index cold build, all codes: %v (%.1fx less than the sum)", cold.Round(time.Millisecond), float64(perSet)/float64(cold))
-	t.Logf("cold request before any snapshot (index build vs own per-set build, first wins): %s %v (its per-set build alone %v) | all codes %v",
+	t.Logf("cold request, no warmer (waits for the index build it starts): %s %v (its per-set build alone %v) | all codes %v",
 		largest, coldOne.Round(time.Millisecond), perSetOne.Round(time.Millisecond), coldAll.Round(time.Millisecond))
+	for _, w := range warmup {
+		t.Logf("cold request for %s at %d%% of the warmup: %v (%.2fx its per-set build alone); rest of the warmup %v; warmup landed after %v",
+			largest, w.pct, w.latency.Round(time.Millisecond), float64(w.latency)/float64(perSetOne),
+			w.remaining.Round(time.Millisecond), w.landed.Round(time.Millisecond))
+	}
 	t.Logf("warm: worst cut of a set from the snapshot %v | first request for all codes (cut + encode) %v | cached hit %v | index heap %d KiB",
 		cutMax.Round(time.Microsecond), firstAll.Round(time.Microsecond), hit, heap/1024)
 }

@@ -143,6 +143,9 @@ type DB struct {
 	// per-set refresh, before it reads the region index; a non-nil error
 	// fails that refresh the way a failing scan does.
 	nodeRegionQueryHook func() error
+	// nodeRegionPerSetHook (test seam, nil in production) runs at the start
+	// of every per-set build (buildNodeRegionCold).
+	nodeRegionPerSetHook func()
 
 	// Global region indexes the per-set entries are cut from (#618,
 	// region_index.go): one per region rule, the heard rule's and the

@@ -331,6 +331,9 @@ func (db *DB) buildNodeRegionCold(ctx context.Context, codes []string) (*nodeReg
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nodeRegionRebuildInterval)
 	defer cancel()
+	if db.nodeRegionPerSetHook != nil {
+		db.nodeRegionPerSetHook()
+	}
 	wm, err := db.maxObservationID(ctx)
 	if err != nil {
 		return nil, err
