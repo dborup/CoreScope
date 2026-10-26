@@ -246,14 +246,16 @@ test('the admin key is never persisted or put in a URL', () => {
 });
 
 // ── revoke: FILTERS, renderAdminRow, XSS ──────────────────────────────────
-test('FILTERS includes a revoked tab alongside the existing three', () => {
+test('FILTERS: the four statuses plus Auto-approved (#616)', () => {
   // Array.from copies out of the vm realm first: comparing a vm-realm array
   // straight to a host array literal with deepStrictEqual fails on
   // prototype identity even when every element is equal.
-  assert.deepStrictEqual(Array.from(CP.FILTERS, (f) => f[0]), ['pending', 'approved', 'rejected', 'revoked']);
-  // Every filter key must be a status the server actually accepts
+  assert.deepStrictEqual(Array.from(CP.FILTERS, (f) => f[0]), ['pending', 'approved', 'rejected', 'revoked', 'auto']);
+  assert.strictEqual(CP.FILTERS[4][1], 'Auto-approved');
+  // Every filter must ask the server for a status it actually accepts
   // (channelregistry.ValidStatus); a typo here would 400 the admin list.
-  for (const [key] of CP.FILTERS) assert.match(key, /^(pending|approved|rejected|revoked)$/);
+  for (const [key] of CP.FILTERS) assert.match(CP.filterStatus(key), /^(pending|approved|rejected|revoked)$/);
+  assert.strictEqual(CP.filterStatus('auto'), 'approved', 'Auto-approved filters the approved list client-side');
 });
 
 test('renderAdminRow: pending gets Approve/Reject, approved gets a Remove (revoke) action, others a plain pill', () => {
@@ -286,6 +288,43 @@ test('renderAdminRow escapes the channel name everywhere it is interpolated (XSS
   // Also proves the aria-label and data-proposal-name attributes specifically:
   assert.ok(!/aria-label="Remove #<img/.test(html), 'aria-label not escaped');
   assert.ok(!/data-proposal-name="#<img/.test(html), 'data-proposal-name not escaped');
+});
+
+// ── #616: approved by auto/admin — badge, filter, deep link ──────────────
+test('renderAdminRow shows an auto/admin badge on approved rows only (#616)', () => {
+  const row = (extra) => CP.renderAdminRow(Object.assign({ id: 'eeeeeeeeeeeeeeee', name: '#By', status: 'approved', createdAt: 1, reviewedAt: 2 }, extra));
+  const auto = row({ approvedBy: 'auto' });
+  assert.match(auto, /<span class="ch-proposals-by" data-approved-by="auto"[^>]*>auto<\/span>/);
+  const admin = row({ approvedBy: 'admin' });
+  assert.match(admin, /<span class="ch-proposals-by" data-approved-by="admin"[^>]*>admin<\/span>/);
+  // No value (old database) or an unknown one: no badge, and nothing from
+  // the field reaches the markup.
+  assert.ok(!/ch-proposals-by/.test(row({})), 'no badge without approvedBy');
+  const junk = row({ approvedBy: '<img src=x onerror=alert(1)>' });
+  assert.ok(!/ch-proposals-by/.test(junk) && !/onerror/.test(junk), 'unknown approvedBy must not render');
+  for (const status of ['pending', 'rejected', 'revoked']) {
+    assert.ok(!/ch-proposals-by/.test(row({ status, approvedBy: 'auto' })), status + ' row must not carry a badge');
+  }
+});
+
+test('filterProposals: Auto-approved keeps only approvedBy=auto; status filters pass the list through (#616)', () => {
+  const items = [
+    { id: '1', status: 'approved', approvedBy: 'auto' },
+    { id: '2', status: 'approved', approvedBy: 'admin' },
+    { id: '3', status: 'approved' },
+    { id: '4', status: 'revoked', approvedBy: 'auto' },
+  ];
+  assert.deepStrictEqual(Array.from(CP.filterProposals(items, 'auto'), (p) => p.id), ['1']);
+  assert.deepStrictEqual(Array.from(CP.filterProposals(items, 'approved'), (p) => p.id), ['1', '2', '3', '4']);
+  assert.deepStrictEqual(Array.from(CP.filterProposals([], 'auto')), []);
+});
+
+test('parseFilter / proposalsHash round-trip the deep link (#616)', () => {
+  for (const [key] of CP.FILTERS) assert.strictEqual(CP.parseFilter(key), key);
+  for (const bad of [null, undefined, '', 'AUTO', 'bogus', 'approved ']) assert.strictEqual(CP.parseFilter(bad), 'pending', JSON.stringify(bad));
+  assert.strictEqual(CP.proposalsHash('pending'), '#/channels?view=proposals');
+  assert.strictEqual(CP.proposalsHash('auto'), '#/channels?view=proposals&filter=auto');
+  assert.strictEqual(CP.proposalsHash('revoked'), '#/channels?view=proposals&filter=revoked');
 });
 
 // ── revoke: mergeApprovedChannels degrades correctly once a channel is
@@ -497,7 +536,7 @@ function loadWithDom(fetchImpl, opts) {
   ctx.clearTimeout = opts.clearTimeout || clearTimeout;
   vm.createContext(ctx);
   vm.runInContext(SRC, ctx, { filename: SRC_PATH });
-  return { CP: ctx.ChannelProposals, document: doc, fetchCalls };
+  return { CP: ctx.ChannelProposals, document: doc, fetchCalls, location };
 }
 
 test('admin dialog: Remove opens a confirm dialog; Escape cancels it and returns focus to Remove', async () => {
@@ -597,6 +636,61 @@ function fireDocKeydown(env, evt) {
   // through the document-level listener registry buildMiniDom exposes.
   (env.document.__events.keydown || []).slice().forEach((fn) => fn(evt));
 }
+
+// ── #616: the Auto-approved filter in the admin dialog ──────────────────
+const BY_ROWS = [
+  { id: 'aaaaaaaaaaaaaaaa', name: '#ByAuto', status: 'approved', createdAt: 1, reviewedAt: 2, approvedBy: 'auto' },
+  { id: 'bbbbbbbbbbbbbbbb', name: '#ByAdmin', status: 'approved', createdAt: 1, reviewedAt: 2, approvedBy: 'admin' },
+];
+
+async function unlockAdmin(env, mountOpts) {
+  env.CP.mount(Object.assign({ root: env.document.body, view: 'proposals' }, mountOpts));
+  const overlay = env.document.getElementById('chProposalsAdmin');
+  env.document.getElementById('chProposalsKey').value = 'strong-enough-admin-key-012345';
+  overlay._listeners.submit[0]({ target: env.document.getElementById('chProposalsKeyForm'), preventDefault() {} });
+  await flush();
+  return overlay;
+}
+
+function listedNames(env) {
+  return env.document.getElementById('chProposalsList').querySelectorAll('.ch-proposals-name').map((n) => n.textContent);
+}
+
+test('admin dialog: a filter=auto deep link lists only auto-approved rows (#616)', async () => {
+  const env = loadWithDom(() => ({ status: 200, body: { proposals: BY_ROWS, enabled: true } }));
+  env.location.hash = '#/channels?view=proposals&filter=auto';
+  await unlockAdmin(env, { filter: 'auto' });
+  const lists = env.fetchCalls.filter((c) => /\/admin\/channel-proposals\?/.test(c.url));
+  assert.strictEqual(lists.length, 1);
+  assert.match(lists[0].url, /status=approved$/);
+  assert.deepStrictEqual(listedNames(env), ['#ByAuto']);
+  const pressed = env.document.getElementById('chProposalsAdmin').querySelector('[aria-pressed="true"]');
+  assert.strictEqual(pressed.getAttribute('data-proposals-filter'), 'auto');
+  assert.strictEqual(env.location.hash, '#/channels?view=proposals&filter=auto');
+});
+
+test('admin dialog: choosing a filter updates the deep link; Pending drops the parameter (#616)', async () => {
+  const env = loadWithDom(() => ({ status: 200, body: { proposals: BY_ROWS, enabled: true } }));
+  const overlay = await unlockAdmin(env, {});
+  const click = (key) => overlay._listeners.click[0]({ target: overlay.querySelector('[data-proposals-filter="' + key + '"]'), preventDefault() {} });
+  click('auto');
+  await flush();
+  assert.strictEqual(env.location.hash, '#/channels?view=proposals&filter=auto');
+  assert.deepStrictEqual(listedNames(env), ['#ByAuto']);
+  click('approved');
+  await flush();
+  assert.strictEqual(env.location.hash, '#/channels?view=proposals&filter=approved');
+  assert.deepStrictEqual(listedNames(env), ['#ByAuto', '#ByAdmin']);
+  click('pending');
+  await flush();
+  assert.strictEqual(env.location.hash, '#/channels?view=proposals');
+});
+
+test('admin dialog: an empty Auto-approved list says so in words (#616)', async () => {
+  const env = loadWithDom(() => ({ status: 200, body: { proposals: [BY_ROWS[1]], enabled: true } }));
+  await unlockAdmin(env, { filter: 'auto' });
+  assert.match(env.document.getElementById('chProposalsList').textContent, /No auto-approved suggestions\./);
+});
 
 // ── #232: an approval reported by the suggest poller refreshes the list ──
 // Polls fire on the next macrotask instead of after 1s/1.5s/….

@@ -400,3 +400,180 @@ func TestChannelProposalsTable_UpgradesCheckWithoutRevoked(t *testing.T) {
 		t.Fatalf("row count after second Apply = %d (%v), want 4", n, err)
 	}
 }
+
+// #616: channel_proposals.approved_by records who approved a channel. A table
+// from before the column gets it added once, and approved rows that lack a
+// value are classified from their timestamps: an approval within a minute of
+// the submission was the auto-approve policy, anything slower an admin. The
+// column stays optional for the server (AssertReady ignores it), so a new
+// server keeps working against a database an older ingestor wrote.
+func TestChannelProposalsApprovedByMigration(t *testing.T) {
+	db := minimalDB(t)
+	defer db.Close()
+	// The table as the previous release creates it: 'revoked' allowed (so
+	// no rebuild), no approved_by column.
+	if _, err := db.Exec(`CREATE TABLE channel_proposals (
+		id TEXT PRIMARY KEY,
+		name TEXT COLLATE BINARY NOT NULL UNIQUE,
+		status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','revoked')),
+		created_at INTEGER NOT NULL,
+		reviewed_at INTEGER NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO channel_proposals (id, name, status, created_at, reviewed_at) VALUES
+		('fast', '#Fast', 'approved', 1000, 1000),
+		('edge', '#Edge', 'approved', 1000, 60999),
+		('limit', '#Limit', 'approved', 1000, 61000),
+		('slow', '#Slow', 'approved', 1000, 86400000),
+		('pend', '#Pend', 'pending', 1000, NULL),
+		('rej', '#Rej', 'rejected', 1000, 1500),
+		('rev', '#Rev', 'revoked', 1000, 1500)`); err != nil {
+		t.Fatal(err)
+	}
+	var logs []string
+	logf := func(format string, args ...interface{}) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	if err := Apply(db, logf); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if has, err := TableHasColumn(db, "channel_proposals", "approved_by"); err != nil || !has {
+		t.Fatalf("approved_by after Apply: has=%v err=%v", has, err)
+	}
+	want := "edge=auto,fast=auto,limit=admin,pend=-,rej=-,rev=-,slow=admin"
+	if got := approvedByRows(t, db); got != want {
+		t.Fatalf("backfill = %s, want %s", got, want)
+	}
+	if n := countLogs(logs, "approved_by"); n != 1 {
+		t.Fatalf("want one log line about approved_by, got %q", logs)
+	}
+
+	// Idempotent: a second run changes nothing and logs nothing, and keeps
+	// a value the ingestor wrote even where the timestamps would infer the
+	// other one (an admin who approved within a minute).
+	if _, err := db.Exec(`UPDATE channel_proposals SET approved_by = 'admin' WHERE id = 'fast'`); err != nil {
+		t.Fatal(err)
+	}
+	logs = nil
+	if err := Apply(db, logf); err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	if n := countLogs(logs, "channel_proposals"); n != 0 {
+		t.Fatalf("second Apply must not touch channel_proposals, logged %q", logs)
+	}
+	want = "edge=auto,fast=admin,limit=admin,pend=-,rej=-,rev=-,slow=admin"
+	if got := approvedByRows(t, db); got != want {
+		t.Fatalf("after second Apply = %s, want %s", got, want)
+	}
+
+	// An older ingestor (rolled back) approves without writing the column;
+	// the next upgrade classifies that row the same way.
+	if _, err := db.Exec(`UPDATE channel_proposals SET status = 'approved', reviewed_at = 2000 WHERE id = 'pend'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(db, logf); err != nil {
+		t.Fatalf("third Apply: %v", err)
+	}
+	if got := approvedByRows(t, db); !strings.Contains(got, "pend=auto") {
+		t.Fatalf("approval written by an older ingestor not classified: %s", got)
+	}
+
+	if _, err := db.Exec(`UPDATE channel_proposals SET approved_by = 'robot' WHERE id = 'slow'`); err == nil {
+		t.Fatal("approved_by CHECK not enforced")
+	}
+	if err := AssertReady(db); err != nil {
+		t.Fatalf("AssertReady after Apply: %v", err)
+	}
+}
+
+// A fresh database gets the column from the CREATE TABLE, and a table that
+// is rebuilt for 'revoked' (pre-release DDL) gets it as well, classified.
+func TestChannelProposalsApprovedByFreshAndRebuilt(t *testing.T) {
+	fresh := minimalDB(t)
+	defer fresh.Close()
+	if err := Apply(fresh, nil); err != nil {
+		t.Fatal(err)
+	}
+	if has, err := TableHasColumn(fresh, "channel_proposals", "approved_by"); err != nil || !has {
+		t.Fatalf("fresh table approved_by: has=%v err=%v", has, err)
+	}
+
+	old := minimalDB(t)
+	defer old.Close()
+	if _, err := old.Exec(`CREATE TABLE channel_proposals (
+		id TEXT PRIMARY KEY,
+		name TEXT COLLATE BINARY NOT NULL UNIQUE,
+		status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected')),
+		created_at INTEGER NOT NULL,
+		reviewed_at INTEGER NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`INSERT INTO channel_proposals (id, name, status, created_at, reviewed_at) VALUES
+		('a', '#A', 'approved', 10, 20), ('b', '#B', 'approved', 10, 999999), ('c', '#C', 'pending', 10, NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(old, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := approvedByRows(t, old), "a=auto,b=admin,c=-"; got != want {
+		t.Fatalf("rebuilt table approved_by = %s, want %s", got, want)
+	}
+}
+
+// AssertReady must not require approved_by: a new server starts against a
+// database an older ingestor migrated (rolling upgrade) and detects the
+// column later.
+func TestAssertReady_DoesNotRequireApprovedBy(t *testing.T) {
+	db := minimalDB(t)
+	defer db.Close()
+	if err := Apply(db, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE channel_proposals`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE channel_proposals (
+		id TEXT PRIMARY KEY,
+		name TEXT COLLATE BINARY NOT NULL UNIQUE,
+		status TEXT NOT NULL CHECK(status IN ('pending','approved','rejected','revoked')),
+		created_at INTEGER NOT NULL,
+		reviewed_at INTEGER NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := AssertReady(db); err != nil {
+		t.Fatalf("AssertReady must not require channel_proposals.approved_by: %v", err)
+	}
+}
+
+// approvedByRows lists id=approved_by ("-" for NULL), ordered by id.
+func approvedByRows(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	rows, err := db.Query(`SELECT id, COALESCE(approved_by, '-') FROM channel_proposals ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id, by string
+		if err := rows.Scan(&id, &by); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, id+"="+by)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(out, ",")
+}
+
+func countLogs(logs []string, sub string) int {
+	n := 0
+	for _, l := range logs {
+		if strings.Contains(l, sub) {
+			n++
+		}
+	}
+	return n
+}
