@@ -121,13 +121,22 @@
     if (bits.length) el.title = bits.join(' \u00B7 ');
   }
 
+  // The one /api/health reader. Resolves to the parsed body, or null for a
+  // network error, non-OK (5xx during a restart) or invalid JSON response.
+  // Shared with version-notice.js (#614) as window.CoreHealth.
+  function readHealth() {
+    if (typeof fetch !== 'function') return Promise.resolve(null);
+    return fetch('/api/health', { headers: { Accept: 'application/json' } })
+      .then(function (r) { return r && r.ok ? r.json() : null; })
+      .then(function (h) { return h || null; }, function () { return null; });
+  }
+  window.CoreHealth = { read: readHealth, field: healthField };
+
   function requestVersion() {
     if (versionRequested || !versionEl || typeof fetch !== 'function') return;
     versionRequested = true;
     var el = versionEl;
-    fetch('/api/health', { headers: { Accept: 'application/json' } })
-      .then(function (r) { return r && r.ok ? r.json() : null; })
-      .then(function (h) { applyVersion(el, h); }, function () { /* neutral label */ });
+    readHealth().then(function (h) { applyVersion(el, h); });
   }
 
   var EDGE_PX = 44;          // pointerdown must start within left N px (drawer trigger zone)

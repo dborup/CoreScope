@@ -6042,3 +6042,45 @@ body.embed #app.app-fixed {
   .regions-controls label { flex: 1 1 140px; }
   .regions-controls select { min-width: 0; flex: 1; }
 }
+
+/* #614 — "new version available" notice (version-notice.js) */
+.version-notice {
+  position: fixed;
+  left: 50%;
+  bottom: calc(16px + var(--bottom-nav-reserve, 0px));
+  transform: translateX(-50%);
+  z-index: var(--z-popover, 300);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 12px;
+  box-sizing: border-box;
+  max-width: calc(100vw - 32px);
+  padding: 10px 14px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px var(--shadow);
+  font-size: 14px;
+}
+.version-notice-btn {
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.version-notice-reload {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: var(--text-on-accent);
+}
+.version-notice-btn:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
