@@ -322,17 +322,21 @@ func (db *DB) detectSchema() {
 		}
 	}
 	// Probed first and closed at once: the PRAGMA passes below can return
-	// early, and this table is independent of them.
-	var declaredTables int
-	if db.conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'client_declared_regions'`).Scan(&declaredTables) == nil && declaredTables > 0 {
-		db.hasClientDeclaredRegionsFlag.forceTrue()
-	}
-	// #616: channel_proposals.approved_by, added by the ingestor (and absent
-	// together with the whole table on an older database). A missing table
-	// is an empty PRAGMA result, not an error.
-	var approvedByCols int
-	if db.conn.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('channel_proposals') WHERE name = 'approved_by'`).Scan(&approvedByCols) == nil && approvedByCols > 0 {
-		db.hasProposalApprovedByFlag.forceTrue()
+	// early, and these are independent of them. One query for both, so the
+	// healer's tick costs no extra round trip for channel_proposals.approved_by
+	// (#616; added by the ingestor, absent together with the whole table on an
+	// older database — a missing table is an empty pragma_table_info, not an
+	// error).
+	var declaredTables, approvedByCols int
+	if db.conn.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'client_declared_regions'),
+		(SELECT COUNT(*) FROM pragma_table_info('channel_proposals') WHERE name = 'approved_by')`).Scan(&declaredTables, &approvedByCols) == nil {
+		if declaredTables > 0 {
+			db.hasClientDeclaredRegionsFlag.forceTrue()
+		}
+		if approvedByCols > 0 {
+			db.hasProposalApprovedByFlag.forceTrue()
+		}
 	}
 
 	rows, err := db.conn.Query("PRAGMA table_info(observations)")

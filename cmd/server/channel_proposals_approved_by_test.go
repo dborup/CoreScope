@@ -159,3 +159,19 @@ func TestChannelProposalServiceUsesApprovedBySchemaFlag(t *testing.T) {
 		t.Fatal("the service must follow the server's approved_by schema flag")
 	}
 }
+
+// Tests that open a DB and close only its conn leave the schema healer
+// ticking on a dead connection for the rest of the test binary, and
+// allocation budgets (TestGraphScore561_AllocationBudget) count every
+// goroutine's allocations. Detecting approved_by must therefore not add a
+// query to the tick: on a closed connection a tick must cost what it cost
+// before #616, measured on master with Go 1.27.1 (the version CI pins). A
+// separate approved_by query made it 4 and pushed that budget over in CI.
+func TestDetectSchemaApprovedByAddsNoQueryToHealerTick(t *testing.T) {
+	const closedTickAllocsBefore616 = 2
+	db := setupTestDB(t)
+	db.conn.Close()
+	if tick := testing.AllocsPerRun(20, db.detectSchema); tick > closedTickAllocsBefore616 {
+		t.Fatalf("detectSchema on a closed connection: %.0f allocs, want <= %d — the approved_by probe must share the first query", tick, closedTickAllocsBefore616)
+	}
+}
