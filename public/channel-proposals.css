@@ -84,6 +84,17 @@
 }
 .ch-proposals-state[data-state="approved"] { color: var(--status-green); }
 .ch-proposals-state[data-state="rejected"] { color: var(--status-red); }
+/* Who approved it (#616): "auto" (auto-approve policy) or "admin". */
+.ch-proposals-by {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-muted);
+}
+.ch-proposals-by[data-approved-by="auto"] { border-color: var(--accent); color: var(--accent); }
 .ch-proposals-empty { padding: 12px 0; font-size: 13px; color: var(--text-muted); }
 
 /* Remove (revoke) confirmation, nested inside the admin dialog's own
