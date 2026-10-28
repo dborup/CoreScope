@@ -137,6 +137,18 @@ func newWSLimiter() *wsLimiter {
 // skipped rather than aborting startup: one typo must not take the server
 // down, but it must not pass unnoticed either.
 func parseCIDRList(entries []string, what string) []*net.IPNet {
+	return parseCIDRs(entries, func(e string) {
+		log.Printf("[ws] WARNING: %s entry %q is neither an IP nor a CIDR, ignored", what, e)
+	})
+}
+
+// parseCIDRListQuiet is parseCIDRList for a second consumer of a list that
+// the first one already warned about.
+func parseCIDRListQuiet(entries []string) []*net.IPNet {
+	return parseCIDRs(entries, nil)
+}
+
+func parseCIDRs(entries []string, warn func(entry string)) []*net.IPNet {
 	out := make([]*net.IPNet, 0, len(entries))
 	for _, raw := range entries {
 		e := strings.TrimSpace(raw)
@@ -155,7 +167,9 @@ func parseCIDRList(entries []string, what string) []*net.IPNet {
 			out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
 			continue
 		}
-		log.Printf("[ws] WARNING: %s entry %q is neither an IP nor a CIDR, ignored", what, e)
+		if warn != nil {
+			warn(e)
+		}
 	}
 	return out
 }
