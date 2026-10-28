@@ -506,7 +506,7 @@ window.ObserverDetailNaiveBanner = {
         <h4 style="margin:0 0 6px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-share-network"/></svg> Direct Neighbors</h4>
         ${renderDirectNeighbors(neighborsData)}
       </div>
-      <div class="obs-charts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(400px,1fr));gap:16px">
+      <div class="obs-charts" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,400px),1fr));gap:16px">
         <div class="chart-card" style="padding:12px">
           <h3 style="margin:0 0 8px;font-size:0.95em">Packets Over Time</h3>
           <canvas id="obsTimeChart" role="img" aria-label="Packets over time chart"></canvas>

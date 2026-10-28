@@ -6095,3 +6095,7 @@ body.embed #app.app-fixed {
   outline: 2px solid var(--accent-strong);
   outline-offset: 2px;
 }
+
+/* #634 (upstream 2344): an unrendered chart canvas keeps its 300px intrinsic
+   width, which overflowed the single-column grid on 320px screens. */
+.obs-charts canvas { max-width: 100%; }

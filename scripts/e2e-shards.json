@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-634-observer-charts-fit-e2e.js",
+      "shard": 3,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #634 observer chart fit at 320/375/390/1280 in both themes. About 15s locally; no CI duration measured yet. Assigned to shard 3."
+    },
+    {
       "file": "test-634-more-menu-focus-e2e.js",
       "shard": 3,
       "env": { "BASE_URL": "$BASE_URL" },
