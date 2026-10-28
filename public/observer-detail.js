@@ -47,6 +47,7 @@ window.ObserverDetailNaiveBanner = {
   let charts = [];
   let currentDays = 7;
   let currentId = null;
+  let detailGeneration = 0; // bumped per load and on leave; a response applies only if it still matches
   let titleVisit = -1; // PageTitle token of the current visit (#563)
 
   function destroyCharts() {
@@ -71,6 +72,7 @@ window.ObserverDetailNaiveBanner = {
   }
 
   function init(app, routeParam) {
+    currentDays = 7; // the selector always renders 7 days on a new visit
     currentId = routeParam;
     titleVisit = window.PageTitle ? window.PageTitle.visit() : -1;
     if (!currentId) {
@@ -137,32 +139,38 @@ window.ObserverDetailNaiveBanner = {
   }
 
   function destroy() {
+    detailGeneration++;
     destroyCharts();
     currentId = null;
     airtimeSeq++;
   }
 
   async function loadDetail() {
+    const generation = ++detailGeneration;
+    const loadId = currentId;
+    const days = currentDays;
     try {
       destroyCharts();
       chartDefaults();
-      const loadId = currentId;
       const [obs, analytics, obsSkewArr, neighborsData] = await Promise.all([
-        api('/observers/' + encodeURIComponent(currentId)),
-        api('/observers/' + encodeURIComponent(currentId) + '/analytics?days=' + currentDays),
+        api('/observers/' + encodeURIComponent(loadId)),
+        api('/observers/' + encodeURIComponent(loadId) + '/analytics?days=' + days),
         api('/observers/clock-skew', { ttl: 30000 }).catch(function() { return []; }),
-        api('/observers/' + encodeURIComponent(currentId) + '/neighbors').catch(function() { return { neighbors: [], reportedAt: '' }; }),
+        api('/observers/' + encodeURIComponent(loadId) + '/neighbors').catch(function() { return { neighbors: [], reportedAt: '' }; }),
       ]);
+      // Only the latest load of the current visit owns the detail view.
+      if (generation !== detailGeneration) return;
       // Find this observer's calibration data.
       var obsSkew = null;
       (Array.isArray(obsSkewArr) ? obsSkewArr : []).forEach(function(s) {
-        if (s && s.observerID === currentId) obsSkew = s;
+        if (s && s.observerID === loadId) obsSkew = s;
       });
       // The page does not wait for the slow bulk summary (#497): the TX/RX
       // cards start as dashes and are filled in below.
       renderDetail(obs, analytics, obsSkew, neighborsData, window.ObserverAirtime.lookup());
       loadAirtimeCards(loadId);
     } catch (e) {
+      if (generation !== detailGeneration) return;
       // SECURITY (OBS-2, PR #1539): use textContent for error messages.
       // Error.message is JS-controlled and shouldn't normally carry attacker
       // strings, but textContent is a one-line defense against an upstream
