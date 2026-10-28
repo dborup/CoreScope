@@ -110,9 +110,9 @@ function loadPacketsSandbox() {
 // Builds a raw frame: header (payloadType<<2 | route), 4 transport-code
 // bytes on routes 0/3, path_len byte, path bytes, payload bytes.
 // firmware/docs/packet_format.md.
-function buildFrame(payloadType, route, pathLenByte, pathHexBytes, payloadHexBytes) {
+function buildFrame(payloadType, route, pathLenByte, pathHexBytes, payloadHexBytes, codesOverride) {
   const hex2 = (n) => n.toString(16).padStart(2, '0').toUpperCase();
-  const codes = (route === 0 || route === 3) ? 'AABBCCDD' : '';
+  const codes = (route === 0 || route === 3) ? (codesOverride || 'AABBCCDD') : '';
   return hex2((payloadType << 2) | route) + codes + hex2(pathLenByte) + pathHexBytes.join('') + payloadHexBytes.join('');
 }
 
@@ -130,11 +130,15 @@ console.log('\n=== #608 A: buildGroupRowHtml child row reads the CHILD\'s own ra
     observation_count: 2, observer_count: 2,
     _children: [
       // Child's own frame: route 3 (TRANSPORT_DIRECT, offset 5), path-len
-      // byte 0x81 -> hashSize (0x81>>6)+1 = 3. Reading it at the parent's
-      // offset 1 instead (byte1 = transport code 0xAA) would give a
-      // different, wrong hashSize.
+      // byte 0x81 -> hashSize (0x81>>6)+1 = 3. The first transport-code
+      // byte is deliberately 0x11, not the default 0xAA: 0xAA's top two
+      // bits ("10") happen to match 0x81's, so a misread at the parent's
+      // offset 1 would coincidentally also yield hashSize 3 and the
+      // assertion below could not tell the two offsets apart. 0x11's top
+      // two bits ("00") give hashSize 1 instead, so reading the wrong
+      // offset is distinguishable from reading the right one.
       { id: 1, observer_id: null, payload_type: 2,
-        raw_hex: buildFrame(2, 3, 0x81, ['AABBCC'], ['42']),
+        raw_hex: buildFrame(2, 3, 0x81, ['AABBCC'], ['42'], '11BBCCDD'),
         path_json: '["AABBCC"]', hash: 'grp608' },
     ],
   };
