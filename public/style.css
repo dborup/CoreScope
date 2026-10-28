@@ -367,6 +367,10 @@
   --shadow: rgba(0,0,0,0.3);
   --trace-ghost-color: #94a3b8;
 
+  /* #620: minimum viewport margin of the region/area dropdown menus. Read by
+   * region-filter.js placeMenu() as well as the menu max-width below. */
+  --region-menu-gutter: 8px;
+
   /* #1128: documented z-index scale. Use these custom props for any new
    * stacking context decision. Existing legacy z-index values that work are
    * left in place to avoid behavioural risk; new code must use these tokens.
@@ -2574,11 +2578,11 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   .ch-header-region .region-pill { padding: 2px 6px; font-size: 11px; }
   /* #416 — the channels header is the tightest host of the region control. */
   .ch-header-region .region-quick-pick { padding: 2px 6px; font-size: 11px; }
-  .ch-header-region .region-quick-picks { margin-left: 6px; padding-left: 6px; gap: 4px; }
+  .ch-header-region .region-quick-picks { gap: 4px; }
   .ch-header-region .region-dropdown-trigger { padding: 3px 6px; font-size: 11px; }
-  /* #239: order: 1 puts the dropdown trigger (more than 4 regions) at the
-     right edge of the strip, so its menu opens leftwards from there. */
-  .ch-header-region .region-dropdown-menu { left: auto; right: 0; }
+  /* #620: the shared menu placement (region-filter.js placeMenu) keeps the
+     open menu inside the viewport wherever the trigger sits, so Channels
+     needs no menu override of its own (it used to pin right: 0 here). */
 
   /* Channel list row: name must dominate. Below 768px channels.js renders
      the flat .ch-row list (#1367), which has no inline share/remove
@@ -3759,13 +3763,18 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
   border-style: solid; border-color: var(--accent-strong);
 }
 .region-quick-pick-active:hover { opacity: 0.85; color: var(--text-on-accent); }
-/* On a phone (390 px and down the row wraps under the control) the hairline
-   would sit above nothing useful, so the quick picks become their own
-   full-width row instead of an indented continuation. */
-@media (max-width: 480px) {
+/* On a phone or small tablet the row wraps away from the control, so the
+   hairline would divide nothing useful: the quick picks become their own
+   full-width row. #620: in dropdown mode that row goes above the control (the
+   wrap gets order: 1), so the menu, which drops below its trigger, never
+   covers the picks, and the container is capped to its host so a long row
+   cannot widen the page. Desktop layout is untouched. */
+@media (max-width: 768px) {
+  .region-filter-container.has-region-quick-picks { max-width: 100%; min-width: 0; }
+  .region-filter-container.has-region-quick-picks .region-dropdown-wrap { order: 1; }
   .region-quick-picks {
     margin-left: 0; padding-left: 0; border-left: 0;
-    flex-basis: 100%; width: 100%;
+    flex-basis: 100%; width: 100%; min-width: 0;
   }
   .region-quick-pick { max-width: 100%; }
 }
@@ -3790,14 +3799,16 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 .region-dropdown-trigger:hover { border-color: var(--accent); color: var(--accent); }
 .region-dropdown-menu {
   position: absolute; top: 100%; left: 0; z-index: var(--z-dropdown);
-  min-width: 220px; width: max-content; max-height: 260px; overflow-y: auto;
+  min-width: min(220px, calc(100vw - 2 * var(--region-menu-gutter)));
+  max-width: calc(100vw - 2 * var(--region-menu-gutter));
+  width: max-content; max-height: 260px; overflow-y: auto;
   background: var(--card-bg, #fff); border: 1px solid var(--border); border-radius: 8px;
   box-shadow: 0 4px 16px rgba(0,0,0,0.12); padding: 4px 0;
 }
 .region-dropdown-item {
   display: flex; align-items: center; gap: 6px; padding: 6px 12px;
   font-size: 13px; cursor: pointer; color: var(--text); white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis; width: 100%; max-width: 320px;
+  overflow: hidden; text-overflow: ellipsis; width: 100%; max-width: min(320px, calc(100vw - 2 * var(--region-menu-gutter) - 2px));
   background: transparent; border: 0px;
 }
 .region-dropdown-item input[type="checkbox"] {

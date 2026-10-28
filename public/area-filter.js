@@ -85,6 +85,7 @@
       var open = !menu.hidden;
       menu.hidden = open;
       trigger.setAttribute('aria-expanded', String(!open));
+      if (!open && window.RegionFilter) RegionFilter.placeMenu(menu);
     };
 
     menu.onclick = function (e) {
@@ -103,8 +104,10 @@
       }
     }
     document.addEventListener('click', onDocClick, true);
+    var unwatch = window.RegionFilter ? RegionFilter.watchMenu(menu) : function () {};
     container._areaCleanup = function () {
       document.removeEventListener('click', onDocClick, true);
+      unwatch();
     };
   }
 

@@ -377,6 +377,49 @@
     return html;
   }
 
+  /** #620: keep an open dropdown menu inside the viewport. The menu is
+   *  anchored to its trigger's left edge in CSS; when that would push it past
+   *  the right edge (trigger in the right half, or a narrow phone) shift it
+   *  left by exactly the overflow, never past the left gutter. Shared by the
+   *  region and area filters so every host page behaves the same. */
+  function menuGutter() {
+    // The CSS custom property is the single source (style.css :root); the
+    // fallback only covers a stylesheet that failed to load.
+    var g = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--region-menu-gutter'));
+    return isNaN(g) ? 8 : g;
+  }
+
+  function placeMenu(menu) {
+    if (!menu || !menu.parentNode || !menu.getBoundingClientRect) return;
+    var wrap = menu.parentNode;
+    menu.style.left = '';
+    var vw = document.documentElement.clientWidth;
+    var gutter = menuGutter();
+    var w = wrap.getBoundingClientRect();
+    var m = menu.getBoundingClientRect();
+    var left = Math.min(w.left, vw - gutter - m.width);
+    left = Math.max(left, gutter);
+    menu.style.left = (left - w.left) + 'px';
+  }
+
+  /** #620: re-place an open menu when the viewport changes under it (window
+   *  resize, device rotation). Debounced, so a drag-resize costs one layout
+   *  read; a closed menu is left alone. Returns the disposer. */
+  function watchMenu(menu) {
+    var timer = null;
+    function onViewportChange() {
+      clearTimeout(timer);
+      timer = setTimeout(function () { if (!menu.hidden) placeMenu(menu); }, 100);
+    }
+    window.addEventListener('resize', onViewportChange);
+    window.addEventListener('orientationchange', onViewportChange);
+    return function () {
+      clearTimeout(timer);
+      window.removeEventListener('resize', onViewportChange);
+      window.removeEventListener('orientationchange', onViewportChange);
+    };
+  }
+
   /** Wire the dropdown control after its markup is in the container. */
   function wireDropdown(container, codes) {
     var trigger = container.querySelector('.region-dropdown-trigger');
@@ -386,6 +429,7 @@
       var open = !menu.hidden;
       menu.hidden = open;
       trigger.setAttribute('aria-expanded', String(!open));
+      if (!open) placeMenu(menu);
     };
 
     menu.onchange = function (e) {
@@ -402,8 +446,10 @@
       }
     }
     document.addEventListener('click', onDocClick, true);
+    var unwatch = watchMenu(menu);
     container._regionCleanup = function () {
       document.removeEventListener('click', onDocClick, true);
+      unwatch();
     };
   }
 
@@ -555,7 +601,9 @@
     fetchRegions: fetchRegions,
     setSelected: setSelected,
     syncFromUrl: syncFromUrl,
-    getGroups: getGroups
+    getGroups: getGroups,
+    placeMenu: placeMenu,
+    watchMenu: watchMenu
   };
   window.RegionShowAll = {
     get: showAllGet,

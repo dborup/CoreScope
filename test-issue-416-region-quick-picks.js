@@ -49,6 +49,7 @@ function load(opts) {
   const replaced = [];
   const ctx = {
     window: {},
+    addEventListener() {}, removeEventListener() {}, // #620 watchMenu: ctx.window = ctx
     document: { addEventListener() {}, removeEventListener() {} },
     location: { hash: opts.hash || '' },
     history: {
