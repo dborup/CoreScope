@@ -85,6 +85,7 @@
       var open = !menu.hidden;
       menu.hidden = open;
       trigger.setAttribute('aria-expanded', String(!open));
+      if (!open && window.RegionFilter) RegionFilter.placeMenu(menu);
     };
 
     menu.onclick = function (e) {

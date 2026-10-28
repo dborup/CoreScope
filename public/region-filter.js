@@ -377,6 +377,24 @@
     return html;
   }
 
+  /** #620: keep an open dropdown menu inside the viewport. The menu is
+   *  anchored to its trigger's left edge in CSS; when that would push it past
+   *  the right edge (trigger in the right half, or a narrow phone) shift it
+   *  left by exactly the overflow, never past the left gutter. Shared by the
+   *  region and area filters so every host page behaves the same. */
+  function placeMenu(menu) {
+    if (!menu || !menu.parentNode || !menu.getBoundingClientRect) return;
+    var wrap = menu.parentNode;
+    menu.style.left = '';
+    var vw = document.documentElement.clientWidth;
+    var gutter = 8;
+    var w = wrap.getBoundingClientRect();
+    var m = menu.getBoundingClientRect();
+    var left = Math.min(w.left, vw - gutter - m.width);
+    left = Math.max(left, gutter);
+    menu.style.left = (left - w.left) + 'px';
+  }
+
   /** Wire the dropdown control after its markup is in the container. */
   function wireDropdown(container, codes) {
     var trigger = container.querySelector('.region-dropdown-trigger');
@@ -386,6 +404,7 @@
       var open = !menu.hidden;
       menu.hidden = open;
       trigger.setAttribute('aria-expanded', String(!open));
+      if (!open) placeMenu(menu);
     };
 
     menu.onchange = function (e) {
@@ -555,7 +574,8 @@
     fetchRegions: fetchRegions,
     setSelected: setSelected,
     syncFromUrl: syncFromUrl,
-    getGroups: getGroups
+    getGroups: getGroups,
+    placeMenu: placeMenu
   };
   window.RegionShowAll = {
     get: showAllGet,
