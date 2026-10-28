@@ -3,7 +3,7 @@
  * API's `name` (not only `advert_name`). */
 'use strict';
 const assert = require('assert');
-const { loadNodes } = require('./test-634-nodes-sandbox');
+const { loadNodes } = require('./sandbox-634-nodes');
 const ctx = loadNodes();
 const w = ctx.window;
 let failed = 0;

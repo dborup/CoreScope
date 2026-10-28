@@ -2,7 +2,7 @@
  * packet, so it must say so (not the generic "Analyze"). */
 'use strict';
 const assert = require('assert');
-const { loadNodes } = require('./test-634-nodes-sandbox');
+const { loadNodes } = require('./sandbox-634-nodes');
 const ctx = loadNodes();
 let failed = 0;
 function test(name, fn) {
