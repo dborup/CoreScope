@@ -120,9 +120,8 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 	for offset := 0; offset < len(snapshot); offset += batchSize {
 		end := min(offset+batchSize, len(snapshot))
 
-		store.mu.RLock()
-		updates := staleContentHashes(store, snapshot[offset:end])
-		store.mu.RUnlock()
+		var updates []hashUpdate
+		store.withRLock(func() { updates = staleContentHashes(store, snapshot[offset:end]) })
 		if len(updates) == 0 {
 			continue
 		}
@@ -135,11 +134,12 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 			indexesReady = true
 		}
 		metadata := store.snapshotPathNodes()
-		store.mu.Lock()
-		held := time.Now()
-		r, m := store.applyContentHashUpdates(updates, metadata)
-		hold.record(time.Since(held))
-		store.mu.Unlock()
+		var r, m int
+		store.withLock(func() {
+			held := time.Now()
+			r, m = store.applyContentHashUpdates(updates, metadata)
+			hold.record(time.Since(held))
+		})
 		rehashed += r
 		merged += m
 
@@ -152,6 +152,22 @@ func migrateContentHashesAsync(store *PacketStore, batchSize int, yieldDuration 
 			rehashed, merged, millis(hold.max), hold.batches, millis(hold.total))
 		refreshDistIndexHashesAfterMigration(store)
 	}
+}
+
+// withRLock and withLock run fn under s.mu and release it even if fn panics:
+// migrateContentHashesAsync recovers a panic so the server keeps serving, and
+// must not leave the lock held for every reader and the next eviction (#621,
+// upstream PR 2327).
+func (s *PacketStore) withRLock(fn func()) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	fn()
+}
+
+func (s *PacketStore) withLock(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn()
 }
 
 // refreshDistIndexHashesAfterMigration repairs the content hash the distance

@@ -6,10 +6,10 @@ import "strings"
 //
 // The ingestor writes observations.resolved_path with json.Marshal of a
 // []*string: a compact array of full pubkeys and nulls, e.g.
-// ["a1…",null,"b2…"]. Load, the chunk merge, live ingest and the eviction
-// prefetch read one per observation, 2.5M at startup on the large instance,
-// and decoding them with encoding/json was 17% of Load's allocations and 59%
-// of the eviction prefetch's (pprof, see the PR description).
+// ["a1…",null,"b2…"]. Load, the chunk merge and live ingest read one per
+// observation, 2.5M at startup on the large instance, and decoding them with
+// encoding/json was 17% of Load's allocations (pprof, see the PR
+// description).
 //
 // scanResolvedPathPubkeys reads that compact form directly. It accepts only
 // what json.Unmarshal would return unchanged: strings of printable ASCII
@@ -73,19 +73,4 @@ func scanResolvedPathPubkeys(dst []string, s string) ([]string, bool) {
 		}
 		i++
 	}
-}
-
-// appendPersistedRelayPubkeys appends the non-empty pubkeys of the
-// resolved_path column value s to dst, scanning in place when it can. The
-// appended strings may point into s.
-func appendPersistedRelayPubkeys(dst []string, s string) []string {
-	if out, ok := scanResolvedPathPubkeys(dst, s); ok {
-		return out
-	}
-	for _, p := range unmarshalResolvedPath(s) {
-		if p != nil && *p != "" {
-			dst = append(dst, *p)
-		}
-	}
-	return dst
 }

@@ -191,7 +191,8 @@ func TestEvictClearsVacatedSliceTails_621(t *testing.T) {
 }
 
 // Eviction drops the grouped-query cache, which holds the transmissions of
-// the last result.
+// the last result, and a sort that started before an eviction does not
+// publish what that eviction removed.
 func TestEvictReleasesGroupedCache_621(t *testing.T) {
 	now := time.Now().UTC()
 	s := makeTestStore(4, now.Add(-48*time.Hour), 0)
@@ -213,6 +214,27 @@ func TestEvictReleasesGroupedCache_621(t *testing.T) {
 		t.Errorf("grouped cache still holds %d transmissions after eviction", cached)
 	}
 
+	// A sorted result snapshotted before an eviction is not published.
+	stale := []*StoreTx{{ID: 99, Hash: "stale"}}
+	before := atomic.LoadInt64(&s.evicted)
+	s.mu.Lock()
+	s.packets[0].FirstSeen = now.Add(-48 * time.Hour).Format(time.RFC3339)
+	s.EvictStale()
+	s.mu.Unlock()
+	s.cacheGroupedPackets(stale, "k", before)
+	s.groupedCacheMu.Lock()
+	published := s.groupedCacheTxs != nil
+	s.groupedCacheMu.Unlock()
+	if published {
+		t.Error("a grouped result sorted before an eviction was published after it")
+	}
+	s.cacheGroupedPackets(stale, "k", atomic.LoadInt64(&s.evicted))
+	s.groupedCacheMu.Lock()
+	published = s.groupedCacheTxs != nil
+	s.groupedCacheMu.Unlock()
+	if !published {
+		t.Error("a grouped result with no eviction since its snapshot was not published")
+	}
 }
 
 // Long-run retention, the issue's measurement: generations of transmissions

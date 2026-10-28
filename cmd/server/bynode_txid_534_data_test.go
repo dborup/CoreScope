@@ -358,8 +358,7 @@ func TestByNodeTxIDs534_Measure(t *testing.T) {
 
 	// One eviction pass over the oldest sixth (a retention cut placed relative
 	// to the data, so a later run on the same DB evicts the same rows), as
-	// RunEviction runs it: candidates, SQL prefetch outside the lock, then
-	// the pass.
+	// RunEviction runs it.
 	store.mu.Lock()
 	cut, err := time.Parse(time.RFC3339, store.packets[len(store.packets)/6].FirstSeen)
 	if err != nil {
@@ -433,11 +432,9 @@ func BenchmarkByNodeIndex534(b *testing.B) {
 }
 
 // bn534EvictionStore builds a store from data without a DB (byNode through
-// addToByNode, as Load feeds it) and returns it with the resolved relays per
-// transmission, which is what RunEviction prefetches from SQL.
-func bn534EvictionStore(txs []bn534Tx) (*PacketStore, map[int][]string) {
+// addToByNode, as Load feeds it).
+func bn534EvictionStore(txs []bn534Tx) *PacketStore {
 	s := NewPacketStore(nil, &PacketStoreConfig{})
-	rp := make(map[int][]string, len(txs))
 	pt := 5
 	for i := range txs {
 		d := &txs[i]
@@ -446,21 +443,16 @@ func bn534EvictionStore(txs []bn534Tx) (*PacketStore, map[int][]string) {
 			tx.DecodedJSON = fmt.Sprintf(`{"type":"ADVERT","pubKey":"%s","name":"R%04d"}`, bn534PK(d.origin), d.origin)
 			s.addToByNode(tx, bn534PK(d.origin))
 		}
-		seen := map[int]bool{}
 		for _, o := range d.obs {
 			for _, k := range o.relays {
 				s.addToByNode(tx, bn534PK(k))
-				if !seen[k] {
-					seen[k] = true
-					rp[tx.ID] = append(rp[tx.ID], bn534PK(k))
-				}
 			}
 		}
 		s.packets = append(s.packets, tx)
 		s.byHash[tx.Hash], s.byTxID[tx.ID] = tx, tx
 		s.byPayloadType[pt] = append(s.byPayloadType[pt], tx)
 	}
-	return s, rp
+	return s
 }
 
 // BenchmarkEvictNodeSets534 is one eviction pass over the oldest sixth of a
@@ -479,12 +471,12 @@ func BenchmarkEvictNodeSets534(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		s, rp := bn534EvictionStore(data)
+		s := bn534EvictionStore(data)
 		s.retentionHours = time.Since(cut).Hours()
 		runtime.GC()
 		b.StartTimer()
 		s.mu.Lock()
-		n := s.EvictStaleWithRP(rp)
+		n := s.EvictStale()
 		s.mu.Unlock()
 		if n == 0 {
 			b.Fatal("nothing evicted")

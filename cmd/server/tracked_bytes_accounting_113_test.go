@@ -354,48 +354,6 @@ func TestTrackedBytes_RebuildCreditsRecordsOfTxNotInTheStore_164(t *testing.T) {
 	acct113Check(t, store, "after dropping a record of a tx outside the store")
 }
 
-// The candidates evictionCandidateTxIDs hands out (the batch it prefetches
-// resolved pubkeys for) must be exactly the tx the pass then evicts, for a
-// memory-triggered pass as for a retention pass.
-func TestEvictionCandidatesMatchWhatIsEvicted_113(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "acct.db")
-	acct113CreateDB(t, dbPath, 3000, 0)
-	store := acct113Load(t, dbPath)
-	store.maxMemoryMB = int(store.trackedBytes / 1048576)
-
-	store.mu.Lock()
-	candidates := map[int]bool{}
-	for _, id := range store.evictionCandidateTxIDs() {
-		candidates[id] = true
-	}
-	live := map[int]bool{}
-	for _, tx := range store.packets {
-		live[tx.ID] = true
-	}
-	store.mu.Unlock()
-	if len(candidates) == 0 {
-		t.Fatal("setup: no eviction candidates")
-	}
-	store.RunEviction()
-	evicted := map[int]bool{}
-	store.mu.RLock()
-	for _, tx := range store.packets {
-		delete(live, tx.ID)
-	}
-	store.mu.RUnlock()
-	for id := range live {
-		evicted[id] = true
-	}
-	if len(evicted) != len(candidates) {
-		t.Fatalf("%d candidates, %d evicted", len(candidates), len(evicted))
-	}
-	for id := range evicted {
-		if !candidates[id] {
-			t.Fatalf("tx %d was evicted but was not a candidate", id)
-		}
-	}
-}
-
 // The fixture's writer must not fail while the server holds a read: a loaded
 // store's schema healer (healSchemaFlags) re-probes this schema every 2 s for
 // its missing optional columns, at any point of the mixed sequence below. In
