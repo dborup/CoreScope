@@ -236,6 +236,11 @@
     return Object.assign({}, n, { _lastHeard: activity, last_heard: null, last_seen: null, _liveSeen: null });
   }
 
+  // #634 (upstream 2296): the link opens one sample packet of the observed path.
+  function renderExamplePacketLink(hash) {
+    return '<a href="#/packets/' + encodeURIComponent(hash) + '" class="ch-analyze-link">View example packet →</a>';
+  }
+
   function renderRelayActivity(n) {
     let html = n.last_relayed ? renderNodeTimestampHtml(n.last_relayed) + ' ' : '';
     html += n.last_relayed && n.relay_active
@@ -1293,7 +1298,7 @@
             }).join(' → ');
             return `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">
               <div>${chain}</div>
-              <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${renderNodeTimestampHtml(p.lastSeen)} · <a href="#/packets/${p.sampleHash}" class="ch-analyze-link">Analyze →</a></div>
+              <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${renderNodeTimestampHtml(p.lastSeen)} · ${renderExamplePacketLink(p.sampleHash)}</div>
             </div>`;
           }).join('');
         }
@@ -2192,7 +2197,7 @@
           }).join(' → ');
           return `<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:12px">
             <div>${chain}</div>
-            <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${renderNodeTimestampHtml(p.lastSeen)} · <a href="#/packets/${p.sampleHash}" class="ch-analyze-link">Analyze →</a></div>
+            <div style="color:var(--text-muted);margin-top:2px">${p.count}× · last ${renderNodeTimestampHtml(p.lastSeen)} · ${renderExamplePacketLink(p.sampleHash)}</div>
           </div>`;
         }).join('');
       }
@@ -2259,6 +2264,7 @@
     localStorage.setItem('meshcore-nodes-sort', JSON.stringify(_fallbackSortState));
   };
   window._nodesSortNodes = sortNodes;
+  window._nodesRenderExamplePacketLink = renderExamplePacketLink;
   window._nodesComputeDisplayOrder = computeDisplayOrder;
   window._nodesSortArrow = function(col) {
     var st = _getSortState();
