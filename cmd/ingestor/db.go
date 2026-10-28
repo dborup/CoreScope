@@ -1073,6 +1073,36 @@ func (s *Store) prepareStatements() error {
 	return nil
 }
 
+// pathHopsTransmitted reports whether data's path lists relays that already
+// transmitted the packet, which is what makes a hop evidence of liveness.
+// Two conditions, both read off this observation's own decoded header:
+//
+//   - the payload type must not repurpose the path bytes. A TRACE's header
+//     path carries per-hop SNR (Mesh.cpp:60-61) and the decoder replaces the
+//     hops with the route the trace was asked to take (BuildPacketData), so
+//     those hops name nodes the packet was aimed at, not nodes that sent it.
+//     That is packetpath.PathBytesAreHops.
+//   - the route must be FLOOD or TRANSPORT_FLOOD. A flood forwarder appends
+//     its own hash as it retransmits (Mesh::routeRecvPacket), so the path is
+//     a record of who transmitted. A direct route's path is the remaining
+//     planned route and each forwarder strips itself from the FRONT
+//     (Mesh::removeSelfFromPath), so its hops are still to come.
+//
+// Without this gate, tracing or direct-messaging a switched-off repeater
+// refreshed its last_seen and kept it looking recently heard (#623, upstream
+// 2308/2307). It is the same rule deriveHeardKey applies to RX capture
+// (client_reception.go) and the server to confirmed relays
+// (txHasObservedFloodPath in cmd/server/node_activity.go).
+//
+// The gate covers the touch only: observations.resolved_path is still written
+// for every observation, so hop analytics are unchanged.
+func pathHopsTransmitted(data *PacketData) bool {
+	if !packetpath.PathBytesAreHops(byte(data.PayloadType)) {
+		return false
+	}
+	return isFloodRoute(data.RouteType)
+}
+
 // touchRelayNodesLocked refreshes nodes.last_seen for nodes observed as
 // relay hops, so a node that forwards traffic stays fresh even when it
 // adverts rarely or not at all.
@@ -1288,8 +1318,11 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 		s.Stats.ObservationsInserted.Add(1)
 		// A resolved hop proves the node was forwarding traffic at
 		// rxTime. Refresh its last_seen so staleness/eviction logic sees
-		// relay activity, not just ADVERTs.
-		s.touchRelayNodesLocked(resolvedPubkeys(resolved), rxTime)
+		// relay activity, not just ADVERTs. Only a flood path is that
+		// proof -- see pathHopsTransmitted (#623).
+		if pathHopsTransmitted(data) {
+			s.touchRelayNodesLocked(resolvedPubkeys(resolved), rxTime)
+		}
 		// #1690: bump transmissions.last_seen so cold-load can filter on
 		// effective recency. Conditional `last_seen < ?` so we never go
 		// backwards on out-of-order ingest.
