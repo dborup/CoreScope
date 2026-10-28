@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-634-more-menu-focus-e2e.js",
+      "shard": 3,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #634 More-menu focus across refits in both themes. About 10s locally; no CI duration measured yet. Assigned to shard 3."
+    },
+    {
       "file": "test-issue-620-region-dropdown-viewport-e2e.js",
       "shard": 3,
       "env": { "BASE_URL": "$BASE_URL" },
