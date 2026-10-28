@@ -153,10 +153,12 @@ function addLiveGlobals(ctx) {
   ctx.RegionFilter = { init() {}, getSelected: () => null, onRegionChange: () => {} };
 }
 
-function makeLiveSandbox({ withAppJs = false } = {}) {
+function makeLiveSandbox({ withAppJs = false, withHopFilter = false } = {}) {
   const ctx = makeSandbox();
   addLiveGlobals(ctx);
 
+  // index.html load order: hop-filter.js, then app.js, then live.js.
+  if (withHopFilter) loadInCtx(ctx, 'public/hop-filter.js');
   loadInCtx(ctx, 'public/payload-labels.js');
   loadInCtx(ctx, 'public/roles.js');
   loadInCtx(ctx, 'public/packet-helpers.js');
@@ -1330,6 +1332,59 @@ console.log('\n=== live.js: shared WebSocket channel ===');
     t.registered.push(() => { laterListenerRan = true; });
     assert.doesNotThrow(() => t.fanOut({ type: 'packet', data: null }));
     assert.ok(laterListenerRan, 'a listener registered after Live must still receive the message');
+  });
+}
+
+// ===== groupIsMultibyte (#608) =====
+// #608 follow-up (review of #600, finding N2): the group's hash-size
+// classifier used to pass each observation's route_type straight through to
+// MC_packetHashSize, trusting it as a per-observation field. In practice
+// route_type never comes from the observation (bufferPacket's WS/DB shapes
+// carry it only at the transmission level), so a GROUP whose observations
+// were actually heard on different routes could have its hash size read at
+// the wrong raw_hex offset for every observation but the first. Now
+// MC_packetHashSize derives the route from each raw_hex's own header byte.
+console.log('\n=== live.js: groupIsMultibyte (#608 per-observation route) ===');
+{
+  const ctx = makeLiveSandbox({ withHopFilter: true });
+  const groupIsMultibyte = ctx.window._liveGroupIsMultibyte;
+  assert.ok(groupIsMultibyte, '_liveGroupIsMultibyte must be exposed');
+
+  // route 1 (FLOOD, offset 1), path-len byte 0x00 -> hashSize 1
+  const singleByteFlood = { raw_hex: '0100', route_type: 1 };
+  // route 0 (TRANSPORT_FLOOD, offset 5), path-len byte 0x40 -> hashSize 2
+  const multiByteTransport = { raw_hex: '00aabbccdd40', route_type: 0 };
+
+  test('a single-byte observation alone is not multibyte', () => {
+    assert.strictEqual(groupIsMultibyte([singleByteFlood]), false);
+  });
+
+  test('a multibyte transport observation alone is multibyte', () => {
+    assert.strictEqual(groupIsMultibyte([multiByteTransport]), true);
+  });
+
+  test('mixed-route group: an unresolvable first observation is skipped, then a different-route observation decides via its OWN header', () => {
+    // Real content hash heard on two different routes (StoreTx.routeMask).
+    // groupIsMultibyte uses the first RESOLVABLE observation (documented
+    // behavior, unchanged by #608); the fix is that whichever one that is,
+    // its own raw_hex header picks the offset -- not a shared/assumed route.
+    const unresolvable = { raw_hex: null, route_type: 1 };
+    // route 3 (TRANSPORT_DIRECT, offset 5), path-len byte 0x80 -> hashSize 3
+    const transportDirectMultibyte = { raw_hex: '03aabbccdd80', route_type: 3 };
+    assert.strictEqual(groupIsMultibyte([unresolvable, transportDirectMultibyte]), true,
+      'the second observation\'s own 3-byte hash size (route 3, offset 5) must be found');
+  });
+
+  test('mixed-route group: an observation carrying a FOREIGN route_type field is read by its own raw_hex, not that field', () => {
+    // header byte 0x00 says TRANSPORT_FLOOD/offset 5 -> real path byte at
+    // offset 5 is 0x40 -> size 2 (multibyte). route_type on the object lies
+    // and claims 1 (non-transport/offset 1); offset 1 here is a deliberately
+    // 0x00 transport-code byte -> size 1 (NOT multibyte). The two offsets
+    // must give different, distinguishable verdicts, or this test cannot
+    // tell a correct per-frame read from a buggy field-trusting one.
+    const foreignRouteType = { raw_hex: '0000BBCCDD40', route_type: 1 };
+    assert.strictEqual(groupIsMultibyte([foreignRouteType]), true,
+      'must classify by the frame\'s own header route (offset 5 -> size 2), not the attached route_type field (which would misread offset 1 -> size 1)');
   });
 }
 

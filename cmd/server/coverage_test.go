@@ -3398,6 +3398,69 @@ func TestAnalyticsHashSizesZeroHopSkip(t *testing.T) {
 	}
 }
 
+// TestAnalyticsHashSizesZeroHopSkipTransportDirect is the TRANSPORT_DIRECT
+// sibling of TestAnalyticsHashSizesZeroHopSkip (#608 follow-up; review of
+// #600, finding N5). computeAnalyticsHashSizes' isUndeclaredZeroHop guards
+// both RouteDirect AND RouteTransportDirect, but only the RouteDirect arm
+// had a test -- dropping `routeType == RouteTransportDirect` from the
+// condition survived the whole cmd/server suite (on master too, so this was
+// pre-existing, not introduced by #608).
+func TestAnalyticsHashSizesZeroHopSkipTransportDirect(t *testing.T) {
+	db := setupTestDB(t)
+	defer db.Close()
+
+	now := time.Now().UTC()
+	recent := now.Add(-1 * time.Hour).Format(time.RFC3339)
+	recentEpoch := now.Add(-1 * time.Hour).Unix()
+
+	db.conn.Exec(`INSERT INTO observers (id, name, iata, last_seen, first_seen, packet_count)
+		VALUES ('obs1', 'Obs', 'SJC', ?, '2026-01-01T00:00:00Z', 10)`, recent)
+
+	pk := "dddd000000000001"
+	db.conn.Exec(`INSERT INTO nodes (public_key, name, role) VALUES (?, 'ZH-Analytics-TD', 'repeater')`, pk)
+
+	decoded := `{"pubKey":"` + pk + `","name":"ZH-Analytics-TD","type":"ADVERT"}`
+
+	// First: a flood advert with hashSize=2 (reliable, multi-hop)
+	// header 0x11 = route_type 1 (flood), payload_type 4
+	// pathByte 0x41 = hashSize bits 01 → size 2, hop_count 1
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
+		VALUES ('1141aabbccdd', 'td_flood', ?, 1, 4, ?)`, recent, decoded)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (1, 1, 10.0, -90, '["aabb"]', ?)`, recentEpoch)
+
+	// Second: a TRANSPORT_DIRECT zero-hop advert, pathByte=0x00 at offset 5
+	// (behind the 4 transport-code bytes) → would give hashSize=1.
+	// header 0x13 = route_type 3 (transport direct), payload_type 4
+	db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json)
+		VALUES ('13aabbccdd00', 'td_direct', ?, 3, 4, ?)`, recent, decoded)
+	db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp)
+		VALUES (2, 1, 10.0, -90, '[]', ?)`, recentEpoch)
+
+	store := NewPacketStore(db, nil)
+	store.Load()
+
+	result := store.GetAnalyticsHashSizes("", "")
+
+	multiByteNodes, ok := result["multiByteNodes"].([]map[string]interface{})
+	if !ok {
+		t.Fatal("expected multiByteNodes slice in analytics hash sizes")
+	}
+
+	found := false
+	for _, n := range multiByteNodes {
+		if n["pubkey"] == pk {
+			found = true
+			if hs, ok := n["hashSize"].(int); ok && hs != 2 {
+				t.Errorf("expected hashSize=2 from flood advert, got %d", hs)
+			}
+		}
+	}
+	if !found {
+		t.Error("node should appear in multiByteNodes with hashSize=2; TRANSPORT_DIRECT zero-hop advert should not overwrite to 1")
+	}
+}
+
 func TestHandleResolveHopsEdgeCases(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()

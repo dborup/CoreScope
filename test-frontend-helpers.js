@@ -2382,6 +2382,32 @@ console.log('\n=== app.js: computeBreakdownRanges ===');
     assert.strictEqual(ctx.rawPayloadOffset(undefined), null);
   });
 
+  // #608: the ONE place rawPathLenByte/rawPayloadOffset/senderPathHashSize
+  // derive a frame's route from its own header byte, instead of each
+  // re-deriving `parseInt(...) & 0x03` separately (follow-up on #600, N6).
+  test('routeTypeFromRawHex reads the low 2 header bits, independent of payload type', () => {
+    assert.strictEqual(ctx.routeTypeFromRawHex('10AABB'), 0); // TRANSPORT_FLOOD
+    assert.strictEqual(ctx.routeTypeFromRawHex('11AABB'), 1); // FLOOD
+    assert.strictEqual(ctx.routeTypeFromRawHex('12AABB'), 2); // DIRECT
+    assert.strictEqual(ctx.routeTypeFromRawHex('13AABB'), 3); // TRANSPORT_DIRECT
+    assert.strictEqual(ctx.routeTypeFromRawHex('FD'), 1); // high payload-type bits ignored
+    assert.strictEqual(ctx.routeTypeFromRawHex('1'), null); // too short
+    assert.strictEqual(ctx.routeTypeFromRawHex('ZZ'), null); // not hex
+    assert.strictEqual(ctx.routeTypeFromRawHex(''), null);
+    assert.strictEqual(ctx.routeTypeFromRawHex(null), null);
+  });
+
+  // #608: firmware Packet::readFrom also rejects payload_len >
+  // MAX_PACKET_PAYLOAD (184) -- rawPayloadOffset's doc comment used to claim
+  // full parity with readFrom without actually enforcing this cap.
+  test('rawPayloadOffset rejects a payload over MAX_PACKET_PAYLOAD (184 bytes)', () => {
+    // route 1, zero hops (path_len 0x00): payload starts at offset 2.
+    const okPayload = 'AA'.repeat(184); // exactly 184 bytes: still accepted
+    assert.strictEqual(ctx.rawPayloadOffset('1100' + okPayload), 2);
+    const tooLong = 'AA'.repeat(185); // 185 bytes: over the cap
+    assert.strictEqual(ctx.rawPayloadOffset('1100' + tooLong), null);
+  });
+
   function findRange(ranges, label) {
     return ranges.find(r => r.label === label);
   }

@@ -42,14 +42,24 @@
 
   // Packet-level path-hash size (1|2|3), or 0 when unresolvable.
   // Reads the path-length byte from raw_hex; its top two bits encode
-  // hashSize-1. Offset is 5 for transport routes (route_type 0/3, which
-  // carry 4 next/last-hop code bytes before path-length) else 1 — mirrors
-  // getPathLenOffset()/computeBreakdownRanges() in public/app.js. Reading
-  // from raw_hex (not path hops) is correct even for zero-hop packets.
-  function packetHashSize(rawHex, routeType) {
+  // hashSize-1. The route comes from THIS frame's own header byte (low 2
+  // bits), not a caller-supplied route_type: one content hash can be heard
+  // on several routes (cmd/server/store.go StoreTx.routeMask), so a group's
+  // transmission-level route_type can describe a different observation than
+  // the raw_hex being read here (#608). Offset is 5 for transport routes
+  // (0/3, which carry 4 next/last-hop code bytes before path-length) else 1
+  // — mirrors getPathLenOffset()/computeBreakdownRanges() in public/app.js.
+  // This file loads before app.js in index.html, so it derives the route
+  // itself rather than depending on that module's routeTypeFromRawHex().
+  // Reading from raw_hex (not path hops) is correct even for zero-hop packets.
+  function packetHashSize(rawHex) {
     if (!rawHex || typeof rawHex !== 'string') return 0;
     var clean = rawHex.replace(/\s+/g, '');
     var bytes = clean.length >> 1;
+    if (bytes < 1) return 0;
+    var headerByte = parseInt(clean.slice(0, 2), 16);
+    if (isNaN(headerByte)) return 0;
+    var routeType = headerByte & 0x03;
     var offset = (routeType === 0 || routeType === 3) ? 5 : 1;
     if (bytes < offset + 1) return 0;
     var pathByte = parseInt(clean.slice(offset * 2, offset * 2 + 2), 16);

@@ -1434,6 +1434,45 @@
   // selected observation as canonical, and dispatches the same payload that
   // the packets-page 'View on map' button would have set in sessionStorage.
   // Without an obs param, the first observation is used.
+  // #608: extracted out of loadRouteFromDeepLink so the real production
+  // slicing is what a unit test exercises (window.__meshcoreMapInternals),
+  // not a hand-copied replica. #594: rawPayloadOffset (app.js) reads path_len
+  // behind the transport codes and rejects a path the firmware would not
+  // accept, so a crafted path_len cannot slice random body bytes into the
+  // srcHash/destHash UI fields.
+  // RESPONSE=1, TXT_MSG=2, ANON_REQ=7, PATH=8 — all carry hashes after the path.
+  const TYPES_WITH_DST_SRC = [1, 2, 7, 8];
+  function extractSrcDstFromRawHex(hex, payloadType) {
+    if (!hex || TYPES_WITH_DST_SRC.indexOf(payloadType) < 0) return { src: null, dst: null };
+    try {
+      const payOff = rawPayloadOffset(hex);
+      if (payOff == null) return { src: null, dst: null };
+      const destOff = payOff * 2;
+      if (hex.length < destOff + 2) return { src: null, dst: null };
+      const dst = hex.slice(destOff, destOff + 2).toUpperCase();
+      // ANON_REQ has no srcHash
+      let src = null;
+      if (payloadType !== 7 && hex.length >= destOff + 4) {
+        src = hex.slice(destOff + 2, destOff + 4).toUpperCase();
+      }
+      return { src, dst };
+    } catch (_) {
+      return { src: null, dst: null };
+    }
+  }
+  function extractChannelHashFromRawHex(hex, payloadType) {
+    if (!hex || payloadType !== 5) return null;
+    try {
+      const payOff = rawPayloadOffset(hex);
+      if (payOff == null) return null;
+      const chOff = payOff * 2;
+      if (hex.length < chOff + 2) return null;
+      return hex.slice(chOff, chOff + 2).toUpperCase();
+    } catch (_) {
+      return null;
+    }
+  }
+
   async function loadRouteFromDeepLink() {
     const alive = mapToken();
     try {
@@ -1558,39 +1597,16 @@
       // ANON_REQ doesn't have a srcHash byte (sender is anonymous), only destHash.
       let inferredSrc = decoded.srcHash || null;
       let inferredDst = decoded.destHash || null;
-      const TYPES_WITH_DST_SRC = [1, 2, 7, 8]; // RESPONSE=1, TXT_MSG=2, ANON_REQ=7, PATH=8 — all carry hashes
-      if ((!inferredSrc || !inferredDst) && chosen.raw_hex && TYPES_WITH_DST_SRC.indexOf(pkt.payload_type) >= 0) {
-        try {
-          const hex = chosen.raw_hex;
-          // #594: rawPayloadOffset (app.js) reads path_len behind the transport
-          // codes and rejects a path the firmware would not accept, so a crafted
-          // path_len cannot slice random body bytes into the srcHash/destHash
-          // UI fields.
-          const payOff = rawPayloadOffset(hex);
-          if (payOff == null) throw new Error('raw_hex does not decode');
-          const destOff = payOff * 2;
-          if (hex.length >= destOff + 2) {
-            inferredDst = inferredDst || hex.slice(destOff, destOff + 2).toUpperCase();
-            // ANON_REQ has no srcHash
-            if (pkt.payload_type !== 7 && hex.length >= destOff + 4) {
-              inferredSrc = inferredSrc || hex.slice(destOff + 2, destOff + 4).toUpperCase();
-            }
-          }
-        } catch (_) {}
+      if ((!inferredSrc || !inferredDst) && chosen.raw_hex) {
+        const r = extractSrcDstFromRawHex(chosen.raw_hex, pkt.payload_type);
+        inferredDst = inferredDst || r.dst;
+        inferredSrc = inferredSrc || r.src;
       }
       // GRP_TXT: channel_hash byte sits right after path bytes in raw_hex.
       // Layout: header, [transport codes], path_len, path bytes, channel_hash, encrypted body.
       let inferredChannelHash = decoded.channelHashHex || null;
-      if (!inferredChannelHash && chosen.raw_hex && pkt.payload_type === 5) {
-        try {
-          const hex = chosen.raw_hex;
-          const payOff = rawPayloadOffset(hex);
-          if (payOff == null) throw new Error('raw_hex does not decode');
-          const chOff = payOff * 2;
-          if (hex.length >= chOff + 2) {
-            inferredChannelHash = hex.slice(chOff, chOff + 2).toUpperCase();
-          }
-        } catch (_) {}
+      if (!inferredChannelHash && chosen.raw_hex) {
+        inferredChannelHash = extractChannelHashFromRawHex(chosen.raw_hex, pkt.payload_type);
       }
       const pktCtx = {
         type: inferredType,
@@ -3050,6 +3066,9 @@
       setNodesForTesting: function (n) { nodes = n; },
       setFiltersForTesting: function (f) { Object.assign(filters, f); },
       destroyForTesting: function () { return destroy(); },
+      // #608: the real loadRouteFromDeepLink raw_hex slicing, not a replica.
+      extractSrcDstFromRawHex: extractSrcDstFromRawHex,
+      extractChannelHashFromRawHex: extractChannelHashFromRawHex,
     };
   }
 })();

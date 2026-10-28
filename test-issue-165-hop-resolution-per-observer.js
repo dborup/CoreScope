@@ -62,6 +62,16 @@ function loadPackets(nodes, observers, coords) {
     payloadTypeName: () => 'ADVERT', payloadTypeColor: () => 'info',
     routeTypeName: () => 'FLOOD', transportBadge: () => '', scopeCellHtml: () => '',
     getPathLenOffset: () => 1,
+    // #608: packets.js's col-hashsize cells now read the path-length byte
+    // via rawPathLenByte() (derives its own route from the frame's header,
+    // app.js) instead of getPathLenOffset(route_type) + a manual slice.
+    // Same simplification as getPathLenOffset above: always offset 1 — the
+    // tests here are about hop resolution, not hash-size display.
+    rawPathLenByte: (rawHex) => {
+      if (typeof rawHex !== 'string' || rawHex.length < 4) return null;
+      const b = parseInt(rawHex.slice(2, 4), 16);
+      return isNaN(b) ? null : b;
+    },
     // app.js helpers buildFieldTable needs. Only the Path Length row's
     // wording depends on pathHashSizeFromByte; the hop rows under test do not.
     isTransportRoute: rt => rt === 0 || rt === 3,
@@ -896,7 +906,11 @@ async function mapRoute(T, p, parent) {
   ctx.drawPacketRoute = route => { drawn = Array.from(route); };
   ctx.drawPacketRouteMulti = () => { throw new Error('expected single-observation route'); };
   const src = fs.readFileSync(path.join(__dirname, 'public', 'map.js'), 'utf8');
-  const begin = src.indexOf('  async function loadRouteFromDeepLink()');
+  // #608: loadRouteFromDeepLink's raw_hex src/dst/channel-hash slicing was
+  // extracted into extractSrcDstFromRawHex()/extractChannelHashFromRawHex(),
+  // defined just above it; include them in the slice or the function body
+  // throws ReferenceError at call time.
+  const begin = src.indexOf('  // #608: extracted out of loadRouteFromDeepLink');
   const end = src.indexOf('\n  // Deep link for #/map?estimatedNodes=', begin);
   assert(begin >= 0 && end > begin, 'map deep-link function boundaries exist');
   vm.runInContext(src.slice(begin, end) + '\nwindow._mapRouteTest = loadRouteFromDeepLink;', ctx, {filename: 'map.js'});

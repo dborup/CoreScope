@@ -13,6 +13,19 @@ function isTransportRoute(rt) { return rt === 0 || rt === 3; }
 /** Byte offset of path_len in raw_hex: 5 for transport routes (4 bytes of next/last hop codes precede it), 1 otherwise. */
 function getPathLenOffset(routeType) { return isTransportRoute(routeType) ? 5 : 1; }
 /**
+ * #608: the ONE place that reads the route bits (low 2 bits of the header
+ * byte) out of a raw frame. rawPathLenByte/rawPayloadOffset/senderPathHashSize
+ * all derive their offset from THIS frame's own header, never from an
+ * externally-supplied route_type, so a per-observation raw_hex is always
+ * read with its own route. null when the header byte is missing or not hex.
+ */
+function routeTypeFromRawHex(rawHex) {
+  if (typeof rawHex !== 'string' || !/^[0-9a-f]{2}/i.test(rawHex)) return null;
+  return parseInt(rawHex.slice(0, 2), 16) & 0x03;
+}
+/** firmware src/MeshCore.h MAX_PACKET_PAYLOAD: Packet::readFrom rejects a payload longer than this. */
+const MAX_PACKET_PAYLOAD = 184;
+/**
  * #322 (1): the ONE implementation of the path-hash width rules. Given a
  * path-length byte, the route it belongs to, and the frame's header byte,
  * return the sender-selected hash width (1-3 bytes) or null when the byte
@@ -45,8 +58,9 @@ function pathHashSizeFromByte(pathByte, routeType, headerByte) {
  * Packet::readFrom), or null when the header or path byte is missing or not hex.
  */
 function rawPathLenByte(rawHex) {
-  if (typeof rawHex !== 'string' || !/^[0-9a-f]{2}/i.test(rawHex)) return null;
-  const offset = getPathLenOffset(parseInt(rawHex.slice(0, 2), 16) & 0x03) * 2;
+  const routeType = routeTypeFromRawHex(rawHex);
+  if (routeType == null) return null;
+  const offset = getPathLenOffset(routeType) * 2;
   const pathHex = rawHex.slice(offset, offset + 2);
   return /^[0-9a-f]{2}$/i.test(pathHex) ? parseInt(pathHex, 16) : null;
 }
@@ -54,8 +68,9 @@ function rawPathLenByte(rawHex) {
  * #594: byte offset of a raw frame's payload: header, the 4 transport-code
  * bytes on routes 0/3, path_length, then hash_count x hash_size path bytes
  * (firmware docs/packet_format.md). null when the frame does not decode the way
- * Packet::readFrom accepts it: no path byte, the reserved 4-byte hash size or a
- * path over MAX_PATH_SIZE (64) bytes (Packet::isValidPathLen), or no payload.
+ * Packet::readFrom accepts it: no path byte, the reserved 4-byte hash size, a
+ * path over MAX_PATH_SIZE (64) bytes (Packet::isValidPathLen), no payload, or
+ * a payload over MAX_PACKET_PAYLOAD (#608; Packet::readFrom).
  */
 function rawPayloadOffset(rawHex) {
   const pathByte = rawPathLenByte(rawHex);
@@ -63,15 +78,18 @@ function rawPayloadOffset(rawHex) {
   const hashSize = (pathByte >> 6) + 1;
   const pathBytes = (pathByte & 0x3F) * hashSize;
   if (hashSize === 4 || pathBytes > 64) return null;
-  const offset = getPathLenOffset(parseInt(rawHex.slice(0, 2), 16) & 0x03) + 1 + pathBytes;
-  return offset < Math.floor(rawHex.length / 2) ? offset : null;
+  const offset = getPathLenOffset(routeTypeFromRawHex(rawHex)) + 1 + pathBytes;
+  const totalBytes = Math.floor(rawHex.length / 2);
+  if (offset >= totalBytes) return null;
+  if (totalBytes - offset > MAX_PACKET_PAYLOAD) return null;
+  return offset;
 }
 /** Sender-selected path-hash width in this frame, or null when not encoded. */
 function senderPathHashSize(rawHex) {
   const pathByte = rawPathLenByte(rawHex);
   if (pathByte == null) return null;
   const header = parseInt(rawHex.slice(0, 2), 16);
-  return pathHashSizeFromByte(pathByte, header & 0x03, header);
+  return pathHashSizeFromByte(pathByte, routeTypeFromRawHex(rawHex), header);
 }
 /**
  * #353: the ONE decision for "this path-hash width reads as a warning". A
