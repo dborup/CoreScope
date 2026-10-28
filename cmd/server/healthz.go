@@ -33,8 +33,16 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		s.store.mu.RLock()
 		loadedTx = len(s.store.packets)
-		for _, p := range s.store.packets {
-			loadedObs += len(p.Observations)
+		select {
+		case <-s.store.StartupLoadDone():
+			// Startup finished: totalObs is the retained observation count.
+			loadedObs = s.store.totalObs
+		default:
+			// Background fill publishes indexes before the packet slice, so
+			// totalObs can run ahead of s.packets. Keep counting until then.
+			for _, p := range s.store.packets {
+				loadedObs += len(p.Observations)
+			}
 		}
 		s.store.mu.RUnlock()
 	}
