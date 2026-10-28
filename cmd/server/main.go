@@ -709,7 +709,7 @@ func newHTTPRouter(srv *Server, hub *Hub, publicDir string) *mux.Router {
 	absPublic, _ := filepath.Abs(publicDir)
 	if _, err := os.Stat(absPublic); err == nil {
 		fs := http.FileServer(http.Dir(absPublic))
-		router.PathPrefix("/").Handler(wsOrStatic(hub, spaHandler(absPublic, fs)))
+		router.PathPrefix("/").Handler(wsOrStatic(hub, spaHandler(absPublic, fs, ogMetaFromConfig(srv.cfg, absPublic))))
 		log.Printf("[static] serving %s", absPublic)
 	} else {
 		log.Printf("[static] directory %s not found — API-only mode", absPublic)
@@ -730,7 +730,14 @@ var vendorVersionedAssetRe = regexp.MustCompile(`^/vendor/[^/]+/\d+\.\d+\.\d+(?:
 // spaHandler serves static files, falling back to index.html for SPA routes.
 // It reads index.html once at creation time and replaces the __BUST__ placeholder
 // with a Unix timestamp so browsers fetch fresh JS/CSS after each server restart.
-func spaHandler(root string, fs http.Handler) http.Handler {
+//
+// Open Graph / Twitter / <title> placeholders are filled from og (#646); omit
+// it for the defaults.
+func spaHandler(root string, fs http.Handler, ogOpt ...*ogMeta) http.Handler {
+	og := newOGMeta(nil, root, nil)
+	if len(ogOpt) > 0 && ogOpt[0] != nil {
+		og = ogOpt[0]
+	}
 	// Pre-process index.html: replace __BUST__ with a cache-bust timestamp
 	indexPath := filepath.Join(root, "index.html")
 	rawHTML, err := os.ReadFile(indexPath)
@@ -739,7 +746,7 @@ func spaHandler(root string, fs http.Handler) http.Handler {
 		rawHTML = []byte("<!DOCTYPE html><html><body><h1>CoreScope</h1><p>index.html not found</p></body></html>")
 	}
 	bustValue := fmt.Sprintf("%d", time.Now().Unix())
-	indexHTML := []byte(strings.ReplaceAll(string(rawHTML), "__BUST__", bustValue))
+	indexHTML := []byte(og.prepare(strings.ReplaceAll(string(rawHTML), "__BUST__", bustValue)))
 	log.Printf("[static] cache-bust value: %s", bustValue)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -757,7 +764,7 @@ func spaHandler(root string, fs http.Handler) http.Handler {
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.Write(indexHTML)
+			w.Write(og.render(indexHTML, r))
 			return
 		}
 
@@ -766,7 +773,7 @@ func spaHandler(root string, fs http.Handler) http.Handler {
 			// SPA fallback — serve pre-processed index.html
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.Write(indexHTML)
+			w.Write(og.render(indexHTML, r))
 			return
 		}
 		// A vendored browser dependency (public/vendor/<name>/<exact
