@@ -45,6 +45,11 @@ async function step(name, fn) {
   try { await fn(); passed++; console.log('  ✓ ' + name); }
   catch (e) { failed++; console.error('  ✗ ' + name + ': ' + e.message); }
 }
+// Settled = the region filter is rendered and, on Packets, the list has rows.
+async function settle(page, route, sel) {
+  await page.locator(sel + ' .region-quick-pick').first().waitFor({ state: 'attached' });
+  if (route === '#/packets') await page.locator('#pktBody tr').first().waitFor({ state: 'attached' });
+}
 function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
 (async () => {
@@ -85,19 +90,24 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       page.setDefaultTimeout(20000);
       await page.goto(BASE + '/' + route, { waitUntil: 'domcontentloaded' });
       await step(`${w}px ${route}: menu inside viewport, picks fit, menu does not cover picks`, async () => {
+        // Wait for the page to settle before touching anything: the region
+        // filter has rendered (its quick picks exist) and, on Packets, the
+        // list has loaded. Every action below goes through a locator, which
+        // re-resolves the element, so a re-render cannot leave a stale handle
+        // behind (#652).
+        await settle(page, route, sel);
         // Packets and Live collapse their filters behind a toggle on a phone.
+        const trigger = page.locator(sel + ' .region-dropdown-trigger');
         for (const t of ['.filter-toggle-btn-mirror', '#filterToggleBtn', '#liveControlsToggle']) {
-          const tog = await page.$(t);
-          if (tog && await tog.isVisible()) {
-            const hidden = await page.$eval(sel + ' .region-dropdown-trigger', (el) => !el.offsetParent).catch(() => true);
-            if (hidden) await tog.click();
+          const tog = page.locator(t);
+          if (await tog.count() && await tog.first().isVisible() && !(await trigger.first().isVisible())) {
+            await tog.first().click();
           }
         }
-        await page.waitForSelector(sel + ' .region-dropdown-trigger', { state: 'visible' });
-        await page.waitForSelector(sel + ' .region-quick-pick');
+        await trigger.first().waitFor({ state: 'visible' });
         const base = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
-        await page.click(sel + ' .region-dropdown-trigger');
-        await page.waitForSelector(sel + ' .region-dropdown-menu:not([hidden])');
+        await trigger.first().click();
+        await page.locator(sel + ' .region-dropdown-menu:not([hidden])').waitFor();
         const r = await page.evaluate((s) => {
                     const vw = document.documentElement.clientWidth;
           const c = document.querySelector(s);
