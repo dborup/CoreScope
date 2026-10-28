@@ -236,6 +236,69 @@
     return Object.assign({}, n, { _lastHeard: activity, last_heard: null, last_seen: null, _liveSeen: null });
   }
 
+  // #634 (upstream 2315): one Traffic share renderer for the full table
+  // (table=true, keeps the row id) and the dl-based previews (table=false).
+  function renderTrafficShare(n, table) {
+    if (n.role !== 'repeater' && n.role !== 'room') return '';
+    if (n.traffic_share_score == null && n.usefulness_score == null) return '';
+    // #1456: prefer the new traffic_share_score field; fall back
+    // to legacy usefulness_score for graceful degradation
+    // against stale servers. The visible label is now "Traffic
+    // share" (the old "Usefulness" implied a composite that
+    // doesn't exist yet — see #672).
+    const raw = (n.traffic_share_score != null) ? n.traffic_share_score : n.usefulness_score;
+    const s = Number(raw) || 0;
+    const pct = (s * 100).toFixed(1);
+    // Visual indicator: width % bar with green→yellow→red color by score.
+    // Per issue #672 classification table: 0.8+ Critical, 0.6+ Valuable,
+    // 0.3+ Moderate, 0.1+ Marginal, else Redundant.
+    let label, color;
+    if (s >= 0.8) { label = 'Critical'; color = 'var(--status-green, #2ecc71)'; }
+    else if (s >= 0.6) { label = 'Valuable'; color = 'var(--status-green, #2ecc71)'; }
+    else if (s >= 0.3) { label = 'Moderate'; color = 'var(--status-yellow, #f1c40f)'; }
+    else if (s >= 0.1) { label = 'Marginal'; color = 'var(--status-orange, #e67e22)'; }
+    else { label = 'Redundant'; color = 'var(--status-red, #e74c3c)'; }
+    const barWidth = Math.max(2, Math.round(s * 100));
+    const tooltip = "Fraction of all non-advert mesh traffic in the analyzer's memory that transited through this repeater as a relay hop. High = lots of packets pass through; low = quieter (may still be structurally important — see Bridge score). One of 4 planned scoring axes (#672); others pending.";
+    const attrs = (table ? 'id="row-usefulness-score" ' : '') + `data-usefulness-score="${s.toFixed(4)}" data-traffic-share-score="${s.toFixed(4)}"`;
+    const labelHtml = `Traffic share <span style="color:var(--text-muted);cursor:help" aria-label="help">ⓘ</span>`;
+    const valueHtml = `<span style="display:inline-block;vertical-align:middle;width:80px;height:8px;background:var(--bg-secondary,#333);border-radius:4px;overflow:hidden;margin-right:6px"><span style="display:block;width:${barWidth}%;height:100%;background:${color}"></span></span><span style="color:${color};font-weight:600">${pct}%</span> <span style="color:var(--text-muted);font-size:11px;margin-left:4px">${label}</span>`;
+    return table
+      ? `<tr ${attrs}><td title="${tooltip}">${labelHtml}</td><td>${valueHtml}</td></tr>`
+      : `<dt title="${tooltip}">${labelHtml}</dt><dd ${attrs}>${valueHtml}</dd>`;
+  }
+
+  function renderHashPrefix(n, table) {
+    let value = n.hash_size
+      ? '<code style="font-family:var(--mono);font-weight:700">' + escapeHtml(String(n.public_key).slice(0, n.hash_size * 2).toUpperCase()) + '</code> (' + escapeHtml(String(n.hash_size)) + '-byte)'
+      : 'Unknown';
+    if (n.hash_size_inconsistent) {
+      const seen = (Array.isArray(n.hash_sizes_seen) ? n.hash_sizes_seen : []).join(', ');
+      value += ' <span style="color:var(--status-yellow);cursor:help" title="Seen: ' + escapeHtml(seen) + '-byte"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> varies</span>';
+    }
+    return table ? `<tr><td>Hash Prefix</td><td>${value}</td></tr>` : `<dt>Hash Prefix</dt><dd>${value}</dd>`;
+  }
+
+  // Tablet slide-over body. The API's node object carries `name`; advert_name
+  // is only the legacy fallback.
+  function renderSlideOverBody(n, pubkey) {
+    const name = n.name || n.advert_name;
+    const lastHeard = n.last_heard || n.last_seen;
+    const relayed = (n.role === 'repeater' || n.role === 'room')
+      ? '<dt>Last Relayed</dt><dd>' + renderRelayActivity(n) + '</dd>' : '';
+    return '<dl style="margin:0;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:13px">' +
+        '<dt>Name</dt><dd>' + escapeHtml(name || '—') + '</dd>' +
+        '<dt>Role</dt><dd>' + escapeHtml((n.role || '').toString() || '—') + '</dd>' +
+        '<dt>Public key</dt><dd class="mono" style="word-break:break-all">' + escapeHtml(n.public_key || '—') + '</dd>' +
+        '<dt>Last heard</dt><dd>' + (lastHeard ? timeAgo(lastHeard) : '—') + '</dd>' +
+        relayed +
+        renderTrafficShare(n, false) +
+        renderHashPrefix(n, false) +
+        '<dt>Adverts</dt><dd>' + (n.advert_count != null ? n.advert_count : '—') + '</dd>' +
+      '</dl>' +
+      '<p style="margin-top:14px"><a class="btn-primary" href="#/nodes/' + encodeURIComponent(pubkey) + '">Open full detail →</a></p>';
+  }
+
   // #634 (upstream 2296): the link opens one sample packet of the observed path.
   function renderExamplePacketLink(hash) {
     return '<a href="#/packets/' + encodeURIComponent(hash) + '" class="ch-analyze-link">View example packet →</a>';
@@ -988,28 +1051,7 @@
           <tr><td>Status</td><td><span title="${si.statusTooltip}">${statusLabel}</span> <span style="font-size:11px;color:var(--text-muted);margin-left:4px">${statusExplanation}</span></td></tr>
           <tr><td>Last Heard (advert)</td><td>${renderNodeTimestampHtml(lastHeard)}</td></tr>
           ${(n.role === 'repeater' || n.role === 'room') ? `<tr><td title="Confirmed observed flood-path relay hops; ambiguous hashes and intended direct routes are excluded.">Last Relayed</td><td>${renderRelayActivity(n)}</td></tr>` : ''}
-          ${(n.role === 'repeater' || n.role === 'room') && (n.traffic_share_score != null || n.usefulness_score != null) ? (() => {
-            // #1456: prefer the new traffic_share_score field; fall back
-            // to legacy usefulness_score for graceful degradation
-            // against stale servers. The visible label is now "Traffic
-            // share" (the old "Usefulness" implied a composite that
-            // doesn't exist yet — see #672).
-            const raw = (n.traffic_share_score != null) ? n.traffic_share_score : n.usefulness_score;
-            const s = Number(raw) || 0;
-            const pct = (s * 100).toFixed(1);
-            // Visual indicator: width % bar with green→yellow→red color by score.
-            // Per issue #672 classification table: 0.8+ Critical, 0.6+ Valuable,
-            // 0.3+ Moderate, 0.1+ Marginal, else Redundant.
-            let label, color;
-            if (s >= 0.8) { label = 'Critical'; color = 'var(--status-green, #2ecc71)'; }
-            else if (s >= 0.6) { label = 'Valuable'; color = 'var(--status-green, #2ecc71)'; }
-            else if (s >= 0.3) { label = 'Moderate'; color = 'var(--status-yellow, #f1c40f)'; }
-            else if (s >= 0.1) { label = 'Marginal'; color = 'var(--status-orange, #e67e22)'; }
-            else { label = 'Redundant'; color = 'var(--status-red, #e74c3c)'; }
-            const barWidth = Math.max(2, Math.round(s * 100));
-            const tooltip = "Fraction of all non-advert mesh traffic in the analyzer's memory that transited through this repeater as a relay hop. High = lots of packets pass through; low = quieter (may still be structurally important — see Bridge score). One of 4 planned scoring axes (#672); others pending.";
-            return `<tr id="row-usefulness-score" data-usefulness-score="${s.toFixed(4)}" data-traffic-share-score="${s.toFixed(4)}"><td title="${tooltip}">Traffic share <span style="color:var(--text-muted);cursor:help" aria-label="help">ⓘ</span></td><td><span style="display:inline-block;vertical-align:middle;width:80px;height:8px;background:var(--bg-secondary,#333);border-radius:4px;overflow:hidden;margin-right:6px"><span style="display:block;width:${barWidth}%;height:100%;background:${color}"></span></span><span style="color:${color};font-weight:600">${pct}%</span> <span style="color:var(--text-muted);font-size:11px;margin-left:4px">${label}</span></td></tr>`;
-          })() : ''}
+          ${renderTrafficShare(n, true)}
           ${(n.role === 'repeater' || n.role === 'room') && n.bridge_score != null ? (() => {
             // Bridge axis (issue #672 axis 2 of 4): normalized betweenness
             // centrality from the neighbor-edges graph. Distinct from the
@@ -1052,7 +1094,7 @@
           ${hasLoc ? `<tr><td>Location</td><td>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</td></tr>` : ''}
           ${hasEstLoc ? `<tr><td>${hasLoc ? 'Neighbor Estimate' : 'Location'} <span class="text-muted" style="font-size:10px">(estimated)</span></td><td>~${Number(n.estimated_lat).toFixed(5)}, ~${Number(n.estimated_lon).toFixed(5)} <span class="text-muted" style="font-size:11px">(from ${n.estimated_contributor_count} neighbor${n.estimated_contributor_count === 1 ? '' : 's'}${hasLoc ? ', ' + Number(n.estimated_distance_km).toFixed(1) + ' km from reported position' : ', no real GPS fix'})</span></td></tr>` : ''}
           ${!estimatesEnabled ? `<tr><td>Position estimates</td><td>${window.EstimatedPositions.disabledNoticeHTML}</td></tr>` : ''}
-          <tr><td>Hash Prefix</td><td>${n.hash_size ? '<code style="font-family:var(--mono);font-weight:700">' + n.public_key.slice(0, n.hash_size * 2).toUpperCase() + '</code> (' + n.hash_size + '-byte)' : 'Unknown'}${n.hash_size_inconsistent ? ' <span style="color:var(--status-yellow);cursor:help" title="Seen: ' + (Array.isArray(n.hash_sizes_seen) ? n.hash_sizes_seen : []).join(', ') + '-byte"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg> varies</span>' : ''}</td></tr>
+          ${renderHashPrefix(n, true)}
         </table>
 
         <div class="node-full-card" id="node-packets">
@@ -1970,18 +2012,8 @@
         if (selectedKey !== pubkey) return;
         const n = (data && data.node) || data || {};
         const titleEl = document.querySelector('.slide-over-title');
-        if (titleEl) titleEl.textContent = n.advert_name || (n.public_key ? n.public_key.slice(0, 10) : 'Node');
-        var role = (n.role || '').toString();
-        var lastHeard = n.last_heard || n.last_seen;
-        so.innerHTML =
-          '<dl style="margin:0;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:13px">' +
-            '<dt>Name</dt><dd>' + escapeHtml(n.advert_name || '—') + '</dd>' +
-            '<dt>Role</dt><dd>' + escapeHtml(role || '—') + '</dd>' +
-            '<dt>Public key</dt><dd class="mono" style="word-break:break-all">' + escapeHtml(n.public_key || '—') + '</dd>' +
-            '<dt>Last heard</dt><dd>' + (lastHeard ? timeAgo(lastHeard) : '—') + '</dd>' +
-            '<dt>Adverts</dt><dd>' + (n.advert_count != null ? n.advert_count : '—') + '</dd>' +
-          '</dl>' +
-          '<p style="margin-top:14px"><a class="btn-primary" href="#/nodes/' + encodeURIComponent(pubkey) + '">Open full detail →</a></p>';
+        if (titleEl) titleEl.textContent = n.name || n.advert_name || (n.public_key ? n.public_key.slice(0, 10) : 'Node');
+        so.innerHTML = renderSlideOverBody(n, pubkey);
       } catch (e) {
         so.innerHTML = '<div class="text-muted">Error: ' + (e && e.message ? e.message : String(e)) + '</div>';
       }
@@ -2063,6 +2095,7 @@
           <dl class="detail-meta">
             <dt>Last Heard (advert)</dt><dd>${renderNodeTimestampHtml(lastHeard)}</dd>
             ${(n.role === 'repeater' || n.role === 'room') ? `<dt>Last Relayed</dt><dd>${renderRelayActivity(n)}</dd>` : ''}
+            ${renderTrafficShare(n, false)}
             <dt>First Seen</dt><dd>${renderNodeTimestampHtml(n.first_seen)}</dd>
             <dt>${renderPacketCountLabel('nodePacketCountHelp', { fallback: !(stats.totalTransmissions || stats.totalPackets), showSeen: false })}</dt><dd>${totalPackets}</dd>
             <dt>Packets Today</dt><dd>${stats.packetsToday || 0}</dd>
@@ -2070,6 +2103,7 @@
             ${hasLoc ? `<dt>Location</dt><dd>${Number(n.lat).toFixed(5)}, ${Number(n.lon).toFixed(5)}</dd>` : ''}
             ${hasEstLoc ? `<dt>${hasLoc ? 'Neighbor Estimate' : 'Location'} <span class="text-muted" style="font-size:10px">(estimated)</span></dt><dd>~${Number(n.estimated_lat).toFixed(5)}, ~${Number(n.estimated_lon).toFixed(5)} <span class="text-muted" style="font-size:11px">(from ${n.estimated_contributor_count} neighbor${n.estimated_contributor_count === 1 ? '' : 's'}${hasLoc ? ', ' + Number(n.estimated_distance_km).toFixed(1) + ' km from reported position' : ', no real GPS fix'})</span></dd>` : ''}
             ${!estimatesEnabled ? `<dt>Position estimates</dt><dd>${window.EstimatedPositions.disabledNoticeHTML}</dd>` : ''}
+            ${renderHashPrefix(n, false)}
           </dl>
         </div>
 
@@ -2264,6 +2298,9 @@
     localStorage.setItem('meshcore-nodes-sort', JSON.stringify(_fallbackSortState));
   };
   window._nodesSortNodes = sortNodes;
+  window._nodesRenderTrafficShare = renderTrafficShare;
+  window._nodesRenderHashPrefix = renderHashPrefix;
+  window._nodesRenderSlideOverBody = renderSlideOverBody;
   window._nodesRenderExamplePacketLink = renderExamplePacketLink;
   window._nodesComputeDisplayOrder = computeDisplayOrder;
   window._nodesSortArrow = function(col) {

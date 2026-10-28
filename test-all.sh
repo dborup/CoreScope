@@ -285,6 +285,7 @@ run test-node-reach-coverage-debounce.js
 run test-observer-detail-view-path.js
 run test-observer-detail-ownership.js
 run test-634-example-packet-link.js
+run test-634-node-preview-metadata.js
 run test-observer-naive-clock-1478.js
 run test-path-inspector.js
 run test-payload-labels-content.js
