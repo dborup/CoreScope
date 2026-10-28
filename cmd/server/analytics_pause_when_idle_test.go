@@ -143,10 +143,14 @@ func (h *pauseHarness) expectTick(want string) {
 
 // wakeWinsRace forces the worst interleaving of a Load that wakes a paused
 // recomputer: the wake pass stores its snapshot before that Load fetches
-// one (#610). Only for passes that succeed and are not gated.
+// one (#610). Only for passes that succeed and are not gated. Call it on a
+// paused recomputer before that Load: the snapshot the hook waits to see
+// replaced is sampled here, not in the hook, which runs after markRead has
+// queued the wake-up, so a wake pass that stored first would leave the
+// hook waiting for a store that never comes (#644).
 func (h *pauseHarness) wakeWinsRace() {
+	old := h.r.cache.Load()
 	h.r.testHookLoad = func() {
-		old := h.r.cache.Load()
 		deadline := time.Now().Add(pauseTestDeadline)
 		for h.r.cache.Load() == old {
 			if time.Now().After(deadline) {
@@ -491,6 +495,37 @@ func TestPauseWhenIdle_FirstComputationNeverPauses(t *testing.T) {
 	h.wakeRead() // the read wakes the paused recomputer: pass 5
 	if v := h.peek(); v != int64(5) {
 		t.Fatalf("snapshot after the wake = %v, want pass 5", v)
+	}
+	h.noPendingEvent()
+}
+
+// #644: wakeWinsRace forces its interleaving whichever side gets there
+// first. Here the wake pass always stores its snapshot before the forcing
+// hook runs, the order a loaded CI runner produced ("wake pass did not store
+// a snapshot", events [... tick-skip kick-run]).
+func TestPauseWhenIdle_WakeWinsRaceWhenWakeStoresFirst(t *testing.T) {
+	h := newPauseHarness(t, "wake-first", true, countingPass).start()
+	h.expectTick("tick-skip")
+	h.wakeWinsRace()
+	force, stored := h.r.testHookLoad, h.r.cache.Load()
+	h.r.testHookLoad = func() {
+		deadline := time.Now().Add(pauseTestDeadline)
+		for h.r.cache.Load() == stored {
+			if time.Now().After(deadline) {
+				t.Errorf("%s: wake pass did not store a snapshot before the hook", h.r.name)
+				break
+			}
+			time.Sleep(50 * time.Microsecond)
+		}
+		h.record("wake-stored")
+		force()
+	}
+	if v := h.peek(); v != int64(1) {
+		t.Fatalf("snapshot = %v, want pass 1", v)
+	}
+	h.wakeRead()
+	if v := h.peek(); v != int64(2) {
+		t.Fatalf("snapshot after the wake = %v, want pass 2", v)
 	}
 	h.noPendingEvent()
 }
