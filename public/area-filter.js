@@ -104,8 +104,10 @@
       }
     }
     document.addEventListener('click', onDocClick, true);
+    var unwatch = window.RegionFilter ? RegionFilter.watchMenu(menu) : function () {};
     container._areaCleanup = function () {
       document.removeEventListener('click', onDocClick, true);
+      unwatch();
     };
   }
 

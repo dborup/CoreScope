@@ -367,6 +367,10 @@
   --shadow: rgba(0,0,0,0.3);
   --trace-ghost-color: #94a3b8;
 
+  /* #620: minimum viewport margin of the region/area dropdown menus. Read by
+   * region-filter.js placeMenu() as well as the menu max-width below. */
+  --region-menu-gutter: 8px;
+
   /* #1128: documented z-index scale. Use these custom props for any new
    * stacking context decision. Existing legacy z-index values that work are
    * left in place to avoid behavioural risk; new code must use these tokens.
@@ -376,7 +380,6 @@
    *   --z-modal-backdrop 9000 / --z-modal 9100 / --z-tooltip 9200
    */
   --z-base: 0;
-  --region-menu-gutter: 8px; /* #620 min viewport margin of region/area dropdown menus */
   --z-dropdown: 100;
   --z-popover: 300;
   --z-modal-backdrop: 9000;
@@ -3737,13 +3740,10 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
    same codes rather than more region pills. Rendered only when the operator
    configured `regionGroups`, which is also what lets the container wrap:
    without groups the layout is byte-for-byte what it was. */
-.region-filter-container.has-region-quick-picks { flex-wrap: wrap; row-gap: 4px; max-width: 100%; min-width: 0; }
+.region-filter-container.has-region-quick-picks { flex-wrap: wrap; row-gap: 4px; }
 .region-quick-picks {
   display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px;
-  margin-right: 8px; padding-right: 8px; border-right: 1px solid var(--border);
-  /* #620: the picks come first, so a menu dropping below the trigger can
-     never cover them even when the row wraps in a narrow host. */
-  order: -1;
+  margin-left: 8px; padding-left: 8px; border-left: 1px solid var(--border);
 }
 .region-quick-pick {
   display: inline-flex; align-items: center; justify-content: center;
@@ -3765,10 +3765,15 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 .region-quick-pick-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 /* On a phone or small tablet the row wraps away from the control, so the
    hairline would divide nothing useful: the quick picks become their own
-   full-width row (above the control, see order: -1 on .region-quick-picks). */
+   full-width row. #620: in dropdown mode that row goes above the control (the
+   wrap gets order: 1), so the menu, which drops below its trigger, never
+   covers the picks, and the container is capped to its host so a long row
+   cannot widen the page. Desktop layout is untouched. */
 @media (max-width: 768px) {
+  .region-filter-container.has-region-quick-picks { max-width: 100%; min-width: 0; }
+  .region-filter-container.has-region-quick-picks .region-dropdown-wrap { order: 1; }
   .region-quick-picks {
-    margin-right: 0; padding-right: 0; border-right: 0;
+    margin-left: 0; padding-left: 0; border-left: 0;
     flex-basis: 100%; width: 100%; min-width: 0;
   }
   .region-quick-pick { max-width: 100%; }

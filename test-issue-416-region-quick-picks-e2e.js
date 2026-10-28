@@ -271,7 +271,7 @@ async function settle(page, from, ms) {
       }
     });
 
-    await step('the quick picks form their own full-width row, above the control (#620)', async () => {
+    await step('the quick picks form their own full-width row under the control', async () => {
       const g = await page.evaluate(() => {
         const c = document.getElementById('nodesRegionFilter');
         const box = (el) => { const b = el.getBoundingClientRect();
@@ -286,11 +286,9 @@ async function settle(page, from, ms) {
       // the width to make room for the quick picks beside them.
       assert(g.wrap === 'wrap', 'the container does not wrap: flex-wrap=' + g.wrap);
       assert(g.bar.w > 300, 'the region pill bar was squeezed to ' + g.bar.w.toFixed(1) + 'px');
-      // #620: above, so an open dropdown menu (which drops below its
-      // trigger) can never cover them.
-      assert(g.picks.bottom <= g.bar.y + 1,
-        'the quick picks sit beside the control, not above it (bottom=' + g.picks.bottom.toFixed(1) +
-        ', bar top=' + g.bar.y.toFixed(1) + ')');
+      assert(g.picks.y >= g.bar.bottom - 1,
+        'the quick picks sit beside the control, not under it (y=' + g.picks.y.toFixed(1) +
+        ', bar bottom=' + g.bar.bottom.toFixed(1) + ')');
       // Its own row, so the hairline indent of the desktop layout is gone.
       assert(Math.abs(g.picks.x - g.container.x) < 1,
         'the quick-pick row is indented by ' + (g.picks.x - g.container.x).toFixed(1) + 'px');

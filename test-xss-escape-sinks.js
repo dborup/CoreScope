@@ -967,6 +967,7 @@ async function loadRegionFilter(regions, opts) {
   };
   const ctx = {
     window: {},
+    addEventListener() {}, removeEventListener() {}, // #620 watchMenu: ctx.window = ctx
     document: { addEventListener() {}, removeEventListener() {} },
     localStorage: { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; } },
     fetch: async (url) => ({
