@@ -46,6 +46,7 @@ run test-nodes-advert-ws-bust-279.js
 run test-issue-120-distance-building.js
 run test-privacy-page.js
 run test-issue-336-external-asset-pinning.js
+run test-issue-628-vendor-gitattributes.js
 run test-issue-442-instrumented-vendor-copy.js
 run test-nav-dynamic-link-lifecycle.js
 run test-nav-first-load-fit.js
