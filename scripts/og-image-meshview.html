@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<!-- Source for public/og-image-meshview.png (1200x630). Render with:
+       node scripts/render-og-image.js
+     Hand-drawn stylised outline; no map tiles or third-party artwork (#646).
+     Colours are the site's dark-theme defaults (public/style.css :root). -->
+<html lang="da">
+<head>
+<meta charset="UTF-8">
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --bg-2: #1a1a2e;
+    --nav: #0f0f23;
+    --accent: #4a9eff;
+    --accent-soft: #6db3ff;
+    --text: #e8eaf0;
+    --text-muted: #8b92a8;
+    --outline: #2a3a5c;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1200px; height: 630px; overflow: hidden; background: var(--bg); }
+  body { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; position: relative;
+         background: linear-gradient(135deg, var(--nav) 0%, var(--bg) 60%, var(--bg-2) 100%); }
+  svg { position: absolute; inset: 0; }
+  .title { position: absolute; left: 72px; top: 225px; color: var(--text); font-size: 90px; font-weight: 800; letter-spacing: -2px; line-height: 1; }
+  .title span { color: var(--accent); }
+  .sub { position: absolute; left: 76px; top: 335px; color: var(--text-muted); font-size: 38px; font-weight: 500; }
+  .bar { position: absolute; left: 76px; top: 190px; width: 96px; height: 8px; border-radius: 4px; background: var(--accent); }
+  .outline { fill: var(--bg-2); fill-opacity: .55; stroke: var(--outline); stroke-width: 3; stroke-linejoin: round; }
+  .link { stroke: var(--accent); stroke-opacity: .55; stroke-width: 2.5; }
+  .node { fill: var(--accent-soft); }
+  .halo { fill: var(--accent); fill-opacity: .18; }
+</style>
+</head>
+<body>
+<svg width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
+  <!-- Jutland -->
+  <path class="outline" d="M760 40 L800 52 L826 96 L818 150 L846 196 L838 250 L808 290 L812 330 L786 372 L792 420 L770 470 L720 520 L650 536 L632 500 L650 470 L640 420 L664 380 L650 330 L676 280 L664 220 L690 170 L700 110 L730 70 Z"/>
+  <!-- Funen -->
+  <path class="outline" d="M850 360 L900 348 L936 372 L920 410 L872 418 L842 396 Z"/>
+  <!-- Zealand -->
+  <path class="outline" d="M960 300 L1020 280 L1070 310 L1060 370 L1020 420 L974 408 L950 360 Z"/>
+  <!-- Lolland-Falster -->
+  <path class="outline" d="M940 450 L1030 440 L1040 468 L960 486 Z"/>
+  <!-- Bornholm -->
+  <path class="outline" d="M1112 470 L1150 462 L1158 496 L1120 502 Z"/>
+
+  <g class="links">
+    <line class="link" x1="760" y1="110" x2="740" y2="200"/>
+    <line class="link" x1="740" y1="200" x2="770" y2="280"/>
+    <line class="link" x1="770" y1="280" x2="720" y2="360"/>
+    <line class="link" x1="720" y1="360" x2="710" y2="450"/>
+    <line class="link" x1="770" y1="280" x2="800" y2="190"/>
+    <line class="link" x1="800" y1="190" x2="760" y2="110"/>
+    <line class="link" x1="770" y1="280" x2="760" y2="400"/>
+    <line class="link" x1="760" y1="400" x2="710" y2="450"/>
+    <line class="link" x1="760" y1="400" x2="880" y2="385"/>
+    <line class="link" x1="880" y1="385" x2="1000" y2="350"/>
+    <line class="link" x1="1000" y1="350" x2="1020" y2="400"/>
+    <line class="link" x1="1020" y1="400" x2="990" y2="465"/>
+    <line class="link" x1="1000" y1="350" x2="1030" y2="305"/>
+    <line class="link" x1="990" y1="465" x2="1135" y2="485"/>
+    <line class="link" x1="880" y1="385" x2="990" y2="465"/>
+    <line class="link" x1="800" y1="190" x2="1030" y2="305"/>
+  </g>
+  <g>
+    <circle class="halo" cx="770" cy="280" r="26"/><circle class="halo" cx="1000" cy="350" r="26"/><circle class="halo" cx="760" cy="400" r="22"/>
+    <circle class="node" cx="760" cy="110" r="9"/><circle class="node" cx="740" cy="200" r="9"/>
+    <circle class="node" cx="770" cy="280" r="14"/><circle class="node" cx="720" cy="360" r="9"/>
+    <circle class="node" cx="710" cy="450" r="9"/><circle class="node" cx="800" cy="190" r="9"/>
+    <circle class="node" cx="760" cy="400" r="12"/><circle class="node" cx="880" cy="385" r="10"/>
+    <circle class="node" cx="1000" cy="350" r="14"/><circle class="node" cx="1020" cy="400" r="9"/>
+    <circle class="node" cx="1030" cy="305" r="9"/><circle class="node" cx="990" cy="465" r="10"/>
+    <circle class="node" cx="1135" cy="485" r="9"/>
+  </g>
+</svg>
+<div class="bar"></div>
+<div class="title">MeshView <span>DK</span></div>
+<div class="sub">Dansk MeshCore overblik</div>
+</body>
+</html>
