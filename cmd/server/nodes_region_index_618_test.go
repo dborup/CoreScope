@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -404,6 +405,69 @@ func waitForHeardIndex(t *testing.T, db *DB, wm int64) *regionMembershipSnapshot
 	return nil
 }
 
+// idx618Trace records what a test and the heard index did, in order, and
+// logs it if the test fails.
+type idx618Trace struct {
+	mu sync.Mutex
+	ev []string
+}
+
+func newIdx618Trace(t *testing.T) *idx618Trace {
+	tr := &idx618Trace{}
+	t.Cleanup(func() {
+		if t.Failed() {
+			tr.mu.Lock()
+			defer tr.mu.Unlock()
+			t.Logf("events before failure:\n  %s", strings.Join(tr.ev, "\n  "))
+		}
+	})
+	return tr
+}
+
+func (tr *idx618Trace) add(format string, args ...any) {
+	tr.mu.Lock()
+	tr.ev = append(tr.ev, fmt.Sprintf(format, args...))
+	tr.mu.Unlock()
+}
+
+// idx618HoldLog holds the first log line containing sub, and whoever writes
+// it, until release is called or the test ends; every "[nodes-region]" line
+// goes to tr. The heard index logs "heard: full build" after it published
+// its snapshot and before its flight returns, so holding that line holds a
+// published build's flight open: the window #644 flaked in.
+func idx618HoldLog(t *testing.T, tr *idx618Trace, sub string) (release func()) {
+	prev := log.Writer()
+	held := make(chan struct{})
+	var holdOnce, releaseOnce sync.Once
+	release = func() { releaseOnce.Do(func() { tr.add("log released"); close(held) }) }
+	log.SetOutput(writerFunc(func(p []byte) (int, error) {
+		if line := strings.TrimSpace(string(p)); strings.Contains(line, "[nodes-region]") {
+			tr.add("log: %s", line[strings.Index(line, "[nodes-region]"):])
+		}
+		if strings.Contains(string(p), sub) {
+			holdOnce.Do(func() { <-held })
+		}
+		return prev.Write(p)
+	}))
+	t.Cleanup(func() {
+		release() // first: SetOutput waits for the held write
+		log.SetOutput(prev)
+	})
+	return release
+}
+
+// idx618SettleIndex returns once no refresh of the heard index is in
+// flight: it joins the one in flight, or runs one of its own. singleflight
+// forgets a flight before it hands out the result, so a refresh started
+// after this returns is never a join of an earlier one, whose snapshot may
+// predate what the caller did to the index since (#644).
+func idx618SettleIndex(db *DB) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := db.regionIndexFlight(ctx, &db.regionHeard, db.heardRegionSpec())
+	return err
+}
+
 // TestNodeRegionIndex618_WarmupServesFirstRequests: after the warmer's build
 // the first requests for any set — single, multi, a quick-pick group — scan
 // nothing. The DB has no PacketStore at all, so the warmup cannot depend on
@@ -757,20 +821,50 @@ func TestNodeRegionIndex618_ColdPerSetBuildsAreSerialised(t *testing.T) {
 // observations a refresh (one warmer tick) finds nothing past the watermark
 // and scans nothing, but re-stamps the snapshot, so an idle index never ages
 // past nodeRegionMaxStale and requests never start waiting on refreshes.
+//
+// #644: the warmer publishes its snapshot before its flight returns. A
+// refresh that joined that flight got the warmer's snapshot back while the
+// published one was the copy this test had aged ("published snapshot is
+// 30m0s old"). The warmer's flight is held open in that window here, and
+// the test settles the index before ageing it.
 func TestNodeRegionIndex618_IdleRefreshReStampsIndex(t *testing.T) {
 	db := rpm2EmptyTestDB(t)
 	rpm2SeedScenario(t, db.conn, 1, rpm2T0)
+	tr := newIdx618Trace(t)
 	full, delta := idx618CountScans(db)
+	count := db.regionHeard.scanHook
+	db.regionHeard.scanHook = func(isFull bool) error {
+		tr.add("scan full=%v", isFull)
+		return count(isFull)
+	}
+	release := idx618HoldLog(t, tr, "heard: full build")
 	stop := db.startRegionIndexWarmer(time.Hour)
 	defer stop()
 	wm := rpm2MaxID(t, db)
 	waitForHeardIndex(t, db, wm)
+	tr.add("warmup snapshot published (watermark %d)", wm)
+
+	settled := make(chan error, 1)
+	go func() { settled <- idx618SettleIndex(db) }()
+	select {
+	case err := <-settled:
+		t.Fatalf("index settled (err %v) while the warmer's flight was held open", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	if err := <-settled; err != nil {
+		t.Fatal(err)
+	}
+	tr.add("settled")
 	idx618AgeIndex(db, nodeRegionMaxStale, 0)
+	tr.add("aged by %v", nodeRegionMaxStale)
 	s, err := db.regionIndexFlight(context.Background(), &db.regionHeard, db.heardRegionSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	for what, snap := range map[string]*regionMembershipSnapshot{"returned": s, "published": db.regionHeard.snap.Load()} {
+	published := db.regionHeard.snap.Load()
+	tr.add("refresh returned: age %v, same as published %v", time.Since(s.refreshed).Round(time.Second), s == published)
+	for what, snap := range map[string]*regionMembershipSnapshot{"returned": s, "published": published} {
 		if age := time.Since(snap.refreshed); age >= nodeRegionFreshTTL {
 			t.Errorf("idle refresh: %s snapshot is %v old, want re-stamped", what, age.Round(time.Second))
 		}
