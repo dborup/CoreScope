@@ -109,6 +109,7 @@ run test-issue-1648-m6-final-sweep.js
 run test-issue-1648-m6-lint-self.js
 run test-issue-1883-redirect-history.js
 run test-issue-1890-og-url.js
+run test-issue-646-og-meta.js
 run test-traces.js
 run test-live-multibyte-filter.js
 run test-issue-124-rx-coverage-viewport.js

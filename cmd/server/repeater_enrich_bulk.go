@@ -109,22 +109,20 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 			b := bulkRelayTx{entry: newRelayEntry(tx, false)}
 			b.entry.parsed = true
 			b.entry.t, b.entry.valid = parseRelayTS(tx.FirstSeen)
-			if txHasObservedFloodPath(tx) {
-				forEachObservedRelayHop(tx, func(token string) bool {
-					key := resolve.key(token)
-					if key == "" {
+			forEachObservedRelayHop(tx, func(token string) bool {
+				key := resolve.key(token)
+				if key == "" {
+					return true
+				}
+				for _, have := range b.keys {
+					if have == key {
 						return true
 					}
-					for _, have := range b.keys {
-						if have == key {
-							return true
-						}
-					}
-					b.keys = append(b.keys, key)
-					confirmed[key] = struct{}{}
-					return true
-				})
-			}
+				}
+				b.keys = append(b.keys, key)
+				confirmed[key] = struct{}{}
+				return true
+			})
 			index[tx.ID] = len(txs)
 			txs = append(txs, b)
 		}

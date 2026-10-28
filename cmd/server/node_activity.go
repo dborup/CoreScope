@@ -125,9 +125,7 @@ func hexFoldEqual(token, lower string) bool {
 // txConfirmsRelay reports whether any raw observed flood path of tx names
 // m.key with identity-safe evidence.
 func txConfirmsRelay(tx *StoreTx, m relayKeyMatcher) bool {
-	// Flood paths record already-observed hops. Direct paths list the
-	// remaining intended route, not nodes that forwarded this observation.
-	if !m.possible() || !txHasObservedFloodPath(tx) {
+	if !m.possible() {
 		return false
 	}
 	found := false
@@ -159,27 +157,57 @@ func (r *relayTokenResolver) key(token string) string {
 	return key
 }
 
-// forEachObservedRelayHop visits the display path hops, then the hops of every
-// other raw observation path. The display observation is only the longest
-// route, so a shorter observation can be the sole raw evidence for a relay that
-// resolved indexing attached to the transmission. visit returns false to stop.
-// Repeated identical paths are rescanned instead of deduplicated: the scanner
-// itself does not allocate (visit may), a per-transmission set would. Caller
-// holds s.mu.
+// forEachObservedRelayHop visits the hops of every raw observation path whose
+// own route is flood. Flood paths record hops that already forwarded
+// (Mesh::routeRecvPacket appends self); direct paths list the route still to
+// come (Mesh::removeSelfFromPath). One content hash covers both route families
+// (Packet::calculatePacketHash skips the header route bits), so the route is
+// the observation's (observationRouteType, #308), never tx.RouteType alone
+// (#632, upstream 2266). The display observation is only the longest route,
+// so a shorter observation can be the sole raw evidence for a relay. Only a
+// transmission without observations falls back to its display path and
+// route. visit returns false to stop. Repeated identical non-display paths are
+// rescanned instead of deduplicated: the scanner itself does not allocate
+// (visit may), a per-transmission set would. Caller holds s.mu.
 func forEachObservedRelayHop(tx *StoreTx, visit func(token string) bool) {
-	for _, token := range txGetParsedPath(tx) {
-		if !visit(token) {
-			return
+	if len(tx.Observations) == 0 {
+		if txHasObservedFloodPath(tx) {
+			visitHops(txGetParsedPath(tx), visit)
 		}
+		return
 	}
+	displayDone := false
 	for _, obs := range tx.Observations {
-		if obs == nil || obs.PathJSON == tx.PathJSON {
+		if obs == nil {
+			continue
+		}
+		if rt, ok := observationRouteType(obs, tx); !ok || (rt != RouteFlood && rt != RouteTransportFlood) {
+			continue
+		}
+		if obs.PathJSON == tx.PathJSON {
+			if displayDone {
+				continue
+			}
+			displayDone = true
+			if !visitHops(txGetParsedPath(tx), visit) {
+				return
+			}
 			continue
 		}
 		if !visitPathJSONHops(obs.PathJSON, visit) {
 			return
 		}
 	}
+}
+
+// visitHops visits already-parsed hops; false if visit stopped early.
+func visitHops(hops []string, visit func(string) bool) bool {
+	for _, token := range hops {
+		if !visit(token) {
+			return false
+		}
+	}
+	return true
 }
 
 // visitPathJSONHops visits the hops of a path_json array with the same accept
