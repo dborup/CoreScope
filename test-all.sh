@@ -282,6 +282,7 @@ run test-live-dt-cap-1524.js
 run test-live-legend-helper.js
 run test-node-reach-coverage-debounce.js
 run test-observer-detail-view-path.js
+run test-observer-detail-ownership.js
 run test-observer-naive-clock-1478.js
 run test-path-inspector.js
 run test-payload-labels-content.js
