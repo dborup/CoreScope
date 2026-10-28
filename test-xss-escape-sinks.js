@@ -568,7 +568,7 @@ function renderObsDetail(obs, neighborsData) {
     'obs', 'obsSkew', 'escapeHtml', 'window', 'HEALTH_THRESHOLDS',
     'formatDuration', 'timeAgo', 'formatSkew', 'renderSkewBadge', 'observerSkewSeverity',
     'statusCls', 'statusLabel', 'neighborsData', 'airtime',
-    radioBlock + '\n' + directNeighborsBlock + '\nreturn `' + tpl + '`;'
+    radioBlock + '\n' + directNeighborsBlock + '\nreturn `' + tpl + '` + renderDirectNeighbors(neighborsData);' // #634: neighbors render into their own region now
   );
   return fn(
     obs, sandbox.obsSkew, escapeHtml, sandbox.window, sandbox.HEALTH_THRESHOLDS,

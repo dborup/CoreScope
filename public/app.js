@@ -1792,6 +1792,11 @@ window.addEventListener('DOMContentLoaded', () => {
     // Always rebuilt from the CURRENT originals, so a link removed since the
     // last run cannot survive as a stale clone in the menu.
     function rebuildMoreMenu(links) {
+      // #634 (upstream 2333): clearing the menu drops a focused clone onto
+      // <body>. Remember its destination and restore focus afterwards, whether
+      // it is still in More or has moved to the inline strip.
+      const focused = navMoreMenu.contains(document.activeElement) ? document.activeElement : null;
+      let focusTarget = focused && links.find(l => l.getAttribute('href') === focused.getAttribute('href'));
       navMoreMenu.innerHTML = '';
       const hidden = links.filter(a => a.classList.contains('is-overflow'));
       hidden.forEach(function(link) {
@@ -1807,7 +1812,10 @@ window.addEventListener('DOMContentLoaded', () => {
         clone.addEventListener('click', closeNav);
         clone.addEventListener('click', closeMoreMenu);
         navMoreMenu.appendChild(clone);
+        if (link === focusTarget) focusTarget = clone;
       });
+      if (hidden.length === 0) closeMoreMenu();
+      if (focusTarget) focusTarget.focus();
       // If nothing overflows, hide the More button entirely so wide
       // viewports don't show a useless dropdown trigger.
       navMoreWrap.classList.toggle('is-hidden', hidden.length === 0);

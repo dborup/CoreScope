@@ -29,7 +29,7 @@ function harness() {
   const app = element('app');
   class Chart {
     static defaults = {};
-    constructor(canvas, config) { this.config = config; this.destroyed = false; charts.push(this); }
+    constructor(canvas, config) { if (Chart.failAt != null && charts.length >= Chart.failAt) throw new Error('chart construction failed'); this.config = config; this.destroyed = false; charts.push(this); }
     destroy() { this.destroyed = true; }
   }
   const context = vm.createContext({
@@ -64,7 +64,7 @@ function harness() {
       error: elements.get('obsDetailContent').firstChild.textContent,
       charts: charts.filter(c => !c.destroyed) };
   }
-  return { page, app, elements, requests, charts, visit, days, snapshot };
+  return { page, app, elements, requests, charts, visit, days, snapshot, Chart };
 }
 
 function complete(requests, id, label = id) {
@@ -89,8 +89,8 @@ async function test(name, fn) {
     await settled();
     assert.strictEqual(h.snapshot().title, 'Current observer');
     assert.strictEqual(h.snapshot().charts.length, 4);
-    assert.match(h.snapshot().html, /2 seconds/);
-    assert.doesNotMatch(h.snapshot().html, /99 seconds/);
+    assert.match(h.elements.get('obsClockRegion').innerHTML, /2 seconds/);
+    assert.doesNotMatch(h.elements.get('obsClockRegion').innerHTML, /99 seconds/);
   });
 
   for (const failure of [false, true]) {
@@ -177,6 +177,100 @@ async function test(name, fn) {
     assert.strictEqual(next[1].url, '/observers/B/analytics?days=7');
     complete(next, 'B');
     await settled();
+  });
+
+  // #634 (upstream 2339): metadata renders as soon as the observer request
+  // finishes; analytics, clock skew and neighbors fill their own regions.
+  const OBS = id => ({ id, name: 'Obs ' + id, last_seen: null });
+  const ANALYTICS = { timeline: [{ label: 'x', count: 1 }], packetTypes: { 4: 1 },
+    nodesTimeline: [{ label: 'x', count: 1 }], snrDistribution: [{ range: '0 to 5', count: 1 }], recentPackets: [] };
+
+  await test('metadata renders before analytics finish; charts follow', async () => {
+    const h = harness();
+    const r = h.visit('A');
+    r[0].resolve(OBS('A'));
+    await settled();
+    assert.strictEqual(h.snapshot().title, 'Obs A');
+    assert.match(h.snapshot().html, /ID: A/);
+    assert.strictEqual(h.snapshot().charts.length, 0, 'no charts before analytics');
+    r[1].resolve(ANALYTICS);
+    await settled();
+    assert.strictEqual(h.snapshot().charts.length, 4);
+  });
+
+  await test('analytics arriving before the observer waits for the metadata shell', async () => {
+    const h = harness();
+    const r = h.visit('A');
+    r[1].resolve(ANALYTICS);
+    await settled();
+    assert.strictEqual(h.snapshot().charts.length, 0);
+    r[0].resolve(OBS('A'));
+    await settled();
+    assert.strictEqual(h.snapshot().charts.length, 4);
+    assert.match(h.snapshot().html, /ID: A/);
+  });
+
+  await test('analytics failure keeps the metadata and reports in the charts region', async () => {
+    const h = harness();
+    const r = h.visit('A');
+    r[0].resolve(OBS('A'));
+    r[1].reject(new Error('analytics down'));
+    await settled();
+    assert.match(h.snapshot().html, /ID: A/);
+    assert.strictEqual(h.snapshot().error, '', 'whole view must not become an error');
+    assert.match(h.elements.get('obsChartsRegion').firstChild.textContent, /analytics down/);
+  });
+
+  await test('clock skew fills its own region without touching the metadata node', async () => {
+    const h = harness();
+    const r = h.visit('A');
+    r[0].resolve(OBS('A'));
+    await settled();
+    const content = h.elements.get('obsDetailContent');
+    const before = content.innerHTML;
+    r[2].resolve([{ observerID: 'A', offsetSec: 2, samples: 2 }]);
+    await settled();
+    assert.strictEqual(h.elements.get('obsDetailContent'), content);
+    assert.strictEqual(content.innerHTML, before, 'metadata markup must not be rewritten');
+    assert.match(h.elements.get('obsClockRegion').innerHTML, /2 seconds/);
+  });
+
+  await test('identity failure still shows the error view', async () => {
+    const h = harness();
+    const r = h.visit('A');
+    r[1].resolve(ANALYTICS);
+    r[0].reject(new Error('no such observer'));
+    await settled();
+    assert.strictEqual(h.snapshot().error, 'Error: no such observer');
+    assert.strictEqual(h.snapshot().charts.length, 0);
+  });
+
+  await test('late secondary replies of an old visit cannot write to the new visit', async () => {
+    const h = harness();
+    const old = h.visit('A');
+    old[0].resolve(OBS('A'));
+    await settled();
+    const next = h.visit('B');
+    next[0].resolve(OBS('B'));
+    await settled();
+    const before = h.snapshot();
+    old[1].resolve(ANALYTICS);
+    old[2].resolve([{ observerID: 'A', offsetSec: 99, samples: 99 }]);
+    await settled();
+    assert.deepStrictEqual(h.snapshot(), before);
+    assert.doesNotMatch(h.elements.get('obsClockRegion').innerHTML, /99 seconds/);
+  });
+
+  await test('a chart that fails to construct leaves no half-built charts and keeps the metadata', async () => {
+    const h = harness();
+    h.Chart.failAt = 2;
+    const r = h.visit('A');
+    r[0].resolve(OBS('A'));
+    r[1].resolve(ANALYTICS);
+    await settled();
+    assert.strictEqual(h.snapshot().charts.length, 0, 'partial charts must be destroyed');
+    assert.match(h.snapshot().html, /ID: A/);
+    assert.match(h.elements.get('obsChartsRegion').firstChild.textContent, /chart construction failed/);
   });
 
   console.log(`Observer detail ownership: ${passed} passed, ${failed} failed`);
