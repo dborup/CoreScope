@@ -27,10 +27,10 @@ import (
 // #149 covers the gate state exhaustively, but every one of its scenarios (and
 // #558's) runs the background loader with an empty chunk loop — oldestLoaded
 // is already past the retention cutoff — so no test merged a packet during an
-// invalidation, and none asserted what the rebuilt index then contains. These
-// two tests close that gap with the real chunk loader: a fill that merges
-// transmissions the hot window did not have, and an assertion that the ready
-// response carries them.
+// invalidation, and none asserted what the rebuilt index then contains. The
+// three tests below close that gap with the real chunk loader: a fill that
+// merges transmissions the hot window did not have, and an assertion that the
+// ready response carries them.
 //
 // The fixture keeps the merged observations below the 5 % Δobs debounce
 // threshold, as upstream's regression does, so the rebuild proves the
