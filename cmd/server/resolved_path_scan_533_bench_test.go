@@ -51,36 +51,10 @@ func BenchmarkDecodePersistedRelayPath_533(b *testing.B) {
 	runtime.KeepAlive(n)
 }
 
-// BenchmarkEvictionBatch_533 is the SQL prefetch RunEviction does before it
-// takes s.mu (resolvedPubkeysForEvictionBatch), over 10K transmissions of a
-// 250K-observation database: one eviction tick's worth on the large instance.
-//
-//	go test -run '^$' -bench EvictionBatch_533 -count 6 .
-func BenchmarkEvictionBatch_533(b *testing.B) {
-	txs := obs489Data(obs489Bench, 533)
-	db, err := OpenDB(obs489DB(b, txs))
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer db.conn.Close()
-	s := NewPacketStore(db, &PacketStoreConfig{})
-	ids := make([]int, 0, 10000)
-	for _, tx := range txs[:10000] {
-		ids = append(ids, tx.id)
-	}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if got := s.resolvedPubkeysForEvictionBatch(ids); len(got) != len(ids) {
-			b.Fatalf("batch covers %d txs, want %d", len(got), len(ids))
-		}
-	}
-}
-
 // TestResolvedPathScan533_Measure loads a CORESCOPE_533_MEASURE-observation
 // synthetic store (2500000 is the large instance: about 170K transmissions)
 // and reports Load wall time, allocations, heap after load and peak RSS
-// proxy (Sys), then times one eviction prefetch over every transmission.
+// proxy (Sys).
 // Run it with -cpuprofile/-memprofile to attribute the cost.
 //
 //	CORESCOPE_533_MEASURE=2500000 go test -run ResolvedPathScan533_Measure -v -timeout 60m
@@ -114,18 +88,5 @@ func TestResolvedPathScan533_Measure(t *testing.T) {
 	t.Logf("load: tx=%d obs=%d wall=%v allocs=%d allocMiB=%.1f heapMiB=%.1f sysMiB=%.0f",
 		len(s.packets), s.totalObs, load, allocs, float64(bytes)/1048576,
 		float64(int64(m1.HeapAlloc)-int64(m0.HeapAlloc))/1048576, float64(m1.Sys)/1048576)
-
-	ids := make([]int, 0, len(txs))
-	for _, tx := range txs {
-		ids = append(ids, tx.id)
-	}
-	runtime.GC()
-	runtime.ReadMemStats(&m0)
-	t0 = time.Now()
-	batch := s.resolvedPubkeysForEvictionBatch(ids)
-	evict := time.Since(t0)
-	runtime.ReadMemStats(&m1)
-	t.Logf("eviction prefetch: tx=%d wall=%v allocs=%d allocMiB=%.1f",
-		len(batch), evict, m1.Mallocs-m0.Mallocs, float64(m1.TotalAlloc-m0.TotalAlloc)/1048576)
 	runtime.KeepAlive(s)
 }

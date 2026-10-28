@@ -26,7 +26,6 @@ func TestRepeaterRelayInfoMap_ConcurrentIngestAndEviction(t *testing.T) {
 	base := time.Now().UTC().Add(-20 * time.Hour).Truncate(time.Second)
 	const initialTx, rounds, txPerRound, keepTx = 200, 60, 20, 40
 	nextID := 1
-	resolved := map[int][]string{}
 	hopsSeen := map[string]bool{}
 	addLocked := func() {
 		id := nextID
@@ -39,7 +38,6 @@ func TestRepeaterRelayInfoMap_ConcurrentIngestAndEviction(t *testing.T) {
 			relay, alt = relayB, `["B7C8"]`
 		}
 		tx := storeObservedTx(store, id, 2, ts, `{"type":"TXT_MSG"}`, alt, `["D4E5F6","D4E5F6","D4E5F6"]`)
-		resolved[id] = []string{relay, hop}
 		// Restart shape: the relay is reachable only through byNode, whose
 		// slices eviction compacts in place, so a stale candidate would
 		// change the relay result instead of being hidden by a full-key
@@ -147,7 +145,7 @@ func TestRepeaterRelayInfoMap_ConcurrentIngestAndEviction(t *testing.T) {
 		// with whole seconds, so keepTx+1 transmissions remain.
 		keepFrom := base.Add(time.Duration(nextID-keepTx)*time.Second - 500*time.Millisecond)
 		store.retentionHours = time.Since(keepFrom).Hours()
-		store.EvictStaleWithRP(resolved)
+		store.EvictStale()
 		round++
 		publishLocked()
 		store.mu.Unlock()

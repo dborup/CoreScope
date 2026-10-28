@@ -500,17 +500,17 @@ type PacketStore struct {
 	// pubkey keys addResolvedPubkeysToPathHopIndex has put it under in
 	// byPathHop, so further observations through the same relays do not
 	// append it again (#158). At most one hash per relay key per live
-	// transmission: evictStaleInternal deletes evicted entries and
+	// transmission: EvictStale deletes evicted entries and
 	// retainResolvedPathHops drops anything no longer in s.packets.
 	pathHopResolved map[*StoreTx][]uint64
 
 	// fallbackByNode records, per transmission, the relay pubkeys the
 	// path_json fallback (indexObservationRelayHops) put it under in byNode
 	// and nodeTxIDs, and nothing else. Without a persisted resolved_path
-	// there is no other record of them, so eviction reads them here to remove
-	// the entries and to credit what addFallbackRelay charged (#202). At most
-	// one entry per (relay, live transmission): evictStaleInternal deletes
-	// evicted transmissions' records.
+	// there is no other record of them, so eviction reads them here to credit
+	// what addFallbackRelay charged (#202), and the content-hash merge to find
+	// the entries (nodeKeyFinder). At most one entry per (relay, live
+	// transmission): EvictStale deletes evicted transmissions' records.
 	fallbackByNode map[*StoreTx][]string
 
 	// Precomputed distinct advert pubkey count (refcounted for eviction correctness).
@@ -2639,6 +2639,7 @@ func (s *PacketStore) QueryGroupedPackets(q PacketQuery) *PacketResult {
 	for i, tx := range results {
 		sorted[i] = latestTx{tx: tx, latest: tx.LatestSeen}
 	}
+	evictedGen := atomic.LoadInt64(&s.evicted)
 	s.mu.RUnlock()
 
 	total := len(sorted)
@@ -2652,15 +2653,25 @@ func (s *PacketStore) QueryGroupedPackets(q PacketQuery) *PacketResult {
 		txs[i] = sorted[i].tx
 	}
 
-	// Cache the sorted StoreTx slice (not maps) — lightweight and reusable for any page.
+	s.cacheGroupedPackets(txs, cacheKey, evictedGen)
+	return s.groupedPageWithRP(txs, total, q.Offset, q.Limit)
+}
+
+// cacheGroupedPackets caches a sorted grouped result (the StoreTx slice, not
+// maps — lightweight and reusable for any page), unless an eviction ran since
+// it was snapshotted (evictedGen, s.evicted read under s.mu): that eviction
+// already dropped the cache, and publishing would keep the transmissions it
+// removed alive (#621, upstream PR 2327).
+func (s *PacketStore) cacheGroupedPackets(txs []*StoreTx, cacheKey string, evictedGen int64) {
 	s.groupedCacheMu.Lock()
+	defer s.groupedCacheMu.Unlock()
+	if atomic.LoadInt64(&s.evicted) != evictedGen {
+		return
+	}
 	s.groupedCacheTxs = txs
-	s.groupedCacheTotal = total
+	s.groupedCacheTotal = len(txs)
 	s.groupedCacheKey = cacheKey
 	s.groupedCacheExp = time.Now().Add(3 * time.Second)
-	s.groupedCacheMu.Unlock()
-
-	return s.groupedPageWithRP(txs, total, q.Offset, q.Limit)
 }
 
 // groupedPageWithRP is groupedTxsToPage plus each row's resolved_path (#165).
@@ -3050,6 +3061,11 @@ func (s *PacketStore) invalidateCachesFor(inv cacheInvalidation) {
 		s.channelsCacheMu.Lock()
 		s.channelsCacheRes = nil
 		s.channelsCacheMu.Unlock()
+		// The grouped cache holds the transmissions of its result (#621).
+		s.groupedCacheMu.Lock()
+		s.groupedCacheTxs = nil
+		s.groupedCacheTotal = 0
+		s.groupedCacheMu.Unlock()
 		s.lastInvalidated = time.Now()
 		s.pendingInv = nil
 		return
@@ -5829,74 +5845,9 @@ func (s *PacketStore) trackedMemoryMB() float64 {
 }
 
 // EvictStale removes packets older than the retention window and/or exceeding
-// the memory cap. Must be called with s.mu held (Lock). Returns the number of
-// packets evicted.
-// evictionCandidateTxIDs determines which tx IDs would be evicted and returns them.
-// Must be called under s.mu.Lock (or RLock). Does NOT modify any state.
-func (s *PacketStore) evictionCandidateTxIDs() []int {
-	if s.retentionHours <= 0 && s.maxMemoryMB <= 0 {
-		return nil
-	}
-	cutoffIdx := 0
-	if s.retentionHours > 0 {
-		cutoff := time.Now().UTC().Add(-time.Duration(s.retentionHours * float64(time.Hour))).Format(time.RFC3339)
-		for cutoffIdx < len(s.packets) && s.packets[cutoffIdx].FirstSeen < cutoff {
-			cutoffIdx++
-		}
-	}
-	if s.maxMemoryMB > 0 {
-		highWatermark := int64(s.maxMemoryMB) * 1048576
-		lowWatermark := int64(float64(highWatermark) * 0.85)
-		accounted := s.accountedBytes()
-		if accounted > highWatermark && len(s.packets) > 0 {
-			var bytesToEvict int64
-			memCutoff := cutoffIdx
-			for memCutoff < len(s.packets) && (accounted-bytesToEvict) > lowWatermark {
-				tx := s.packets[memCutoff]
-				bytesToEvict += s.txChargedBytes(tx)
-				for _, obs := range tx.Observations {
-					bytesToEvict += estimateStoreObsBytes(obs)
-				}
-				memCutoff++
-			}
-			maxEvict := len(s.packets) / 4
-			if maxEvict < 1 {
-				maxEvict = 1
-			}
-			if memCutoff > maxEvict {
-				memCutoff = maxEvict
-			}
-			if memCutoff > cutoffIdx {
-				cutoffIdx = memCutoff
-			}
-		}
-	}
-	if cutoffIdx == 0 || cutoffIdx > len(s.packets) {
-		return nil
-	}
-	ids := make([]int, cutoffIdx)
-	for i := 0; i < cutoffIdx; i++ {
-		ids[i] = s.packets[i].ID
-	}
-	return ids
-}
-
-// EvictStaleWithRP runs eviction using pre-fetched resolved pubkeys.
-// rpBatch may be nil (in which case resolved pubkey cleanup for byNode/nodeTxIDs is skipped).
-// Must be called under s.mu.Lock.
-func (s *PacketStore) EvictStaleWithRP(rpBatch map[int][]string) int {
-	return s.evictStaleInternal(rpBatch)
-}
-
-// EvictStale is a SQL-free legacy/test entry point without a resolved-pubkey
-// batch. Prefer RunEviction(), which prefetches that cleanup evidence outside
-// the lock; a nil batch skips that portion of byNode/nodeTxIDs cleanup.
-// Must be called under s.mu.Lock.
+// the memory cap, with every in-memory membership they have. It runs no SQL.
+// Must be called with s.mu held (Lock). Returns the number of packets evicted.
 func (s *PacketStore) EvictStale() int {
-	return s.evictStaleInternal(nil)
-}
-
-func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 	if s.retentionHours <= 0 && s.maxMemoryMB <= 0 {
 		return 0
 	}
@@ -5966,7 +5917,6 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 	// Track which observer IDs and payload types need filtering
 	affectedObservers := make(map[string]struct{})
 	affectedPayloadTypes := make(map[int]struct{})
-	affectedNodes := make(map[string]struct{})
 
 	// First pass: remove from primary indexes (byHash, byTxID, byObsID),
 	// collect IDs for batch secondary index cleanup, and handle non-index work
@@ -5991,46 +5941,8 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 			affectedPayloadTypes[*tx.PayloadType] = struct{}{}
 		}
 
-		// Remove from nodeTxIDs and collect affected node keys.
-		// Must mirror indexByNode: process decoded JSON fields AND resolved_path pubkeys.
-		evictedFromNode := make(map[string]bool)
-		if tx.DecodedJSON != "" {
-			var decoded map[string]interface{}
-			if json.Unmarshal([]byte(tx.DecodedJSON), &decoded) == nil {
-				for _, field := range []string{"pubKey", "destPubKey", "srcPubKey"} {
-					if v, ok := decoded[field].(string); ok && v != "" {
-						s.unlistNodeTx(v, tx)
-						affectedNodes[v] = struct{}{}
-						evictedFromNode[v] = true
-					}
-				}
-			}
-		}
-		// Clean up resolved_path pubkeys from byNode/nodeTxIDs.
-		// Uses pre-fetched batch data when available (no SQL under lock).
-		var rpPubkeys []string
-		if rpBatch != nil {
-			rpPubkeys = rpBatch[tx.ID]
-		}
-		for _, pk := range rpPubkeys {
-			if pk == "" || evictedFromNode[pk] {
-				continue
-			}
-			s.unlistNodeTx(pk, tx)
-			affectedNodes[pk] = struct{}{}
-			evictedFromNode[pk] = true
-		}
-		// ...and the relays the path_json fallback indexed it under, which no
-		// resolved_path names (#202). The record is deleted here; its charge
-		// was taken in txChargedBytes above.
-		for _, pk := range s.fallbackByNode[tx] {
-			if evictedFromNode[pk] {
-				continue
-			}
-			s.unlistNodeTx(pk, tx)
-			affectedNodes[pk] = struct{}{}
-			evictedFromNode[pk] = true
-		}
+		// Its byNode memberships go in the sweep below; the record of the
+		// path_json fallback relays goes here, after txChargedBytes read it.
 		delete(s.fallbackByNode, tx)
 
 		// Remove from resolved pubkey index
@@ -6046,15 +5958,14 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 	}
 	s.invalidateRelayStatsCache()
 
-	// Batch-remove from byObserver: single pass per affected observer slice
+	// Batch-remove from byObserver: single pass per affected observer slice.
+	// slices.DeleteFunc clears the vacated tail, which would otherwise keep
+	// evicted pointers alive until an append overwrote them (#621).
 	for obsID := range affectedObservers {
-		obsList := s.byObserver[obsID]
-		filtered := obsList[:0]
-		for _, o := range obsList {
-			if _, evicted := evictedObsIDs[o.ID]; !evicted {
-				filtered = append(filtered, o)
-			}
-		}
+		filtered := slices.DeleteFunc(s.byObserver[obsID], func(o *StoreObs) bool {
+			_, evicted := evictedObsIDs[o.ID]
+			return evicted
+		})
 		if len(filtered) == 0 {
 			delete(s.byObserver, obsID)
 		} else {
@@ -6064,13 +5975,10 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 
 	// Batch-remove from byPayloadType: single pass per affected type slice
 	for pt := range affectedPayloadTypes {
-		ptList := s.byPayloadType[pt]
-		filtered := ptList[:0]
-		for _, t := range ptList {
-			if _, evicted := evictedTxIDs[t.ID]; !evicted {
-				filtered = append(filtered, t)
-			}
-		}
+		filtered := slices.DeleteFunc(s.byPayloadType[pt], func(t *StoreTx) bool {
+			_, evicted := evictedTxIDs[t.ID]
+			return evicted
+		})
 		if len(filtered) == 0 {
 			delete(s.byPayloadType, pt)
 		} else {
@@ -6078,14 +5986,22 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 		}
 	}
 
-	// Batch-remove from byNode: single pass per affected node slice
-	for nodeKey := range affectedNodes {
-		nodeList := s.byNode[nodeKey]
-		filtered := nodeList[:0]
-		for _, t := range nodeList {
-			if _, evicted := evictedTxIDs[t.ID]; !evicted {
-				filtered = append(filtered, t)
+	// Remove from byNode and nodeTxIDs: one sweep of the actual memberships
+	// per batch, as for byPathHop (#621, upstream PR 2327). Rebuilding the
+	// keys missed resolved relays: they were taken from a SQL prefetch of
+	// resolved_path, which the ingestor prunes on its own schedule and its
+	// upsert can rewrite after the server indexed the old value. A list
+	// without an evicted transmission is only read.
+	for nodeKey, list := range s.byNode {
+		filtered := slices.DeleteFunc(list, func(t *StoreTx) bool {
+			if !evictedTxSet[t] {
+				return false
 			}
+			s.unlistNodeTx(nodeKey, t)
+			return true
+		})
+		if len(filtered) == len(list) {
+			continue
 		}
 		if len(filtered) == 0 {
 			delete(s.byNode, nodeKey)
@@ -6097,8 +6013,9 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 	// Remove from distance indexes — filter out records referencing evicted txs
 	s.compactDistIndex(evictedTxSet)
 
-	// Trim packets slice
+	// Trim packets slice, clearing the vacated tail (#621).
 	n := copy(s.packets, s.packets[cutoffIdx:])
+	clear(s.packets[n:])
 	s.packets = s.packets[:n]
 	s.totalObs -= evictedObs
 
@@ -6128,25 +6045,10 @@ func (s *PacketStore) evictStaleInternal(rpBatch map[int][]string) int {
 
 // RunEviction acquires the write lock and runs eviction. Safe to call from
 // a goroutine. Returns evicted count.
-// Uses a two-phase approach: determines eviction candidates under lock,
-// releases lock for batch SQL fetch of resolved pubkeys, then re-acquires
-// lock for the actual eviction pass.
 func (s *PacketStore) RunEviction() int {
-	// Phase 1: determine candidates under lock
-	s.mu.Lock()
-	txIDs := s.evictionCandidateTxIDs()
-	s.mu.Unlock()
-
-	// Phase 2: batch-fetch resolved pubkeys from SQL (no lock held)
-	var rpBatch map[int][]string
-	if len(txIDs) > 0 {
-		rpBatch = s.resolvedPubkeysForEvictionBatch(txIDs)
-	}
-
-	// Phase 3: actual eviction under write lock, using pre-fetched data
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.EvictStaleWithRP(rpBatch)
+	return s.EvictStale()
 }
 
 // StartEvictionTicker starts a background goroutine that runs eviction every

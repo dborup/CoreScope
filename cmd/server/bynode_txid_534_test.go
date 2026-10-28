@@ -314,11 +314,12 @@ func TestHashMigrateMergeKeepsNodeSetsExact_534(t *testing.T) {
 	}
 }
 
-// An eviction whose resolved-relay prefetch missed a relay (the per-chunk
-// query error is skipped, or the DB's resolved_path no longer names it) leaves
-// that relay's entry behind. Keyed by hash, the stale entry kept a later
-// transmission with the same content hash out of byNode for good; keyed by ID
-// it matches nothing new.
+// Eviction rebuilt the relays of a transmission from a SQL prefetch, and one
+// it missed (the per-chunk query error was skipped, or the DB's resolved_path
+// no longer named it) left that relay's entry behind; keyed by hash, the stale
+// entry kept a later transmission with the same content hash out of byNode for
+// good. Since #621 eviction sweeps the actual memberships, and the later
+// transmission is listed either way.
 func TestByNodeStaleEntryDoesNotBlockSameHash_534(t *testing.T) {
 	s := NewPacketStore(nil, &PacketStoreConfig{RetentionHours: 24})
 	relay := acct113PK(5)
@@ -327,7 +328,7 @@ func TestByNodeStaleEntryDoesNotBlockSameHash_534(t *testing.T) {
 	s.packets = append(s.packets, old)
 	s.byHash[old.Hash], s.byTxID[old.ID] = old, old
 	s.addToByNode(old, relay)
-	if n := s.EvictStaleWithRP(map[int][]string{}); n != 1 {
+	if n := s.EvictStale(); n != 1 {
 		s.mu.Unlock()
 		t.Fatalf("evicted %d, want 1", n)
 	}
@@ -349,9 +350,9 @@ func TestByNodeStaleEntryDoesNotBlockSameHash_534(t *testing.T) {
 // was heard by an observer in the region. It matches the region's
 // observations to the sets by transmission ID; observation IDs differ from
 // transmission IDs here, so matching on the wrong one fails. Relay d's
-// transmission was evicted with a prefetch that missed d, and the same packet
-// was later heard again in EDI only: the hash keys matched d's stale entry
-// and kept d in EDI.
+// transmission was evicted, and the same packet was later heard again in EDI
+// only. Before #621 an eviction prefetch that missed d left d's entry behind,
+// and the hash keys matched it and kept d in EDI.
 func TestGetBulkHealthRegionMatchesByTransmission_534(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
@@ -420,7 +421,7 @@ func TestGetBulkHealthRegionMatchesByTransmission_534(t *testing.T) {
 
 	store.mu.Lock()
 	store.retentionHours = 24
-	evicted := store.EvictStaleWithRP(map[int][]string{}) // the prefetch missed d
+	evicted := store.EvictStale()
 	store.mu.Unlock()
 	if evicted != 1 {
 		t.Fatalf("evicted %d, want 1", evicted)
