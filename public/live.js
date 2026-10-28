@@ -3351,6 +3351,7 @@
   window._liveExpandToBufferEntriesAsync = expandToBufferEntriesAsync;
   window._liveSEG_MAP = SEG_MAP;
   window._liveBufferPacket = bufferPacket;
+  window._liveGroupIsMultibyte = groupIsMultibyte;
   // "One socket per viewer" tests: Live must reach the packet stream through
   // app.js's shared channel and never open a socket of its own.
   window._liveConnectWS = connectWS;
@@ -3465,16 +3466,18 @@
   }
 
   // A packet group is multibyte when its path hash size is >= 2 bytes.
-  // All observations of one packet share the same hash size; use the first
-  // observation with a resolvable raw_hex. Unresolvable => treated as single
-  // (excluded when the "Multibyte only" filter is on).
+  // #608: observations of one content hash can be heard on different routes
+  // (cmd/server/store.go StoreTx.routeMask), so hash size is read per
+  // observation from ITS OWN raw_hex header (window.MC_packetHashSize
+  // derives the route from the frame itself, not from a passed-in field) --
+  // it is not assumed shared across the group. Use the first observation
+  // with a resolvable raw_hex; unresolvable => treated as single (excluded
+  // when the "Multibyte only" filter is on).
   function groupIsMultibyte(packets) {
     if (!packets || !packets.length) return false;
     for (var i = 0; i < packets.length; i++) {
       var p = packets[i];
-      var size = window.MC_packetHashSize
-        ? window.MC_packetHashSize(p.raw_hex, p.route_type)
-        : 0;
+      var size = window.MC_packetHashSize ? window.MC_packetHashSize(p.raw_hex) : 0;
       if (size > 0) return size >= 2;
     }
     return false;

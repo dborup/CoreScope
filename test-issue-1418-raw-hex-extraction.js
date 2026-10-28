@@ -13,17 +13,20 @@
  *   PATH (type 8):     destHash + srcHash bytes after path
  *   GRP_TXT (type 5):  channel_hash byte after path
  *
- * This test asserts behavior by replicating map.js's slicing around the real
- * rawPayloadOffset() and exercising it on hand-built raw_hex fixtures
- * built to mirror real wire packets.
- *
- * Source invariants (string grep on map.js) also guarded so any code-move
- * that drops the extraction is caught.
+ * #608 follow-up (review of #600, finding N1): this used to assert the
+ * extraction with source regexes and a hand-copied REPLICA of map.js's
+ * slicing. A mutant on the real map.js (`const destOff = payOff * 2 + 2;`)
+ * survived every suite. map.js now extracts the slicing into
+ * extractSrcDstFromRawHex()/extractChannelHashFromRawHex(), exposed via
+ * window.__meshcoreMapInternals (the same test-seam pattern used by the
+ * Top Routes overlay and scope-filter tests) — this file drives the REAL
+ * production functions through a vm sandbox, same as those.
  */
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 
 let passed = 0, failed = 0;
 function assert(cond, msg) {
@@ -36,10 +39,8 @@ const mapSrc = fs.readFileSync(path.join(__dirname, 'public', 'map.js'), 'utf8')
 console.log('\n=== #1418 raw_hex A: source invariants in map.js ===');
 assert(/TYPES_WITH_DST_SRC\s*=\s*\[\s*1\s*,\s*2\s*,\s*7\s*,\s*8\s*\]/.test(mapSrc),
   'TYPES_WITH_DST_SRC = [1, 2, 7, 8] (RESPONSE, TXT_MSG, ANON_REQ, PATH)');
-assert(/payload_type\s*!==\s*7/.test(mapSrc),
+assert(/payloadType\s*!==\s*7/.test(mapSrc),
   'ANON_REQ (type 7) special-cased to skip srcHash extraction');
-assert(/payload_type\s*===\s*5/.test(mapSrc),
-  'GRP_TXT (type 5) branch present for channel_hash extraction');
 assert(/PAYLOAD_TYPE_MAP\s*=\s*\{[^}]*0:\s*'REQ'[^}]*1:\s*'RESPONSE'[^}]*2:\s*'TXT_MSG'/m.test(mapSrc),
   'PAYLOAD_TYPE_MAP covers 0=REQ, 1=RESPONSE, 2=TXT_MSG');
 assert(/5:\s*'GRP_TXT'[^}]*7:\s*'ANON_REQ'[^}]*8:\s*'PATH'/m.test(mapSrc),
@@ -55,48 +56,47 @@ assert((mapSrc.match(/rawPayloadOffset\(hex\)/g) || []).length >= 2,
 assert(!/hex\.slice\(2,\s*4\)/.test(mapSrc),
   'no raw_hex branch reads path_len at byte 1 (#594)');
 
-console.log('\n=== #1418 raw_hex B: extractor over the real rawPayloadOffset ===');
+console.log('\n=== #1418 raw_hex B: real map.js extractors (vm.createContext, #608) ===');
 
-// The real app.js helper, loaded as the browser loads it.
-const vm = require('vm');
-const noop = () => {};
-const ctx = {
-  window: { addEventListener: noop }, console, addEventListener: noop, location: { hash: '' },
-  fetch: () => Promise.resolve({ json: () => ({}) }), setTimeout: noop, clearTimeout: noop, setInterval: noop, clearInterval: noop,
-  document: { readyState: 'complete', addEventListener: noop, getElementById: () => null, querySelector: () => null, querySelectorAll: () => [], createElement: () => ({}), head: { appendChild: noop } },
-  localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
-};
-vm.createContext(ctx);
+// Minimal browser-like sandbox. map.js's top-level code (filters init,
+// localStorage reads, the final window.__meshcoreMapInternals assignment)
+// needs these; nothing here needs Leaflet since the extractors never touch
+// map/marker/layer objects.
+function makeSandbox() {
+  const noop = () => {};
+  const ctx = {
+    window: { addEventListener: noop, removeEventListener: noop, dispatchEvent: noop },
+    document: {
+      readyState: 'complete', addEventListener: noop, removeEventListener: noop,
+      getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
+      createElement: () => ({ style: {}, classList: { add: noop, remove: noop, toggle: noop }, appendChild: noop, addEventListener: noop, setAttribute: noop }),
+      head: { appendChild: noop }, body: { appendChild: noop },
+    },
+    console, location: { hash: '' },
+    fetch: () => Promise.resolve({ json: () => Promise.resolve({}) }),
+    setTimeout: noop, clearTimeout: noop, setInterval: () => 0, clearInterval: noop,
+    localStorage: { getItem: () => null, setItem: noop, removeItem: noop },
+    navigator: { userAgent: '' },
+    getComputedStyle: () => ({ getPropertyValue: () => '' }),
+  };
+  vm.createContext(ctx);
+  return ctx;
+}
+
+const ctx = makeSandbox();
+// app.js first (defines rawPayloadOffset, a free variable map.js's
+// extractors close over, exactly as index.html loads them in order).
 for (const f of ['payload-labels.js', 'app.js']) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', f), 'utf8'), ctx, { filename: f });
 }
-const rawPayloadOffset = ctx.rawPayloadOffset;
-
-// Replica of the slicing inside loadRouteFromDeepLink (map.js), around the
-// real offset helper. If map.js's slicing changes, update it and say why.
-function extractSrcDst(rawHex, payloadType) {
-  const TYPES = [1, 2, 7, 8];
-  if (TYPES.indexOf(payloadType) < 0) return { src: null, dst: null };
-  const payOff = rawPayloadOffset(rawHex);
-  if (payOff == null) return { src: null, dst: null };
-  const destOff = payOff * 2;
-  if (rawHex.length < destOff + 2) return { src: null, dst: null };
-  const dst = rawHex.slice(destOff, destOff + 2).toUpperCase();
-  let src = null;
-  if (payloadType !== 7 && rawHex.length >= destOff + 4) {
-    src = rawHex.slice(destOff + 2, destOff + 4).toUpperCase();
-  }
-  return { src, dst };
+vm.runInContext(mapSrc, ctx, { filename: 'map.js' });
+const internals = ctx.window.__meshcoreMapInternals;
+if (!internals || typeof internals.extractSrcDstFromRawHex !== 'function') {
+  console.error('  ✗ window.__meshcoreMapInternals.extractSrcDstFromRawHex not found — map.js failed to load?');
+  process.exit(1);
 }
-
-function extractChannelHash(rawHex, payloadType) {
-  if (payloadType !== 5) return null;
-  const payOff = rawPayloadOffset(rawHex);
-  if (payOff == null) return null;
-  const chOff = payOff * 2;
-  if (rawHex.length < chOff + 2) return null;
-  return rawHex.slice(chOff, chOff + 2).toUpperCase();
-}
+const extractSrcDst = internals.extractSrcDstFromRawHex;
+const extractChannelHash = internals.extractChannelHashFromRawHex;
 
 // Build a frame: header (payload type in bits 2-5, route in bits 0-1), the
 // 4 transport-code bytes on routes 0/3, path_len, path bytes, payload.
@@ -171,6 +171,14 @@ assert(r.dst === 'EE' && r.src === 'FF', '64 path bytes (MAX_PATH_SIZE) still ex
 r = extractSrcDst(build(2, 1, 0x61, ['AB'.repeat(66)], ['EE', 'FF']), 2);
 assert(r.src === null && r.dst === null, '66 path bytes → rejected (above MAX_PATH_SIZE 64)');
 
+// #608: a mutant on the real map.js slicing (`destOff = payOff * 2 + 2`,
+// i.e. off by one path byte) must be caught. With it, the TXT_MSG fixture
+// above would read 'FF' as dst instead of '42'. Pin the exact byte math so
+// that mutant fails this assertion rather than only the replica's.
+r = extractSrcDst(build(2, 1, 0x01, ['AB'], ['42', '99', 'FF']), 2);
+assert(r.dst === '42' && r.src === '99',
+  'destOff = payOff * 2 (not +2): dst/src read right at the payload start, no off-by-one (got dst=' + r.dst + ', src=' + r.src + ')');
+
 console.log('\n=== #1418 raw_hex C: channel_hash NOT extracted for non-GRP_TXT ===');
 [0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12].forEach(function (pt) {
   const v = extractChannelHash(build(5, 1, 0x00, [], ['AB']), pt);
@@ -180,4 +188,4 @@ console.log('\n=== #1418 raw_hex C: channel_hash NOT extracted for non-GRP_TXT =
 console.log('\n=== Summary ===');
 console.log('  passed: ' + passed);
 console.log('  failed: ' + failed);
-if (failed > 0) process.exit(1);
+process.exit(failed > 0 ? 1 : 0);

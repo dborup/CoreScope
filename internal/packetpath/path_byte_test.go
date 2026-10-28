@@ -29,6 +29,13 @@ func TestPathByte(t *testing.T) {
 		{"odd length before path byte", "13AABBCCD", RouteTransportDirect, 0, false},
 		{"non-hex path byte", "11ZZ", RouteFlood, 0, false},
 		{"non-hex header", "G100", 0, 0, false},
+		// #608 follow-up (review of #600, finding N3): hexByteAt's
+		// second-nibble validation was untested — every other non-hex case
+		// above fails on the FIRST nibble ("11ZZ", "G100"), so a mutant that
+		// drops the second hexNibble's ok check (`hi<<4 | lo, ok1`) survived.
+		// Here the path byte's first nibble ('0') is valid hex but the
+		// second ('Z') is not.
+		{"non-hex second nibble of path byte", "110Z", RouteFlood, 0, false},
 		{"empty", "", 0, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

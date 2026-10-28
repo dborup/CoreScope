@@ -2726,12 +2726,16 @@
     const groupTypeName = payloadTypeName(p.payload_type);
     const groupTypeClass = payloadTypeColor(p.payload_type);
     const groupSize = p.raw_hex ? Math.floor(p.raw_hex.length / 2) : 0;
-    const _grpPlOff = getPathLenOffset(p.route_type);
     // #1849: TRACE (payload_type=9) header path bytes are per-hop SNR readings,
     // not truncated hop hashes (see internal/packetpath/route.go PathBytesAreHops).
     // The (>>6)+1 derivation is meaningless for TRACE — render — with a tooltip.
     const _grpIsTrace = p.payload_type === 9;
-    const groupHashBytes = _grpIsTrace ? '—' : (((parseInt(p.raw_hex?.slice(_grpPlOff * 2, _grpPlOff * 2 + 2), 16) || 0) >> 6) + 1);
+    // #608: the path-length byte's own offset depends on ITS frame's route,
+    // read from p.raw_hex's own header — not p.route_type, which can
+    // describe a different observation (StoreTx.RouteType is the
+    // first-ingested frame's route; raw_hex and route_type here are paired
+    // from that same frame, but rawPathLenByte self-derives either way).
+    const groupHashBytes = _grpIsTrace ? '—' : (((rawPathLenByte(p.raw_hex) || 0) >> 6) + 1);
     const _grpHashSizeTitle = _grpIsTrace ? ' title="TRACE path bytes are SNR readings, not hash prefixes — see sidebar decoder for actual hop count"' : '';
     const isSingle = p.count <= 1;
     // Channel color highlighting (#271)
@@ -2772,13 +2776,17 @@
         const typeClass = payloadTypeColor(c.payload_type);
         const size = c.raw_hex ? Math.floor(c.raw_hex.length / 2) : 0;
         const childPath = getParsedPath(c);
-        const _cPlOff = getPathLenOffset(p.route_type);
         // #1849: TRACE header path bytes are SNR readings, not hop hashes.
         const _cIsTrace = c.payload_type === 9;
+        // #608: a content hash can be heard on several routes (StoreTx.
+        // routeMask, cmd/server/store.go), so the group header's p.route_type
+        // is the first-ingested frame's route and can disagree with this
+        // CHILD observation's own raw_hex. Read the path-length offset from
+        // c.raw_hex's own header byte instead.
         const childHashBytes = _cIsTrace
           ? '—'
           : (c.raw_hex
-            ? (((parseInt(c.raw_hex.slice(_cPlOff * 2, _cPlOff * 2 + 2), 16) || 0) >> 6) + 1)
+            ? (((rawPathLenByte(c.raw_hex) || 0) >> 6) + 1)
             : (childPath.length > 0 ? childPath[0].length / 2 : 0));
         const _cHashSizeTitle = _cIsTrace ? ' title="TRACE path bytes are SNR readings, not hash prefixes — see sidebar decoder for actual hop count"' : '';
         const childRegion = c.observer_id ? (observerMap.get(c.observer_id)?.iata || '') : '';
@@ -2812,10 +2820,10 @@
     // Channel color highlighting (#271)
     const _chanStyle = window.ChannelColors ? window.ChannelColors.getRowStyle(decoded.type || typeName, decoded.channel) : '';
     const size = p.raw_hex ? Math.floor(p.raw_hex.length / 2) : 0;
-    const _flatPlOff = getPathLenOffset(p.route_type);
     // #1849: TRACE path bytes = SNR readings, not hop hashes.
     const _flatIsTrace = p.payload_type === 9;
-    const hashBytes = _flatIsTrace ? '—' : (((parseInt(p.raw_hex?.slice(_flatPlOff * 2, _flatPlOff * 2 + 2), 16) || 0) >> 6) + 1);
+    // #608: offset from p.raw_hex's own header byte (see buildGroupRowHtml).
+    const hashBytes = _flatIsTrace ? '—' : (((rawPathLenByte(p.raw_hex) || 0) >> 6) + 1);
     const _flatHashSizeTitle = _flatIsTrace ? ' title="TRACE path bytes are SNR readings, not hash prefixes — see sidebar decoder for actual hop count"' : '';
     const pathStr = renderPath(pathHops, p.observer_id, { summary: true, packet: p });
     const detail = getDetailPreview(decoded);
@@ -3827,19 +3835,25 @@
     // Single source of truth — derived from the same bytes we display, so a
     // post-#882 per-obs raw_hex with a different path length than the top-level
     // packet's raw_hex still gets accurate byte highlights.
+    // #608: the route comes from THIS raw_hex's own header byte, not
+    // pkt.route_type -- observations of one transmission can carry different
+    // route types (ObservationResp has no route_type of its own; effectivePkt
+    // only inherits pkt.route_type through the {...pkt, ...currentObs} spread
+    // in observationPacket()), so pkt.route_type can describe a different
+    // frame than obsRawHexForRanges.
     const obsRawHexForRanges = effectivePkt.raw_hex || pkt.raw_hex || '';
     const ranges = obsRawHexForRanges
-      ? computeBreakdownRanges(obsRawHexForRanges, pkt.route_type, pkt.payload_type)
+      ? computeBreakdownRanges(obsRawHexForRanges, routeTypeFromRawHex(obsRawHexForRanges), pkt.payload_type)
       : [];
 
     // Cross-check: hop count from raw_hex path_len byte vs path_json length
     const obsRawHex = effectivePkt.raw_hex || pkt.raw_hex || '';
     let rawHopCount = null;
     if (obsRawHex.length >= 4) {
-      // path_len byte position depends on route type
-      const plOff = getPathLenOffset(pkt.route_type);
-      const plByte = parseInt(obsRawHex.slice(plOff * 2, plOff * 2 + 2), 16);
-      if (!isNaN(plByte)) rawHopCount = plByte & 0x3F;
+      // #608: same reasoning as above — read the path-length byte at the
+      // offset obsRawHex's own header implies, not pkt.route_type's.
+      const plByte = rawPathLenByte(obsRawHex);
+      if (plByte != null) rawHopCount = plByte & 0x3F;
     }
     if (rawHopCount != null && pathHops.length !== rawHopCount) {
       console.warn(`[CoreScope] Hop count inconsistency for packet ${pkt.hash}: path_json has ${pathHops.length} hops but raw_hex path_len has ${rawHopCount}. UI shows path_json.`);
