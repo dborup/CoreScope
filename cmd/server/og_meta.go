@@ -7,6 +7,7 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -76,6 +77,8 @@ func newOGMeta(pick func(string) any, publicDir string, trusted []*net.IPNet) *o
 	if base := ogString(pick("publicBaseUrl")); base != "" {
 		if u, err := url.Parse(base); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
 			o.publicBase = strings.TrimRight(u.Scheme+"://"+u.Host+u.Path, "/")
+		} else {
+			log.Printf("[og] WARNING: branding.publicBaseUrl %q is not an absolute http(s) URL, ignored", base)
 		}
 	}
 
@@ -88,6 +91,9 @@ func newOGMeta(pick func(string) any, publicDir string, trusted []*net.IPNet) *o
 	default:
 		// Unset, or unusable (github host, traversal, missing file): fall
 		// back to the bundled image rather than emit a broken URL.
+		if spec != "" {
+			log.Printf("[og] WARNING: branding.ogImageUrl %q is unusable (github host, bad path or missing file under public/), using %s", spec, ogDefaultImage)
+		}
 		o.imagePath = ogDefaultImage
 	}
 	if o.imagePath != "" {
@@ -196,8 +202,9 @@ func (o *ogMeta) render(prepared []byte, r *http.Request) []byte {
 
 // ogMetaFromConfig builds the link-preview renderer from config.json branding
 // overlaid by theme.json (same precedence as handleConfigTheme).
-func ogMetaFromConfig(cfg *Config, publicDir string) *ogMeta {
-	theme := LoadTheme(".")
+// themeDir is where theme.json lives (LoadTheme also checks themeDir/data).
+func ogMetaFromConfig(cfg *Config, publicDir, themeDir string) *ogMeta {
+	theme := LoadTheme(themeDir)
 	pick := func(key string) any {
 		if v, ok := theme.Branding[key]; ok && v != nil {
 			return v
@@ -209,7 +216,8 @@ func ogMetaFromConfig(cfg *Config, publicDir string) *ogMeta {
 	}
 	var trusted []*net.IPNet
 	if cfg != nil {
-		trusted = parseCIDRList(cfg.WSTrustedProxies(), "trustedProxies")
+		// Quiet: the ws limiter parses the same list and already warns.
+		trusted = parseCIDRListQuiet(cfg.WSTrustedProxies())
 	}
 	return newOGMeta(pick, publicDir, trusted)
 }
