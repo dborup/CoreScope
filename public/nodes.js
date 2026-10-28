@@ -281,7 +281,7 @@
 
   // Tablet slide-over body. The API's node object carries `name`; advert_name
   // is only the legacy fallback.
-  function renderSlideOverBody(n, pubkey) {
+  function renderSlideOverBody(n) {
     const name = n.name || n.advert_name;
     const lastHeard = n.last_heard || n.last_seen;
     const relayed = (n.role === 'repeater' || n.role === 'room')
@@ -296,7 +296,7 @@
         renderHashPrefix(n, false) +
         '<dt>Adverts</dt><dd>' + (n.advert_count != null ? n.advert_count : '—') + '</dd>' +
       '</dl>' +
-      '<p style="margin-top:14px"><a class="btn-primary" href="#/nodes/' + encodeURIComponent(pubkey) + '">Open full detail →</a></p>';
+      '<p style="margin-top:14px"><a class="btn-primary" href="#/nodes/' + encodeURIComponent(n.public_key || '') + '">Open full detail →</a></p>';
   }
 
   // #634 (upstream 2296): the link opens one sample packet of the observed path.
@@ -2013,7 +2013,7 @@
         const n = (data && data.node) || data || {};
         const titleEl = document.querySelector('.slide-over-title');
         if (titleEl) titleEl.textContent = n.name || n.advert_name || (n.public_key ? n.public_key.slice(0, 10) : 'Node');
-        so.innerHTML = renderSlideOverBody(n, pubkey);
+        so.innerHTML = renderSlideOverBody(n);
       } catch (e) {
         so.innerHTML = '<div class="text-muted">Error: ' + (e && e.message ? e.message : String(e)) + '</div>';
       }

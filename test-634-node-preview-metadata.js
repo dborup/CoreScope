@@ -37,15 +37,15 @@ test('hash prefix: shows the prefix, Unknown when missing, escapes sizes', () =>
   assert.ok(!bad.includes('"><img'), bad);
 });
 test('slide-over body: uses `name`, falls back to advert_name, escapes', () => {
-  assert.ok(w._nodesRenderSlideOverBody(rep, KEY).includes('<dd>Rep One</dd>'));
-  const legacy = w._nodesRenderSlideOverBody({ public_key: KEY, advert_name: 'Legacy', role: 'repeater' }, KEY);
+  assert.ok(w._nodesRenderSlideOverBody(rep).includes('<dd>Rep One</dd>'));
+  const legacy = w._nodesRenderSlideOverBody({ public_key: KEY, advert_name: 'Legacy', role: 'repeater' });
   assert.ok(legacy.includes('<dd>Legacy</dd>'));
-  assert.ok(!w._nodesRenderSlideOverBody({ public_key: KEY, name: '<b>x</b>' }, KEY).includes('<b>x</b>'));
+  assert.ok(!w._nodesRenderSlideOverBody({ public_key: KEY, name: '<b>x</b>' }).includes('<b>x</b>'));
 });
 test('slide-over body: repeater shows Last Relayed, Traffic share, Hash Prefix; companion does not show the first two', () => {
-  const h = w._nodesRenderSlideOverBody(rep, KEY);
+  const h = w._nodesRenderSlideOverBody(rep);
   assert.ok(h.includes('Last Relayed') && h.includes('Traffic share') && h.includes('Hash Prefix'), h);
-  const c = w._nodesRenderSlideOverBody({ public_key: KEY, name: 'C', role: 'companion', traffic_share_score: 0.5 }, KEY);
+  const c = w._nodesRenderSlideOverBody({ public_key: KEY, name: 'C', role: 'companion', traffic_share_score: 0.5 });
   assert.ok(!c.includes('Last Relayed') && !c.includes('Traffic share') && c.includes('Hash Prefix'), c);
 });
 test('side preview <dl class="detail-meta"> renders Traffic share and Hash Prefix once each', () => {
