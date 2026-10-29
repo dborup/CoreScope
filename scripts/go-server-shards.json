@@ -59,6 +59,7 @@
   "pinned": [
     {"name":"TestHotStartup_ConcurrentQueryDuringBackgroundLoad","shard":1,"samplesSeconds":[320.45,280.66],"meanSeconds":300.555},
     {"name":"TestDifferentRegionsAreNeverMixed_109","shard":1,"samplesSeconds":[14.15,23.36],"meanSeconds":18.755},
+    {"name":"TestGraphScore629_GoldenBitIdentical","shard":1,"samplesSeconds":[143.86],"meanSeconds":143.86},
     {"name":"TestChannelsSQL_PlanWithStats","shard":2,"samplesSeconds":[59.96,40.17],"meanSeconds":50.065},
     {"name":"TestTrackedBytesTracksTheHeap_113","shard":2,"samplesSeconds":[34.89,59.45],"meanSeconds":47.17},
     {"name":"TestNodeAdvertRoutes_StreamMatchesWindowOracle","shard":2,"samplesSeconds":[34.81,58.93],"meanSeconds":46.87},
