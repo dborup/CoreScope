@@ -3939,12 +3939,15 @@
         const graphLoad = ensureHopAffinity();
         if (!hasHopAffinity()) graphLanding = graphLoad;
         const origin = senderLat != null && senderLon != null ? { lat: senderLat, lon: senderLon } : null;
-        inferFor = o => {
-          const [lat, lon] = observerPosition(o.observer_id);
-          return inferObservationPath(o, lat === null ? null : { lat, lon }, origin);
+        // `frame` is where the provenance check reads direction/raw_hex:
+        // observationPacket() keeps the aggregate packet's bytes as a display
+        // fallback, which is not this observation's own frame (#165/#608).
+        inferFor = (row, frame) => {
+          const [lat, lon] = observerPosition(row.observer_id);
+          return inferObservationPath(row, lat === null ? null : { lat, lon }, origin, frame || row);
         };
-        pathEntries = inferFor(effectivePkt);
-        if (observations.length > 1) aggregateEntries = inferFor(pkt);
+        pathEntries = inferFor(effectivePkt, currentObs || pkt);
+        if (observations.length > 1) aggregateEntries = inferFor(pkt, pkt);
       } catch (e) {
         console.warn('[packets] path inference failed:', e);
       }
@@ -4251,9 +4254,9 @@
         if (!landed || detailRenders.get(panel) !== renderToken) return;
         refreshDetailHops(panel, {
           pathHops: pathHops, observerId: effectivePkt.observer_id, packet: effectivePkt,
-          entries: inferFor(effectivePkt),
+          entries: inferFor(effectivePkt, currentObs || pkt),
           aggregatePath: getParsedPath(pkt), aggregateObserverId: pkt.observer_id, aggregatePacket: pkt,
-          aggregateEntries: observations.length > 1 ? inferFor(pkt) : null,
+          aggregateEntries: observations.length > 1 ? inferFor(pkt, pkt) : null,
         });
       });
     }

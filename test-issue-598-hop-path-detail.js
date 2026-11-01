@@ -221,6 +221,48 @@ console.log('\n=== #598 M: HopDisplay renders an inferred hop ===');
     assert.ok(!/<b>hop<\/b>/.test(html), 'the prefix is escaped: ' + html);
   });
 
+  // #1283 — a hop the ingestor resolved is the answer, not a guess with odds.
+  const canonical = { hop: 'b1', name: 'SERVER-SAYS', pubkey: pk('b1'), located: true, unlisted: false,
+    unreliable: false, ambiguous: false, canonical: true, confidence: 1,
+    candidates: [{ name: 'SERVER-SAYS', pubkey: pk('b1'), located: true, confidence: 1 }] };
+  canonical.conflicts = canonical.candidates;
+  test('a hop the ingestor resolved says so, and claims no likelihood', () => {
+    const html = HopDisplay.renderHop('b1', canonical, {});
+    assert.ok(/SERVER-SAYS/.test(html), html);
+    assert.ok(/resolved by the ingestor/.test(html), 'the tooltip names the source: ' + html);
+    assert.ok(!/% likely/.test(html), 'and invents no odds for an authoritative answer: ' + html);
+    assert.ok(!/hop-conflict-btn|hop-unreliable-btn/.test(html), 'no badge: ' + html);
+    assert.ok(!/hop-ambiguous/.test(html), 'and no dashed underline: ' + html);
+  });
+
+  // The other side: the ingestor's answer is kept and flagged, not replaced
+  // and not mislabelled "(no GPS)" — the node has a position, it just does not
+  // fit where the hop sits.
+  const misplaced = { hop: 'b1', name: 'WRONG-REGION', pubkey: pk('b1'), lat: null, lon: null,
+    located: false, unlisted: true, unreliable: true, ambiguous: false, confidence: 0.9,
+    candidates: [{ name: 'WRONG-REGION', pubkey: pk('b1'), located: true, confidence: 0 }] };
+  misplaced.conflicts = misplaced.candidates;
+  test('a hop the ingestor resolved that does not fit keeps its name and the #165 warning', () => {
+    const html = HopDisplay.renderHop('b1', misplaced, {});
+    assert.ok(/WRONG-REGION/.test(html), 'the ingestor\'s answer is still what the hop is called: ' + html);
+    assert.ok(/hop-unreliable-btn/.test(html), 'flagged with the existing unreliable warning: ' + html);
+    assert.ok(/hop-unreliable\b/.test(html), 'and the pill carries the unreliable class: ' + html);
+    assert.ok(!/\(no GPS\)/.test(html), 'it is NOT labelled no GPS — it has a position: ' + html);
+    assert.ok(/does not fit this point in the path/.test(html), 'the tooltip says why: ' + html);
+    assert.ok(!/hop-conflict-btn/.test(html), 'and offers no candidate list in its place: ' + html);
+  });
+
+  test('routeHopFromInferred keeps a misplaced ingestor answer off the "no GPS" chip', () => {
+    const ctx2 = makeSandbox();
+    loadInCtx(ctx2, 'public/packet-helpers.js');
+    const h = ctx2.window.routeHopFromInferred('b1', misplaced, 'repeater');
+    assert.strictEqual(h.name, 'WRONG-REGION', 'the name survives into the route sidebar');
+    assert.strictEqual(h.resolved, false);
+    assert.strictEqual(h.unlisted, true, 'the chip reads "unlisted", which is what happened');
+    assert.ok(!h.gpsless, 'and never "no GPS": the node has coordinates');
+    assert.ok(h.lat === undefined && h.lon === undefined, 'with nothing to draw');
+  });
+
   test('a resolve() entry (no numeric confidence) renders exactly as before', () => {
     const legacy = { name: 'OLD-WAY', pubkey: pk('b1'), ambiguous: true, globalFallback: true,
       conflicts: [{ name: 'OLD-WAY', pubkey: pk('b1'), distKm: 12 }, { name: 'OTHER', pubkey: pk('b1b'), distKm: 44 }] };
@@ -369,10 +411,16 @@ function detailData() {
       resolved_path: null, observer_id: OBSERVER_NORTH,
     },
     observations: [
+      // Each carries its OWN received-flood frame — header 0x15 (payload
+      // GRP_TXT, route FLOOD), a path-length byte of hash_size 1 and its hop
+      // count, its hop bytes, then payload. Without that the observer anchor
+      // is withheld (#165/#408/#608), which section R covers directly.
       { id: 10, observer_id: OBSERVER_SOUTH, timestamp: '2026-01-01T00:00:00Z',
-        path_json: JSON.stringify(['10', 'b1', '10']), resolved_path: null, snr: 1, rssi: -90 },
+        path_json: JSON.stringify(['10', 'b1', '10']), resolved_path: null, snr: 1, rssi: -90,
+        direction: 'rx', raw_hex: '15' + '03' + '10b110' + 'AABB' },
       { id: 11, observer_id: OBSERVER_NORTH, timestamp: '2026-01-01T00:00:01Z',
-        path_json: JSON.stringify(['10', 'b1', '10', 'c2']), resolved_path: null, snr: 2, rssi: -80 },
+        path_json: JSON.stringify(['10', 'b1', '10', 'c2']), resolved_path: null, snr: 2, rssi: -80,
+        direction: 'rx', raw_hex: '15' + '04' + '10b110c2' + 'AABB' },
     ],
     observation_count: 2,
   };
@@ -509,7 +557,6 @@ await testAsync('a non-null resolved_path entry on the shown observation IS used
 await testAsync('the byte breakdown and the Path row name the same node at every hop', async () => {
   const ctx = detailCtx();
   const data = detailData();
-  data.observations[0].raw_hex = '15' + '03' + '10b110' + 'AABB';
   const panel = makePanel();
   await ctx._packetsTestAPI.renderDetail(panel, data, 10);
   const html = panel.innerHTML;
@@ -664,12 +711,22 @@ test('refreshDetailHops leaves the aggregate row alone when there is none', () =
 
 console.log('\n=== #598 R: the shared helpers ===');
 
-test('inferObservationPath passes the observation\'s own path, hint and observer', () => {
+// A frame's header byte: payload type in bits 5-2, route in bits 1-0.
+const header = (payload, route) => ((payload << 2) | route).toString(16).padStart(2, '0');
+const RX_FLOOD = { direction: 'rx', raw_hex: header(5, 1) + '021011' };
+
+function helperCtx() {
   const ctx = makeSandbox();
   const seen = [];
   ctx.window.HopResolver = { inferPath: (hops, opts) => { seen.push({ hops, opts }); return []; } };
   loadInCtx(ctx, 'public/packet-helpers.js');
-  const obs = { observer_id: 'OBS-9', path_json: '["10","b1"]', resolved_path: '["' + pk('10') + '",null]' };
+  return { ctx: ctx, seen: seen };
+}
+
+test('inferObservationPath passes the observation\'s own path, hint and observer', () => {
+  const { ctx, seen } = helperCtx();
+  const obs = Object.assign({ observer_id: 'OBS-9', path_json: '["10","b1"]',
+    resolved_path: '["' + pk('10') + '",null]' }, RX_FLOOD);
   ctx.window.inferObservationPath(obs, { lat: 51, lon: 5 }, { lat: 50, lon: 5 });
   assert.strictEqual(seen.length, 1);
   assert.deepStrictEqual(seen[0].hops, ['10', 'b1']);
@@ -677,6 +734,55 @@ test('inferObservationPath passes the observation\'s own path, hint and observer
   assert.deepStrictEqual(seen[0].opts.origin, { lat: 50, lon: 5 });
   assert.strictEqual(seen[0].opts.observerId, 'OBS-9');
   assert.deepStrictEqual(seen[0].opts.resolvedPath, [pk('10'), null]);
+});
+
+// #165/#408/#608 — the observer anchors the end of the path only when THIS
+// observation's own frame proves it received a flood. Both the detail pane and
+// the map deep link go through this one helper, so neither can borrow receiver
+// evidence the other would refuse.
+test('the observer anchor is withheld unless the observation\'s own frame proves a received flood', () => {
+  const cases = [
+    ['a received flood', RX_FLOOD, true],
+    ['a transmitted observation', { direction: 'tx', raw_hex: header(5, 1) + '021011' }, false],
+    ['no direction at all', { raw_hex: header(5, 1) + '021011' }, false],
+    ['a transport-direct frame', { direction: 'rx', raw_hex: header(5, 3) + 'AABBCCDD021011' }, false],
+    ['a transport-flood frame', { direction: 'rx', raw_hex: header(5, 0) + 'AABBCCDD021011' }, false],
+    ['a direct frame', { direction: 'rx', raw_hex: header(5, 2) + '021011' }, false],
+    ['a TRACE, whose path is planned', { direction: 'rx', raw_hex: header(9, 1) + '021011' }, false],
+    ['no frame of its own', { direction: 'rx' }, false],
+    ['a frame that is not hex', { direction: 'rx', raw_hex: 'zz' }, false],
+    // "1" is a valid hex digit: read as a byte it would say route FLOOD.
+    ['a frame of a single nibble', { direction: 'rx', raw_hex: '1' }, false],
+    ['a non-string raw_hex', { direction: 'rx', raw_hex: 21 }, false],
+  ];
+  for (const [label, frame, anchored] of cases) {
+    const { ctx, seen } = helperCtx();
+    const obs = Object.assign({ observer_id: 'OBS-9', path_json: '["10","b1"]' }, frame);
+    ctx.window.inferObservationPath(obs, { lat: 51, lon: 5 }, { lat: 50, lon: 5 });
+    assert.strictEqual(seen[0].opts.observer !== null, anchored, label + ': observer anchor');
+    assert.strictEqual(seen[0].opts.observerId !== null, anchored,
+      label + ': the IATA-centre fallback is gated the same way');
+    assert.deepStrictEqual(seen[0].opts.origin, { lat: 50, lon: 5 },
+      label + ': the sender anchor is unaffected — it comes from the payload, not the receiver');
+  }
+});
+
+test('a frame carried only as a display fallback is not provenance', () => {
+  const { ctx, seen } = helperCtx();
+  // packets.js observationPacket() spreads the aggregate packet first, so an
+  // observation with no raw_hex of its own still has one to display.
+  const row = Object.assign({ observer_id: 'OBS-9', path_json: '["10"]' }, RX_FLOOD);
+  ctx.window.inferObservationPath(row, { lat: 51, lon: 5 }, null, { direction: 'rx' });
+  assert.strictEqual(seen[0].opts.observer, null,
+    'the explicit frame decides, so the parent packet\'s bytes cannot anchor an observation');
+});
+
+test('renderDetail reads provenance from the observation, never from the spread row', () => {
+  const pktSrc = src('public/packets.js');
+  assert.ok(/inferFor\(effectivePkt, currentObs \|\| pkt\)/.test(pktSrc),
+    'the Path row passes the selected observation as the frame source');
+  assert.ok(/inferFor\(pkt, pkt\)/.test(pktSrc),
+    'and the aggregate row passes the packet row as its own');
 });
 
 test('routeHopFromInferred: a located hop becomes a resolved route hop', () => {

@@ -89,6 +89,11 @@ window.HopDisplay = (function() {
     return Math.round((confidence || 0) * 100) + '%';
   }
 
+  // #165 — the hash-to-name match is geographically inconsistent with the path
+  // around it. Shared by renderHop() and renderInferredHop(): one glyph, one
+  // wording, and the "Path symbols" legend describes exactly this button.
+  const UNRELIABLE_BADGE = ' <button class="hop-unreliable-btn status-warn" aria-label="Unreliable name resolution" title="Unreliable name resolution — this hash\u2192name match is geographically inconsistent with the surrounding path hops. The repeater itself may be fine; this specific hop assignment is uncertain."><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg></button>';
+
   // The yellow "N candidates" button. pick is the inferred answer, or null for
   // a resolve() hop, and rides along in data-conflict for the popover.
   function conflictButton(h, conflicts, globalFallback, pick, count, label) {
@@ -107,13 +112,22 @@ window.HopDisplay = (function() {
     const name = entry.name || null;
     // A guess is dashed; the badge only appears when there are candidates to
     // weigh: the alternatives to a guess, or those rejected for an unlisted hop.
-    const guess = !entry.unlisted && entry.confidence < LIKELY;
+    // A canonical hop is the ingestor's own answer (#1283) and neither.
+    const guess = !entry.canonical && !entry.unlisted && entry.confidence < LIKELY;
     const unsure = entry.unlisted ? !name && candidates.length > 0 : guess && candidates.length > 1;
+    // A node the ingestor resolved that does not fit where the hop sits. #165
+    // already has a warning for that, and it is not the same thing as a node
+    // with no GPS to check.
+    const misplaced = !!(entry.unlisted && name && entry.unreliable);
 
     let title;
-    if (!entry.unlisted) {
+    if (entry.canonical) {
+      title = `${h} — resolved by the ingestor`;
+    } else if (!entry.unlisted) {
       title = `${h} — ${pct(entry.confidence)} likely` +
         (candidates.length > 1 ? ` · ${candidates.length} nodes share this prefix` : '');
+    } else if (misplaced) {
+      title = `${h} — resolved by the ingestor, but this node does not fit this point in the path`;
     } else if (name) {
       title = `${h} — the only known node with this prefix, no GPS to check its place in the path`;
     } else if (candidates.length) {
@@ -129,15 +143,19 @@ window.HopDisplay = (function() {
       name ? 'hop-named' : '',
       guess || unsure ? 'hop-ambiguous' : '',
       entry.unlisted ? 'hop-unlisted' : '',
+      misplaced ? 'hop-unreliable' : '',
       // #165 — callers mark the pill itself; see renderHop() below.
       opts.className || '',
     ].filter(Boolean).join(' ');
-    const label = name && entry.unlisted ? `${display} <span class="hop-nogps">(no GPS)</span>` : display;
+    const label = name && entry.unlisted && !misplaced
+      ? `${display} <span class="hop-nogps">(no GPS)</span>` : display;
     const pill = opts.link !== false && entry.pubkey
       ? `<a class="${cls} hop-link" href="#/nodes/${encodeURIComponent(entry.pubkey)}" title="${escapeHtml(title)}" data-hop-link="true">${label}</a>`
       : `<span class="${cls}" title="${escapeHtml(title)}">${label}</span>`;
 
-    if (!unsure || opts.badge === false) return pill;
+    if (opts.badge === false) return pill;
+    if (misplaced) return `<span class="hop-group">${pill}${UNRELIABLE_BADGE}</span>`;
+    if (!unsure) return pill;
     const pick = { name, confidence: entry.confidence };
     const btn = conflictButton(h, candidates, false, pick, candidates.length,
       candidates.length + ' candidates — click for details');
@@ -171,9 +189,7 @@ window.HopDisplay = (function() {
       ? conflictButton(h, conflicts, globalFallback, null, badgeCount,
         badgeCount + ' candidates — click for details')
       : '';
-    const unreliableBadge = unreliable
-      ? ' <button class="hop-unreliable-btn status-warn" aria-label="Unreliable name resolution" title="Unreliable name resolution — this hash\u2192name match is geographically inconsistent with the surrounding path hops. The repeater itself may be fine; this specific hop assignment is uncertain."><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg></button>'
-      : '';
+    const unreliableBadge = unreliable ? UNRELIABLE_BADGE : '';
     // #165 (port of upstream 2099) — opts.badge === false renders the name without its badge, for the
     // packets list, which summarises per path instead of per hop.
     const warnBadge = opts.badge === false ? '' : (conflictBadge + unreliableBadge);

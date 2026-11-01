@@ -567,9 +567,10 @@ window.HopResolver = (function() {
     }
     const start = isLocated(opts.origin) ? pathPoint(opts.origin.lat, opts.origin.lon) : null;
 
-    const C = [], unplaced = [];
+    const C = [], unplaced = [], hints = [];
     for (let i = 0; i < L; i++) {
       const hinted = rp && rp[i] ? pubkeyIdx[String(rp[i]).toLowerCase()] : null;
+      hints.push(hinted || null);
       const nodes = hinted ? [hinted] : (prefixIdx[String(hops[i]).toLowerCase()] || []);
       C.push(nodes.filter(isLocated).map(n => pathPoint(n.lat, n.lon, n)));
       unplaced.push(nodes.filter(n => !isLocated(n)));
@@ -643,6 +644,24 @@ window.HopResolver = (function() {
         const n = C[i][k].node;
         entry.name = n.name; entry.pubkey = n.public_key;
         entry.lat = n.lat; entry.lon = n.lon; entry.located = true;
+        if (hints[i]) {
+          // The ingestor resolved this hop and stays authoritative (#1283):
+          // the geometry agrees, so it is the answer, not a guess with odds.
+          // `canonical` keeps it off the likelihood wording in hop-display.
+          entry.canonical = true;
+          entry.confidence = 1;
+          entry.ambiguous = false;
+        }
+      } else if (hints[i]) {
+        // The ingestor resolved this hop, so its answer is still what the hop
+        // is called — but the node does not fit where the hop sits, so it is
+        // flagged rather than drawn. Upstream drops the name entirely; this
+        // fork keeps it, because the ingestor stays authoritative (#1283) and
+        // because #165 already has a warning for exactly this: a hash to name
+        // match that is geographically inconsistent with the path around it.
+        entry.name = hints[i].name;
+        entry.pubkey = hints[i].public_key;
+        entry.unreliable = true;
       } else if (C[i].length) {
         // Located nodes share this prefix, but none fits where the hop is.
         entry.unreliable = true;

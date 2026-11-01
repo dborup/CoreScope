@@ -68,21 +68,63 @@ window.getParsedDecoded = function getParsedDecoded(p) {
 };
 
 /**
+ * Whether THIS observation's own frame proves it received a flood, which is
+ * what makes its observer evidence for the end of the path (#165/#408/#608).
+ *
+ * A relaying node appends its own hash before forwarding, so the last recorded
+ * hop of a received flood is the relay the observer heard directly
+ * (firmware Mesh::routeRecvPacket). Nothing of the sort holds otherwise:
+ *   - a transport route carries next/last-hop codes, not a flood chain;
+ *   - a TRACE's path bytes are SNR values on a PLANNED route, so its last
+ *     entry is not a relay this observer heard (upstream lists TRACE support
+ *     as a follow-up for the same reason);
+ *   - a transmitted observation did not hear anything.
+ *
+ * The route and payload type come from the frame's OWN header byte (#608) —
+ * one content hash is heard on several routes, so a transmission-level
+ * route_type can describe a different observation. An observation carrying no
+ * frame of its own has no provenance and gets no anchor: the aggregate
+ * packet's raw_hex must not stand in for it.
+ *
+ * @param {Object} obs - an observation (direction, raw_hex)
+ */
+window.observationIsRxFlood = function observationIsRxFlood(obs) {
+  if (!obs || String(obs.direction || '').toLowerCase() !== 'rx') return false;
+  var hex = typeof obs.raw_hex === 'string' ? obs.raw_hex : '';
+  // Two full hex digits or there is no header byte to read: parseInt would
+  // take a single nibble as a byte.
+  if (!/^[0-9a-f]{2}/i.test(hex)) return false;
+  var header = parseInt(hex.slice(0, 2), 16);
+  if ((header & 0x03) !== 1) return false;        // FLOOD only
+  return ((header >> 2) & 0x0f) !== 9;            // not a TRACE
+};
+
+/**
  * One observation's hops, inferred as a whole path (HopResolver.inferPath).
  * Shared by the packet detail pane and the map route view so both show the
  * same nodes for the selected observation (#598). The observation's own
  * resolved_path is the server hint — this never writes it back; the ingestor
  * stays authoritative (#1283) and the inference is display-only.
  *
+ * The observer anchor (and its IATA-centre fallback) is applied only when this
+ * observation's own frame proves a received flood, so neither caller can
+ * borrow receiver evidence the data does not support. Both callers go through
+ * here, which is what keeps the detail pane and the map route view in step.
+ *
  * @param {Object} obs - an observation (path_json, observer_id, resolved_path)
  * @param {{lat,lon}|null} observer - where its observer is, when known
  * @param {{lat,lon}|null} origin - where the sender is, when known
+ * @param {Object} [frame] - where to read direction/raw_hex for the provenance
+ *   check, when `obs` carries the aggregate packet's bytes as a display
+ *   fallback (packets.js observationPacket) rather than its own frame.
+ *   Defaults to `obs`.
  * @returns {Array} one inferPath entry per hop
  */
-window.inferObservationPath = function inferObservationPath(obs, observer, origin) {
+window.inferObservationPath = function inferObservationPath(obs, observer, origin, frame) {
+  var heard = window.observationIsRxFlood(frame || obs);
   return window.HopResolver.inferPath(window.getParsedPath(obs), {
-    observer: observer,
-    observerId: obs.observer_id,
+    observer: heard ? observer : null,
+    observerId: heard ? obs.observer_id : null,
     origin: origin,
     resolvedPath: window.getResolvedPath(obs),
   });
@@ -140,6 +182,12 @@ window.routeHopFromInferred = function routeHopFromInferred(hop, entry, role) {
   var e = entry || {};
   if (e.located) {
     return { lat: e.lat, lon: e.lon, name: e.name, pubkey: e.pubkey, role: role || null, resolved: true, confidence: e.confidence };
+  }
+  // A node the ingestor resolved that does not fit this point in the path: it
+  // has a position, so "no GPS" would be wrong. Keep its name and mark the hop
+  // unlisted, which is what the sidebar chip then says.
+  if (e.pubkey && e.unreliable) {
+    return { name: e.name, pubkey: e.pubkey, role: role || null, resolved: false, unlisted: true };
   }
   if (e.pubkey) return { name: e.name, pubkey: e.pubkey, role: role || null, resolved: false, gpsless: true };
   return { name: String(hop).slice(0, 8), pubkey: hop, resolved: false, unlisted: true };

@@ -899,6 +899,9 @@ async function mapRoute(T, p, parent) {
   const ctx = T._context;
   await T.resolveHopsForPackets([p]);
   ctx.nodes = [REMOTE, LOCAL, LAST_REMOTE, LAST_LOCAL];
+  // #598 — the loader looks the chosen observation's observer up in the
+  // module's `observers` list to anchor the path on where it was heard.
+  ctx.observers = [RECEIVE_OBS];
   ctx.mapToken = () => () => true;
   ctx.location.hash = '#/map?packet=TEST';
   ctx.fetch = async () => ({ok: true, json: async () => ({packet: parent || {...p, payload_type: 4}, observations: [p]})});
@@ -919,54 +922,60 @@ async function mapRoute(T, p, parent) {
   return drawn;
 }
 
-test('map fallback retains global candidates at every unconfirmed position, including repeated prefixes', async () => {
-  for (const pathJson of ['["aa","bb"]', '["aa","aa"]', '["aa","bb","aa"]']) {
-    const hops = JSON.parse(pathJson), T = regionPackets(), p = received({path_json: pathJson});
+// #598 — the map deep link no longer resolves each prefix on its own; it
+// infers the chosen observation's path as a whole (inferObservationPath), the
+// same way the packet detail pane does, so the two agree.
+//
+// What #165/#408 protects is unchanged: these observations carry no frame of
+// their own, so inferObservationPath() withholds the observer anchor (and its
+// IATA centre) entirely — a transmission-level route_type or the aggregate
+// packet's raw_hex is not proof that THIS observation received a flood. With
+// no anchor the model has no receiver evidence and keeps candidate order, so
+// every unconfirmed position still answers the global default, as before.
+//
+// One thing does change, and it is the point of #598: a node forwards a given
+// packet once (firmware wasSeen/markSeen), so a prefix the path repeats can no
+// longer be one node at every position. The later position keeps the node; the
+// earlier one is reported unlisted and keeps its raw prefix, rather than being
+// given a node the path already uses.
+test('map fallback keeps global candidates at every unconfirmed position, and never one node twice', async () => {
+  // Which of two identical positions keeps the node is a genuine tie with no
+  // anchor on either end, so these assert the invariants, not an order.
+  const cases = [
+    ['["aa"]', { placed: [REMOTE.public_key], unlisted: 0 }],
+    ['["aa","bb"]', { placed: [REMOTE.public_key, LAST_REMOTE.public_key], unlisted: 0 }],
+    ['["aa","aa"]', { placed: [REMOTE.public_key], unlisted: 1 }],
+    ['["aa","bb","aa"]', { placed: [REMOTE.public_key, LAST_REMOTE.public_key], unlisted: 1 }],
+  ];
+  for (const [pathJson, want] of cases) {
+    const T = regionPackets(), p = received({path_json: pathJson});
     const drawn = await mapRoute(T, p);
-    const expected = hops.map(h => h === 'aa' ? REMOTE.public_key : LAST_REMOTE.public_key);
-    assert(JSON.stringify(drawn) === JSON.stringify(expected), 'map fallback collapsed or region-filtered an earlier position: ' + JSON.stringify(drawn));
+    const placed = drawn.filter(h => h.length > 2);
+    assert(JSON.stringify(placed.slice().sort()) === JSON.stringify(want.placed.slice().sort()),
+      pathJson + ': expected the global defaults ' + JSON.stringify(want.placed) + ', got ' + JSON.stringify(drawn));
+    assert(drawn.length - placed.length === want.unlisted,
+      pathJson + ': expected ' + want.unlisted + ' unlisted position(s), got ' + JSON.stringify(drawn));
+    assert(!drawn.includes(LOCAL.public_key) && !drawn.includes(LAST_LOCAL.public_key),
+      pathJson + ': the receiving region is not evidence without provenance: ' + JSON.stringify(drawn));
+    assert(new Set(placed).size === placed.length,
+      pathJson + ': a node was placed at two positions: ' + JSON.stringify(drawn));
   }
 });
 
-test('low-level resolver narrows only an unrepeated terminal hop when the caller explicitly knows RX flood context', async () => {
-  const T = regionPackets();
-  await T.resolveHops(['00']);
-  const resolved = T._context.HopResolver.resolve(['aa', 'bb'], null, null, null, null, RECEIVE_OBS.id);
-  assert(resolved.aa.conflicts.length === 2 && !resolved.aa.conflicts.some(c => c.regional), 'earlier hop must retain both global candidates');
-  assert(resolved.bb.candidates.length === 1 && resolved.bb.pubkey === LAST_LOCAL.public_key, 'known terminal RX context may narrow the final hop');
-});
-
-test('low-level prefix-map resolver cannot narrow a terminal prefix repeated earlier, including different case', async () => {
-  const T = regionPackets();
-  await T.resolveHops(['00']);
-  for (const hops of [['aa', 'bb', 'aa'], ['AA', 'bb', 'aa']]) {
-    const resolved = T._context.HopResolver.resolve(hops, null, null, null, null, RECEIVE_OBS.id);
-    assert(resolved[hops[0]].conflicts.length === 2 && resolved.aa.conflicts.length === 2, 'map key cannot narrow an earlier repeated position');
-    assert(!resolved.aa.conflicts.some(c => c.regional), 'repeated terminal prefix retains global candidates');
-  }
-});
-
-test('pooled unrelated prefixes are resolved independently, without fabricated adjacency or receiver anchors', async () => {
-  const T = regionPackets(), ctx = T._context;
-  const resolve = ctx.HopResolver.resolve, calls = [];
-  ctx.HopResolver.resolve = (hops, ...args) => { calls.push({hops: Array.from(hops), args}); return resolve(hops, ...args); };
-  await T.resolveHopsForPackets([received({path_json: '["aa","bb"]'}), received({path_json: '["bb","aa"]'})]);
-  assert(calls.length === 2 && calls.every(c => c.hops.length === 1 && c.args.every(v => v === null)),
-    'one call per distinct singleton, no artificial path or receiver hints: ' + JSON.stringify(calls));
-});
-
-test('destroy during singleton-prefix yield cancels every remaining cache write', async () => {
-  const T = regionPackets();
-  await T.resolveHops(['00']);
-  setTimeout(() => T._destroy(), 0);
-  await T.resolveHops(Array.from({length: 600}, (_, i) => (0x500000 + i).toString(16)));
-  assert(T._hopCacheSize() === 0, 'cancelled singleton job repopulated a remounted cache');
-});
-
-test('real map deep-link keeps canonical repeated positions and nulls without sharing certainty', async () => {
+// #598 — the two canonical positions still carry the ingestor's own answers,
+// including the repeated "aa" prefix resolving to two different nodes. What
+// changes is the position the server left NULL: it used to reach the renderer
+// as a bare prefix for a naive lookup, and is now inferred along with the rest
+// of the path. The ingestor stays authoritative (#1283) and nothing is written
+// back.
+test('real map deep-link keeps canonical repeated positions, and now fills the nulls', async () => {
   const T = regionPackets(), p = received({path_json: '["aa","bb","aa"]', resolved_path: [REMOTE.public_key, null, LOCAL.public_key]});
   const drawn = await mapRoute(T, p);
-  assert(JSON.stringify(drawn) === JSON.stringify([REMOTE.public_key, 'bb', LOCAL.public_key]), 'canonical map positions/null were changed: ' + JSON.stringify(drawn));
+  assert(drawn[0] === REMOTE.public_key && drawn[2] === LOCAL.public_key,
+    'both canonical positions keep the node the server named: ' + JSON.stringify(drawn));
+  assert(drawn[0] !== drawn[2], 'and the repeated prefix is still two different nodes');
+  assert(drawn[1] !== 'bb' && drawn[1].length > 2,
+    'the position the server left null is inferred rather than handed over as a bare prefix: ' + JSON.stringify(drawn));
 });
 
 test('map fallback does not apply receiver hints to planned, TX or metadata-free observations', async () => {

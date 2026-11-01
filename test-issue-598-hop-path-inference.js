@@ -273,6 +273,27 @@ console.log('\n=== #598 G: the server hint restricts a hop, but cannot force a b
   });
   assert(overruled[0].unlisted === true,
     'a hinted node 900 km off the path is reported unlisted rather than drawn (got ' + overruled[0].name + ')');
+  assert(overruled[0].located === false, 'and carries no position, so no 900 km line is drawn');
+  // #1283 — the ingestor stays authoritative, so our fork keeps the name it
+  // resolved and flags it, rather than dropping it as upstream does. The flag
+  // is the existing "geographically inconsistent" warning (#165).
+  assert(overruled[0].name === 'B1-WRONG-REGION' && overruled[0].pubkey === badHint.public_key,
+    'the node the ingestor named is still what the hop is called (got ' + overruled[0].name + ')');
+  assert(overruled[0].unreliable === true, 'and is flagged unreliable');
+  assert(!overruled[0].canonical,
+    'a hint the geometry rejected is not presented as the canonical answer');
+
+  // The other side of the same rule: a hint the geometry accepts IS the
+  // answer, not a guess with odds, because the ingestor is authoritative.
+  HopResolver.init([hinted, other, b2]);
+  const accepted = HopResolver.inferPath(['b1', 'b2'], {
+    observer: at(90), resolvedPath: [hinted.public_key, null],
+  });
+  assert(accepted[0].canonical === true, 'an accepted hint is marked canonical');
+  assert(accepted[0].confidence === 1, 'and claims no doubt about the ingestor\'s answer');
+  assert(accepted[0].ambiguous === false, 'and is not ambiguous: there was only one candidate');
+  assert(accepted[0].located === true && accepted[0].name === 'B1-HINTED', 'and is placed');
+  assert(!accepted[1].canonical, 'the hop the server left null is inferred, not canonical');
 
   // A wrong-length resolved_path describes another frame; it is not a hint.
   const misaligned = HopResolver.inferPath(['b1', 'b2'], {
@@ -410,10 +431,13 @@ console.log('\n=== #598 L: the real fixture paths, before and after ===');
       return g && g.pubkey ? g.pubkey : null;
     });
     const obsNode = byKey.get(String(o.observer_id || '').toLowerCase());
+    // Only a LOCATED hop is drawn on the map and counted as placed here. A
+    // hop the ingestor resolved but the geometry rejects keeps its name and is
+    // flagged (#1283), without a position.
     const inferred = HopResolver.inferPath(hops, {
       observer: isLoc(obsNode) ? { lat: obsNode.lat, lon: obsNode.lon } : null,
       observerId: o.observer_id, resolvedPath: rp,
-    }).map(e => e.pubkey);
+    }).map(e => e.located ? e.pubkey : null);
 
     const tKm = worstHopKm(today), iKm = worstHopKm(inferred);
     worstToday = Math.max(worstToday, tKm); worstInferred = Math.max(worstInferred, iKm);

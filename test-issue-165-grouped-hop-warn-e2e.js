@@ -189,20 +189,43 @@ function warnedRows(page) {
         assert(await path.locator('.hop-path-warn').count() === warns, id + ': wrong raw-list certainty');
       }
     });
+    // #598 — the detail pane now infers the shown observation's path as a
+    // whole, so the hops the server left NULL get the most likely node WITH
+    // its odds instead of a bare guess. The canonical/null distinction this
+    // step protects is still visible, and more precisely: a hop the ingestor
+    // resolved says so and claims no odds, while an inferred hop states its
+    // likelihood and how many nodes share its prefix.
     await step('observation-local UI: selected detail and byte breakdown both use that observation', async () => {
       await page.goto(BASE + '/#/packet/' + hash + '?obs=36302', {waitUntil: 'domcontentloaded'});
       await page.waitForSelector('.detail-obs-row.observation-current[data-obs-id="36302"]');
       const path = () => page.locator('dt').filter({hasText: /^Path$/}).locator('xpath=following-sibling::dd[1]');
-      assert((await path().textContent()).includes('CANON-NEAR') && await path().locator('.hop-conflict-btn').count() === 0, 'selected canonical detail differs from child');
+      const hop = () => path().locator('.hop').first();
       const byteRow = page.locator('tr').filter({hasText: /Hop 0 —/});
+      assert((await path().textContent()).includes('CANON-NEAR') && await path().locator('.hop-conflict-btn').count() === 0, 'selected canonical detail differs from child');
+      const canonTitle = await hop().getAttribute('title');
+      assert(/resolved by the ingestor$/.test(canonTitle),
+        'a hop the ingestor resolved says so and claims no odds: ' + canonTitle);
       assert((await byteRow.textContent()).includes('CANON-NEAR'), 'byte table reads another row canonical answer');
-      await page.locator('.detail-obs-row[data-obs-id="36303"]').click();
-      await page.waitForSelector('.detail-obs-row.observation-current[data-obs-id="36303"]');
-      assert(await path().locator('.hop-conflict-btn').count() === 1, 'null canonical selected detail must remain ambiguous');
-      assert(await byteRow.locator('.hop-conflict-btn').count() === 1, 'byte table must preserve null ambiguity too');
-      await page.locator('.detail-obs-row[data-obs-id="36304"]').click();
-      await page.waitForSelector('.detail-obs-row.observation-current[data-obs-id="36304"]');
-      assert(await path().locator('.hop-conflict-btn').count() === 1, 'absent canonical cannot inherit parent answer');
+
+      for (const obsId of ['36303', '36304']) {
+        await page.locator('.detail-obs-row[data-obs-id="' + obsId + '"]').click();
+        await page.waitForSelector('.detail-obs-row.observation-current[data-obs-id="' + obsId + '"]');
+        await page.waitForFunction(() => {
+          const dt = [...document.querySelectorAll('dt')].find(el => el.textContent === 'Path');
+          return /likely/.test(dt?.nextElementSibling?.querySelector('.hop')?.getAttribute('title') || '');
+        });
+        const title = await hop().getAttribute('title');
+        assert(/\d+% likely/.test(title),
+          obsId + ': a hop the server left unresolved is presented with its likelihood, not as certain: ' + title);
+        assert(/2 nodes share this prefix/.test(title),
+          obsId + ': and still discloses that the prefix is shared: ' + title);
+        assert(title !== canonTitle, obsId + ': an inferred hop does not read like a canonical one');
+        // The byte table prints the prefix in upper case; the rest of the
+        // tooltip must match.
+        const byteTitle = await byteRow.locator('.hop').first().getAttribute('title');
+        assert(byteTitle.toLowerCase() === title.toLowerCase(),
+          obsId + ': the byte table says the same thing: ' + byteTitle);
+      }
     });
     await step('observation-local UI: WS new-group packets keep their canonical path without promoting certainty', async () => {
       await page.goto(LIST, {waitUntil: 'domcontentloaded'});
@@ -225,7 +248,16 @@ function warnedRows(page) {
       await page.goto(BASE + '/#/packet/' + hash + '?obs=36304', {waitUntil: 'domcontentloaded'});
       await page.waitForSelector('.detail-obs-row.observation-current[data-obs-id="36304"]');
       const path = page.locator('dt').filter({hasText: /^Path$/}).locator('xpath=following-sibling::dd[1]');
-      assert(await path.locator('.hop-conflict-btn').count() === 1, 'remounted mobile null/missing observation borrowed certainty');
+      // #598 — the hop is inferred rather than guessed, so what must survive
+      // the remount is that it still does NOT read as the canonical answer the
+      // sibling observations carry.
+      await page.waitForFunction(() => {
+        const dt = [...document.querySelectorAll('dt')].find(el => el.textContent === 'Path');
+        return /likely/.test(dt?.nextElementSibling?.querySelector('.hop')?.getAttribute('title') || '');
+      });
+      const title = await path.locator('.hop').first().getAttribute('title');
+      assert(/\d+% likely/.test(title) && /2 nodes share this prefix/.test(title),
+        'remounted mobile null/missing observation borrowed certainty: ' + title);
       assert(!errors.length, 'browser exceptions: ' + errors.join('; '));
     });
   } finally { await ctx.close(); }
@@ -287,20 +319,34 @@ function warnedRows(page) {
       assert(await hopPage.locator('#pktBody tr[data-hash="' + hopRows[1].hash + '"] .hop-uncertain').count() === 2,
         'both repeated positions stay explicitly uncertain without route provenance');
     });
-    await step('#408 UI: selected detail and byte table retain global ambiguity for repeated prefixes', async () => {
+    // #598 — the packets LIST still answers both repeated positions from the
+    // shared per-prefix guess (step above, unchanged). The detail pane no
+    // longer can: a node forwards a given packet once, so one position keeps
+    // the node and the other is reported unlisted. The two positions are still
+    // resolved independently, which is what this step has always protected.
+    await step('#408 UI: the selected detail resolves repeated prefixes per position', async () => {
       const p = hopRows[1];
       await hopPage.goto(BASE + '/#/packet/' + p.hash + '?obs=' + p.id, {waitUntil: 'domcontentloaded'});
       await hopPage.waitForFunction(() => {
         const dt = [...document.querySelectorAll('dt')].find(el => el.textContent === 'Path');
         const pills = [...(dt?.nextElementSibling?.querySelectorAll('.hop') || [])];
-        return pills.length === 2 && pills.every(pill => pill.textContent === 'TEST-REMOTE-AA');
+        return pills.length === 2 && pills.some(pill => /^TEST-/.test(pill.textContent));
       });
       const detailPath = hopPage.locator('dt').filter({hasText: /^Path$/}).locator('xpath=following-sibling::dd[1]');
-      const names = await detailPath.locator('.hop').allTextContents();
-      assert(JSON.stringify(names) === JSON.stringify(expected[1]), 'detail collapsed repeated-prefix contexts: ' + JSON.stringify(names));
+      const pills = await detailPath.locator('.hop').evaluateAll(els => els.map(el => ({
+        text: el.textContent, href: el.getAttribute('href'),
+        unlisted: el.classList.contains('hop-unlisted'),
+      })));
+      assert(pills.length === 2, 'both positions render: ' + JSON.stringify(pills));
+      const named = pills.filter(x => x.href).map(x => x.href);
+      assert(new Set(named).size === named.length,
+        'no node is placed at both positions: ' + JSON.stringify(pills.map(x => x.text)));
+      assert(pills.filter(x => x.unlisted).length === 1,
+        'exactly one position is reported unlisted: ' + JSON.stringify(pills.map(x => x.text)));
       for (let i = 0; i < 2; i++) {
         const byteRow = hopPage.locator('tr').filter({hasText: new RegExp('Hop ' + i + ' —')});
-        assert((await byteRow.locator('.hop').textContent()) === expected[1][i], 'byte table differs at position ' + i);
+        assert((await byteRow.locator('.hop').first().getAttribute('href')) === pills[i].href,
+          'the byte table names the same thing at position ' + i);
       }
     });
     await step('#408 UI: remount and real WS mixed-route headers cannot narrow borrowed observation paths', async () => {
