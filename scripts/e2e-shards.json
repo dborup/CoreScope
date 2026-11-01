@@ -26,6 +26,14 @@
       "measurementNote": "New suite; #620 region dropdown viewport containment at 320/375/768/1280 across six pages. About 100s locally; no CI duration measured yet. Assigned to shard 3."
     },
     {
+      "file": "test-issue-598-hop-path-inference-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #598 whole-path hop inference on fixture packet 57224a4a01c9c682 observation 147 (22 one-byte hops) at 1280 and 390 px, including the map route view. About 20s locally; no CI duration measured yet. Assigned to shard 1 (fewest suites)."
+    },
+    {
       "file": "test-issue-595-packets-filter-races-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

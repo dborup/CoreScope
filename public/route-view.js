@@ -311,14 +311,22 @@
       var glyph = roleGlyph(p.role);
       var name = escapeHtml(p.name || (p.pubkey ? String(p.pubkey).slice(0,8) : '?'));
       // Show a status badge for unresolved hops:
-      //  - gpsless: node identified but missing GPS → no-GPS pin chip
-      //  - else:    couldn't resolve prefix       → unknown chip
+      //  - gpsless:  node identified but missing GPS      → no-GPS pin chip
+      //  - unlisted: #598, nodes share the prefix but none
+      //              fits this point in the path           → unlisted chip
+      //  - else:     couldn't resolve prefix               → unknown chip
       var statusBadge = '';
       if (p.resolved === false) {
         if (p.gpsless) {
           statusBadge = ' <span class="mc-rt-status-chip mc-rt-status-nogps" title="Node identified but has no GPS coordinates"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-map-pin"/></svg> no GPS</span>';
         } else {
-          statusBadge = ' <span class="mc-rt-status-chip mc-rt-status-unknown" title="Could not resolve this hop prefix to a known node"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> unknown</span>';
+          // #598 — an inferred hop was left unlisted: a node missing from the
+          // node list, or one without GPS. "unknown" would read as a lookup
+          // failure, which is a different thing from "no listed node fits".
+          var unknownTitle = p.unlisted
+            ? 'No listed node with this prefix fits this point in the path'
+            : 'Could not resolve this hop prefix to a known node';
+          statusBadge = ' <span class="mc-rt-status-chip mc-rt-status-unknown" title="' + escapeHtml(unknownTitle) + '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-magnifying-glass"/></svg> ' + (p.unlisted ? 'unlisted' : 'unknown') + '</span>';
         }
       }
       // hops derived from the packet's PAYLOAD (sender/recipient

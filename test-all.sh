@@ -309,6 +309,8 @@ run test-channel-ux-round2.js
 run test-drag-manager.js
 run test-fluid-scaffolding.js
 run test-hop-resolver-affinity.js
+run test-issue-598-hop-path-inference.js
+run test-issue-598-hop-path-detail.js
 run test-issue-1470-card-bg-contrast.js
 run test-issue-1646-compare-polish.js
 run test-perf-disk-io-1120.js

@@ -1,21 +1,30 @@
 /**
  * #1418 — map.js loadRouteFromDeepLink:
- *   - Hop resolution priority (server resolved_path > HopResolver > raw).
+ *   - Hop resolution for the chosen observation.
  *   - GRP_TXT channel hash → name resolution (enc_ placeholder, SHA-256 byte
  *     match for keyed channels, fallback to "channel 0x<HEX>").
  *
  * The deep-link loader is a giant async function; we don't run it end-to-end.
  * Instead we verify:
- *   1. Source invariants: priority order is unambiguous in code.
- *   2. Replica of the chosen-path resolution logic, exercised on fixtures.
+ *   1. Source invariants for the hop resolution the loader actually performs.
+ *   2. The REAL shared helper that resolves the chosen observation's hops
+ *      (window.inferObservationPath), exercised on fixtures.
  *   3. Replica of the channel-match predicate (the same `find` callback).
  *   4. Live SubtleCrypto comparison: SHA-256(name)[0] === target byte
  *      reproduced via node's built-in crypto.
+ *
+ * #598 — the three-tier priority this file used to pin (server resolved_path >
+ * HopResolver.resolve > raw prefixes) is gone. The loader now infers the chosen
+ * observation's hops as ONE path, with that observation's resolved_path as a
+ * hint rather than as an overriding tier, which is also what the packet detail
+ * pane does — so the two agree. Section A and B below were a copy of the old
+ * selection logic living in this test file; they now exercise the real helper.
  */
 'use strict';
 
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 const crypto = require('crypto');
 
 let passed = 0, failed = 0;
@@ -26,96 +35,102 @@ function assert(cond, msg) {
 
 const mapSrc = fs.readFileSync(path.join(__dirname, 'public', 'map.js'), 'utf8');
 
-console.log('\n=== #1418 hop-priority A: source invariants (3-tier priority) ===');
-// Priority comment is documented; assert the structural keywords are in order.
-const priorityBlock = mapSrc.match(/Priority:[\s\S]{0,800}rawHops/);
-assert(!!priorityBlock,
-  'priority block documented in map.js');
-if (priorityBlock) {
-  const blk = priorityBlock[0];
-  const iResolved = blk.indexOf('resolved_path');
-  const iHopRes = blk.indexOf('HopResolver');
-  const iRaw = blk.indexOf('raw');
-  assert(iResolved >= 0 && iHopRes >= 0 && iRaw >= 0,
-    'priority block mentions all three: resolved_path, HopResolver, raw');
-  assert(iResolved < iHopRes && iHopRes < iRaw,
-    'priority order in comment: resolved_path → HopResolver → raw');
-}
-// Structural code path: resolved_path branch checked first, then HopResolver,
-// then naked rawHops fallback.
-assert(/if\s*\(\s*Array\.isArray\(resolvedHops\)[^\)]*\)\s*\{[\s\S]{0,200}\}\s*else if\s*\(\s*window\.HopResolver/.test(mapSrc),
-  'code structure: if (resolvedHops valid) else if (window.HopResolver) else (rawHops)');
+console.log('\n=== #1418 hop-priority A: source invariants ===');
 
-console.log('\n=== #1418 hop-priority B: replica of chosen-path selection ===');
+// The loader resolves the chosen observation's hops through the shared helper,
+// not through a priority ladder of its own, and hands the entries to whichever
+// renderer draws the route.
+const deepLink = mapSrc.slice(mapSrc.indexOf('async function loadRouteFromDeepLink'));
+assert(/inferObservationPath\(chosen, obsPos, originPos\)/.test(deepLink),
+  'the loader infers the CHOSEN observation\'s hops with the shared helper');
+assert(!/else if\s*\(\s*window\.HopResolver/.test(mapSrc),
+  'the old three-tier priority ladder is gone');
+assert(!/HopResolver\.resolve\(/.test(deepLink),
+  'and the loader no longer resolves prefixes one at a time');
+assert((deepLink.match(/inferredHops: inferredHops/g) || []).length === 2,
+  'both route renderers receive the inferred entries, so neither re-resolves');
+assert(/const chosenPath = inferredHops \? rawHops\.map\(\(h, i\) => inferredHops\[i\]\.pubkey \|\| h\) : rawHops/.test(deepLink),
+  'an unlisted hop keeps its raw prefix in the canonical path, rather than borrowing a neighbour\'s pubkey');
 
-// Replicate the chooseChosenPath logic exactly. window.HopResolver shim
-// returns a per-pubkey dict; resolveResult[h] is consulted per raw hop.
-function chooseChosenPath(rawHops, resolvedHopsRaw, hopResolver) {
-  let resolvedHops = null;
-  try {
-    if (resolvedHopsRaw) {
-      resolvedHops = typeof resolvedHopsRaw === 'string' ? JSON.parse(resolvedHopsRaw) : resolvedHopsRaw;
-    }
-  } catch (_) {}
-  if (Array.isArray(resolvedHops) && resolvedHops.length === rawHops.length) {
-    return rawHops.map((h, i) => resolvedHops[i] || h);
+console.log('\n=== #1418 hop-priority B: the real inferObservationPath() ===');
+
+// The helper, loaded for real alongside the resolver it calls. Two repeaters
+// share "AA" and two share "BB"; LOCAL-* sit on the observer, REMOTE-* about
+// 1,200 km away, so path continuity has something to decide.
+const LOCAL_AA = { public_key: 'aaee0002', name: 'LOCAL-AA', role: 'repeater', lat: 55, lon: 10 };
+const REMOTE_AA = { public_key: 'aaff0001', name: 'REMOTE-AA', role: 'repeater', lat: 45, lon: 2 };
+const LOCAL_BB = { public_key: 'bbee0002', name: 'LOCAL-BB', role: 'repeater', lat: 55, lon: 10 };
+const REMOTE_BB = { public_key: 'bbff0001', name: 'REMOTE-BB', role: 'repeater', lat: 45, lon: 2 };
+const HINTED = { public_key: 'cc99000a', name: 'SERVER-SAYS', role: 'room_server', lat: 55.05, lon: 10.05 };
+
+function loadHelper() {
+  const ctx = {
+    window: {}, console, Math, Object, Array, Number, Date, Map, Set, JSON, String, Boolean,
+    Float64Array, Int32Array, Infinity, parseInt, parseFloat, isNaN, encodeURIComponent,
+    api: () => Promise.resolve({ edges: [] }),
+  };
+  vm.createContext(ctx);
+  for (const f of ['hop-resolver.js', 'packet-helpers.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', f), 'utf8'), ctx, { filename: f });
   }
-  if (hopResolver && typeof hopResolver.resolve === 'function' && rawHops.length) {
-    try {
-      const result = hopResolver.resolve(rawHops);
-      return rawHops.map(h => {
-        const r = result ? result[h] : null;
-        return r && r.pubkey ? r.pubkey : h;
-      });
-    } catch (_) { return rawHops; }
-  }
-  return rawHops;
+  ctx.window.HopResolver.init([LOCAL_AA, REMOTE_AA, LOCAL_BB, REMOTE_BB, HINTED],
+    { observers: [{ id: 'TEST-RX', iata: 'TST' }], iataCoords: { TST: { lat: 55, lon: 10 } } });
+  ctx.window.HopResolver.setAffinity({});
+  return ctx.window;
+}
+// What the loader builds from the entries: a pubkey per position, or the raw
+// prefix where the hop was left unlisted.
+function chosenPathFor(W, obs, observer) {
+  const rawHops = JSON.parse(obs.path_json);
+  const entries = W.inferObservationPath(obs, observer || null, null);
+  return rawHops.map((h, i) => entries[i].pubkey || h);
 }
 
-const rawHops = ['AA', 'BB', 'CC'];
+{
+  const W = loadHelper();
+  const observer = { lat: 55, lon: 10 };
 
-// Tier 1: server resolved_path takes priority over HopResolver
-const serverResolved = ['AAFULL1', 'BBFULL2', 'CCFULL3'];
-const naiveResolver = { resolve: () => ({ AA: { pubkey: 'WRONG_A' }, BB: { pubkey: 'WRONG_B' }, CC: { pubkey: 'WRONG_C' }}) };
-let chosen = chooseChosenPath(rawHops, serverResolved, naiveResolver);
-assert(JSON.stringify(chosen) === JSON.stringify(serverResolved),
-  'server resolved_path wins over HopResolver (returns ' + JSON.stringify(chosen) + ')');
+  // The observation's own resolved_path is a hint: a plausible one is used.
+  const hinted = chosenPathFor(W, {
+    observer_id: 'TEST-RX', path_json: '["AA","BB"]',
+    resolved_path: JSON.stringify([HINTED.public_key, null]),
+  }, observer);
+  assert(hinted[0] === HINTED.public_key,
+    'a non-null resolved_path entry names that hop (got ' + hinted[0] + ')');
+  assert(hinted[1] === LOCAL_BB.public_key,
+    'and the hop the server left null is inferred, anchored on the observer (got ' + hinted[1] + ')');
 
-// Tier 1 with JSON string input (server returns it stringified sometimes)
-chosen = chooseChosenPath(rawHops, JSON.stringify(serverResolved), naiveResolver);
-assert(JSON.stringify(chosen) === JSON.stringify(serverResolved),
-  'server resolved_path accepts JSON-string input (parses it)');
+  // A resolved_path of the wrong length describes another frame.
+  const mismatched = chosenPathFor(W, {
+    observer_id: 'TEST-RX', path_json: '["AA","BB"]',
+    resolved_path: JSON.stringify([HINTED.public_key]),
+  }, observer);
+  assert(mismatched[0] === LOCAL_AA.public_key,
+    'a resolved_path of the wrong length is ignored, not misaligned (got ' + mismatched[0] + ')');
 
-// Tier 2: no resolved_path → use HopResolver
-const smartResolver = { resolve: () => ({ AA: { pubkey: 'AAFULL_DIFF' }, BB: { pubkey: 'BBFULL_DIFF' }, CC: { pubkey: 'CCFULL_DIFF' }}) };
-chosen = chooseChosenPath(rawHops, null, smartResolver);
-assert(JSON.stringify(chosen) === JSON.stringify(['AAFULL_DIFF', 'BBFULL_DIFF', 'CCFULL_DIFF']),
-  'no resolved_path → HopResolver result used (returns ' + JSON.stringify(chosen) + ')');
+  // No hint at all: both hops are inferred.
+  const inferred = chosenPathFor(W, { observer_id: 'TEST-RX', path_json: '["AA","BB"]' }, observer);
+  assert(JSON.stringify(inferred) === JSON.stringify([LOCAL_AA.public_key, LOCAL_BB.public_key]),
+    'with no hint the whole path is inferred (got ' + JSON.stringify(inferred) + ')');
 
-// HopResolver returns different from naive prefix → values change
-chosen = chooseChosenPath(['AB'], null, { resolve: () => ({ AB: { pubkey: 'ABcorrect123' } }) });
-assert(chosen[0] === 'ABcorrect123',
-  'HopResolver overrides naive prefix when it returns a longer pubkey');
+  // A repeated prefix is not one node twice: a node forwards a flood once.
+  const repeated = chosenPathFor(W, { observer_id: 'TEST-RX', path_json: '["AA","BB","AA"]' }, observer);
+  assert(new Set(repeated.filter(h => h.length > 2)).size === repeated.filter(h => h.length > 2).length,
+    'no node is placed at two positions (got ' + JSON.stringify(repeated) + ')');
+  assert(repeated[0] === 'AA',
+    'the position no listed node plausibly fits keeps its raw prefix, so the renderer draws it as ' +
+    'unlisted instead of borrowing REMOTE-AA 1,200 km away (got ' + repeated[0] + ')');
 
-// HopResolver throws → fallback to raw
-chosen = chooseChosenPath(rawHops, null, { resolve: () => { throw new Error('boom'); } });
-assert(JSON.stringify(chosen) === JSON.stringify(rawHops),
-  'HopResolver throw → fallback to rawHops');
+  // With no observer position the IATA centre stands in, so a deep link from
+  // an observer without GPS still gets a path rather than bare prefixes.
+  const viaIata = chosenPathFor(W, { observer_id: 'TEST-RX', path_json: '["AA","BB"]' }, null);
+  assert(viaIata[1] === LOCAL_BB.public_key,
+    'the observer\'s IATA centre anchors the last hop when it reports no position (got ' + viaIata[1] + ')');
 
-// Tier 3: no resolved_path, no HopResolver → raw prefixes
-chosen = chooseChosenPath(rawHops, null, null);
-assert(JSON.stringify(chosen) === JSON.stringify(rawHops),
-  'no resolved_path AND no HopResolver → raw prefixes returned as-is');
-
-// Length mismatch: resolved_path is wrong length → falls through to HopResolver
-chosen = chooseChosenPath(rawHops, ['only_one'], smartResolver);
-assert(JSON.stringify(chosen) === JSON.stringify(['AAFULL_DIFF', 'BBFULL_DIFF', 'CCFULL_DIFF']),
-  'resolved_path with mismatched length → falls through to HopResolver');
-
-// Per-element falsy in resolved_path → falls back to raw for THAT index
-chosen = chooseChosenPath(rawHops, ['AAFULL1', null, 'CCFULL3'], null);
-assert(JSON.stringify(chosen) === JSON.stringify(['AAFULL1', 'BB', 'CCFULL3']),
-  'per-index null in resolved_path → falls back to raw for that index only');
+  // An empty path infers nothing and resolves to nothing.
+  assert(chosenPathFor(W, { observer_id: 'TEST-RX', path_json: '[]' }, observer).length === 0,
+    'an empty path yields an empty canonical path');
+}
 
 console.log('\n=== #1418 channel A: GRP_TXT match predicate (sync part) ===');
 
