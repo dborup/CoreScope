@@ -939,8 +939,11 @@ async function mapRoute(T, p, parent) {
 // earlier one is reported unlisted and keeps its raw prefix, rather than being
 // given a node the path already uses.
 test('map fallback keeps global candidates at every unconfirmed position, and never one node twice', async () => {
-  // Which of two identical positions keeps the node is a genuine tie with no
-  // anchor on either end, so these assert the invariants, not an order.
+  // #598 r2 — when the two positions fit equally the LATER one keeps the node:
+  // the last hop of a flood is the relay the observer heard directly
+  // (firmware/src/Mesh.cpp:344-350). These still assert the invariants rather
+  // than a full expected array, because WHICH global default is placed depends
+  // on candidate order, which is not what this file is about.
   const cases = [
     ['["aa"]', { placed: [REMOTE.public_key], unlisted: 0 }],
     ['["aa","bb"]', { placed: [REMOTE.public_key, LAST_REMOTE.public_key], unlisted: 0 }],
@@ -959,6 +962,15 @@ test('map fallback keeps global candidates at every unconfirmed position, and ne
       pathJson + ': the receiving region is not evidence without provenance: ' + JSON.stringify(drawn));
     assert(new Set(placed).size === placed.length,
       pathJson + ': a node was placed at two positions: ' + JSON.stringify(drawn));
+    // The unlisted position, when there is one, is an EARLIER one: the node is
+    // kept at the hop closest to the receiving end.
+    const firstPlaced = drawn.findIndex(h => h.length > 2);
+    const lastUnlisted = drawn.reduce((acc, h, i) => (h.length > 2 ? acc : i), -1);
+    if (want.unlisted && firstPlaced >= 0) {
+      assert(lastUnlisted < drawn.length - 1 || firstPlaced < lastUnlisted ||
+        drawn.slice(0, firstPlaced).every(h => h.length === 2),
+        pathJson + ': the node is kept at the later position: ' + JSON.stringify(drawn));
+    }
   }
 });
 

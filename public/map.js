@@ -1556,10 +1556,12 @@
       let inferredHops = null;
       if (rawHops.length && window.HopResolver && window.inferObservationPath) {
         try {
-          if (!window.HopResolver.ready()) {
-            const coords = await api('/iata-coords', { ttl: 300000 }).catch(() => ({ coords: {} }));
-            window.HopResolver.init(nodes || [], { observers: observers, iataCoords: coords.coords || {} });
-          }
+          // #598 r2 F5 — the FULL catalogue, through the shared helper. `nodes`
+          // here is the map's own filtered list (lastHeard + area), and
+          // indexing that would have left a packets page visited afterwards
+          // inferring hops from a narrower catalogue than a cold visit.
+          await window.ensureHopCatalogue();
+          if (!alive()) return; // #123
           // The neighbour graph is evidence, not a prerequisite. A fresh map
           // page waits for it so its route matches a detail pane opened later;
           // arriving from a packet detail it is already loaded.
@@ -1567,11 +1569,14 @@
           if (!alive()) return; // #123
           const obsKey = String(chosen.observer_id || '').toLowerCase();
           const ob = (observers || []).find(o => String(o.id).toLowerCase() === obsKey) ||
+            window.hopObservers().find(o => String(o.id).toLowerCase() === obsKey) ||
             (nodes || []).find(n => (n.public_key || '').toLowerCase() === obsKey);
           const obsPos = ob && ob.lat != null && ob.lon != null ? { lat: ob.lat, lon: ob.lon } : null;
-          const senderLat = decoded.lat != null ? decoded.lat : decoded.latitude;
-          const senderLon = decoded.lon != null ? decoded.lon : decoded.longitude;
-          const originPos = senderLat != null && senderLon != null ? { lat: senderLat, lon: senderLon } : null;
+          // #598 r2 F5 — the same sender resolution the detail pane does, not
+          // decoded.lat alone: a GRP_TXT or TXT_MSG carries no GPS, so the two
+          // views anchored hop 0 differently.
+          const originPos = await window.senderPosition(decoded);
+          if (!alive()) return; // #123
           inferredHops = inferObservationPath(chosen, obsPos, originPos);
         } catch (e) {
           console.warn('[deep-link] path inference failed', e);

@@ -128,6 +128,9 @@ console.log('\n=== #598 M: HopDisplay renders an inferred hop ===');
 
 {
   const ctx = makeSandbox();
+  // hop-display.js reads the likely threshold from HopResolver (nit 8), and
+  // index.html loads the resolver first, so the test does too.
+  loadInCtx(ctx, 'public/hop-resolver.js');
   loadInCtx(ctx, 'public/hop-display.js');
   const HopDisplay = ctx.window.HopDisplay;
 
@@ -285,10 +288,27 @@ console.log('\n=== #598 M: HopDisplay renders an inferred hop ===');
     assert.ok(/unlisted/.test(html), 'and it reaches the rendered legend');
   });
 
-  test('HopDisplay and HopResolver agree on what counts as likely', () => {
-    const rs = makeSandbox();
-    loadInCtx(rs, 'public/hop-resolver.js');
-    assert.strictEqual(HopDisplay.LIKELY, rs.window.HopResolver.LIKELY_CONFIDENCE);
+  // #598 r2 nit 8 — one threshold, defined once in HopResolver and read from
+  // there. A second literal in hop-display.js could drift from the model that
+  // computes the confidence it is compared against.
+  test('HopDisplay reads the likely threshold from HopResolver rather than keeping its own', () => {
+    assert.strictEqual(HopDisplay.LIKELY(), ctx.window.HopResolver.LIKELY_CONFIDENCE);
+    const displaySrc = src('public/hop-display.js');
+    assert.ok(!/LIKELY\s*=\s*0?\.\d/.test(displaySrc),
+      'hop-display.js holds no numeric threshold of its own');
+    assert.ok(/HopResolver\.LIKELY_CONFIDENCE/.test(displaySrc), 'it reads the resolver\'s');
+
+    // And the rendering follows the resolver's value, not a baked-in 0.7.
+    const stub = makeSandbox();
+    loadInCtx(stub, 'public/hop-resolver.js');
+    loadInCtx(stub, 'public/hop-display.js');
+    const borderline = { hop: 'a0', name: 'EDGE', pubkey: pk('a0'), located: true, unlisted: false,
+      unreliable: false, ambiguous: true, confidence: 0.5,
+      candidates: [{ name: 'EDGE', pubkey: pk('a0'), located: true, confidence: 0.5 },
+        { name: 'OTHER', pubkey: pk('a0b'), located: true, confidence: 0.5 }] };
+    borderline.conflicts = borderline.candidates;
+    assert.ok(/hop-ambiguous/.test(stub.window.HopDisplay.renderHop('a0', borderline, {})),
+      '0.5 is a guess at the resolver\'s 0.7 threshold');
   });
 
   test('the popover states the inferred pick and each candidate\'s odds', () => {
@@ -338,7 +358,7 @@ const POS_HOPS = ['10', 'b1', '10', 'c2'];
   const ctx = loadPackets();
   const api = ctx._packetsTestAPI;
   ctx.HopResolver.init(NODES_POS);
-  ctx.HopResolver.setAffinity({});
+  ctx.HopResolver.setPathAffinity({});
   const entries = ctx.HopResolver.inferPath(POS_HOPS, { observer: at(120), origin: at(0) });
 
   test('fixture: the model really does answer the repeated prefix differently', () => {
@@ -681,7 +701,7 @@ console.log('\n=== #598 Q: refreshDetailHops touches only the hop rows ===');
 test('refreshDetailHops rewrites the Path row, the aggregate row and the byte hop names', () => {
   const ctx = loadPackets();
   ctx.HopResolver.init(NODES_POS);
-  ctx.HopResolver.setAffinity({});
+  ctx.HopResolver.setPathAffinity({});
   const entries = ctx.HopResolver.inferPath(POS_HOPS, { observer: at(120), origin: at(0) });
   const panel = makePanel();
   const el0 = { dataset: { hopIdx: '0' }, innerHTML: '' };
@@ -745,11 +765,18 @@ test('inferObservationPath passes the observation\'s own path, hint and observer
 test('the observer anchor is withheld unless the observation\'s own frame proves a received flood', () => {
   const cases = [
     ['a received flood', RX_FLOOD, true],
+    // #598 r2 F1 — TRANSPORT_FLOOD (route 0) is a flood: firmware Packet.h:14
+    // ("flood mode + transport codes"), Packet.h:64 isRouteFlood() includes
+    // it, and Mesh.cpp:344-350 appends the relay's own hash for it. This repo
+    // already says so: cmd/ingestor/client_reception.go, cmd/server/db.go.
+    // Scoped traffic is all TRANSPORT_FLOOD, so rejecting it silently dropped
+    // the anchor for most of the real mesh.
+    ['a transport-flood frame', { direction: 'rx', raw_hex: header(5, 0) + 'AABBCCDD021011' }, true],
     ['a transmitted observation', { direction: 'tx', raw_hex: header(5, 1) + '021011' }, false],
     ['no direction at all', { raw_hex: header(5, 1) + '021011' }, false],
     ['a transport-direct frame', { direction: 'rx', raw_hex: header(5, 3) + 'AABBCCDD021011' }, false],
-    ['a transport-flood frame', { direction: 'rx', raw_hex: header(5, 0) + 'AABBCCDD021011' }, false],
     ['a direct frame', { direction: 'rx', raw_hex: header(5, 2) + '021011' }, false],
+    ['a TRACE on a transport flood', { direction: 'rx', raw_hex: header(9, 0) + 'AABBCCDD021011' }, false],
     ['a TRACE, whose path is planned', { direction: 'rx', raw_hex: header(9, 1) + '021011' }, false],
     ['no frame of its own', { direction: 'rx' }, false],
     ['a frame that is not hex', { direction: 'rx', raw_hex: 'zz' }, false],
@@ -779,12 +806,111 @@ test('a frame carried only as a display fallback is not provenance', () => {
     'the explicit frame decides, so the parent packet\'s bytes cannot anchor an observation');
 });
 
+// #598 r2 F2 — a node with no coordinates was never checked against the path,
+// so it cannot be "geographically inconsistent" (#165). The PR promised
+// "(no GPS)" for it. These go through the real inferObservationPath(), not a
+// hand-built entry, which is how the old test missed it.
+test('a hinted node WITHOUT GPS reads as (no GPS), not as geographically inconsistent', () => {
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/hop-resolver.js');
+  loadInCtx(ctx, 'public/hop-display.js');
+  loadInCtx(ctx, 'public/packet-helpers.js');
+  const noGpsNode = { public_key: pk('c7'), name: 'HINTED-NO-GPS', role: 'repeater', lat: null, lon: null };
+  const neighbour = node('b1', 'NEIGHBOUR', 0);
+  ctx.window.HopResolver.init([noGpsNode, neighbour]);
+  ctx.window.HopResolver.setPathAffinity({});
+
+  const obs = Object.assign({
+    observer_id: 'OBS-9', path_json: '["b1","c7"]',
+    resolved_path: JSON.stringify([null, noGpsNode.public_key]),
+  }, RX_FLOOD);
+  const entries = ctx.window.inferObservationPath(obs, { lat: at(30).lat, lon: at(30).lon }, null);
+
+  const e = entries[1];
+  assert.strictEqual(e.name, 'HINTED-NO-GPS', 'the ingestor\'s node is still what the hop is called');
+  assert.strictEqual(e.located, false, 'it has no position to draw');
+  assert.strictEqual(e.unlisted, true, 'so it does not sit on the path geometry');
+  assert.strictEqual(e.unreliable, false,
+    'and it is NOT flagged geographically inconsistent: there were no coordinates to check');
+
+  const html = ctx.window.HopDisplay.renderHop('c7', e, {});
+  assert.ok(/\(no GPS\)/.test(html), 'the pane says (no GPS): ' + html);
+  assert.ok(!/hop-unreliable/.test(html), 'and shows no #165 warning: ' + html);
+
+  const routeHop = ctx.window.routeHopFromInferred('c7', e, 'repeater');
+  assert.strictEqual(routeHop.gpsless, true, 'the route sidebar chip reads "no GPS"');
+  assert.ok(!routeHop.unlisted, 'not "unlisted"');
+});
+
+test('a hinted node WITH GPS that does not fit is still flagged, through the real model', () => {
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/hop-resolver.js');
+  loadInCtx(ctx, 'public/hop-display.js');
+  loadInCtx(ctx, 'public/packet-helpers.js');
+  // 900 km up the corridor from a path whose hops are 30 km apart.
+  const farNode = node('c7', 'HINTED-FAR', 900);
+  const neighbour = node('b1', 'NEIGHBOUR', 0);
+  ctx.window.HopResolver.init([farNode, neighbour]);
+  ctx.window.HopResolver.setPathAffinity({});
+  const obs = Object.assign({
+    observer_id: 'OBS-9', path_json: '["b1","c7"]',
+    resolved_path: JSON.stringify([null, farNode.public_key]),
+  }, RX_FLOOD);
+  const e = ctx.window.inferObservationPath(obs, { lat: at(30).lat, lon: at(30).lon }, null)[1];
+  assert.strictEqual(e.name, 'HINTED-FAR');
+  assert.strictEqual(e.located, false, 'not drawn');
+  assert.strictEqual(e.unreliable, true, 'flagged: a LOCATED node that does not fit the path');
+  const html = ctx.window.HopDisplay.renderHop('c7', e, {});
+  assert.ok(/hop-unreliable/.test(html), 'the #165 warning is shown: ' + html);
+  assert.ok(!/\(no GPS\)/.test(html), 'and not (no GPS): ' + html);
+});
+
 test('renderDetail reads provenance from the observation, never from the spread row', () => {
   const pktSrc = src('public/packets.js');
   assert.ok(/inferFor\(effectivePkt, currentObs \|\| pkt\)/.test(pktSrc),
     'the Path row passes the selected observation as the frame source');
-  assert.ok(/inferFor\(pkt, pkt\)/.test(pktSrc),
-    'and the aggregate row passes the packet row as its own');
+  // #598 r2 nit 7 — the aggregate row used to pass `pkt`, so the
+  // TRANSMISSION's raw_hex served as provenance for a path that may have been
+  // reported by a different observation. It now passes the observation whose
+  // path_json IS the aggregate path, or no frame at all.
+  assert.ok(/inferFor\(pkt, aggregateFrame\)/.test(pktSrc),
+    'and the aggregate row passes the observation that reported that path');
+  assert.ok(!/inferFor\(pkt, pkt\)/.test(pktSrc),
+    'never the transmission row as its own provenance');
+});
+
+await testAsync('the aggregate row is anchored only when an observation reported that exact path', async () => {
+  const ctx = detailCtx();
+  const data = detailData();
+  // The packet row's 4-hop path is observation 11's, which carries a received
+  // flood frame, so the aggregate row may be anchored on observation 11's
+  // observer. Rendered from the southern observation, to prove the aggregate
+  // row picks its own frame rather than the shown one's.
+  const panel = makePanel();
+  await ctx._packetsTestAPI.renderDetail(panel, data, 10);
+  const agg = panel.innerHTML.match(/Longest observed path: ([\s\S]*?)<\/div>/)[1];
+  assert.ok(/4 hops/.test(agg), 'the aggregate row renders the packet row\'s own path: ' + agg);
+  assert.ok(/data-hop-link/.test(agg), 'with inferred hops');
+
+  // Now no observation reports that path. The transmission row carries a
+  // received-flood frame of its own, but it describes the FIRST-INGESTED
+  // frame, not this path, so it is not provenance for it: no anchor. The hop
+  // is chosen by candidate order (TEN-SOUTH), not by distance to the packet
+  // row's northern observer (TEN-NORTH), which is what an anchor would give.
+  const orphan = detailData();
+  orphan.packet.path_json = JSON.stringify(['10']);
+  orphan.packet.direction = 'rx';
+  orphan.packet.raw_hex = '15' + '01' + '10' + 'AABB';
+  const panel2 = makePanel();
+  await ctx._packetsTestAPI.renderDetail(panel2, orphan, 10);
+  const agg2 = panel2.innerHTML.match(/Longest observed path: ([\s\S]*?)<\/div>/)[1];
+  assert.ok(/1 hops/.test(agg2), 'it still renders: ' + agg2);
+  // Read the pill, not the whole row: the candidate popover's data-conflict
+  // payload names both candidates by design.
+  const aggPick = (agg2.match(/data-hop-link="true">([^<]*)</) || [])[1];
+  assert.strictEqual(aggPick, 'TEN-SOUTH',
+    'the aggregate hop is not anchored on the packet row\'s observer, because that row\'s ' +
+    'frame is not evidence for a path no observation reported (got ' + aggPick + ')');
 });
 
 test('routeHopFromInferred: a located hop becomes a resolved route hop', () => {
@@ -826,7 +952,7 @@ await testAsync('ensureHopAffinity loads once, refreshes after the TTL, and keep
   let now = 1000000;
   ctx.Date = Object.assign(function () {}, Date, { now: () => now });
   const applied = [];
-  ctx.window.HopResolver = { setAffinity: g => applied.push(g) };
+  ctx.window.HopResolver = { setPathAffinity: g => applied.push(g) };
   let calls = 0, fail = false;
   ctx.api = ctx.window.api = () => {
     calls++;
@@ -864,13 +990,200 @@ await testAsync('ensureHopAffinity loads once, refreshes after the TTL, and keep
 await testAsync('ensureHopAffinity asks for the shape the server keeps cached', async () => {
   const ctx = makeSandbox();
   const asked = [];
-  ctx.window.HopResolver = { setAffinity() {} };
+  ctx.window.HopResolver = { setPathAffinity() {} };
   ctx.api = ctx.window.api = (p, o) => { asked.push([p, o]); return Promise.resolve({ edges: [] }); };
   loadInCtx(ctx, 'public/packet-helpers.js');
   await ctx.window.ensureHopAffinity();
   assert.strictEqual(asked[0][0], '/analytics/neighbor-graph',
     'the default query shape, which /api/analytics/neighbor-graph serves from its 5-minute snapshot');
   assert.strictEqual(asked[0][1].ttl, 300000, 'cached client-side for the same 5 minutes');
+});
+
+console.log('\n=== #598 r2 F6: opening a packet detail does not change the Live view ===');
+
+test('the neighbour graph the inference loads is invisible to resolve()', async () => {
+  // ensureHopAffinity() is the first setAffinity() call in the app, so before
+  // #598 one packet-detail open switched live.js's resolve() from geographic
+  // picks to graph-based ones. The PR says Live is unchanged, so inferPath()
+  // gets its own graph.
+  const ctx = makeSandbox();
+  ctx.api = ctx.window.api = () => Promise.resolve({
+    edges: [{ source: pk('b1'), target: pk('10b'), score: 9 }],
+  });
+  loadInCtx(ctx, 'public/hop-resolver.js');
+  loadInCtx(ctx, 'public/packet-helpers.js');
+  ctx.api = ctx.window.api = ctx.api;
+  const R = ctx.window.HopResolver;
+
+  // Two "10" candidates equidistant from B1, so only the graph can separate
+  // them — exactly the situation live.js's pickByAffinity() is sensitive to.
+  const east = { public_key: pk('10b'), name: 'TEN-EAST', role: 'repeater', lat: 50.27, lon: 5.4 };
+  const west = { public_key: pk('10'), name: 'TEN-WEST', role: 'repeater', lat: 50.27, lon: 4.6 };
+  R.init([east, west, node('b1', 'B1', 0)]);
+
+  const before = R.resolve(['b1', '10'], null, null, null, null, null)['10'].name;
+  assert.strictEqual(R.getAffinity(pk('b1'), pk('10b')), 0, 'fixture: resolve() has no graph yet');
+
+  return ctx.window.ensureHopAffinity().then(landed => {
+    assert.strictEqual(landed, true, 'the inference loaded a graph');
+    assert.strictEqual(R.getAffinity(pk('b1'), pk('10b')), 0,
+      'resolve()\'s own graph is still empty, so the Live view cannot have changed');
+    const after = R.resolve(['b1', '10'], null, null, null, null, null)['10'].name;
+    assert.strictEqual(after, before,
+      'resolve() answers the same before and after a detail pane opened (' + before + ' -> ' + after + ')');
+    assert.strictEqual(R.getPathAffinity(pk('b1'), pk('10b')), 9,
+      'while the inference does have the link');
+    // And Live loading its own graph still reaches resolve(), as before.
+    R.setAffinity({ edges: [{ source: pk('b1'), target: pk('10b'), score: 3 }] });
+    assert.strictEqual(R.getAffinity(pk('b1'), pk('10b')), 3, 'live.js setAffinity() is untouched');
+    assert.strictEqual(R.getPathAffinity(pk('b1'), pk('10b')), 9,
+      'and does not overwrite the inference graph');
+  });
+});
+
+test('inferPath reads the path graph, not resolve()\'s', () => {
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/hop-resolver.js');
+  const R = ctx.window.HopResolver;
+  const east = { public_key: pk('10b'), name: 'TEN-EAST', role: 'repeater', lat: 50.27, lon: 5.4 };
+  const west = { public_key: pk('10'), name: 'TEN-WEST', role: 'repeater', lat: 50.27, lon: 4.6 };
+  R.init([east, west, node('b1', 'B1', 0)]);
+  R.setAffinity({});
+  R.setPathAffinity({});
+  const tied = R.inferPath(['b1', '10'], { observer: { lat: at(0).lat, lon: at(0).lon } });
+
+  // A link in resolve()'s graph must NOT move the inference.
+  R.setAffinity({ edges: [{ source: pk('b1'), target: pk('10b'), score: 9 }] });
+  const unmoved = R.inferPath(['b1', '10'], { observer: { lat: at(0).lat, lon: at(0).lon } });
+  assert.strictEqual(unmoved[1].name, tied[1].name,
+    'the Live graph does not steer the inference');
+
+  // A link in the path graph does.
+  R.setPathAffinity({ edges: [{ source: pk('b1'), target: pk('10b'), score: 9 }] });
+  const moved = R.inferPath(['b1', '10'], { observer: { lat: at(0).lat, lon: at(0).lon } });
+  assert.strictEqual(moved[1].name, 'TEN-EAST', 'its own graph does (got ' + moved[1].name + ')');
+});
+
+console.log('\n=== #598 r2 F5: one catalogue and one sender position for both views ===');
+
+await testAsync('the map opening first does not leave the packets page a narrower catalogue', async () => {
+  // The map page's own node list is filtered (lastHeard + area). Indexing that
+  // made HopResolver.ready() true, so a packets page visited afterwards reused
+  // it and could not see the nodes the filter had dropped.
+  const ctx = makeSandbox();
+  const FULL = [node('10', 'TEN-SOUTH', 0), node('10b', 'TEN-NORTH', 60), node('b1', 'MIDDLE', 30)];
+  const MAP_FILTERED = [FULL[0]]; // what a 30-day + area filter left behind
+  let nodeCalls = 0;
+  ctx.api = ctx.window.api = (p) => {
+    if (p.startsWith('/nodes?') || p === '/nodes') { nodeCalls++; return Promise.resolve({ nodes: FULL, total: FULL.length }); }
+    if (p === '/observers') return Promise.resolve({ observers: [{ id: 'OBS-1', iata: null, lat: at(90).lat, lon: at(90).lon }] });
+    if (p === '/iata-coords') return Promise.resolve({ coords: {} });
+    return Promise.resolve({});
+  };
+  loadInCtx(ctx, 'public/app.js');
+  loadInCtx(ctx, 'public/hop-resolver.js');
+  loadInCtx(ctx, 'public/packet-helpers.js');
+  ctx.api = ctx.window.api = ctx.api;
+
+  // The map's old behaviour, reproduced: index the filtered list first.
+  ctx.window.HopResolver.init(MAP_FILTERED);
+  assert.strictEqual(ctx.window.HopResolver.ready(), true,
+    'fixture: the filtered index already makes ready() true, which is why ready() is the wrong test');
+  assert.strictEqual(ctx.window.hasHopCatalogue(), false, 'but the full catalogue is not installed');
+
+  assert.strictEqual(await ctx.window.ensureHopCatalogue(), true, 'the shared helper installs it');
+  assert.strictEqual(ctx.window.hasHopCatalogue(), true);
+
+  // The node the map's filter dropped is resolvable again.
+  const entries = ctx.window.HopResolver.inferPath(['10', 'b1', '10'],
+    { observer: { lat: at(90).lat, lon: at(90).lon }, origin: { lat: at(0).lat, lon: at(0).lon } });
+  const names = entries.map(e => e.name).filter(Boolean);
+  assert.ok(names.includes('TEN-NORTH'),
+    'the full catalogue is in the index, not the map\'s filtered list: ' + JSON.stringify(names));
+  assert.ok(names.includes('MIDDLE'), 'including the middle hop the filter dropped');
+
+  // And it is one load, however many callers ask.
+  await ctx.window.ensureHopCatalogue();
+  await ctx.window.ensureHopCatalogue();
+  assert.strictEqual(nodeCalls, 1, 'one catalogue fetch for three calls, got ' + nodeCalls);
+
+  // The observer list is handed on, so neither page refetches or substitutes
+  // a filtered one.
+  assert.strictEqual(ctx.window.hopObservers().length, 1, 'the installed observers are readable');
+});
+
+await testAsync('a failed catalogue load is retried, not cached as done', async () => {
+  const ctx = makeSandbox();
+  let fail = true, calls = 0;
+  ctx.api = ctx.window.api = (p) => {
+    if (p.startsWith('/nodes?') || p === '/nodes') {
+      calls++;
+      return fail ? Promise.reject(new Error('503')) : Promise.resolve({ nodes: [node('b1', 'B1', 0)], total: 1 });
+    }
+    if (p === '/observers') return Promise.resolve({ observers: [] });
+    return Promise.resolve({ coords: {} });
+  };
+  loadInCtx(ctx, 'public/app.js');
+  loadInCtx(ctx, 'public/hop-resolver.js');
+  loadInCtx(ctx, 'public/packet-helpers.js');
+  ctx.api = ctx.window.api = ctx.api;
+  assert.strictEqual(await ctx.window.ensureHopCatalogue(), false, 'a failure reports false');
+  assert.strictEqual(ctx.window.hasHopCatalogue(), false, 'and is not recorded as installed');
+  fail = false;
+  assert.strictEqual(await ctx.window.ensureHopCatalogue(), true, 'the next call retries');
+  assert.strictEqual(calls, 2);
+});
+
+await testAsync('senderPosition: the payload wins, then the node lookup, then the name search', async () => {
+  function withApi(handler) {
+    const ctx = makeSandbox();
+    ctx.api = ctx.window.api = handler;
+    loadInCtx(ctx, 'public/packet-helpers.js');
+    ctx.api = ctx.window.api = handler;
+    return ctx.window;
+  }
+  const asked = [];
+  const api = (p) => {
+    asked.push(p);
+    if (p.startsWith('/nodes/search')) return Promise.resolve({ nodes: [{ lat: 3, lon: 4 }] });
+    if (p.startsWith('/nodes/')) return Promise.resolve({ node: { lat: 1, lon: 2 } });
+    return Promise.resolve({});
+  };
+
+  let W = withApi(api);
+  assert.deepStrictEqual(Object.assign({}, await W.senderPosition({ lat: 9, lon: 8 })), { lat: 9, lon: 8 });
+  assert.strictEqual(asked.length, 0, 'a payload position asks nothing');
+  assert.deepStrictEqual(Object.assign({}, await W.senderPosition({ latitude: 7, longitude: 6 })), { lat: 7, lon: 6 },
+    'the latitude/longitude spelling is accepted too');
+
+  asked.length = 0;
+  W = withApi(api);
+  assert.deepStrictEqual(Object.assign({}, await W.senderPosition({ pubKey: 'abc' })), { lat: 1, lon: 2 });
+  assert.deepStrictEqual(asked, ['/nodes/abc'], 'the node lookup is tried next');
+
+  asked.length = 0;
+  W = withApi((p) => { asked.push(p); return p.startsWith('/nodes/search') ? Promise.resolve({ nodes: [{ lat: 3, lon: 4 }] }) : Promise.resolve({ node: {} }); });
+  assert.deepStrictEqual(Object.assign({}, await W.senderPosition({ pubKey: 'abc', sender: 'Someone' })), { lat: 3, lon: 4 });
+  assert.ok(asked.some(p => p.startsWith('/nodes/search?q=Someone')), 'then the name search: ' + JSON.stringify(asked));
+
+  W = withApi(() => Promise.reject(new Error('503')));
+  assert.strictEqual(await W.senderPosition({ pubKey: 'abc', sender: 'x' }), null, 'a failure is just no anchor');
+  assert.strictEqual(await W.senderPosition({}), null, 'nothing to go on is no anchor');
+  assert.strictEqual(await W.senderPosition(null), null, 'and no decoded payload is safe');
+});
+
+test('both views go through the shared helpers, so neither can drift', () => {
+  const pktSrc = src('public/packets.js');
+  const mapSrc2 = src('public/map.js');
+  for (const [label, body] of [['packets.js', pktSrc], ['map.js', mapSrc2]]) {
+    assert.ok(/ensureHopCatalogue\(\)/.test(body), label + ' loads the catalogue through the shared helper');
+    assert.ok(!/HopResolver\.init\(/.test(body),
+      label + ' does not index a node list of its own any more');
+  }
+  assert.ok(/senderPosition\(decoded\)/.test(pktSrc), 'the pane takes the shared sender position');
+  assert.ok(/window\.senderPosition\(decoded\)/.test(mapSrc2), 'and so does the map');
+  assert.ok(!/decoded\.lat != null \? decoded\.lat : decoded\.latitude/.test(mapSrc2),
+    'the map no longer reads decoded.lat on its own');
 });
 
 console.log('\n=== #598 S: the map route view takes the same inferred hops ===');

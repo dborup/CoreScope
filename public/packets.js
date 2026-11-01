@@ -1176,30 +1176,18 @@
     }, { passive: false });
   }
 
-  // Ensure HopResolver is initialized with the nodes list + observer IATA data
+  // Ensure HopResolver is initialized with the nodes list + observer IATA data.
+  // #598 r2 F5 — the catalogue load itself lives in packet-helpers.js
+  // (ensureHopCatalogue), so the map page cannot leave this page with a
+  // narrower index than a cold visit would build. This wrapper adds only what
+  // the packets page needs on top of it.
   async function ensureHopResolver() {
-    if (!HopResolver.ready()) {
-      try {
-        const [nodeData, obsData, coordData] = await Promise.all([
-          fetchAllNodes('', { ttl: 60000 }),
-          api('/observers', { ttl: 60000 }),
-          api('/iata-coords', { ttl: 300000 }).catch(() => ({ coords: {} })),
-        ]);
-        const obsList = obsData.observers || obsData || [];
-        HopResolver.init(nodeData.nodes || [], {
-          observers: obsList,
-          iataCoords: coordData.coords || {},
-        });
-        // #165 (upstream 2099) — seed the lookup resolveHops() needs for the anchor, in case a
-        // render gets here before loadObservers() has run.
-        if (!observerMap || !observerMap.size) {
-          observerMap = new Map(obsList.map(o => [o.id, o]));
-        }
-      } catch (e) {
-        // Non-fatal: hops will render as unresolved hex prefixes until a later
-        // call succeeds. Log so a paginated /api/nodes failure isn't silent.
-        console.warn('[packets] HopResolver init failed:', e);
-      }
+    const ok = await ensureHopCatalogue();
+    // #165 (upstream 2099) — seed the lookup resolveHops() needs for the anchor, in case a
+    // render gets here before loadObservers() has run.
+    if (ok && (!observerMap || !observerMap.size)) {
+      const obsList = hopObservers();
+      if (obsList.length) observerMap = new Map(obsList.map(o => [o.id, o]));
     }
   }
 
@@ -3867,25 +3855,10 @@
       console.warn(`[CoreScope] Hop count inconsistency for packet ${pkt.hash}: path_json has ${pathHops.length} hops but raw_hex path_len has ${rawHopCount}. UI shows path_json.`);
     }
 
-    // Resolve sender GPS — from packet directly, or from known node in DB
-    let senderLat = decoded.lat != null ? decoded.lat : (decoded.latitude || null);
-    let senderLon = decoded.lon != null ? decoded.lon : (decoded.longitude || null);
-    if (senderLat == null) {
-      // Try to find sender node GPS from DB
-      const senderKey = decoded.pubKey || decoded.srcPubKey;
-      const senderName = decoded.sender || decoded.name;
-      try {
-        if (senderKey) {
-          const nd = await api(`/nodes/${senderKey}`, { ttl: 30000 }).catch(() => null);
-          if (nd?.node?.lat && nd.node.lon) { senderLat = nd.node.lat; senderLon = nd.node.lon; }
-        }
-        if (senderLat == null && senderName) {
-          const sd = await api(`/nodes/search?q=${encodeURIComponent(senderName)}`, { ttl: 30000 }).catch(() => null);
-          const match = sd?.nodes?.[0];
-          if (match?.lat && match.lon) { senderLat = match.lat; senderLon = match.lon; }
-        }
-      } catch {}
-    }
+    // Resolve sender GPS — from the packet directly, or from a known node in
+    // the DB. #598 r2 F5 — one implementation, shared with the map route view,
+    // so hop 0 is anchored on the same point in both.
+    const senderPos = await senderPosition(decoded);
 
     // #1868 — CONTROL DISCOVER_RESP carries a responder pubkey (full 32B or
     // 8B prefix) with no name attached. /api/nodes/{pubkey} already handles
@@ -3938,7 +3911,7 @@
         await ensureHopResolver();
         const graphLoad = ensureHopAffinity();
         if (!hasHopAffinity()) graphLanding = graphLoad;
-        const origin = senderLat != null && senderLon != null ? { lat: senderLat, lon: senderLon } : null;
+        const origin = senderPos;
         // `frame` is where the provenance check reads direction/raw_hex:
         // observationPacket() keeps the aggregate packet's bytes as a display
         // fallback, which is not this observation's own frame (#165/#608).
@@ -3947,7 +3920,15 @@
           return inferObservationPath(row, lat === null ? null : { lat, lon }, origin, frame || row);
         };
         pathEntries = inferFor(effectivePkt, currentObs || pkt);
-        if (observations.length > 1) aggregateEntries = inferFor(pkt, pkt);
+        if (observations.length > 1) {
+          // #598 r2 nit 7 — the aggregate row shows the packet's LONGEST
+          // observed path, which one particular observation reported. Its
+          // provenance is that observation's frame; the transmission row's
+          // raw_hex describes the first-ingested frame, which may be a
+          // different observation's, so it is not evidence for this path.
+          const aggregateFrame = observations.find(o => o.path_json === pkt.path_json) || {};
+          aggregateEntries = inferFor(pkt, aggregateFrame);
+        }
       } catch (e) {
         console.warn('[packets] path inference failed:', e);
       }
@@ -4256,7 +4237,9 @@
           pathHops: pathHops, observerId: effectivePkt.observer_id, packet: effectivePkt,
           entries: inferFor(effectivePkt, currentObs || pkt),
           aggregatePath: getParsedPath(pkt), aggregateObserverId: pkt.observer_id, aggregatePacket: pkt,
-          aggregateEntries: observations.length > 1 ? inferFor(pkt, pkt) : null,
+          aggregateEntries: observations.length > 1
+            ? inferFor(pkt, observations.find(o => o.path_json === pkt.path_json) || {})
+            : null,
         });
       });
     }

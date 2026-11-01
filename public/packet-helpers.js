@@ -71,10 +71,18 @@ window.getParsedDecoded = function getParsedDecoded(p) {
  * Whether THIS observation's own frame proves it received a flood, which is
  * what makes its observer evidence for the end of the path (#165/#408/#608).
  *
- * A relaying node appends its own hash before forwarding, so the last recorded
- * hop of a received flood is the relay the observer heard directly
- * (firmware Mesh::routeRecvPacket). Nothing of the sort holds otherwise:
- *   - a transport route carries next/last-hop codes, not a flood chain;
+ * A relaying node appends its OWN hash before forwarding a flood, so the last
+ * recorded hop of a received flood is the relay the observer heard directly:
+ * `firmware/src/Mesh.cpp:344-350` (`routeRecvPacket`, gated on
+ * `isRouteFlood()`). Both flood routes qualify — `firmware/src/Packet.h:64`
+ * `isRouteFlood()` covers ROUTE_TYPE_FLOOD (1) and ROUTE_TYPE_TRANSPORT_FLOOD
+ * (0, "flood mode + transport codes", `Packet.h:14`). Scoped traffic is all
+ * TRANSPORT_FLOOD, and this repo already classes 0 and 1 together
+ * (`cmd/ingestor/client_reception.go`, `cmd/server/db.go`).
+ *
+ * Nothing of the sort holds otherwise:
+ *   - a DIRECT route (2) or TRANSPORT_DIRECT (3) carries a supplied path, not
+ *     a chain the relays appended (`Packet.h:65` `isRouteDirect()`);
  *   - a TRACE's path bytes are SNR values on a PLANNED route, so its last
  *     entry is not a relay this observer heard (upstream lists TRACE support
  *     as a follow-up for the same reason);
@@ -95,8 +103,105 @@ window.observationIsRxFlood = function observationIsRxFlood(obs) {
   // take a single nibble as a byte.
   if (!/^[0-9a-f]{2}/i.test(hex)) return false;
   var header = parseInt(hex.slice(0, 2), 16);
-  if ((header & 0x03) !== 1) return false;        // FLOOD only
+  // TRANSPORT_FLOOD (0) and FLOOD (1); DIRECT (2) and TRANSPORT_DIRECT (3) not.
+  if ((header & 0x03) > 1) return false;
   return ((header >> 2) & 0x0f) !== 9;            // not a TRACE
+};
+
+/**
+ * #598 r2 F5 — install the FULL node catalogue into the shared HopResolver,
+ * once per page life.
+ *
+ * `HopResolver.ready()` is not the test for this. It only says "some nodes are
+ * indexed", and the map page used to index its own filtered list
+ * (`lastHeard=30d` plus the area filter); a packets page visited afterwards
+ * then reused that narrower index and inferred different hops than a cold
+ * packets page would. This helper keeps its own flag, so whichever page gets
+ * here first installs the same full catalogue, observers and IATA centres, and
+ * both pages feed the model the same inputs.
+ *
+ * Non-fatal on failure: hops render as unresolved prefixes and the next call
+ * retries.
+ *
+ * @returns {Promise<boolean>} true once the full catalogue is in place
+ */
+var hopCatalogueLoad = null;
+var hopCatalogueLoaded = false;
+var hopObserverList = [];
+window.ensureHopCatalogue = function ensureHopCatalogue() {
+  if (hopCatalogueLoaded) return Promise.resolve(true);
+  if (!hopCatalogueLoad) {
+    hopCatalogueLoad = Promise.all([
+      fetchAllNodes('', { ttl: 60000 }),
+      api('/observers', { ttl: 60000 }),
+      api('/iata-coords', { ttl: 300000 }).catch(function () { return { coords: {} }; }),
+    ]).then(function (res) {
+      var nodeData = res[0], obsData = res[1], coordData = res[2];
+      var obsList = obsData.observers || obsData || [];
+      window.HopResolver.init(nodeData.nodes || [], {
+        observers: obsList,
+        iataCoords: coordData.coords || {},
+      });
+      hopCatalogueLoaded = true;
+      hopObserverList = obsList;
+      return true;
+    }).catch(function (e) {
+      console.warn('[hops] catalogue init failed:', e);
+      hopCatalogueLoad = null;
+      return false;
+    });
+  }
+  return hopCatalogueLoad;
+};
+
+/** Whether the full catalogue is installed (tests and callers that must know). */
+window.hasHopCatalogue = function hasHopCatalogue() {
+  return hopCatalogueLoaded;
+};
+
+/**
+ * The observer list ensureHopCatalogue() installed, with the lat/lon
+ * /api/observers reports. Callers need it to anchor the end of a path and
+ * must not refetch it or fall back to a page-local, filtered list.
+ */
+window.hopObservers = function hopObservers() {
+  return hopObserverList;
+};
+
+/**
+ * #598 r2 F5 — where the sender of this packet is, or null.
+ *
+ * The packet detail pane and the map route view must anchor hop 0 on the same
+ * point. The pane resolved the sender through `/api/nodes/{key}` and a name
+ * search; the map read `decoded.lat` only, so a GRP_TXT or TXT_MSG packet (no
+ * GPS in the payload) got an anchor in one view and none in the other. One
+ * implementation now serves both.
+ *
+ * @param {Object} decoded - the observation's decoded_json
+ * @returns {Promise<{lat,lon}|null>}
+ */
+window.senderPosition = function senderPosition(decoded) {
+  var d = decoded || {};
+  var lat = d.lat != null ? d.lat : (d.latitude != null ? d.latitude : null);
+  var lon = d.lon != null ? d.lon : (d.longitude != null ? d.longitude : null);
+  if (lat != null && lon != null) return Promise.resolve({ lat: lat, lon: lon });
+
+  var key = d.pubKey || d.srcPubKey;
+  var name = d.sender || d.name;
+  var byKey = key
+    ? api('/nodes/' + key, { ttl: 30000 }).catch(function () { return null; })
+    : Promise.resolve(null);
+  return byKey.then(function (nd) {
+    var n = nd && nd.node;
+    if (n && n.lat && n.lon) return { lat: n.lat, lon: n.lon };
+    if (!name) return null;
+    return api('/nodes/search?q=' + encodeURIComponent(name), { ttl: 30000 })
+      .catch(function () { return null; })
+      .then(function (sd) {
+        var m = sd && sd.nodes && sd.nodes[0];
+        return m && m.lat && m.lon ? { lat: m.lat, lon: m.lon } : null;
+      });
+  }).catch(function () { return null; });
 };
 
 /**
@@ -153,7 +258,9 @@ window.ensureHopAffinity = function ensureHopAffinity() {
     hopAffinityRequestedAt = Date.now();
     hopAffinityLoad = api('/analytics/neighbor-graph', { ttl: HOP_AFFINITY_TTL_MS })
       .then(function (graph) {
-        window.HopResolver.setAffinity(graph);
+        // #598 r2 F6 — inferPath()'s own graph, so opening a packet detail
+        // cannot change what resolve() answers in the list, Live or node pages.
+        window.HopResolver.setPathAffinity(graph);
         hopAffinityLoaded = true;
         return true;
       })

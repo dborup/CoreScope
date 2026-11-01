@@ -20,7 +20,13 @@ window.HopResolver = (function() {
   let nodesList = [];
   let observerIataMap = {}; // observer_id → iata
   let iataCoords = {};  // iata → {lat, lon}
-  let affinityMap = {}; // pubkey → { neighborPubkey → score }
+  let affinityMap = {}; // pubkey → { neighborPubkey → score } — resolve() only
+  // #598 r2 F6 — inferPath()'s own neighbour graph. The packet detail pane
+  // loads a graph (packet-helpers.js ensureHopAffinity), and that used to be
+  // the app's FIRST setAffinity() call: opening one packet detail switched
+  // live.js's resolve() from geographic picks to graph-based ones for the rest
+  // of the session. Separate maps keep each consumer's behaviour its own.
+  let pathAffinityMap = {};
 
   function dist(lat1, lon1, lat2, lon2) {
     return Math.sqrt((lat1 - lat2) ** 2 + (lon1 - lon2) ** 2);
@@ -397,13 +403,19 @@ window.HopResolver = (function() {
     const lim = gap * PATH_MODEL.maxHopKm;
     let geo = d <= lim ? d / PATH_MODEL.typicalHopKm
       : (lim + 4 * (d - lim)) / PATH_MODEL.typicalHopKm;
-    if (gap === 1 && a.pubkey && b.pubkey && getAffinity(a.pubkey, b.pubkey) > 0) geo *= PATH_MODEL.linkFactor;
+    if (gap === 1 && a.pubkey && b.pubkey && getPathAffinity(a.pubkey, b.pubkey) > 0) geo *= PATH_MODEL.linkFactor;
     return c + geo;
   }
 
   // steps[p][g][j * |C[p+g]| + l] = cost from candidate j at hop p to
-  // candidate l at hop p+g. Infinity for the same node twice. Computed once,
-  // shared by every solve and the confidence pass.
+  // candidate l at hop p+g. Computed once, shared by every solve and by the
+  // confidence pass.
+  //
+  // #598 r2 — this used to force Infinity for the same node at both ends,
+  // which only covered pairs inside the comparison window and so could not be
+  // the mechanism that keeps a node to one position. It also masked single-
+  // point mutants on the ban loop, which IS that mechanism. One place now
+  // enforces the rule: dedupe() below, which runs to convergence.
   function buildSteps(C) {
     const L = C.length;
     const steps = [];
@@ -413,7 +425,7 @@ window.HopResolver = (function() {
         const A = C[p], Bq = C[p + g], row = new Float64Array(A.length * Bq.length);
         for (let j = 0; j < A.length; j++) {
           for (let l = 0; l < Bq.length; l++) {
-            row[j * Bq.length + l] = A[j].pubkey === Bq[l].pubkey ? Infinity : spanCost(A[j], Bq[l], g);
+            row[j * Bq.length + l] = spanCost(A[j], Bq[l], g);
           }
         }
         steps[p].push(row);
@@ -576,33 +588,91 @@ window.HopResolver = (function() {
       unplaced.push(nodes.filter(n => !isLocated(n)));
     }
 
-    // Keep each node to one position: when the best path uses a node twice,
-    // ban it from whichever of the two positions costs less to give up.
-    const bans = C.map(() => null);
-    const banned = (i, pubkey) => bans.map((s, j) => j === i ? new Set([...(s || []), pubkey]) : s);
-    const steps = buildSteps(C);
-    let sol = solvePath(C, steps, start, end, bans);
-    for (let guard = 0; guard < L; guard++) {
-      const seenAt = new Map();
-      let dup = null;
-      for (let i = 0; i < L && !dup; i++) {
-        if (sol.assign[i] < 0) continue;
-        const key = C[i][sol.assign[i]].pubkey;
-        if (seenAt.has(key)) dup = [seenAt.get(key), i, key];
-        else seenAt.set(key, i);
+    // #598 r2 F3 — the ingestor's answer belongs to the position it was given
+    // for. Ban every hinted pubkey everywhere else BEFORE solving, so an
+    // unresolved hop cannot take a node another hop has been told it is: that
+    // showed the node twice and demoted the authoritative answer to
+    // "unreliable". Kept separate from the dedup bans below, because a node the
+    // ingestor placed elsewhere is no alternative for this hop at all, while a
+    // node the model itself placed elsewhere is one it weighed and rejected
+    // (and is reported with `usedAt`).
+    const hintBans = C.map(() => null);
+    hints.forEach((n, i) => {
+      if (!n) return;
+      for (let j = 0; j < L; j++) {
+        if (j === i) continue;
+        if (!hintBans[j]) hintBans[j] = new Set();
+        hintBans[j].add(n.public_key);
       }
-      if (!dup) break;
-      const banFirst = banned(dup[0], dup[2]), banSecond = banned(dup[1], dup[2]);
-      const s1 = solvePath(C, steps, start, end, banFirst), s2 = solvePath(C, steps, start, end, banSecond);
-      const firstWins = s1.total <= s2.total;
-      bans.splice(0, L, ...(firstWins ? banFirst : banSecond));
-      sol = firstWins ? s1 : s2;
-    }
+    });
+    const bans = hintBans.map(b => (b ? new Set(b) : null));
+    const addBan = (i, pubkey) => {
+      if (!bans[i]) bans[i] = new Set();
+      bans[i].add(pubkey);
+    };
 
-    // For confidence, a node the path uses at one hop is no alternative at
-    // another. The best path stays feasible, so the assignment is unchanged.
+    const steps = buildSteps(C);
+
+    // Keep each node to one position (a node forwards a given packet once —
+    // see the firmware note above). The solver has no such constraint, so the
+    // duplicates it produces are removed here, and the loop runs to
+    // CONVERGENCE: stopping after a fixed number of rounds left duplicates in
+    // the output (#598 r2 F4 measured 7 of them on a 63-hop path with 8
+    // distinct prefixes). This is the ONE place the rule is enforced.
+    //
+    // Each round bans every repeated node at all but its best-fitting
+    // position, judged by that position's min-marginal cost F+B from the solve
+    // we already have, and then solves once more. Bans only ever accumulate,
+    // and each round adds at least one, so the rounds are bounded by the total
+    // number of candidate placements; past that every candidate is banned
+    // everywhere and the assignment is empty. Handling all duplicates per
+    // round rather than one keeps a pathological path affordable: 63 hops that
+    // all share one prefix went from 377 ms to 19 ms.
+    function duplicates(assign) {
+      const at = new Map();
+      for (let i = 0; i < L; i++) {
+        if (assign[i] < 0) continue;
+        const key = C[i][assign[i]].pubkey;
+        if (!at.has(key)) at.set(key, []);
+        at.get(key).push(i);
+      }
+      const out = [];
+      for (const [key, positions] of at) if (positions.length > 1) out.push([key, positions]);
+      return out;
+    }
+    const placements = C.reduce((n, c) => n + c.length, 0);
+    let sol = solvePath(C, steps, start, end, bans);
+    for (let round = 0; round <= placements; round++) {
+      const dups = duplicates(sol.assign);
+      if (!dups.length) break;
+      for (const [key, positions] of dups) {
+        // Keep it where it fits best; give it up everywhere else. A duplicated
+        // node is at both ends of the SAME path, so its min-marginal is often
+        // identical at every position it occupies — `<=` then keeps the LATEST
+        // one, which is the firmware-grounded tie-break: the last hop of a
+        // flood is the relay the observer heard directly
+        // (firmware/src/Mesh.cpp:344-350), so the later position is the one
+        // backed by evidence. Picking the earliest put a node that sits on the
+        // observer at hop 0 and left the hop it actually relayed unlisted.
+        let best = positions[0];
+        let bestCost = sol.F[best][sol.assign[best]] + sol.B[best][sol.assign[best]];
+        for (const i of positions.slice(1)) {
+          const c = sol.F[i][sol.assign[i]] + sol.B[i][sol.assign[i]];
+          if (c <= bestCost) { bestCost = c; best = i; }
+        }
+        for (const i of positions) if (i !== best) addBan(i, key);
+      }
+      sol = solvePath(C, steps, start, end, bans);
+    }
+    // This assignment is the answer. Nothing below may change it.
+    const assign = sol.assign;
+
+    // For confidence only: a node the path uses at one hop is no alternative at
+    // another, so its cost there must not count as a rival. This re-solve
+    // supplies the forward/backward marginals the softmax needs; the
+    // assignment above stands, which is what keeps the invariant intact.
     const usedAt = new Map();
-    sol.assign.forEach((k, i) => { if (k >= 0) usedAt.set(C[i][k].pubkey, i); });
+    assign.forEach((k, i) => { if (k >= 0) usedAt.set(C[i][k].pubkey, i); });
     const confidenceBans = C.map((c, i) => {
       const s = new Set(bans[i] || []);
       for (const pt of c) {
@@ -611,11 +681,14 @@ window.HopResolver = (function() {
       }
       return s.size ? s : null;
     });
-    sol = solvePath(C, steps, start, end, confidenceBans);
-    const mu = unlistedMarginals(C, steps, start, end, sol.F, sol.B);
+    const marginals = solvePath(C, steps, start, end, confidenceBans);
+    const mu = unlistedMarginals(C, steps, start, end, marginals.F, marginals.B);
     const T = PATH_MODEL.temperature;
+    // A node the ingestor placed at another hop is not an alternative here, so
+    // it is not listed and does not make this hop ambiguous.
+    const offered = C.map((c, i) => (hintBans[i] ? c.filter(pt => !hintBans[i].has(pt.pubkey)) : c));
     return hops.map((hop, i) => {
-      const costs = Array.from(C[i], (_, k) => sol.F[i][k] + sol.B[i][k]);
+      const costs = Array.from(C[i], (_, k) => marginals.F[i][k] + marginals.B[i][k]);
       const lowest = Math.min(mu[i], ...costs);
       const weights = costs.map(c => c === Infinity ? 0 : Math.exp(-(c - lowest) / T));
       const wUnlisted = mu[i] === Infinity ? 0 : Math.exp(-(mu[i] - lowest) / T);
@@ -627,16 +700,17 @@ window.HopResolver = (function() {
         const j = usedAt.get(pt.pubkey);
         if (j !== undefined && j !== i) c.usedAt = j; // the path has it at hop j
         return c;
-      }).sort((a, b) => b.confidence - a.confidence);
+      }).filter(c => !(hintBans[i] && hintBans[i].has(c.pubkey)))
+        .sort((a, b) => b.confidence - a.confidence);
       for (const n of unplaced[i]) {
         candidates.push({ name: n.name, pubkey: n.public_key, lat: null, lon: null, located: false, confidence: null });
       }
 
-      const k = sol.assign[i];
+      const k = assign[i];
       const entry = {
         hop: hop, name: null, pubkey: null, lat: null, lon: null,
         located: false, unlisted: k < 0, unreliable: false,
-        ambiguous: C[i].length > 1,
+        ambiguous: offered[i].length > 1,
         confidence: k < 0 ? wUnlisted / sum : weights[k] / sum,
         candidates: candidates, conflicts: candidates,
       };
@@ -654,15 +728,17 @@ window.HopResolver = (function() {
         }
       } else if (hints[i]) {
         // The ingestor resolved this hop, so its answer is still what the hop
-        // is called — but the node does not fit where the hop sits, so it is
-        // flagged rather than drawn. Upstream drops the name entirely; this
-        // fork keeps it, because the ingestor stays authoritative (#1283) and
-        // because #165 already has a warning for exactly this: a hash to name
-        // match that is geographically inconsistent with the path around it.
+        // is called. Upstream drops the name entirely; this fork keeps it,
+        // because the ingestor stays authoritative (#1283).
         entry.name = hints[i].name;
         entry.pubkey = hints[i].public_key;
-        entry.unreliable = true;
-      } else if (C[i].length) {
+        // #598 r2 F2 — flag it only when it is a LOCATED node that does not
+        // fit where the hop sits, which is what #165's warning means ("a hash
+        // to name match that is geographically inconsistent with the path
+        // around it"). A node with no coordinates was never checked against
+        // anything, so it reads "(no GPS)" instead.
+        entry.unreliable = isLocated(hints[i]);
+      } else if (offered[i].length) {
         // Located nodes share this prefix, but none fits where the hop is.
         entry.unreliable = true;
       } else if (unplaced[i].length === 1) {
@@ -686,14 +762,29 @@ window.HopResolver = (function() {
    * @param {Object} graph - { edges: [{source, target, score, weight}, ...] }
    */
   function setAffinity(graph) {
-    affinityMap = {};
-    if (!graph || !graph.edges) return;
+    affinityMap = buildAffinity(graph);
+  }
+
+  /**
+   * Load neighbor-graph affinity data for inferPath() ONLY (#598 r2 F6).
+   * Kept apart from setAffinity() so the packet detail pane cannot change what
+   * resolve() answers for the packets list, the live view or node pages.
+   */
+  function setPathAffinity(graph) {
+    pathAffinityMap = buildAffinity(graph);
+  }
+
+  function buildAffinity(graph) {
+    const map = {};
+    if (!graph || !graph.edges) return map;
     for (const e of graph.edges) {
-      if (!affinityMap[e.source]) affinityMap[e.source] = {};
-      affinityMap[e.source][e.target] = e.score || e.weight || 1;
-      if (!affinityMap[e.target]) affinityMap[e.target] = {};
-      affinityMap[e.target][e.source] = e.score || e.weight || 1;
+      const w = e.score || e.weight || 1;
+      if (!map[e.source]) map[e.source] = {};
+      map[e.source][e.target] = w;
+      if (!map[e.target]) map[e.target] = {};
+      map[e.target][e.source] = w;
     }
+    return map;
   }
 
   /**
@@ -702,6 +793,12 @@ window.HopResolver = (function() {
   function getAffinity(pubkeyA, pubkeyB) {
     if (!pubkeyA || !pubkeyB || !affinityMap[pubkeyA]) return 0;
     return affinityMap[pubkeyA][pubkeyB] || 0;
+  }
+
+  /** The inferPath() graph's score between two pubkeys (0 if not neighbors). */
+  function getPathAffinity(pubkeyA, pubkeyB) {
+    if (!pubkeyA || !pubkeyB || !pathAffinityMap[pubkeyA]) return 0;
+    return pathAffinityMap[pubkeyA][pubkeyB] || 0;
   }
 
   /**
@@ -744,5 +841,5 @@ window.HopResolver = (function() {
     return n && n.name ? n.name : null;
   }
 
-  return { init: init, resolve: resolve, inferPath: inferPath, LIKELY_CONFIDENCE: LIKELY_CONFIDENCE, resolveFromServer: resolveFromServer, serverHopEntry: serverHopEntry, ready: ready, haversineKm: haversineKm, setAffinity: setAffinity, getAffinity: getAffinity, nameForKey: nameForKey };
+  return { init: init, resolve: resolve, inferPath: inferPath, LIKELY_CONFIDENCE: LIKELY_CONFIDENCE, resolveFromServer: resolveFromServer, serverHopEntry: serverHopEntry, ready: ready, haversineKm: haversineKm, setAffinity: setAffinity, getAffinity: getAffinity, setPathAffinity: setPathAffinity, getPathAffinity: getPathAffinity, nameForKey: nameForKey };
 })();

@@ -73,7 +73,7 @@ console.log('\n=== #598 A: a prefix repeated in one path resolves per position =
   const far = node(key('a0f'), 'A0-FAR', 200);
   const b1 = node(key('b1'), 'B1-MID', 0);
   HopResolver.init([mid, far, b1]);
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
   const out = HopResolver.inferPath(['a0', 'b1', 'a0'], { observer: at(0), origin: at(0) });
 
   assert(out.length === 3, 'one entry per hop');
@@ -97,13 +97,36 @@ console.log('\n=== #598 A: a prefix repeated in one path resolves per position =
   // is what keeps the node to one position here.
   const only = node(key('a0'), 'A0-ONLY', 0);
   HopResolver.init([only]);
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
   const hops = ['a0', 'f1', 'f2', 'f3', 'f4', 'f5', 'f6', 'f7', 'f8', 'f9', 'a0'];
   const out = HopResolver.inferPath(hops, { observer: at(0), origin: at(0) });
   const placed = out.filter(e => e.pubkey === only.public_key);
   assert(placed.length === 1,
     'across a gap of 10 positions the single candidate is still placed once, not twice (got ' + placed.length + ')');
   assert(out[0].unlisted !== out[10].unlisted, 'exactly one of the two ends is left unlisted');
+}
+
+{
+  // #598 r2 — when a duplicated node fits both positions equally (its
+  // min-marginal is the cost of the same path either way), the LATER position
+  // wins. The last hop of a flood is the relay the observer heard directly
+  // (firmware/src/Mesh.cpp:344-350), so that is the position evidence supports.
+  // Round 1 left this as an arbitrary tie; it resolved to hop 0, which put a
+  // node sitting on the observer at the start of the path.
+  const onObserver = node(key('a0'), 'A0-AT-OBSERVER', 90);
+  const mid = node(key('b1'), 'B1-MID', 45);
+  HopResolver.init([onObserver, mid]);
+  HopResolver.setPathAffinity({});
+
+  const out = HopResolver.inferPath(['a0', 'b1', 'a0'], { observer: at(90) });
+  assert(out[2].name === 'A0-AT-OBSERVER',
+    'the repeated node stays at the hop nearest the observer that heard it (got ' +
+    JSON.stringify(out.map(e => e.located ? e.name : '(' + e.hop + ')')) + ')');
+  assert(out[0].unlisted === true, 'and the earlier position is the one reported unlisted');
+
+  const two = HopResolver.inferPath(['a0', 'a0'], { observer: at(90) });
+  assert(two[1].name === 'A0-AT-OBSERVER' && two[0].unlisted === true,
+    'the same on a two-hop path (got ' + JSON.stringify(two.map(e => e.located ? e.name : '(' + e.hop + ')')) + ')');
 }
 
 console.log('\n=== #598 B: an implausible jump is not drawn ===');
@@ -115,7 +138,7 @@ console.log('\n=== #598 B: an implausible jump is not drawn ===');
   const zz = node(key('cc'), 'CC-FARAWAY', 400);
   const b2 = node(key('b2'), 'B2', 60);
   HopResolver.init([b1, zz, b2]);
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
   const out = HopResolver.inferPath(['b1', 'cc', 'b2'], { observer: at(90), origin: at(0) });
 
   assert(out[1].unlisted === true, 'a candidate 400 km off the path is reported unlisted');
@@ -140,7 +163,7 @@ console.log('\n=== #598 C: the observer anchors the last hop ===');
   const far = node(key('a0f'), 'A0-FAR-OBS', 30);
   const b1 = node(key('b1'), 'B1-MID', 60);
   HopResolver.init([near, far, b1]);
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
 
   const unanchored = HopResolver.inferPath(['b1', 'a0'], {});
   assert(unanchored[1].name === 'A0-FAR-OBS',
@@ -178,7 +201,7 @@ console.log('\n=== #598 D: the sender anchors the first hop ===');
   // A0-FAR-SENDER is indexed first, so without the origin anchor this
   // single-hop path has nothing to separate them and would answer FAR.
   HopResolver.init([farOrigin, nearOrigin]);
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
   assert(HopResolver.inferPath(['a0'], {})[0].name === 'A0-FAR-SENDER',
     'fixture: with no anchor this hop answers A0-FAR-SENDER');
   const out = HopResolver.inferPath(['a0'], { origin: at(0) });
@@ -192,7 +215,7 @@ console.log('\n=== #598 E: unlisted hops are named honestly ===');
   const b1 = node(key('b1'), 'B1', 0);
   const b2 = node(key('b2'), 'B2', 30);
   HopResolver.init([b1, b2]);
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
   const out = HopResolver.inferPath(['b1', 'ff', 'b2'], { observer: at(60) });
   assert(out[1].unlisted === true, 'a prefix no known node has is unlisted');
   assert(out[1].unreliable === false,
@@ -207,7 +230,7 @@ console.log('\n=== #598 E: unlisted hops are named honestly ===');
   const noGps = node(key('c7'), 'C7-NO-GPS', null);
   const b1 = node(key('b1'), 'B1', 0);
   HopResolver.init([noGps, b1]);
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
   const out = HopResolver.inferPath(['b1', 'c7'], { observer: at(30) });
   assert(out[1].name === 'C7-NO-GPS', 'the only known node with the prefix is named even without GPS');
   assert(out[1].pubkey === noGps.public_key, 'and links to that node');
@@ -217,6 +240,9 @@ console.log('\n=== #598 E: unlisted hops are named honestly ===');
 }
 
 console.log('\n=== #598 F: a neighbour-graph link breaks a tie ===');
+// #598 r2 F6 — the model reads its OWN graph (setPathAffinity), not the one
+// live.js installs with setAffinity(), so a packet detail cannot change what
+// resolve() answers elsewhere.
 
 {
   // Two "a0" candidates placed symmetrically about the corridor, so geography
@@ -226,18 +252,18 @@ console.log('\n=== #598 F: a neighbour-graph link breaks a tie ===');
   const b1 = node(key('b1'), 'B1', 0);
   HopResolver.init([east, west, b1]);
 
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
   const tied = HopResolver.inferPath(['b1', 'a0'], { observer: at(0) });
   assert(Math.abs(tied[0].confidence - 1) < 1e-9 || true, 'fixture: the two candidates are a tie');
   assert(tied[1].confidence < 0.6, 'fixture check: with no graph the tie leaves low confidence (' + tied[1].confidence.toFixed(3) + ')');
 
-  HopResolver.setAffinity({ edges: [{ source: b1.public_key, target: west.public_key, score: 0.9 }] });
+  HopResolver.setPathAffinity({ edges: [{ source: b1.public_key, target: west.public_key, score: 0.9 }] });
   const linked = HopResolver.inferPath(['b1', 'a0'], { observer: at(0) });
   assert(linked[1].name === 'A0-WEST',
     'the candidate with a neighbour-graph link to the adjacent hop wins the tie (got ' + linked[1].name + ')');
   assert(linked[1].confidence > tied[1].confidence,
     'and the link raises that hop\'s confidence (' + tied[1].confidence.toFixed(3) + ' -> ' + linked[1].confidence.toFixed(3) + ')');
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
 }
 
 console.log('\n=== #598 G: the server hint restricts a hop, but cannot force a bad fit ===');
@@ -250,7 +276,7 @@ console.log('\n=== #598 G: the server hint restricts a hop, but cannot force a b
   const other = node(key('b1'), 'B1-DEFAULT', 0);
   const b2 = node(key('b2'), 'B2', 60);
   HopResolver.init([hinted, other, b2]);
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
 
   const withHint = HopResolver.inferPath(['b1', 'b2'], {
     observer: at(90), resolvedPath: [hinted.public_key, null],
@@ -302,6 +328,44 @@ console.log('\n=== #598 G: the server hint restricts a hop, but cannot force a b
   assert(misaligned[0].name !== 'B1-HINTED', 'a resolved_path of the wrong length is ignored');
 }
 
+console.log('\n=== #598 r2 F3: the ingestor\'s node belongs to the hop it was given for ===');
+
+{
+  // "aa" at hop 0 and hop 2, both well placed; the ingestor names X at hop 2.
+  // Before the fix X stayed a candidate at hop 0, the solver took it there
+  // (91% "likely"), and the position the ingestor had actually answered was
+  // flagged unreliable — the node shown twice, and the authoritative answer
+  // demoted. The hinted pubkey is now banned everywhere else before solving.
+  const X = node('aa1', 'INGESTOR-SAYS', 60);
+  const other = node('aa2', 'OTHER-AA', 0);
+  const mid = node('bb', 'MIDDLE-BB', 30);
+  HopResolver.init([X, other, mid]);
+  HopResolver.setPathAffinity({});
+
+  const out = HopResolver.inferPath(['aa', 'bb', 'aa'], {
+    observer: at(90), origin: at(0), resolvedPath: [null, null, X.public_key],
+  });
+  assert(out[2].pubkey === X.public_key && out[2].canonical === true,
+    'the hop the ingestor answered keeps its node (got ' + out[2].name + ', canonical=' + out[2].canonical + ')');
+  assert(out[2].unreliable === false, 'and is not flagged');
+  assert(out[0].pubkey !== X.public_key,
+    'the unresolved hop cannot take the ingestor\'s node (got ' + out[0].name + ')');
+  const placed = out.filter(e => e.located).map(e => e.pubkey);
+  assert(new Set(placed).size === placed.length,
+    'and no node is placed twice: ' + JSON.stringify(out.map(e => e.name)));
+  assert(!(out[0].candidates || []).some(c => c.pubkey === X.public_key),
+    'the hinted node is not even offered as a candidate at another position');
+
+  // The ban is per position, not global: a hint at hop 0 leaves hop 2 free to
+  // take the other node with that prefix.
+  const flipped = HopResolver.inferPath(['aa', 'bb', 'aa'], {
+    observer: at(90), origin: at(0), resolvedPath: [X.public_key, null, null],
+  });
+  assert(flipped[0].pubkey === X.public_key && flipped[0].canonical === true,
+    'the hint applies at the position it was given for (got ' + flipped[0].name + ')');
+  assert(flipped[2].pubkey !== X.public_key, 'and nowhere else');
+}
+
 console.log('\n=== #598 H: output shape, and display-only ===');
 
 {
@@ -310,7 +374,7 @@ console.log('\n=== #598 H: output shape, and display-only ===');
   const c = node(key('a0c'), 'A0-C', null);
   const mid = node(key('b1'), 'B1', 15);
   HopResolver.init([a, b, c, mid]);
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
 
   const hops = ['a0', 'b1', 'a0'];
   const frozen = hops.slice();
@@ -352,7 +416,7 @@ console.log('\n=== #598 I: confidence separates an answer from a guess ===');
   const only = node(key('a0'), 'A0-ONLY', 30);
   const b1 = node(key('b1'), 'B1', 0);
   HopResolver.init([only, b1]);
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
   const sure = HopResolver.inferPath(['b1', 'a0'], { observer: at(30), origin: at(0) });
   assert(sure[1].confidence >= HopResolver.LIKELY_CONFIDENCE,
     'a sole well-placed candidate is an answer, not a guess (' + sure[1].confidence.toFixed(3) + ')');
@@ -383,7 +447,7 @@ console.log('\n=== #598 L: the real fixture paths, before and after ===');
   const fx = JSON.parse(fs.readFileSync(path.join(REPO, 'test-fixtures', 'hop-path-598.json'), 'utf8'));
   const byKey = new Map(fx.nodes.map(n => [String(n.public_key).toLowerCase(), n]));
   HopResolver.init(fx.nodes, { observers: fx.observers, iataCoords: {} });
-  HopResolver.setAffinity({});
+  HopResolver.setPathAffinity({});
 
   const isLoc = n => n && n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
   const guesses = new Map();
@@ -458,6 +522,7 @@ console.log('\n=== #598 L: the real fixture paths, before and after ===');
     'no inferred path places a node twice across all five (today: ' + reuseToday + ')');
 }
 
+console.log('\n=== #598 M: no node is placed twice, on every performance input ===');
 console.log('\n=== #598 J: performance on 40-60-hop paths ===');
 
 // The model runs once per detail render, once more for the aggregate row and
@@ -497,7 +562,7 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
     });
   }
   Fast.init(catalogue);
-  Fast.setAffinity({});
+  Fast.setPathAffinity({});
   const realHops = [];
   for (let i = 0; i < 48; i++) realHops.push(catalogue[(i * 37) % 1200].public_key.slice(0, 2));
   const realTimes = [];
@@ -522,7 +587,7 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
     }
   }
   Fast.init(worst);
-  Fast.setAffinity({});
+  Fast.setPathAffinity({});
   const worstHops = [];
   for (let i = 0; i < 64; i++) worstHops.push((i % 16).toString(16) + '0');
   const worstTimes = [];
@@ -546,7 +611,7 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
     });
   }
   Fast.init(big);
-  Fast.setAffinity({});
+  Fast.setPathAffinity({});
   const bigHops = realHops.slice();
   const bigTimes = [];
   for (let r = 0; r < 15; r++) {
@@ -566,7 +631,7 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
   // costs the duplicate pass another pair of solves — so a few distinct
   // prefixes is worse than many.
   Fast.init(worst);
-  Fast.setAffinity({});
+  Fast.setPathAffinity({});
   function timeHops(n, distinct) {
     const hs = [];
     for (let i = 0; i < n; i++) hs.push((i % distinct).toString(16) + '0');
@@ -578,16 +643,26 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
     }
     return median(ts);
   }
-  const wireMax = timeHops(63, 8);
-  console.log('    63 hops (wire maximum) x 16 candidates, 8 distinct prefixes: median ' +
-    wireMax.toFixed(1) + ' ms');
+  // #598 r2 F4 — swept over 1..16 distinct prefixes at 63 hops; the worst
+  // median is taken, so the gate cannot be satisfied by a lucky shape. Before
+  // the dedup loop ran to convergence the 63×8 case measured 45 ms, but it
+  // left 7 duplicate nodes in the output; converging and batching the bans is
+  // both correct and faster.
+  let wireMax = 0, wireMaxAt = 0;
+  for (const distinct of [1, 2, 3, 4, 6, 8, 12, 16]) {
+    const v = timeHops(63, distinct);
+    if (v > wireMax) { wireMax = v; wireMaxAt = distinct; }
+  }
+  console.log('    63 hops (wire maximum) x 16 candidates, worst of 1-16 distinct prefixes: median ' +
+    wireMax.toFixed(1) + ' ms (at ' + wireMaxAt + ' distinct)');
   assert(wireMax < 120,
-    'the heaviest path a frame can carry infers in under 120 ms (median ' + wireMax.toFixed(1) + ' ms)');
+    'the heaviest path a frame can carry infers in under 120 ms (median ' + wireMax.toFixed(1) +
+    ' ms at ' + wireMaxAt + ' distinct prefixes)');
 
   // And on a realistic catalogue, where a 1-byte prefix is shared by four or
   // five nodes rather than sixteen, the same ceiling is cheap.
   Fast.init(catalogue);
-  Fast.setAffinity({});
+  Fast.setPathAffinity({});
   const realCeiling = [];
   for (let i = 0; i < 63; i++) realCeiling.push(catalogue[(i % 12) * 97].public_key.slice(0, 2));
   const realTimes2 = [];
@@ -601,6 +676,98 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
   assert(realCeilMed < 40,
     'the wire maximum over a realistic catalogue infers in under 40 ms (median ' +
     realCeilMed.toFixed(1) + ' ms)');
+}
+
+// #598 r2 F4 — the one-node-one-position invariant has to hold on exactly the
+// inputs the perf gates use, not only on the hand-built fixtures above. A
+// looping flood that repeats its 1-byte prefixes is the real trigger: the ban
+// loop used to stop after L iterations whether or not duplicates remained, and
+// the confidence pass then re-solved and could reintroduce them.
+{
+  const dupCases = [];
+  function noDuplicates(label, entries) {
+    const placed = entries.filter(e => e.located).map(e => e.pubkey);
+    const seen = new Set(), dup = new Set();
+    for (const k of placed) { if (seen.has(k)) dup.add(k); else seen.add(k); }
+    dupCases.push([label, dup.size, placed.length]);
+    assert(dup.size === 0,
+      label + ': ' + dup.size + ' node(s) placed at more than one position (of ' +
+      placed.length + ' placed hops)');
+  }
+
+  const code2 = fs.readFileSync(path.join(REPO, 'public', 'hop-resolver.js'), 'utf8');
+  const realm2 = {};
+  new Function('window', 'console', code2)(realm2, { debug: () => {} });
+  const R = realm2.HopResolver;
+
+  function spread(i, salt) {
+    let h = (i * 2654435761 + salt) >>> 0;
+    let out = '';
+    for (let w = 0; w < 8; w++) { out += (h >>> 0).toString(16).padStart(8, '0'); h = (h * 1664525 + 1013904223) >>> 0; }
+    return out.slice(0, 64);
+  }
+  const cat = [];
+  for (let i = 0; i < 1200; i++) {
+    cat.push({ public_key: spread(i, 11), name: 'N' + i, role: 'repeater',
+      lat: 50 + (i % 60) * 0.038, lon: 5 + Math.floor(i / 60) * 0.06 });
+  }
+  const dense = [];
+  for (let h = 0; h < 16; h++) {
+    for (let c = 0; c < 16; c++) {
+      dense.push({ public_key: (h.toString(16) + '0' + c.toString(16)).padEnd(64, 'a'),
+        name: 'W' + h + '-' + c, role: 'repeater', lat: 50 + h * 0.2 + c * 0.01, lon: 5 + c * 0.02 });
+    }
+  }
+
+  R.init(cat); R.setPathAffinity({});
+  const hops48 = [];
+  for (let i = 0; i < 48; i++) hops48.push(cat[(i * 37) % 1200].public_key.slice(0, 2));
+  noDuplicates('48 hops over 1,200 nodes',
+    R.inferPath(hops48, { observer: { lat: 51.1, lon: 5.6 }, origin: { lat: 50.1, lon: 5.1 } }));
+
+  const ceiling = [];
+  for (let i = 0; i < 63; i++) ceiling.push(cat[(i % 12) * 97].public_key.slice(0, 2));
+  noDuplicates('63 hops over 1,200 nodes, 12 distinct prefixes',
+    R.inferPath(ceiling, { observer: { lat: 51.1, lon: 5.6 }, origin: { lat: 50.1, lon: 5.1 } }));
+
+  R.init(dense); R.setPathAffinity({});
+  for (const [n, distinct] of [[64, 16], [63, 8], [63, 6], [63, 4], [48, 6]]) {
+    const hs = [];
+    for (let i = 0; i < n; i++) hs.push((i % distinct).toString(16) + '0');
+    noDuplicates(n + ' hops x 16 candidates, ' + distinct + ' distinct prefixes',
+      R.inferPath(hs, { observer: { lat: 53, lon: 5.3 }, origin: { lat: 50, lon: 5 } }));
+  }
+
+  const big = [];
+  for (let i = 0; i < 4800; i++) {
+    big.push({ public_key: spread(i, 29), name: 'B' + i, role: 'repeater',
+      lat: 50 + (i % 60) * 0.038, lon: 5 + Math.floor(i / 60) * 0.015 });
+  }
+  R.init(big); R.setPathAffinity({});
+  noDuplicates('48 hops over 4,800 nodes',
+    R.inferPath(hops48, { observer: { lat: 51.1, lon: 5.6 } }));
+
+  dupCases.forEach(([label, dup, placed]) =>
+    console.log('    ' + label + ': ' + placed + ' placed, ' + dup + ' duplicated'));
+
+  // #598 r2 F4 — the marginals solve must not decide the answer. It runs under
+  // a SUPERSET of the dedup bans, so the deduplicated assignment is still
+  // feasible under it and therefore still optimal; the two can only differ by
+  // picking different optima of equal cost (400 randomised inputs found no
+  // such case). That makes the separation a structural guarantee rather than
+  // something a behavioural test can catch, so it is pinned structurally: the
+  // entry build reads the deduplicated `assign`, and the marginals solve is
+  // used for F/B only.
+  const rs = fs.readFileSync(path.join(REPO, 'public', 'hop-resolver.js'), 'utf8');
+  const body = rs.slice(rs.indexOf('function inferPath('), rs.indexOf('\n  /**\n   * Check if the resolver'));
+  assert(/\/\/ This assignment is the answer\. Nothing below may change it\.\s*\n\s*const assign = sol\.assign;/.test(body),
+    'the deduplicated assignment is captured and marked as final');
+  assert(/const k = assign\[i\];/.test(body), 'the chosen node at each hop comes from it');
+  assert(!/marginals\.assign/.test(body), 'the marginals solve never supplies an assignment');
+  assert(/marginals\.F\[i\]\[k\] \+ marginals\.B\[i\]\[k\]/.test(body),
+    'and is used for the forward/backward marginals the softmax needs');
+  assert(!/sol\.assign/.test(body.slice(body.indexOf('const assign = sol.assign;') + 26)),
+    'nothing after it reads the solver state again');
 }
 
 console.log('\n=== #598 K: no per-hop network calls, and no O(n) scan per hop ===');

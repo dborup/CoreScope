@@ -8,8 +8,15 @@ window.HopDisplay = (function() {
   }
 
   // #598 — an inferred hop below this confidence is shown as a guess: dashed
-  // underline and a badge to its candidates. Mirrors HopResolver's own value.
-  const LIKELY = 0.7;
+  // underline and a badge to its candidates. #598 r2 nit 8 — read from
+  // HopResolver, which computes the confidence this is compared against, so
+  // there is one threshold and it cannot drift. Resolved at call time:
+  // index.html loads hop-resolver.js first, but a caller that renders before
+  // it exists should get no threshold rather than a stale copy of one.
+  function LIKELY() {
+    if (typeof window === 'undefined' || !window.HopResolver) return 0;
+    return window.HopResolver.LIKELY_CONFIDENCE;
+  }
 
   // Dismiss any open conflict popover
   function dismissPopover() {
@@ -113,7 +120,7 @@ window.HopDisplay = (function() {
     // A guess is dashed; the badge only appears when there are candidates to
     // weigh: the alternatives to a guess, or those rejected for an unlisted hop.
     // A canonical hop is the ingestor's own answer (#1283) and neither.
-    const guess = !entry.canonical && !entry.unlisted && entry.confidence < LIKELY;
+    const guess = !entry.canonical && !entry.unlisted && entry.confidence < LIKELY();
     const unsure = entry.unlisted ? !name && candidates.length > 0 : guess && candidates.length > 1;
     // A node the ingestor resolved that does not fit where the hop sits. #165
     // already has a warning for that, and it is not the same thing as a node
