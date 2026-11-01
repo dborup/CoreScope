@@ -247,6 +247,8 @@ console.log('\n=== #598 M: HopDisplay renders an inferred hop ===');
     assert.ok(/WRONG-REGION/.test(html), 'the ingestor\'s answer is still what the hop is called: ' + html);
     assert.ok(/hop-unreliable-btn/.test(html), 'flagged with the existing unreliable warning: ' + html);
     assert.ok(/hop-unreliable\b/.test(html), 'and the pill carries the unreliable class: ' + html);
+    assert.ok(!/hop-unlisted/.test(html),
+      'but not hop-unlisted, which mutes a hex prefix and this hop shows a name: ' + html);
     assert.ok(!/\(no GPS\)/.test(html), 'it is NOT labelled no GPS — it has a position: ' + html);
     assert.ok(/does not fit this point in the path/.test(html), 'the tooltip says why: ' + html);
     assert.ok(!/hop-conflict-btn/.test(html), 'and offers no candidate list in its place: ' + html);

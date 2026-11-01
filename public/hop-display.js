@@ -142,7 +142,9 @@ window.HopDisplay = (function() {
       'hop',
       name ? 'hop-named' : '',
       guess || unsure ? 'hop-ambiguous' : '',
-      entry.unlisted ? 'hop-unlisted' : '',
+      // hop-unlisted mutes the hex prefix; a misplaced hop shows a NAME, and
+      // .hop-unreliable (italic, #165) is the mark that belongs to it.
+      entry.unlisted && !misplaced ? 'hop-unlisted' : '',
       misplaced ? 'hop-unreliable' : '',
       // #165 — callers mark the pill itself; see renderHop() below.
       opts.className || '',
