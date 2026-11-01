@@ -18,6 +18,12 @@
 const { chromium } = require('playwright');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
+// The packets page defaults to a 15-minute window and the freshened CI fixture
+// ages out of it while the shard runs, so a row count taken before a race can
+// differ from the count after it (#658). Every page here pins a 1-year window.
+const SEEDED_WINDOW_MIN = 525600;
+// The first /api/packets `since` must reach at least this far back.
+const MIN_WINDOW_MS = 300 * 24 * 3600 * 1000;
 let passed = 0, failed = 0;
 function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 async function step(name, fn) {
@@ -36,11 +42,20 @@ function deferred() {
 async function openPackets(browserOrCtx) {
   // A fresh context per page: the observer filter persists in localStorage.
   const ctx = browserOrCtx.newContext ? await browserOrCtx.newContext() : browserOrCtx;
+  // packets.js reads meshcore-time-window once, when the script is evaluated,
+  // so the seed must be in place before the first page load.
+  await ctx.addInitScript(min => { localStorage.setItem('meshcore-time-window', String(min)); }, SEEDED_WINDOW_MIN);
   const page = await ctx.newPage();
   page.setDefaultTimeout(10000);
+  let firstPacketsUrl = null;
+  page.on('request', r => { if (!firstPacketsUrl && /\/api\/packets\?/.test(r.url())) firstPacketsUrl = r.url(); });
   await page.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#fNode');
   await page.waitForSelector('#pktBody tr[data-hash]', { state: 'attached' });
+  const since = firstPacketsUrl && new URL(firstPacketsUrl).searchParams.get('since');
+  const reach = since ? Date.now() - Date.parse(since) : Infinity;
+  assert(reach >= MIN_WINDOW_MS,
+    'first /api/packets request has since=' + since + ' (' + Math.round(reach / 60000) + ' min back), the pinned window was not in effect, so row counts depend on fixture age (#658)');
   return page;
 }
 
@@ -157,7 +172,8 @@ async function assertPicked(page, name, key) {
 
   await step('observer filter: a slow response for an earlier selection does not overwrite the later one', async () => {
     const page = await openPackets(browser);
-    const allRows = await page.locator('#pktBody tr[data-hash], #pktBody tr[data-id]').count();
+    const rowCount = () => page.locator('#pktBody tr[data-hash], #pktBody tr[data-id]').count();
+    const frames = () => page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
     const gate = deferred(); const inflight = deferred();
     let held = false;
     await page.route(u => u.pathname === '/api/packets', async route => {
@@ -169,12 +185,25 @@ async function assertPicked(page, name, key) {
     const box = page.locator('#observerMenu input[data-obs-id]:not([data-obs-id="__all__"])').first();
     await box.check();
     await within(inflight.promise, 5000, 'held /api/packets request with observer=');
+    // The "All" refetch must land before the earlier response is released:
+    // released first, the late response is overwritten by "All" even without
+    // the stale-response guard, and the step cannot fail for the real bug.
+    const allLanded = page.waitForResponse(r => {
+      const u = new URL(r.url());
+      return u.pathname === '/api/packets' && !u.searchParams.get('observer');
+    });
     await page.locator('#observerMenu input[data-obs-id="__all__"]').check();
+    await within(allLanded, 5000, '/api/packets response for "All"');
+    await frames();
+    // The baseline is read after "All" has settled, not before the race: the
+    // fixture ages out of the packets window, so an earlier count can be stale (#658).
+    const allRows = await rowCount();
+    assert(allRows > 0, 'the "All" selection rendered no rows');
     gate.resolve();
     // After the late response lands, the table must still reflect "All".
     await page.evaluate(() => fetch('/api/healthz').then(r => r.text()));
-    await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
-    const after = await page.locator('#pktBody tr[data-hash], #pktBody tr[data-id]').count();
+    await frames();
+    const after = await rowCount();
     assert(after === allRows, 'table shows ' + after + ' rows, expected the unfiltered ' + allRows);
     await page.close();
   });
