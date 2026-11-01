@@ -877,6 +877,38 @@ test('renderDetail reads provenance from the observation, never from the spread 
     'and the aggregate row passes the observation that reported that path');
   assert.ok(!/inferFor\(pkt, pkt\)/.test(pktSrc),
     'never the transmission row as its own provenance');
+  // #598 r3 C — the same path can be reported by two observers; the frame has
+  // to be the one belonging to the packet row's OWN observer.
+  assert.ok(/o\.path_json === pkt\.path_json && o\.observer_id === pkt\.observer_id/.test(pktSrc),
+    'matched on the observer as well as the path');
+});
+
+await testAsync('the aggregate frame is the packet row\'s own observer\'s, not another with the same path', async () => {
+  const ctx = detailCtx();
+  const data = detailData();
+  // Two observations report the SAME one-hop path. Only the northern one is
+  // the packet row's own observer; the southern one is a DIRECT frame, which
+  // must never be read as provenance for the packet row's path.
+  data.packet.path_json = JSON.stringify(['10']);
+  data.observations[0] = Object.assign({}, data.observations[0], {
+    path_json: JSON.stringify(['10']),
+    // route 2 = DIRECT: not a flood, so not provenance for anything.
+    direction: 'rx', raw_hex: header(5, 2) + '01' + '10' + 'AABB',
+  });
+  data.observations[1] = Object.assign({}, data.observations[1], {
+    path_json: JSON.stringify(['10']),
+    direction: 'rx', raw_hex: header(5, 1) + '01' + '10' + 'AABB',
+  });
+  const panel = makePanel();
+  await ctx._packetsTestAPI.renderDetail(panel, data, 10);
+  const agg = panel.innerHTML.match(/Longest observed path: ([\s\S]*?)<\/div>/)[1];
+  const pick = (agg.match(/data-hop-link="true">([^<]*)</) || [])[1];
+  // The packet row's observer is OBS-NORTH, whose own frame IS a flood, so the
+  // aggregate hop is anchored there and resolves to the northern node. Picking
+  // the southern observation's DIRECT frame would withhold the anchor and give
+  // the candidate-order answer instead.
+  assert.strictEqual(pick, 'TEN-NORTH',
+    'the aggregate row used the packet row\'s own observer\'s frame (got ' + pick + ')');
 });
 
 await testAsync('the aggregate row is anchored only when an observation reported that exact path', async () => {
@@ -1110,6 +1142,78 @@ await testAsync('the map opening first does not leave the packets page a narrowe
   // The observer list is handed on, so neither page refetches or substitutes
   // a filtered one.
   assert.strictEqual(ctx.window.hopObservers().length, 1, 'the installed observers are readable');
+});
+
+await testAsync('a Packets -> Live -> Packets round trip gets the full catalogue back', async () => {
+  // #598 r3 B — the flag alone was not enough. Live re-indexes the shared
+  // HopResolver with its own lists (live.js: area-filtered nodes, located-only
+  // nodes, and init([]) when the VCR returns to live), and `hopCatalogueLoaded`
+  // stayed true through that, so the next Packets visit kept Live's index.
+  // HopResolver now counts its init()s and the helper re-installs when the
+  // generation it recorded no longer matches.
+  const ctx = makeSandbox();
+  const FULL = [node('10', 'TEN-SOUTH', 0), node('10b', 'TEN-NORTH', 60), node('b1', 'MIDDLE', 30)];
+  let nodeCalls = 0;
+  ctx.api = ctx.window.api = (p) => {
+    if (p.startsWith('/nodes?') || p === '/nodes') { nodeCalls++; return Promise.resolve({ nodes: FULL, total: FULL.length }); }
+    if (p === '/observers') return Promise.resolve({ observers: [{ id: 'OBS-1', iata: null, lat: at(90).lat, lon: at(90).lon }] });
+    if (p === '/iata-coords') return Promise.resolve({ coords: {} });
+    return Promise.resolve({});
+  };
+  loadInCtx(ctx, 'public/app.js');
+  loadInCtx(ctx, 'public/hop-resolver.js');
+  loadInCtx(ctx, 'public/packet-helpers.js');
+  ctx.api = ctx.window.api = ctx.api;
+  const R = ctx.window.HopResolver;
+
+  const infer = () => R.inferPath(['10', 'b1', '10'],
+    { observer: { lat: at(90).lat, lon: at(90).lon }, origin: { lat: at(0).lat, lon: at(0).lon } })
+    .map(e => e.name).filter(Boolean);
+
+  // Packets: the full catalogue.
+  assert.strictEqual(await ctx.window.ensureHopCatalogue(), true);
+  assert.ok(infer().includes('TEN-NORTH'), 'the full catalogue resolves the far hop');
+  assert.strictEqual(nodeCalls, 1);
+
+  // Live: re-indexes with its own, narrower list.
+  R.init([FULL[0]]);
+  assert.ok(!infer().includes('TEN-NORTH'), 'fixture: Live\'s index cannot see it');
+
+  // Packets again: the helper must notice and re-install.
+  assert.strictEqual(await ctx.window.ensureHopCatalogue(), true, 'the helper re-installs');
+  assert.strictEqual(nodeCalls, 2, 'which costs one more catalogue fetch, got ' + nodeCalls);
+  assert.ok(infer().includes('TEN-NORTH'), 'and the far hop resolves again');
+
+  // Live's VCR "back to live" clears the index entirely.
+  R.init([]);
+  assert.strictEqual(R.ready(), false, 'fixture: the index is empty');
+  assert.strictEqual(await ctx.window.ensureHopCatalogue(), true, 'the helper re-installs from empty too');
+  assert.strictEqual(nodeCalls, 3);
+  assert.ok(infer().includes('TEN-NORTH'), 'and the catalogue is back');
+
+  // A further visit with nobody else touching the index costs nothing.
+  await ctx.window.ensureHopCatalogue();
+  await ctx.window.ensureHopCatalogue();
+  assert.strictEqual(nodeCalls, 3, 'no refetch while the helper\'s own index is still installed');
+});
+
+test('HopResolver counts its init()s so a consumer can tell its index was replaced', () => {
+  const ctx = makeSandbox();
+  loadInCtx(ctx, 'public/hop-resolver.js');
+  const R = ctx.window.HopResolver;
+  const g0 = R.initGeneration();
+  assert.strictEqual(typeof g0, 'number', 'the generation is a number');
+  R.init([node('b1', 'B1', 0)]);
+  const g1 = R.initGeneration();
+  assert.ok(g1 > g0, 'init() bumps it (' + g0 + ' -> ' + g1 + ')');
+  R.init([]);
+  assert.ok(R.initGeneration() > g1, 'an empty init() bumps it too — that is the VCR case');
+  const g2 = R.initGeneration();
+  R.inferPath(['b1'], {});
+  R.resolve(['b1']);
+  R.setAffinity({});
+  R.setPathAffinity({});
+  assert.strictEqual(R.initGeneration(), g2, 'and nothing but init() moves it');
 });
 
 await testAsync('a failed catalogue load is retried, not cached as done', async () => {

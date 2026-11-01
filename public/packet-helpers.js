@@ -116,9 +116,14 @@ window.observationIsRxFlood = function observationIsRxFlood(obs) {
  * indexed", and the map page used to index its own filtered list
  * (`lastHeard=30d` plus the area filter); a packets page visited afterwards
  * then reused that narrower index and inferred different hops than a cold
- * packets page would. This helper keeps its own flag, so whichever page gets
- * here first installs the same full catalogue, observers and IATA centres, and
- * both pages feed the model the same inputs.
+ * packets page would.
+ *
+ * #598 r3 B — a flag of our own is not enough either, because `live.js`
+ * re-indexes the same global from its own lists (area-filtered nodes, located
+ * nodes only, and `init([])` when the VCR returns to live). So the generation
+ * HopResolver counts is recorded here, and the catalogue is re-installed when
+ * it no longer matches: a Packets -> Live -> Packets round trip gets the full
+ * catalogue back instead of keeping Live's.
  *
  * Non-fatal on failure: hops render as unresolved prefixes and the next call
  * retries.
@@ -126,10 +131,16 @@ window.observationIsRxFlood = function observationIsRxFlood(obs) {
  * @returns {Promise<boolean>} true once the full catalogue is in place
  */
 var hopCatalogueLoad = null;
-var hopCatalogueLoaded = false;
+var hopCatalogueGen = -1;
 var hopObserverList = [];
+function hopCatalogueInstalled() {
+  return hopCatalogueGen >= 0 && window.HopResolver.initGeneration() === hopCatalogueGen;
+}
 window.ensureHopCatalogue = function ensureHopCatalogue() {
-  if (hopCatalogueLoaded) return Promise.resolve(true);
+  if (hopCatalogueInstalled()) return Promise.resolve(true);
+  // Someone else replaced the index: drop the finished load so the next line
+  // starts a new one rather than resolving the stale promise.
+  if (hopCatalogueGen >= 0) { hopCatalogueLoad = null; hopCatalogueGen = -1; }
   if (!hopCatalogueLoad) {
     hopCatalogueLoad = Promise.all([
       fetchAllNodes('', { ttl: 60000 }),
@@ -142,7 +153,7 @@ window.ensureHopCatalogue = function ensureHopCatalogue() {
         observers: obsList,
         iataCoords: coordData.coords || {},
       });
-      hopCatalogueLoaded = true;
+      hopCatalogueGen = window.HopResolver.initGeneration();
       hopObserverList = obsList;
       return true;
     }).catch(function (e) {
@@ -154,9 +165,12 @@ window.ensureHopCatalogue = function ensureHopCatalogue() {
   return hopCatalogueLoad;
 };
 
-/** Whether the full catalogue is installed (tests and callers that must know). */
+/**
+ * Whether the catalogue this helper installed is still the index in place.
+ * False both before the first load and after another page replaced it.
+ */
 window.hasHopCatalogue = function hasHopCatalogue() {
-  return hopCatalogueLoaded;
+  return hopCatalogueInstalled();
 };
 
 /**

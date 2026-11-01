@@ -3926,7 +3926,10 @@
           // provenance is that observation's frame; the transmission row's
           // raw_hex describes the first-ingested frame, which may be a
           // different observation's, so it is not evidence for this path.
-          const aggregateFrame = observations.find(o => o.path_json === pkt.path_json) || {};
+          // #598 r3 C — matched on the observer too: two observers can report
+          // the same path, and only the packet row's own observer's frame
+          // says anything about the row's path.
+          const aggregateFrame = aggregateFrameFor(pkt, observations);
           aggregateEntries = inferFor(pkt, aggregateFrame);
         }
       } catch (e) {
@@ -4238,11 +4241,21 @@
           entries: inferFor(effectivePkt, currentObs || pkt),
           aggregatePath: getParsedPath(pkt), aggregateObserverId: pkt.observer_id, aggregatePacket: pkt,
           aggregateEntries: observations.length > 1
-            ? inferFor(pkt, observations.find(o => o.path_json === pkt.path_json) || {})
+            ? inferFor(pkt, aggregateFrameFor(pkt, observations))
             : null,
         });
       });
     }
+  }
+
+  // #598 r2 nit 7 / r3 C — the frame behind the cross-observer aggregate row.
+  // That row renders the packet's longest observed path, so its provenance is
+  // the observation that reported THAT path for THIS row's observer. Two
+  // observers can report the same path, and an observation of another observer
+  // says nothing about this row; `{}` when none matches means no anchor.
+  function aggregateFrameFor(pkt, observations) {
+    return (observations || []).find(o =>
+      o.path_json === pkt.path_json && o.observer_id === pkt.observer_id) || {};
   }
 
   // #598 — redraw the inferred hop rows of an already-rendered detail pane in

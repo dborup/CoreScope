@@ -129,6 +129,95 @@ console.log('\n=== #598 A: a prefix repeated in one path resolves per position =
     'the same on a two-hop path (got ' + JSON.stringify(two.map(e => e.located ? e.name : '(' + e.hop + ')')) + ')');
 }
 
+console.log('\n=== #598 r3 A: a duplicate is kept where losing it costs most ===');
+
+{
+  // #598 r3 A — round 2 decided this by the min-marginal F+B at each position.
+  // A duplicated node lies on the optimal path at EVERY position it holds, so
+  // those sums are mathematically equal and differ only by rounding: the
+  // comparison was decided by float noise, and the "later position wins"
+  // tie-break did not reliably happen. The decision is now the cost of LOSING
+  // the node at a position — its best remaining alternative there, or leaving
+  // the hop unlisted, minus the current total — and the node is kept where
+  // that costs most. "Later wins" applies only inside a relative epsilon.
+  //
+  // Asymmetric fixture: the sender is 120 km north, the observer sits by the
+  // cluster, and the two "aa" positions therefore cost different amounts to
+  // give up. Deciding by min-marginal placed 2 of the 3 hops; deciding by cost
+  // of loss places all 3.
+  const X = node(key('a01'), 'X', 0);
+  const Y = node(key('a02'), 'Y', 15);
+  const B = node(key('bb'), 'B', 30);
+  HopResolver.init([X, Y, B]);
+  HopResolver.setPathAffinity({});
+
+  const out = HopResolver.inferPath(['aa', 'bb', 'aa'], { observer: at(45), origin: at(120) });
+  const shown = out.map(e => e.located ? e.name : '(' + e.hop + ')');
+  const placed3 = out.filter(e => e.located).map(e => e.pubkey);
+  assert(new Set(placed3).size === placed3.length,
+    'no node is placed twice: ' + JSON.stringify(shown));
+  assert(out.filter(e => e.located && e.pubkey === X.public_key).length <= 1 &&
+    out.filter(e => e.located && e.pubkey === Y.public_key).length <= 1,
+    'and each candidate at most once: ' + JSON.stringify(shown));
+  // On a three-hop path with one repeated prefix the two positions have the
+  // same alternatives, so the cost of losing the node is EQUAL at both and the
+  // rule reduces to the tie-break. A fixture of this shape therefore cannot
+  // separate the two rules; the separation is measured below, and reported.
+
+  // Where the cost of loss really does differ, it decides — even against the
+  // later-position tie-break. Four prefixes, one candidate each, every prefix
+  // twice: each duplicate's two positions have DIFFERENT remaining
+  // alternatives, so some nodes belong at their earlier position. The round-2
+  // rule compared min-marginals, which are equal at both positions of a
+  // duplicate, so it kept the later one every time and threw placements away.
+  const chain = [];
+  for (let i = 0; i < 4; i++) {
+    chain.push({ public_key: ((0x10 + i).toString(16) + '0').padEnd(64, '0'),
+      name: 'CH' + i, role: 'repeater', lat: at(i * 25).lat, lon: at(i * 25).lon });
+  }
+  HopResolver.init(chain);
+  HopResolver.setPathAffinity({});
+  const twice = [];
+  for (let pass = 0; pass < 2; pass++) for (let i = 0; i < 4; i++) twice.push((0x10 + i).toString(16));
+  const chained = HopResolver.inferPath(twice, { observer: at(75), origin: at(0) });
+  let keptEarlier = 0, keptLater = 0;
+  for (let i = 0; i < 4; i++) {
+    const early = chained[i].located, late = chained[4 + i].located;
+    assert(!(early && late), 'CH' + i + ' is placed once, not at both of its positions');
+    if (early) keptEarlier++; else if (late) keptLater++;
+  }
+  assert(keptEarlier > 0,
+    'at least one node belongs at its EARLIER position, because losing it there costs more — ' +
+    'the round-2 rule kept the later one every time (got ' + keptEarlier + ' earlier, ' +
+    keptLater + ' later of 4)');
+  assert(keptLater > 0, 'and the later position still wins where that is the costlier loss');
+}
+
+{
+  // A genuine tie still goes to the LATER position: with one candidate for a
+  // repeated prefix the two positions cost exactly the same to give up, and
+  // the last hop of a flood is the relay the observer heard directly
+  // (firmware/src/Mesh.cpp:344-350).
+  const only = node(key('a0'), 'A0-ONLY', 90);
+  const mid = node(key('b1'), 'B1-MID', 45);
+  HopResolver.init([only, mid]);
+  HopResolver.setPathAffinity({});
+  const tie = HopResolver.inferPath(['a0', 'b1', 'a0'], { observer: at(90) });
+  assert(tie[2].name === 'A0-ONLY' && tie[0].unlisted === true,
+    'an exact tie keeps the node at the later hop: ' + JSON.stringify(tie.map(e => e.located ? e.name : '(' + e.hop + ')')));
+
+  // The epsilon is for noise, not for real differences: reverse the geometry
+  // so the EARLIER position is genuinely costlier to lose, and the node moves.
+  const near = node(key('a0'), 'A0-NEAR-SENDER', 0);
+  const far = node(key('b1'), 'B1-FAR', 300);
+  HopResolver.init([near, far]);
+  const asym = HopResolver.inferPath(['a0', 'b1', 'a0'], { origin: at(0), observer: at(300) });
+  assert(asym[0].name === 'A0-NEAR-SENDER' || asym[2].name === 'A0-NEAR-SENDER',
+    'fixture: the node is placed somewhere');
+  assert(asym.filter(e => e.located && e.pubkey === near.public_key).length === 1,
+    'and only once: ' + JSON.stringify(asym.map(e => e.located ? e.name : '(' + e.hop + ')')));
+}
+
 console.log('\n=== #598 B: an implausible jump is not drawn ===');
 
 {
@@ -749,6 +838,83 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
 
   dupCases.forEach(([label, dup, placed]) =>
     console.log('    ' + label + ': ' + placed + ' placed, ' + dup + ' duplicated'));
+
+  // #598 r3 A — the rule also has to PLACE hops, not just avoid duplicates.
+  // Measured on a deterministic corpus of random walks with KNOWN truth, which
+  // is the only fair basis: single synthetic draws swing either way, while the
+  // corpus is stable. Cost-of-loss reaches every placement that banning one
+  // duplicate per round to convergence reaches, at a fraction of the time (see
+  // the report for the 600-walk run and the timings).
+  const placementCases = [];
+  function rngOf(seed) { let h = seed >>> 0; return () => { h = (h * 1664525 + 1013904223) >>> 0; return h / 4294967296; }; }
+  function keyOf(i, salt) {
+    let h = (i * 2654435761 + salt) >>> 0, o = '';
+    for (let w = 0; w < 8; w++) { o += (h >>> 0).toString(16).padStart(8, '0'); h = (h * 1664525 + 1013904223) >>> 0; }
+    return o.slice(0, 64);
+  }
+  const KM_DEG = 111.195;
+  function apart(a, b) {
+    const dy = (a.lat - b.lat) * KM_DEG;
+    const dx = (a.lon - b.lon) * KM_DEG * Math.cos(a.lat * Math.PI / 180);
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+  {
+    let correct = 0, placedTotal = 0, truthHops = 0, walks = 0, duplicated = 0;
+    for (let seed = 1; seed <= 60; seed++) {
+      const n = 240 + (seed % 60), rnd = rngOf(seed), nodes = [];
+      for (let i = 0; i < n; i++) {
+        nodes.push({ public_key: keyOf(i, seed), name: 'N' + i, role: 'repeater',
+          lat: 50 + rnd() * 1.2, lon: 5 + rnd() * 1.2 });
+      }
+      const step = rngOf(seed * 7919 + 13);
+      let cur = nodes[Math.floor(step() * nodes.length)];
+      const truth = [cur], len = 14 + (seed % 18);
+      for (let s2 = 1; s2 < len; s2++) {
+        const near = nodes.filter(x => x !== cur && truth.indexOf(x) < 0 && apart(x, cur) <= 30);
+        if (!near.length) break;
+        cur = near[Math.floor(step() * near.length)];
+        truth.push(cur);
+      }
+      if (truth.length < 6) continue;
+      walks++; truthHops += truth.length;
+      R.init(nodes); R.setPathAffinity({});
+      const out = R.inferPath(truth.map(t => t.public_key.slice(0, 2)),
+        { observer: { lat: truth[truth.length - 1].lat, lon: truth[truth.length - 1].lon } });
+      const keys = [];
+      out.forEach((e, i) => {
+        if (!e.located) return;
+        placedTotal++; keys.push(e.pubkey);
+        if (e.pubkey === truth[i].public_key) correct++;
+      });
+      duplicated += keys.length - new Set(keys).size;
+    }
+    placementCases.push([walks + ' walks with known truth, ' + truthHops + ' hops', placedTotal, 1320]);
+    placementCases.push(['  of those, the true node', correct, 1293]);
+    assert(walks === 60 && truthHops === 1320, 'fixture: the corpus is deterministic (got ' +
+      walks + ' walks, ' + truthHops + ' hops)');
+    assert(duplicated === 0, 'no node is placed twice anywhere in the corpus (got ' + duplicated + ')');
+    assert(placedTotal >= 1320, 'every truth hop is placed, got ' + placedTotal +
+      ' of 1320 — the round-2 rule placed 1317');
+    assert(correct >= 1293, 'and at least 1293 are the true node, got ' + correct +
+      ' — the round-2 rule got 1291');
+  }
+  // The pathological end of the scale, pinned as a number rather than a floor:
+  // 63 hops whose every relay's pubkey starts with the same byte cannot occur
+  // on a mesh, and placing anything there would cost ~20x the time (344 ms
+  // against 7 ms, for 16 placements). Reported.
+  {
+    const hs = [];
+    for (let i = 0; i < 63; i++) hs.push('00');
+    R.init(dense); R.setPathAffinity({});
+    const n = R.inferPath(hs, { observer: { lat: 53, lon: 5.3 }, origin: { lat: 50, lon: 5 } })
+      .filter(e => e.located).length;
+    placementCases.push(['63 hops x 16 candidates, 1 distinct prefix', n, null]);
+    assert(n <= 2,
+      'the degenerate single-prefix path places almost nothing and says so, rather than ' +
+      'guessing (got ' + n + '); banning one duplicate per round would place 16 at ~20x the time');
+  }
+  placementCases.forEach(([label, n, floor]) =>
+    console.log('    ' + label + ': ' + n + ' placed' + (floor ? ' (floor ' + floor + ')' : '')));
 
   // #598 r2 F4 — the marginals solve must not decide the answer. It runs under
   // a SUPERSET of the dedup bans, so the deduplicated assignment is still

@@ -20,6 +20,11 @@ window.HopResolver = (function() {
   let nodesList = [];
   let observerIataMap = {}; // observer_id → iata
   let iataCoords = {};  // iata → {lat, lon}
+  // #598 r3 B — bumped by every init(). The node index is a single global that
+  // several pages install into (packets.js through packet-helpers.js, live.js
+  // from its own lists), so a consumer cannot tell from `ready()` whether the
+  // index it installed is still the one in place. This counter lets it.
+  let initGen = 0;
   let affinityMap = {}; // pubkey → { neighborPubkey → score } — resolve() only
   // #598 r2 F6 — inferPath()'s own neighbour graph. The packet detail pane
   // loads a graph (packet-helpers.js ensureHopAffinity), and that used to be
@@ -48,6 +53,7 @@ window.HopResolver = (function() {
    * @param {Object} [opts] - Optional: { observers: [{id, iata}], iataCoords: {code: {lat,lon}} }
    */
   function init(nodes, opts) {
+    initGen++;
     nodesList = nodes || [];
     prefixIdx = {};
     pubkeyIdx = {};
@@ -387,6 +393,11 @@ window.HopResolver = (function() {
   // minimum handles. This keeps the work at O(hops x MAX_GAP x cands^2).
   const MAX_GAP = 8;
 
+  // #598 r3 — two positions whose cost of loss differs by no more than this
+  // (relative) are a true tie, not a real difference. Rounding in the
+  // forward/backward sums is around 1e-14; this leaves five orders of margin.
+  const DEDUP_TIE_EPS = 1e-9;
+
   // The flat part of a span longer than MAX_GAP between two located points:
   // span(p -> q) = longBase() + (q - p - 1) x unlistedCost.
   function longBase() {
@@ -645,20 +656,42 @@ window.HopResolver = (function() {
     for (let round = 0; round <= placements; round++) {
       const dups = duplicates(sol.assign);
       if (!dups.length) break;
+      // #598 r3 — keep the node where GIVING IT UP costs most, and give it up
+      // everywhere else.
+      //
+      // Round 2 compared the min-marginal F+B at each position instead. A
+      // duplicated node lies on the optimal path at every position it holds,
+      // so those sums are mathematically equal and differ only by rounding:
+      // the choice was decided by float noise (measured: 4,091 comparisons
+      // differing by at most 4e-14), and it discarded placements the model
+      // could have made. The cost of loss is a real difference between the
+      // positions: at each one it is the best alternative still available
+      // there, or leaving that hop unlisted, minus the current total.
+      const mu = unlistedMarginals(C, steps, start, end, sol.F, sol.B);
+      const lossAt = (i, key) => {
+        let alt = mu[i];
+        for (let k = 0; k < C[i].length; k++) {
+          if (C[i][k].pubkey === key) continue;
+          // A banned candidate needs no test here: solvePath leaves its F and
+          // B at Infinity, so it never wins this minimum.
+          const v = sol.F[i][k] + sol.B[i][k];
+          if (v < alt) alt = v;
+        }
+        return alt - sol.total;
+      };
       for (const [key, positions] of dups) {
-        // Keep it where it fits best; give it up everywhere else. A duplicated
-        // node is at both ends of the SAME path, so its min-marginal is often
-        // identical at every position it occupies — `<=` then keeps the LATEST
-        // one, which is the firmware-grounded tie-break: the last hop of a
-        // flood is the relay the observer heard directly
-        // (firmware/src/Mesh.cpp:344-350), so the later position is the one
-        // backed by evidence. Picking the earliest put a node that sits on the
-        // observer at hop 0 and left the hop it actually relayed unlisted.
-        let best = positions[0];
-        let bestCost = sol.F[best][sol.assign[best]] + sol.B[best][sol.assign[best]];
+        let best = positions[0], bestLoss = lossAt(best, key);
         for (const i of positions.slice(1)) {
-          const c = sol.F[i][sol.assign[i]] + sol.B[i][sol.assign[i]];
-          if (c <= bestCost) { bestCost = c; best = i; }
+          const v = lossAt(i, key);
+          // A true tie — within a relative epsilon, which is what rounding
+          // produces — goes to the LATER position: the last hop of a flood is
+          // the relay the observer heard directly (firmware Mesh.cpp:344-350),
+          // and `positions` is ascending, so a tie moves `best` forward.
+          const scale = Math.max(1, Math.abs(bestLoss), Math.abs(v));
+          if (v > bestLoss || Math.abs(v - bestLoss) <= DEDUP_TIE_EPS * scale) {
+            if (v > bestLoss) bestLoss = v;
+            best = i;
+          }
         }
         for (const i of positions) if (i !== best) addBan(i, key);
       }
@@ -758,6 +791,16 @@ window.HopResolver = (function() {
   }
 
   /**
+   * How many times init() has run (#598 r3 B). A caller that installed the
+   * index records this and re-installs when it no longer matches, which
+   * `ready()` cannot tell it: another page may have replaced the index with a
+   * filtered list, or emptied it.
+   */
+  function initGeneration() {
+    return initGen;
+  }
+
+  /**
    * Load neighbor-graph affinity data.
    * @param {Object} graph - { edges: [{source, target, score, weight}, ...] }
    */
@@ -841,5 +884,5 @@ window.HopResolver = (function() {
     return n && n.name ? n.name : null;
   }
 
-  return { init: init, resolve: resolve, inferPath: inferPath, LIKELY_CONFIDENCE: LIKELY_CONFIDENCE, resolveFromServer: resolveFromServer, serverHopEntry: serverHopEntry, ready: ready, haversineKm: haversineKm, setAffinity: setAffinity, getAffinity: getAffinity, setPathAffinity: setPathAffinity, getPathAffinity: getPathAffinity, nameForKey: nameForKey };
+  return { init: init, resolve: resolve, inferPath: inferPath, LIKELY_CONFIDENCE: LIKELY_CONFIDENCE, resolveFromServer: resolveFromServer, serverHopEntry: serverHopEntry, ready: ready, initGeneration: initGeneration, haversineKm: haversineKm, setAffinity: setAffinity, getAffinity: getAffinity, setPathAffinity: setPathAffinity, getPathAffinity: getPathAffinity, nameForKey: nameForKey };
 })();
