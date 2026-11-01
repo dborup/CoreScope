@@ -891,6 +891,9 @@
   // initial load yields between observer groups) stops instead of writing
   // into the next page's cache.
   let hopCacheGen = 0;
+  // #598 — the latest renderDetail() of each panel. A hop redraw scheduled by
+  // an earlier render of the same panel (refreshDetailHops) is dropped.
+  const detailRenders = new WeakMap();
   function hopCacheHas(k) { return hopNameCache.has(k); }
   function hopCacheGet(k) { return hopNameCache.get(k); }
   function hopCacheSet(k, v) {
@@ -1337,6 +1340,9 @@
       ? window.MC_filterPathHops(hops)
       : hops;
     if (!filtered.length) return '— <span class="text-muted" title="All path hops were 1-byte and are hidden by the customizer toggle">(1-byte filtered)</span>';
+    // #598 — one inferred entry per hop (HopResolver.inferPath) replaces the
+    // per-prefix lookup: a prefix seen twice in one path can be two nodes.
+    const entries = opts && opts.entries && opts.entries.length === hops.length ? opts.entries : null;
     const rp = canonicalPath(opts && opts.packet, hops);
     // Filtering returns a subsequence. Retain ORIGINAL hop indices so hiding
     // a 1-byte hop cannot shift another hop onto its canonical answer. This
@@ -1346,7 +1352,9 @@
       if (hops[i] === filtered[next]) { visible.push({ h: hops[i], i }); next++; }
     }
     const arrow = '<span class="arrow">→</span>';
-    if (!(opts && opts.summary)) return visible.map(({ h, i }) => renderHop(h, hopEntryFor(h, rp, i))).join(arrow);
+    if (!(opts && opts.summary)) {
+      return visible.map(({ h, i }) => renderHop(h, entries ? entries[i] : hopEntryFor(h, rp, i))).join(arrow);
+    }
 
     let uncertain = 0;
     const body = visible.map(({ h, i }) => {
@@ -3904,10 +3912,42 @@
 
     // Resolve only holes in THIS selected observation. Canonical entries are
     // read directly at render time, never promoted to prefix-wide certainty.
+    // This stays the fallback source for the hop rows: it only ever writes the
+    // same context-free global guess the list would compute for that prefix,
+    // so the detail pane cannot change what the packets list shows.
     if (pathHops.length) {
       try {
         await resolveHopsForPackets([effectivePkt]);
       } catch {}
+    }
+
+    // #598 — infer the shown observation's hops as ONE path, anchored on the
+    // observer that heard it, and keep them by position: a prefix seen twice in
+    // a path can be two nodes. The aggregate row gets the same for the packet's
+    // own (longest) path. Display only — the stored resolved_path is a hint and
+    // is never rewritten (#1283).
+    //
+    // The neighbour graph is evidence, not a prerequisite, and is NOT awaited:
+    // until the first one lands the pane renders without it, and the inferred
+    // hop rows are redrawn in place when it does (end of this function).
+    const renderToken = {};
+    detailRenders.set(panel, renderToken);
+    let pathEntries = null, aggregateEntries = null, inferFor = null, graphLanding = null;
+    if (pathHops.length) {
+      try {
+        await ensureHopResolver();
+        const graphLoad = ensureHopAffinity();
+        if (!hasHopAffinity()) graphLanding = graphLoad;
+        const origin = senderLat != null && senderLon != null ? { lat: senderLat, lon: senderLon } : null;
+        inferFor = o => {
+          const [lat, lon] = observerPosition(o.observer_id);
+          return inferObservationPath(o, lat === null ? null : { lat, lon }, origin);
+        };
+        pathEntries = inferFor(effectivePkt);
+        if (observations.length > 1) aggregateEntries = inferFor(pkt);
+      } catch (e) {
+        console.warn('[packets] path inference failed:', e);
+      }
     }
 
     // Sender-selected hash width from the path byte. Read it from the SAME
@@ -4045,7 +4085,7 @@
       ${messageHtml}
       <dl class="detail-meta">
         <dt>Payload Type</dt><dd><span class="badge badge-${payloadTypeColor(pkt.payload_type)}">${typeName}</span></dd>
-        <dt>Path</dt><dd>${displayHopCount > 0 ? `<span class="badge badge-info">${displayHopCount} hop${displayHopCount !== 1 ? 's' : ''}</span> ` + renderPath(pathHops, effectivePkt.observer_id, { packet: effectivePkt }) : '— (direct)'}</dd>
+        <dt>Path</dt><dd>${displayHopCount > 0 ? `<span class="badge badge-info">${displayHopCount} hop${displayHopCount !== 1 ? 's' : ''}</span> ` + '<span class="detail-path-hops">' + renderPath(pathHops, effectivePkt.observer_id, { packet: effectivePkt, entries: pathEntries }) + '</span>' : '— (direct)'}</dd>
         <dt>Timestamp</dt><dd>${renderTimestampCell(effectivePkt.timestamp)}</dd>
         <dt>Observer</dt><dd>${escapeHtml(obsNameOnly(effectivePkt.observer_id))}${obsIataBadge(effectivePkt)}</dd>
         ${locationHtml ? `<dt>Location</dt><dd>${locationHtml}</dd>` : ''}
@@ -4071,7 +4111,7 @@
         ${hasRawHex ? `<div class="hex-legend">${buildHexLegend(ranges)}</div>
         <div class="hex-dump">${createColoredHexDump(effectivePkt.raw_hex || pkt.raw_hex, ranges)}</div>` : ''}
 
-        ${hasRawHex ? buildFieldTable(effectivePkt.raw_hex ? effectivePkt : pkt, decoded, pathHops, ranges, ctrlPubKeyNode, anonReqSenderNode, effectivePkt) : buildDecodedTable(decoded)}
+        ${hasRawHex ? buildFieldTable(effectivePkt.raw_hex ? effectivePkt : pkt, decoded, pathHops, ranges, ctrlPubKeyNode, anonReqSenderNode, effectivePkt, pathEntries) : buildDecodedTable(decoded)}
       </details>` : ''}
 
       ${observations.length > 1 ? `
@@ -4104,7 +4144,7 @@
         const aggregatePath = getParsedPath(pkt) || [];
         return `<div class="detail-aggregate" style="margin-top:12px;padding:10px;background:var(--card-bg);border-radius:6px;border:1px solid var(--border);font-size:0.9em">
           <div style="font-weight:600;margin-bottom:4px;color:var(--text-muted)">Cross-observer aggregate</div>
-          <div>Longest observed path: ${aggregatePath.length ? `${aggregatePath.length} hops — ${renderPath(aggregatePath, pkt.observer_id, { packet: pkt })}` : '— (direct)'}</div>
+          <div>Longest observed path: ${aggregatePath.length ? `${aggregatePath.length} hops — <span class="detail-aggregate-hops">${renderPath(aggregatePath, pkt.observer_id, { packet: pkt, entries: aggregateEntries })}</span>` : '— (direct)'}</div>
           <div style="font-size:0.8em;color:var(--text-muted);margin-top:2px">Longest path seen across all ${uniqueObservers} observer${uniqueObservers !== 1 ? 's' : ''}</div>
         </div>`;
       })() : ''}
@@ -4166,47 +4206,13 @@
     // Wire up view route on map button
     const routeBtn = panel.querySelector('#viewRouteBtn');
     if (routeBtn && pathHops.length) {
-      routeBtn.addEventListener('click', async () => {
+      routeBtn.addEventListener('click', () => {
         try {
-          // Prefer server-side resolved_path if available
-          const serverResolved = canonicalPath(effectivePkt, pathHops);
-          let resolvedKeys;
-          if (serverResolved && serverResolved.length === pathHops.length) {
-            // Use server-resolved pubkeys, fall back to short prefix for null entries
-            resolvedKeys = pathHops.map((h, i) => serverResolved[i] || h);
-          } else {
-            // Fall back to client-side HopResolver
-            const senderLat = decoded.lat || decoded.latitude;
-            const senderLon = decoded.lon || decoded.longitude;
-            let obsLat = null, obsLon = null;
-            const obsId = obsName(effectivePkt.observer_id);
-            await ensureHopResolver();
-            const data = { resolved: HopResolver.resolve(pathHops, senderLat || null, senderLon || null, null, null, null) };
-            resolvedKeys = pathHops.map(h => {
-              const r = data.resolved?.[h];
-              return r?.pubkey || h;
-            });
-          }
-          // Build origin info for the sender node
-          const origin = {};
-          if (decoded.pubKey) origin.pubkey = decoded.pubKey;
-          else if (decoded.srcHash) origin.pubkey = decoded.srcHash;
-          if (decoded.adName || decoded.name) origin.name = decoded.adName || decoded.name;
-          if (senderLat != null && senderLon != null) { origin.lat = senderLat; origin.lon = senderLon; }
-          // #1418 Phase D: also include the recipient (destHash) so the route
-          // displays as: sender → [intermediate hops] → recipient. Without
-          // this the destination node is invisible — operator only sees the
-          // last intermediate repeater.
-          const destination = {};
-          if (decoded.destHash) destination.pubkey = decoded.destHash;
-          // #1418 Phase C: include ALL observations as alternate paths so the
-          // route view can render union-of-edges with stroke-width weighting.
-          // Each observation contributes its own path_json array.
-          const allPaths = (observations || []).map(o => {
-            let path = [];
-            try { path = JSON.parse(o.path_json || '[]'); } catch (_) {}
-            return { path: path, observer: o.observer_name, observer_id: o.observer_id, snr: o.snr, rssi: o.rssi };
-          }).filter(p => p.path && p.path.length > 0);
+          // #598 — nothing is resolved here. This handler used to compute
+          // resolvedKeys, origin, destination and allPaths and then throw them
+          // away: the navigation below is a URL, and the map page rebuilds the
+          // whole payload (and now infers the chosen observation's hops with
+          // the same shared helper this pane uses).
           // #1418/#1419: navigate via deep-link URL only. The map page's
           // loadRouteFromDeepLink() re-fetches the packet from the API and
           // builds the full payload (incl. packetContext) consistently.
@@ -4236,6 +4242,39 @@
         }
       });
     }
+
+    // #598 — the first neighbour graph landed after this render: redraw its
+    // inferred hop rows with the graph, unless the panel has been rendered
+    // again since (another observation clicked).
+    if (graphLanding && inferFor) {
+      graphLanding.then(landed => {
+        if (!landed || detailRenders.get(panel) !== renderToken) return;
+        refreshDetailHops(panel, {
+          pathHops: pathHops, observerId: effectivePkt.observer_id, packet: effectivePkt,
+          entries: inferFor(effectivePkt),
+          aggregatePath: getParsedPath(pkt), aggregateObserverId: pkt.observer_id, aggregatePacket: pkt,
+          aggregateEntries: observations.length > 1 ? inferFor(pkt) : null,
+        });
+      });
+    }
+  }
+
+  // #598 — redraw the inferred hop rows of an already-rendered detail pane in
+  // place: the Path row, the cross-observer aggregate row and the byte
+  // breakdown's hop names. Everything else in the pane stays as it is. The
+  // candidate popovers keep working because hop-display.js dismisses through
+  // one delegated document listener, not listeners bound at render time.
+  function refreshDetailHops(panel, v) {
+    const path = panel.querySelector('.detail-path-hops');
+    if (path) path.innerHTML = renderPath(v.pathHops, v.observerId, { packet: v.packet, entries: v.entries });
+    const agg = panel.querySelector('.detail-aggregate-hops');
+    if (agg && v.aggregateEntries) {
+      agg.innerHTML = renderPath(v.aggregatePath, v.aggregateObserverId, { packet: v.aggregatePacket, entries: v.aggregateEntries });
+    }
+    panel.querySelectorAll('.detail-hop-name').forEach(el => {
+      const i = Number(el.dataset.hopIdx);
+      if (v.entries && v.entries[i]) el.innerHTML = renderHop(String(v.pathHops[i] || '').toUpperCase(), v.entries[i]);
+    });
   }
 
   function buildDecodedTable(decoded) {
@@ -4252,7 +4291,9 @@
   // its own. `hopPkt` keeps the hop rows with the packet that reported the
   // hops, so the byte table can never pair one packet's hops with another's
   // observer and canonical path. It defaults to the byte source.
-  function buildFieldTable(pkt, decoded, pathHops, ranges, ctrlPubKeyNode, anonReqSenderNode, hopPkt) {
+  // #598 — `hopEntries` are the inferred entries for `pathHops`, aligned by
+  // position. When absent (inference unavailable) the per-prefix lookup stands.
+  function buildFieldTable(pkt, decoded, pathHops, ranges, ctrlPubKeyNode, anonReqSenderNode, hopPkt, hopEntries) {
     const buf = pkt.raw_hex || '';
     const hopOwner = hopPkt || pkt;
     const size = Math.floor(buf.length / 2);
@@ -4310,11 +4351,13 @@
     if (pathHops.length > 0) {
       rows += sectionRow('Path (' + pathHops.length + ' hops)', 'section-path');
       const hopRp = canonicalPath(hopOwner, pathHops);
+      const entries = hopEntries && hopEntries.length === pathHops.length ? hopEntries : null;
       for (let i = 0; i < pathHops.length; i++) {
         const hopOff = off + i * hashSize;
         const hex = String(pathHops[i] || '').toUpperCase();
-        const hopHtml = HopDisplay.renderHop(hex, hopEntryFor(pathHops[i], hopRp, i));
-        const label = `Hop ${i} — ${hopHtml}`;
+        const hopHtml = HopDisplay.renderHop(hex, entries ? entries[i] : hopEntryFor(pathHops[i], hopRp, i));
+        // #598 — the span is the redraw target when the neighbour graph lands.
+        const label = `Hop ${i} — <span class="detail-hop-name" data-hop-idx="${i}">${hopHtml}</span>`;
         rows += fieldRow(hopOff, label, hex, '');
       }
       off += hashSize * pathHops.length;
@@ -4746,6 +4789,8 @@
       fieldRow,
       renderTimestampCell,
       renderPath,
+      refreshDetailHops,
+      renderDetail,
       observationPacket,
       observerPosition,
       resolveHops,

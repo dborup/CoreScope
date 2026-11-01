@@ -7,6 +7,10 @@ window.HopDisplay = (function() {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
 
+  // #598 — an inferred hop below this confidence is shown as a guess: dashed
+  // underline and a badge to its candidates. Mirrors HopResolver's own value.
+  const LIKELY = 0.7;
+
   // Dismiss any open conflict popover
   function dismissPopover() {
     const old = document.querySelector('.hop-conflict-popover');
@@ -25,18 +29,29 @@ window.HopDisplay = (function() {
     });
   }
 
-  function showConflictPopover(btn, h, conflicts, globalFallback) {
+  function showConflictPopover(btn, h, conflicts, globalFallback, pick) {
     dismissPopover();
     ensureGlobalListener();
 
-    const regional = conflicts.filter(c => c.regional);
+    // #598 — an inferred hop (pick) says what the whole path settled on, so a
+    // regional narrowing of its prefix is not what its candidates mean.
+    const regional = pick ? [] : conflicts.filter(c => c.regional);
     const shown = regional.length > 0 ? regional : conflicts;
 
-    let html = `<div class="hop-conflict-header">${escapeHtml(h)} — ${shown.length} candidate${shown.length > 1 ? 's' : ''}${regional.length > 0 ? ' in region' : ' (global fallback)'}</div>`;
+    const count = `${shown.length} candidate${shown.length > 1 ? 's' : ''}`;
+    const header = pick
+      ? `${escapeHtml(h)} — ${pick.name ? 'likely ' + escapeHtml(pick.name) : 'unlisted node'} (${pct(pick.confidence)}) · ${count}`
+      : `${escapeHtml(h)} — ${count}${regional.length > 0 ? ' in region' : ' (global fallback)'}`;
+    let html = `<div class="hop-conflict-header">${header}</div>`;
     html += '<div class="hop-conflict-list">';
     for (const c of shown) {
       const name = escapeHtml(c.name || c.pubkey?.slice(0, 16) || '?');
-      const dist = c.distKm != null ? `<span class="hop-conflict-dist">${c.distKm}km</span>` : '';
+      // An inferred candidate carries a likelihood, or the hop the path
+      // already uses it at; a resolve() candidate carries its region distance.
+      const metric = pick
+        ? (c.located === false ? 'no GPS' : c.usedAt != null ? 'hop ' + c.usedAt : pct(c.confidence))
+        : (c.distKm != null ? c.distKm + 'km' : '');
+      const dist = metric ? `<span class="hop-conflict-dist">${escapeHtml(metric)}</span>` : '';
       const pk = c.pubkey ? c.pubkey.slice(0, 12) + '…' : '';
       html += `<a href="#/nodes/${encodeURIComponent(c.pubkey || '')}" class="hop-conflict-item">
         <span class="hop-conflict-name">${name}</span>
@@ -70,6 +85,65 @@ window.HopDisplay = (function() {
     return regional > 0 ? regional : (entry.globalFallback ? conflicts.length : 0);
   }
 
+  function pct(confidence) {
+    return Math.round((confidence || 0) * 100) + '%';
+  }
+
+  // The yellow "N candidates" button. pick is the inferred answer, or null for
+  // a resolve() hop, and rides along in data-conflict for the popover.
+  function conflictButton(h, conflicts, globalFallback, pick, count, label) {
+    const conflictData = escapeHtml(JSON.stringify({ h, conflicts, globalFallback, pick }));
+    return ` <button class="hop-conflict-btn status-warn" data-conflict='${conflictData}' onclick="event.preventDefault();event.stopPropagation();HopDisplay._showFromBtn(this)" title="${escapeHtml(label)}"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>${count}</button>`;
+  }
+
+  /**
+   * #598 — a hop from HopResolver.inferPath(): one position in ONE
+   * observation's path, with a confidence. "Unlisted" means no located node
+   * sharing its prefix fits that point in the path, so the hex prefix is shown
+   * rather than the nearest node that happens to share it.
+   */
+  function renderInferredHop(h, entry, opts) {
+    const candidates = entry.candidates || [];
+    const name = entry.name || null;
+    // A guess is dashed; the badge only appears when there are candidates to
+    // weigh: the alternatives to a guess, or those rejected for an unlisted hop.
+    const guess = !entry.unlisted && entry.confidence < LIKELY;
+    const unsure = entry.unlisted ? !name && candidates.length > 0 : guess && candidates.length > 1;
+
+    let title;
+    if (!entry.unlisted) {
+      title = `${h} — ${pct(entry.confidence)} likely` +
+        (candidates.length > 1 ? ` · ${candidates.length} nodes share this prefix` : '');
+    } else if (name) {
+      title = `${h} — the only known node with this prefix, no GPS to check its place in the path`;
+    } else if (candidates.length) {
+      title = `${h} — no listed node with this prefix fits this point in the path`;
+    } else {
+      title = `${h} — no known node has this prefix`;
+    }
+
+    const display = opts.hexMode || !name ? h
+      : escapeHtml(opts.truncate ? name.slice(0, opts.truncate) : name);
+    const cls = [
+      'hop',
+      name ? 'hop-named' : '',
+      guess || unsure ? 'hop-ambiguous' : '',
+      entry.unlisted ? 'hop-unlisted' : '',
+      // #165 — callers mark the pill itself; see renderHop() below.
+      opts.className || '',
+    ].filter(Boolean).join(' ');
+    const label = name && entry.unlisted ? `${display} <span class="hop-nogps">(no GPS)</span>` : display;
+    const pill = opts.link !== false && entry.pubkey
+      ? `<a class="${cls} hop-link" href="#/nodes/${encodeURIComponent(entry.pubkey)}" title="${escapeHtml(title)}" data-hop-link="true">${label}</a>`
+      : `<span class="${cls}" title="${escapeHtml(title)}">${label}</span>`;
+
+    if (!unsure || opts.badge === false) return pill;
+    const pick = { name, confidence: entry.confidence };
+    const btn = conflictButton(h, candidates, false, pick, candidates.length,
+      candidates.length + ' candidates — click for details');
+    return `<span class="hop-group">${pill}${btn}</span>`;
+  }
+
   /**
    * Render a hop prefix as HTML with conflict info.
    */
@@ -77,6 +151,8 @@ window.HopDisplay = (function() {
     opts = opts || {};
     if (!entry) entry = {};
     if (typeof entry === 'string') entry = { name: entry };
+    // #598 — only inferPath() entries carry a numeric confidence.
+    if (typeof entry.confidence === 'number') return renderInferredHop(h, entry, opts);
 
     const name = entry.name || null;
     const pubkey = entry.pubkey || h;
@@ -91,9 +167,9 @@ window.HopDisplay = (function() {
     if (unreliable) title += ' — unreliable';
 
     const badgeCount = conflictBadgeCount(entry);
-    const conflictData = escapeHtml(JSON.stringify({ h, conflicts, globalFallback }));
     const conflictBadge = badgeCount > 1
-      ? ` <button class="hop-conflict-btn status-warn" data-conflict='${conflictData}' onclick="event.preventDefault();event.stopPropagation();HopDisplay._showFromBtn(this)" title="${badgeCount} candidates — click for details"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>${badgeCount}</button>`
+      ? conflictButton(h, conflicts, globalFallback, null, badgeCount,
+        badgeCount + ' candidates — click for details')
       : '';
     const unreliableBadge = unreliable
       ? ' <button class="hop-unreliable-btn status-warn" aria-label="Unreliable name resolution" title="Unreliable name resolution — this hash\u2192name match is geographically inconsistent with the surrounding path hops. The repeater itself may be fine; this specific hop assignment is uncertain."><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg></button>'
@@ -140,7 +216,7 @@ window.HopDisplay = (function() {
   function _showFromBtn(btn) {
     try {
       const data = JSON.parse(btn.dataset.conflict);
-      showConflictPopover(btn, data.h, data.conflicts, data.globalFallback);
+      showConflictPopover(btn, data.h, data.conflicts, data.globalFallback, data.pick || null);
     } catch (e) { console.error('Conflict popover error:', e); }
   }
 
@@ -157,7 +233,9 @@ window.HopDisplay = (function() {
     { glyphHtml: '<span class="status-warn">' + WARN_PH + '</span>',
       description: 'Warning icon alone (no number) — unreliable name resolution: the best-guess pubkey couldn\u2019t be confirmed against surrounding path hops.' },
     { glyphHtml: 'dashed underline',
-      description: 'Ambiguous or global-fallback resolution — the name matched outside the current region.' },
+      description: 'Ambiguous or global-fallback resolution — the name matched outside the current region, or is a guess.' },
+    { glyphHtml: '<span class="hop-unlisted">5E</span>',
+      description: 'Hex prefix in a packet\u2019s detail — unlisted: no known node with this prefix fits this point in the path. It is likely a node missing from the node list, or one without GPS.' },
   ];
 
   function renderPathSymbolsLegend() {
@@ -169,5 +247,5 @@ window.HopDisplay = (function() {
            '<ul class="path-legend-list">' + items + '</ul></details>';
   }
 
-  return { renderHop, renderPath, conflictBadgeCount, _showFromBtn, PATH_SYMBOLS_LEGEND, renderPathSymbolsLegend };
+  return { renderHop, renderPath, conflictBadgeCount, _showFromBtn, _showConflictPopover: showConflictPopover, LIKELY, PATH_SYMBOLS_LEGEND, renderPathSymbolsLegend };
 })();
