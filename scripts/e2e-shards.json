@@ -1035,6 +1035,14 @@
       ]
     },
     {
+      "file": "test-live-heard-filter-e2e.js",
+      "shard": 2,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e"
+    },
+    {
       "file": "test-issue-125-live-toggles-early-e2e.js",
       "shard": 2,
       "env": {

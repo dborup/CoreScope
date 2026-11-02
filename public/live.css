@@ -1511,3 +1511,17 @@ input.live-node-filter-input:focus {
 .leaflet-zoom-anim .leaflet-liveAnimPane-pane {
   display: none !important;
 }
+
+/* #660 — "Last heard" filter select in the live toggles row. */
+select.live-heard-select {
+  box-sizing: border-box;
+  height: 26px;
+  min-height: 26px; /* Override global min-height on form controls */
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 4px;
+  font-size: inherit;
+}
+.live-toggles .live-heard-label { cursor: default; }
