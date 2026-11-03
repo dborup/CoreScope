@@ -53,8 +53,18 @@ test('module exports the same object on window and module.exports', () => {
   assert.strictEqual(mod, F);
 });
 
-test('option set is All, 1h, 3h, 6h, 12h, 24h, 7d with All as default', () => {
-  assert.deepStrictEqual(Array.from(F.OPTIONS, o => o.key), ['all', '1h', '3h', '6h', '12h', '24h', '7d']);
+test('option set is All, 1h, 3h, 6h, 12h, 24h, 2d-6d, 7d with All as default', () => {
+  assert.deepStrictEqual(Array.from(F.OPTIONS, o => o.key),
+    ['all', '1h', '3h', '6h', '12h', '24h', '2d', '3d', '4d', '5d', '6d', '7d']);
+  assert.deepStrictEqual(Array.from(F.OPTIONS, o => o.label),
+    ['All', '1 h', '3 h', '6 h', '12 h', '24 h', '2 d', '3 d', '4 d', '5 d', '6 d', '7 d']);
+  for (let d = 2; d <= 6; d++) assert.strictEqual(F.windowMs(d + 'd'), d * 24 * H, d + 'd');
+  for (const k of ['2d', '3d', '4d', '5d', '6d']) {
+    // hash / storage round-trip
+    assert.strictEqual(F.normalizeKey(k), k);
+    assert.strictEqual(F.resolveInitialKey(k, '24h'), k);
+    assert.strictEqual(F.resolveInitialKey(null, k), k);
+  }
   assert.strictEqual(F.DEFAULT_KEY, 'all');
   assert.strictEqual(F.windowMs('all'), null);
   assert.strictEqual(F.windowMs('1h'), H);
