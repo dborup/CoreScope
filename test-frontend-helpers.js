@@ -7583,18 +7583,19 @@ console.log('\n=== live.js: node-filter URL update preserves lat/lon/zoom (#1709
   const liveSrc = fs.readFileSync('public/live.js', 'utf8');
 
   test('node-filter URL update does not unconditionally drop lat/lon/zoom', () => {
-    // The two history.replaceState call sites in the node-filter flow must
-    // either (a) build params from getHashParams() so unrelated keys survive,
-    // or (b) explicitly re-add lat/lon/zoom. We assert (a): both sites must
-    // seed `params` from getHashParams() rather than a fresh URLSearchParams.
-    // Grep for the two blocks; both must contain getHashParams within ~6 lines
-    // before a history.replaceState call that mutates the `node` key.
-    const idx = liveSrc.indexOf("params.set('node'");
-    assert.ok(idx >= 0, "expected params.set('node', val) in live.js node-filter logic");
-    // Scan 200 chars before to find a getHashParams() seeding
-    const before = liveSrc.slice(Math.max(0, idx - 400), idx);
-    assert.ok(/getHashParams\s*\(/.test(before),
-      'node-filter URL update must seed params from getHashParams() to preserve lat/lon/zoom');
+    // Every live.js hash rewrite (node filter, #660 "Last heard") goes
+    // through setLiveHashParam(), which must seed params from
+    // getHashParams() so unrelated keys (lat/lon/zoom) survive. Both
+    // node-filter call sites must use it.
+    const m = liveSrc.match(/function setLiveHashParam\(name, value\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, 'expected function setLiveHashParam(name, value) in live.js');
+    assert.ok(/const params = getHashParams \? getHashParams\(\)/.test(m[1]),
+      'setLiveHashParam must seed params from getHashParams() to preserve lat/lon/zoom');
+    assert.ok(/params\.set\(name, value\)/.test(m[1]) && /params\.delete\(name\)/.test(m[1]),
+      'setLiveHashParam must set or delete only its own key');
+    assert.ok(/history\.replaceState\(/.test(m[1]), 'setLiveHashParam must not trigger hashchange');
+    assert.strictEqual((liveSrc.match(/setLiveHashParam\('node', (val|key)\)/g) || []).length, 2,
+      'both node-filter URL updates must go through setLiveHashParam');
   });
 
   test('node-filter URL update has no fresh URLSearchParams() with only node key (would clobber viewport)', () => {

@@ -161,6 +161,7 @@ function makeLiveSandbox({ withAppJs = false, withHopFilter = false } = {}) {
   if (withHopFilter) loadInCtx(ctx, 'public/hop-filter.js');
   loadInCtx(ctx, 'public/payload-labels.js');
   loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/live-heard-filter.js');
   loadInCtx(ctx, 'public/packet-helpers.js');
   if (withAppJs) loadInCtx(ctx, 'public/app.js');
   try { loadInCtx(ctx, 'public/live.js'); } catch (e) {
@@ -293,6 +294,7 @@ console.log('\n=== live.js: expandToBufferEntriesAsync ===');
   addLiveGlobals(ctx);
   loadInCtx(ctx, 'public/payload-labels.js');
   loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/live-heard-filter.js');
   loadInCtx(ctx, 'public/packet-helpers.js');
   try { loadInCtx(ctx, 'public/live.js'); } catch (e) {
     for (const k of Object.keys(ctx.window)) ctx[k] = ctx.window[k];
@@ -1221,7 +1223,7 @@ console.log('\n=== live.js: foreignPathColor ===');
 // socket. These drive the REAL live.js closure through a counting channel.
 console.log('\n=== live.js: shared WebSocket channel ===');
 {
-  function makeWSSandbox() {
+  function makeWSSandbox(opts) {
     const ctx = makeSandbox();
     addLiveGlobals(ctx);
     let constructed = 0;
@@ -1240,6 +1242,7 @@ console.log('\n=== live.js: shared WebSocket channel ===');
     ctx.document.body.classList = { add() {}, remove() {}, contains() { return false; } };
     loadInCtx(ctx, 'public/payload-labels.js');
     loadInCtx(ctx, 'public/roles.js');
+    if (!(opts && opts.noHeardFilter)) loadInCtx(ctx, 'public/live-heard-filter.js');
     loadInCtx(ctx, 'public/packet-helpers.js');
     // Deliberately unguarded: a live.js load failure must fail these tests.
     loadInCtx(ctx, 'public/live.js');
@@ -1255,6 +1258,16 @@ console.log('\n=== live.js: shared WebSocket channel ===');
     };
   }
   const pkt = (hash) => ({ type: 'packet', data: { hash, timestamp: new Date().toISOString(), payload_type: 4 } });
+
+  test('#660: a missing live-heard-filter.js degrades to no filter instead of throwing', () => {
+    const t = makeWSSandbox({ noHeardFilter: true });
+    assert.strictEqual(t.ctx.window.LiveHeardFilter, undefined);
+    t.connect();
+    const before = t.buffer().length;
+    t.fanOut({ type: 'packet', data: { hash: 'noheard-1', timestamp: new Date().toISOString(), payload_type: 5,
+      route_type: 1, resolved_path: ['aa'.repeat(32)] } });
+    assert.strictEqual(t.buffer().length, before + 1, 'packet must still be buffered');
+  });
 
   test('Live constructs no WebSocket and registers exactly one shared listener', () => {
     const t = makeWSSandbox();

@@ -58,6 +58,10 @@
   let matrixMode = localStorage.getItem('live-matrix-mode') === 'true';
   let matrixRain = localStorage.getItem('live-matrix-rain') === 'true';
   let colorByHash = localStorage.getItem('meshcore-color-packets-by-hash') !== 'false';
+  // #660 "Last heard" filter key (live-heard-filter.js). Resolved from the
+  // hash, then localStorage, in wireHeardFilter() on every mount.
+  let heardKey = 'all';
+  let _heardReapplyTimer = null;
   // Color a path's connecting lines red instead of by packet type when the
   // packet's origin node is flagged foreign (nodes.foreign_advert — GPS
   // outside the configured geo_filter region). Darker red = more hops
@@ -445,7 +449,9 @@
   }
 
   function vcrSetMode(mode) {
+    const wasLive = VCR.mode === 'LIVE';
     VCR.mode = mode;
+    if (wasLive !== (mode === 'LIVE')) applyHeardFilter();
     if (mode !== 'LIVE' && !VCR.frozenNow) VCR.frozenNow = Date.now();
     if (mode === 'LIVE') VCR.frozenNow = null;
     updateVCRUI();
@@ -973,6 +979,7 @@
 
   function bufferPacket(pkt) {
     pkt._ts = packetTimestamp(pkt);
+    stampHeardFromPacket(pkt);
     const entry = { ts: pkt._ts, pkt };
     VCR.buffer.push(entry);
     // Keep buffer capped at ~2000 — adjust playhead to avoid stale indices (#63)
@@ -1219,6 +1226,147 @@
     }
     // The Heat/Matrix interlock holds from the first paint.
     syncHeatToggleToMatrix(matrixMode);
+    wireHeardFilter();
+  }
+
+  // Rewrites one ?param of the #/live hash in place. replaceState, so the
+  // SPA router does not re-run (a hashchange would re-init the page).
+  function setLiveHashParam(name, value) {
+    const params = getHashParams ? getHashParams() : new URLSearchParams();
+    if (value) params.set(name, value);
+    else params.delete(name);
+    const base = location.hash.split('?')[0] || '#/live';
+    const qs = params.toString();
+    const newUrl = location.pathname + location.search + base + (qs ? '?' + qs : '');
+    try { history.replaceState(null, '', newUrl); } catch (_) {}
+  }
+
+  // #660 — "Last heard" select. Same contract as the toggles above: restored
+  // and wired before init's first await. A valid ?heard= wins over the
+  // saved value and is saved, like ?node= (#1110).
+  function wireHeardFilter() {
+    const sel = document.getElementById('liveHeardSelect');
+    if (!sel || sel.dataset.liveWired === '1') return;
+    sel.dataset.liveWired = '1';
+    const F = window.LiveHeardFilter;
+    // Optional module (stale cached index.html, blocked script): without it
+    // the Live page runs unfiltered and the control is not offered.
+    const label = document.getElementById('liveHeardLabel');
+    if (!F) { if (label) label.style.display = 'none'; return; }
+    let stored = null;
+    try { stored = localStorage.getItem(F.STORAGE_KEY); } catch (_) { /* private mode */ }
+    const fromHash = getHashParams ? getHashParams().get(F.HASH_PARAM) : null;
+    heardKey = F.resolveInitialKey(fromHash, stored);
+    if (fromHash === heardKey) {
+      try { localStorage.setItem(F.STORAGE_KEY, heardKey); } catch (_) { /* quota */ }
+    }
+    for (const o of F.OPTIONS) {
+      const opt = document.createElement('option');
+      opt.value = o.key;
+      opt.textContent = o.label;
+      sel.appendChild(opt);
+    }
+    sel.value = heardKey;
+    sel.addEventListener('change', () => {
+      heardKey = F.normalizeKey(sel.value);
+      try { localStorage.setItem(F.STORAGE_KEY, heardKey); } catch (_) { /* quota */ }
+      setLiveHashParam(F.HASH_PARAM, heardKey === F.DEFAULT_KEY ? '' : heardKey);
+      applyHeardFilter();
+    });
+    updateHeardCount(0);
+  }
+
+  // Active window in ms, or null for All. Suspended outside LIVE mode: VCR
+  // scrubbing loads nodes by first_seen <= beforeTs but their last_seen is
+  // today's, so ages against the replay clock would be meaningless.
+  function heardWindowMs() {
+    const F = window.LiveHeardFilter;
+    return F && VCR.mode === 'LIVE' ? F.windowMs(heardKey) : null;
+  }
+
+  function isHeardHidden(n, winMs, now) {
+    const F = window.LiveHeardFilter;
+    return F ? F.isHidden(n, winMs, now, window.getNodeFreshness) : false;
+  }
+
+  // Same deferral rule as addNodeMarker/cullMarkers: only markers within the
+  // padded viewport are attached.
+  function markerInView(marker) {
+    if (!map) return true;
+    try { return map.getBounds().pad(0.5).contains(marker.getLatLng()); }
+    catch (e) { return true; } // getBounds() can throw during early Leaflet init
+  }
+
+  // Flips one marker; layer work only on a state change, never a rebuild.
+  function setMarkerHeardHidden(marker, hide) {
+    marker._heardHidden = hide;
+    if (!nodesLayer) return;
+    if (hide) {
+      if (nodesLayer.hasLayer(marker)) nodesLayer.removeLayer(marker);
+    } else if (!nodesLayer.hasLayer(marker) && markerInView(marker)) {
+      nodesLayer.addLayer(marker);
+    }
+  }
+
+  // One O(n) predicate pass over the loaded markers (~5 ms at 10k nodes).
+  // Runs on select change, VCR mode change, after loadNodes, on the shared
+  // 60 s prune tick and (coalesced) when live traffic revives a hidden node.
+  function applyHeardFilter() {
+    if (_heardReapplyTimer) { clearTimeout(_heardReapplyTimer); _heardReapplyTimer = null; }
+    const winMs = heardWindowMs();
+    const now = Date.now();
+    let hidden = 0;
+    for (const key in nodeMarkers) {
+      const marker = nodeMarkers[key];
+      const hide = isHeardHidden(nodeData[key], winMs, now);
+      if (hide) hidden++;
+      if (hide !== !!marker._heardHidden) setMarkerHeardHidden(marker, hide);
+    }
+    updateHeardCount(hidden);
+  }
+
+  function scheduleHeardFilter() {
+    if (_heardReapplyTimer) return;
+    _heardReapplyTimer = setTimeout(applyHeardFilter, 250);
+  }
+
+  function updateHeardCount(hidden) {
+    const el = document.getElementById('liveHeardCount');
+    if (!el) return;
+    const F = window.LiveHeardFilter;
+    if (!F || heardKey === F.DEFAULT_KEY) { el.classList.add('hidden'); el.textContent = ''; return; }
+    el.classList.remove('hidden');
+    el.textContent = VCR.mode === 'LIVE' ? hidden + ' hidden' : 'paused in replay';
+  }
+
+  // Stamps _lastHeard on nodes a live WS packet proves were transmitting
+  // (LiveHeardFilter.heardKeysFromPacket). Called for every WS packet, in
+  // every VCR mode and with the tab hidden, so evidence is never dropped.
+  //
+  // Stamps Date.now(), not the ingestor's rxTime: pkt._ts is the
+  // transmission's first_seen (the wrong clock for a new observation of an
+  // old transmission) and the broadcast carries no per-observation time.
+  // Same evidence rule as the ingestor's relay touch, not the same clock
+  // guard: the ingestor's UPDATE never moves last_seen backwards, whereas
+  // this stamp is always "now", so an ingestor catch-up or MQTT backlog
+  // revives a node here that it would leave alone in nodes.last_seen. That
+  // is accepted: the node really did just transmit, as far as this page can
+  // tell, and the stamp is page-local (gone on reload).
+  function stampHeardFromPacket(pkt) {
+    const F = window.LiveHeardFilter;
+    if (!F) return;
+    const keys = F.heardKeysFromPacket(pkt);
+    if (!keys.length) return;
+    const now = Date.now();
+    let revive = false;
+    for (const k of keys) {
+      const n = nodeData[k];
+      if (!n) continue;
+      n._lastHeard = now;
+      const m = nodeMarkers[k];
+      if (m && m._heardHidden) revive = true;
+    }
+    if (revive) scheduleHeardFilter();
   }
 
   // Matrix mode owns the heat map: while it is on, the heat layer is hidden
@@ -1302,6 +1450,9 @@
             <span id="multibyteDesc" class="sr-only">Show only multibyte (≥2-byte path-hash) packets; hide unreliable single-byte traffic</span>
             <label><input type="checkbox" id="liveForeignToggle" checked aria-describedby="foreignDesc"> Foreign origin</label>
             <span id="foreignDesc" class="sr-only">Color a packet's route red when it originates from a node outside your configured region; darker red means more hops traveled</span>
+            <label id="liveHeardLabel" class="live-heard-label" title="Hide repeaters and rooms not heard within this window. Heard = an own advert or a flood packet the server resolved this node relaying, plus live packets since the page loaded. Adverts alone are infrequent and the interval is set per node, so a healthy repeater that relays nothing can look silent until its next advert: pick a window longer than its advert interval. Companions and sensors are never hidden. Suspended during VCR replay.">Last heard <select id="liveHeardSelect" class="live-heard-select" aria-describedby="heardDesc"></select></label>
+            <span id="heardDesc" class="sr-only">Hide repeaters and rooms with no advert or relayed traffic within the chosen window. Adverts are infrequent and the interval is set per node, so a healthy repeater that relays nothing can look silent until its next advert: pick a window longer than its advert interval. Companions and sensors are never hidden. Suspended during VCR replay.</span>
+            <span id="liveHeardCount" class="live-filter-count hidden" aria-live="polite"></span>
             <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Geo filter boundary</label>
             <label id="liveSelectedAreaLabel" style="display:none"><input type="checkbox" id="liveSelectedAreaToggle"> Selected area outline</label>
             </div>
@@ -1522,7 +1673,7 @@
 
         for (const key in nodeMarkers) {
           const marker = nodeMarkers[key];
-          const isVisible = bounds.contains(marker.getLatLng());
+          const isVisible = !marker._heardHidden && bounds.contains(marker.getLatLng());
           const hasLayer = nodesLayer.hasLayer(marker);
 
           if (isVisible && !hasLayer) nodesLayer.addLayer(marker);
@@ -1810,15 +1961,7 @@
         // setNodeFilter accepts pubkeys/prefixes/names; commit raw for live filtering.
         const val = (rawValue || '').trim();
         setNodeFilter(val ? [val] : []);
-        // Update URL without triggering hashchange (which would re-init the page).
-        const params = getHashParams ? getHashParams() : new URLSearchParams();
-        if (val) params.set('node', val);
-        else params.delete('node');
-        const base = location.hash.split('?')[0] || '#/live';
-        const qs = params.toString();
-        const newHash = base + (qs ? '?' + qs : '');
-        const newUrl = location.pathname + location.search + newHash;
-        try { history.replaceState(null, '', newUrl); } catch (_) {}
+        setLiveHashParam('node', val);
       }
 
       function selectSuggestion(opt) {
@@ -1827,13 +1970,7 @@
         nodeFilterInput.value = name;
         // Filter by pubkey prefix when available — most precise.
         setNodeFilter(key ? [key] : (name ? [name] : []));
-        const params = getHashParams ? getHashParams() : new URLSearchParams();
-        if (key) params.set('node', key);
-        else params.delete('node');
-        const base = location.hash.split('?')[0] || '#/live';
-        const qs = params.toString();
-        const newUrl = location.pathname + location.search + base + (qs ? '?' + qs : '');
-        try { history.replaceState(null, '', newUrl); } catch (_) {}
+        setLiveHashParam('node', key);
         hideDropdown();
       }
 
@@ -1940,12 +2077,7 @@
         if (nodeFilterInput) nodeFilterInput.value = '';
         setNodeFilter([]);
         // Drop the ?node param without re-running the SPA route handler.
-        const params = getHashParams ? getHashParams() : new URLSearchParams();
-        params.delete('node');
-        const base = location.hash.split('?')[0] || '#/live';
-        const qs = params.toString();
-        const newUrl = location.pathname + location.search + base + (qs ? '?' + qs : '');
-        try { history.replaceState(null, '', newUrl); } catch (_) {}
+        setLiveHashParam('node', '');
       });
     }
     if (nodeFilterInput) {
@@ -2621,7 +2753,9 @@
     }, 1000);
 
     // Prune stale nodes every 60 seconds
-    _pruneInterval = setInterval(pruneStaleNodes, 60000);
+    // One shared 60 s tick: nodes also age out of the "Last heard" filter
+    // here (#660), with no timer of its own.
+    _pruneInterval = setInterval(() => { pruneStaleNodes(); applyHeardFilter(); }, 60000);
 
     // Refresh relative timestamps in feed every 10 seconds (#701)
     _feedTimestampInterval = setInterval(function() {
@@ -2904,6 +3038,7 @@
         }
       });
       const _el2 = document.getElementById('liveNodeCount'); if (_el2) _el2.textContent = Object.keys(nodeMarkers).length;
+      applyHeardFilter();
       // Initialize shared HopResolver with loaded nodes
       if (window.HopResolver) HopResolver.init(list);
       // Fetch affinity data for hop disambiguation
@@ -3163,18 +3298,14 @@
       popupAnchor: [0, -sizePx / 2]
     });
     const marker = L.marker([n.lat, n.lon], { icon: icon, interactive: true });
-    if (nodesLayer) {
-      try {
-        // If the marker is outside the current map bounds, it is intentionally
-        // deferred to save DOM nodes. cullMarkers() is the only path that will
-        // re-attach it later when the user pans or zooms.
-        if (!map || map.getBounds().pad(0.5).contains(marker.getLatLng())) {
-          marker.addTo(nodesLayer);
-        }
-      } catch (e) {
-        // Fallback: map.getBounds() can throw during early Leaflet initialization
-        marker.addTo(nodesLayer);
-      }
+    // #660: a node the "Last heard" filter hides is never attached; its
+    // marker is kept so applyHeardFilter() can show it again without a rebuild.
+    marker._heardHidden = isHeardHidden(n, heardWindowMs(), Date.now());
+    // If the marker is outside the current map bounds, it is intentionally
+    // deferred to save DOM nodes. cullMarkers() is the only path that will
+    // re-attach it later when the user pans or zooms.
+    if (nodesLayer && !marker._heardHidden && markerInView(marker)) {
+      marker.addTo(nodesLayer);
     }
 
     marker.bindTooltip(escapeHtml(n.name || n.public_key.slice(0, 8)), {
@@ -3534,7 +3665,7 @@
       if (h.payloadTypeName === 'ADVERT' && p.pubKey) {
         var key = p.pubKey;
         if (!nodeMarkers[key] && p.lat != null && p.lon != null && !(p.lat === 0 && p.lon === 0)) {
-          var n = { public_key: key, name: p.name || key.slice(0,8), role: p.role || 'unknown', lat: p.lat, lon: p.lon, _liveSeen: Date.now() };
+          var n = { public_key: key, name: p.name || key.slice(0,8), role: p.role || 'unknown', lat: p.lat, lon: p.lon, _liveSeen: Date.now(), _lastHeard: Date.now() };
           nodeData[key] = n;
           addNodeMarker(n);
           if (window.HopResolver) HopResolver.init(Object.values(nodeData));
@@ -4779,6 +4910,7 @@
     if (_lcdClockInterval) { clearInterval(_lcdClockInterval); _lcdClockInterval = null; }
     if (_rateCounterInterval) { clearInterval(_rateCounterInterval); _rateCounterInterval = null; }
     if (_pruneInterval) { clearInterval(_pruneInterval); _pruneInterval = null; }
+    if (_heardReapplyTimer) { clearTimeout(_heardReapplyTimer); _heardReapplyTimer = null; }
     if (_feedTimestampInterval) { clearInterval(_feedTimestampInterval); _feedTimestampInterval = null; }
     if (_affinityInterval) { clearInterval(_affinityInterval); _affinityInterval = null; }
     // Unsubscribe rather than close: the socket belongs to app.js and the rest
