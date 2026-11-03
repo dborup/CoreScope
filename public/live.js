@@ -1249,6 +1249,10 @@
     if (!sel || sel.dataset.liveWired === '1') return;
     sel.dataset.liveWired = '1';
     const F = window.LiveHeardFilter;
+    // Optional module (stale cached index.html, blocked script): without it
+    // the Live page runs unfiltered and the control is not offered.
+    const label = document.getElementById('liveHeardLabel');
+    if (!F) { if (label) label.style.display = 'none'; return; }
     let stored = null;
     try { stored = localStorage.getItem(F.STORAGE_KEY); } catch (_) { /* private mode */ }
     const fromHash = getHashParams ? getHashParams().get(F.HASH_PARAM) : null;
@@ -1276,11 +1280,13 @@
   // scrubbing loads nodes by first_seen <= beforeTs but their last_seen is
   // today's, so ages against the replay clock would be meaningless.
   function heardWindowMs() {
-    return VCR.mode === 'LIVE' ? window.LiveHeardFilter.windowMs(heardKey) : null;
+    const F = window.LiveHeardFilter;
+    return F && VCR.mode === 'LIVE' ? F.windowMs(heardKey) : null;
   }
 
   function isHeardHidden(n, winMs, now) {
-    return window.LiveHeardFilter.isHidden(n, winMs, now, window.getNodeFreshness);
+    const F = window.LiveHeardFilter;
+    return F ? F.isHidden(n, winMs, now, window.getNodeFreshness) : false;
   }
 
   // Same deferral rule as addNodeMarker/cullMarkers: only markers within the
@@ -1327,7 +1333,8 @@
   function updateHeardCount(hidden) {
     const el = document.getElementById('liveHeardCount');
     if (!el) return;
-    if (heardKey === 'all') { el.classList.add('hidden'); el.textContent = ''; return; }
+    const F = window.LiveHeardFilter;
+    if (!F || heardKey === F.DEFAULT_KEY) { el.classList.add('hidden'); el.textContent = ''; return; }
     el.classList.remove('hidden');
     el.textContent = VCR.mode === 'LIVE' ? hidden + ' hidden' : 'paused in replay';
   }
@@ -1335,8 +1342,20 @@
   // Stamps _lastHeard on nodes a live WS packet proves were transmitting
   // (LiveHeardFilter.heardKeysFromPacket). Called for every WS packet, in
   // every VCR mode and with the tab hidden, so evidence is never dropped.
+  //
+  // Stamps Date.now(), not the ingestor's rxTime: pkt._ts is the
+  // transmission's first_seen (the wrong clock for a new observation of an
+  // old transmission) and the broadcast carries no per-observation time.
+  // Same evidence rule as the ingestor's relay touch, not the same clock
+  // guard: the ingestor's UPDATE never moves last_seen backwards, whereas
+  // this stamp is always "now", so an ingestor catch-up or MQTT backlog
+  // revives a node here that it would leave alone in nodes.last_seen. That
+  // is accepted: the node really did just transmit, as far as this page can
+  // tell, and the stamp is page-local (gone on reload).
   function stampHeardFromPacket(pkt) {
-    const keys = window.LiveHeardFilter.heardKeysFromPacket(pkt);
+    const F = window.LiveHeardFilter;
+    if (!F) return;
+    const keys = F.heardKeysFromPacket(pkt);
     if (!keys.length) return;
     const now = Date.now();
     let revive = false;
@@ -1432,7 +1451,7 @@
             <label><input type="checkbox" id="liveForeignToggle" checked aria-describedby="foreignDesc"> Foreign origin</label>
             <span id="foreignDesc" class="sr-only">Color a packet's route red when it originates from a node outside your configured region; darker red means more hops traveled</span>
             <label id="liveHeardLabel" class="live-heard-label" title="Hide repeaters and rooms not heard within this window. Heard = an own advert or a flood packet the server resolved this node relaying, plus live packets since the page loaded. Adverts alone are infrequent and the interval is set per node, so a healthy repeater that relays nothing can look silent until its next advert: pick a window longer than its advert interval. Companions and sensors are never hidden. Suspended during VCR replay.">Last heard <select id="liveHeardSelect" class="live-heard-select" aria-describedby="heardDesc"></select></label>
-            <span id="heardDesc" class="sr-only">Hide repeaters and rooms with no advert or relayed traffic within the chosen window</span>
+            <span id="heardDesc" class="sr-only">Hide repeaters and rooms with no advert or relayed traffic within the chosen window. Adverts are infrequent and the interval is set per node, so a healthy repeater that relays nothing can look silent until its next advert: pick a window longer than its advert interval. Companions and sensors are never hidden. Suspended during VCR replay.</span>
             <span id="liveHeardCount" class="live-filter-count hidden" aria-live="polite"></span>
             <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Geo filter boundary</label>
             <label id="liveSelectedAreaLabel" style="display:none"><input type="checkbox" id="liveSelectedAreaToggle"> Selected area outline</label>

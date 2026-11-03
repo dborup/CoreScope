@@ -3,17 +3,25 @@
  * select, the markers and the timer. Loaded after roles.js; the freshness
  * helper is passed in (getNodeFreshness) rather than read from window.
  *
- * Basis: "any traffic". The candidates are getNodeFreshness's fixed set
- * minus _liveSeen ({ includeLiveSeen: false }), because live.js stamps
- * _liveSeen with the page-load time on every API-loaded node. What is left:
+ * Basis: "any traffic", the only basis offered (owner decision, #660). The
+ * candidates are getNodeFreshness's fixed set minus _liveSeen
+ * ({ includeLiveSeen: false }), because live.js stamps _liveSeen with the
+ * page-load time on every API-loaded node. What is left:
  *   - last_seen / last_heard from /api/nodes. Both carry nodes.last_seen,
  *     which the ingestor advances on the node's own adverts AND on resolved
  *     flood relay hops (cmd/ingestor/db.go touchRelayNodesLocked, 5 min
- *     debounce). There is no advert-only timestamp in the bulk node list,
- *     so an "adverts only" basis is not offered.
+ *     debounce). Why no "adverts only" or "relayed only" basis:
+ *       - There is no exact advert-only timestamp. /api/nodes does serve
+ *         last_relayed, but it and last_seen come from different sources and
+ *         clocks, so they cannot be compared directly (last_relayed can be
+ *         newer than last_seen), and "last_seen newer than last_relayed" is
+ *         only an approximation of "advert".
+ *       - roles.js holds the doctrine "last_relayed is NEVER a candidate".
+ *       - "Any traffic" is the fastest signal for spotting an outage.
+ *     A relay-only basis could be a follow-up if someone asks for it.
  *   - _lastHeard, stamped by live.js from WS packets via heardKeysFromPacket
- *     (same evidence rule as the ingestor), so a node comes back as soon as
- *     traffic arrives instead of on the next reload.
+ *     (same evidence rule as the ingestor's relay touch), so a node comes
+ *     back as soon as traffic arrives instead of on the next reload.
  *
  * Scope: repeater and room only. Companions and sensors sleep, roam and go
  * quiet by design; their silence is not an outage signal.
@@ -75,9 +83,12 @@
 
   // Pubkeys one WS packet proves were transmitting just now: the signed
   // sender of an ADVERT, and the server-resolved relay hops of a flood
-  // packet. resolved_path only holds unambiguous resolutions (null
-  // otherwise), so a 1-byte prefix collision cannot keep a dead repeater
-  // alive. The WS route_type/payload_type are transmission-level.
+  // packet. On the WS path resolved_path can come from an affinity tiebreak
+  // when a prefix is ambiguous, so a 1-byte collision can stamp the wrong
+  // repeater. That is the same rule as the ingestor's relay touch (it uses
+  // the same context-aware resolver), so the filter is no more permissive
+  // than nodes.last_seen. The WS route_type/payload_type are
+  // transmission-level.
   function heardKeysFromPacket(pkt) {
     var keys = [];
     if (!pkt || typeof pkt !== 'object') return keys;

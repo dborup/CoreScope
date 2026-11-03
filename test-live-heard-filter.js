@@ -197,32 +197,31 @@ test('predicate over 10k nodes (ISO strings, 3 fields each) stays fast', () => {
     nodes.push({ role: i % 3 ? 'repeater' : 'companion', last_seen: iso(t), last_heard: iso(t), _liveSeen: NOW, _lastHeard: i % 7 ? undefined : t });
   }
   const win = F.windowMs('6h');
-  const bestOf = (fn) => {
-    let best = Infinity, out = 0;
-    for (let r = 0; r < 9; r++) {
-      const t0 = process.hrtime.bigint();
-      out = fn();
-      best = Math.min(best, Number(process.hrtime.bigint() - t0) / 1e6);
-    }
-    return { best, out };
-  };
-  // Baseline: one bare getNodeFreshness pass over the same nodes. The
-  // predicate is that call plus O(1) work, so it must stay close to it on
-  // any machine; the absolute cap guards against a slow helper.
-  const base = bestOf(() => {
+  // Baseline: bare getNodeFreshness over the in-scope nodes only. That is
+  // exactly the work the predicate has to do (companions short-circuit in
+  // inScope), so the predicate must sit within a small margin of it on any
+  // machine. Both are timed in interleaved rounds and compared on their
+  // best round, so load spikes hit both sides alike.
+  const scoped = nodes.filter((n) => F.inScope(n.role));
+  const ROUNDS = 25;
+  let base = Infinity, pred = Infinity, out = 0;
+  for (let r = 0; r < ROUNDS; r++) {
+    let t0 = process.hrtime.bigint();
     let c = 0;
-    for (let i = 0; i < nodes.length; i++) if (fresh(nodes[i], NOW, { includeLiveSeen: false })) c++;
-    return c;
-  });
-  const pred = bestOf(() => {
-    let c = 0;
+    for (let i = 0; i < scoped.length; i++) if (fresh(scoped[i], NOW, { includeLiveSeen: false })) c++;
+    base = Math.min(base, Number(process.hrtime.bigint() - t0) / 1e6);
+    t0 = process.hrtime.bigint();
+    c = 0;
     for (let i = 0; i < nodes.length; i++) if (F.isHidden(nodes[i], win, NOW, fresh)) c++;
-    return c;
-  });
-  console.log('     10k nodes: predicate best of 9 = ' + pred.best.toFixed(2) + ' ms (' + pred.out +
-    ' hidden); bare getNodeFreshness pass = ' + base.best.toFixed(2) + ' ms');
+    pred = Math.min(pred, Number(process.hrtime.bigint() - t0) / 1e6);
+    out = c;
+  }
+  console.log('     10k nodes: predicate best of ' + ROUNDS + ' = ' + pred.toFixed(2) + ' ms (' + out +
+    ' hidden); in-scope getNodeFreshness baseline = ' + base.toFixed(2) + ' ms (ratio ' + (pred / base).toFixed(2) + ')');
+  pred = { best: pred, out: out };
+  base = { best: base };
   assert.ok(pred.out > 0 && pred.out < 10000, 'expected a mixed result, got ' + pred.out);
-  assert.ok(pred.best < 1.5 * base.best + 0.5,
+  assert.ok(pred.best < 1.3 * base.best + 0.2,
     'predicate ' + pred.best.toFixed(2) + ' ms vs freshness baseline ' + base.best.toFixed(2) + ' ms');
   assert.ok(pred.best < 25, 'predicate over 10k nodes took ' + pred.best.toFixed(2) + ' ms');
 });

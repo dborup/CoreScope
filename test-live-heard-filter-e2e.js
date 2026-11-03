@@ -241,6 +241,50 @@ function onMap(page) {
     } finally { await c.ctx.close(); }
   });
 
+  await step('a conflicting hash and stored value: the hash wins', async () => {
+    const c = await newPage(browser, errors);
+    try {
+      // Stored 1h would hide the 10 h old repeater; the deep link says 24h.
+      await c.ctx.addInitScript((k) => { try { localStorage.setItem(k, '1h'); } catch (_) {} }, KEY);
+      await gotoLive(c.page, 'heard=24h&' + VIEW);
+      assert(await c.page.$eval('#liveHeardSelect', (e) => e.value) === '24h', 'stored value beat the hash');
+      assert((await onMap(c.page))[OLD_REP] === true, 'old repeater hidden: storage won over the hash');
+      assert(await c.page.evaluate((k) => localStorage.getItem(k), KEY) === '24h', 'deep link not saved over the stored value');
+    } finally { await c.ctx.close(); }
+  });
+
+  await step('the advert-lag caveat is in the aria-describedby text, not only the title', async () => {
+    const d = await page.$eval('#liveHeardSelect', (e) => {
+      const el = document.getElementById(e.getAttribute('aria-describedby'));
+      return el ? el.textContent : null;
+    });
+    assert(d !== null, 'aria-describedby target missing');
+    assert(/advert/i.test(d) && /interval/i.test(d) && /longer/i.test(d), 'describedby text lacks the advert-lag caveat: "' + d + '"');
+  });
+
+  await step('page still works when live-heard-filter.js fails to load', async () => {
+    const errs = [];
+    const c = await newPage(browser, errs);
+    try {
+      await c.page.route(/\/live-heard-filter\.js/, (route) => route.abort());
+      await c.page.goto(BASE + '/?r=' + Date.now() + '#/live?heard=6h&' + VIEW, { waitUntil: 'domcontentloaded' });
+      await c.page.waitForFunction((k) => {
+        const m = window._liveNodeMarkers && window._liveNodeMarkers();
+        return !!(window._liveWSHandler && window._liveWSHandler()) && m && m[k];
+      }, OLD_REP, { timeout: 20000 });
+      const s = await onMap(c.page);
+      assert(s[OLD_REP] && s[FRESH_REP] && s[OLD_COMP], 'markers missing without the module: ' + JSON.stringify(s));
+      assert(await c.page.$('.leaflet-container'), 'no Leaflet container');
+      assert(!(await c.page.isVisible('#liveHeardLabel')), 'filter control still visible without its module');
+      await c.page.evaluate((pk) => window._liveBufferPacket({
+        id: 661, hash: 'e2e660nomod' + Date.now(), raw_hex: '1500', route_type: 1, payload_type: 5,
+        path_json: '[]', resolved_path: [pk], observer_id: 'e2e-660', timestamp: new Date().toISOString(),
+        decoded: { header: { payloadTypeName: 'GRP_TXT' }, payload: { text: 'x' }, path: { hops: [] } },
+      }), OLD_REP);
+      assert(errs.length === 0, errs.join('\n    '));
+    } finally { await c.ctx.close(); }
+  });
+
   await step('no page errors', async () => {
     assert(errors.length === 0, errors.join('\n    '));
   });
