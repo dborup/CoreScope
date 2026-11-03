@@ -43,6 +43,11 @@
     { key: '6h', ms: 6 * H, label: '6 h' },
     { key: '12h', ms: 12 * H, label: '12 h' },
     { key: '24h', ms: 24 * H, label: '24 h' },
+    { key: '2d', ms: 2 * 24 * H, label: '2 d' },
+    { key: '3d', ms: 3 * 24 * H, label: '3 d' },
+    { key: '4d', ms: 4 * 24 * H, label: '4 d' },
+    { key: '5d', ms: 5 * 24 * H, label: '5 d' },
+    { key: '6d', ms: 6 * 24 * H, label: '6 d' },
     { key: '7d', ms: 7 * 24 * H, label: '7 d' }
   ];
   var DEFAULT_KEY = 'all';

@@ -1269,12 +1269,9 @@ func (db *DB) GetNodes(limit, offset int, role, search, before, lastHeard, sortB
 		args = append(args, before)
 	}
 	if lastHeard != "" {
-		durations := map[string]int64{
-			"1h": 3600000, "6h": 21600000, "24h": 86400000,
-			"7d": 604800000, "30d": 2592000000,
-		}
-		if ms, ok := durations[lastHeard]; ok {
-			since := time.Now().Add(-time.Duration(ms) * time.Millisecond).Format(time.RFC3339)
+		if d, ok := lastHeardDuration(lastHeard); ok {
+			// UTC so the string comparison matches stored "Z" timestamps.
+			since := time.Now().Add(-d).UTC().Format(time.RFC3339)
 			where = append(where, "last_seen > ?")
 			args = append(args, since)
 		}

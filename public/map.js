@@ -303,8 +303,15 @@
             <label for="mcLastHeard" class="sr-only">Filter by last heard time</label>
             <select id="mcLastHeard" aria-label="Filter by last heard time">
               <option value="1h">1 hour</option>
+              <option value="3h">3 hours</option>
               <option value="6h">6 hours</option>
+              <option value="12h">12 hours</option>
               <option value="24h">24 hours</option>
+              <option value="2d">2 days</option>
+              <option value="3d">3 days</option>
+              <option value="4d">4 days</option>
+              <option value="5d">5 days</option>
+              <option value="6d">6 days</option>
               <option value="7d">7 days</option>
               <option value="30d" selected>30 days</option>
             </select>
