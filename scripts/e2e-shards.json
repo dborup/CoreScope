@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-664-live-gear-mobile-e2e.js",
+      "shard": 3,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #664 Live gear stays reachable over the expanded controls panel at 375/320/768 touch and 1440 desktop. About 15s locally; no CI duration measured yet. Assigned to shard 3."
+    },
+    {
       "file": "test-634-observer-charts-fit-e2e.js",
       "shard": 3,
       "env": { "BASE_URL": "$BASE_URL" },
