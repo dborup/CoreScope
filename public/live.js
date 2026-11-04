@@ -486,6 +486,31 @@
       if (content <= body.clientHeight + 1) root.classList.remove('is-capped');
     }
     function schedule() { if (!raf) raf = requestAnimationFrame(fit); }
+    // A menu opens below its trigger, which in a capped body can be below the
+    // scroll box (43–83px tall in 641–768px landscape). Scroll the body just
+    // enough to show the menu, or its top if it is taller than the box.
+    // Capture phase, since the area trigger stops propagation; the check runs
+    // in the next frame, after the trigger's own handler has opened the menu.
+    var menuRaf = 0;
+    function showOpenedMenu(e) {
+      var trigger = e.target.closest && e.target.closest('.region-dropdown-trigger');
+      var menu = trigger && trigger.parentNode.querySelector('.region-dropdown-menu');
+      if (!menu) return;
+      cancelAnimationFrame(menuRaf);
+      menuRaf = requestAnimationFrame(function() {
+        menuRaf = 0;
+        if (menu.hidden || !root.classList.contains('is-capped')) return;
+        var m = menu.getBoundingClientRect();
+        var boxTop = body.getBoundingClientRect().top + body.clientTop;
+        var below = m.bottom - (boxTop + body.clientHeight);
+        if (below > 0) body.scrollTop += Math.min(below, m.top - boxTop);
+      });
+    }
+    body.addEventListener('click', showOpenedMenu, true);
+    // No window resize/visualViewport listeners: everything fit() reads
+    // follows an observed box (.live-page is sized from the viewport height,
+    // the header from its width), and a visual-only change (keyboard, pinch
+    // zoom) changes none of it.
     var ro = null;
     if (typeof ResizeObserver === 'function') {
       try {
@@ -493,16 +518,12 @@
         [header, page, bar].concat([].slice.call(body.children)).forEach(function(el) { if (el) ro.observe(el); });
       } catch (_) { ro = null; }
     }
-    window.addEventListener('resize', schedule);
-    window.addEventListener('orientationchange', schedule);
-    if (window.visualViewport) window.visualViewport.addEventListener('resize', schedule);
     schedule();
     _controlsFitCleanup = function() {
       if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      if (menuRaf) { cancelAnimationFrame(menuRaf); menuRaf = 0; }
       if (ro) { try { ro.disconnect(); } catch (_) {} ro = null; }
-      window.removeEventListener('resize', schedule);
-      window.removeEventListener('orientationchange', schedule);
-      if (window.visualViewport) window.visualViewport.removeEventListener('resize', schedule);
+      body.removeEventListener('click', showOpenedMenu, true);
       root.classList.remove('is-capped');
     };
   }

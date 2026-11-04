@@ -992,13 +992,16 @@ body.live-fullscreen #liveFullscreenToggle:hover,
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
 }
-/* A capped panel stays above the feed card (same z-index 1000, later in the
-   DOM), which otherwise covers the scrolled-in controls at 641–768px wide.
-   Still below node detail (1050) and the bottom-nav (1200). */
-.live-header:has(.live-controls.is-expanded.is-capped) { z-index: 1001; }
-.live-controls.is-capped .live-controls-body :is(.live-region-filter-container, .live-area-filter-container):has(.region-dropdown-menu:not([hidden])) { flex: 0 0 100%; }
-.live-controls.is-capped .live-controls-body .region-dropdown-wrap:has(> .region-dropdown-menu:not([hidden])) { flex: 0 0 100%; }
-.live-controls.is-capped .live-controls-body .region-dropdown-menu { min-width: 0; max-width: 100%; }
+/* The feed card (z-index 1000, later in the DOM) covers the scrolled-in
+   controls of a capped panel at 641–768px wide. Drop only the feed below the
+   header (also 1000, first in the DOM) while capped. Raising the header
+   instead would put it over node detail (a 1000 overlay from 641px up) and
+   the VCR "More" menu (1100, but inside the 1000 VCR bar), which both come
+   later in the DOM and must stay on top. */
+.live-page:has(.live-controls.is-expanded.is-capped) .live-feed { z-index: 999; }
+.live-controls.is-expanded.is-capped .live-controls-body :is(.live-region-filter-container, .live-area-filter-container):has(.region-dropdown-menu:not([hidden])) { flex: 0 0 100%; }
+.live-controls.is-expanded.is-capped .live-controls-body .region-dropdown-wrap:has(> .region-dropdown-menu:not([hidden])) { flex: 0 0 100%; }
+.live-controls.is-expanded.is-capped .live-controls-body .region-dropdown-menu { min-width: 0; max-width: 100%; }
 
 /* === VCR Bar === */
 .vcr-bar {
