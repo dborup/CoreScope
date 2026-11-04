@@ -9,10 +9,11 @@
 // 568×320 and 740×360 overflowed as well.
 //
 // Region groups and areas are answered in the browser, as in the #664/#666
-// E2Es. Scrolling uses real touch scroll gestures (CDP
-// Input.synthesizeScrollGesture), not scrollIntoView(): .live-page is
-// `overflow: hidden`, which scripts can still scroll but a finger cannot, so
-// scrollIntoView() would pass on master.
+// E2Es. Scrolling uses user input, not scrollIntoView(): a finger drag (CDP
+// Input.dispatchTouchEvent), with a mouse wheel at the same point as the
+// fallback where headless Chromium does not scroll on synthetic touch.
+// .live-page is `overflow: hidden`, which scripts can still scroll but user
+// input cannot, so scrollIntoView() would pass on master.
 //
 // Overflowing panels (320×568, 375×812, 568×320, 740×360 touch, 16 groups):
 //   - the panel bottom is inside the viewport and above the VCR bar
@@ -129,12 +130,25 @@ async function swipeUp(page, cdp, s) {
   const top = Math.max(s.body[1], 0) + 12;
   const x = Math.round((s.body[0] + s.body[2]) / 2);
   const y = Math.round(Math.max(top, bottom));
-  await cdp.send('Input.synthesizeScrollGesture', {
-    x, y, yDistance: -Math.max(40, Math.round((bottom - top) * 0.8)), xDistance: 0,
-    gestureSourceType: 'touch', speed: 1200, repeatCount: 1,
-  });
+  const dist = Math.max(40, Math.round((bottom - top) * 0.8));
+  const before = s.scrollTop;
+  // Finger drag: touchStart, ten touchMoves upwards, touchEnd.
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
+  for (let i = 1; i <= 10; i++) {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: y - (dist * i) / 10 }] });
+  }
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   await page.waitForTimeout(150);
+  if ((await state(page)).scrollTop !== before) { scrollBy.touch++; return; }
+  // Some headless builds do not turn synthetic touch drags into scrolls. A
+  // wheel at the same point takes the same user scroll chain, which an
+  // `overflow: hidden` ancestor cannot join either, so master stays red.
+  await page.mouse.move(x, y);
+  await page.mouse.wheel(0, dist);
+  await page.waitForTimeout(150);
+  if ((await state(page)).scrollTop !== before) scrollBy.wheel++;
 }
+const scrollBy = { touch: 0, wheel: 0 };
 
 // Swipe until `visible(s)` holds or the panel stops moving.
 async function swipeUntil(page, cdp, visible) {
@@ -262,6 +276,7 @@ async function runRotate(browser) {
   try { await runRotate(browser); }
   catch (e) { failed++; console.error('  ✗ [rotate] fatal: ' + e.message); }
   await browser.close();
+  console.log(`  panel scrolled by touch drag ${scrollBy.touch}×, by wheel fallback ${scrollBy.wheel}×`);
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();
