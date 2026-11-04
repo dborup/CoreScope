@@ -7,7 +7,7 @@
       "env": { "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; #666 Live gear tappable in landscape at 812x375, 667x375, 640x360 and 568x320 touch, plus the portrait/desktop control position. About 8s locally; no CI duration measured yet. Assigned to shard 3 next to #664."
+      "measurementNote": "New suite; #666 Live gear tappable in landscape at 812x375, 667x375, 640x360 and 568x320 touch and on short desktop windows (1024x480, 1280x500), with the 720x300 legend-toggle, 320x480 portrait and 1280x501 boundary cases plus the portrait/desktop control position. About 12s locally; no CI duration measured yet. Assigned to shard 3 next to #664."
     },
     {
       "file": "test-issue-664-live-gear-mobile-e2e.js",

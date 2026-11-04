@@ -957,9 +957,12 @@ body.live-fullscreen #liveFullscreenToggle:hover,
    fullscreen, gear) runs from y 74 to 356, so in a ~375px-tall viewport the
    gear ends under the VCR bar or below the .live-page clip. Lay the stack
    out as one row instead (y 74–174, gear still in the corner), which also
-   keeps it clear of the legend toggle on the right edge. The header stops
-   short of the row (4 × 10px Leaflet margin + 52 + 48 + 52 + 52px controls
-   + 6px gap) while expanded, so it cannot cover the controls either. */
+   keeps the toggles mostly above the legend toggle on the right edge (at
+   720×300 it still reaches 9px into the gear, but both centres stay
+   hit-testable). Short desktop windows (≤ 500px tall) get the row too.
+   The header stops short of the row (4 × 10px Leaflet margin + 52 + 48 +
+   52 + 52px controls + 6px gap) while expanded, so it cannot cover the
+   controls either. */
 @media (orientation: landscape) and (max-height: 500px) {
   .live-page .leaflet-top.leaflet-right {
     display: flex;
