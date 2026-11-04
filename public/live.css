@@ -953,6 +953,24 @@ body.live-fullscreen #liveFullscreenToggle:hover,
   top: 64px;
 }
 
+/* #666 — on a landscape phone the one-column stack (zoom, layers,
+   fullscreen, gear) runs from y 74 to 356, so in a ~375px-tall viewport the
+   gear ends under the VCR bar or below the .live-page clip. Lay the stack
+   out as one row instead (y 74–174, gear still in the corner), which also
+   keeps it clear of the legend toggle on the right edge. The header stops
+   short of the row (4 × 10px Leaflet margin + 52 + 48 + 52 + 52px controls
+   + 6px gap) while expanded, so it cannot cover the controls either. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .live-page .leaflet-top.leaflet-right {
+    display: flex;
+    align-items: flex-start;
+  }
+  body:not(.live-fullscreen) .live-header:has(.live-controls.is-expanded) {
+    --live-ctrl-rail: 250px;
+    max-width: calc(100vw - 12px - var(--live-ctrl-rail));
+  }
+}
+
 /* === VCR Bar === */
 .vcr-bar {
   position: absolute;
