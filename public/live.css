@@ -974,6 +974,32 @@ body.live-fullscreen #liveFullscreenToggle:hover,
   }
 }
 
+/* #667 — the expanded panel is an overlay in the `overflow: hidden`
+   .live-page, so content below the map area (VCR bar, bottom-nav, viewport
+   edge) could not be reached. live.js sets `.is-capped` only while the
+   content does not fit, and publishes where the body starts
+   (--live-ctrl-top) and how much of the viewport bottom is taken
+   (--live-ctrl-reserve). The body then ends 12px above that (header padding
+   + border + gap, or the bottom safe area if larger) and scrolls. While
+   capped, an open region/area menu takes the full body width and no more,
+   so the scroll box cannot clip it sideways; a panel that fits keeps the
+   pre-#667 menu width. */
+.live-controls.is-expanded.is-capped .live-controls-body {
+  --live-ctrl-gutter: max(12px, env(safe-area-inset-bottom, 0px));
+  max-height: calc(100vh - var(--live-ctrl-top, 0px) - var(--live-ctrl-reserve, 0px) - var(--live-ctrl-gutter));
+  max-height: calc(100dvh - var(--live-ctrl-top, 0px) - var(--live-ctrl-reserve, 0px) - var(--live-ctrl-gutter));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+/* A capped panel stays above the feed card (same z-index 1000, later in the
+   DOM), which otherwise covers the scrolled-in controls at 641–768px wide.
+   Still below node detail (1050) and the bottom-nav (1200). */
+.live-header:has(.live-controls.is-expanded.is-capped) { z-index: 1001; }
+.live-controls.is-capped .live-controls-body :is(.live-region-filter-container, .live-area-filter-container):has(.region-dropdown-menu:not([hidden])) { flex: 0 0 100%; }
+.live-controls.is-capped .live-controls-body .region-dropdown-wrap:has(> .region-dropdown-menu:not([hidden])) { flex: 0 0 100%; }
+.live-controls.is-capped .live-controls-body .region-dropdown-menu { min-width: 0; max-width: 100%; }
+
 /* === VCR Bar === */
 .vcr-bar {
   position: absolute;
