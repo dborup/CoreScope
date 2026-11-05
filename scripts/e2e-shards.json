@@ -50,7 +50,7 @@
       "env": { "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; #634 More-menu focus across refits in both themes. About 5s locally; no CI duration measured yet. Assigned to shard 3."
+      "measurementNote": "New suite; #634 More-menu focus across refits in both themes. About 10s locally; no CI duration measured yet. Assigned to shard 3."
     },
     {
       "file": "test-issue-620-region-dropdown-viewport-e2e.js",
@@ -90,7 +90,7 @@
       "env": { "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; #245 M2 Analytics -> Advert Intervals: API, deep link, tab URL, region link, dark theme and 390 px. Needs seed-245-advert-intervals.sql. About 5s locally; no CI duration measured yet. Assigned to shard 2, the lowest measured total."
+      "measurementNote": "New suite; #245 M2 Analytics -> Advert Intervals: API, deep link, tab URL, region link, dark theme and 390 px. Needs seed-245-advert-intervals.sql. About 10s locally; no CI duration measured yet. Assigned to shard 2, the lowest measured total."
     },
     {
       "file": "test-issue-416-region-quick-picks-e2e.js",
