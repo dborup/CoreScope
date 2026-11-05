@@ -181,6 +181,10 @@ test('map.js: drawPacketRoute and drawPacketRouteMulti both filter through the s
   const multi = body('drawPacketRouteMulti');
   assert(/tagPathHopTokens\(raw, canonicalPath\)/.test(multi), 'drawPacketRouteMulti must tag its path hops');
   assert(/const edgeCounts = routeEdgeCounts\(paths\)/.test(multi), 'edge weights come from the filtered paths');
+  // Payload endpoints (sender/recipient) are marked as in drawPacketRoute, so
+  // the sidebar labels them "from payload" and never counts them as relays.
+  assert((multi.match(/_fromPayload: true/g) || []).length === 5,
+    'all five sender/recipient pushes in drawPacketRouteMulti carry _fromPayload');
 });
 
 console.log('\n#673: ' + passed + ' passed, ' + failed + ' failed');
