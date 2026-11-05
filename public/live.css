@@ -642,7 +642,18 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
   .live-stat-pill { font-size: 11px; padding: 2px 7px; }
   .live-toggles { font-size: 10px; gap: 6px; margin-left: 0; overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; width: 100%; min-width: 0; }
   .live-title { font-size: 12px; letter-spacing: 1px; }
+}
 
+/* #672 — the #1234 header layout also serves short landscape at 641–768px
+   (height ≤ 500px; at that width this is always landscape). There the
+   top-nav (52px, duplicated by the bottom-nav at ≤ 768px) and the 48px
+   chart toggle in the header row left a capped controls panel (#667) a
+   43–83px scroll box. Only the header and the top-nav switch here: the
+   feed, the legend, the VCR touch targets and the gear keep their
+   641–768px rules, and the Leaflet controls keep the #666 landscape row
+   below the 56px offset. The VCR bar slims down with it (before "Mobile
+   VCR"). */
+@media (max-width: 640px), (max-width: 768px) and (max-height: 500px) {
   /* #1234 chrome-reduction pass 2 — mobile-only adjustments.
    * - Drop MESH LIVE text label and the chart-icon header toggle; counters
    *   speak for themselves on a narrow phone.
@@ -692,7 +703,9 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
     height: calc(100vh - var(--bottom-nav-reserve, 0px));
     height: calc(100dvh - var(--bottom-nav-reserve, 0px));
   }
+}
 
+@media (max-width: 640px) {
   /* #1234 — VCR scope: 12h/24h collapse into the More dropdown at ≤640px. */
   .vcr-scope-btn--overflow { display: none !important; }
   .vcr-scope-more-wrap { display: inline-flex !important; position: relative; }
@@ -1315,6 +1328,18 @@ input.live-node-filter-input:focus {
   .node-detail-backdrop.active { display: block; }
 }
 
+/* #672 — slimmer VCR bar in short landscape at 641–768px: the 60px LCD
+   set its height (77px). The mobile LCD size and the mobile vertical padding
+   bring it to the height of the buttons row; the buttons keep their sizes.
+   Before "Mobile VCR", whose bar padding still wins at ≤ 640px. */
+@media (max-width: 640px), (max-width: 768px) and (max-height: 500px) {
+  .vcr-bar { padding-top: 4px; padding-bottom: calc(4px + env(safe-area-inset-bottom, 0px)); }
+  .vcr-lcd { padding: 2px 4px; }
+  .vcr-lcd-canvas { width: 74px; height: 18px; }
+  .vcr-lcd-mode { font-size: 0.55rem; letter-spacing: 1px; }
+  .vcr-lcd-pkts { font-size: 0.5rem; letter-spacing: 1px; }
+}
+
 /* Mobile VCR */
 @media (max-width: 640px) {
   /* #1244: SINGLE-ROW layout. PR #1234 was meant to put all VCR controls
@@ -1346,12 +1371,8 @@ input.live-node-filter-input:focus {
      * free space via flex:1 instead. */
     margin-left: 0;
     min-width: 0;
-    padding: 2px 4px;
     flex-shrink: 0;
   }
-  .vcr-lcd-canvas { width: 74px; height: 18px; }
-  .vcr-lcd-mode { font-size: 0.55rem; letter-spacing: 1px; }
-  .vcr-lcd-pkts { font-size: 0.5rem; letter-spacing: 1px; }
   .vcr-scope-btns { order: 2; flex-shrink: 0; gap: 1px; }
   .vcr-mode { display: none; }
   /* #1244: timeline absorbs remaining width on the single row. */
