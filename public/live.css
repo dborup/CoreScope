@@ -1094,6 +1094,12 @@ input.live-node-filter-input:focus {
   min-width: 200px;
 }
 .live-node-filter-dropdown.hidden { display: none; }
+/* #671 — at <= 768px .live-toggles is a scroll container (overflow-y: auto,
+   and overflow-x: auto at <= 640px), which clipped the open list to the
+   48px node-filter row; below it, taps reached the region quick-picks. Let
+   that row overflow only while its list is open, so the toggles row and
+   the closed filter row keep their scroll behaviour. */
+.live-toggles:has(> .live-node-filter-wrap > .live-node-filter-dropdown:not(.hidden)) { overflow: visible; }
 .live-node-filter-option {
   padding: 6px 10px;
   cursor: pointer;
