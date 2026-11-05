@@ -329,7 +329,13 @@ body.mc-route-active .leaflet-overlay-pane svg path:not(.mc-rt-edge) { display: 
 }
 .mc-rt-onebyte .mc-rt-hash { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border: 1px solid var(--path-hash-warn); border-radius: var(--badge-radius, 8px); background: var(--surface-1); }
 .mc-rt-onebyte-summary { margin-top: 4px; color: var(--text); }
-.mc-rt-marker--unsure { opacity: 0.7; }
+.mc-rt-detail-unsure {
+  margin-bottom: 6px; padding: 4px 6px;
+  border-left: 3px solid var(--path-hash-warn);
+  background: var(--surface-2);
+  font-size: 11px; color: var(--text);
+}
+.mc-rt-mobile-unsure { color: var(--path-hash-warn); font-weight: 600; }
 .mc-rt-marker--unsure::after {
   content: ''; position: absolute; inset: -3px; border-radius: 50%;
   border: 2px dashed var(--path-hash-warn); pointer-events: none;

@@ -110,6 +110,7 @@
   var buildOneByteNotice = _MC_RT_U.buildOneByteNotice;
   var buildUnsureChip = _MC_RT_U.buildUnsureChip;
   var isMarkedUnsure = _MC_RT_U.isMarkedUnsure;
+  var buildUnsureDetail = _MC_RT_U.buildUnsureDetail;
 
   // #674 — Mark mode of the 1-byte hop setting: uncertain hops get a chip in
   // the sidebar and a dashed marker/segment on the map.
@@ -150,10 +151,12 @@
   }
 
   function renderHopDetail(p, container) {
-    container.innerHTML = '<div class="mc-rt-detail-loading">Loading hop info…</div>';
+    // #674: the uncertain-hop words for touch, where the chip's tooltip is out of reach.
+    var unsureNote = isMarkMode() ? buildUnsureDetail(p) : '';
+    container.innerHTML = unsureNote + '<div class="mc-rt-detail-loading">Loading hop info…</div>';
     fetchHopDetail(p.pubkey).then(function (data) {
       if (!data) {
-        container.innerHTML = '<div class="mc-rt-detail-na">No data for this node</div>';
+        container.innerHTML = unsureNote + '<div class="mc-rt-detail-na">No data for this node</div>';
         return;
       }
       var node = (data.detail && data.detail.node) || {};
@@ -193,7 +196,7 @@
         (routeCount > 1 ? ' <span class="mc-rt-route-badge">' + routeCount + ' routes</span>' : '') +
       '</a>';
 
-      container.innerHTML =
+      container.innerHTML = unsureNote +
         '<div class="mc-rt-detail">' +
           '<div class="mc-rt-detail-row1">' +
             '<span class="mc-rt-detail-name">' + escapeHtml(node.name || p.name || '?') + '</span>' +
@@ -491,7 +494,7 @@
           (unresolvedCount ? ' · ' + unresolvedCount + ' unresolved' : '') +
         '</div>' +
         contextBlock +
-        buildOneByteNotice(positions, pktCtx && pktCtx.pathHashSize, markMode ? 'mark' : '') +
+        '<div class="mc-rt-onebyte-slot">' + buildOneByteNotice(positions, pktCtx && pktCtx.pathHashSize, markMode ? 'mark' : '') + '</div>' +
         multiPathChip +
         pathPicker +
         '<div class="mc-rt-spark-wrap">' + spark + '</div>' +
@@ -543,7 +546,9 @@
         }).join('→');
       }
     } catch (e) { console.warn('[route-view]', e); }
+    var unsureCount = markMode ? positions.filter(isMarkedUnsure).length : 0;
     summaryLine = routeMetaText(positions, totalKm, { type: typeTag, multiPath: multiPath, totalObservers: totalObservers }) +
+                  (unsureCount ? ' · <span class="mc-rt-mobile-unsure">' + unsureCount + ' uncertain</span>' : '') +
                   (hexRoute ? '<br><span class="mc-rt-mobile-hex">' + escapeHtml(hexRoute) + '</span>' : '');
     sidebar.innerHTML =
       // Desktop: resize handle on the right edge + collapse button.
@@ -718,6 +723,12 @@
     // canonical edges + markers with the selected path's own. Stroke-width
     // stays = global observer count per edge. "All" restores the union view.
     // Hides ALL canonical markers + edges to avoid phantom polylines.
+    // #674: re-render the Mark notice for the path the sidebar now shows.
+    function refreshOneByteNotice(list) {
+      var slot = sidebar.querySelector('.mc-rt-onebyte-slot');
+      if (slot) slot.innerHTML = buildOneByteNotice(list, pktCtx && pktCtx.pathHashSize, markMode ? 'mark' : '');
+    }
+
     function isolatePath(pathKey) {
       if (!pathKey) return restoreAllPaths();
       // #673: an all-1-byte bucket (hide toggle ON) has no visible hop; its
@@ -793,8 +804,10 @@
         var ratio = matchCount / localTotalObs;
         var w = 2 + ratio * 6;
         var color = rampColor(i, iso.length - 1);
+        var isoUnsure = markMode && (isMarkedUnsure(a) || isMarkedUnsure(b)); // #674
         var poly = L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
-          color: color, weight: w, opacity: 0.95,
+          color: color, weight: w, opacity: isoUnsure ? 0.6 : 0.95,
+          dashArray: isoUnsure ? '6 4' : null,
           className: 'mc-rt-edge mc-rt-edge-iso'
         }).addTo(layer);
         sidebar._isoEdges.push(poly);
@@ -806,7 +819,7 @@
         var ep = { isOrigin: i === 0, isDest: i === iso.length - 1, resolved: true };
         var built = buildMarkerSVG(ep, { color: c, seqNum: i + 1 });
         var icon = L.divIcon({
-          html: '<div class="mc-rt-marker mc-rt-iso-marker" aria-label="Hop ' + (i+1) + ' of ' + iso.length + ', ' + escapeHtml(p.name || '?') + '">' + built.html + '</div>',
+          html: '<div class="mc-rt-marker mc-rt-iso-marker' + (markMode && isMarkedUnsure(p) ? ' mc-rt-marker--unsure' : '') + '" aria-label="Hop ' + (i+1) + ' of ' + iso.length + ', ' + escapeHtml(p.name || '?') + (markMode && isMarkedUnsure(p) ? ' (uncertain)' : '') + '">' + built.html + '</div>',
           className: 'mc-rt-marker-icon',
           iconSize: [built.size + 4, built.size + 4],
           iconAnchor: [(built.size + 4)/2, (built.size + 4)/2]
@@ -890,6 +903,7 @@
         if (pinnedTop) pinnedTop.innerHTML = rowFor(iso[0], 0);
         if (pinnedBottom) pinnedBottom.innerHTML = iso.length > 1 ? rowFor(iso[iso.length - 1], iso.length - 1) : '';
         listEl.innerHTML = iso.slice(1, -1).map(function (p, k) { return rowFor(p, k + 1); }).join('');
+        refreshOneByteNotice(iso); // #674: the notice describes the path on screen
       }
     }
     function restoreAllPaths() {
@@ -917,6 +931,7 @@
         if (pinnedTop2) pinnedTop2.innerHTML = sidebar._canonRows.top;
         if (pinnedBottom2) pinnedBottom2.innerHTML = sidebar._canonRows.bottom;
         if (listEl2) listEl2.innerHTML = sidebar._canonRows.middle;
+        refreshOneByteNotice(positions); // #674
         var newRowEls = sidebar.querySelectorAll('.mc-rt-row');
         // Polish review (dijkstra #1423): centralized wireRow ensures the
         // restore path picks up every listener type the initial render
@@ -956,6 +971,13 @@
           }
           return null;
         }
+        // #674: in Mark mode a 1-byte union hop is uncertain when it is one of
+        // the route's marked guesses, or when it was only resolved here by a
+        // first prefix match in the node list (a guess by construction).
+        function unionHopUnsure(pre, pos) {
+          if (!markMode || String(pre).length !== 2 || !pos) return false;
+          return positions.indexOf(pos) === -1 ? true : isMarkedUnsure(pos);
+        }
         sidebar._unionOverlay = [];
         sidebar._unionMarkers = [];
         // Track unique nodes seen (for marker rendering)
@@ -972,11 +994,13 @@
           var count = opts.edgeCounts[k];
           var ratio = count / (opts.totalObservers || 1);
           var w = 2 + ratio * 6; // 2..8
+          var unionUnsure = unionHopUnsure(aPre, aPos) || unionHopUnsure(bPre, bPos); // #674
           // Single color (no gradient — sequence has no meaning here)
           var poly = L.polyline([[aPos.lat, aPos.lon], [bPos.lat, bPos.lon]], {
             color: 'var(--accent, #06b6d4)',
             weight: w,
-            opacity: 0.7,
+            opacity: unionUnsure ? 0.45 : 0.7,
+            dashArray: unionUnsure ? '6 4' : null,
             className: 'mc-rt-edge mc-rt-edge-union'
           }).addTo(layer);
           // Convert CSS var to inline (Leaflet doesn't resolve CSS vars in stroke)
@@ -990,7 +1014,8 @@
         Object.keys(uniqueNodes).forEach(function (pre) {
           var n = uniqueNodes[pre];
           var accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#06b6d4';
-          var html = '<div class="mc-rt-marker mc-rt-marker-union" aria-label="' + escapeHtml(n.name || pre) + '">' +
+          var uUnsure = unionHopUnsure(pre, n);
+          var html = '<div class="mc-rt-marker mc-rt-marker-union' + (uUnsure ? ' mc-rt-marker--unsure' : '') + '" aria-label="' + escapeHtml(n.name || pre) + (uUnsure ? ' (uncertain)' : '') + '">' +
             '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">' +
               '<circle cx="7" cy="7" r="4" fill="' + accent + '" stroke="#fff" stroke-width="1"/>' +
             '</svg></div>';

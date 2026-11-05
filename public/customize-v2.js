@@ -1604,9 +1604,9 @@
   // Reads and writes through hop-filter.js (MC_get1ByteHopsMode /
   // MC_set1ByteHopsMode), which owns the storage key, the default (mark) and
   // the migration of the #1633 boolean key. Every change fires
-  // `mc-hide-1byte-hops-changed`; map.js + packets.js subscribe and
-  // re-render in place (PR #1689 r1 adv #4). Analytics + route-view rebuild
-  // on next navigation — they re-render on tab activation.
+  // `mc-hide-1byte-hops-changed`; map.js (which redraws the route view) and
+  // packets.js subscribe and re-render in place (PR #1689 r1 adv #4, #673).
+  // Analytics rebuilds on its next tab activation.
   function _renderHide1ByteHopsToggle() {
     var mode = typeof window.MC_get1ByteHopsMode === 'function' ? window.MC_get1ByteHopsMode() : 'mark';
     var opt = function (value, label) {

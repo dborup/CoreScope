@@ -108,12 +108,6 @@ window.HopDisplay = (function() {
     return ` <button class="hop-conflict-btn status-warn" data-conflict='${conflictData}' onclick="event.preventDefault();event.stopPropagation();HopDisplay._showFromBtn(this)" title="${escapeHtml(label)}"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>${count}</button>`;
   }
 
-  /**
-   * #598 — a hop from HopResolver.inferPath(): one position in ONE
-   * observation's path, with a confidence. "Unlisted" means no located node
-   * sharing its prefix fits that point in the path, so the hex prefix is shown
-   * rather than the nearest node that happens to share it.
-   */
   // #674 — the ONE rule for "this inferred hop is uncertain", shared by the
   // packet detail (renderInferredHop) and the map route view: a guess below
   // LIKELY_CONFIDENCE with alternatives to weigh, or an unlisted hop whose
@@ -127,6 +121,12 @@ window.HopDisplay = (function() {
     return guess && candidates.length > 1;
   }
 
+  /**
+   * #598 — a hop from HopResolver.inferPath(): one position in ONE
+   * observation's path, with a confidence. "Unlisted" means no located node
+   * sharing its prefix fits that point in the path, so the hex prefix is shown
+   * rather than the nearest node that happens to share it.
+   */
   function renderInferredHop(h, entry, opts) {
     const candidates = entry.candidates || [];
     const name = entry.name || null;

@@ -83,9 +83,13 @@ test('an explicit new mode wins over a leftover legacy key', () => {
   assert(w.MC_get1ByteHopsMode() === 'show', 'got ' + w.MC_get1ByteHopsMode());
 });
 
-test('an invalid stored mode reads as the default', () => {
-  const w = sandbox({ [MODE_KEY]: 'bogus' }, ['hop-filter.js']);
-  assert(w.MC_get1ByteHopsMode() === 'mark', 'got ' + w.MC_get1ByteHopsMode());
+test('an invalid stored mode reads as the default and is removed', () => {
+  for (const junk of ['bogus', 'constructor', '__proto__', 'toString', '']) {
+    const store = { [MODE_KEY]: junk };
+    const w = sandbox(store, ['hop-filter.js']);
+    assert(w.MC_get1ByteHopsMode() === 'mark', JSON.stringify(junk) + ' read as ' + w.MC_get1ByteHopsMode());
+    assert(!(MODE_KEY in store), JSON.stringify(junk) + ' was not cleaned up');
+  }
 });
 
 test('set1ByteHopsMode stores show/hide, clears the key for the default, rejects junk', () => {
@@ -98,8 +102,10 @@ test('set1ByteHopsMode stores show/hide, clears the key for the default, rejects
   w.MC_set1ByteHopsMode('mark');
   assert(!(MODE_KEY in store), 'default is stored as "no key": ' + JSON.stringify(store));
   w.MC_set1ByteHopsMode('hide');
-  w.MC_set1ByteHopsMode('nonsense');
-  assert(w.MC_get1ByteHopsMode() === 'hide', 'junk must not change the mode');
+  for (const junk of ['nonsense', 'constructor', '__proto__', 'toString']) {
+    w.MC_set1ByteHopsMode(junk);
+    assert(w.MC_get1ByteHopsMode() === 'hide' && store[MODE_KEY] === 'hide', 'junk ' + junk + ' changed the mode');
+  }
 });
 
 test('every mode change fires mc-hide-1byte-hops-changed with { mode, value }', () => {
@@ -179,6 +185,8 @@ test('Mark notice: 1-byte badge plus "N of M hops are uncertain" (relays only)',
 test('Mark notice: nothing in Show or Hide mode, nothing for a certain 2-byte route', () => {
   const U = routeUtils().MC_ROUTE_UTILS;
   const positions = [relay(true), relay(false)];
+  const twoByte = { _hopHex: 'ABCD', unsure: true, candidateCount: 2 };
+  assert(U.buildOneByteNotice([twoByte], 2, 'mark') === '', 'an uncertain 2-byte hop is not counted');
   assert(U.buildOneByteNotice(positions, 1, 'show') === '', 'show must render nothing');
   assert(U.buildOneByteNotice(positions, 1, 'hide') === '', 'hide must render nothing');
   assert(U.buildOneByteNotice([relay(false)], 2, 'mark') === '', 'certain multi-byte route: nothing to say');
@@ -186,14 +194,22 @@ test('Mark notice: nothing in Show or Hide mode, nothing for a certain 2-byte ro
 
 test('Unsure chip: "? 1 of N" with escaped candidate names in the tooltip', () => {
   const U = routeUtils().MC_ROUTE_UTILS;
-  const html = U.buildUnsureChip({ unsure: true, candidateCount: 7,
-    alternatives: [{ name: '<b>Best</b>', confidence: 0.4 }, { name: 'Two', confidence: 0.3 }] });
+  const hop = { _hopHex: '28', unsure: true, candidateCount: 7,
+    alternatives: [{ name: '<b>Best</b>', confidence: 0.4 }, { name: 'Two', confidence: 0.3 }] };
+  const html = U.buildUnsureChip(hop);
   assert(/mc-rt-status-unsure/.test(html) && /1 of 7/.test(html), html);
   assert(!/<b>Best<\/b>/.test(html) && /&lt;b&gt;Best&lt;\/b&gt;/.test(html), 'names must be escaped: ' + html);
   assert(/40%/.test(html) && /30%/.test(html), 'confidences missing: ' + html);
-  assert(U.buildUnsureChip({ unsure: false, candidateCount: 7 }) === '', 'a certain hop gets no chip');
-  assert(U.buildUnsureChip({ unsure: true, unlisted: true, candidateCount: 2 }) === '',
+  assert(/<span class="sr-only">Uncertain hop: 7 nodes share this prefix/.test(html),
+    'screen readers need the words, not just the title: ' + html);
+  assert(U.buildUnsureChip({ _hopHex: '28', unsure: false, candidateCount: 7 }) === '', 'a certain hop gets no chip');
+  assert(U.buildUnsureChip({ _hopHex: '28', unsure: true, unlisted: true, candidateCount: 2 }) === '',
     'an unlisted hop already has its own chip; it is not marked twice');
+  assert(U.buildUnsureChip({ _hopHex: 'ABCD', unsure: true, candidateCount: 2 }) === '',
+    'Mark is about 1-byte hops: an uncertain 2-byte hop stays unmarked');
+  const detail = U.buildUnsureDetail(hop);
+  assert(/mc-rt-detail-unsure/.test(detail) && /Likeliest: &lt;b&gt;Best/.test(detail), 'touch detail line: ' + detail);
+  assert(U.buildUnsureDetail({ _hopHex: 'ABCD', unsure: true, candidateCount: 2 }) === '', 'no detail line for 2-byte');
 });
 
 test('route-view.js wires the notice, chip and dashed styling to Mark mode', () => {
@@ -202,6 +218,11 @@ test('route-view.js wires the notice, chip and dashed styling to Mark mode', () 
   assert(/buildUnsureChip\(/.test(src), 'route-view must render the chip');
   assert(/MC_get1ByteHopsMode/.test(src), 'route-view must read the mode');
   assert(/mc-rt-marker--unsure/.test(src), 'uncertain markers need their own class');
+  assert(/refreshOneByteNotice\(iso\)/.test(src) && /refreshOneByteNotice\(positions\)/.test(src),
+    'the notice follows an isolated path and comes back on restore');
+  assert(/function unionHopUnsure\(/.test(src), 'the "All" overlay marks uncertain hops too');
+  assert(/buildUnsureDetail\(p\)/.test(src), 'the hop detail panel carries the words for touch');
+  assert(/ uncertain<\/span>/.test(src), 'the collapsed mobile summary carries the count');
 });
 
 test('customizer: a three-option select replaces the checkbox, and reset clears the new key', () => {

@@ -23,13 +23,20 @@
   // "true" becomes mode "hide"; anything else is dropped.
   var MODE_KEY = 'meshcore-1byte-hops-mode';
   var LEGACY_KEY = 'meshcore-hide-1byte-hops';
-  var MODES = { show: true, mark: true, hide: true };
+  var MODES = ['show', 'mark', 'hide'];
   var DEFAULT_MODE = 'mark';
+
+  // An array lookup, not an object one: "constructor" or "__proto__" must not
+  // pass as a mode (#677 review).
+  function isMode(m) { return MODES.indexOf(m) !== -1; }
 
   function get1ByteHopsMode() {
     try {
       var stored = localStorage.getItem(MODE_KEY);
-      if (stored && MODES[stored]) return stored;
+      if (isMode(stored)) return stored;
+      // Not a mode (junk, or written by a future version): drop it.
+      if (stored != null) localStorage.removeItem(MODE_KEY);
+      // One-time migration, so it writes on read: the #1633 key goes away.
       var legacy = localStorage.getItem(LEGACY_KEY);
       if (legacy != null) {
         localStorage.removeItem(LEGACY_KEY);
@@ -43,7 +50,7 @@
   }
 
   function set1ByteHopsMode(mode) {
-    if (!MODES[mode]) return;
+    if (!isMode(mode)) return;
     try {
       if (mode === DEFAULT_MODE) localStorage.removeItem(MODE_KEY);
       else localStorage.setItem(MODE_KEY, mode);

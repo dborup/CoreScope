@@ -154,11 +154,24 @@
       '<span class="mc-rt-detail-spark-meta">' + pts.length + ' obs · ' + minS.toFixed(1) + '..' + maxS.toFixed(1) + ' dB</span>';
   }
 
-  // #674 — a hop Mark mode flags: an uncertain guess. An unlisted hop is
-  // uncertain too, but its own "unlisted" chip already says so and it has no
-  // position to doubt, so it is not marked twice.
+  // #674 — a hop Mark mode flags: an uncertain guess for a 1-byte prefix (the
+  // setting is about 1-byte hops; a 2-byte route stays as in Show). An
+  // unlisted hop is uncertain too, but its own "unlisted" chip already says so
+  // and it has no position to doubt, so it is not marked twice.
   function isMarkedUnsure(p) {
-    return !!(p && p.unsure && !p.unlisted);
+    return !!(p && p.unsure && !p.unlisted && String(p._hopHex || '').length === 2);
+  }
+
+  // The words for one uncertain hop, shared by the chip's tooltip and
+  // screen-reader text and by the hop detail panel (touch has no tooltip).
+  function unsureText(p) {
+    var n = Number(p.candidateCount) || 0;
+    var alts = (p.alternatives || []).map(function (a) {
+      var pct = a.confidence == null ? '' : ' (' + Math.round(Number(a.confidence) * 100) + '%)';
+      return (a.name || 'unlisted node') + pct;
+    });
+    return 'Uncertain hop: ' + n + ' nodes share this prefix, so this is a best guess.' +
+      (alts.length ? ' Likeliest: ' + alts.join(', ') + '.' : '');
   }
 
   // #674 — Mark mode, the route-level line: the packet's 1-byte badge and how
@@ -186,20 +199,23 @@
   // the tooltip. Names are node-controlled, so every one is escaped.
   function buildUnsureChip(p) {
     if (!isMarkedUnsure(p)) return '';
-    var n = Number(p.candidateCount) || 0;
-    var alts = (p.alternatives || []).map(function (a) {
-      var pct = a.confidence == null ? '' : ' (' + Math.round(Number(a.confidence) * 100) + '%)';
-      return (a.name || 'unlisted node') + pct;
-    });
-    var title = 'Uncertain hop: ' + n + ' nodes share this prefix, so this is a best guess.' +
-      (alts.length ? ' Likeliest: ' + alts.join(', ') + '.' : '');
-    return ' <span class="mc-rt-status-chip mc-rt-status-unsure" title="' + escapeHtml(title) + '">? 1 of ' + n + '</span>';
+    var text = escapeHtml(unsureText(p));
+    return ' <span class="mc-rt-status-chip mc-rt-status-unsure" title="' + text + '">' +
+      '<span aria-hidden="true">? 1 of ' + (Number(p.candidateCount) || 0) + '</span>' +
+      '<span class="sr-only">' + text + '</span></span>';
+  }
+
+  // The same words at the top of the hop detail panel.
+  function buildUnsureDetail(p) {
+    if (!isMarkedUnsure(p)) return '';
+    return '<div class="mc-rt-detail-unsure">' + escapeHtml(unsureText(p)) + '</div>';
   }
 
   window.MC_ROUTE_UTILS = {
     buildOneByteNotice: buildOneByteNotice,
     buildUnsureChip: buildUnsureChip,
     isMarkedUnsure: isMarkedUnsure,
+    buildUnsureDetail: buildUnsureDetail,
     escapeHtml: escapeHtml,
     buildPacketContextBlock: buildPacketContextBlock,
     buildSnrSparkline: buildSnrSparkline
