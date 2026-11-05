@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-674-1byte-hop-modes-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #674 1-byte hop Show/Mark/Hide: Mark default (badge, uncertain summary, chips, dashed markers) on the 22-hop 1-byte fixture route, live mode changes through the customizer select, #1633 key migration, 2-byte control, light/dark notice theming and a 375px no-overflow check. About 20s locally; no CI duration measured yet. Assigned to shard 1 next to #673."
+    },
+    {
       "file": "test-issue-673-map-hide-inferred-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

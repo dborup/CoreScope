@@ -1600,23 +1600,25 @@
     '</div>';
   }
 
-  // ── #1633 Hide 1-byte path hops toggle ──
-  // Writes localStorage["meshcore-hide-1byte-hops"]. Default OFF: key is
-  // removed (not "false") so MC_getHide1ByteHops cleanly returns false.
-  // Fires `mc-hide-1byte-hops-changed`; map.js + packets.js subscribe and
+  // ── #1633 / #674 1-byte path hops: Show / Mark / Hide ──
+  // Reads and writes through hop-filter.js (MC_get1ByteHopsMode /
+  // MC_set1ByteHopsMode), which owns the storage key, the default (mark) and
+  // the migration of the #1633 boolean key. Every change fires
+  // `mc-hide-1byte-hops-changed`; map.js + packets.js subscribe and
   // re-render in place (PR #1689 r1 adv #4). Analytics + route-view rebuild
-  // on next navigation — they don't need live wiring because they re-render
-  // on tab activation.
+  // on next navigation — they re-render on tab activation.
   function _renderHide1ByteHopsToggle() {
-    var on = false;
-    try { on = localStorage.getItem('meshcore-hide-1byte-hops') === 'true'; } catch (_e) {}
+    var mode = typeof window.MC_get1ByteHopsMode === 'function' ? window.MC_get1ByteHopsMode() : 'mark';
+    var opt = function (value, label) {
+      return '<option value="' + value + '"' + (mode === value ? ' selected' : '') + '>' + label + '</option>';
+    };
     return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Path Display</p>' +
-      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">1-byte path-hash prefixes (firmware default) collide ~8-way at ~2k relays — many polylines and route-pattern rows they produce are visual noise. Hide them globally without changing what\'s stored.</p>' +
-      '<div class="cust-field" style="display:flex;align-items:center;gap:8px">' +
-        '<input type="checkbox" id="cv2-hide-1byte-hops" data-cv2-hide-1byte-hops' +
-          (on ? ' checked' : '') +
-          ' style="width:16px;height:16px;cursor:pointer">' +
-        '<label for="cv2-hide-1byte-hops" style="cursor:pointer;margin:0">Hide short (1-byte) path-hash hops</label>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">1-byte path-hash prefixes (firmware default) collide often: several nodes share each one, so a 1-byte hop on a route is a best guess. Mark flags the uncertain hops on the map route; Hide leaves 1-byte hops out everywhere without changing what\'s stored.</p>' +
+      '<div class="cust-field">' +
+        '<label for="cv2-hide-1byte-hops" style="display:block;margin-bottom:4px">Short (1-byte) path-hash hops</label>' +
+        '<select id="cv2-hide-1byte-hops" data-cv2-hide-1byte-hops style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">' +
+          opt('show', 'Show') + opt('mark', 'Mark uncertain hops (default)') + opt('hide', 'Hide') +
+        '</select>' +
       '</div>';
   }
 
@@ -2317,20 +2319,12 @@
       });
     });
 
-    // #1633 Hide-1-byte-path-hops checkbox — persists + fires
-    // mc-hide-1byte-hops-changed; consumers re-render or rely on the next
-    // navigation refresh (analytics tab, packets list).
-    container.querySelectorAll('[data-cv2-hide-1byte-hops]').forEach(function (cb) {
-      cb.addEventListener('change', function () {
-        var on = !!cb.checked;
-        if (typeof window.MC_setHide1ByteHops === 'function') {
-          window.MC_setHide1ByteHops(on);
-        } else {
-          try {
-            if (on) localStorage.setItem('meshcore-hide-1byte-hops', 'true');
-            else localStorage.removeItem('meshcore-hide-1byte-hops');
-          } catch (_e) {}
-        }
+    // #1633 / #674 1-byte path hops select — persists + fires
+    // mc-hide-1byte-hops-changed through hop-filter.js; consumers re-render
+    // or rely on the next navigation refresh (analytics tab, packets list).
+    container.querySelectorAll('[data-cv2-hide-1byte-hops]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        if (typeof window.MC_set1ByteHopsMode === 'function') window.MC_set1ByteHopsMode(sel.value);
       });
     });
 
@@ -2803,7 +2797,8 @@
       STORAGE_KEY,                 // 'cs-theme-overrides'
       'meshcore-cb-preset',        // #1361 CB preset id
       'channels-show-encrypted',   // #1454 encrypted-channel toggle
-      'meshcore-hide-1byte-hops',  // #1633 hide 1-byte path hops toggle
+      'meshcore-hide-1byte-hops',  // #1633 hide 1-byte path hops toggle (pre-#674)
+      'meshcore-1byte-hops-mode',  // #674 1-byte path hops: show/mark/hide
       'mc-dark-tile-provider'      // #1430 dark-tile provider pick
     ];
     for (var i = 0; i < CUSTOMIZER_LS_KEYS.length; i++) {

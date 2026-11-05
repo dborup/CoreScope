@@ -952,8 +952,11 @@ test('routeHopFromInferred: a located hop becomes a resolved route hop', () => {
     name: 'TEN-SOUTH', pubkey: pk('10'), lat: 50, lon: 5, located: true, confidence: 0.9,
   }, 'repeater');
   // Built inside the sandbox realm, so compare fields rather than prototypes.
-  assert.deepStrictEqual(Object.assign({}, h), { lat: 50, lon: 5, name: 'TEN-SOUTH',
+  // #674 adds the Mark-mode fields; a hop with no candidates is not uncertain.
+  const { unsure, candidateCount, alternatives, ...rest } = h;
+  assert.deepStrictEqual(Object.assign({}, rest), { lat: 50, lon: 5, name: 'TEN-SOUTH',
     pubkey: pk('10'), role: 'repeater', resolved: true, confidence: 0.9 });
+  assert.deepStrictEqual([unsure, candidateCount, JSON.stringify(alternatives)], [false, 0, '[]']);
 });
 
 test('routeHopFromInferred: a named hop without GPS becomes a gpsless route hop', () => {

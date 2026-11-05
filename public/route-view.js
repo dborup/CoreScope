@@ -107,6 +107,15 @@
   var escapeHtml = _MC_RT_U.escapeHtml;
   var buildPacketContextBlock = _MC_RT_U.buildPacketContextBlock;
   var buildSnrSparkline = _MC_RT_U.buildSnrSparkline;
+  var buildOneByteNotice = _MC_RT_U.buildOneByteNotice;
+  var buildUnsureChip = _MC_RT_U.buildUnsureChip;
+  var isMarkedUnsure = _MC_RT_U.isMarkedUnsure;
+
+  // #674 — Mark mode of the 1-byte hop setting: uncertain hops get a chip in
+  // the sidebar and a dashed marker/segment on the map.
+  function isMarkMode() {
+    return typeof window.MC_get1ByteHopsMode === 'function' && window.MC_get1ByteHopsMode() === 'mark';
+  }
 
   // Polish review (carmack #1423): bound _detailCache (was unbounded plain
   // object; every distinct pubkey ever clicked was retained for the tab's
@@ -278,6 +287,7 @@
   function buildSidebar(positions, mapRef, layer, edges, markers, opts) {
     opts = opts || {};
     var total = positions.length;
+    var markMode = isMarkMode();
     // Compute hop distances
     var dists = [], maxDist = 0;
     for (var i = 1; i < total; i++) {
@@ -348,6 +358,8 @@
         payloadBadge = ' <span class="mc-rt-status-chip mc-rt-status-payload" title="Sender/recipient decoded from packet payload (not from outer path bytes)">from payload</span>';
       }
       var unresolved = p.resolved === false ? ' mc-rt-unresolved' : '';
+      var unsureChip = markMode ? buildUnsureChip(p) : '';
+      if (unsureChip) unresolved += ' mc-rt-unsure';
       // Stripe color: incoming edge color (idx-1) for non-origin, outgoing for origin.
       var stripeIdx = idx === 0 ? 0 : (idx - 1);
       var stripeColor = total > 1 ? rampColor(stripeIdx, total - 1) : 'transparent';
@@ -360,7 +372,7 @@
         '<span class="mc-rt-stripe" aria-hidden="true"></span>' +
         '<span class="mc-rt-seq">' + (idx + 1) + '</span>' +
         '<span class="mc-rt-glyph" title="' + (p.role || 'unknown') + '">' + glyph + '</span>' +
-        '<span class="mc-rt-name">' + name + obsChip + statusBadge + payloadBadge + '</span>' +
+        '<span class="mc-rt-name">' + name + obsChip + statusBadge + unsureChip + payloadBadge + '</span>' +
         '<span class="mc-rt-distlabel">' + distLabel + '</span>' +
         '<div class="mc-rt-distbar-wrap">' + distBar + '</div>' +
         '</li>';
@@ -479,6 +491,7 @@
           (unresolvedCount ? ' · ' + unresolvedCount + ' unresolved' : '') +
         '</div>' +
         contextBlock +
+        buildOneByteNotice(positions, pktCtx && pktCtx.pathHashSize, markMode ? 'mark' : '') +
         multiPathChip +
         pathPicker +
         '<div class="mc-rt-spark-wrap">' + spark + '</div>' +
@@ -868,7 +881,7 @@
             '<span class="mc-rt-stripe" aria-hidden="true"></span>' +
             '<span class="mc-rt-seq">' + (idx + 1) + '</span>' +
             '<span class="mc-rt-glyph" title="' + (p.role || '?') + '">' + glyph + '</span>' +
-            '<span class="mc-rt-name">' + name + '</span>' +
+            '<span class="mc-rt-name">' + name + (markMode ? buildUnsureChip(p) : '') + '</span>' +
             '<span class="mc-rt-distlabel">' + distLabel + '</span>' +
             '<div class="mc-rt-distbar-wrap">' + distBar + '</div>' +
             '</li>';
@@ -1309,11 +1322,14 @@
       // visible. Range 2..8 px (4× ratio). Linear in coverage ratio.
       return 3 + ratio * 6;
     }
+    var markUnsure = isMarkMode();
     for (var i = 0; i < total - 1; i++) {
       var ca = resolveCoord(i), cb = resolveCoord(i + 1);
       if (!ca || !cb) { edges.push(null); continue; }
       var color = rampColor(i, total - 1);
-      var unresolvedEdge = !ca.resolved || !cb.resolved;
+      // #674: a segment touching an uncertain hop is drawn like an unresolved one.
+      var unresolvedEdge = !ca.resolved || !cb.resolved ||
+        (markUnsure && (isMarkedUnsure(positions[i]) || isMarkedUnsure(positions[i + 1])));
       var w = edgeWeight(i);
       var poly = L.polyline([[ca.lat, ca.lon], [cb.lat, cb.lon]], {
         color: color, weight: w, opacity: unresolvedEdge ? 0.5 : 0.85,
@@ -1339,7 +1355,8 @@
       var color = (window.ROLE_COLORS && window.ROLE_COLORS[p.role]) || '#3b82f6';
       var isLoop = srcDstSameNode && (p.isOrigin || p.isDest);
       var built = buildMarkerSVG(p, { color: color, seqNum: i + 1, isLoop: isLoop });
-      var html = '<div class="mc-rt-marker" data-hop-idx="' + i + '" tabindex="0" aria-label="Hop ' + (i+1) + ' of ' + total + ', ' + escapeHtml(p.name || '?') + '">' + built.html + '</div>';
+      var unsureMk = markUnsure && isMarkedUnsure(p);
+      var html = '<div class="mc-rt-marker' + (unsureMk ? ' mc-rt-marker--unsure' : '') + '" data-hop-idx="' + i + '" tabindex="0" aria-label="Hop ' + (i+1) + ' of ' + total + ', ' + escapeHtml(p.name || '?') + (unsureMk ? ' (uncertain)' : '') + '">' + built.html + '</div>';
       var icon = L.divIcon({
         html: html, className: 'mc-rt-marker-icon',
         iconSize: [built.size + 4, built.size + 4],

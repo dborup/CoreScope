@@ -114,6 +114,19 @@ window.HopDisplay = (function() {
    * sharing its prefix fits that point in the path, so the hex prefix is shown
    * rather than the nearest node that happens to share it.
    */
+  // #674 — the ONE rule for "this inferred hop is uncertain", shared by the
+  // packet detail (renderInferredHop) and the map route view: a guess below
+  // LIKELY_CONFIDENCE with alternatives to weigh, or an unlisted hop whose
+  // candidates were all rejected. A canonical hop is the ingestor's own
+  // answer (#1283) and never uncertain.
+  function isUnsureInferredHop(entry) {
+    if (!entry || typeof entry !== 'object') return false;
+    const candidates = entry.candidates || [];
+    if (entry.unlisted) return !entry.name && candidates.length > 0;
+    const guess = !entry.canonical && entry.confidence < LIKELY();
+    return guess && candidates.length > 1;
+  }
+
   function renderInferredHop(h, entry, opts) {
     const candidates = entry.candidates || [];
     const name = entry.name || null;
@@ -121,7 +134,7 @@ window.HopDisplay = (function() {
     // weigh: the alternatives to a guess, or those rejected for an unlisted hop.
     // A canonical hop is the ingestor's own answer (#1283) and neither.
     const guess = !entry.canonical && !entry.unlisted && entry.confidence < LIKELY();
-    const unsure = entry.unlisted ? !name && candidates.length > 0 : guess && candidates.length > 1;
+    const unsure = isUnsureInferredHop(entry);
     // A node the ingestor resolved that does not fit where the hop sits. #165
     // already has a warning for that, and it is not the same thing as a node
     // with no GPS to check.
@@ -272,5 +285,5 @@ window.HopDisplay = (function() {
            '<ul class="path-legend-list">' + items + '</ul></details>';
   }
 
-  return { renderHop, renderPath, conflictBadgeCount, _showFromBtn, _showConflictPopover: showConflictPopover, LIKELY, PATH_SYMBOLS_LEGEND, renderPathSymbolsLegend };
+  return { renderHop, renderPath, conflictBadgeCount, isUnsureInferredHop, _showFromBtn, _showConflictPopover: showConflictPopover, LIKELY, PATH_SYMBOLS_LEGEND, renderPathSymbolsLegend };
 })();

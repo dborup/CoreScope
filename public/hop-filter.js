@@ -1,7 +1,8 @@
 /* === CoreScope — hop-filter.js === */
-/* #1633 — Render-time filter that hides 1-byte path hops when the
- * customize-v2 toggle is ON. Pure render-time; firmware behavior and
- * wire/store contents are untouched.
+/* #1633 — Render-time filter that hides 1-byte path hops in the "hide"
+ * mode of the customize-v2 setting (#674: Show / Mark / Hide, Mark by
+ * default). Pure render-time; firmware behavior and wire/store contents
+ * are untouched.
  *
  * A "hop" here is a hex-string prefix as stored in observations.path_json
  * (e.g. "AB" = 1-byte, "CDEF" = 2-byte, "ABCDEF" = 3-byte). Byte count
@@ -14,24 +15,52 @@
 'use strict';
 
 (function () {
-  var STORAGE_KEY = 'meshcore-hide-1byte-hops';
+  // #674 — three modes for 1-byte path hops:
+  //   show — as before #674, no markings;
+  //   mark — (default) visible, uncertain hops marked in the map route view;
+  //   hide — the #1633 behaviour: 1-byte hops left out everywhere.
+  // The default is stored as "no key". The #1633 boolean key migrates once:
+  // "true" becomes mode "hide"; anything else is dropped.
+  var MODE_KEY = 'meshcore-1byte-hops-mode';
+  var LEGACY_KEY = 'meshcore-hide-1byte-hops';
+  var MODES = { show: true, mark: true, hide: true };
+  var DEFAULT_MODE = 'mark';
 
-  function getHide1ByteHops() {
-    try { return localStorage.getItem(STORAGE_KEY) === 'true'; }
-    catch (_e) { return false; }
+  function get1ByteHopsMode() {
+    try {
+      var stored = localStorage.getItem(MODE_KEY);
+      if (stored && MODES[stored]) return stored;
+      var legacy = localStorage.getItem(LEGACY_KEY);
+      if (legacy != null) {
+        localStorage.removeItem(LEGACY_KEY);
+        if (legacy === 'true') {
+          localStorage.setItem(MODE_KEY, 'hide');
+          return 'hide';
+        }
+      }
+    } catch (_e) { /* storage unavailable */ }
+    return DEFAULT_MODE;
   }
 
-  function setHide1ByteHops(on) {
+  function set1ByteHopsMode(mode) {
+    if (!MODES[mode]) return;
     try {
-      if (on) localStorage.setItem(STORAGE_KEY, 'true');
-      else localStorage.removeItem(STORAGE_KEY);
+      if (mode === DEFAULT_MODE) localStorage.removeItem(MODE_KEY);
+      else localStorage.setItem(MODE_KEY, mode);
+      localStorage.removeItem(LEGACY_KEY);
     } catch (_e) { /* private mode */ }
     if (typeof window !== 'undefined' && typeof window.CustomEvent === 'function') {
       window.dispatchEvent(new window.CustomEvent('mc-hide-1byte-hops-changed', {
-        detail: { value: !!on }
+        detail: { mode: mode, value: mode === 'hide' }
       }));
     }
   }
+
+  // #1633 API, kept for its callers: "hide" is mode hide; turning it off
+  // restores the pre-#674 unmarked view (show).
+  function getHide1ByteHops() { return get1ByteHopsMode() === 'hide'; }
+
+  function setHide1ByteHops(on) { set1ByteHopsMode(on ? 'hide' : 'show'); }
 
   // bytes of a hop hex token — handles undefined / non-string.
   function hopByteLen(h) {
@@ -101,6 +130,8 @@
   if (typeof window !== 'undefined') {
     window.MC_getHide1ByteHops = getHide1ByteHops;
     window.MC_setHide1ByteHops = setHide1ByteHops;
+    window.MC_get1ByteHopsMode = get1ByteHopsMode;
+    window.MC_set1ByteHopsMode = set1ByteHopsMode;
     window.MC_isVisibleHop = isVisibleHop;
     window.MC_filterPathHops = filterPathHops;
     window.MC_hopByteLen = hopByteLen;
@@ -111,11 +142,14 @@
     module.exports = {
       getHide1ByteHops: getHide1ByteHops,
       setHide1ByteHops: setHide1ByteHops,
+      get1ByteHopsMode: get1ByteHopsMode,
+      set1ByteHopsMode: set1ByteHopsMode,
       isVisibleHop: isVisibleHop,
       filterPathHops: filterPathHops,
       hopByteLen: hopByteLen,
       packetHashSize: packetHashSize,
-      _STORAGE_KEY: STORAGE_KEY
+      _MODE_KEY: MODE_KEY,
+      _LEGACY_KEY: LEGACY_KEY
     };
   }
 })();

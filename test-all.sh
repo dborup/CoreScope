@@ -240,6 +240,7 @@ run test-issue-1697-mqtt-mobile-e2e.js
 run test-warmup-banner.js
 run test-issue-1633-hide-1byte-hops.js
 run test-issue-673-map-hide-inferred.js
+run test-issue-674-1byte-hop-modes.js
 run test-issue-1668-m4-per-route.js
 run test-a11y-axe-1668-selftest.js
 run test-a11y-1716-rf-range-btn-active.js
