@@ -974,6 +974,35 @@ body.live-fullscreen #liveFullscreenToggle:hover,
   }
 }
 
+/* #667 — the expanded panel is an overlay in the `overflow: hidden`
+   .live-page, so content below the map area (VCR bar, bottom-nav, viewport
+   edge) could not be reached. live.js sets `.is-capped` only while the
+   content does not fit, and publishes where the body starts
+   (--live-ctrl-top) and how much of the viewport bottom is taken
+   (--live-ctrl-reserve). The body then ends 12px above that (header padding
+   + border + gap, or the bottom safe area if larger) and scrolls. While
+   capped, an open region/area menu takes the full body width and no more,
+   so the scroll box cannot clip it sideways; a panel that fits keeps the
+   pre-#667 menu width. */
+.live-controls.is-expanded.is-capped .live-controls-body {
+  --live-ctrl-gutter: max(12px, env(safe-area-inset-bottom, 0px));
+  max-height: calc(100vh - var(--live-ctrl-top, 0px) - var(--live-ctrl-reserve, 0px) - var(--live-ctrl-gutter));
+  max-height: calc(100dvh - var(--live-ctrl-top, 0px) - var(--live-ctrl-reserve, 0px) - var(--live-ctrl-gutter));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+/* The feed card (z-index 1000, later in the DOM) covers the scrolled-in
+   controls of a capped panel at 641–768px wide. Drop only the feed below the
+   header (also 1000, first in the DOM) while capped. Raising the header
+   instead would put it over node detail (a 1000 overlay from 641px up) and
+   the VCR "More" menu (1100, but inside the 1000 VCR bar), which both come
+   later in the DOM and must stay on top. */
+.live-page:has(.live-controls.is-expanded.is-capped) .live-feed { z-index: 999; }
+.live-controls.is-expanded.is-capped .live-controls-body :is(.live-region-filter-container, .live-area-filter-container):has(.region-dropdown-menu:not([hidden])) { flex: 0 0 100%; }
+.live-controls.is-expanded.is-capped .live-controls-body .region-dropdown-wrap:has(> .region-dropdown-menu:not([hidden])) { flex: 0 0 100%; }
+.live-controls.is-expanded.is-capped .live-controls-body .region-dropdown-menu { min-width: 0; max-width: 100%; }
+
 /* === VCR Bar === */
 .vcr-bar {
   position: absolute;

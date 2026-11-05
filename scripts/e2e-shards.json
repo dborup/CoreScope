@@ -2,6 +2,17 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-667-live-panel-overflow-e2e.js",
+      "shard": 3,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 72.631,
+      "secondsByExecution": [
+        72.631
+      ],
+      "measurementNote": "#667 expanded Live controls panel capped and scrollable by touch at 320x568, 375x812, 568x320 and 740x360 with 16 injected region groups, the fitting-panel guards, rotation, and the #669 review round-2 steps (VCR menu and node detail stay above a capped panel, opened menu scrolls into the 653x320/740x360 box, scrolled resize, destroy() teardown). 72.6s measured on CI run 41854055204 (shard 3, 47 passed); about 54s locally. Assigned to shard 3 next to #664 and #666."
+    },
+    {
       "file": "test-issue-666-live-gear-landscape-e2e.js",
       "shard": 3,
       "env": { "BASE_URL": "$BASE_URL" },

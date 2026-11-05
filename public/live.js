@@ -448,6 +448,86 @@
     };
   }
 
+  // #667: the expanded controls panel is an overlay inside the
+  // `overflow: hidden` .live-page, so a panel taller than the map area could
+  // not be scrolled. Publish where #liveControlsBody starts and how much of
+  // the viewport bottom is taken (VCR bar, bottom-nav) so CSS can cap the
+  // body there, and set `.is-capped` only while the content does not fit:
+  // a panel that fits keeps overflow visible and its dropdown overlays.
+  var _controlsFitCleanup = null;
+  function initControlsFitTracker() {
+    if (_controlsFitCleanup) { try { _controlsFitCleanup(); } catch (_) {} _controlsFitCleanup = null; }
+    var root = document.getElementById('liveControls');
+    var body = document.getElementById('liveControlsBody');
+    var header = document.getElementById('liveHeader');
+    var page = document.querySelector('.live-page');
+    var bar = document.getElementById('vcrBar');
+    if (!root || !body || !page) return;
+    var raf = 0;
+    function fit() {
+      raf = 0;
+      if (!root.classList.contains('is-expanded') || !body.getClientRects().length) {
+        root.classList.remove('is-capped');
+        return;
+      }
+      var top = body.getBoundingClientRect().top;
+      var barH = bar && bar.getClientRects().length ? bar.getBoundingClientRect().height : 0;
+      var reserve = window.innerHeight - (page.getBoundingClientRect().bottom - barH);
+      page.style.setProperty('--live-ctrl-top', Math.round(top) + 'px');
+      page.style.setProperty('--live-ctrl-reserve', Math.max(0, Math.ceil(reserve)) + 'px');
+      // Measure under the cap; in-flow children only, so an open dropdown
+      // overlay of a fitting panel does not count.
+      root.classList.add('is-capped');
+      var content = 0;
+      for (var c = body.firstElementChild; c; c = c.nextElementSibling) {
+        var r = c.getBoundingClientRect();
+        if (r.height) content = Math.max(content, r.bottom - top + body.scrollTop);
+      }
+      if (content <= body.clientHeight + 1) root.classList.remove('is-capped');
+    }
+    function schedule() { if (!raf) raf = requestAnimationFrame(fit); }
+    // A menu opens below its trigger, which in a capped body can be below the
+    // scroll box (43–83px tall in 641–768px landscape). Scroll the body just
+    // enough to show the menu, or its top if it is taller than the box.
+    // Capture phase, since the area trigger stops propagation; the check runs
+    // in the next frame, after the trigger's own handler has opened the menu.
+    var menuRaf = 0;
+    function showOpenedMenu(e) {
+      var trigger = e.target.closest && e.target.closest('.region-dropdown-trigger');
+      var menu = trigger && trigger.parentNode.querySelector('.region-dropdown-menu');
+      if (!menu) return;
+      cancelAnimationFrame(menuRaf);
+      menuRaf = requestAnimationFrame(function() {
+        menuRaf = 0;
+        if (menu.hidden || !root.classList.contains('is-capped')) return;
+        var m = menu.getBoundingClientRect();
+        var boxTop = body.getBoundingClientRect().top + body.clientTop;
+        var below = m.bottom - (boxTop + body.clientHeight);
+        if (below > 0) body.scrollTop += Math.min(below, m.top - boxTop);
+      });
+    }
+    body.addEventListener('click', showOpenedMenu, true);
+    // No window resize/visualViewport listeners: everything fit() reads
+    // follows an observed box (.live-page is sized from the viewport height,
+    // the header from its width), and a visual-only change (keyboard, pinch
+    // zoom) changes none of it.
+    var ro = null;
+    if (typeof ResizeObserver === 'function') {
+      try {
+        ro = new ResizeObserver(schedule);
+        [header, page, bar].concat([].slice.call(body.children)).forEach(function(el) { if (el) ro.observe(el); });
+      } catch (_) { ro = null; }
+    }
+    schedule();
+    _controlsFitCleanup = function() {
+      if (raf) { cancelAnimationFrame(raf); raf = 0; }
+      if (menuRaf) { cancelAnimationFrame(menuRaf); menuRaf = 0; }
+      if (ro) { try { ro.disconnect(); } catch (_) {} ro = null; }
+      body.removeEventListener('click', showOpenedMenu, true);
+      root.classList.remove('is-capped');
+    };
+  }
+
   function vcrSetMode(mode) {
     const wasLive = VCR.mode === 'LIVE';
     VCR.mode = mode;
@@ -2358,6 +2438,7 @@
         });
       });
       applyForViewport();
+      initControlsFitTracker(); // #667
       // #1180 — bind once across SPA re-mounts. MQL is process-global per
       // query string; per-init binds accumulate handlers without bound.
       if (!_liveNarrowMqlBound) {
@@ -4945,6 +5026,7 @@
       _timelineScrubHandlers = null;
     }
     if (_vcrHeightCleanup) { try { _vcrHeightCleanup(); } catch (_) {} _vcrHeightCleanup = null; }
+    if (_controlsFitCleanup) { try { _controlsFitCleanup(); } catch (_) {} _controlsFitCleanup = null; }
     // Restore #app height to CSS default
     const appEl = document.getElementById('app');
     if (appEl) appEl.style.height = '';
