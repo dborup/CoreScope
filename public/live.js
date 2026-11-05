@@ -491,10 +491,12 @@
     // enough to show the menu, or its top if it is taller than the box.
     // Capture phase, since the area trigger stops propagation; the check runs
     // in the next frame, after the trigger's own handler has opened the menu.
+    // The node-filter typeahead opens after an input and a fetch, not on a
+    // click, so it announces itself with a 'live-menu-open' event (#671).
     var menuRaf = 0;
     function showOpenedMenu(e) {
-      var trigger = e.target.closest && e.target.closest('.region-dropdown-trigger');
-      var menu = trigger && trigger.parentNode.querySelector('.region-dropdown-menu');
+      var trigger = e.type === 'click' && e.target.closest && e.target.closest('.region-dropdown-trigger');
+      var menu = e.type === 'click' ? trigger && trigger.parentNode.querySelector('.region-dropdown-menu') : e.target;
       if (!menu) return;
       cancelAnimationFrame(menuRaf);
       menuRaf = requestAnimationFrame(function() {
@@ -507,6 +509,7 @@
       });
     }
     body.addEventListener('click', showOpenedMenu, true);
+    body.addEventListener('live-menu-open', showOpenedMenu);
     // No window resize/visualViewport listeners: everything fit() reads
     // follows an observed box (.live-page is sized from the viewport height,
     // the header from its width), and a visual-only change (keyboard, pinch
@@ -524,6 +527,7 @@
       if (menuRaf) { cancelAnimationFrame(menuRaf); menuRaf = 0; }
       if (ro) { try { ro.disconnect(); } catch (_) {} ro = null; }
       body.removeEventListener('click', showOpenedMenu, true);
+      body.removeEventListener('live-menu-open', showOpenedMenu);
       root.classList.remove('is-capped');
     };
   }
@@ -2086,6 +2090,7 @@
           }).join('');
           nodeFilterDropdown.classList.remove('hidden');
           nodeFilterInput.setAttribute('aria-expanded', 'true');
+          nodeFilterDropdown.dispatchEvent(new Event('live-menu-open', { bubbles: true }));
           nodeFilterDropdown.querySelectorAll('.live-node-filter-option').forEach(function (opt) {
             opt.addEventListener('mousedown', function (ev) {
               // Use mousedown so we run before blur hides the dropdown.
