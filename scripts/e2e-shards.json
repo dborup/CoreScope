@@ -7,7 +7,7 @@
       "env": { "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; #673 map packet route honours the hide-1-byte-hops toggle for inferred hops, single observer and a synthetic second observer (drawPacketRouteMulti), toggle off and on. About 16s locally; no CI duration measured yet. Assigned to shard 1, which runs the fewest suites."
+      "measurementNote": "New suite; #673 map packet route honours the hide-1-byte-hops toggle for inferred hops: live toggle off/on/off on a 22-hop 1-byte route with one observer and with a synthetic second observer (drawPacketRouteMulti), plus a 14-hop 2-byte control route. About 3s locally; no CI duration measured yet. Assigned to shard 1, which runs the fewest suites."
     },
     {
       "file": "test-issue-667-live-panel-overflow-e2e.js",

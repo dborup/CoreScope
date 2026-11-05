@@ -901,10 +901,45 @@
     });
     const after = kept.filter(function (p) { return !!p._hopHex; }).length;
     if (kept.length < positions.length && kept.length >= 1) {
-      // Re-mark the last surviving hop as destination if the original got dropped.
-      kept[kept.length - 1].isDest = true;
+      // Re-mark the last surviving hop as destination if the original got
+      // dropped — on a copy, so the caller's position objects stay untouched.
+      kept[kept.length - 1] = Object.assign({}, kept[kept.length - 1], { isDest: true });
     }
     return { positions: kept, hopsHiddenCount: before - after };
+  }
+
+  // #673: tag each canonical path hop with the token its observation carried,
+  // so hide1ByteRoutePositions can see it. Inferred hops already carry their
+  // raw prefix (inferredRouteHops); otherwise canonicalPath holds the raw
+  // prefixes. Mutates the freshly built positions in place.
+  function tagPathHopTokens(positions, canonicalPath) {
+    positions.forEach(function (p, i) {
+      if (p._hopHex == null) p._hopHex = String(canonicalPath[i]);
+    });
+    return positions;
+  }
+
+  // Observers per edge across all paths, for the multi-path stroke weights and
+  // the "All" overlay. #673: built from the hide-1-byte filtered hop lists, so
+  // a hidden hop neither draws a guessed node nor splits its neighbours' edge.
+  function routeEdgeCounts(paths) {
+    const edgeCounts = {};
+    paths.forEach(function (p) {
+      const raw = p.path || [];
+      const hops = window.MC_filterPathHops ? window.MC_filterPathHops(raw) : raw;
+      for (let i = 0; i < hops.length - 1; i++) {
+        const key = hops[i] + '\u2192' + hops[i + 1];
+        edgeCounts[key] = (edgeCounts[key] || 0) + 1;
+      }
+    });
+    return edgeCounts;
+  }
+
+  // #673: nothing of the route survives the 1-byte filter. Clear the layer
+  // and the sidebar, so a live toggle does not leave the previous route up.
+  function clearRouteView() {
+    if (routeLayer) routeLayer.clearLayers();
+    if (window.MeshRouteView && typeof window.MeshRouteView.clear === 'function') window.MeshRouteView.clear();
   }
 
   async function drawPacketRoute(hopKeys, origin, opts) {
@@ -1088,7 +1123,7 @@
     const hidden = hide1ByteRoutePositions(positions);
     positions = hidden.positions;
     const hopsHiddenCount = hidden.hopsHiddenCount;
-    if (positions.length < 1) return;
+    if (positions.length < 1) { clearRouteView(); return; }
 
     // Hand off to sequence-primary sequence-primary renderer (#1418), falling
     // back to the legacy role-aware MeshRoute (#1374), then to the minimal
@@ -1346,15 +1381,10 @@
 
     // Count hop & edge occurrences across all paths.
     const hopCounts = {};
-    const edgeCounts = {};
     paths.forEach(p => {
-      const hops = p.path || [];
-      hops.forEach(h => { hopCounts[h] = (hopCounts[h] || 0) + 1; });
-      for (let i = 0; i < hops.length - 1; i++) {
-        const key = hops[i] + '\u2192' + hops[i + 1];
-        edgeCounts[key] = (edgeCounts[key] || 0) + 1;
-      }
+      (p.path || []).forEach(h => { hopCounts[h] = (hopCounts[h] || 0) + 1; });
     });
+    const edgeCounts = routeEdgeCounts(paths);
 
     // Resolve canonical hops: the inferred hops when given (#598), else
     // /api/resolve-hops + naive fallback.
@@ -1417,10 +1447,7 @@
     });
 
     if (raw.length < 1) return;
-    // #673: tag each path hop with its token so the 1-byte filter can see it.
-    // Inferred hops already carry their raw prefix (inferredRouteHops);
-    // otherwise canonicalPath holds the observation's raw prefixes.
-    if (!inferredRaw) raw.forEach((p, i) => { p._hopHex = String(canonicalPath[i]); });
+    tagPathHopTokens(raw, canonicalPath); // #673
     if (origin && origin.pubkey) {
       const op = nodes.find(n => n.public_key.toLowerCase() === origin.pubkey.toLowerCase() ||
                                   n.public_key.toLowerCase().startsWith(origin.pubkey.toLowerCase()));
@@ -1454,11 +1481,10 @@
     }
     // #673 — the same 1-byte filter as drawPacketRoute; before this the
     // multi-observer route ignored the toggle entirely.
+    // MeshRouteView.render marks origin/destination by position index.
     const hidden = hide1ByteRoutePositions(raw);
     const routePositions = hidden.positions;
-    if (routePositions.length < 1) return;
-    routePositions[routePositions.length - 1].isDest = true;
-    if (routePositions[0]) routePositions[0].isOrigin = true;
+    if (routePositions.length < 1) { clearRouteView(); return; }
 
     if (routeLayer) routeLayer.clearLayers();
 
@@ -1477,6 +1503,10 @@
     }
   }
   window.drawPacketRouteMulti = drawPacketRouteMulti;
+  // #673: the mc-hide-1byte-hops-changed listener re-issues single-observer
+  // routes through window.drawPacketRoute; without this export a live toggle
+  // never redrew them.
+  window.drawPacketRoute = drawPacketRoute;
 
   // #1418/#1419: deep-link loader. Reads URL params
   //   #/map?packet=<hash>&obs=<observation_id>
@@ -3092,6 +3122,7 @@
       createClusterGroup: createClusterGroup, makeClusterIcon: makeClusterIcon,
       // #673 — route hops for inferred paths and the shared 1-byte hop filter.
       inferredRouteHops: inferredRouteHops, hide1ByteRoutePositions: hide1ByteRoutePositions,
+      tagPathHopTokens: tagPathHopTokens, routeEdgeCounts: routeEdgeCounts,
       nodePassesByteSizeFilter: nodePassesByteSizeFilter,
       nodePassesScopeFilter: nodePassesScopeFilter, buildScopeOptions: buildScopeOptions,
       nodePassesRelayedScopeFilter: nodePassesRelayedScopeFilter, buildRelayedScopeOptions: buildRelayedScopeOptions,

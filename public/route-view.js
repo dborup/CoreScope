@@ -18,6 +18,15 @@
   // invalidateSize below) must not touch the removed map: Leaflet throws
   // "Cannot read properties of undefined (reading '_leaflet_pos')".
   var watchedMaps = new WeakSet(), removedMaps = new WeakSet();
+
+  // #1689 r1 (adv #1): bucket-key prefix for a path whose every hop the
+  // hide-1-byte filter removed (see the path picker in buildSidebar).
+  var ALL_ONE_BYTE_KEY = '⟨all-1byte⟩::';
+
+  // #1633: the hops the hide-1-byte-hops toggle leaves visible.
+  function visibleHops(hops) {
+    return window.MC_filterPathHops ? window.MC_filterPathHops(hops) : hops;
+  }
   function watchMapRemoval(mapRef) {
     if (!mapRef || typeof mapRef.once !== 'function' || watchedMaps.has(mapRef)) return;
     watchedMaps.add(mapRef);
@@ -407,7 +416,7 @@
         var hops = (typeof window !== 'undefined' && window.MC_filterPathHops)
           ? window.MC_filterPathHops(rawHops)
           : rawHops;
-        var k = hops.length ? hops.join('→') : ('⟨all-1byte⟩::' + rawHops.join('→'));
+        var k = hops.length ? hops.join('→') : (ALL_ONE_BYTE_KEY + rawHops.join('→'));
         if (!pathGroups[k]) pathGroups[k] = { key: k, observers: [], count: 0, allOneByte: hops.length === 0 && rawHops.length > 0, rawHops: rawHops };
         pathGroups[k].observers.push(p.observer || '?');
         pathGroups[k].count++;
@@ -512,11 +521,11 @@
           return Array.isArray(p.path) && opts.canonicalPath &&
             p.path.length === opts.canonicalPath.length;
         }) || opts.allPaths[0];
-        hexRoute = (bestMatch.path || []).map(function (h) {
+        hexRoute = visibleHops(bestMatch.path || []).map(function (h) {
           return String(h).slice(0, 2).toUpperCase();
         }).join('→');
       } else if (Array.isArray(opts.canonicalPath) && opts.canonicalPath.length) {
-        hexRoute = opts.canonicalPath.map(function (h) {
+        hexRoute = visibleHops(opts.canonicalPath).map(function (h) {
           return String(h).slice(0, 2).toUpperCase();
         }).join('→');
       }
@@ -698,8 +707,12 @@
     // Hides ALL canonical markers + edges to avoid phantom polylines.
     function isolatePath(pathKey) {
       if (!pathKey) return restoreAllPaths();
-      var prefixes = pathKey.split('\u2192').filter(function(s){return s.length>0;});
-      if (!prefixes.length) return restoreAllPaths();
+      // #673: an all-1-byte bucket (hide toggle ON) has no visible hop; its
+      // key only carries the raw prefixes to keep buckets apart, so isolate
+      // the endpoints instead of resolving those hidden prefixes to nodes.
+      var prefixes = pathKey.indexOf(ALL_ONE_BYTE_KEY) === 0 ? []
+        : pathKey.split('\u2192').filter(function(s){return s.length>0;});
+      if (!prefixes.length && pathKey.indexOf(ALL_ONE_BYTE_KEY) !== 0) return restoreAllPaths();
       function findPosByPrefix(pre) {
         var preLow = pre.toLowerCase();
         for (var k = 0; k < positions.length; k++) {
@@ -1557,5 +1570,12 @@
     }
   }
 
-  window.MeshRouteView = { render: render, relayHopCount: relayHopCount, routeMetaText: routeMetaText };
+  // #673: drop the route layer and sidebar without leaving route mode, for a
+  // re-render in which nothing survives the hide-1-byte-hops filter.
+  function clear(layer) {
+    if (layer && layer.clearLayers) layer.clearLayers();
+    document.querySelectorAll('.mc-rt-sidebar').forEach(function (el) { el.remove(); });
+  }
+
+  window.MeshRouteView = { render: render, clear: clear, relayHopCount: relayHopCount, routeMetaText: routeMetaText };
 })();

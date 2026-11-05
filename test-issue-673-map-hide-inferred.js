@@ -81,6 +81,11 @@ test('internals export inferredRouteHops and hide1ByteRoutePositions', () => {
   assert(typeof I.hide1ByteRoutePositions === 'function', 'hide1ByteRoutePositions not exported');
 });
 
+test('both renderers are on window, where the live toggle listener calls them', () => {
+  assert(typeof on.window.drawPacketRoute === 'function', 'window.drawPacketRoute missing: a live toggle cannot redraw single-observer routes');
+  assert(typeof on.window.drawPacketRouteMulti === 'function', 'window.drawPacketRouteMulti missing');
+});
+
 test('inferredRouteHops tags each position with the RAW prefix, not the inferred pubkey', () => {
   const hops = I.inferredRouteHops(pubkeyPath, inferred);
   assert(hops.map(h => h._hopHex).join(',') === '28,ABCD,92',
@@ -113,10 +118,48 @@ test('hide OFF: positions are returned unchanged and nothing is counted', () => 
   assert(r.positions.length === 3 && r.hopsHiddenCount === 0, 'expected 3 positions and 0 hidden');
 });
 
-test('hide ON: the helper never mutates the caller\'s array', () => {
+test('hide ON: the helper mutates neither the caller\'s array nor its position objects', () => {
   const positions = I.inferredRouteHops(pubkeyPath, inferred);
-  I.hide1ByteRoutePositions(positions);
+  positions[2].isDest = true;
+  const before = JSON.stringify(positions);
+  const r = I.hide1ByteRoutePositions(positions);
   assert(positions.length === 3, 'input array was mutated');
+  assert(JSON.stringify(positions) === before, 'a position object was mutated');
+  assert(r.positions[0] !== positions[1] && r.positions[0].isDest === true,
+    'the re-marked destination is a copy');
+});
+
+test('tagPathHopTokens: non-inferred hops get their raw prefix, inferred tags are kept', () => {
+  const raw = [{ name: 'a' }, { name: 'b', _hopHex: 'ABCD' }, { name: 'c' }];
+  I.tagPathHopTokens(raw, ['28', 'IGNORED', '92']);
+  assert(raw.map(p => p._hopHex).join(',') === '28,ABCD,92', 'got ' + raw.map(p => p._hopHex).join(','));
+  // The non-inferred multi branch, end to end: tag, then filter.
+  const r = I.hide1ByteRoutePositions(I.tagPathHopTokens([{ name: 'x' }, { name: 'y' }], ['28', 'ABCD']));
+  assert(r.positions.map(p => p.name).join(',') === 'y' && r.hopsHiddenCount === 1,
+    'untagged multi-path hops must still be filtered');
+});
+
+test('routeEdgeCounts: hide ON counts edges between surviving hops only', () => {
+  const paths = [{ path: ['28', 'ABCD', '92', 'EF01'] }, { path: ['ABCD', 'EF01'] }];
+  const on = JSON.stringify(I.routeEdgeCounts(paths));
+  assert(on === JSON.stringify({ 'ABCD\u2192EF01': 2 }), 'hide ON got ' + on);
+  const offCounts = Ioff.routeEdgeCounts(paths);
+  assert(offCounts['28\u2192ABCD'] === 1 && offCounts['ABCD\u219292'] === 1 && offCounts['92\u2192EF01'] === 1 &&
+    offCounts['ABCD\u2192EF01'] === 1, 'hide OFF got ' + JSON.stringify(offCounts));
+});
+
+test('route-view.js: MeshRouteView.clear() empties the layer and removes the sidebar', () => {
+  const removed = [];
+  const ctx = { window: null, console, WeakSet, setTimeout: () => 0, clearTimeout: () => {},
+    document: { querySelectorAll: (sel) => sel === '.mc-rt-sidebar' ? [{ remove: () => removed.push(sel) }] : [],
+      addEventListener: () => {}, querySelector: () => null },
+    addEventListener: () => {}, removeEventListener: () => {}, location: { hash: '' } };
+  ctx.window = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'route-view.js'), 'utf8'), ctx, { filename: 'route-view.js' });
+  let cleared = 0;
+  ctx.MeshRouteView.clear({ clearLayers: () => { cleared++; } });
+  assert(cleared === 1 && removed.length === 1, 'layer cleared ' + cleared + 'x, sidebars removed ' + removed.length);
 });
 
 test('map.js: drawPacketRoute and drawPacketRouteMulti both filter through the shared helper', () => {
@@ -130,9 +173,14 @@ test('map.js: drawPacketRoute and drawPacketRouteMulti both filter through the s
   for (const fn of ['drawPacketRoute', 'drawPacketRouteMulti']) {
     const b = body(fn);
     assert(/hide1ByteRoutePositions\(/.test(b), fn + ' must call hide1ByteRoutePositions');
+    assert(/length < 1\) \{ clearRouteView\(\); return; \}/.test(b),
+      fn + ' must clear the route view when nothing survives the filter');
     assert(/hopsHiddenCount:\s*\w+\.hopsHiddenCount|hopsHiddenCount:\s*hopsHiddenCount/.test(b),
       fn + ' must pass hopsHiddenCount to the renderer');
   }
+  const multi = body('drawPacketRouteMulti');
+  assert(/tagPathHopTokens\(raw, canonicalPath\)/.test(multi), 'drawPacketRouteMulti must tag its path hops');
+  assert(/const edgeCounts = routeEdgeCounts\(paths\)/.test(multi), 'edge weights come from the filtered paths');
 });
 
 console.log('\n#673: ' + passed + ' passed, ' + failed + ' failed');
