@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-673-map-hide-inferred-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #673 map packet route honours the hide-1-byte-hops toggle for inferred hops, single observer and a synthetic second observer (drawPacketRouteMulti), toggle off and on. About 16s locally; no CI duration measured yet. Assigned to shard 1, which runs the fewest suites."
+    },
+    {
       "file": "test-issue-667-live-panel-overflow-e2e.js",
       "shard": 3,
       "env": { "BASE_URL": "$BASE_URL" },
