@@ -80,14 +80,21 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   const setHide = (page, on) => page.evaluate((v) => window.MC_setHide1ByteHops(v), on);
 
   // Toggle off → every relay; live toggle on → none, and no stale sidebar; off → back.
+  // With every relay hidden the sidebar is either gone (no endpoint survives)
+  // or redrawn with only payload endpoints (the CI seeds resolve this
+  // packet's recipient) — either way the 22-relay sidebar must not stay up.
   async function flipCycle(multi) {
     const { ctx, page, errors } = await openRoute(ONE_BYTE, { hide: false, multi });
     try {
       await waitRelays(page, ONE_BYTE.relays);
       assert(await page.evaluate(() => window.__mc_lastRouteDraw.kind) === (multi ? 'multi' : 'single'),
         'expected the ' + (multi ? 'multi' : 'single') + '-observer renderer');
+      await page.evaluate(() => document.querySelector('.mc-rt-sidebar').setAttribute('data-e2e-old', '1'));
       await setHide(page, true);
-      await page.waitForFunction(() => !document.querySelector('.mc-rt-sidebar'));
+      await page.waitForFunction(() => {
+        const s = document.querySelector('.mc-rt-sidebar');
+        return !s || !s.hasAttribute('data-e2e-old');
+      });
       assert(await relayCount(page) === 0, 'relays still listed with 1-byte hops hidden');
       await setHide(page, false);
       await waitRelays(page, ONE_BYTE.relays);
