@@ -2,12 +2,20 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-670-live-feed-capped-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #670 the capped Live controls panel wins over the bottom-left feed at 641x360, 653x320, 740x360, 768x360, 800x400 touch and 1024x500 mouse (feed targets under the panel, a panel control in the overlap tappable, the gear restores the feed), with a fitting-panel 1024x500 guard. About 16s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-672-live-landscape-scroll-box-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; #672 capped Live controls panel scroll box at least 150px in short landscape at 653x320, 700x360 and 740x360 touch with the last control (Area trigger) reachable and tappable, the 653x320 gear, bottom-nav and VCR-button guards, and the 640x320, 769x360, 768x1024 and 1280x500 boundary guards. About 12s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+      "measurementNote": "New suite; #672 capped Live controls panel scroll box at least 150px in short landscape at 653x320, 700x360, 740x360 and 700x480 touch with the last control (Area trigger) reachable and tappable, the 653x320 gear, bottom-nav and VCR-button guards, and the 640x320, 769x360, 768x1024 and 1280x500 boundary guards. About 12s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
     },
     {
       "file": "test-issue-671-live-typeahead-capped-e2e.js",
