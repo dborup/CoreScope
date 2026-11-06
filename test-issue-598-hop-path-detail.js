@@ -1324,8 +1324,11 @@ console.log('\n=== #598 S: the map route view takes the same inferred hops ===')
     const body = mapSrc.slice(mapSrc.indexOf('function inferredRouteHops'),
       mapSrc.indexOf('async function drawPacketRoute(hopKeys'));
     assert.ok(/routeHopFromInferred\(/.test(body), 'no second copy of the mapping (DRY)');
-    assert.ok(/_hopHex: String\(hop\)/.test(body),
-      '#1633 — the original hex token stays, so the 1-byte filter still works');
+    // #673 — the RAW prefix from the inferred entry, not hopKeys[i]: the deep
+    // link passes inferred pubkeys as hopKeys, and a pubkey never reads as a
+    // 1-byte hop, so the old String(hop) silently disabled the filter.
+    assert.ok(/_hopHex: String\(inferred\[i\]\.hop != null \? inferred\[i\]\.hop : hop\)/.test(body),
+      '#1633/#673 — the original hex token stays, so the 1-byte filter still works');
     assert.ok(!/nodes\.(find|filter)\(/.test(body), 'roles come from one pass, not a scan per hop');
   });
 
