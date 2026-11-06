@@ -10,14 +10,17 @@
 // real touch taps at the element's centre.
 //
 // Steps:
-//   - band 653×320, 700×360, 740×360 (16 groups): the capped scroll box is
+//   - band 653×320, 700×360, 740×360, 700×480 (16 groups): the band layout
+//     (no top-nav, no chart toggle, mobile LCD); the capped scroll box is
 //     ≥ 150px; scrolled to the end, a tap on the last control (Area
-//     trigger) opens its menu; no horizontal page scroll
+//     trigger) opens its menu; no horizontal page scroll. 700×480 is the
+//     tallest case and pins the max-height: 500px ceiling (#678 review N1)
 //   - band 653×320: the gear stays ≥ 44px and hit-testable in the #666
 //     landscape row (same top as the zoom control, below the 56px offset),
 //     the bottom-nav is shown, and the VCR buttons keep the sizes they have
 //     at 769px
-//   - boundaries: 640×320 keeps the ≤ 640px layout (box ≥ 150px); 769×360
+//   - boundaries: 640×320 keeps the ≤ 640px layout and the capped header
+//     offset, reserve and box it has on master (#678 review N3); 769×360
 //     keeps the top-nav, the MESH LIVE title and the full LCD
 //   - guards: a 768×1024 portrait tablet (chart toggle) and a 1280×500
 //     desktop window (title) keep the top-nav, the header and the full LCD
@@ -28,6 +31,15 @@ const { chromium } = require('playwright');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const MIN_BOX = 150;
+const MOBILE_LCD = 74;
+// N3 (#678 review): 640×320 is outside #672's change, so its capped panel
+// must match master, not just clear MIN_BOX (152 vs 150 left 2px). The box
+// is innerHeight − --live-ctrl-top − --live-ctrl-reserve − 12px gutter. The
+// CSS inputs are pinned exactly: the #1234 header at top 8px with 4px
+// padding, and a 112px reserve (58px bottom-nav + 54px VCR bar). Only the
+// header row above the body depends on font metrics: 36px on macOS, 35px on
+// Linux CI (box 152 vs 153), so that offset gets that 1px range.
+const AT_640 = { headerTop: 8, padTop: '4px', ctrlReserve: '112px', rowMin: 35, rowMax: 36, gutter: 12 };
 const groups = (n) => Array.from({ length: n }, (_, i) => ({ name: 'Region group ' + (i + 1), codes: ['SJC'] }));
 const AREAS = [{ key: 'north', label: 'North' }, { key: 'south', label: 'South' }];
 
@@ -71,6 +83,11 @@ function state(page) {
       area: area && rect(area), areaCentre: area && centre(area), areaHit: hitOk(area),
       menuOpen: !!menu && !menu.hidden,
       hScroll: document.documentElement.scrollWidth > document.documentElement.clientWidth,
+      ctrlTop: document.querySelector('.live-page').style.getPropertyValue('--live-ctrl-top'),
+      vh: window.innerHeight,
+      headerTop: Math.round(document.getElementById('liveHeader').getBoundingClientRect().top),
+      headerPadTop: getComputedStyle(document.getElementById('liveHeader')).paddingTop,
+      ctrlReserve: document.querySelector('.live-page').style.getPropertyValue('--live-ctrl-reserve'),
     };
   });
 }
@@ -141,6 +158,12 @@ async function runBand(browser, w, h) {
   const tag = `[${w}x${h}]`;
   const { ctx, page } = await openLive(browser, w, h, true);
   let s = await openPanel(page, true);
+  // N1 (#678 review): pins the band's height ceiling, which the box check
+  // alone does not — out of the band 700×480 still gets a ≥ 150px box.
+  await step(`${tag} in the band: no top-nav, no chart toggle, mobile LCD`, async () => {
+    assert(!s.topNav && !s.chartToggle, `topNav ${s.topNav}, chartToggle ${s.chartToggle}`);
+    assert(s.lcdWidth === MOBILE_LCD, `LCD canvas ${s.lcdWidth}px wide, expected ${MOBILE_LCD}px`);
+  });
   await step(`${tag} capped panel: scroll box is ≥ ${MIN_BOX}px`, async () => {
     assert(s.capped, 'panel not capped (16 groups should not fit)');
     assert(s.box >= MIN_BOX, `scroll box ${s.box}px < ${MIN_BOX}px`);
@@ -178,8 +201,16 @@ async function runBoundary640(browser) {
   await step('[640x320] keeps the ≤ 640px layout: no top-nav, no chart toggle', async () =>
     assert(!closed.topNav && !closed.chartToggle, `topNav ${closed.topNav}, chartToggle ${closed.chartToggle}`));
   const s = await openPanel(page, true);
-  await step(`[640x320] capped panel: scroll box is ≥ ${MIN_BOX}px`, async () =>
-    assert(s.capped && s.box >= MIN_BOX, `capped ${s.capped}, box ${s.box}px`));
+  await step('[640x320] capped panel unchanged from master: header at 8px, 112px reserve, box from the cap formula', async () => {
+    assert(s.capped, 'panel not capped');
+    const top = parseInt(s.ctrlTop, 10), reserve = parseInt(s.ctrlReserve, 10);
+    const row = top - s.headerTop;
+    const got = { headerTop: s.headerTop, padTop: s.headerPadTop, ctrlTop: s.ctrlTop, ctrlReserve: s.ctrlReserve, box: s.box };
+    assert(s.headerTop === AT_640.headerTop && s.headerPadTop === AT_640.padTop, `header ${JSON.stringify(got)}`);
+    assert(s.ctrlReserve === AT_640.ctrlReserve, `reserve ${JSON.stringify(got)}`);
+    assert(row >= AT_640.rowMin && row <= AT_640.rowMax, `header row ${row}px, master ${AT_640.rowMin}–${AT_640.rowMax}px: ${JSON.stringify(got)}`);
+    assert(s.box === s.vh - top - reserve - AT_640.gutter, `box ${s.box}px ≠ ${s.vh} − ${top} − ${reserve} − ${AT_640.gutter}: ${JSON.stringify(got)}`);
+  });
   await ctx.close();
 }
 
@@ -210,7 +241,7 @@ async function runUnchanged(browser, w, h, touch) {
     ['769', () => runUnchanged(browser, 769, 360, true)],
     ['768 portrait', () => runUnchanged(browser, 768, 1024, true)],
     ['desktop', () => runUnchanged(browser, 1280, 500, false)],
-    ...[[653, 320], [700, 360], [740, 360]].map(([w, h]) => [`${w}x${h}`, () => runBand(browser, w, h)]),
+    ...[[653, 320], [700, 360], [740, 360], [700, 480]].map(([w, h]) => [`${w}x${h}`, () => runBand(browser, w, h)]),
     ['640', () => runBoundary640(browser)],
   ];
   for (const [name, run] of runs) {

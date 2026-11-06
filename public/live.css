@@ -1006,11 +1006,16 @@ body.live-fullscreen #liveFullscreenToggle:hover,
   -webkit-overflow-scrolling: touch;
 }
 /* The feed card (z-index 1000, later in the DOM) covers the scrolled-in
-   controls of a capped panel at 641–768px wide. Drop only the feed below the
-   header (also 1000, first in the DOM) while capped. Raising the header
-   instead would put it over node detail (a 1000 overlay from 641px up) and
-   the VCR "More" menu (1100, but inside the 1000 VCR bar), which both come
-   later in the DOM and must stay on top. */
+   controls of a capped panel. Drop only the feed below the header (also
+   1000, first in the DOM) while capped. Raising the header instead would put
+   it over node detail (a 1000 overlay from 641px up) and the VCR "More" menu
+   (1100, but inside the 1000 VCR bar), which both come later in the DOM and
+   must stay on top.
+   #670: the panel wins at every width where the feed is shown (641px up),
+   not only 641–768px. A capped panel reaches down to the VCR reserve and
+   the feed sits wholly inside its box, so the feed is unusable until the
+   gear closes the panel. Moving the feed aside does not fit: the rail right
+   of the panel is 250px, the feed 280–360px. */
 .live-page:has(.live-controls.is-expanded.is-capped) .live-feed { z-index: 999; }
 .live-controls.is-expanded.is-capped .live-controls-body :is(.live-region-filter-container, .live-area-filter-container):has(.region-dropdown-menu:not([hidden])) { flex: 0 0 100%; }
 .live-controls.is-expanded.is-capped .live-controls-body .region-dropdown-wrap:has(> .region-dropdown-menu:not([hidden])) { flex: 0 0 100%; }
