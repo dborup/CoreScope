@@ -344,8 +344,9 @@ test('[adv #2] map.js source: drawPacketRoute propagates hopsHiddenCount to rend
   const src = fs.readFileSync(path.join(__dirname, 'public/map.js'), 'utf8');
   assert.ok(/hopsHiddenCount\s*:\s*hopsHiddenCount/.test(src),
     'map.js must pass hopsHiddenCount into the route renderer opts');
-  assert.ok(/var\s+hopsHiddenCount\s*=\s*0/.test(src) || /let\s+hopsHiddenCount\s*=\s*0/.test(src),
-    'map.js must compute hopsHiddenCount before filtering positions');
+  // #673: the count comes from the shared filter helper both route renderers use.
+  assert.ok(/function hide1ByteRoutePositions\(/.test(src) && /hopsHiddenCount = hidden\.hopsHiddenCount/.test(src),
+    'map.js must compute hopsHiddenCount from hide1ByteRoutePositions before rendering');
 });
 
 test('[adv #2] route-render.js: redacted edges use dashed + reduced opacity + emit badge', () => {

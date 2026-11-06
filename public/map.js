@@ -868,11 +868,78 @@
   // (inferObservationPath), aligned with hopKeys. opts.inferredHops on either
   // renderer takes this path instead of /api/resolve-hops, which resolves each
   // prefix on its own and so cannot tell two hops that share a prefix apart.
+  // #673: _hopHex is the raw prefix the observation carried (entry.hop), not
+  // hopKeys[i]: loadRouteFromDeepLink passes the inferred pubkeys as hopKeys,
+  // and a 64-char pubkey never reads as a 1-byte hop to MC_isVisibleHop.
   function inferredRouteHops(hopKeys, inferred) {
     const roles = new Map((nodes || []).map(n => [n.public_key, n.role]));
     return hopKeys.map((hop, i) => Object.assign(
       routeHopFromInferred(inferred[i].hop, inferred[i], roles.get(inferred[i].pubkey)),
-      { _hopHex: String(hop) }));
+      { _hopHex: String(inferred[i].hop != null ? inferred[i].hop : hop) }));
+  }
+
+  // #1633 — render-time 1-byte hop filter (default OFF). Origin / destination
+  // positions carry no _hopHex (they came from the payload, not the outer path
+  // bytes) and therefore always survive. Intermediate hops with a 1-byte
+  // _hopHex are dropped when the customizer toggle is ON. Returns a new array;
+  // the caller's positions are not mutated.
+  //
+  // #1689 r1 (adv #2): if the filter drops every intermediate hop the result
+  // is a 2-point origin→dest polyline that is visually identical to a
+  // "direct delivery, no hops" route. Operators misread that as ground-truth
+  // direct path. To make the redaction LEGIBLE the renderer gets
+  // hopsHiddenCount so it can draw the polyline in a different style
+  // (dashed/lighter) and add a midpoint badge that reads "N hops hidden".
+  // #673: shared by drawPacketRoute and drawPacketRouteMulti.
+  function hide1ByteRoutePositions(positions) {
+    if (!(window.MC_isVisibleHop && window.MC_getHide1ByteHops && window.MC_getHide1ByteHops())) {
+      return { positions: positions, hopsHiddenCount: 0 };
+    }
+    const before = positions.filter(function (p) { return !!p._hopHex; }).length;
+    const kept = positions.filter(function (p) {
+      return !p._hopHex || window.MC_isVisibleHop(p._hopHex);
+    });
+    const after = kept.filter(function (p) { return !!p._hopHex; }).length;
+    if (kept.length < positions.length && kept.length >= 1) {
+      // Re-mark the last surviving hop as destination if the original got
+      // dropped — on a copy, so the caller's position objects stay untouched.
+      kept[kept.length - 1] = Object.assign({}, kept[kept.length - 1], { isDest: true });
+    }
+    return { positions: kept, hopsHiddenCount: before - after };
+  }
+
+  // #673: tag each canonical path hop with the token its observation carried,
+  // so hide1ByteRoutePositions can see it. Inferred hops already carry their
+  // raw prefix (inferredRouteHops); otherwise canonicalPath holds the raw
+  // prefixes. Mutates the freshly built positions in place.
+  function tagPathHopTokens(positions, canonicalPath) {
+    positions.forEach(function (p, i) {
+      if (p._hopHex == null) p._hopHex = String(canonicalPath[i]);
+    });
+    return positions;
+  }
+
+  // Observers per edge across all paths, for the multi-path stroke weights and
+  // the "All" overlay. #673: built from the hide-1-byte filtered hop lists, so
+  // a hidden hop neither draws a guessed node nor splits its neighbours' edge.
+  function routeEdgeCounts(paths) {
+    const edgeCounts = {};
+    paths.forEach(function (p) {
+      const raw = p.path || [];
+      const hops = window.MC_filterPathHops ? window.MC_filterPathHops(raw) : raw;
+      for (let i = 0; i < hops.length - 1; i++) {
+        const key = hops[i] + '\u2192' + hops[i + 1];
+        edgeCounts[key] = (edgeCounts[key] || 0) + 1;
+      }
+    });
+    return edgeCounts;
+  }
+
+  // #673: nothing of the route survives the 1-byte filter. Clear the layer
+  // and the sidebar, so a live toggle does not leave the previous route up.
+  function clearRouteView() {
+    if (routeLayer) routeLayer.clearLayers();
+    if (window.MeshRouteView && typeof window.MeshRouteView.clear === 'function') window.MeshRouteView.clear();
   }
 
   async function drawPacketRoute(hopKeys, origin, opts) {
@@ -1052,33 +1119,11 @@
     // Mark final hop as destination so the renderer applies the dest glyph.
     positions[positions.length - 1].isDest = true;
 
-    // #1633 — render-time 1-byte hop filter (default OFF). Origin / destination
-    // positions are added without _hopHex (they came from the payload, not the
-    // outer path bytes) and therefore always survive. Intermediate hops with a
-    // 1-byte _hopHex are dropped when the customizer toggle is ON.
-    //
-    // #1689 r1 (adv #2): if the filter drops every intermediate hop the result
-    // is a 2-point origin→dest polyline that is visually identical to a
-    // "direct delivery, no hops" route. Operators misread that as ground-truth
-    // direct path. To make the redaction LEGIBLE we tag the surviving
-    // positions with `_hopsHiddenCount` so the renderer can draw the polyline
-    // in a different style (dashed/lighter) and add a midpoint badge that
-    // reads "N hops hidden (1-byte)".
-    var hopsHiddenCount = 0;
-    if (window.MC_isVisibleHop && window.MC_getHide1ByteHops && window.MC_getHide1ByteHops()) {
-      var beforeCount = positions.length;
-      var beforeIntermediate = positions.filter(function (p) { return !!p._hopHex; }).length;
-      positions = positions.filter(function (p) {
-        return !p._hopHex || window.MC_isVisibleHop(p._hopHex);
-      });
-      var afterIntermediate = positions.filter(function (p) { return !!p._hopHex; }).length;
-      hopsHiddenCount = beforeIntermediate - afterIntermediate;
-      if (positions.length < beforeCount && positions.length >= 1) {
-        // Re-mark last surviving hop as destination if the original got dropped.
-        positions[positions.length - 1].isDest = true;
-      }
-      if (positions.length < 1) return;
-    }
+    // #1633 / #673 — drop 1-byte hops when the customizer toggle is ON.
+    const hidden = hide1ByteRoutePositions(positions);
+    positions = hidden.positions;
+    const hopsHiddenCount = hidden.hopsHiddenCount;
+    if (positions.length < 1) { clearRouteView(); return; }
 
     // Hand off to sequence-primary sequence-primary renderer (#1418), falling
     // back to the legacy role-aware MeshRoute (#1374), then to the minimal
@@ -1336,15 +1381,10 @@
 
     // Count hop & edge occurrences across all paths.
     const hopCounts = {};
-    const edgeCounts = {};
     paths.forEach(p => {
-      const hops = p.path || [];
-      hops.forEach(h => { hopCounts[h] = (hopCounts[h] || 0) + 1; });
-      for (let i = 0; i < hops.length - 1; i++) {
-        const key = hops[i] + '\u2192' + hops[i + 1];
-        edgeCounts[key] = (edgeCounts[key] || 0) + 1;
-      }
+      (p.path || []).forEach(h => { hopCounts[h] = (hopCounts[h] || 0) + 1; });
     });
+    const edgeCounts = routeEdgeCounts(paths);
 
     // Resolve canonical hops: the inferred hops when given (#598), else
     // /api/resolve-hops + naive fallback.
@@ -1407,18 +1447,19 @@
     });
 
     if (raw.length < 1) return;
+    tagPathHopTokens(raw, canonicalPath); // #673
     if (origin && origin.pubkey) {
       const op = nodes.find(n => n.public_key.toLowerCase() === origin.pubkey.toLowerCase() ||
                                   n.public_key.toLowerCase().startsWith(origin.pubkey.toLowerCase()));
       if (op) {
         const hasGps = op.lat != null && op.lon != null && !(op.lat === 0 && op.lon === 0);
         if (hasGps) {
-          raw.unshift({ lat: op.lat, lon: op.lon, name: origin.name || op.name || 'Sender', pubkey: op.public_key, role: op.role || 'companion', resolved: true, isOrigin: true, observerCount: totalObservers, observerTotal: totalObservers });
+          raw.unshift({ lat: op.lat, lon: op.lon, name: origin.name || op.name || 'Sender', pubkey: op.public_key, role: op.role || 'companion', resolved: true, isOrigin: true, _fromPayload: true, observerCount: totalObservers, observerTotal: totalObservers });
         } else {
-          raw.unshift({ name: origin.name || op.name || 'Sender', pubkey: op.public_key, role: op.role || 'companion', resolved: false, gpsless: true, isOrigin: true, observerCount: totalObservers, observerTotal: totalObservers });
+          raw.unshift({ name: origin.name || op.name || 'Sender', pubkey: op.public_key, role: op.role || 'companion', resolved: false, gpsless: true, isOrigin: true, _fromPayload: true, observerCount: totalObservers, observerTotal: totalObservers });
         }
       } else if (origin.name) {
-        raw.unshift({ name: origin.name, pubkey: origin.pubkey, role: 'companion', resolved: false, isOrigin: true, observerCount: totalObservers, observerTotal: totalObservers });
+        raw.unshift({ name: origin.name, pubkey: origin.pubkey, role: 'companion', resolved: false, isOrigin: true, _fromPayload: true, observerCount: totalObservers, observerTotal: totalObservers });
       }
     }
     // #1418 Phase D: append destination (recipient from decoded.destHash) so
@@ -1432,21 +1473,26 @@
       if (dp) {
         const hasGps = dp.lat != null && dp.lon != null && !(dp.lat === 0 && dp.lon === 0);
         if (hasGps) {
-          raw.push({ lat: dp.lat, lon: dp.lon, name: opts.destination.name || dp.name || 'Recipient', pubkey: dp.public_key, role: dp.role || 'companion', resolved: true, observerCount: totalObservers, observerTotal: totalObservers });
+          raw.push({ lat: dp.lat, lon: dp.lon, name: opts.destination.name || dp.name || 'Recipient', pubkey: dp.public_key, role: dp.role || 'companion', resolved: true, _fromPayload: true, observerCount: totalObservers, observerTotal: totalObservers });
         } else {
-          raw.push({ name: opts.destination.name || dp.name || 'Recipient', pubkey: dp.public_key, role: dp.role || 'companion', resolved: false, gpsless: true, observerCount: totalObservers, observerTotal: totalObservers });
+          raw.push({ name: opts.destination.name || dp.name || 'Recipient', pubkey: dp.public_key, role: dp.role || 'companion', resolved: false, gpsless: true, _fromPayload: true, observerCount: totalObservers, observerTotal: totalObservers });
         }
       }
     }
-    raw[raw.length - 1].isDest = true;
-    if (raw[0]) raw[0].isOrigin = true;
+    // #673 — the same 1-byte filter as drawPacketRoute; before this the
+    // multi-observer route ignored the toggle entirely.
+    // MeshRouteView.render marks origin/destination by position index.
+    const hidden = hide1ByteRoutePositions(raw);
+    const routePositions = hidden.positions;
+    if (routePositions.length < 1) { clearRouteView(); return; }
 
     if (routeLayer) routeLayer.clearLayers();
 
     if (window.MeshRouteView && typeof window.MeshRouteView.render === 'function') {
-      window.MeshRouteView.render(map, routeLayer, raw, {
+      window.MeshRouteView.render(map, routeLayer, routePositions, {
         timestamp: opts.timestamp || Date.now(),
         multiPath: true,
+        hopsHiddenCount: hidden.hopsHiddenCount,
         totalObservers: totalObservers,
         edgeCounts: edgeCounts,
         packetHash: opts.packetHash || null,
@@ -1457,6 +1503,10 @@
     }
   }
   window.drawPacketRouteMulti = drawPacketRouteMulti;
+  // #673: the mc-hide-1byte-hops-changed listener re-issues single-observer
+  // routes through window.drawPacketRoute; without this export a live toggle
+  // never redrew them.
+  window.drawPacketRoute = drawPacketRoute;
 
   // #1418/#1419: deep-link loader. Reads URL params
   //   #/map?packet=<hash>&obs=<observation_id>
@@ -3070,6 +3120,9 @@
   if (typeof window !== 'undefined') {
     window.__meshcoreMapInternals = {
       createClusterGroup: createClusterGroup, makeClusterIcon: makeClusterIcon,
+      // #673 — route hops for inferred paths and the shared 1-byte hop filter.
+      inferredRouteHops: inferredRouteHops, hide1ByteRoutePositions: hide1ByteRoutePositions,
+      tagPathHopTokens: tagPathHopTokens, routeEdgeCounts: routeEdgeCounts,
       nodePassesByteSizeFilter: nodePassesByteSizeFilter,
       nodePassesScopeFilter: nodePassesScopeFilter, buildScopeOptions: buildScopeOptions,
       nodePassesRelayedScopeFilter: nodePassesRelayedScopeFilter, buildRelayedScopeOptions: buildRelayedScopeOptions,
