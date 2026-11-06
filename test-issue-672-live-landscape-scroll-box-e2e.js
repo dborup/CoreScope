@@ -19,8 +19,8 @@
 //     landscape row (same top as the zoom control, below the 56px offset),
 //     the bottom-nav is shown, and the VCR buttons keep the sizes they have
 //     at 769px
-//   - boundaries: 640×320 keeps the ≤ 640px layout and the capped box, top
-//     and reserve it has on master (#678 review N3); 769×360
+//   - boundaries: 640×320 keeps the ≤ 640px layout and the capped header
+//     offset, reserve and box it has on master (#678 review N3); 769×360
 //     keeps the top-nav, the MESH LIVE title and the full LCD
 //   - guards: a 768×1024 portrait tablet (chart toggle) and a 1280×500
 //     desktop window (title) keep the top-nav, the header and the full LCD
@@ -33,8 +33,13 @@ const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const MIN_BOX = 150;
 const MOBILE_LCD = 74;
 // N3 (#678 review): 640×320 is outside #672's change, so its capped panel
-// must match master exactly, not just clear MIN_BOX (152 vs 150 left 2px).
-const AT_640 = { box: 152, ctrlTop: '44px', ctrlReserve: '112px' };
+// must match master, not just clear MIN_BOX (152 vs 150 left 2px). The box
+// is innerHeight − --live-ctrl-top − --live-ctrl-reserve − 12px gutter. The
+// CSS inputs are pinned exactly: the #1234 header at top 8px with 4px
+// padding, and a 112px reserve (58px bottom-nav + 54px VCR bar). Only the
+// header row above the body depends on font metrics: 36px on macOS, 35px on
+// Linux CI (box 152 vs 153), so that offset gets that 1px range.
+const AT_640 = { headerTop: 8, padTop: '4px', ctrlReserve: '112px', rowMin: 35, rowMax: 36, gutter: 12 };
 const groups = (n) => Array.from({ length: n }, (_, i) => ({ name: 'Region group ' + (i + 1), codes: ['SJC'] }));
 const AREAS = [{ key: 'north', label: 'North' }, { key: 'south', label: 'South' }];
 
@@ -79,6 +84,9 @@ function state(page) {
       menuOpen: !!menu && !menu.hidden,
       hScroll: document.documentElement.scrollWidth > document.documentElement.clientWidth,
       ctrlTop: document.querySelector('.live-page').style.getPropertyValue('--live-ctrl-top'),
+      vh: window.innerHeight,
+      headerTop: Math.round(document.getElementById('liveHeader').getBoundingClientRect().top),
+      headerPadTop: getComputedStyle(document.getElementById('liveHeader')).paddingTop,
       ctrlReserve: document.querySelector('.live-page').style.getPropertyValue('--live-ctrl-reserve'),
     };
   });
@@ -193,10 +201,15 @@ async function runBoundary640(browser) {
   await step('[640x320] keeps the ≤ 640px layout: no top-nav, no chart toggle', async () =>
     assert(!closed.topNav && !closed.chartToggle, `topNav ${closed.topNav}, chartToggle ${closed.chartToggle}`));
   const s = await openPanel(page, true);
-  await step(`[640x320] capped panel unchanged from master: box ${AT_640.box}px, top ${AT_640.ctrlTop}, reserve ${AT_640.ctrlReserve}`, async () => {
+  await step('[640x320] capped panel unchanged from master: header at 8px, 112px reserve, box from the cap formula', async () => {
     assert(s.capped, 'panel not capped');
-    const got = { box: s.box, ctrlTop: s.ctrlTop, ctrlReserve: s.ctrlReserve };
-    assert(JSON.stringify(got) === JSON.stringify(AT_640), `${JSON.stringify(got)} vs master ${JSON.stringify(AT_640)}`);
+    const top = parseInt(s.ctrlTop, 10), reserve = parseInt(s.ctrlReserve, 10);
+    const row = top - s.headerTop;
+    const got = { headerTop: s.headerTop, padTop: s.headerPadTop, ctrlTop: s.ctrlTop, ctrlReserve: s.ctrlReserve, box: s.box };
+    assert(s.headerTop === AT_640.headerTop && s.headerPadTop === AT_640.padTop, `header ${JSON.stringify(got)}`);
+    assert(s.ctrlReserve === AT_640.ctrlReserve, `reserve ${JSON.stringify(got)}`);
+    assert(row >= AT_640.rowMin && row <= AT_640.rowMax, `header row ${row}px, master ${AT_640.rowMin}–${AT_640.rowMax}px: ${JSON.stringify(got)}`);
+    assert(s.box === s.vh - top - reserve - AT_640.gutter, `box ${s.box}px ≠ ${s.vh} − ${top} − ${reserve} − ${AT_640.gutter}: ${JSON.stringify(got)}`);
   });
   await ctx.close();
 }
