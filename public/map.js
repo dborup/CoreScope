@@ -1690,7 +1690,10 @@
         srcResolvedName: inferredSrc ? resolveNameByHash(inferredSrc) : null,
         destResolvedName: inferredDst ? resolveNameByHash(inferredDst) : null,
         observedHops: chosenPath.length,
-        observationCount: observations.length
+        observationCount: observations.length,
+        // #674: the route view's Mark-mode badge reads the hash size from the
+        // chosen observation's own header byte.
+        pathHashSize: window.MC_packetHashSize ? window.MC_packetHashSize(chosen.raw_hex || pkt.raw_hex) : 0
       };
       // GRP_TXT: try to resolve the channel name from /api/channels.
       if (inferredType === 'GRP_TXT' && inferredChannelHash) {

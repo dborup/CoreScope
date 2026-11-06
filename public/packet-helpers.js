@@ -301,15 +301,28 @@ window.hasHopAffinity = function hasHopAffinity() {
  */
 window.routeHopFromInferred = function routeHopFromInferred(hop, entry, role) {
   var e = entry || {};
+  var out;
   if (e.located) {
-    return { lat: e.lat, lon: e.lon, name: e.name, pubkey: e.pubkey, role: role || null, resolved: true, confidence: e.confidence };
+    out = { lat: e.lat, lon: e.lon, name: e.name, pubkey: e.pubkey, role: role || null, resolved: true, confidence: e.confidence };
+  } else if (e.pubkey && e.unreliable) {
+    // A node the ingestor resolved that does not fit this point in the path:
+    // it has a position, so "no GPS" would be wrong. Keep its name and mark
+    // the hop unlisted, which is what the sidebar chip then says.
+    out = { name: e.name, pubkey: e.pubkey, role: role || null, resolved: false, unlisted: true };
+  } else if (e.pubkey) {
+    out = { name: e.name, pubkey: e.pubkey, role: role || null, resolved: false, gpsless: true };
+  } else {
+    out = { name: String(hop).slice(0, 8), pubkey: hop, resolved: false, unlisted: true };
   }
-  // A node the ingestor resolved that does not fit this point in the path: it
-  // has a position, so "no GPS" would be wrong. Keep its name and mark the hop
-  // unlisted, which is what the sidebar chip then says.
-  if (e.pubkey && e.unreliable) {
-    return { name: e.name, pubkey: e.pubkey, role: role || null, resolved: false, unlisted: true };
-  }
-  if (e.pubkey) return { name: e.name, pubkey: e.pubkey, role: role || null, resolved: false, gpsless: true };
-  return { name: String(hop).slice(0, 8), pubkey: hop, resolved: false, unlisted: true };
+  // #674 — what the Mark mode of the route view shows: whether the hop is
+  // uncertain (the shared HopDisplay rule), how many nodes it could be, and
+  // the three likeliest of them.
+  var candidates = e.candidates || [];
+  out.unsure = !!(window.HopDisplay && window.HopDisplay.isUnsureInferredHop &&
+    window.HopDisplay.isUnsureInferredHop(e));
+  out.candidateCount = candidates.length;
+  out.alternatives = candidates.slice(0, 3).map(function (c) {
+    return { name: c.name || null, confidence: c.confidence == null ? null : Number(c.confidence) };
+  });
+  return out;
 };

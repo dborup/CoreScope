@@ -108,6 +108,19 @@ window.HopDisplay = (function() {
     return ` <button class="hop-conflict-btn status-warn" data-conflict='${conflictData}' onclick="event.preventDefault();event.stopPropagation();HopDisplay._showFromBtn(this)" title="${escapeHtml(label)}"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-warning"/></svg>${count}</button>`;
   }
 
+  // #674 — the ONE rule for "this inferred hop is uncertain", shared by the
+  // packet detail (renderInferredHop) and the map route view: a guess below
+  // LIKELY_CONFIDENCE with alternatives to weigh, or an unlisted hop whose
+  // candidates were all rejected. A canonical hop is the ingestor's own
+  // answer (#1283) and never uncertain.
+  function isUnsureInferredHop(entry) {
+    if (!entry || typeof entry !== 'object') return false;
+    const candidates = entry.candidates || [];
+    if (entry.unlisted) return !entry.name && candidates.length > 0;
+    const guess = !entry.canonical && entry.confidence < LIKELY();
+    return guess && candidates.length > 1;
+  }
+
   /**
    * #598 — a hop from HopResolver.inferPath(): one position in ONE
    * observation's path, with a confidence. "Unlisted" means no located node
@@ -121,7 +134,7 @@ window.HopDisplay = (function() {
     // weigh: the alternatives to a guess, or those rejected for an unlisted hop.
     // A canonical hop is the ingestor's own answer (#1283) and neither.
     const guess = !entry.canonical && !entry.unlisted && entry.confidence < LIKELY();
-    const unsure = entry.unlisted ? !name && candidates.length > 0 : guess && candidates.length > 1;
+    const unsure = isUnsureInferredHop(entry);
     // A node the ingestor resolved that does not fit where the hop sits. #165
     // already has a warning for that, and it is not the same thing as a node
     // with no GPS to check.
@@ -272,5 +285,5 @@ window.HopDisplay = (function() {
            '<ul class="path-legend-list">' + items + '</ul></details>';
   }
 
-  return { renderHop, renderPath, conflictBadgeCount, _showFromBtn, _showConflictPopover: showConflictPopover, LIKELY, PATH_SYMBOLS_LEGEND, renderPathSymbolsLegend };
+  return { renderHop, renderPath, conflictBadgeCount, isUnsureInferredHop, _showFromBtn, _showConflictPopover: showConflictPopover, LIKELY, PATH_SYMBOLS_LEGEND, renderPathSymbolsLegend };
 })();
