@@ -7,7 +7,8 @@
  *   - Resolves localStorage → server default → 'carto-dark' / 'carto-light'.
  *   - MC_applyTileFilter() applies/clears the CSS filter on
  *     `.leaflet-tile-pane` based on current theme + selected provider.
- *   - MC_createLayerControl() builds a Leaflet control mapping providers.
+ *   - MC_createLayerControl() builds a Leaflet control mapping providers,
+ *     plus the optional DHM terrain hillshade overlay (#680).
  *
  * No new deps — URL-only providers.
  */
@@ -282,6 +283,130 @@
     };
   }
 
+  /* #680 — optional DHM terrain hillshade overlay (Denmark).
+   *
+   * Offered only when /api/config/client carries an enabled `dhm` block
+   * (roles.js stores it as window.MC_DHM_CFG); the server sends it only
+   * while map.dhm is enabled with a token. Tiles come from the server's
+   * same-origin WMS proxy, which adds the token: the browser never sees it.
+   *
+   * The layer lives in its own pane between the base tiles (tilePane, 200)
+   * and the vector overlays/markers (overlayPane 400, markerPane 600). That
+   * also keeps it out of the dark-theme invert filter on the tile pane.
+   *
+   * On/off is remembered per viewer (localStorage) and mirrored in the hash
+   * as ?terrain=1. A ?terrain=1 / ?terrain=0 in the hash wins over the
+   * stored choice and is saved, like Live's ?heard= (#660).
+   */
+  var TERRAIN_ID          = 'dhm-terrain';
+  var TERRAIN_LABEL       = 'Terrain (DHM hillshade)';
+  var TERRAIN_STORAGE_KEY = 'mc-terrain-dhm';
+  var TERRAIN_HASH_PARAM  = 'terrain';
+  var TERRAIN_OPACITY     = 0.65;
+  var TERRAIN_PANE        = 'mcTerrainPane';
+  var TERRAIN_PANE_Z      = 250;
+
+  function getTerrainConfig() {
+    var c = window.MC_DHM_CFG;
+    if (!c || c.enabled !== true || typeof c.url !== 'string' || c.url.charAt(0) !== '/' || c.url.charAt(1) === '/') return null;
+    return c;
+  }
+
+  function resolveTerrainOn(hashValue, stored) {
+    if (hashValue === '1') return true;
+    if (hashValue === '0') return false;
+    return stored === '1';
+  }
+
+  function _hashParts() {
+    var hash = (typeof location !== 'undefined' && location.hash) || '';
+    var qi = hash.indexOf('?');
+    return { base: qi >= 0 ? hash.slice(0, qi) : hash, params: new URLSearchParams(qi >= 0 ? hash.slice(qi + 1) : '') };
+  }
+
+  function _readTerrainPref() {
+    var hv = null, stored = null;
+    try { hv = _hashParts().params.get(TERRAIN_HASH_PARAM); } catch (_) {}
+    try { stored = window.localStorage && window.localStorage.getItem(TERRAIN_STORAGE_KEY); } catch (_) {}
+    var on = resolveTerrainOn(hv, stored);
+    if (hv === '1' || hv === '0') {
+      try { if (window.localStorage) window.localStorage.setItem(TERRAIN_STORAGE_KEY, on ? '1' : '0'); } catch (_) {}
+    }
+    return on;
+  }
+
+  // replaceState, so the SPA router does not re-run on the hash rewrite.
+  function _saveTerrainPref(on) {
+    try { if (window.localStorage) window.localStorage.setItem(TERRAIN_STORAGE_KEY, on ? '1' : '0'); } catch (_) {}
+    try {
+      var h = _hashParts();
+      if (on) h.params.set(TERRAIN_HASH_PARAM, '1');
+      else h.params.delete(TERRAIN_HASH_PARAM);
+      var qs = h.params.toString();
+      history.replaceState(history.state, '', location.pathname + location.search + h.base + (qs ? '?' + qs : ''));
+    } catch (_) {}
+  }
+
+  function createTerrainLayer(map, cfg) {
+    if (!map.getPane(TERRAIN_PANE)) {
+      var pane = map.createPane(TERRAIN_PANE);
+      pane.style.zIndex = String(TERRAIN_PANE_Z);
+      pane.style.pointerEvents = 'none';
+      pane.classList.add('mc-terrain-pane');
+    }
+    // Only these options become WMS parameters (layers, styles, format,
+    // transparent, version + crs/width/height/bbox); the server accepts
+    // exactly that shape. `bounds` keeps Leaflet from requesting tiles
+    // outside DHM coverage at all.
+    return L.tileLayer.wms(cfg.url, {
+      layers: cfg.layer,
+      styles: '',
+      format: 'image/png',
+      transparent: true,
+      version: '1.3.0',
+      crs: L.CRS.EPSG3857,
+      tileSize: 256,
+      opacity: TERRAIN_OPACITY,
+      pane: TERRAIN_PANE,
+      minZoom: cfg.minZoom,
+      maxZoom: cfg.maxZoom,
+      bounds: L.latLngBounds(cfg.bounds),
+      attribution: cfg.attribution,
+      className: 'mc-terrain-tiles'
+    });
+  }
+
+  // Live runs without an attribution control; the DHM credit is still
+  // required while the overlay is on, so such a map gets one for exactly
+  // that time (it lists every active layer's credit, as Leaflet does).
+  function _syncTerrainAttribution(map, on) {
+    if (on && !map.attributionControl && !map._mcTerrainAttribution) {
+      map._mcTerrainAttribution = L.control.attribution({ position: 'bottomright', prefix: false }).addTo(map);
+    } else if (!on && map._mcTerrainAttribution) {
+      try { map._mcTerrainAttribution.remove(); } catch (_) {}
+      map._mcTerrainAttribution = null;
+    }
+  }
+
+  // Once per map: listen for the user's toggles and apply the initial
+  // choice. Runs before the layer control exists, so the initial add does
+  // not make L.Control.Layers re-render its labels (that would undo the
+  // label surgery in _buildControl) and is not mistaken for a toggle.
+  function _wireTerrain(map, layer) {
+    if (map._mcTerrainWired) return;
+    map._mcTerrainWired = true;
+    map.on('overlayadd overlayremove', function (e) {
+      if (e.layer !== map._mcTerrainLayer) return;
+      var on = e.type === 'overlayadd';
+      _syncTerrainAttribution(map, on);
+      _saveTerrainPref(on);
+    });
+    if (_readTerrainPref()) {
+      map.addLayer(layer);
+      _syncTerrainAttribution(map, true);
+    }
+  }
+
   // ── Public surface ──────────────────────────────────────────────────────
   
   window.MC_DARK_TILE_DEFAULT           = DEFAULT_ID;
@@ -295,6 +420,8 @@
   window.MC_setServerDefaultLightTileProvider = setServerDefaultLight;
   window.MC_applyTileFilter             = applyTileFilter;
   window.MC_getTileSpec                 = getTileSpec;
+  window.MC_getTerrainConfig            = getTerrainConfig;
+  window.MC_resolveTerrainOn            = resolveTerrainOn;
 
 
   /**
@@ -384,8 +511,30 @@
       lightIds.forEach(function (id) { baseMaps[id] = _makeLayer(id); });
       darkIds.forEach(function  (id) { baseMaps[id] = _makeLayer(id); });
 
+      // #680 — the terrain overlay survives control rebuilds; it is dropped
+      // only if the server stops offering it.
+      var terrainCfg = getTerrainConfig();
+      var overlays = null;
+      if (terrainCfg) {
+        if (!map._mcTerrainLayer) map._mcTerrainLayer = createTerrainLayer(map, terrainCfg);
+        _wireTerrain(map, map._mcTerrainLayer);
+        overlays = {};
+        overlays[TERRAIN_LABEL] = map._mcTerrainLayer;
+      } else if (map._mcTerrainLayer) {
+        try { map.removeLayer(map._mcTerrainLayer); } catch (_) {}
+        _syncTerrainAttribution(map, false);
+        map._mcTerrainLayer = null;
+      }
+
       // Use the dynamic controlPosition variable instead of a hardcoded string
-      _control = L.control.layers(baseMaps, null, { position: controlPosition }).addTo(map);
+      _control = L.control.layers(baseMaps, overlays, { position: controlPosition }).addTo(map);
+
+      if (terrainCfg) {
+        try {
+          var overlayLabel = _control.getContainer().querySelector('.leaflet-control-layers-overlays label');
+          if (overlayLabel) overlayLabel.setAttribute('data-overlay-id', TERRAIN_ID);
+        } catch (_) {}
+      }
 
       // DOM surgery: map IDs to human-readable labels, inject separator, set data attributes.
       // We pass raw IDs to Leaflet as keys so e.name is the exact ID without label parsing.
