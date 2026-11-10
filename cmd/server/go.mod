@@ -72,3 +72,7 @@ replace github.com/meshcore-analyzer/brokerurl => ../../internal/brokerurl
 require github.com/meshcore-analyzer/pprofbind v0.0.0
 
 replace github.com/meshcore-analyzer/pprofbind => ../../internal/pprofbind
+
+require github.com/meshcore-analyzer/dhm v0.0.0
+
+replace github.com/meshcore-analyzer/dhm => ../../internal/dhm

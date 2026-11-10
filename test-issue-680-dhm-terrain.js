@@ -29,7 +29,7 @@ const SRC = fs.readFileSync(path.join(__dirname, 'public', 'map-tile-providers.j
 const ENABLED = {
   enabled: true, url: '/api/map/dhm/wms', layer: 'dhm_terraen_skyggekort',
   minZoom: 7, maxZoom: 19, bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
-  attribution: 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel',
+  attribution: 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0',
 };
 
 function makeStorage(init) {

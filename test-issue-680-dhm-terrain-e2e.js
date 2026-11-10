@@ -41,7 +41,7 @@ const DHM_PATH = '/api/map/dhm/wms';
 const DHM_BLOCK = {
   enabled: true, url: DHM_PATH, layer: 'dhm_terraen_skyggekort',
   minZoom: 7, maxZoom: 19, bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
-  attribution: 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel',
+  attribution: 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0',
 };
 // Must match dhmFixedParams + bbox in cmd/server/dhm_proxy.go.
 const ALLOWED = {

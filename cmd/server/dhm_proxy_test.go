@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/meshcore-analyzer/dhm"
 )
 
 // #680 — DHM terrain hillshade proxy. Every test runs against a fake
@@ -82,6 +84,7 @@ type fakeUpstream struct {
 	hits     atomic.Int64
 	mu       sync.Mutex
 	queries  []url.Values
+	tokens   []string // `token` request header per upstream request
 	handler  func(w http.ResponseWriter, r *http.Request)
 	inFlight atomic.Int64
 	maxSeen  atomic.Int64
@@ -102,6 +105,7 @@ func newFakeUpstream(t *testing.T, h func(w http.ResponseWriter, r *http.Request
 		}
 		f.mu.Lock()
 		f.queries = append(f.queries, r.URL.Query())
+		f.tokens = append(f.tokens, r.Header.Get("token"))
 		f.mu.Unlock()
 		if f.handler != nil {
 			f.handler(w, r)
@@ -131,18 +135,18 @@ func (l *dhmLogSink) String() string {
 	return l.buf.String()
 }
 
-func testDHMOptions(upstream string, logs *dhmLogSink) dhmProxyOptions {
+func testDHMOptions(baseURL string, logs *dhmLogSink) dhmProxyOptions {
 	o := defaultDHMProxyOptions()
-	o.upstream = upstream
-	o.timeout = 2 * time.Second
-	o.logf = logs.logf
-	o.logEvery = 0 // tests want every failure logged
+	o.client.BaseURL = baseURL
+	o.client.Timeout = 2 * time.Second
+	o.client.Logf = logs.logf
+	o.client.LogEvery = 0 // tests want every failure logged
 	return o
 }
 
 func newTestDHMProxy(t *testing.T, up *fakeUpstream, logs *dhmLogSink, tweak func(*dhmProxyOptions)) *dhmProxy {
 	t.Helper()
-	o := testDHMOptions(up.srv.URL+"/dhm_DAF", logs)
+	o := testDHMOptions(up.srv.URL+"/", logs)
 	if tweak != nil {
 		tweak(&o)
 	}
@@ -205,7 +209,6 @@ func TestDHMProxy_ValidTileForwardsFixedUpstreamShape(t *testing.T) {
 		"service": "WMS", "version": "1.3.0", "request": "GetMap",
 		"layers": "dhm_terraen_skyggekort", "styles": "", "format": "image/png",
 		"transparent": "TRUE", "crs": "EPSG:3857", "width": "256", "height": "256",
-		"token": dhmTestToken,
 	}
 	for k, v := range want {
 		if vs, ok := got[k]; !ok || len(vs) != 1 || vs[0] != v {
@@ -227,6 +230,15 @@ func TestDHMProxy_ValidTileForwardsFixedUpstreamShape(t *testing.T) {
 	}
 	if len(got) != len(want)+1 {
 		t.Errorf("upstream got extra params: %v", got)
+	}
+	// The token travels in the `token` request header, never in the URL.
+	if up.tokens[0] != dhmTestToken {
+		t.Errorf("upstream token header %q, want the configured token", up.tokens[0])
+	}
+	for k := range got {
+		if strings.EqualFold(k, "token") {
+			t.Errorf("token sent in the upstream query string")
+		}
 	}
 	assertNoToken(t, "valid tile", w, logs)
 }
@@ -406,8 +418,12 @@ func TestDHMProxy_EnabledIsOfferedAndRouted(t *testing.T) {
 		t.Fatal(err)
 	}
 	if body.DHM == nil || !body.DHM.Enabled || body.DHM.URL != "/api/map/dhm/wms" ||
-		body.DHM.Layer != "dhm_terraen_skyggekort" || body.DHM.Attribution == "" {
+		body.DHM.Layer != "dhm_terraen_skyggekort" {
 		t.Fatalf("client dhm block %+v", body.DHM)
+	}
+	// The overlay credits the shared CC BY 4.0 attribution constant.
+	if body.DHM.Attribution != dhm.Attribution || !strings.Contains(body.DHM.Attribution, "CC BY 4.0") {
+		t.Fatalf("client dhm attribution %q, want dhm.Attribution with CC BY 4.0", body.DHM.Attribution)
 	}
 
 	z, x, y := dkTile()
@@ -487,20 +503,33 @@ func TestDHMProxy_UpstreamErrorsDoNotLeak(t *testing.T) {
 	}{
 		{"500 with echoed url", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(500)
-			io.WriteString(w, detail+" "+r.URL.String())
+			io.WriteString(w, detail+" "+r.URL.String()+" "+r.Header.Get("token"))
 		}},
 		{"401 json", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(401)
-			io.WriteString(w, `{"message":"User not authorized","token":"`+r.URL.Query().Get("token")+`"}`)
+			io.WriteString(w, `{"message":"User not authorized","token":"`+r.Header.Get("token")+`"}`)
+		}},
+		// Dataforsyningen answers a missing or bad token with 403. The WMS
+		// sends an OGC exception (verified against dhm_DAF); other services
+		// send the bare text `User not authorized`.
+		{"403 plain text", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(403)
+			io.WriteString(w, "User not authorized "+detail+" "+r.Header.Get("token"))
+		}},
+		{"403 OGC exception", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/xml")
+			w.WriteHeader(403)
+			io.WriteString(w, `<ServiceExceptionReport><ServiceException>User not authorized: `+detail+` `+r.Header.Get("token")+`</ServiceException></ServiceExceptionReport>`)
 		}},
 		{"200 OGC exception", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/xml")
-			io.WriteString(w, `<ServiceExceptionReport><ServiceException>`+detail+` `+r.URL.RawQuery+`</ServiceException></ServiceExceptionReport>`)
+			io.WriteString(w, `<ServiceExceptionReport><ServiceException>`+detail+` `+r.Header.Get("token")+`</ServiceException></ServiceExceptionReport>`)
 		}},
 		{"200 image/png header but not a png", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "image/png")
-			io.WriteString(w, detail+r.URL.RawQuery)
+			io.WriteString(w, detail+r.Header.Get("token"))
 		}},
 		{"oversize png", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "image/png")
@@ -521,7 +550,8 @@ func TestDHMProxy_UpstreamErrorsDoNotLeak(t *testing.T) {
 			if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
 				t.Fatalf("error tile Cache-Control %q, want no-store", cc)
 			}
-			if strings.Contains(w.Body.String(), "ORA-") || strings.Contains(logs.String(), "ORA-") {
+			if strings.Contains(w.Body.String(), "ORA-") || strings.Contains(logs.String(), "ORA-") ||
+				strings.Contains(w.Body.String(), "not authorized") || strings.Contains(logs.String(), "not authorized") {
 				t.Fatalf("upstream detail leaked")
 			}
 			if logs.String() == "" {
@@ -537,8 +567,8 @@ func TestDHMProxy_UpstreamErrorsDoNotLeak(t *testing.T) {
 	}
 }
 
-// A redirect would replay the token-bearing query to wherever upstream
-// points; the proxy must not follow it.
+// A redirect would replay the token header to wherever upstream points;
+// the proxy must not follow it.
 func TestDHMProxy_DoesNotFollowRedirects(t *testing.T) {
 	elsewhere := newFakeUpstream(t, nil)
 	up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
@@ -551,14 +581,18 @@ func TestDHMProxy_DoesNotFollowRedirects(t *testing.T) {
 	if elsewhere.hits.Load() != 0 {
 		t.Fatalf("redirect followed: the token-bearing request reached another host")
 	}
+	if len(elsewhere.tokens) != 0 {
+		t.Fatalf("token header reached the redirect target")
+	}
 	if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), dhmTransparentPNG) {
 		t.Fatalf("status %d, want transparent tile", w.Code)
 	}
 	assertNoToken(t, "redirect", w, logs)
 }
 
-// A transport error (net/http's *url.Error) quotes the full upstream URL —
-// token included. It must never reach the response or the log.
+// A transport error (net/http's *url.Error) quotes the full upstream URL.
+// The token is not in that URL, and the error must still never reach the
+// response or the log.
 func TestDHMProxy_TransportErrorDoesNotLogTokenURL(t *testing.T) {
 	up := newFakeUpstream(t, nil)
 	logs := &dhmLogSink{}
@@ -585,7 +619,7 @@ func TestDHMProxy_UpstreamTimeout(t *testing.T) {
 		}
 	})
 	logs := &dhmLogSink{}
-	p := newTestDHMProxy(t, up, logs, func(o *dhmProxyOptions) { o.timeout = 150 * time.Millisecond })
+	p := newTestDHMProxy(t, up, logs, func(o *dhmProxyOptions) { o.client.Timeout = 150 * time.Millisecond })
 	z, x, y := dkTile()
 	start := time.Now()
 	w := doTile(p, leafletQuery(z, x, y))
@@ -606,7 +640,7 @@ func TestDHMProxy_UpstreamConcurrencyLimit(t *testing.T) {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(pngStub)
 	})
-	p := newTestDHMProxy(t, up, &dhmLogSink{}, func(o *dhmProxyOptions) { o.concurrency = 2 })
+	p := newTestDHMProxy(t, up, &dhmLogSink{}, func(o *dhmProxyOptions) { o.client.Concurrency = 2 })
 	z, x0, y0 := dkTile()
 	var wg sync.WaitGroup
 	for i := 0; i < 12; i++ {
@@ -643,7 +677,7 @@ func TestDHMProxy_CacheHitsAndEntryBound(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		doTile(p, tile(i))
 	}
-	if n := p.cache.len(); n > 3 {
+	if n := p.cache.Len(); n > 3 {
 		t.Fatalf("cache holds %d entries, bound is 3", n)
 	}
 	// tile 0 is the least recently used → evicted → upstream again.
@@ -665,10 +699,10 @@ func TestDHMProxy_CacheByteBound(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		doTile(p, leafletQuery(z, x+i, y))
 	}
-	if b := p.cache.size(); b > per*2+per/2 {
+	if b := p.cache.Size(); b > per*2+per/2 {
 		t.Fatalf("cache holds %d bytes, bound is %d", b, per*2+per/2)
 	}
-	if n := p.cache.len(); n != 2 {
+	if n := p.cache.Len(); n != 2 {
 		t.Fatalf("cache holds %d entries, want 2 under the byte bound", n)
 	}
 }
@@ -679,7 +713,7 @@ func TestDHMProxy_CacheTTLEviction(t *testing.T) {
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	p := newTestDHMProxy(t, up, &dhmLogSink{}, func(o *dhmProxyOptions) {
 		o.cacheTTL = time.Hour
-		o.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+		o.client.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
 	})
 	z, x, y := dkTile()
 	doTile(p, leafletQuery(z, x, y))
@@ -697,8 +731,8 @@ func TestDHMProxy_CacheTTLEviction(t *testing.T) {
 	if up.hits.Load() != 2 {
 		t.Fatalf("expired tile served from cache: hits %d", up.hits.Load())
 	}
-	if p.cache.len() != 1 {
-		t.Fatalf("expired entry not replaced: len %d", p.cache.len())
+	if p.cache.Len() != 1 {
+		t.Fatalf("expired entry not replaced: len %d", p.cache.Len())
 	}
 }
 
@@ -736,8 +770,8 @@ func TestDHMProxy_AcceptsLeafletBBoxes(t *testing.T) {
 		if w.Code != 200 {
 			t.Fatalf("Leaflet bbox %q (z%d/%d/%d): status %d", tc.bbox, tc.z, tc.x, tc.y, w.Code)
 		}
-		key, err := parseDHMTileRequest(q)
-		if err != nil || key != (dhmTileKey{tc.z, tc.x, tc.y}) {
+		key, err := dhm.ParseTileRequest(q)
+		if err != nil || key != (dhm.TileKey{Z: tc.z, X: tc.x, Y: tc.y}) {
 			t.Fatalf("Leaflet bbox %q parsed as %+v (%v), want z%d/%d/%d", tc.bbox, key, err, tc.z, tc.x, tc.y)
 		}
 	}
@@ -808,7 +842,7 @@ func TestDHMConfig_ExampleConfigIsOffAndStripped(t *testing.T) {
 	if _, ok := cfg.Map["dhm"]; ok {
 		t.Fatalf("example map.dhm left in the client-visible map block")
 	}
-	if cfg.DHM.active() || newDHMProxyFromConfig(cfg) != nil {
+	if cfg.DHM.Active() || newDHMProxyFromConfig(cfg) != nil {
 		t.Fatalf("example config enables the DHM proxy")
 	}
 }
