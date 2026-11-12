@@ -1,7 +1,7 @@
 package dhm
 
 import (
-	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net/http"
@@ -14,13 +14,30 @@ import (
 // #681 M1 — the WCS GetCoverage shape and the ElevationSource. Every test
 // runs against a fake upstream (httptest); none reaches Dataforsyningen.
 
-var tiffStub = []byte("II*\x00\x08\x00\x00\x00stub")
+// rasterTIFF is a valid DHM-shaped GeoTIFF for r: a ramp, georeferenced on
+// r.BBox at r.Width × r.Height.
+func rasterTIFF(r RasterRequest, order binary.ByteOrder) []byte {
+	f := newFixture(r.Width, r.Height, ramp(r.Width, r.Height, func(c, row int) float32 { return float32(c + row) }))
+	f.order = order
+	f.georeferenced(r.BBox[0], r.BBox[3], (r.BBox[2]-r.BBox[0])/float64(r.Width))
+	f.scale[1] = (r.BBox[3] - r.BBox[1]) / float64(r.Height)
+	return f.bytes()
+}
 
+var tiffStub = rasterTIFF(someRaster(), binary.LittleEndian)
+
+// tiffUpstream answers every GetCoverage with a GeoTIFF for exactly the
+// requested bbox and size.
 func tiffUpstream(t *testing.T) *upstream {
 	t.Helper()
 	return newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		got, err := parseCoverageQuery(r.URL.Query())
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Content-Type", "image/tiff")
-		w.Write(tiffStub)
+		w.Write(rasterTIFF(got, binary.LittleEndian))
 	})
 }
 
@@ -49,12 +66,12 @@ func TestWCSSourceIsAnElevationSource(t *testing.T) {
 func TestWCSFetchSendsExactGetCoverage(t *testing.T) {
 	u := tiffUpstream(t)
 	src := newTestSource(t, u, &logSink{})
-	data, err := src.FetchRaster(someRaster())
+	g, err := src.FetchRaster(someRaster())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(data, tiffStub) {
-		t.Fatalf("body %q", data)
+	if g.Width != 179 || g.Height != 179 || g.Extent() != someRaster().BBox {
+		t.Fatalf("grid %dx%d extent %v", g.Width, g.Height, g.Extent())
 	}
 	if u.paths[0] != "/"+WCSService || WCSService != "dhm_wcs_DAF" {
 		t.Fatalf("upstream path %q", u.paths[0])
@@ -302,9 +319,12 @@ func TestWCSRejectsNonTIFFResponses(t *testing.T) {
 		{"200 xml", "text/xml", []byte("<ServiceExceptionReport/>"), "unexpected content type"},
 		{"png", "image/png", pngStub, "unexpected content type"},
 		{"no content type", "", tiffStub, "unexpected content type"},
-		{"tiff type, html body", "image/tiff", []byte("<html>oops</html>"), "non-tiff response"},
-		{"tiff type, empty body", "image/tiff", nil, "non-tiff response"},
-		{"tiff type, BigTIFF", "image/tiff", []byte("II+\x00\x08\x00\x00\x00"), "non-tiff response"},
+		{"tiff type, html body", "image/tiff", []byte("<html>oops</html>"), "invalid raster"},
+		{"tiff type, empty body", "image/tiff", nil, "invalid raster"},
+		{"tiff type, BigTIFF", "image/tiff", []byte("II+\x00\x08\x00\x00\x00"), "invalid raster"},
+		{"tiff prefix type", "image/tiffany", tiffStub, "unexpected content type"},
+		{"tiff-fx type", "image/tiff-fx", tiffStub, "unexpected content type"},
+		{"geotiff prefix type", "image/geotiffx", tiffStub, "unexpected content type"},
 	}
 	for _, tc := range cases {
 		u := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
@@ -324,7 +344,7 @@ func TestWCSRejectsNonTIFFResponses(t *testing.T) {
 		{"image/tiff", tiffStub},
 		{"image/tiff; subtype=geotiff", tiffStub},
 		{"image/geotiff", tiffStub},
-		{"IMAGE/TIFF", []byte("MM\x00*\x00\x00\x00\x08stub")}, // big-endian
+		{"IMAGE/TIFF", rasterTIFF(someRaster(), binary.BigEndian)},
 	}
 	for _, a := range accepted {
 		u := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
@@ -362,10 +382,12 @@ func TestBodyCapIsPerService(t *testing.T) {
 		t.Fatalf("WCS cap %d", o.MaxCoverageBodyBytes)
 	}
 	big := 1<<20 + 4096 // over the tile cap, under the raster cap
-	serve := func(ct string, magic []byte, n int) *upstream {
+	// serve answers with body padded with zeros to n bytes; a TIFF stays
+	// valid, since nothing points into the padding.
+	serve := func(ct string, body []byte, n int) *upstream {
 		return newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", ct)
-			w.Write(append(append([]byte{}, magic...), make([]byte, n-len(magic))...))
+			w.Write(append(append([]byte{}, body...), make([]byte, n-len(body))...))
 		})
 	}
 	if _, err := newTestSource(t, serve("image/tiff", tiffStub, big), &logSink{}).FetchRaster(someRaster()); err != nil {
