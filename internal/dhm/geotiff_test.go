@@ -457,6 +457,8 @@ func FuzzDecodeGeoTIFF(f *testing.F) {
 		}
 	}
 	f.Add(handBuiltBigEndian)
+	// No georeferencing: decodes, but must never yield a sample.
+	f.Add(newFixture(2, 2, []float32{1, 2, 3, 4}).bytes())
 	for _, b := range malformedTIFFs() {
 		if len(b) < 4096 {
 			f.Add(b)
@@ -473,13 +475,21 @@ func FuzzDecodeGeoTIFF(f *testing.F) {
 		if g.Georef != (Georef{}) && !g.Georef.valid() {
 			t.Fatalf("invalid georef %+v", g.Georef)
 		}
-		if g.Georef == (Georef{}) {
-			g.Georef = Georef{575000, 6226500, 10, 10}
-		}
+		// Sample the decoded grid as it is, also without georeferencing
+		// (#686 review F2): a sample is either unknown or a finite value,
+		// and a grid without a valid Georef has none at all.
 		x := g.Extent()
-		g.Sample((x[0]+x[2])/2, (x[1]+x[3])/2)
-		g.Sample(x[0], x[1])
-		g.Sample(x[2], x[3])
+		for _, p := range [][2]float64{
+			{(x[0] + x[2]) / 2, (x[1] + x[3]) / 2}, {x[0], x[1]}, {x[2], x[3]}, {0, 0},
+		} {
+			v, ok := g.Sample(p[0], p[1])
+			if ok && (math.IsNaN(v) || math.IsInf(v, 0)) {
+				t.Fatalf("Sample(%v, %v) = %v, true", p[0], p[1], v)
+			}
+			if ok && !g.Georef.valid() {
+				t.Fatalf("Sample(%v, %v) = %v, true without georeferencing", p[0], p[1], v)
+			}
+		}
 	})
 }
 

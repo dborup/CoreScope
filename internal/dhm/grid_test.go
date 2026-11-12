@@ -146,6 +146,45 @@ func TestSampleInconsistentGrid(t *testing.T) {
 	}
 }
 
+// #686 review F2: a grid without usable georeferencing has no samples.
+// decodeGeoTIFF returns the zero Georef for a file without georeferencing,
+// and the division by PixelE = 0 used to give (NaN, true).
+func TestSampleInvalidGeorefIsNotAValue(t *testing.T) {
+	bare, err := decodeGeoTIFF(newFixture(2, 2, []float32{1, 2, 3, 4}).bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bare.Georef != (Georef{}) {
+		t.Fatalf("fixture has georef %+v", bare.Georef)
+	}
+	nan, inf := math.NaN(), math.Inf(1)
+	grids := map[string]Grid{"decoded, no georef": bare}
+	for name, r := range map[string]Georef{
+		"PixelE 0":     {575000, 6226500, 0, 10},
+		"PixelN 0":     {575000, 6226500, 10, 0},
+		"PixelE < 0":   {575000, 6226500, -10, 10},
+		"PixelN < 0":   {575000, 6226500, 10, -10},
+		"PixelE NaN":   {575000, 6226500, nan, 10},
+		"PixelN +Inf":  {575000, 6226500, 10, inf},
+		"OriginE NaN":  {nan, 6226500, 10, 10},
+		"OriginN -Inf": {575000, -inf, 10, 10},
+		"OriginE +Inf": {inf, 6226500, 10, 10},
+	} {
+		grids[name] = Grid{Width: 2, Height: 2, Values: []float32{1, 2, 3, 4}, Georef: r}
+	}
+	for name, g := range grids {
+		x := g.Extent()
+		for _, p := range [][2]float64{
+			{0, 0}, {575000, 6226500}, {575005, 6226495}, {575010, 6226490},
+			{x[0], x[1]}, {x[2], x[3]}, {(x[0] + x[2]) / 2, (x[1] + x[3]) / 2},
+		} {
+			if v, ok := g.Sample(p[0], p[1]); ok || v != 0 {
+				t.Errorf("%s: Sample(%v, %v) = %v, %v; want 0, false", name, p[0], p[1], v, ok)
+			}
+		}
+	}
+}
+
 // Decoded georeferencing and the sampler agree: a PixelIsPoint file and a
 // PixelIsArea file of the same raster give the same samples.
 func TestSampleOnDecodedGeoTIFF(t *testing.T) {

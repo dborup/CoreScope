@@ -38,6 +38,8 @@ func (g Georef) valid() bool {
 }
 
 // Extent is the grid's outer bbox in EPSG:25832: minE, minN, maxE, maxN.
+// It is only meaningful when Georef is valid (both pixel sizes finite and
+// positive, the origin finite); Sample checks that, Extent does not.
 func (g *Grid) Extent() [4]float64 {
 	r := g.Georef
 	return [4]float64{r.OriginE, r.OriginN - float64(g.Height)*r.PixelN, r.OriginE + float64(g.Width)*r.PixelE, r.OriginN}
@@ -67,11 +69,13 @@ func (g *Grid) cell(col, row int) (float64, bool) {
 // Sample interpolates the elevation at easting e, northing n bilinearly
 // between the four surrounding pixel centres. ok is false outside the
 // grid's extent, and when any pixel that carries weight in the result is
-// nodata: a value next to a gap is unknown, not smeared into it. Between
+// nodata: a value next to a gap is unknown, not smeared into it. ok is
+// also false for a grid without a valid Georef, such as the zero Georef of
+// a GeoTIFF without georeferencing. Between
 // the outermost pixel centres and the extent edge the edge pixels are held
 // constant.
 func (g *Grid) Sample(e, n float64) (float64, bool) {
-	if g.Width < 1 || g.Height < 1 || len(g.Values) != g.Width*g.Height {
+	if g.Width < 1 || g.Height < 1 || len(g.Values) != g.Width*g.Height || !g.Georef.valid() {
 		return 0, false
 	}
 	x := g.Extent()
