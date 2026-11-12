@@ -74,6 +74,39 @@ func TestFetchRasterReturnsGeoreferencedGrid(t *testing.T) {
 			t.Errorf("%s: err %v, want raster mismatch", name, err)
 		}
 	}
+	// #686 review N4: a georeferenced grid must also have the requested
+	// resolution, up to the WCS snapping one pixel. Each of these covers
+	// the bbox, so a coverage check alone accepted them.
+	pyr := func(w, h int, e, n, pxE, pxN float64) []byte {
+		f := newFixture(w, h, make([]float32, w*h)).georeferenced(e, n, pxE)
+		f.scale[1] = pxN
+		return f.bytes()
+	}
+	B := r.BBox[2] - r.BBox[0]
+	for name, body := range map[string][]byte{
+		"2x2 over the bbox":       pyr(2, 2, r.BBox[0], r.BBox[3], B/2, B/2),
+		"10x coarser, same count": pyr(r.Width, r.Height, r.BBox[0], r.BBox[3], 10*px, 10*px),
+		"2 px wider":              pyr(r.Width+2, r.Height, r.BBox[0], r.BBox[3], px, px),
+		"2 px taller":             pyr(r.Width, r.Height+2, r.BBox[0], r.BBox[3], px, px),
+		"twice the extent":        pyr(2*r.Width, 2*r.Height, r.BBox[0]-B/2, r.BBox[3]+B/2, px, px),
+		"pixels 2x tall":          pyr(r.Width, r.Height/2+1, r.BBox[0], r.BBox[3], px, 2*px),
+		"west edge 1.5 px out":    pyr(r.Width+1, r.Height, r.BBox[0]-1.5*px, r.BBox[3], px, px),
+	} {
+		_, err := newTestSource(t, serve(body), &logSink{}).FetchRaster(r)
+		if !errors.As(err, &fe) || fe.Reason != "raster mismatch" {
+			t.Errorf("N4 %s: err %v, want raster mismatch", name, err)
+		}
+	}
+	for name, body := range map[string][]byte{
+		"one px narrower":       pyr(r.Width-1, r.Height-1, r.BBox[0]+px/2, r.BBox[3]-px/2, px, px),
+		"one px larger, offset": pyr(r.Width+1, r.Height+1, r.BBox[0]-0.9*px, r.BBox[3]+0.9*px, px, px),
+		"pixel 0.5% larger":     pyr(r.Width, r.Height, r.BBox[0], r.BBox[3], px*1.005, px*1.005),
+	} {
+		if _, err := newTestSource(t, serve(body), &logSink{}).FetchRaster(r); err != nil {
+			t.Errorf("N4 %s: %v, want accepted", name, err)
+		}
+	}
+
 	bad := newFixture(r.Width, r.Height, vals)
 	bad.fields = map[uint16]*fixtureField{tagSampleFormat: bad.shorts(1)}
 	if _, err := newTestSource(t, serve(bad.bytes()), &logSink{}).FetchRaster(r); !errors.As(err, &fe) || fe.Reason != "invalid raster" {

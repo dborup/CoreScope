@@ -62,8 +62,8 @@ type RasterRequest struct {
 
 // ElevationSource fetches elevation rasters, so a replacement for the DHM
 // WCS is a drop-in (#681 owner decision 8). FetchRaster returns a decoded,
-// georeferenced Grid in EPSG:25832 that covers r.BBox; the wire format is
-// the source's business.
+// georeferenced Grid in EPSG:25832 that covers r.BBox at r's resolution,
+// up to one pixel of snapping; the wire format is the source's business.
 type ElevationSource interface {
 	FetchRaster(r RasterRequest) (Grid, error)
 }
@@ -208,7 +208,7 @@ func (s *WCSSource) FetchRaster(r RasterRequest) (Grid, error) {
 			PixelE:  (r.BBox[2] - r.BBox[0]) / float64(r.Width),
 			PixelN:  (r.BBox[3] - r.BBox[1]) / float64(r.Height),
 		}
-	} else if !g.covers(r.BBox) {
+	} else if !g.fits(r) {
 		return Grid{}, FetchError{"raster mismatch"}
 	}
 	return g, nil

@@ -45,12 +45,20 @@ func (g *Grid) Extent() [4]float64 {
 	return [4]float64{r.OriginE, r.OriginN - float64(g.Height)*r.PixelN, r.OriginE + float64(g.Width)*r.PixelE, r.OriginN}
 }
 
-// covers reports whether the grid spans bbox to within one pixel on every
-// edge, which allows for a server that snaps its output grid.
-func (g *Grid) covers(bbox [4]float64) bool {
-	x, r := g.Extent(), g.Georef
-	return x[0] <= bbox[0]+r.PixelE && x[2] >= bbox[2]-r.PixelE &&
-		x[1] <= bbox[1]+r.PixelN && x[3] >= bbox[3]-r.PixelN
+// fits reports whether the grid is the raster r asked for, up to a server
+// that snaps its output grid: each edge within one requested pixel of r's
+// bbox, and at most one pixel more or fewer per axis. Covering the bbox is
+// not enough (#686 review N4): a coarse grid can cover it too, and would
+// silently degrade every sample.
+func (g *Grid) fits(r RasterRequest) bool {
+	if g.Width < r.Width-1 || g.Width > r.Width+1 || g.Height < r.Height-1 || g.Height > r.Height+1 {
+		return false
+	}
+	x := g.Extent()
+	pxE := (r.BBox[2] - r.BBox[0]) / float64(r.Width)
+	pxN := (r.BBox[3] - r.BBox[1]) / float64(r.Height)
+	return math.Abs(x[0]-r.BBox[0]) <= pxE && math.Abs(x[2]-r.BBox[2]) <= pxE &&
+		math.Abs(x[1]-r.BBox[1]) <= pxN && math.Abs(x[3]-r.BBox[3]) <= pxN
 }
 
 // cell returns the value at (col, row) and whether it holds elevation.
