@@ -112,8 +112,10 @@
   "map": {
     "dhm": {
       "_comment": "#680 — optional 'Terrain (DHM hillshade)' overlay on the Map and Live pages (Denmark only). Needs a personal Dataforsyningen token (free, from dataforsyningen.dk). The token stays on the server: browsers fetch tiles from /api/map/dhm/wms, which adds it, and it is never sent to clients, written to responses or logged. Off unless enabled is true and token is non-empty; otherwise the overlay is not offered and the endpoint returns 404.",
+      "_comment_layer": "#687 — which DHM hillshade the server fetches: 'exaggerated' (default; the clearer quickDHM_skyggekort_terraen_overdrevet from wms/dhm_temp) or 'terrain' (dhm_terraen_skyggekort from dhm_DAF). With 'exaggerated', any tile that fails upstream is served from the terrain layer instead. Any other value logs a warning and uses 'terrain'. Browsers are unaffected either way.",
       "enabled": false,
-      "token": ""
+      "token": "",
+      "layer": "exaggerated"
     },
     "tiles": {
       "_comment_defaults": "#332 — the built-in defaults are 'osm-dark' / 'osm-standard' (keyless OpenStreetMap, tiles to zoom 18). Set darkDefault/lightDefault to any enabled style id to override; they take priority over the built-in fallback. Carto is NOT the default any more: since August 2026 keyless Carto raster tiles come back HTTP 200 with 'API KEY REQUIRED' stamped into the PNG, and CoreScope has no Carto basemap-key plumbing.",

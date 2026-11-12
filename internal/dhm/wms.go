@@ -1,7 +1,6 @@
 package dhm
 
 import (
-	"bytes"
 	"fmt"
 	"math"
 	"net/url"
@@ -174,15 +173,8 @@ func checkTileQuery(q url.Values) error {
 
 var pngSignature = []byte("\x89PNG\r\n\x1a\n")
 
-// FetchHillshadeTile fetches one hillshade tile. Only a real PNG is
-// returned; anything else is a FetchError.
+// FetchHillshadeTile fetches one #680 terrain hillshade tile. Only a real
+// PNG is returned; anything else is a FetchError.
 func (c *Client) FetchHillshadeTile(k TileKey) ([]byte, error) {
-	data, err := c.Get(WMSService, k.upstreamQuery(), "image/png")
-	if err != nil {
-		return nil, err
-	}
-	if !bytes.HasPrefix(data, pngSignature) {
-		return nil, FetchError{"non-image response"}
-	}
-	return data, nil
+	return c.FetchHillshade(HillshadeTerrain, k)
 }

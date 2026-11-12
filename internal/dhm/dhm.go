@@ -6,7 +6,7 @@
 // upstream through one shared Client that adds the token. The package holds
 // what every DHM feature needs exactly once:
 //
-//   - Config: the operator's `map.dhm` block (enabled + token).
+//   - Config: the operator's `map.dhm` block (enabled, token, layer).
 //   - Client: the upstream HTTP client. The token goes in the `token`
 //     request header (Dataforsyningen's recommended method), never in a
 //     URL, so no upstream URL can leak it. The client also enforces the
@@ -16,7 +16,8 @@
 //   - Cache: a bounded LRU (entries, bytes, TTL) for upstream responses.
 //   - Attribution: the one CC BY 4.0 credit line for DHM data.
 //
-// The hillshade tile shape (#680) lives in wms.go. The elevation raster
+// The hillshade tile shape (#680) lives in wms.go, and the exaggerated
+// hillshade service (#687) in hillshade.go. The elevation raster
 // shape for the terrain profile (#681) lives in wcs.go, behind the
 // ElevationSource interface, which returns a decoded Grid (grid.go) read by
 // a stdlib-only float32 GeoTIFF decoder (geotiff.go); utm.go projects
@@ -42,6 +43,9 @@ const (
 type Config struct {
 	Enabled bool   `json:"enabled"`
 	Token   string `json:"token"`
+	// Layer is the hillshade upstream (#687): "exaggerated" (default) or
+	// "terrain"; see ParseHillshade.
+	Layer string `json:"layer"`
 }
 
 // Active reports whether DHM features may be offered: enabled with a token.
