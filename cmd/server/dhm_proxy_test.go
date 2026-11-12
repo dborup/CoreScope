@@ -145,15 +145,25 @@ func testDHMOptions(baseURL string, logs *dhmLogSink) dhmProxyOptions {
 	return o
 }
 
+// newTestDHMProxy is a proxy on the #680 terrain upstream, which the #680
+// tests specify; #687's default (exaggerated, with terrain as fallback) is
+// dhm_hillshade_687_test.go.
 func newTestDHMProxy(t *testing.T, up *fakeUpstream, logs *dhmLogSink, tweak func(*dhmProxyOptions)) *dhmProxy {
+	t.Helper()
+	return newTestDHMProxyLayer(t, up, "terrain", logs, tweak)
+}
+
+// dhmTestLayers are the map.dhm.layer values the limit tests run under:
+// terrain, and the shipped default (exaggerated).
+var dhmTestLayers = []string{"terrain", ""}
+
+func newTestDHMProxyLayer(t *testing.T, up *fakeUpstream, layer string, logs *dhmLogSink, tweak func(*dhmProxyOptions)) *dhmProxy {
 	t.Helper()
 	o := testDHMOptions(up.srv.URL+"/", logs)
 	if tweak != nil {
 		tweak(&o)
 	}
-	// The #680 tests specify the terrain upstream; #687's default
-	// (exaggerated, with terrain as fallback) is dhm_hillshade_687_test.go.
-	p := newDHMProxy(DHMConfig{Enabled: true, Token: dhmTestToken, Layer: "terrain"}, o)
+	p := newDHMProxy(DHMConfig{Enabled: true, Token: dhmTestToken, Layer: layer}, o)
 	if p == nil {
 		t.Fatal("newDHMProxy returned nil for an enabled config with a token")
 	}
@@ -612,53 +622,66 @@ func TestDHMProxy_TransportErrorDoesNotLogTokenURL(t *testing.T) {
 	assertNoToken(t, "transport error", w, logs)
 }
 
+// Run for both layers (#688 review F1): a timeout is not a fallback
+// trigger, so the default config also makes one upstream attempt.
 func TestDHMProxy_UpstreamTimeout(t *testing.T) {
-	release := make(chan struct{})
-	defer close(release)
-	up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-release:
-		case <-time.After(5 * time.Second):
-		}
-	})
-	logs := &dhmLogSink{}
-	p := newTestDHMProxy(t, up, logs, func(o *dhmProxyOptions) { o.client.Timeout = 150 * time.Millisecond })
-	z, x, y := dkTile()
-	start := time.Now()
-	w := doTile(p, leafletQuery(z, x, y))
-	if el := time.Since(start); el > 2*time.Second {
-		t.Fatalf("upstream timeout not enforced: took %v", el)
+	for _, layer := range dhmTestLayers {
+		t.Run("layer="+layer, func(t *testing.T) {
+			release := make(chan struct{})
+			defer close(release)
+			up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+				select {
+				case <-release:
+				case <-time.After(5 * time.Second):
+				}
+			})
+			logs := &dhmLogSink{}
+			p := newTestDHMProxyLayer(t, up, layer, logs, func(o *dhmProxyOptions) { o.client.Timeout = 150 * time.Millisecond })
+			z, x, y := dkTile()
+			start := time.Now()
+			w := doTile(p, leafletQuery(z, x, y))
+			if el := time.Since(start); el > 2*time.Second {
+				t.Fatalf("upstream timeout not enforced: took %v", el)
+			}
+			if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), dhmTransparentPNG) || w.Header().Get("X-CoreScope-Tile") != "unavailable" {
+				t.Fatalf("status %d, tile %q", w.Code, w.Header().Get("X-CoreScope-Tile"))
+			}
+			if up.hits.Load() != 1 {
+				t.Fatalf("upstream attempts %d, want 1", up.hits.Load())
+			}
+			assertNoToken(t, "timeout", w, logs)
+		})
 	}
-	if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), dhmTransparentPNG) {
-		t.Fatalf("status %d", w.Code)
-	}
-	assertNoToken(t, "timeout", w, logs)
 }
 
 // ── Concurrency limit towards upstream ─────────────────────────────────────
 
 func TestDHMProxy_UpstreamConcurrencyLimit(t *testing.T) {
-	up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(60 * time.Millisecond)
-		w.Header().Set("Content-Type", "image/png")
-		w.Write(pngStub)
-	})
-	p := newTestDHMProxy(t, up, &dhmLogSink{}, func(o *dhmProxyOptions) { o.client.Concurrency = 2 })
-	z, x0, y0 := dkTile()
-	var wg sync.WaitGroup
-	for i := 0; i < 12; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			doTile(p, leafletQuery(z, x0+i%4, y0+i/4))
-		}(i)
-	}
-	wg.Wait()
-	if m := up.maxSeen.Load(); m > 2 {
-		t.Fatalf("upstream saw %d concurrent requests, limit is 2", m)
-	}
-	if up.hits.Load() != 12 {
-		t.Fatalf("upstream hits %d, want 12 distinct tiles", up.hits.Load())
+	for _, layer := range dhmTestLayers {
+		t.Run("layer="+layer, func(t *testing.T) {
+			up := newFakeUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+				time.Sleep(60 * time.Millisecond)
+				w.Header().Set("Content-Type", "image/png")
+				w.Write(pngStub)
+			})
+			p := newTestDHMProxyLayer(t, up, layer, &dhmLogSink{}, func(o *dhmProxyOptions) { o.client.Concurrency = 2 })
+			z, x0, y0 := dkTile()
+			var wg sync.WaitGroup
+			for i := 0; i < 12; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					doTile(p, leafletQuery(z, x0+i%4, y0+i/4))
+				}(i)
+			}
+			wg.Wait()
+			if m := up.maxSeen.Load(); m > 2 {
+				t.Fatalf("upstream saw %d concurrent requests, limit is 2", m)
+			}
+			if up.hits.Load() != 12 {
+				t.Fatalf("upstream hits %d, want 12 distinct tiles", up.hits.Load())
+			}
+		})
 	}
 }
 

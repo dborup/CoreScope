@@ -239,6 +239,13 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeDHMTile(w, dhmTransparentPNG, 0, "unavailable")
 		return
 	}
+	if !dhm.FallbackEligible(err) {
+		// A timeout or a full budget: retrying on terrain would only wait
+		// again (#688 review F1).
+		p.client.LogFailure("exaggerated hillshade tile", err)
+		writeDHMTile(w, dhmTransparentPNG, 0, "unavailable")
+		return
+	}
 	// #687: the exaggerated tile failed; serve the terrain tile instead.
 	data, hit, fallbackErr := p.layerTile(dhm.HillshadeTerrain, key)
 	if fallbackErr != nil {

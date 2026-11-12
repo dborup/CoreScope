@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // #687 — the exaggerated hillshade (wms/dhm_temp) next to the #680 terrain
@@ -249,5 +250,63 @@ func TestExaggeratedDisablesTransparentGzip(t *testing.T) {
 	}
 	if u.paths[0] != "/"+ExaggeratedWMSService {
 		t.Fatalf("path %q", u.paths[0])
+	}
+}
+
+// #688 review F1: only the failures the issue lists trigger the terrain
+// fallback: non-200, a transport error, a wrong content type or an invalid
+// PNG. A timeout or a full concurrency budget (busy) does not: a second
+// attempt would wait on the same budget again.
+func TestFallbackEligible(t *testing.T) {
+	for reason, want := range map[string]bool{
+		"status 404": true, "status 500": true, "status 302": true, "status 401": true,
+		"transport": true, "read": true, "unexpected content type": true, "non-image response": true,
+		"timeout": false, "busy": false, "oversize response": false, "request": false,
+		"unknown": false, "": false, "status": false, "status404": false,
+	} {
+		if got := FallbackEligible(FetchError{reason}); got != want {
+			t.Errorf("FallbackEligible(%q) = %v, want %v", reason, got, want)
+		}
+	}
+	for _, err := range []error{nil, ErrBadRequest, errors.New("status 500")} {
+		if FallbackEligible(err) {
+			t.Errorf("FallbackEligible(%v) = true", err)
+		}
+	}
+}
+
+// The real client produces the two non-eligible categories for the
+// exaggerated service: a hanging upstream is a timeout, and a held
+// concurrency budget is busy, each after one Timeout.
+func TestExaggeratedTimeoutAndBusyAreNotEligible(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	u := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	o := DefaultClientOptions()
+	o.BaseURL = u.srv.URL + "/"
+	o.Timeout = 200 * time.Millisecond
+	o.Concurrency = 1
+	o.Logf = (&logSink{}).logf
+	c := NewClient(Config{Enabled: true, Token: testToken}, o)
+
+	_, err := c.FetchHillshade(HillshadeExaggerated, someTile())
+	if FailureReason(err) != "timeout" || FallbackEligible(err) {
+		t.Fatalf("hanging upstream: %v, eligible %v", err, FallbackEligible(err))
+	}
+
+	c.sem <- struct{}{} // the whole budget is in use
+	defer func() { <-c.sem }()
+	hits := u.hits.Load()
+	_, err = c.FetchHillshade(HillshadeExaggerated, TileKey{Z: 10, X: 541, Y: 316})
+	if FailureReason(err) != "busy" || FallbackEligible(err) {
+		t.Fatalf("full budget: %v, eligible %v", err, FallbackEligible(err))
+	}
+	if u.hits.Load() != hits {
+		t.Fatalf("a busy request reached upstream")
 	}
 }

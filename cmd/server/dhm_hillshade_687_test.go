@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -423,5 +424,85 @@ func TestDHM687_FallbackLogIsThrottled(t *testing.T) {
 	doTile(p, leafletQuery(z, x+5, y))
 	if n := strings.Count(logs.String(), "\n"); n != 2 {
 		t.Fatalf("%d log lines after LogEvery, want 2: %q", n, logs.String())
+	}
+}
+
+// hang is an upstream that never answers: it returns when the proxy gives
+// up (the request context ends) or the test ends.
+func hang(t *testing.T) func(w http.ResponseWriter, r *http.Request) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	return func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}
+}
+
+// #688 review F1: a timeout is not a fallback trigger. Under the default
+// config a hanging exaggerated upstream costs one Timeout per tile request,
+// never a second one on the terrain service.
+func TestDHM687_TimeoutDoesNotFallBack(t *testing.T) {
+	const timeout = 300 * time.Millisecond
+	u := newDHMUpstreams(t)
+	u.exaggerated.set(hang(t))
+	u.terrain.set(hang(t))
+	logs := &dhmLogSink{}
+	p := newLayerProxy(t, u, "", logs, func(o *dhmProxyOptions) { o.client.Timeout = timeout })
+	z, x, y := dkTile()
+	start := time.Now()
+	w := doTile(p, leafletQuery(z, x, y))
+	el := time.Since(start)
+	assertTile(t, "timeout", w, dhmTransparentPNG, "unavailable", ccNoStore)
+	if u.exaggerated.hits() != 1 || u.terrain.hits() != 0 {
+		t.Fatalf("hits exaggerated=%d terrain=%d, want 1 and 0", u.exaggerated.hits(), u.terrain.hits())
+	}
+	if el < timeout || el > timeout*3/2 {
+		t.Fatalf("tile request took %v, want about one Timeout (%v)", el, timeout)
+	}
+	if want := "[dhm] upstream exaggerated hillshade tile failed (timeout)\n"; logs.String() != want {
+		t.Fatalf("log %q, want %q", logs.String(), want)
+	}
+	assertNoToken(t, "timeout", w, logs)
+}
+
+// #688 review F1: with the shared upstream budget saturated, a tile request
+// under the default config waits at most one Timeout and is not retried on
+// the terrain service.
+func TestDHM687_SaturatedBudgetNoExtraWait(t *testing.T) {
+	const timeout = 300 * time.Millisecond
+	u := newDHMUpstreams(t)
+	u.exaggerated.set(hang(t))
+	u.terrain.set(hang(t))
+	logs := &dhmLogSink{}
+	p := newLayerProxy(t, u, "", logs, func(o *dhmProxyOptions) {
+		o.client.Timeout = timeout
+		o.client.Concurrency = 1
+	})
+	z, x, y := dkTile()
+	// Tile A takes the only slot and hangs upstream.
+	done := make(chan struct{})
+	go func() { defer close(done); doTile(p, leafletQuery(z, x, y)) }()
+	for deadline := time.Now().Add(2 * time.Second); u.exaggerated.hits() == 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("tile A never reached upstream")
+		}
+		runtime.Gosched()
+	}
+	// Tile B waits for the budget.
+	start := time.Now()
+	w := doTile(p, leafletQuery(z, x+1, y))
+	el := time.Since(start)
+	<-done
+	assertTile(t, "tile B", w, dhmTransparentPNG, "unavailable", ccNoStore)
+	if u.terrain.hits() != 0 {
+		t.Fatalf("terrain attempts %d, want 0", u.terrain.hits())
+	}
+	if el > timeout*3/2 {
+		t.Fatalf("tile B took %v with a saturated budget, want at most about one Timeout (%v)", el, timeout)
+	}
+	if strings.Contains(logs.String(), "fallback") {
+		t.Fatalf("fallback logged: %q", logs.String())
 	}
 }

@@ -2,7 +2,9 @@ package dhm
 
 import (
 	"bytes"
+	"errors"
 	"net/url"
+	"strings"
 )
 
 // #687 — the exaggerated hillshade.
@@ -103,6 +105,25 @@ func (c *Client) FetchHillshade(h Hillshade, k TileKey) ([]byte, error) {
 		return nil, FetchError{"non-image response"}
 	}
 	return data, nil
+}
+
+// FallbackEligible reports whether err from the exaggerated layer may be
+// answered with the terrain layer (#687): the upstream answered with a
+// non-200 status, a wrong content type or an invalid PNG, or the connection
+// failed. A timeout or a full concurrency budget (busy) is not eligible: a
+// second attempt would wait on the same budget for another Timeout (#688
+// review F1). Neither is an oversize response or a request we refused.
+func FallbackEligible(err error) bool {
+	var fe FetchError
+	if !errors.As(err, &fe) {
+		return false
+	}
+	switch fe.Reason {
+	case "transport", "read", "unexpected content type", "non-image response":
+		return true
+	}
+	code, ok := strings.CutPrefix(fe.Reason, "status ")
+	return ok && code != ""
 }
 
 // LogFallback logs, throttled like LogFailure and by category only, that
