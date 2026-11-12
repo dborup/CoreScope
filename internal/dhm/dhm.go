@@ -18,8 +18,10 @@
 //
 // The hillshade tile shape (#680) lives in wms.go. The elevation raster
 // shape for the terrain profile (#681) lives in wcs.go, behind the
-// ElevationSource interface. Further features add their own request shape
-// next to them and reuse the rest.
+// ElevationSource interface, which returns a decoded Grid (grid.go) read by
+// a stdlib-only float32 GeoTIFF decoder (geotiff.go); utm.go projects
+// lat/lon to the rasters' EPSG:25832. Further features add their own
+// request shape next to them and reuse the rest.
 package dhm
 
 import "strings"
