@@ -58,7 +58,7 @@ func (c *Cache[K]) Put(k K, data []byte, now time.Time) {
 	}
 	c.items[k] = c.order.PushFront(&cacheEntry[K]{key: k, data: data, expires: now.Add(c.ttl)})
 	c.bytes += len(data)
-	for c.order.Len() > c.maxEntries || c.bytes > c.maxBytes {
+	for c.order.Len() > 0 && (c.order.Len() > c.maxEntries || c.bytes > c.maxBytes) {
 		c.removeLocked(c.order.Back())
 	}
 }

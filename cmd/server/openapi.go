@@ -58,7 +58,7 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/config/map":        {Summary: "Get map configuration", Tag: "config"},
 		"GET /api/config/geo-filter": {Summary: "Get geo-filter configuration", Tag: "config"},
 		"GET /api/map/dhm/wms": {Summary: "DHM terrain hillshade tile (WMS proxy)", Description: "Read-only proxy for one 256x256 EPSG:3857 tile of the Danmarks Hojdemodel terrain hillshade (dhm_terraen_skyggekort) from Dataforsyningen; the server adds its access token. Accepts exactly service=WMS, request=GetMap, version=1.3.0, layers=dhm_terraen_skyggekort, styles=, format=image/png, transparent=true, width=256, height=256, crs=EPSG:3857 and a bbox that is one web-mercator tile at zoom 7-19; anything else is 400. Tiles outside DHM coverage and upstream failures return a transparent PNG. 404 unless map.dhm is enabled with a token. (#680)", Tag: "config",
-			QueryParams: []paramMeta{{Name: "bbox", Description: "minx,miny,maxx,maxy of one EPSG:3857 tile", Type: "string", Required: true}}},
+			QueryParams: dhmTileQueryParams()},
 
 		// Admin / system
 		"GET /api/health": {Summary: "Health check", Description: "Returns server health, uptime, and memory stats.", Tag: "admin"},

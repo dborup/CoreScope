@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -234,6 +235,8 @@ func TestExactQuery(t *testing.T) {
 		{"a": {"1", "1"}, "b": {""}, "f": {"v"}},        // repeated fixed key
 		{"a": {"1"}, "b": {""}, "f": {"v"}, "x": {"y"}}, // extra key
 		{"a": {"1"}, "f": {"v"}, "x": {""}},             // swapped key, same count
+		{"a": {"1"}, "f": {"v"}},                        // fixed key missing (#682 review F2/MX1)
+		{"f": {"v"}},                                    // every fixed key missing
 	}
 	for i, q := range bad {
 		if _, err := ExactQuery(q, fixed, "f"); !errors.Is(err, ErrBadRequest) {
@@ -262,5 +265,90 @@ func TestCacheBounds(t *testing.T) {
 	}
 	if _, ok := c.Get(4, now.Add(time.Minute)); ok {
 		t.Fatal("expired entry served")
+	}
+}
+
+// lonLatTile is the test's own lon/lat → tile formula, independent of wms.go.
+func lonLatTile(z int, lon, lat float64) TileKey {
+	n := math.Exp2(float64(z))
+	r := lat * math.Pi / 180
+	return TileKey{
+		Z: z,
+		X: int((lon + 180) / 360 * n),
+		Y: int((1 - math.Log(math.Tan(r)+1/math.Cos(r))/math.Pi) / 2 * n),
+	}
+}
+
+// #682 review F2/MX2: tiles outside DHM coverage must never go upstream, so
+// the module pins IntersectsCoverage itself.
+func TestTileIntersectsCoverage(t *testing.T) {
+	cases := []struct {
+		name     string
+		lon, lat float64
+		z        int
+		want     bool
+	}{
+		{"Aarhus", 10.2039, 56.1629, 10, true},
+		{"Copenhagen z19", 12.5683, 55.6761, 19, true},
+		{"Bornholm", 14.9, 55.1, 12, true},
+		{"Skagen tip", 10.6, 57.74, 14, true},
+		{"Paris", 2.3522, 48.8566, 10, false},
+		{"Oslo", 10.75, 59.91, 10, false},
+		{"just west of coverage", 7.9, 55.5, 14, false},
+		{"just east of coverage", 15.7, 55.1, 14, false},
+		{"just north of coverage", 10.5, 57.85, 14, false},
+		{"just south of coverage", 10.0, 54.35, 14, false},
+	}
+	for _, tc := range cases {
+		k := lonLatTile(tc.z, tc.lon, tc.lat)
+		if got := k.IntersectsCoverage(); got != tc.want {
+			t.Errorf("%s (%v): IntersectsCoverage = %v, want %v", tc.name, k, got, tc.want)
+		}
+	}
+	// A z7 tile that only partly overlaps coverage still intersects.
+	if k := lonLatTile(7, 7.0, 55.0); !k.IntersectsCoverage() {
+		t.Errorf("z7 tile straddling the west edge (%v) does not intersect", k)
+	}
+}
+
+// #682 review N3: LogEvery == 0 documents "0 logs all", including
+// concurrent failures.
+func TestClientLogEveryZeroLogsEveryFailure(t *testing.T) {
+	logs := &logSink{}
+	var tick atomic.Int64
+	o := DefaultClientOptions()
+	o.Logf = logs.logf
+	o.LogEvery = 0
+	o.Now = func() time.Time { return time.Unix(0, tick.Add(1)) }
+	c := NewClient(Config{Enabled: true, Token: testToken}, o)
+	const n = 400
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); c.LogFailure("x", FetchError{"timeout"}) }()
+	}
+	wg.Wait()
+	if got := strings.Count(logs.String(), "\n"); got != n {
+		t.Fatalf("%d of %d failures logged with LogEvery == 0", got, n)
+	}
+}
+
+// #682 review N4: a non-positive bound must not make Put dereference an
+// empty list.
+func TestCacheNonPositiveBoundDoesNotPanic(t *testing.T) {
+	now := time.Unix(0, 0)
+	for _, maxEntries := range []int{0, -1} {
+		c := NewCache[int](maxEntries, 10, time.Minute)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("Put with maxEntries=%d panicked: %v", maxEntries, r)
+				}
+			}()
+			c.Put(1, []byte("a"), now)
+		}()
+		if c.Len() != 0 {
+			t.Fatalf("maxEntries=%d cached %d entries", maxEntries, c.Len())
+		}
 	}
 }

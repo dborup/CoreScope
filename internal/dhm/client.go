@@ -168,13 +168,12 @@ func (c *Client) LogFailure(what string, err error) {
 	if errors.As(err, &fe) {
 		reason = fe.Reason
 	}
-	now := c.opts.Now().UnixNano()
-	last := c.lastLog.Load()
-	if c.opts.LogEvery > 0 && now-last < int64(c.opts.LogEvery) {
-		return
-	}
-	if !c.lastLog.CompareAndSwap(last, now) {
-		return
+	if c.opts.LogEvery > 0 {
+		now := c.opts.Now().UnixNano()
+		last := c.lastLog.Load()
+		if now-last < int64(c.opts.LogEvery) || !c.lastLog.CompareAndSwap(last, now) {
+			return
+		}
 	}
 	c.opts.Logf("[dhm] upstream %s failed (%s)", what, reason)
 }

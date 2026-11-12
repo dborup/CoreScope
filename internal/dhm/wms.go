@@ -43,6 +43,16 @@ var tileParams = map[string]string{
 	"crs":         "EPSG:3857",
 }
 
+// TileParams returns a copy of the fixed browser query parameters (every
+// key except bbox) with their exact values, e.g. for API documentation.
+func TileParams() map[string]string {
+	out := make(map[string]string, len(tileParams))
+	for k, v := range tileParams {
+		out[k] = v
+	}
+	return out
+}
+
 // TileKey is one Web Mercator tile.
 type TileKey struct{ Z, X, Y int }
 

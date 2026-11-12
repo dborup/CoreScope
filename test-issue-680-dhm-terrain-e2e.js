@@ -43,7 +43,7 @@ const DHM_BLOCK = {
   minZoom: 7, maxZoom: 19, bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
   attribution: 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0',
 };
-// Must match dhmFixedParams + bbox in cmd/server/dhm_proxy.go.
+// Must match tileParams + bbox in internal/dhm/wms.go.
 const ALLOWED = {
   service: 'WMS', request: 'GetMap', version: '1.3.0', layers: 'dhm_terraen_skyggekort',
   styles: '', format: 'image/png', transparent: 'true', width: '256', height: '256', crs: 'EPSG:3857',

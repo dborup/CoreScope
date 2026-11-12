@@ -343,7 +343,9 @@
       if (on) h.params.set(TERRAIN_HASH_PARAM, '1');
       else h.params.delete(TERRAIN_HASH_PARAM);
       var qs = h.params.toString();
-      history.replaceState(history.state, '', location.pathname + location.search + h.base + (qs ? '?' + qs : ''));
+      // An empty hash gets a bare '#', so the parameter never lands in the
+      // query string (#682 review F4).
+      history.replaceState(history.state, '', location.pathname + location.search + (qs ? (h.base || '#') + '?' + qs : h.base));
     } catch (_) {}
   }
 

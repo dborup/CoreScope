@@ -31,7 +31,9 @@ import (
 	"image/png"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/meshcore-analyzer/dhm"
@@ -71,12 +73,44 @@ func dhmClientConfig() *DHMClientConfig {
 	}
 }
 
+// dhmTileQueryParams documents the exact tile request shape for OpenAPI:
+// every fixed key with its only accepted value, plus bbox, all required.
+func dhmTileQueryParams() []paramMeta {
+	fixed := dhm.TileParams()
+	names := make([]string, 0, len(fixed))
+	for k := range fixed {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	out := make([]paramMeta, 0, len(names)+1)
+	for _, k := range names {
+		desc := "must be exactly " + strconv.Quote(fixed[k])
+		if fixed[k] == "" {
+			desc = "must be present and empty"
+		}
+		out = append(out, paramMeta{Name: k, Description: desc, Type: "string", Required: true})
+	}
+	return append(out, paramMeta{Name: "bbox", Description: "minx,miny,maxx,maxy of one EPSG:3857 tile at zoom 7-19", Type: "string", Required: true})
+}
+
 // extractDHMConfig moves map.dhm into the typed DHM field, because the
 // free-form Map block is shipped verbatim by /api/config/client. The raw
 // block is deleted even when it is malformed: it must never reach clients.
+//
+// Map is a map[string]interface{}, so key lookup is case-sensitive. A
+// case variant (`DHM`, `Dhm`, …) is removed too, with a warning, but it
+// does not enable the overlay: only the documented spelling does, so the
+// result never depends on which of several spellings map iteration meets
+// first.
 func (c *Config) extractDHMConfig() {
 	if c.Map == nil {
 		return
+	}
+	for k := range c.Map {
+		if k != "dhm" && strings.EqualFold(k, "dhm") {
+			delete(c.Map, k)
+			log.Printf("[dhm] config map.%s ignored and removed from the client config; the key must be spelled map.dhm", k)
+		}
 	}
 	raw, ok := c.Map["dhm"]
 	if !ok {

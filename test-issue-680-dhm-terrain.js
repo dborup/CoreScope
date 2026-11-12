@@ -5,7 +5,7 @@
  *   - offered only when /api/config/client carried an enabled dhm block
  *     with a same-origin URL;
  *   - the WMS options produce exactly the request shape the Go proxy
- *     allow-lists (cmd/server/dhm_proxy.go dhmFixedParams);
+ *     allow-lists (internal/dhm/wms.go tileParams);
  *   - own pane between base tiles (200) and overlays/markers (400/600);
  *   - hash (?terrain=1|0) wins over the stored choice and is saved;
  *     toggling saves + rewrites the hash;
@@ -123,7 +123,7 @@ function makeSandbox(opts) {
   opts = opts || {};
   const listeners = {};
   const replaced = [];
-  const loc = { hash: opts.hash || '#/map', pathname: '/', search: '' };
+  const loc = { hash: 'hash' in opts ? opts.hash : '#/map', pathname: '/', search: opts.search || '' };
   const ctx = {
     console, URLSearchParams, JSON, Math, Object, Array, String, Number, Boolean,
     location: loc,
@@ -305,6 +305,25 @@ test('toggle off → stored "0" + terrain param removed', () => {
   map.removeLayer(terrainLayer(ctl));
   assert.strictEqual(ctx.localStorage._raw['mc-terrain-dhm'], '0');
   assert.strictEqual(ctx.location.hash, '#/live?heard=1h');
+});
+
+// #682 review F4: with an empty location.hash the parameter must go into a
+// new hash, never into the query string (`/?debug=1?terrain=1`).
+test('toggle on with an empty hash writes #?terrain=1, query string untouched', () => {
+  const ctx = makeSandbox({ dhm: ENABLED, hash: '', search: '?debug=1' });
+  const { map, ctl } = buildControl(ctx);
+  map.addLayer(terrainLayer(ctl));
+  assert.strictEqual(ctx.replaced[ctx.replaced.length - 1], '/?debug=1#?terrain=1');
+  assert.strictEqual(ctx.location.search, '?debug=1');
+  assert.strictEqual(ctx.location.hash, '#?terrain=1');
+});
+
+test('toggle off with an empty hash leaves the URL without a hash', () => {
+  const ctx = makeSandbox({ dhm: ENABLED, hash: '', search: '?debug=1', storage: { 'mc-terrain-dhm': '1' } });
+  const { map, ctl } = buildControl(ctx);
+  map.removeLayer(terrainLayer(ctl));
+  assert.strictEqual(ctx.replaced[ctx.replaced.length - 1], '/?debug=1');
+  assert.strictEqual(ctx.localStorage._raw['mc-terrain-dhm'], '0');
 });
 
 test('control rebuild keeps the same layer and its on state', () => {

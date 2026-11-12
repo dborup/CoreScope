@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -844,5 +845,100 @@ func TestDHMConfig_ExampleConfigIsOffAndStripped(t *testing.T) {
 	}
 	if cfg.DHM.Active() || newDHMProxyFromConfig(cfg) != nil {
 		t.Fatalf("example config enables the DHM proxy")
+	}
+}
+
+// #682 review F1: Config.Map is a map[string]interface{}, so a key spelled
+// `DHM`, `Dhm` or `dHm` escaped the exact-key strip and its token shipped in
+// /api/config/client. Every case variant must be stripped, must not enable
+// the proxy, and must be warned about without the token.
+func TestDHMConfig_CaseVariantKeysAreStripped(t *testing.T) {
+	for _, key := range []string{"DHM", "Dhm", "dHm"} {
+		t.Run(key, func(t *testing.T) {
+			dir := t.TempDir()
+			cfgJSON := `{"map":{"tiles":{},"` + key + `":{"enabled":true,"token":"` + dhmTestToken + `"}}}`
+			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfgJSON), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var logBuf bytes.Buffer
+			log.SetOutput(&logBuf)
+			cfg, err := LoadConfig(dir)
+			log.SetOutput(os.Stderr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for k := range cfg.Map {
+				if strings.EqualFold(k, "dhm") {
+					t.Fatalf("map.%s left in the client-visible map block", k)
+				}
+			}
+			if cfg.DHM.Active() || newDHMProxyFromConfig(cfg) != nil {
+				t.Fatalf("map.%s enabled the proxy; only the canonical map.dhm may", key)
+			}
+			if !strings.Contains(logBuf.String(), "map."+key) {
+				t.Fatalf("no warning naming map.%s: %q", key, logBuf.String())
+			}
+			if strings.Contains(logBuf.String(), dhmTestToken) {
+				t.Fatalf("token in the warning: %q", logBuf.String())
+			}
+			srv, router := setupTestServer(t)
+			srv.cfg.Map = cfg.Map
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, httptest.NewRequest("GET", "/api/config/client", nil))
+			if strings.Contains(w.Body.String(), dhmTestToken) {
+				t.Fatalf("token from map.%s leaked via /api/config/client", key)
+			}
+		})
+	}
+}
+
+// The canonical key wins when a case variant sits next to it, and the
+// variant is still stripped.
+func TestDHMConfig_CanonicalKeyWinsOverCaseVariant(t *testing.T) {
+	dir := t.TempDir()
+	cfgJSON := `{"map":{"DHM":{"enabled":true,"token":"other-` + dhmTestToken + `"},"dhm":{"enabled":true,"token":"` + dhmTestToken + `"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfgJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DHM.Token != dhmTestToken || !cfg.DHM.Active() {
+		t.Fatalf("canonical map.dhm not used: active=%v", cfg.DHM.Active())
+	}
+	for k := range cfg.Map {
+		if strings.EqualFold(k, "dhm") {
+			t.Fatalf("map.%s left in the client-visible map block", k)
+		}
+	}
+}
+
+// #682 review N2: every mandatory query parameter is declared in OpenAPI,
+// so a client generated from the schema sends a request the proxy accepts.
+func TestDHMOpenAPIDeclaresEveryRequiredParam(t *testing.T) {
+	meta, ok := routeDescriptions()["GET /api/map/dhm/wms"]
+	if !ok {
+		t.Fatal("route not described")
+	}
+	declared := map[string]bool{}
+	for _, p := range meta.QueryParams {
+		if !p.Required {
+			t.Errorf("param %s not marked required", p.Name)
+		}
+		declared[p.Name] = true
+	}
+	z, x, y := dkTile()
+	q := leafletQuery(z, x, y)
+	for k := range q {
+		if !declared[k] {
+			t.Errorf("mandatory query param %q not declared in OpenAPI", k)
+		}
+	}
+	if len(declared) != len(q) {
+		t.Errorf("OpenAPI declares %d params, the proxy accepts exactly %d", len(declared), len(q))
+	}
+	if _, err := dhm.ParseTileRequest(q); err != nil {
+		t.Fatalf("leafletQuery is not an accepted request: %v", err)
 	}
 }
