@@ -8,6 +8,11 @@ package main
 // fetches the tile through the shared DHM client (internal/dhm), which
 // adds the token server-side in the `token` request header.
 //
+// #687: the server chooses the upstream layer (map.dhm.layer). By default
+// it is the exaggerated hillshade (wms/dhm_temp); if that fails for a
+// tile, the #680 terrain hillshade (dhm_DAF) is served instead. Browsers
+// keep requesting the #680 shape either way.
+//
 // Security properties, each pinned by dhm_proxy_test.go and the
 // internal/dhm tests:
 //   - Not an open proxy. The upstream service is a constant, every client
@@ -42,6 +47,10 @@ import (
 const (
 	dhmClientPath    = "/api/map/dhm/wms"
 	dhmBrowserMaxAge = 24 * time.Hour
+	// dhmFallbackMaxAge is the browser cache lifetime of a terrain tile
+	// served in place of a failed exaggerated one (#687), so the browser
+	// asks again soon rather than keeping a mixed map for a day.
+	dhmFallbackMaxAge = 10 * time.Minute
 )
 
 // DHMConfig is config.json `map.dhm` (Config.DHM).
@@ -148,8 +157,16 @@ func defaultDHMProxyOptions() dhmProxyOptions {
 
 type dhmProxy struct {
 	client *dhm.Client
-	cache  *dhm.Cache[dhm.TileKey]
+	layer  dhm.Hillshade // configured upstream layer
+	cache  *dhm.Cache[dhmCacheKey]
 	now    func() time.Time
+}
+
+// dhmCacheKey is a tile of the upstream layer it was actually fetched
+// from, so a terrain fallback is never served as an exaggerated tile.
+type dhmCacheKey struct {
+	Layer dhm.Hillshade
+	Tile  dhm.TileKey
 }
 
 // newDHMProxy returns nil unless map.dhm is enabled with a token: an
@@ -159,9 +176,15 @@ func newDHMProxy(cfg dhm.Config, opts dhmProxyOptions) *dhmProxy {
 	if client == nil {
 		return nil
 	}
+	layer, ok := dhm.ParseHillshade(cfg.Layer)
+	if !ok {
+		// The value is not echoed: it could be a misplaced token.
+		opts.client.Logf(`[dhm] config map.dhm.layer must be "exaggerated" or "terrain"; using "terrain"`)
+	}
 	return &dhmProxy{
 		client: client,
-		cache:  dhm.NewCache[dhm.TileKey](opts.cacheMaxEntries, opts.cacheMaxBytes, opts.cacheTTL),
+		layer:  layer,
+		cache:  dhm.NewCache[dhmCacheKey](opts.cacheMaxEntries, opts.cacheMaxBytes, opts.cacheTTL),
 		now:    opts.client.Now,
 	}
 }
@@ -176,13 +199,15 @@ var dhmTransparentPNG = func() []byte {
 	return buf.Bytes()
 }()
 
-func writeDHMTile(w http.ResponseWriter, data []byte, cacheable bool, state string) {
+// writeDHMTile writes a tile the browser may cache for maxAge; 0 is
+// no-store.
+func writeDHMTile(w http.ResponseWriter, data []byte, maxAge time.Duration, state string) {
 	h := w.Header()
 	h.Set("Content-Type", "image/png")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-CoreScope-Tile", state)
-	if cacheable {
-		h.Set("Cache-Control", "public, max-age="+strconv.Itoa(int(dhmBrowserMaxAge/time.Second)))
+	if maxAge > 0 {
+		h.Set("Cache-Control", "public, max-age="+strconv.Itoa(int(maxAge/time.Second)))
 	} else {
 		h.Set("Cache-Control", "no-store")
 	}
@@ -201,21 +226,58 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !key.IntersectsCoverage() {
-		writeDHMTile(w, dhmTransparentPNG, true, "outside")
+		writeDHMTile(w, dhmTransparentPNG, dhmBrowserMaxAge, "outside")
 		return
 	}
-	if data, ok := p.cache.Get(key, p.now()); ok {
-		writeDHMTile(w, data, true, "hit")
+	data, hit, err := p.layerTile(p.layer, key)
+	if err == nil {
+		writeDHMTile(w, data, dhmBrowserMaxAge, tileState("", hit))
 		return
 	}
-	data, err := p.client.FetchHillshadeTile(key)
-	if err != nil {
+	if p.layer == dhm.HillshadeTerrain {
 		p.client.LogFailure("hillshade tile", err)
-		writeDHMTile(w, dhmTransparentPNG, false, "unavailable")
+		writeDHMTile(w, dhmTransparentPNG, 0, "unavailable")
 		return
 	}
-	p.cache.Put(key, data, p.now())
-	writeDHMTile(w, data, true, "miss")
+	// #687: the exaggerated tile failed; serve the terrain tile instead.
+	data, hit, fallbackErr := p.layerTile(dhm.HillshadeTerrain, key)
+	if fallbackErr != nil {
+		p.client.LogFailure("hillshade tile", dhm.FetchError{Reason: "exaggerated " + dhm.FailureReason(err) +
+			", terrain " + dhm.FailureReason(fallbackErr)})
+		writeDHMTile(w, dhmTransparentPNG, 0, "unavailable")
+		return
+	}
+	p.client.LogFallback("exaggerated hillshade tile", err)
+	writeDHMTile(w, data, dhmFallbackMaxAge, tileState("fallback", hit))
+}
+
+// layerTile returns the tile of one upstream layer, from the cache or
+// upstream, and whether it was a cache hit. Only successes are cached.
+func (p *dhmProxy) layerTile(h dhm.Hillshade, k dhm.TileKey) ([]byte, bool, error) {
+	ck := dhmCacheKey{Layer: h, Tile: k}
+	if data, ok := p.cache.Get(ck, p.now()); ok {
+		return data, true, nil
+	}
+	data, err := p.client.FetchHillshade(h, k)
+	if err != nil {
+		return nil, false, err
+	}
+	p.cache.Put(ck, data, p.now())
+	return data, false, nil
+}
+
+// tileState is the X-CoreScope-Tile value: hit/miss, or with a prefix
+// fallback/fallback-hit.
+func tileState(prefix string, hit bool) string {
+	switch {
+	case prefix == "" && hit:
+		return "hit"
+	case prefix == "":
+		return "miss"
+	case hit:
+		return prefix + "-hit"
+	}
+	return prefix
 }
 
 func newDHMProxyFromConfig(cfg *Config) *dhmProxy {

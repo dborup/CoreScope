@@ -151,7 +151,9 @@ func newTestDHMProxy(t *testing.T, up *fakeUpstream, logs *dhmLogSink, tweak fun
 	if tweak != nil {
 		tweak(&o)
 	}
-	p := newDHMProxy(DHMConfig{Enabled: true, Token: dhmTestToken}, o)
+	// The #680 tests specify the terrain upstream; #687's default
+	// (exaggerated, with terrain as fallback) is dhm_hillshade_687_test.go.
+	p := newDHMProxy(DHMConfig{Enabled: true, Token: dhmTestToken, Layer: "terrain"}, o)
 	if p == nil {
 		t.Fatal("newDHMProxy returned nil for an enabled config with a token")
 	}

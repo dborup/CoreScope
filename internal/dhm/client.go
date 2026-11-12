@@ -25,6 +25,8 @@ var allowedServices = map[string]serviceShape{
 	// The tile proxy rebuilds every WMS query from a validated TileKey.
 	WMSService: {},
 	WCSService: {check: checkCoverageQuery, raster: true},
+	// #687: only the exaggerated hillshade's exact tile shape.
+	ExaggeratedWMSService: {check: hillshadeQueryCheck(HillshadeExaggerated)},
 }
 
 // serviceShape is what the Client enforces per service.
@@ -210,14 +212,24 @@ func isTimeout(err error) bool {
 	return errors.As(err, &te) && te.Timeout()
 }
 
+// FailureReason is err's fixed category: the FetchError reason, or
+// "unknown". It never holds a URL or upstream text.
+func FailureReason(err error) string {
+	var fe FetchError
+	if errors.As(err, &fe) {
+		return fe.Reason
+	}
+	return "unknown"
+}
+
 // LogFailure logs an upstream failure by category only, at most once per
 // LogEvery.
 func (c *Client) LogFailure(what string, err error) {
-	var fe FetchError
-	reason := "unknown"
-	if errors.As(err, &fe) {
-		reason = fe.Reason
-	}
+	c.logThrottled("[dhm] upstream %s failed (%s)", what, FailureReason(err))
+}
+
+// logThrottled logs at most once per LogEvery, across all callers.
+func (c *Client) logThrottled(format string, args ...interface{}) {
 	if c.opts.LogEvery > 0 {
 		now := c.opts.Now().UnixNano()
 		last := c.lastLog.Load()
@@ -225,5 +237,5 @@ func (c *Client) LogFailure(what string, err error) {
 			return
 		}
 	}
-	c.opts.Logf("[dhm] upstream %s failed (%s)", what, reason)
+	c.opts.Logf(format, args...)
 }
