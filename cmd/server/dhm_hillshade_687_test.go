@@ -506,3 +506,44 @@ func TestDHM687_SaturatedBudgetNoExtraWait(t *testing.T) {
 		t.Fatalf("fallback logged: %q", logs.String())
 	}
 }
+
+// #688 review F2: a terrain-only config makes exactly one upstream attempt
+// per tile and never reports a fallback, also when terrain fails.
+func TestDHM687_TerrainLayerOneAttempt(t *testing.T) {
+	cases := []struct {
+		name   string
+		h      func(w http.ResponseWriter, r *http.Request)
+		state  string
+		reason string
+	}{
+		{"ok", nil, "miss", ""},
+		{"500", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }, "unavailable", "status 500"},
+		{"bad png", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "image/png")
+			io.WriteString(w, "not a png")
+		}, "unavailable", "non-image response"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			u := newDHMUpstreams(t)
+			u.terrain.set(tc.h)
+			logs := &dhmLogSink{}
+			p := newLayerProxy(t, u, "terrain", logs, nil)
+			z, x, y := dkTile()
+			w := doTile(p, leafletQuery(z, x, y))
+			if got := w.Header().Get("X-CoreScope-Tile"); got != tc.state {
+				t.Fatalf("X-CoreScope-Tile %q, want %q", got, tc.state)
+			}
+			if u.terrain.hits() != 1 || u.exaggerated.hits() != 0 {
+				t.Fatalf("hits terrain=%d exaggerated=%d, want 1 and 0", u.terrain.hits(), u.exaggerated.hits())
+			}
+			want := ""
+			if tc.reason != "" {
+				want = "[dhm] upstream hillshade tile failed (" + tc.reason + ")\n"
+			}
+			if logs.String() != want {
+				t.Fatalf("log %q, want %q", logs.String(), want)
+			}
+		})
+	}
+}
