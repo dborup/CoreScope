@@ -19,10 +19,18 @@ import (
 const DefaultBaseURL = "https://api.dataforsyningen.dk/"
 
 // allowedServices are the only upstream services the Client calls. A
-// feature that needs another DHM service (for example the WCS in #681)
-// adds it here, next to its own request shape.
-var allowedServices = map[string]bool{
-	WMSService: true,
+// feature that needs another DHM service adds it here, next to its own
+// request shape.
+var allowedServices = map[string]serviceShape{
+	// The tile proxy rebuilds every WMS query from a validated TileKey.
+	WMSService: {},
+	WCSService: {check: checkCoverageQuery, raster: true},
+}
+
+// serviceShape is what the Client enforces per service.
+type serviceShape struct {
+	check  func(url.Values) error // nil: callers build the query from a validated key
+	raster bool                   // responses are raster chunks: MaxCoverageBodyBytes applies
 }
 
 // tokenHeader is the request header Dataforsyningen reads the token from.
@@ -36,21 +44,25 @@ type ClientOptions struct {
 	BaseURL      string        // DefaultBaseURL outside tests
 	Timeout      time.Duration // per upstream request, including the body
 	Concurrency  int           // upstream requests in flight, all features together
-	MaxBodyBytes int           // larger responses are rejected
-	Now          func() time.Time
-	Logf         func(format string, args ...interface{})
-	LogEvery     time.Duration // throttle for failure log lines; 0 logs all
+	MaxBodyBytes int           // larger responses are rejected (WMS tiles)
+	// MaxCoverageBodyBytes caps a WCS raster chunk, which can exceed the
+	// tile cap; see maxRasterBodyBytes.
+	MaxCoverageBodyBytes int
+	Now                  func() time.Time
+	Logf                 func(format string, args ...interface{})
+	LogEvery             time.Duration // throttle for failure log lines; 0 logs all
 }
 
 func DefaultClientOptions() ClientOptions {
 	return ClientOptions{
-		BaseURL:      DefaultBaseURL,
-		Timeout:      10 * time.Second,
-		Concurrency:  4,
-		MaxBodyBytes: 1 << 20,
-		Now:          time.Now,
-		Logf:         log.Printf,
-		LogEvery:     time.Minute,
+		BaseURL:              DefaultBaseURL,
+		Timeout:              10 * time.Second,
+		Concurrency:          4,
+		MaxBodyBytes:         1 << 20,
+		MaxCoverageBodyBytes: maxRasterBodyBytes,
+		Now:                  time.Now,
+		Logf:                 log.Printf,
+		LogEvery:             time.Minute,
 	}
 }
 
@@ -92,9 +104,16 @@ func (e FetchError) Error() string { return e.Reason }
 // Get fetches service?q and returns the body of a 200 response whose
 // Content-Type starts with contentType. Every other outcome, including
 // error bodies in any format (OGC XML, plain text, JSON), is a FetchError.
-// Identical concurrent requests share one upstream call.
+// Identical concurrent requests share one upstream call. A service with a
+// request shape (the WCS) only accepts exactly that shape.
 func (c *Client) Get(service string, q url.Values, contentType string) ([]byte, error) {
-	if !allowedServices[service] {
+	return c.get(service, q, []string{contentType})
+}
+
+// get is Get accepting any of contentTypes.
+func (c *Client) get(service string, q url.Values, contentTypes []string) ([]byte, error) {
+	shape, ok := allowedServices[service]
+	if !ok {
 		return nil, ErrBadRequest
 	}
 	for k := range q {
@@ -102,9 +121,18 @@ func (c *Client) Get(service string, q url.Values, contentType string) ([]byte, 
 			return nil, ErrBadRequest
 		}
 	}
+	if shape.check != nil {
+		if err := shape.check(q); err != nil {
+			return nil, err
+		}
+	}
+	maxBody := c.opts.MaxBodyBytes
+	if shape.raster {
+		maxBody = c.opts.MaxCoverageBodyBytes
+	}
 	target := c.opts.BaseURL + service + "?" + q.Encode()
-	v, err, _ := c.flight.Do(contentType+" "+target, func() (interface{}, error) {
-		return c.fetch(target, contentType)
+	v, err, _ := c.flight.Do(strings.Join(contentTypes, ",")+" "+target, func() (interface{}, error) {
+		return c.fetch(target, contentTypes, maxBody)
 	})
 	if err != nil {
 		return nil, err
@@ -112,7 +140,7 @@ func (c *Client) Get(service string, q url.Values, contentType string) ([]byte, 
 	return v.([]byte), nil
 }
 
-func (c *Client) fetch(target, contentType string) ([]byte, error) {
+func (c *Client) fetch(target string, contentTypes []string, maxBody int) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), c.opts.Timeout)
 	defer cancel()
 	select {
@@ -126,7 +154,7 @@ func (c *Client) fetch(target, contentType string) ([]byte, error) {
 		return nil, FetchError{"request"}
 	}
 	req.Header.Set(tokenHeader, c.token)
-	req.Header.Set("Accept", contentType)
+	req.Header.Set("Accept", strings.Join(contentTypes, ", "))
 	resp, err := c.http.Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
@@ -136,23 +164,33 @@ func (c *Client) fetch(target, contentType string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, int64(c.opts.MaxBodyBytes)))
+		io.Copy(io.Discard, io.LimitReader(resp.Body, int64(maxBody)))
 		return nil, FetchError{"status " + strconv.Itoa(resp.StatusCode)}
 	}
-	if !strings.HasPrefix(strings.ToLower(resp.Header.Get("Content-Type")), contentType) {
+	if !hasContentType(resp.Header.Get("Content-Type"), contentTypes) {
 		return nil, FetchError{"unexpected content type"}
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(c.opts.MaxBodyBytes)+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBody)+1))
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
 			return nil, FetchError{"timeout"}
 		}
 		return nil, FetchError{"read"}
 	}
-	if len(data) > c.opts.MaxBodyBytes {
+	if len(data) > maxBody {
 		return nil, FetchError{"oversize response"}
 	}
 	return data, nil
+}
+
+func hasContentType(got string, want []string) bool {
+	got = strings.ToLower(got)
+	for _, w := range want {
+		if strings.HasPrefix(got, w) {
+			return true
+		}
+	}
+	return false
 }
 
 func isTimeout(err error) bool {
