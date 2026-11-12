@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -22,8 +23,9 @@ const DefaultBaseURL = "https://api.dataforsyningen.dk/"
 // feature that needs another DHM service adds it here, next to its own
 // request shape.
 var allowedServices = map[string]serviceShape{
-	// The tile proxy rebuilds every WMS query from a validated TileKey.
-	WMSService: {},
+	// The tile proxy rebuilds every WMS query from a validated TileKey;
+	// the check holds any other caller to that shape too.
+	WMSService: {check: checkTileQuery},
 	WCSService: {check: checkCoverageQuery, raster: true},
 	// #687: only the exaggerated hillshade's exact tile shape.
 	ExaggeratedWMSService: {check: hillshadeQueryCheck(HillshadeExaggerated)},
@@ -31,7 +33,7 @@ var allowedServices = map[string]serviceShape{
 
 // serviceShape is what the Client enforces per service.
 type serviceShape struct {
-	check  func(url.Values) error // nil: callers build the query from a validated key
+	check  func(url.Values) error // accepts only the service's exact query shape
 	raster bool                   // responses are raster chunks: MaxCoverageBodyBytes applies
 }
 
@@ -48,7 +50,7 @@ type ClientOptions struct {
 	Concurrency  int           // upstream requests in flight, all features together
 	MaxBodyBytes int           // larger responses are rejected (WMS tiles)
 	// MaxCoverageBodyBytes caps a WCS raster chunk, which can exceed the
-	// tile cap; see maxRasterBodyBytes.
+	// tile cap; 0 means maxRasterBodyBytes.
 	MaxCoverageBodyBytes int
 	Now                  func() time.Time
 	Logf                 func(format string, args ...interface{})
@@ -116,7 +118,7 @@ type FetchError struct{ Reason string }
 func (e FetchError) Error() string { return e.Reason }
 
 // Get fetches service?q and returns the body of a 200 response whose
-// Content-Type starts with contentType. Every other outcome, including
+// media type is contentType. Every other outcome, including
 // error bodies in any format (OGC XML, plain text, JSON), is a FetchError.
 // Identical concurrent requests share one upstream call. A service with a
 // request shape (the WCS) only accepts exactly that shape.
@@ -143,6 +145,9 @@ func (c *Client) get(service string, q url.Values, contentTypes []string) ([]byt
 	maxBody := c.opts.MaxBodyBytes
 	if shape.raster {
 		maxBody = c.opts.MaxCoverageBodyBytes
+		if maxBody <= 0 {
+			maxBody = maxRasterBodyBytes
+		}
 	}
 	target := c.opts.BaseURL + service + "?" + q.Encode()
 	v, err, _ := c.flight.Do(strings.Join(contentTypes, ",")+" "+target, func() (interface{}, error) {
@@ -197,10 +202,15 @@ func (c *Client) fetch(target string, contentTypes []string, maxBody int) ([]byt
 	return data, nil
 }
 
+// hasContentType reports whether the media type of got is exactly one of
+// want; parameters such as `; subtype=geotiff` are allowed.
 func hasContentType(got string, want []string) bool {
-	got = strings.ToLower(got)
+	mt, _, err := mime.ParseMediaType(got)
+	if err != nil {
+		return false
+	}
 	for _, w := range want {
-		if strings.HasPrefix(got, w) {
+		if mt == w {
 			return true
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -61,12 +62,19 @@ func TestClientDisablesCompressionForHillshadeTile(t *testing.T) {
 func TestClientDisablesCompressionForRaster(t *testing.T) {
 	u, aeCh := truncatedGzipUpstream(t, "image/tiff", tiffStub)
 	src := NewWCSSource(newTestClient(t, u, &logSink{}))
-	data, err := src.FetchRaster(someRaster())
+	g, err := src.FetchRaster(someRaster())
 	if err != nil {
 		t.Fatalf("FetchRaster: %v", err)
 	}
-	if !bytes.Equal(data, tiffStub) {
-		t.Fatalf("body %q, want %q", data, tiffStub)
+	// FetchRaster returns the decoded grid (#681 M2): it must be the whole
+	// GeoTIFF, not a truncated or partial one.
+	want, err := decodeGeoTIFF(tiffStub)
+	if err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	if g.Width != want.Width || g.Height != want.Height || g.Georef != want.Georef ||
+		!slices.Equal(g.Values, want.Values) {
+		t.Fatalf("grid %dx%d %+v, want the fixture's %dx%d %+v", g.Width, g.Height, g.Georef, want.Width, want.Height, want.Georef)
 	}
 	if ae := <-aeCh; strings.Contains(ae, "gzip") {
 		t.Fatalf("upstream request Accept-Encoding %q carries gzip", ae)

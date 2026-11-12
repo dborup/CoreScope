@@ -143,21 +143,32 @@ func (k TileKey) IntersectsCoverage() bool {
 func (k TileKey) upstreamQuery() url.Values {
 	b := k.BBox()
 	q := url.Values{}
-	q.Set("service", "WMS")
-	q.Set("version", "1.3.0")
-	q.Set("request", "GetMap")
-	q.Set("layers", HillshadeLayer)
-	q.Set("styles", "")
-	q.Set("format", "image/png")
+	for key, v := range tileParams {
+		q.Set(key, v)
+	}
+	// WMS 1.3.0 spells the boolean TRUE; Leaflet sends `true`.
 	q.Set("transparent", "TRUE")
-	q.Set("crs", "EPSG:3857")
-	q.Set("width", strconv.Itoa(TileSize))
-	q.Set("height", strconv.Itoa(TileSize))
 	q.Set("bbox", strings.Join([]string{
 		strconv.FormatFloat(b[0], 'f', -1, 64), strconv.FormatFloat(b[1], 'f', -1, 64),
 		strconv.FormatFloat(b[2], 'f', -1, 64), strconv.FormatFloat(b[3], 'f', -1, 64),
 	}, ","))
 	return q
+}
+
+// checkTileQuery accepts q only if it is exactly the upstreamQuery of the
+// tile its bbox names, so Client.Get cannot send any other WMS request.
+func checkTileQuery(q url.Values) error {
+	if len(q["bbox"]) != 1 {
+		return ErrBadRequest
+	}
+	k, err := TileFromBBox(q["bbox"][0])
+	if err != nil {
+		return err
+	}
+	if q.Encode() != k.upstreamQuery().Encode() {
+		return ErrBadRequest
+	}
+	return nil
 }
 
 var pngSignature = []byte("\x89PNG\r\n\x1a\n")

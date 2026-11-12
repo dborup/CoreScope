@@ -1,7 +1,6 @@
 package dhm
 
 import (
-	"bytes"
 	"net/url"
 	"strconv"
 	"strings"
@@ -30,8 +29,8 @@ const (
 	// maxRasterBodyBytes is one MaxRasterSize² raster of uncompressed
 	// float32 (DEFLATE does not reliably shrink float elevations, and
 	// upstream may not compress at all), plus 64 KiB for the TIFF header,
-	// IFD, GeoTIFF keys and strip tables (512 strips × 2 × 8 bytes = 8 KiB).
-	// That is 1 114 112 bytes, above the 1 MiB tile cap.
+	// IFD, GeoTIFF keys and strip tables (512 strips × 2 LONGs × 4 bytes
+	// = 4 KiB). That is 1 114 112 bytes, above the 1 MiB tile cap.
 	maxRasterBodyBytes = MaxRasterSize*MaxRasterSize*4 + 64<<10
 )
 
@@ -62,11 +61,11 @@ type RasterRequest struct {
 }
 
 // ElevationSource fetches elevation rasters, so a replacement for the DHM
-// WCS is a drop-in (#681 owner decision 8). FetchRaster returns a GeoTIFF
-// covering exactly r.BBox at r.Width × r.Height in EPSG:25832. Decoding is
-// the caller's.
+// WCS is a drop-in (#681 owner decision 8). FetchRaster returns a decoded,
+// georeferenced Grid in EPSG:25832 that covers r.BBox at r's resolution,
+// up to one pixel of snapping; the wire format is the source's business.
 type ElevationSource interface {
-	FetchRaster(r RasterRequest) ([]byte, error)
+	FetchRaster(r RasterRequest) (Grid, error)
 }
 
 // Validate accepts r only if every field is inside the allow-list.
@@ -162,15 +161,23 @@ func parseSize(s string) (int, error) {
 	return n, nil
 }
 
+// checkCoverageQuery accepts q only in the exact spelling coverageQuery
+// builds for the request it parses to. A numerically valid but
+// non-canonical bbox or size (0x1p19, 5.75e5, 575000., 0179) would
+// otherwise reach upstream in a shape this package never sends.
 func checkCoverageQuery(q url.Values) error {
-	_, err := parseCoverageQuery(q)
-	return err
+	r, err := parseCoverageQuery(q)
+	if err != nil {
+		return err
+	}
+	if q.Encode() != r.coverageQuery().Encode() {
+		return ErrBadRequest
+	}
+	return nil
 }
 
-// geoTIFFContentTypes are the Content-Type prefixes accepted for a raster.
+// geoTIFFContentTypes are the media types accepted for a raster.
 var geoTIFFContentTypes = []string{"image/tiff", "image/geotiff"}
-
-var tiffSignatures = [][]byte{[]byte("II*\x00"), []byte("MM\x00*")}
 
 // WCSSource is the DHM WCS ElevationSource.
 type WCSSource struct{ c *Client }
@@ -178,18 +185,31 @@ type WCSSource struct{ c *Client }
 // NewWCSSource returns the DHM WCS source on c.
 func NewWCSSource(c *Client) *WCSSource { return &WCSSource{c} }
 
-// FetchRaster fetches one raster. Only a classic TIFF is returned; anything
-// else is ErrBadRequest (Client.Get validates the query before any upstream
-// call) or a FetchError.
-func (s *WCSSource) FetchRaster(r RasterRequest) ([]byte, error) {
+// FetchRaster fetches and decodes one raster. A request outside the
+// allow-list is ErrBadRequest before any upstream call (Client.Get checks
+// the query); every upstream or decoding failure is a FetchError.
+func (s *WCSSource) FetchRaster(r RasterRequest) (Grid, error) {
 	data, err := s.c.get(WCSService, r.coverageQuery(), geoTIFFContentTypes)
 	if err != nil {
-		return nil, err
+		return Grid{}, err
 	}
-	for _, sig := range tiffSignatures {
-		if bytes.HasPrefix(data, sig) {
-			return data, nil
+	g, err := decodeGeoTIFF(data)
+	if err != nil {
+		return Grid{}, FetchError{"invalid raster"}
+	}
+	if g.Georef == (Georef{}) {
+		// No georeferencing in the file: the grid is the request.
+		if g.Width != r.Width || g.Height != r.Height {
+			return Grid{}, FetchError{"raster mismatch"}
 		}
+		g.Georef = Georef{
+			OriginE: r.BBox[0],
+			OriginN: r.BBox[3],
+			PixelE:  (r.BBox[2] - r.BBox[0]) / float64(r.Width),
+			PixelN:  (r.BBox[3] - r.BBox[1]) / float64(r.Height),
+		}
+	} else if !g.fits(r) {
+		return Grid{}, FetchError{"raster mismatch"}
 	}
-	return nil, FetchError{"non-tiff response"}
+	return g, nil
 }
