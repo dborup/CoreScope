@@ -17,8 +17,8 @@ import (
 // chose a stdlib-only reader over a new dependency (#681 decision 3). This
 // reads exactly one shape: classic TIFF (either byte order), the first IFD,
 // one 32-bit IEEE float sample per pixel, strips, no compression or
-// DEFLATE, and predictor none, horizontal or floating point. Everything
-// else is an error.
+// DEFLATE, predictor none, horizontal or floating point, and FillOrder and
+// Orientation absent or 1. Everything else is an error.
 //
 // The input comes from the network, so every size is checked before it is
 // used: the raster is at most MaxRasterSize per edge before anything is
@@ -38,7 +38,9 @@ const (
 	tagImageLength     = 257
 	tagBitsPerSample   = 258
 	tagCompression     = 259
+	tagFillOrder       = 266
 	tagStripOffsets    = 273
+	tagOrientation     = 274
 	tagSamplesPerPixel = 277
 	tagRowsPerStrip    = 278
 	tagStripByteCounts = 279
@@ -56,6 +58,7 @@ const (
 // the field map never grows with the file's entry count (#686 review N1).
 var readTags = map[uint16]bool{
 	tagImageWidth: true, tagImageLength: true, tagBitsPerSample: true, tagCompression: true,
+	tagFillOrder: true, tagOrientation: true,
 	tagStripOffsets: true, tagSamplesPerPixel: true, tagRowsPerStrip: true, tagStripByteCounts: true,
 	tagPredictor: true, tagTileWidth: true, tagSampleFormat: true, tagModelPixelScale: true,
 	tagModelTiepoint: true, tagModelTransform: true, tagGeoKeyDirectory: true, tagGDALNoData: true,
@@ -146,6 +149,10 @@ func decodeGeoTIFF(buf []byte) (Grid, error) {
 		{tagBitsPerSample, 0, 32},
 		{tagSampleFormat, 1, sampleFormatFloat},
 		{tagSamplesPerPixel, 1, 1},
+		// #686 review N2: bit order and row/column order other than the
+		// TIFF default would decode to wrong values, so they are errors.
+		{tagFillOrder, 1, 1},
+		{tagOrientation, 1, 1},
 	} {
 		v, err := r.uint(want.tag, want.def, true)
 		if err != nil || v != want.only {

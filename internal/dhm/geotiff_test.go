@@ -269,6 +269,19 @@ func malformedTIFFs() map[string][]byte {
 		"IFD past end":     []byte("II*\x00\xf0\xff\xff\xff"),
 		"IFD at max u32":   []byte("MM\x00*\xff\xff\xff\xff"),
 
+		// #686 review N2: bit-reversed bytes or a flipped raster would
+		// decode to wrong elevations, so anything but 1 is an error.
+		"FillOrder 2":       field(tagFillOrder, func(f *tiffFixture) *fixtureField { return f.shorts(2) }),
+		"FillOrder 0":       field(tagFillOrder, func(f *tiffFixture) *fixtureField { return f.shorts(0) }),
+		"FillOrder x2":      field(tagFillOrder, func(f *tiffFixture) *fixtureField { return f.shorts(1, 1) }),
+		"FillOrder ASCII":   field(tagFillOrder, func(f *tiffFixture) *fixtureField { return asciiField("1") }),
+		"Orientation 2":     field(tagOrientation, func(f *tiffFixture) *fixtureField { return f.shorts(2) }),
+		"Orientation 4":     field(tagOrientation, func(f *tiffFixture) *fixtureField { return f.shorts(4) }),
+		"Orientation 8":     field(tagOrientation, func(f *tiffFixture) *fixtureField { return f.shorts(8) }),
+		"Orientation 0":     field(tagOrientation, func(f *tiffFixture) *fixtureField { return f.shorts(0) }),
+		"Orientation x2":    field(tagOrientation, func(f *tiffFixture) *fixtureField { return f.shorts(1, 1) }),
+		"Orientation empty": field(tagOrientation, func(f *tiffFixture) *fixtureField { return &fixtureField{typ: typeShort} }),
+
 		"SampleFormat uint":   field(tagSampleFormat, func(f *tiffFixture) *fixtureField { return f.shorts(1) }),
 		"SampleFormat int":    field(tagSampleFormat, func(f *tiffFixture) *fixtureField { return f.shorts(2) }),
 		"SampleFormat absent": with(func(f *tiffFixture) { f.drop = []uint16{tagSampleFormat} }),
@@ -382,6 +395,28 @@ func TestDecodeGeoTIFFRejectsMalformed(t *testing.T) {
 				t.Errorf("%s: accepted as %dx%d", name, g.Width, g.Height)
 			}
 		}()
+	}
+}
+
+// FillOrder and Orientation set explicitly to their default 1 (the only
+// values the decoder reads correctly) decode like a file without them.
+func TestDecodeGeoTIFFFillOrderAndOrientationDefault(t *testing.T) {
+	plain := newFixture(3, 2, varied(3, 2)).georeferenced(575000, 6226500, 10)
+	want, err := decodeGeoTIFF(plain.bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, order := range []binary.ByteOrder{binary.LittleEndian, binary.BigEndian} {
+		f := newFixture(3, 2, varied(3, 2)).georeferenced(575000, 6226500, 10)
+		f.order = order
+		f.fields = map[uint16]*fixtureField{tagFillOrder: f.shorts(1), tagOrientation: f.shorts(1)}
+		g, err := decodeGeoTIFF(f.bytes())
+		if err != nil {
+			t.Fatalf("%v: explicit FillOrder/Orientation 1: %v", order, err)
+		}
+		if !slices.Equal(g.Values, want.Values) || g.Georef != want.Georef {
+			t.Fatalf("%v: decoded %v %+v, want %v %+v", order, g.Values, g.Georef, want.Values, want.Georef)
+		}
 	}
 }
 
