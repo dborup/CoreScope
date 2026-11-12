@@ -158,6 +158,12 @@
 }
 
 :root {
+  /* #680 DHM terrain overlay: multiply darkens the base map by the
+     hillshade's shadows. Dark themes (both blocks below) invert the
+     hillshade and screen it, the same treatment the inverted dark base
+     tiles get, so relief shows as light ridges and labels stay readable. */
+  --terrain-overlay-blend: multiply;
+  --terrain-overlay-filter: none;
   /* Node-quality link strength colours (bottleneck tiers). Dark-theme
      overrides live in the [data-theme="dark"] block below (brighter hues). */
   --link-strong: #1a7f37;
@@ -393,6 +399,8 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
+    --terrain-overlay-blend: screen;
+    --terrain-overlay-filter: invert(1);
     --status-green: #22c55e;
     /* #1719 — on dark card-bg (#232340) #22c55e gives 6.65:1, AA pass.
        Keep the bright hue for text rather than darkening it. */
@@ -454,6 +462,8 @@
 /* ⚠️ DARK THEME VARIABLES — KEEP IN SYNC with @media block above (EMOJI-OK-COMMENT) */
 [data-theme="dark"] {
   color-scheme: dark;
+  --terrain-overlay-blend: screen;
+  --terrain-overlay-filter: invert(1);
   /* Brighter link-strength hues for contrast on dark map tiles + surfaces. */
   --link-strong: #3fb950;
   --link-medium: #d29922;
@@ -2817,6 +2827,12 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 }
 [data-theme="dark"] .leaflet-control-layers-toggle {
   filter: invert(1);
+}
+
+/* #680 — DHM terrain hillshade pane (between base tiles and markers). */
+.mc-terrain-pane {
+  mix-blend-mode: var(--terrain-overlay-blend);
+  filter: var(--terrain-overlay-filter);
 }
 
 /* ---- Leaflet overrides for theme ---- */

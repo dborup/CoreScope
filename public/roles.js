@@ -822,6 +822,8 @@
       (cfg.map && cfg.map.tiles && cfg.map.tiles.lightUrl) || null;
     window.MC_DARK_TILE_URL_OVERRIDE = cfg.tiles ? (cfg.tiles.dark || null) :
       (cfg.map && cfg.map.tiles && cfg.map.tiles.darkUrl) || null;
+    // #680 — terrain overlay offer; absent unless the server's DHM proxy is on.
+    window.MC_DHM_CFG = cfg.dhm || null;
     if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);
     if (cfg.snrThresholds) Object.assign(SNR_THRESHOLDS, cfg.snrThresholds);
     if (cfg.distThresholds) Object.assign(DIST_THRESHOLDS, cfg.distThresholds);

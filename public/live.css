@@ -1314,6 +1314,9 @@ input.live-node-filter-input:focus {
  * how tall it grows (mobile two-row layout, safe-area-inset, etc.).
  */
 .live-feed { bottom: calc(var(--vcr-bar-height, 58px) + 10px); }
+/* #680 — Live has no attribution control of its own; the one the DHM terrain
+ * overlay adds while it is on must sit above the VCR bar, not under it. */
+#liveMap .leaflet-bottom { bottom: var(--vcr-bar-height, 58px); }
 /* Cap the feed's height so its scrollable content never extends below the
  * VCR bar top edge, even when the feed is pinned to a bottom corner.
  */

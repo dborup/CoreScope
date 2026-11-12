@@ -97,6 +97,10 @@ type Server struct {
 	// Cached /api/scope-audit/transport scans — per window and observer region, bounded
 	scopeTransport scopeAuditCache[scopeTransportScan]
 
+	// dhm is the #680 terrain hillshade proxy; nil while map.dhm is
+	// disabled or has no token (the endpoint then answers 404).
+	dhm *dhmProxy
+
 	// Cached /api/analytics/wardriving response — per-window, recomputed at most once every 30s
 	wardrivingStatsMu       sync.Mutex
 	wardrivingStatsCache    map[string]*WardrivingStatsResponse
@@ -222,6 +226,8 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 
 		// Keys come from request parameters (window × region), so bound them.
 		scopeTransport: scopeAuditCache[scopeTransportScan]{max: scopeTransportCacheMax},
+
+		dhm: newDHMProxyFromConfig(cfg),
 	}
 }
 
@@ -322,6 +328,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/regions/observed", s.handleRegionsObserved).Methods("GET")
 	r.HandleFunc("/api/config/theme", s.handleConfigTheme).Methods("GET")
 	r.HandleFunc("/api/config/map", s.handleConfigMap).Methods("GET")
+	r.HandleFunc("/api/map/dhm/wms", s.handleDHMTile).Methods("GET")
 	r.HandleFunc("/api/config/geo-filter", s.handleConfigGeoFilter).Methods("GET")
 	r.HandleFunc("/api/config/areas", s.handleConfigAreas).Methods("GET")
 	r.HandleFunc("/api/config/areas/polygons", s.handleConfigAreasPolygons).Methods("GET")
@@ -628,6 +635,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		GeoFilter:           s.getGeoFilter(),
 		Privacy:             privacy,
 		EstimatedPositions:  EstimatedPositionsClientConfig{Enabled: s.estimatedPositionsEnabled()},
+		DHM:                 s.dhmClientConfig(),
 	})
 }
 

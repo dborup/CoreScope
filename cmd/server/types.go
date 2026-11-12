@@ -1673,6 +1673,10 @@ type ClientConfigResponse struct {
 	Privacy *PrivacyClientConfig `json:"privacy,omitempty"`
 
 	EstimatedPositions EstimatedPositionsClientConfig `json:"estimatedPositions"`
+
+	// DHM offers the #680 terrain hillshade overlay. Omitted unless map.dhm
+	// is enabled with a token; it never carries the token itself.
+	DHM *DHMClientConfig `json:"dhm,omitempty"`
 }
 
 // PrivacyClientConfig is the privacy block of /api/config/client. It carries

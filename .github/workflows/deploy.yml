@@ -230,6 +230,8 @@ jobs:
           (cd internal/dbschema && go test ./...)
           (cd internal/brokerurl && go test ./...)
           (cd internal/pprofbind && go test ./...)
+          # internal/dhm (#680): shared DHM upstream client, allow-list and cache.
+          (cd internal/dhm && go test -race ./...)
           # internal/regions is its own module: the server/ingestor steps
           # above compile it but never run its tests, and it now holds the
           # hashRegions/hashRegionsPath loader both processes share (#360).

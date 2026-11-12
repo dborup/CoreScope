@@ -284,6 +284,10 @@ type Config struct {
 	CacheInvalidMs   *int                   `json:"cacheInvalidateMs"`
 	ExternalUrls     map[string]interface{} `json:"externalUrls"`
 
+	// DHM is map.dhm, lifted out of Map by extractDHMConfig so the token
+	// never rides along when Map is shipped to the browser (#680).
+	DHM DHMConfig `json:"-"`
+
 	LiveMap struct {
 		PropagationBufferMs int `json:"propagationBufferMs"`
 		MaxNodes            int `json:"maxNodes"`
@@ -832,6 +836,7 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		}
 		cfg.NormalizeTimestampConfig()
 		cfg.migrateDeprecatedConfig()
+		cfg.extractDHMConfig()
 		cfg.applyListLimitsDefaults()
 		cfg.RegionGroups = normalizeRegionGroups(cfg.RegionGroups, log.Printf)
 		applyCORSEnv(cfg)
@@ -840,6 +845,10 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 	}
 	cfg.NormalizeTimestampConfig()
 	cfg.migrateDeprecatedConfig()
+	// A config.json that failed to parse above may still have filled Map
+	// (encoding/json keeps decoding past a type error), so map.dhm and its
+	// token must be lifted out on this path too (#680).
+	cfg.extractDHMConfig()
 	cfg.applyListLimitsDefaults()
 	applyCORSEnv(cfg)
 	// No config.json anywhere: HASH_REGIONS_PATH alone can still name a
