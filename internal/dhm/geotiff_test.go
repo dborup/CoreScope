@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 )
@@ -401,9 +402,11 @@ func TestDecodeGeoTIFFEveryTruncation(t *testing.T) {
 	}
 }
 
-// No allocation follows a size read from the file: a header that claims
-// more than MaxRasterSize, or strips outside the buffer, costs a few KiB at
-// most, and nothing ever costs more than one MaxRasterSize² raster.
+// The only size read from the file that drives allocation is the raster's,
+// and it is checked against MaxRasterSize first: a header that claims more,
+// or strips outside the buffer, costs at most 16 KiB, and nothing ever costs
+// more than one MaxRasterSize² raster. The IFD's entry count does not drive
+// allocation either; see TestDecodeGeoTIFFManyIFDEntriesAllocationIsBounded.
 func TestDecodeGeoTIFFAllocationIsBounded(t *testing.T) {
 	small := []string{"width 513", "height 65535", "width 2^32-1", "absurd both",
 		"strip offset past end", "strip count past end", "field count overflow", "uncompressed 512² from 8 bytes"}
@@ -418,6 +421,48 @@ func TestDecodeGeoTIFFAllocationIsBounded(t *testing.T) {
 		if n := allocBytes(b); n > bound {
 			t.Errorf("%s: %d bytes allocated, over one raster", name, n)
 		}
+	}
+}
+
+// #686 review N1: the IFD's entry count comes from the file. A valid file
+// with every distinct tag that leaves the decode unchanged (65 530 entries;
+// the other six tags change the result) decodes with the same small
+// allocation as a plain one.
+func TestDecodeGeoTIFFManyIFDEntriesAllocationIsBounded(t *testing.T) {
+	f := newFixture(2, 2, []float32{1, 2, 3, 4}).georeferenced(575000, 6226500, 10)
+	plain := f.bytes()
+	ifdEntries := func(b []byte) int {
+		return int(binary.LittleEndian.Uint16(b[binary.LittleEndian.Uint32(b[4:]):]))
+	}
+	// Add every other tag, except those that change the decode: Predictor,
+	// TileWidth, ModelTransformation, GDAL_NODATA, FillOrder 266 and
+	// Orientation 274. Tags the file already has are overwritten unchanged.
+	f.fields = map[uint16]*fixtureField{}
+	skip := map[int]bool{tagPredictor: true, tagTileWidth: true, tagModelTransform: true, tagGDALNoData: true, 266: true, 274: true}
+	for tag := 0; tag <= 0xffff; tag++ {
+		if !skip[tag] {
+			f.fields[uint16(tag)] = f.shorts(7)
+		}
+	}
+	for _, tag := range []uint16{tagImageWidth, tagImageLength, tagBitsPerSample, tagCompression, tagStripOffsets,
+		tagSamplesPerPixel, tagRowsPerStrip, tagStripByteCounts, tagSampleFormat, tagModelTiepoint,
+		tagModelPixelScale, tagGeoKeyDirectory, 262} {
+		delete(f.fields, tag)
+	}
+	b := f.bytes()
+	if n := ifdEntries(b); n != 65530 {
+		t.Fatalf("fixture has %d IFD entries", n)
+	}
+	g, err := decodeGeoTIFF(b)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !slices.Equal(g.Values, []float32{1, 2, 3, 4}) || g.Georef != (Georef{575000, 6226500, 10, 10}) {
+		t.Fatalf("decoded %v %+v", g.Values, g.Georef)
+	}
+	base := allocBytes(plain)
+	if n := allocBytes(b); n > base+4<<10 {
+		t.Fatalf("%d bytes allocated for a %d-byte file with 65 530 entries; a plain file takes %d", n, len(b), base)
 	}
 }
 

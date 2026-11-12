@@ -25,7 +25,8 @@ import (
 // allocated, every offset and length is checked against the buffer, and a
 // strip that inflates to more than its expected size is an error. No
 // allocation depends on a size read from the file except the bounded
-// raster itself.
+// raster itself: the IFD keeps only the fixed set of tags the decoder
+// reads, however many entries the file lists.
 
 // errBadTIFF is every decode failure. Its text is fixed, so it never
 // carries file content.
@@ -50,6 +51,15 @@ const (
 	tagGeoKeyDirectory = 34735
 	tagGDALNoData      = 42113
 )
+
+// readTags are the tags readIFD keeps; every other entry is skipped, so
+// the field map never grows with the file's entry count (#686 review N1).
+var readTags = map[uint16]bool{
+	tagImageWidth: true, tagImageLength: true, tagBitsPerSample: true, tagCompression: true,
+	tagStripOffsets: true, tagSamplesPerPixel: true, tagRowsPerStrip: true, tagStripByteCounts: true,
+	tagPredictor: true, tagTileWidth: true, tagSampleFormat: true, tagModelPixelScale: true,
+	tagModelTiepoint: true, tagModelTransform: true, tagGeoKeyDirectory: true, tagGDALNoData: true,
+}
 
 // TIFF field types.
 const (
@@ -196,10 +206,13 @@ func (r *tiffReader) readIFD() error {
 	if off+2+n*12 > uint64(len(b)) {
 		return errBadTIFF
 	}
-	r.fields = make(map[uint16]tiffField, n)
+	r.fields = make(map[uint16]tiffField, len(readTags))
 	for i := uint64(0); i < n; i++ {
 		e := b[off+2+i*12 : off+2+i*12+12]
 		tag, typ, count := r.order.Uint16(e), r.order.Uint16(e[2:]), r.order.Uint32(e[4:])
+		if !readTags[tag] {
+			continue
+		}
 		size := typeSize(typ)
 		if size == 0 {
 			// A type the decoder never reads: kept without data, so a tag
