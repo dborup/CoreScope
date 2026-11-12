@@ -78,6 +78,14 @@ type Client struct {
 	lastLog atomic.Int64 // unix nanos of the last failure log line
 }
 
+// disableCompressionTransport clones the default transport with
+// compression disabled, so it never adds Accept-Encoding: gzip.
+func disableCompressionTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DisableCompression = true
+	return t
+}
+
 // NewClient returns nil unless cfg is Active.
 func NewClient(cfg Config, opts ClientOptions) *Client {
 	if !cfg.Active() {
@@ -88,6 +96,10 @@ func NewClient(cfg Config, opts ClientOptions) *Client {
 		opts:  opts,
 		http: &http.Client{
 			Timeout: opts.Timeout,
+			// Disable transparent gzip: the upstream truncates gzip
+			// bodies over HTTP/2 (#684), and PNG tiles and GeoTIFF
+			// rasters are already compressed anyway.
+			Transport: disableCompressionTransport(),
 			// Never follow a redirect: it would resend the token header
 			// to wherever upstream points.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
