@@ -91,6 +91,10 @@ func TestFetchRasterReturnsGeoreferencedGrid(t *testing.T) {
 		"twice the extent":        pyr(2*r.Width, 2*r.Height, r.BBox[0]-B/2, r.BBox[3]+B/2, px, px),
 		"pixels 2x tall":          pyr(r.Width, r.Height/2+1, r.BBox[0], r.BBox[3], px, 2*px),
 		"west edge 1.5 px out":    pyr(r.Width+1, r.Height, r.BBox[0]-1.5*px, r.BBox[3], px, px),
+		// Same extent, more pixels: only the size bound catches these.
+		"2 px more, same extent":  pyr(r.Width+2, r.Height+2, r.BBox[0], r.BBox[3], B/float64(r.Width+2), B/float64(r.Height+2)),
+		"2 px fewer, same extent": pyr(r.Width-2, r.Height, r.BBox[0], r.BBox[3], B/float64(r.Width-2), px),
+		"twice as fine":           pyr(2*r.Width, 2*r.Height, r.BBox[0], r.BBox[3], px/2, px/2),
 	} {
 		_, err := newTestSource(t, serve(body), &logSink{}).FetchRaster(r)
 		if !errors.As(err, &fe) || fe.Reason != "raster mismatch" {
