@@ -547,3 +547,25 @@ func TestDHM687_TerrainLayerOneAttempt(t *testing.T) {
 		})
 	}
 }
+
+// #688 review N1: the API docs name the default upstream and say what each
+// X-CoreScope-Tile value means; fallback-hit still made an upstream call.
+func TestDHM687_OpenAPIDescribesLayersAndTileStates(t *testing.T) {
+	meta, ok := routeDescriptions()["GET /api/map/dhm/wms"]
+	if !ok {
+		t.Fatal("route not described")
+	}
+	if !strings.Contains(meta.Summary, "exaggerated by default") || strings.Contains(meta.Summary, "terrain hillshade tile") {
+		t.Errorf("summary %q does not name the default layer", meta.Summary)
+	}
+	for _, want := range []string{
+		exaggeratedLayer, "wms/dhm_temp", terrainLayer, "map.dhm.layer",
+		"hit / miss", "fallback = ", "outside = ", "unavailable = ",
+		"fallback-hit = the exaggerated attempt still went upstream and failed, and the terrain tile came from the cache",
+		"not on a timeout or a full upstream budget",
+	} {
+		if !strings.Contains(meta.Description, want) {
+			t.Errorf("description lacks %q", want)
+		}
+	}
+}
