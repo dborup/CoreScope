@@ -16,9 +16,10 @@
 //   - Cache: a bounded LRU (entries, bytes, TTL) for upstream responses.
 //   - Attribution: the one CC BY 4.0 credit line for DHM data.
 //
-// The hillshade tile shape (#680) lives in wms.go. Further features, such
-// as the terrain profile (#681), add their own request shape next to it and
-// reuse the rest.
+// The hillshade tile shape (#680) lives in wms.go. The elevation raster
+// shape for the terrain profile (#681) lives in wcs.go, behind the
+// ElevationSource interface. Further features add their own request shape
+// next to them and reuse the rest.
 package dhm
 
 import "strings"
