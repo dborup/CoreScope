@@ -994,8 +994,11 @@ type WebSocketConfig struct {
 	// X-Forwarded-For may be believed. REQUIRED for the limits to do anything
 	// behind nginx/Caddy/Traefik/ingress: without it every visitor shares the
 	// proxy's address, so the limits are skipped and a warning is logged.
-	// Never list an address you do not control; anyone reaching the server
-	// from a trusted address can name any client IP they like.
+	// X-Forwarded-For is walked from the right, skipping these addresses;
+	// the first untrusted entry is the client (#691), so a proxy may append
+	// to the header or replace it. Never list an address you do not control;
+	// anyone reaching the server from a trusted address can name any client
+	// IP they like.
 	TrustedProxies []string `json:"trustedProxies,omitempty"`
 
 	// Deny blocks addresses outright at the upgrade, before the handshake.

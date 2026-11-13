@@ -5,9 +5,10 @@ package main
 // visitors: /api/terrain/profile and the DHM tile proxy.
 //
 // Clients are identified exactly like the /ws limits (#1794, clientAddr):
-// X-Forwarded-For only from a configured trusted proxy, and no per-IP
-// limit at all when every request comes from an unconfigured local proxy,
-// because that would throttle every visitor together. That case logs one
+// X-Forwarded-For only from a configured trusted proxy, walked from the
+// right past trusted hops (#691), and no per-IP limit at all when every
+// request comes from an unconfigured local proxy, because that would
+// throttle every visitor together. That case logs one
 // warning naming the setting to fix.
 //
 // The budget is a GCRA token bucket: perMin requests at once, refilled at
@@ -49,21 +50,75 @@ func clientAddr(r *http.Request, trustedProxies []*net.IPNet) (ip net.IP, distin
 		return nil, false
 	}
 	if ipInAny(peer, trustedProxies) {
-		// First hop is the client; later hops were appended by intermediaries
-		// we have no reason to trust individually.
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first := strings.TrimSpace(strings.Split(xff, ",")[0])
-			if fwd := net.ParseIP(first); fwd != nil {
-				return fwd, true
-			}
-		}
-		// A trusted proxy that forwarded no XFF still identifies itself.
-		return peer, true
+		return forwardedClient(r.Header.Values("X-Forwarded-For"), peer, trustedProxies), true
 	}
 	if peer.IsLoopback() || peer.IsPrivate() || peer.IsLinkLocalUnicast() {
 		return peer, false
 	}
 	return peer, true
+}
+
+// forwardedClient finds the client behind a trusted peer (#691). It walks
+// X-Forwarded-For from the RIGHT, the end our own proxies write, and skips
+// hops that are themselves trusted proxies; the first untrusted address is
+// the client. The left-most entry is not believed: a proxy that appends to
+// the header (nginx $proxy_add_x_forwarded_for) leaves whatever the client
+// sent there, so it would let one client mint a fresh budget per request
+// and fill the client table with forged addresses. A proxy that replaces
+// the header writes one entry, which this walk returns as before.
+//
+// Several header lines count as one comma-joined line, in order (RFC 9110
+// 5.3), so a client-sent line ahead of the proxy's own is still left of it.
+//
+// A malformed or empty entry fails closed: the walk stops and the result is
+// the nearest address a trusted hop vouched for (peer, when the bad entry is
+// right-most). A trusted proxy only ever writes the address it saw, so a
+// bad entry there is not its work, and skipping past it would hand the
+// identity to whatever lies further left — client-controlled behind an
+// appending proxy. Stopping instead attributes the request to a known hop,
+// which keeps the limit enforced rather than bypassable. "host:port" and
+// "[v6]:port" entries are accepted, since some proxies append the port.
+//
+// When every entry is trusted, the left-most (furthest) trusted hop is the
+// best we know. The walk does not allocate: it runs on every /ws upgrade
+// and every limited DHM request.
+func forwardedClient(lines []string, peer net.IP, trusted []*net.IPNet) net.IP {
+	client := peer
+	for li := len(lines) - 1; li >= 0; li-- {
+		rest := lines[li]
+		for {
+			hop := rest
+			cut := strings.LastIndexByte(rest, ',')
+			if cut >= 0 {
+				hop, rest = rest[cut+1:], rest[:cut]
+			}
+			ip := parseForwardedHop(hop)
+			if ip == nil {
+				return client
+			}
+			if !ipInAny(ip, trusted) {
+				return ip
+			}
+			client = ip
+			if cut < 0 {
+				break
+			}
+		}
+	}
+	return client
+}
+
+// parseForwardedHop parses one X-Forwarded-For entry: a bare address, or
+// one with a port. Anything else, including an empty entry, is nil.
+func parseForwardedHop(s string) net.IP {
+	s = strings.TrimSpace(s)
+	if ip := net.ParseIP(s); ip != nil {
+		return ip
+	}
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		return net.ParseIP(host)
+	}
+	return nil
 }
 
 // ipRateLimiter is a per-client budget of perMin requests per minute. A nil

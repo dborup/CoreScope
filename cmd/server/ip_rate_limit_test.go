@@ -115,8 +115,15 @@ func TestIPRateLimiter_TrustedProxyXFF(t *testing.T) {
 	if ok, _ := l.allow(limiterReq("127.0.0.1:1", "203.0.113.9")); !ok {
 		t.Fatal("first request refused")
 	}
-	if ok, _ := l.allow(limiterReq("127.0.0.1:2", "203.0.113.9, 10.0.0.1")); ok {
+	// #691: the walk is from the right past trusted hops, so the same
+	// client behind a second trusted hop is still the same client ...
+	if ok, _ := l.allow(limiterReq("127.0.0.1:2", "203.0.113.9, 127.0.0.1")); ok {
 		t.Fatal("same forwarded client not limited")
+	}
+	// ... while an untrusted right-most hop is the client: everything left
+	// of it may have been written by that client.
+	if ok, _ := l.allow(limiterReq("127.0.0.1:2", "203.0.113.9, 10.0.0.1")); !ok {
+		t.Fatal("untrusted right-most hop not treated as its own client")
 	}
 	if ok, _ := l.allow(limiterReq("127.0.0.1:3", "203.0.113.10")); !ok {
 		t.Fatal("other forwarded client limited")
