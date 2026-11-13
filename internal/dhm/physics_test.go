@@ -160,3 +160,51 @@ func TestDecimateKeepsEndpointsAndWorst(t *testing.T) {
 		t.Fatal("negative keep broke the bound")
 	}
 }
+
+// TestAssessEndpointNodataIsUnknown: a NaN at either end of the series
+// being assessed makes the verdict unknown (#696 finding 2). Assess is
+// the same for both models; the endpoint heights alone do not catch it,
+// since they come from the DTM, so a DSM gap at an endpoint used to pass
+// as "clear". The handler side is TestTerrainProfile_EndpointNodata.
+func TestAssessEndpointNodataIsUnknown(t *testing.T) {
+	nan := float32(math.NaN())
+	l := Link{DistanceM: 20, HeightA: 10, HeightB: 10, LambdaM: Wavelength(FirmwareFreqMHz), K: DefaultKFactor}
+	if a := l.Assess([]float32{0, 0, 0}); a.State != VerdictClear {
+		t.Fatalf("control: %+v", a)
+	}
+	for _, s := range [][]float32{{nan, 0, 0}, {0, 0, nan}} {
+		if a := l.Assess(s); a.State != VerdictUnknown || a.WorstIndex != -1 {
+			t.Errorf("Assess(%v) = %+v, want unknown", s, a)
+		}
+	}
+}
+
+// TestAssessObstacleNextToEndpoint: the interior samples right next to
+// each antenna are assessed, so an obstacle there blocks the link, in
+// both directions (#696 finding 3).
+func TestAssessObstacleNextToEndpoint(t *testing.T) {
+	l, dtm := flatLink()
+	n := len(dtm)
+	for i := range dtm {
+		dtm[i] = -500 // only the obstacle matters
+	}
+	dtm[0], dtm[n-1] = 0, 0
+	for _, c := range []struct {
+		name   string
+		idx    int
+		ha, hb float64
+	}{
+		{"next to A", 1, 10, 10},
+		{"next to B", n - 2, 10, 10},
+		{"next to A, B high", 1, 10, 200},
+		{"next to B, A high", n - 2, 200, 10},
+	} {
+		obst := append([]float32(nil), dtm...)
+		obst[c.idx] = 300 // far above any line of sight
+		ll := l
+		ll.HeightA, ll.HeightB = c.ha, c.hb
+		if a := ll.Assess(obst); a.State != VerdictBlocked || a.WorstIndex != c.idx {
+			t.Errorf("%s: %q at %d, want blocked at %d", c.name, a.State, a.WorstIndex, c.idx)
+		}
+	}
+}
