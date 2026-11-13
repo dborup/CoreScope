@@ -14,9 +14,11 @@ import (
 // WCS 1.0 only serves axis-aligned rasters, so one raster around a
 // diagonal path costs O(L²) pixels. Splitting the path into chunks of
 // about ChunkM keeps the total near O(L), at most MaxCallsPerModel
-// rasters per elevation model. Samples outside the DHM raster extent are never
-// requested: a path that leaves Denmark gets a gap there, and a path with
-// no sample inside makes no upstream call at all.
+// rasters per elevation model. Samples outside the DHM raster extent, or
+// outside Danish land and waters (InDenmark, #692: upstream answers 0.0
+// there, not nodata), are never requested: a path that leaves Denmark
+// gets a gap there, and a path with no sample inside makes no upstream
+// call at all.
 
 const (
 	MinStepM = 10 // finer than any Fresnel radius needs (plan §1.3)
@@ -56,7 +58,8 @@ type PlanOptions struct {
 }
 
 // Plan is the sampling of one path: evenly spaced samples from A to B in
-// EPSG:25832, and the rasters that cover the ones inside the DHM extent.
+// EPSG:25832, and the rasters that cover the ones DHM covers (inside the
+// raster extent and InDenmark).
 type Plan struct {
 	DistanceM float64
 	StepM     float64
@@ -94,7 +97,9 @@ func PlanProfile(a, b LatLon, o PlanOptions) Plan {
 		e, nn := ea+(eb-ea)*t, na+(nb-na)*t
 		p.E[i], p.N[i] = e, nn
 		// Written so NaN (a projection far outside zone 32) is outside.
-		p.inside[i] = e >= ext[0] && e <= ext[2] && nn >= ext[1] && nn <= ext[3]
+		// The extent check is first: it is cheaper, and InDenmark is only
+		// meaningful where DHM serves rasters at all.
+		p.inside[i] = e >= ext[0] && e <= ext[2] && nn >= ext[1] && nn <= ext[3] && InDenmark(e, nn)
 	}
 
 	// Chunks of about ChunkM: rounding, so a path a few metres over a
@@ -119,7 +124,7 @@ func PlanProfile(a, b LatLon, o PlanOptions) Plan {
 // chunk plans the raster for samples [first, last]: their bbox plus one
 // pixel of margin for bilinear sampling, clipped to the raster extent, at
 // the sample step or coarser if the edge would exceed MaxRasterSize. ok is
-// false when no sample is inside the extent.
+// false when no sample is covered.
 func (p *Plan) chunk(first, last int) (planChunk, bool) {
 	minE, minN := math.Inf(1), math.Inf(1)
 	maxE, maxN := math.Inf(-1), math.Inf(-1)
@@ -151,7 +156,7 @@ func (p *Plan) chunk(first, last int) (planChunk, bool) {
 // Calls is the number of rasters fetched per elevation model.
 func (p *Plan) Calls() int { return len(p.chunks) }
 
-// Covered is the number of samples inside the DHM raster extent.
+// Covered is the number of samples DHM covers.
 func (p *Plan) Covered() int {
 	n := 0
 	for _, in := range p.inside {
@@ -164,7 +169,7 @@ func (p *Plan) Covered() int {
 
 // Fetch fetches model m's rasters concurrently (the Client's semaphore
 // bounds the upstream concurrency) and returns the elevation at every
-// sample, NaN where there is none: outside the extent, or nodata. Each
+// sample, NaN where there is none: not covered, or nodata. Each
 // raster gets perCall (0: no own limit); the first failure cancels the
 // others and is returned. A raster is decoded, sampled and dropped; none
 // is kept.
