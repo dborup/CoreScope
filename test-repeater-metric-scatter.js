@@ -89,10 +89,33 @@ const fakeLocalStorage = (() => {
   return { getItem: k => (k in s ? s[k] : null), setItem: (k, v) => { s[k] = String(v); }, removeItem: k => { delete s[k]; } };
 })();
 
+// Busiest Repeaters (the tab's second section) keeps its URL view-param
+// specs next to the other tabs' ones, outside the block: run the real ones.
+const specStart = src.indexOf('var BUSIEST_SORT');
+const specEnd = src.indexOf('// === BUSIEST SPECS END');
+if (specStart < 0 || specEnd < 0) {
+  console.error('  ✗ could not locate the BUSIEST_* view-param specs');
+  process.exit(1);
+}
+const SPECS = new Function(src.slice(specStart, specEnd) + '\nreturn { BUSIEST_SORT, BUSIEST_OBSERVERS, BUSIEST_LIMIT };')();
+let observersData = { observers: [] };
+let lastApiPath = null;
+const api = async (p) => { lastApiPath = p; return observersData; };
+// The URL as restoreViewParams/setViewParam would read and write it.
+const viewParams = {};
+const restoreViewParams = specs => specs.map(s => {
+  const v = viewParams[s.param];
+  return v != null && s.allowed.indexOf(v) >= 0 ? v : s.dflt;
+});
+const setViewParam = (spec, v) => { viewParams[spec.param] = v; };
+CLIENT_TTL.observers = 0;
+
 const M = new Function(
   'esc', 'window', 'RegionFilter', 'AreaFilter', 'fetchAllNodes', 'getFavorites', 'CLIENT_TTL', 'localStorage',
-  block + '\nreturn { REPEATER_METRIC_AXES, REPEATER_METRIC_POINT_CAP, _niceCeil, _axisFmt, _axisFromMax, _resolveAxis, _toScatterPoints, _sampleExact, _sampleForPlot, renderMetricScatter, renderRepeaterMetricsTab };')(
-  esc, windowStub, RegionFilter, AreaFilter, fetchAllNodes, getFavorites, CLIENT_TTL, fakeLocalStorage);
+  'api', 'restoreViewParams', 'setViewParam', 'BUSIEST_SORT', 'BUSIEST_OBSERVERS', 'BUSIEST_LIMIT',
+  block + '\nreturn { REPEATER_METRIC_AXES, REPEATER_METRIC_POINT_CAP, _niceCeil, _axisFmt, _axisFromMax, _resolveAxis, _toScatterPoints, _sampleExact, _sampleForPlot, renderMetricScatter, renderRepeaterMetricsTab, _busiestRepeaterRows, renderBusiestRepeatersTable, BUSIEST_DEFAULT_ROWS };')(
+  esc, windowStub, RegionFilter, AreaFilter, fetchAllNodes, getFavorites, CLIENT_TTL, fakeLocalStorage,
+  api, restoreViewParams, setViewParam, SPECS.BUSIEST_SORT, SPECS.BUSIEST_OBSERVERS, SPECS.BUSIEST_LIMIT);
 
 console.log('\n=== [1] axis registry: all 8 axes exist and read the right point fields ===');
 assert(M.REPEATER_METRIC_AXES.map(a => a.key).join(',') === 'traffic,usefulness,bridge,coverage,redundancy,relay1h,relay24h,adverts',
@@ -323,6 +346,7 @@ function makeElement(id) {
     querySelectorAll() { return []; },
     addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); },
     fireChange() { (this._listeners.change || []).forEach(fn => fn({ target: this })); },
+    fireClick() { (this._listeners.click || []).forEach(fn => fn({ target: this })); },
   };
 }
 
@@ -487,6 +511,117 @@ function makeElement(id) {
     assert(/No repeater or room nodes/.test(el.innerHTML),
       'a node set with no repeater/room rows shows an explicit empty state');
   }
+
+  console.log('\n=== [B1] Busiest Repeaters rows: who is listed, in which order ===');
+  {
+    const nodes = [
+      { public_key: 'aa01', name: 'Alpha', role: 'repeater', relay_count_1h: 10, relay_count_24h: 300 },
+      { public_key: 'bb02', name: 'Bravo', role: 'repeater', relay_count_1h: 40, relay_count_24h: 200 },
+      { public_key: 'cc03', name: 'Charlie', role: 'room', relay_count_1h: '5', relay_count_24h: '300' },
+      { public_key: 'dd04', name: 'Delta', role: 'repeater', relay_count_1h: 0, relay_count_24h: 0 },
+      { public_key: 'ee05', name: 'Echo', role: 'companion', relay_count_1h: 99, relay_count_24h: 999 },
+      { public_key: 'FF06', name: 'Foxtrot', role: 'repeater', relay_count_1h: 1, relay_count_24h: 500 },
+    ];
+    const obs = new Set(['ff06']);
+    const r24 = M._busiestRepeaterRows(nodes, obs, '24h', false);
+    assert(r24.map(r => r.name).join(',') === 'Alpha,Charlie,Bravo',
+      '24h: repeaters and rooms with relays, most first; ties go to the 1h count; got ' + r24.map(r => r.name).join(','));
+    assert(r24[1].relay24h === 300 && r24[1].relay1h === 5, 'string counts from the API are cast to numbers');
+    const r1 = M._busiestRepeaterRows(nodes, obs, '1h', false);
+    assert(r1.map(r => r.name).join(',') === 'Bravo,Alpha,Charlie', '1h: ranked by the last hour; got ' + r1.map(r => r.name).join(','));
+    const withObs = M._busiestRepeaterRows(nodes, obs, '24h', true);
+    assert(withObs[0].name === 'Foxtrot' && withObs[0].observer === true,
+      'an observer repeater is listed when included, matched on a lower-cased public key');
+    assert(withObs.filter(r => r.observer).length === 1, 'only the observer repeater is marked as one');
+    assert(M._busiestRepeaterRows(nodes, new Set(), '24h', false).length === 4,
+      'without an observer list nothing is hidden');
+  }
+
+  console.log('\n=== [B2] Busiest Repeaters table markup ===');
+  {
+    const rows = Array.from({ length: 60 }, (_, i) => ({ pk: 'k' + i, name: 'R' + i, role: 'repeater', relay1h: 1, relay24h: 1000 - i, observer: false }));
+    rows[0].name = '<img src=x onerror=alert(1)>';
+    const top = M.renderBusiestRepeatersTable(rows, '24h', '50');
+    assert((top.match(/<tr><td/g) || []).length === M.BUSIEST_DEFAULT_ROWS, 'the default limit shows the top 50 rows');
+    assert(!top.includes('<img src=x') && top.includes('&lt;img src=x'), 'a node name is escaped');
+    assert(/id="busiestLimitToggle"[^>]*>Show all 60</.test(top), 'a "Show all 60" button follows the truncated list');
+    assert(/aria-sort="descending">Relayed 24h</.test(top) && !/aria-sort="descending">Relayed 1h</.test(top),
+      'the sorted column is marked aria-sort="descending"');
+    const all = M.renderBusiestRepeatersTable(rows, '1h', 'all');
+    assert((all.match(/<tr><td/g) || []).length === 60 && /Show top 50</.test(all), '"all" shows every row and offers the top 50 again');
+    assert(/aria-sort="descending">Relayed 1h</.test(all), 'sorting by 1h marks the 1h column');
+    const few = M.renderBusiestRepeatersTable(rows.slice(0, 3), '24h', '50');
+    assert(!few.includes('busiestLimitToggle'), 'no limit button when every row fits');
+    assert(/No repeater in this view relayed/.test(M.renderBusiestRepeatersTable([], '24h', '50')), 'an empty list says so');
+    assert(/<td style="text-align:right">1<\/td><td[^>]*><a href="#\/nodes\/k0\/analytics"/.test(top), 'rows are numbered and link to the node analytics');
+    assert(/^<div class="analytics-table-scroll"><table class="analytics-table busiest-repeaters-table"/.test(top),
+      'the table carries its own #206 scroll wrapper, so a redraw keeps it, and the class that lifts the 480px minimum');
+  }
+
+  console.log('\n=== [B3] Busiest Repeaters in the rendered tab: URL state and controls ===');
+  {
+    nodesData = [
+      { public_key: 'aa01', name: 'Alpha', role: 'repeater', relay_count_1h: 10, relay_count_24h: 300 },
+      { public_key: 'bb02', name: 'Bravo', role: 'repeater', relay_count_1h: 40, relay_count_24h: 200 },
+      { public_key: 'ff06', name: 'ObsRep', role: 'repeater', relay_count_1h: 1, relay_count_24h: 900 },
+    ];
+    observersData = { observers: [{ id: 'FF06', name: 'ObsRep' }] };
+    Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    assert(lastApiPath === '/observers', 'the tab fetches the observer list');
+    const table = () => el.querySelector('#busiestRepeatersTable').innerHTML;
+    const names = () => Array.from(table().matchAll(/class="analytics-link">([^<]+)</g), m => m[1]).join(',');
+    assert(names() === 'Alpha,Bravo', 'default: 24h order with the observer repeater hidden; got ' + names());
+    assert(/Include observer repeaters \(1\)/.test(el.innerHTML), 'the checkbox shows how many observer repeaters are hidden');
+    assert(/option value="24h" selected/.test(el.innerHTML), 'the sort select opens on 24h');
+
+    const sortSel = el.querySelector('#busiestSort');
+    sortSel.value = '1h';
+    sortSel.fireChange();
+    assert(names() === 'Bravo,Alpha' && viewParams.bsort === '1h', 'choosing 1h re-sorts and writes bsort=1h to the URL');
+
+    const obsBox = el.querySelector('#busiestObservers');
+    obsBox.checked = true;
+    obsBox.fireChange();
+    assert(names() === 'Bravo,Alpha,ObsRep' && viewParams.bobs === 'show', 'including observers lists them and writes bobs=show');
+    assert(/ObsRep<\/a> <span class="text-muted">observer<\/span>/.test(table()), 'an observer repeater is tagged as one');
+
+    sortSel.value = 'bogus';
+    sortSel.fireChange();
+    assert(viewParams.bsort === '24h', 'an unknown sort value falls back to 24h');
+  }
+  {
+    // Deep link: the URL decides the state on render.
+    viewParams.bsort = '1h'; viewParams.bobs = 'show'; viewParams.blimit = 'all';
+    nodesData = Array.from({ length: 55 }, (_, i) => ({ public_key: 'p' + i, name: 'N' + i, role: 'repeater', relay_count_1h: i, relay_count_24h: 100 }));
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    assert(/option value="1h" selected/.test(el.innerHTML) && /id="busiestObservers" checked/.test(el.innerHTML),
+      'bsort=1h and bobs=show from the URL select the controls');
+    const html = el.querySelector('#busiestRepeatersTable').innerHTML;
+    assert((html.match(/<tr><td/g) || []).length === 55, 'blimit=all from the URL shows every row');
+    el.querySelector('#busiestRepeatersTable').querySelector('#busiestLimitToggle').fireClick();
+    assert(viewParams.blimit === '50' && (el.querySelector('#busiestRepeatersTable').innerHTML.match(/<tr><td/g) || []).length === 50,
+      'the limit button goes back to the top 50 and writes it to the URL');
+    Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
+  }
+  {
+    const failingApi = observersData;
+    observersData = null;
+    nodesData = [{ public_key: 'aa01', name: 'Alpha', role: 'repeater', relay_count_1h: 1, relay_count_24h: 2 }];
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    assert(/Alpha/.test(el.querySelector('#busiestRepeatersTable').innerHTML) && /Include observer repeaters \(0\)/.test(el.innerHTML),
+      'without an observer list the table still renders and hides nobody');
+    observersData = failingApi;
+  }
+
+  console.log('\n=== [B4] wiring (structural) ===');
+  assert(/'repeater-metrics': \[BUSIEST_SORT\.param, BUSIEST_OBSERVERS\.param, BUSIEST_LIMIT\.param\]/.test(src),
+    'TAB_URL_PARAMS drops bsort/bobs/blimit when another tab is selected');
+  assert(/api\('\/observers', \{ ttl: CLIENT_TTL\.observers \}\)\.catch\(/.test(block),
+    'a failing observer fetch cannot break the Repeater Metrics tab');
 
   console.log('\n────────────────────────────────────────');
   console.log(`  ${passed} passed, ${failed} failed`);

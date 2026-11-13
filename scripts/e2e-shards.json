@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-busiest-repeaters-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; Analytics Repeater Metrics Busiest Repeaters table: 24h and 1h ranking checked against /api/nodes, observer repeaters hidden and shown, bsort/bobs/blimit deep link and tab-switch cleanup, top-50 limit toggle, and all four columns inside a 375px phone. About 15s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-680-dhm-terrain-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

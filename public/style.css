@@ -3515,6 +3515,8 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .analytics-table-scroll .analytics-table,
 .analytics-table-scroll .analytics-peer-table,
 .analytics-table-scroll .compare-table { min-width: 480px; }
+/* Busiest Repeaters: four columns that fit a phone, names wrap anywhere. */
+.analytics-table-scroll .busiest-repeaters-table { min-width: 0; }
 @media (max-width: 640px) {
   .spark-bar { min-width: 60px; width: auto; }
 }
