@@ -1533,6 +1533,62 @@ test('#393 N10 countEscDefs catches a second, differently-declared esc', () => {
 });
 
 // =========================================================================
+// #681 M4 — terrain-profile.js: node names reach the chart's <title> and the
+// only sink that renders it is an SVG string. The chart is built in Node from
+// the real module, so a dropped esc() in buildChart fails here.
+// =========================================================================
+
+const terrainEsc = loadLocalEsc('public/terrain-profile.js');
+
+function loadTerrainProfile() {
+  const ctx = {
+    window: { addEventListener() {}, localStorage: null },
+    console, Math, Date, JSON, Array, Object, String, Number, RegExp, Error,
+    isNaN, isFinite, parseInt, parseFloat, URLSearchParams, Map, Set, Promise,
+    setTimeout: () => 0, clearTimeout: () => {},
+    document: { createElement: () => ({ style: {}, setAttribute() {}, appendChild() {} }) },
+  };
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync('public/terrain-profile.js', 'utf8'), ctx);
+  return ctx.window.TerrainProfile;
+}
+
+function terrainChart(nameA, nameB) {
+  const TP = loadTerrainProfile();
+  return TP.buildChart({
+    distanceM: 1000,
+    a: { lat: 56, lon: 10, kind: 'node', groundM: 0, antennaM: 10, antennaSource: 'role-default', assumed: true },
+    b: { lat: 56.01, lon: 10, kind: 'node', groundM: 0, antennaM: 10, antennaSource: 'role-default', assumed: true },
+    model: 'dtm', stepM: 500, sampleCount: 3,
+    coverage: { state: 'full', pct: 100, firstGapM: null },
+    samples: [{ d: 0, dtm: 0 }, { d: 500, dtm: 0 }, { d: 1000, dtm: 0 }],
+    physics: { freqMHz: 869.618, freqSource: 'firmware', lambdaM: 0.34474, k: 1.3333, kSource: 'default', f1MaxM: 9.28 },
+    verdict: { state: 'clear', model: 'dtm', criterion: 0.6, worstClearanceM: 9.9, worstAtM: 500, worstF1Fraction: 1.07 },
+    attribution: 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0',
+  }, { nameA, nameB });
+}
+
+test('#681 M4 terrain-profile esc() neutralises both payloads', () => {
+  assertNoXss(terrainEsc(TAG_PAYLOAD + ATTR_PAYLOAD), '#681 esc()');
+});
+
+test('#681 M4 a hostile node name reaches the chart title escaped', () => {
+  const svg = terrainChart(TAG_PAYLOAD, ATTR_PAYLOAD);
+  const title = (svg.match(/<title>([\s\S]*?)<\/title>/) || [])[1];
+  assert.ok(title, '#681: the chart has no <title> to carry the verdict');
+  assertNoXss(title, '#681 chart title');
+  assert.strictEqual(svg.indexOf('<img'), -1, '#681: a raw tag reached the chart SVG');
+  assert.ok(title.indexOf('&lt;img') >= 0, '#681: the payload must be escaped, not dropped');
+});
+
+test('#681 M4 the empty-state chart escapes its text too', () => {
+  const TP = loadTerrainProfile();
+  const svg = TP.buildChart({ samples: [], coverage: { state: 'none', pct: 0 }, verdict: { state: 'unknown' } },
+    { nameA: TAG_PAYLOAD, nameB: TAG_PAYLOAD });
+  assert.strictEqual(svg.indexOf('<img'), -1, '#681: a raw tag reached the empty-state SVG');
+});
+
+// =========================================================================
 // SUMMARY
 // =========================================================================
 (async () => {

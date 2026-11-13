@@ -136,6 +136,7 @@ run test-issue-1420-tile-providers.js
 run test-issue-1614-tile-url-function.js
 run test-issue-332-tile-provider-fallback.js
 run test-issue-680-dhm-terrain.js
+run test-issue-681-profile-tool.js
 run test-issue-390-legacy-tile-followups.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js

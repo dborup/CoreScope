@@ -811,6 +811,9 @@
 
     loadNodes().then(() => {
       if (!alive()) return;
+      // #681 M4 — offer the Path profile tool (and restore a ?profile= deep
+      // link) once the nodes are in, so endpoint names resolve immediately.
+      initProfileTool();
       // Check for a wardriving GPS trail (via sessionStorage) — see
       // drawGPSTrail. Distinct from map-route-hops: these are raw shared
       // coordinates, not mesh hop keys needing node resolution.
@@ -2307,6 +2310,9 @@
     if (_renderingMarkers) return;
     _renderingMarkers = true;
     try { _renderMarkersInner(); } finally { _renderingMarkers = false; }
+    // #681 M4: markers are rebuilt on every filter change; re-attach the
+    // profile pickers to the new ones. A no-op unless the tool is armed.
+    profileSyncPickers();
   }
 
   function _renderMarkersInner() {
@@ -2687,6 +2693,275 @@
     });
   }
 
+  // ── #681 M4: Path profile measure tool ──────────────────────────────────
+  // Pick two nodes, or a node and any map point, and read the terrain, the
+  // line of sight and the first Fresnel zone between them. The chart and the
+  // panel live in public/terrain-profile.js; this is only the map half —
+  // the toggle, the picking, the preview line and the deep link.
+  //
+  // Offered only when /api/config/client carries an enabled `dhm` block with
+  // `profile: true`; the server omits the block entirely without a token and
+  // drops the flag unless map.dhm.profile.enabled is set, so a disabled
+  // instance never builds any of this.
+  //
+  // Inert until armed: no request, no map listener and no marker handler
+  // exists before the user presses the toggle.
+  var profileTool = null;     // the terrain-profile.js controller
+  var profileArm = null;      // 'a' | 'b' while picking, else null
+  var profileLine = null;     // the measured path
+  var profileGhost = null;    // live preview from A to the pointer
+  var profileBtn = null;
+  var profileHintEl = null;
+  var profileKeyHandler = null;
+  var profileAnchor = null;   // [lat, lon] of A while picking B
+
+  function profileOffered() {
+    var c = window.MC_DHM_CFG;
+    return !!(c && c.enabled === true && c.profile === true &&
+      window.TerrainProfile && typeof window.TerrainProfile.create === 'function');
+  }
+
+  // resolveNode is the only thing terrain-profile.js asks the map for: a
+  // display name and a position for a public key. Observers count as nodes
+  // here because they carry a marker and a key just the same.
+  function profileResolveNode(pubkey) {
+    if (!pubkey) return null;
+    var want = String(pubkey).toLowerCase();
+    var i, n;
+    for (i = 0; i < nodes.length; i++) {
+      n = nodes[i];
+      if ((n.public_key || '').toLowerCase() === want) {
+        return { name: n.name || n.adv_name || null, lat: n.lat, lon: n.lon, role: n.role || null };
+      }
+    }
+    for (i = 0; i < observers.length; i++) {
+      n = observers[i];
+      if ((n.id || '').toLowerCase() === want) {
+        return { name: n.name || n.id || null, lat: n.lat, lon: n.lon, role: 'observer' };
+      }
+    }
+    return null;
+  }
+
+  function profileRefLatLng(ref) {
+    if (!ref) return null;
+    if (ref.kind === 'point') return [ref.lat, ref.lon];
+    var n = profileResolveNode(ref.pubkey);
+    return (n && n.lat != null && n.lon != null) ? [n.lat, n.lon] : null;
+  }
+
+  function ensureProfileTool() {
+    if (profileTool) return profileTool;
+    var wrap = document.getElementById('map-wrap');
+    if (!wrap || !profileOffered()) return null;
+    profileTool = window.TerrainProfile.create({
+      mount: wrap,
+      resolveNode: profileResolveNode,
+      onClose: function () {
+        profileDisarm();
+        profileClearLine();
+        profileSyncButton();
+      }
+    });
+    if (!profileKeyHandler) {
+      // Escape disarms the picker; a second Escape closes the panel.
+      profileKeyHandler = function (e) {
+        if (e.key !== 'Escape') return;
+        if (profileArm) { profileDisarm(); return; }
+        if (profileTool && profileTool.isOpen()) profileTool.close();
+      };
+      document.addEventListener('keydown', profileKeyHandler);
+    }
+    return profileTool;
+  }
+
+  function profileSyncButton() {
+    if (!profileBtn) return;
+    var armed = !!profileArm;
+    profileBtn.classList.toggle('active', armed);
+    profileBtn.setAttribute('aria-pressed', armed ? 'true' : 'false');
+  }
+
+  function profileShowHint(text) {
+    if (!profileHintEl) return;
+    profileHintEl.textContent = text;
+    profileHintEl.hidden = false;
+  }
+
+  function profileHideHint() {
+    if (profileHintEl) profileHintEl.hidden = true;
+  }
+
+  // While armed, every marker gets a click handler and loses its popup; when
+  // disarmed the handlers go and the popups come back, so an idle map carries
+  // none of this. The popup has to go rather than be closed again afterwards:
+  // Leaflet auto-pans the map to fit a popup it opens, which would move every
+  // marker out from under the pointer between the first pick and the second.
+  function profileSyncPickers() {
+    if (!profileArm && !profileTool) return;
+    var on = !!profileArm;
+    for (var i = 0; i < _currentMarkerData.length; i++) {
+      var m = _currentMarkerData[i];
+      var mk = m._leafletMarker;
+      if (!mk) continue;
+      mk.off('click', onProfileMarkerPick);
+      if (on) {
+        mk.unbindPopup();
+        mk.on('click', onProfileMarkerPick);
+      } else if (!mk.getPopup() && typeof m.popupFn === 'function') {
+        mk.bindPopup(m.popupFn(), { maxWidth: 280 });
+      }
+    }
+  }
+
+  function onProfileMarkerPick(e) {
+    var mk = e && e.target;
+    if (!profileArm || !mk) return;
+    L.DomEvent.stopPropagation(e);
+    var key = mk._nodeKey ? String(mk._nodeKey).toLowerCase() : '';
+    var ll = mk.getLatLng();
+    profilePick(/^[0-9a-f]{64}$/.test(key)
+      ? { kind: 'node', pubkey: key }
+      : { kind: 'point', lat: Number(ll.lat.toFixed(5)), lon: Number(ll.lng.toFixed(5)) });
+  }
+
+  function onProfileMapClick(e) {
+    if (!profileArm || !e || !e.latlng) return;
+    profilePick({ kind: 'point', lat: Number(e.latlng.lat.toFixed(5)), lon: Number(e.latlng.lng.toFixed(5)) });
+  }
+
+  function onProfilePointerMove(e) {
+    if (profileArm !== 'b' || !profileAnchor || !e || !e.latlng) return;
+    var pts = [profileAnchor, [e.latlng.lat, e.latlng.lng]];
+    if (profileGhost) { profileGhost.setLatLngs(pts); return; }
+    profileGhost = L.polyline(pts, { className: 'tp-path-ghost', interactive: false, weight: 2, dashArray: '6 6' }).addTo(map);
+  }
+
+  function profilePick(ref) {
+    var tool = ensureProfileTool();
+    if (!tool) return;
+    var side = profileArm === 'b' ? 'b' : 'a';
+    tool.setEndpoint(side, ref);
+    if (side === 'a') {
+      profileAnchor = profileRefLatLng(ref);
+      profileArm = 'b';
+      profileShowHint('Now pick the other end: a node marker or any point.');
+      profileSyncButton();
+    } else {
+      profileDisarm();
+    }
+    profileDrawLine();
+  }
+
+  function profileArmFor(side) {
+    if (!ensureProfileTool()) return;
+    profileArm = side;
+    if (map) {
+      map.getContainer().classList.add('tp-picking');
+      map.on('click', onProfileMapClick);
+      map.on('mousemove', onProfilePointerMove);
+    }
+    profileSyncPickers();
+    profileSyncButton();
+    profileShowHint(side === 'a'
+      ? 'Pick the first end: a node marker or any point.'
+      : 'Now pick the other end: a node marker or any point.');
+  }
+
+  function profileDisarm() {
+    if (!profileArm) return;
+    profileArm = null;
+    profileAnchor = null;
+    if (map) {
+      map.getContainer().classList.remove('tp-picking');
+      map.off('click', onProfileMapClick);
+      map.off('mousemove', onProfilePointerMove);
+    }
+    profileSyncPickers();
+    profileSyncButton();
+    profileHideHint();
+    profileClearGhost();
+  }
+
+  function profileClearGhost() {
+    if (profileGhost && map) { try { map.removeLayer(profileGhost); } catch (_) {} }
+    profileGhost = null;
+  }
+
+  function profileClearLine() {
+    profileClearGhost();
+    if (profileLine && map) { try { map.removeLayer(profileLine); } catch (_) {} }
+    profileLine = null;
+  }
+
+  function profileDrawLine() {
+    profileClearLine();
+    if (!map || !profileTool) return;
+    var st = profileTool.getState();
+    var a = profileRefLatLng(st.a), b = profileRefLatLng(st.b);
+    if (!a || !b) return;
+    // No `color` option: the stroke comes from --los-line in style.css, so
+    // the line follows the theme and the customizer like everything else.
+    profileLine = L.polyline([a, b], { className: 'tp-path-line', interactive: false, weight: 3 }).addTo(map);
+  }
+
+  function onProfileToggle() {
+    var tool = ensureProfileTool();
+    if (!tool) return;
+    if (profileArm) { profileDisarm(); return; }
+    if (tool.isOpen()) { tool.close(); return; }
+    profileArmFor('a');
+  }
+
+  function buildProfileToggle() {
+    var wrap = document.getElementById('map-wrap');
+    if (!wrap || profileBtn) return;
+    profileBtn = document.createElement('button');
+    profileBtn.type = 'button';
+    profileBtn.id = 'mapProfileToggle';
+    profileBtn.className = 'map-profile-toggle';
+    profileBtn.setAttribute('data-testid', 'map-profile-toggle');
+    profileBtn.setAttribute('aria-pressed', 'false');
+    profileBtn.setAttribute('aria-label', 'Path profile');
+    profileBtn.title = 'Path profile — terrain, line of sight and Fresnel zone';
+    profileBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-ruler"/></svg>';
+    profileBtn.addEventListener('click', onProfileToggle);
+    wrap.appendChild(profileBtn);
+    profileHintEl = document.createElement('div');
+    profileHintEl.className = 'map-profile-hint';
+    profileHintEl.setAttribute('data-testid', 'map-profile-hint');
+    profileHintEl.setAttribute('role', 'status');
+    profileHintEl.hidden = true;
+    wrap.appendChild(profileHintEl);
+  }
+
+  // initProfileTool waits for the client config, then offers the tool and
+  // restores a #/map?profile=… link. Without the config block it does
+  // nothing at all — no button, no listener, no request.
+  async function initProfileTool() {
+    const alive = mapToken();
+    try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}
+    if (!alive() || !profileOffered()) return;
+    buildProfileToggle();
+    var st = window.TerrainProfile.parseState((location.hash || '').split('?')[1] || '');
+    if (!st) return;
+    var tool = ensureProfileTool();
+    if (!tool) return;
+    tool.setState(st);
+    profileDrawLine();
+  }
+
+  function destroyProfileTool() {
+    profileDisarm();
+    profileClearLine();
+    if (profileKeyHandler) document.removeEventListener('keydown', profileKeyHandler);
+    profileKeyHandler = null;
+    if (profileTool) profileTool.destroy();
+    profileTool = null;
+    profileBtn = null;
+    profileHintEl = null;
+  }
+
   function destroy() {
     // #123: make every pending response and timer of this mount inert.
     mapGeneration++;
@@ -2730,6 +3005,7 @@
     neighborPubkeys = null;
     delete window._mapSelectRefNode;
     delete window._mapGetNeighborPubkeys;
+    destroyProfileTool();
   }
 
   function toggleHeatmap(on) {
