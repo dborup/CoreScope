@@ -380,6 +380,27 @@ func TestTerrainProfile_CacheEvictionAndTTL(t *testing.T) {
 	}
 }
 
+// N3 (#689 review): the worst-case cache footprint at the documented maxima
+// of cacheEntries and maxSamples must match config.example.json's
+// _comment_cacheEntries (~105 MB); a mutant of the per-entry size formula,
+// or a drift in either bound, should move this off the documented figure.
+func TestTerrainProfile_CacheFootprintAtMaxima(t *testing.T) {
+	warned := false
+	set := resolveTerrainSettings(dhm.ProfileConfig{CacheEntries: intp(4096), MaxSamples: intp(3200)},
+		func(string, ...interface{}) { warned = true })
+	if warned {
+		t.Fatal("4096/3200 are the documented maxima and should not warn")
+	}
+	if set.cacheEntries != 4096 || set.plan.MaxSamples != 3200 {
+		t.Fatalf("resolved maxima %d/%d, want 4096/3200", set.cacheEntries, set.plan.MaxSamples)
+	}
+	maxBytes := terrainCacheMaxBytes(set.cacheEntries, set.plan.MaxSamples)
+	const documentedMB = 105_000_000 // config.example.json _comment_cacheEntries
+	if maxBytes > documentedMB || float64(documentedMB-maxBytes) > 2_000_000 {
+		t.Fatalf("worst case %d bytes (%.1f MB) no longer matches the documented ~105 MB", maxBytes, float64(maxBytes)/1e6)
+	}
+}
+
 func TestTerrainProfile_SingleflightCollapses20Requests(t *testing.T) {
 	release := make(chan struct{})
 	src := newFakeElevation(t, flatElev(0))
@@ -699,6 +720,34 @@ func TestTerrainProfile_DTMDecidesDSMInforms(t *testing.T) {
 	}
 	if resp.Verdict.Surface == nil || resp.Verdict.Surface.State != "blocked" {
 		t.Fatalf("surface info %+v", resp.Verdict.Surface)
+	}
+}
+
+// N1 (#689 review): a nodata hole in the DTM makes the deciding verdict
+// unknown, but the DSM is a separate, complete coverage and must not be
+// allowed to report a confident "surface" verdict on a partial profile.
+func TestTerrainProfile_SurfaceVerdictGatedByCoverage(t *testing.T) {
+	e0, _ := dhm.ToUTM32(56.1629, 10.2039)
+	dtmWithHole := newFakeElevation(t, func(e, n float64) float32 {
+		if e > e0+4500 && e < e0+5500 {
+			return -9999
+		}
+		return 0
+	})
+	split := modelSplit{dtm: dtmWithHole, dsm: newFakeElevation(t, flatElev(0))}
+	env := newTerrainEnv(t, split, dhm.ProfileConfig{}, nil)
+	resp := decodeProfile(t, env.get(pathQuery(aarhusPt, offsetPt(56.1629, 10.2039, 10000, 0), "ha=10", "hb=10")))
+	if resp.Coverage.State != "partial" || resp.Verdict.State != "unknown" {
+		t.Fatalf("expected a partial, unknown deciding verdict: %+v %+v", resp.Coverage, resp.Verdict)
+	}
+	if resp.Verdict.Surface == nil {
+		t.Fatal("expected surface info to be present (DSM supplied)")
+	}
+	if resp.Verdict.Surface.State != "unknown" {
+		t.Fatalf("surface verdict must be unknown on a partial profile, got %+v", resp.Verdict.Surface)
+	}
+	if resp.Verdict.Surface.WorstClearanceM != nil || resp.Verdict.Surface.WorstAtM != nil || resp.Verdict.Surface.WorstF1Fraction != nil {
+		t.Fatalf("surface clearance numbers must be null when unknown: %+v", resp.Verdict.Surface)
 	}
 }
 
