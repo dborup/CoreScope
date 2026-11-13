@@ -45,6 +45,22 @@ var (
 	sjOdde      = LatLon{55.9740, 11.2960}
 	himmelbjerg = LatLon{56.1050, 9.6830}
 	silkeborg   = LatLon{56.1697, 9.5451}
+	kollund     = LatLon{54.8350, 9.4680}
+	// #704 — Okseøerne, two Danish islets in Flensborg Fjord off
+	// Sønderhav (Aabenraa Kommune). Neither Natural Earth layer has them.
+	// #704 quotes 54.847, 9.558 and 54.842, 9.562 from memory; those are
+	// not the islets but the German Holnis peninsula (see holnisN/holnisS
+	// below). Surveyed positions, from OpenStreetMap ways 4098190 and
+	// 4100737, agree with Wikidata Q2013616 (54.85754, 9.50797) and
+	// da.wikipedia "Okseøerne" (54.85694, 9.50556) to within 400 m.
+	storeOkseo = LatLon{54.85785, 9.50905}
+	lilleOkseo = LatLon{54.85761, 9.50235}
+	// The two coordinates #704 remembered, both on German land: 3.4 and
+	// 3.8 km east-southeast of Store Okseø, and 3.7 and 4.3 km from the
+	// nearest Danish land. Uncovered is the right answer for them, so
+	// the partial they produce is correct, not the bug #704 reports.
+	holnisN = LatLon{54.847, 9.558}
+	holnisS = LatLon{54.842, 9.562}
 )
 
 func coversLL(p LatLon) bool {
@@ -65,6 +81,11 @@ func TestCoversPlaces(t *testing.T) {
 		{"Tønder", tonder, true},
 		{"Saltholm", LatLon{55.6400, 12.7600}, true},
 		{"Hesselø", hesselo, true},
+		// #704: Danish islets 2.1 km from the German shore of Flensborg
+		// Fjord, outside the 1250 m buffer. See
+		// TestOkseoerneClearTheForeignPolygon for the clearance.
+		{"Store Okseø", storeOkseo, true},
+		{"Lille Okseø", lilleOkseo, true},
 		{"Christiansø", LatLon{55.3205, 15.1872}, true},
 		{"Anholt", anholt, true},
 		{"Læsø", laeso, true},
@@ -101,6 +122,9 @@ func TestCoversPlaces(t *testing.T) {
 		{"Ystad", ystad, false},
 		{"Varberg", LatLon{57.1000, 12.2500}, false},
 		{"Flensburg", flensburg, false},
+		// #704's remembered Okseøerne coordinates: German land on Holnis.
+		{"Holnis (#704's 54.847, 9.558)", holnisN, false},
+		{"Holnis (#704's 54.842, 9.562)", holnisS, false},
 		{"Niebüll", niebull, false},
 		{"Sylt, Westerland", LatLon{54.9070, 8.3200}, false},
 		{"Rügen, Bergen", LatLon{54.4170, 13.4330}, false},
@@ -192,13 +216,63 @@ func TestPlanDanishPathsStayFull(t *testing.T) {
 		// 1250 m buffer must leave them covered.
 		{"Øresund, Helsingør→Copenhagen", helsingor, copenhagen},
 		{"Øresund, Copenhagen→Saltholm", copenhagen, LatLon{55.6400, 12.7600}},
-		{"Flensborg Fjord, Kollund→Egernsund", LatLon{54.8350, 9.4680}, LatLon{54.9040, 9.5980}},
+		{"Flensborg Fjord, Kollund→Egernsund", kollund, LatLon{54.9040, 9.5980}},
+		// #704: a path that ends on a Danish islet, not past it.
+		{"Flensborg Fjord, Kollund→Store Okseø", kollund, storeOkseo},
+		{"Flensborg Fjord, Kollund→Lille Okseø", kollund, lilleOkseo},
+		{"Flensborg Fjord, Lille Okseø→Store Okseø", lilleOkseo, storeOkseo},
 	} {
 		p := PlanProfile(c.a, c.b, defaultPlan())
 		if p.Covered() != len(p.E) {
 			t.Errorf("%s: covered %d of %d, first gap %.0f m", c.name, p.Covered(), len(p.E), firstGapM(&p))
 		}
 	}
+}
+
+// #704 — why Okseøerne stay covered, as a number rather than a verdict.
+// The generator subtracts Danish land, Danish minor islands and
+// DANISH_ISLANDS after the buffer, but the islets are clear of the
+// buffered German coast to begin with: Natural Earth puts German land
+// 2261 m from Store Okseø, and the real coast at Holnis (Glücksburg) is
+// 2105 m away, against a 1250 m buffer and a 150 m simplification
+// tolerance. This pins the margin that is left, so a wider buffer or a
+// source whose coast has moved cannot swallow them without a red test.
+func TestOkseoerneClearTheForeignPolygon(t *testing.T) {
+	b := foreignLand()
+	for _, c := range []struct {
+		name string
+		p    LatLon
+	}{
+		{"Store Okseø", storeOkseo},
+		{"Lille Okseø", lilleOkseo},
+	} {
+		e, n := ToUTM32(c.p.Lat, c.p.Lon)
+		if !Covers(e, n) {
+			t.Errorf("%s: not covered", c.name)
+			continue
+		}
+		best := math.Inf(1)
+		for i := range b.segs {
+			if d := pointSegM(&b.segs[i], e, n); d < best {
+				best = d
+			}
+		}
+		if best < 750 {
+			t.Errorf("%s: %.0f m to the nearest foreign-land edge, want at least 750 m", c.name, best)
+		}
+		t.Logf("%s: %.0f m clear of the foreign-land polygon", c.name, best)
+	}
+}
+
+// pointSegM is the distance from (e, n) to the segment s, in metres.
+func pointSegM(s *boundarySeg, e, n float64) float64 {
+	de, dn := s.e1-s.e0, s.n1-s.n0
+	l2 := de*de + dn*dn
+	tt := 0.0
+	if l2 > 0 {
+		tt = math.Max(0, math.Min(1, ((e-s.e0)*de+(n-s.n0)*dn)/l2))
+	}
+	return math.Hypot(e-s.e0-tt*de, n-s.n0-tt*dn)
 }
 
 // A point exactly on the foreign coast is on foreign land (the polygon is
@@ -289,7 +363,10 @@ func TestBoundaryCellRangeEps(t *testing.T) {
 // #692 review N3: the polygon itself is pinned. It is byte-reproducible;
 // after a deliberate regeneration (see scripts/gen-dhm-foreign-land.py)
 // update this hash and the windows of the path tests above if the coast
-// moved.
+// moved. #704 added the Danish-islet subtraction to the generator and
+// regenerated with the pinned dependency and Natural Earth versions: the
+// output is byte-identical, because no Danish islet lies inside the
+// 1250 m buffer today, so the hash is deliberately unchanged.
 const foreignLandSHA256 = "764ea5d73dc694e3153e1cea50217f8bcb49593b8c94083d7059b13124c0c51d"
 
 func TestForeignLandIsPinned(t *testing.T) {

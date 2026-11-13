@@ -724,6 +724,13 @@ func TestTerrainProfile_LeavingDenmarkIsPartial(t *testing.T) {
 		{"Øresund, Copenhagen→Saltholm east", "55.67610,12.56830", "55.66000,12.86000"},
 		{"Øresund, Helsingør→Copenhagen", "56.03610,12.61360", "55.67610,12.56830"},
 		{"Øresund, Copenhagen→Saltholm", "55.67610,12.56830", "55.64000,12.76000"},
+		// #704 — Okseøerne are Danish islets 2.1 km off the German shore
+		// of Flensborg Fjord, outside the 1250 m buffer, so a path that
+		// ends on one keeps its verdict. The coordinates are surveyed
+		// (OpenStreetMap ways 4098190/4100737, agreeing with Wikidata
+		// Q2013616); #704's remembered ones are German land on Holnis.
+		{"Flensborg Fjord, Kollund→Store Okseø", "54.83500,9.46800", "54.85785,9.50905"},
+		{"Flensborg Fjord, Kollund→Lille Okseø", "54.83500,9.46800", "54.85761,9.50235"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			src := newFakeElevation(t, flatElev(0))
