@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/meshcore-analyzer/dhm"
+	"github.com/meshcore-analyzer/dhm/dhmtest"
 )
 
 // #687 — the exaggerated hillshade (wms/dhm_temp) by default, with the #680
@@ -30,8 +31,9 @@ const (
 )
 
 var (
-	exaggeratedStub = append([]byte("\x89PNG\r\n\x1a\n"), []byte("exaggerated-tile")...)
-	terrainStub     = append([]byte("\x89PNG\r\n\x1a\n"), []byte("terrain-tile")...)
+	// Real, distinct 256×256 PNGs: the client decodes every tile (#695).
+	exaggeratedStub = dhmtest.PNG(256, 256, 2)
+	terrainStub     = dhmtest.PNG(256, 256, 3)
 )
 
 // dhmService is one fake upstream WMS: it records what it was asked and
@@ -157,7 +159,7 @@ func assertTile(t *testing.T, where string, w *httptest.ResponseRecorder, body [
 		t.Fatalf("%s: status %d content-type %q", where, w.Code, w.Header().Get("Content-Type"))
 	}
 	if !bytes.Equal(w.Body.Bytes(), body) {
-		t.Fatalf("%s: body %q, want %q", where, w.Body.Bytes(), body)
+		t.Fatalf("%s: body %d bytes, want the %d-byte tile", where, w.Body.Len(), len(body))
 	}
 	if got := w.Header().Get("X-CoreScope-Tile"); got != state {
 		t.Fatalf("%s: X-CoreScope-Tile %q, want %q", where, got, state)
@@ -312,6 +314,11 @@ func TestDHM687_FallbackToTerrain(t *testing.T) {
 		{"redirect", "status 302", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/elsewhere", http.StatusFound)
 		}, false},
+		// #695: a body with the PNG signature that is not a whole 256×256
+		// PNG is never cached (step 2 goes upstream again) and falls back.
+		{"signature only", "invalid image", servePNGBody(sigOnlyPNG), false},
+		{"truncated png", "invalid image", servePNGBody(truncatedPNG), false},
+		{"wrong size png", "invalid image", servePNGBody(wrongSizePNG), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -522,6 +529,9 @@ func TestDHM687_TerrainLayerOneAttempt(t *testing.T) {
 			w.Header().Set("Content-Type", "image/png")
 			io.WriteString(w, "not a png")
 		}, "unavailable", "non-image response"},
+		{"signature only", servePNGBody(sigOnlyPNG), "unavailable", "invalid image"},
+		{"truncated png", servePNGBody(truncatedPNG), "unavailable", "invalid image"},
+		{"wrong size png", servePNGBody(wrongSizePNG), "unavailable", "invalid image"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
