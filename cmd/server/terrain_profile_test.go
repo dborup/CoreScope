@@ -1110,7 +1110,7 @@ func TestTerrainProfile_ExampleConfigMatchesDefaults(t *testing.T) {
 	if got, want := resolveTerrainSettings(cfg.DHM.Profile, logs.logf), resolveTerrainSettings(dhm.ProfileConfig{}, logs.logf); got != want {
 		t.Fatalf("example profile %+v, defaults %+v", got, want)
 	}
-	if got := dhmTileRateLimit(cfg.DHM); got != dhmTileRateLimitDefault {
+	if got := dhmTileRateLimit(cfg.DHM, logs.logf); got != dhmTileRateLimitDefault {
 		t.Fatalf("example tile limit %d, default %d", got, dhmTileRateLimitDefault)
 	}
 	if cfg.Radio == nil || cfg.Radio.DefaultFreqMHz != nil || cfg.Radio.KFactor != nil || len(cfg.Radio.AntennaHeightsM) != 0 {

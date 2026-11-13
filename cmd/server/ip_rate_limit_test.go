@@ -175,6 +175,20 @@ func TestIPRateLimiter_TableIsBounded(t *testing.T) {
 	}
 }
 
+// N1 (#690 review): TestIPRateLimiter_TableIsBounded sets maxClients by
+// hand, pinning the mechanism but not the shipped value — raising
+// ipLimiterMaxClients passed the whole suite. This pins the constant and
+// that newIPRateLimiter actually wires it in.
+func TestIPRateLimiter_DefaultMaxClientsIsTheConstant(t *testing.T) {
+	if ipLimiterMaxClients != 4096 {
+		t.Fatalf("ipLimiterMaxClients = %d, want 4096", ipLimiterMaxClients)
+	}
+	l := newIPRateLimiter("test", 60, nil, nil)
+	if l.maxClients != ipLimiterMaxClients {
+		t.Fatalf("newIPRateLimiter maxClients = %d, want ipLimiterMaxClients (%d)", l.maxClients, ipLimiterMaxClients)
+	}
+}
+
 // ── Wiring: both endpoints answer 429 with Retry-After ─────────────────────
 
 func TestTerrainProfile_RateLimit429(t *testing.T) {
@@ -247,17 +261,33 @@ func TestDHMTile_RateLimit429(t *testing.T) {
 // The shipped tile default is far above a heavy interactive session (see
 // dhmTileRateLimitDefault) and is off only when set to 0.
 func TestDHMTile_RateLimitConfig(t *testing.T) {
-	if got := dhmTileRateLimit(dhm.Config{}); got != dhmTileRateLimitDefault {
+	inRange := &dhmLogSink{}
+	if got := dhmTileRateLimit(dhm.Config{}, inRange.logf); got != dhmTileRateLimitDefault {
 		t.Fatalf("default %d", got)
 	}
-	if got := dhmTileRateLimit(dhm.Config{TileRateLimitPerMin: intp(0)}); got != 0 {
+	if got := dhmTileRateLimit(dhm.Config{TileRateLimitPerMin: intp(0)}, inRange.logf); got != 0 {
 		t.Fatalf("explicit 0 → %d", got)
 	}
-	if got := dhmTileRateLimit(dhm.Config{TileRateLimitPerMin: intp(-4)}); got != dhmTileRateLimitDefault {
-		t.Fatalf("negative → %d", got)
-	}
-	if got := dhmTileRateLimit(dhm.Config{TileRateLimitPerMin: intp(50)}); got != 50 {
+	if got := dhmTileRateLimit(dhm.Config{TileRateLimitPerMin: intp(50)}, inRange.logf); got != 50 {
 		t.Fatalf("50 → %d", got)
+	}
+	if got := dhmTileRateLimit(dhm.Config{TileRateLimitPerMin: intp(dhmTileRateLimitMax)}, inRange.logf); got != dhmTileRateLimitMax {
+		t.Fatalf("at the bound → %d, want %d", got, dhmTileRateLimitMax)
+	}
+	if inRange.String() != "" {
+		t.Fatalf("in-range values warned: %q", inRange.String())
+	}
+	// N2 (#690 review): out-of-range, like profile.rateLimitPerMin
+	// (integer(..., 0, 6000)), warns and falls back to the default instead
+	// of being accepted verbatim.
+	for _, v := range []int{-4, dhmTileRateLimitMax + 1} {
+		logs := &dhmLogSink{}
+		if got := dhmTileRateLimit(dhm.Config{TileRateLimitPerMin: intp(v)}, logs.logf); got != dhmTileRateLimitDefault {
+			t.Fatalf("%d → %d, want the default %d", v, got, dhmTileRateLimitDefault)
+		}
+		if !strings.Contains(logs.String(), "map.dhm.tileRateLimitPerMin") {
+			t.Fatalf("%d: no warning for an out-of-range tileRateLimitPerMin: %q", v, logs.String())
+		}
 	}
 	if defaultDHMProxyOptions().rateLimitPerMin != 0 {
 		t.Fatal("the bare proxy options must not limit; the config path sets it")

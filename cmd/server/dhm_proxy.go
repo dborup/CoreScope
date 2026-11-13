@@ -165,13 +165,29 @@ type dhmProxyOptions struct {
 // tiles of DHM coverage is held to 20 per second per address.
 const dhmTileRateLimitDefault = 1200
 
-// dhmTileRateLimit is map.dhm.tileRateLimitPerMin: unset or negative is
-// the default, 0 is off.
-func dhmTileRateLimit(c dhm.Config) int {
-	if c.TileRateLimitPerMin == nil || *c.TileRateLimitPerMin < 0 {
+// dhmTileRateLimitMax bounds map.dhm.tileRateLimitPerMin like
+// profile.rateLimitPerMin bounds its own key (0-6000, 600x its default of
+// 10): about 50x the shipped tile default, comfortably under the point
+// (perMin above ~6e10, where time.Minute/perMin truncates to zero) where
+// the limiter would silently stop limiting (#690 review N2).
+const dhmTileRateLimitMax = 60000
+
+// dhmTileRateLimit is map.dhm.tileRateLimitPerMin: unset is the default, 0
+// is off, and anything outside [0, dhmTileRateLimitMax] warns and falls
+// back to the default too, like profile.rateLimitPerMin.
+func dhmTileRateLimit(c dhm.Config, logf func(string, ...interface{})) int {
+	if logf == nil {
+		logf = log.Printf
+	}
+	if c.TileRateLimitPerMin == nil {
 		return dhmTileRateLimitDefault
 	}
-	return *c.TileRateLimitPerMin
+	v := *c.TileRateLimitPerMin
+	if v < 0 || v > dhmTileRateLimitMax {
+		logf("[dhm] config map.dhm.tileRateLimitPerMin is out of range; using %d", dhmTileRateLimitDefault)
+		return dhmTileRateLimitDefault
+	}
+	return v
 }
 
 func defaultDHMProxyOptions() dhmProxyOptions {
@@ -330,7 +346,7 @@ func newDHMProxyFromConfig(cfg *Config) *dhmProxy {
 		return nil
 	}
 	opts := defaultDHMProxyOptions()
-	opts.rateLimitPerMin = dhmTileRateLimit(cfg.DHM)
+	opts.rateLimitPerMin = dhmTileRateLimit(cfg.DHM, opts.client.Logf)
 	opts.trustedProxies = parseCIDRListQuiet(cfg.WSTrustedProxies())
 	return newDHMProxy(cfg.DHM, opts)
 }
