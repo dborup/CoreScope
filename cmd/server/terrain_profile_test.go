@@ -689,9 +689,11 @@ func TestTerrainProfile_LeavingDenmarkIsPartial(t *testing.T) {
 		name, a, b string
 		lo, hi     float64 // where the gap must start, metres along the path
 	}{
-		{"Copenhagen→Malmö", "55.67610,12.56830", "55.60500,13.00380", 26000, 28000},
+		{"Copenhagen→Malmö", "55.67610,12.56830", "55.60500,13.00380", 24500, 27000},
+		// #693 review round 2, F1: the likeliest cross-border path.
+		{"Helsingør→Kärnan", "56.03610,12.61360", "56.04750,12.69690", 3500, 4900},
 		{"Aabenraa→Flensburg", "55.04430,9.41740", "54.78360,9.43210", 24000, 27500},
-		{"Rønne→Ystad", "55.10090,14.70670", "55.44000,13.83000", 63500, 66500},
+		{"Rønne→Ystad", "55.10090,14.70670", "55.44000,13.83000", 62500, 65000},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			src := newFakeElevation(t, flatElev(0))
@@ -720,6 +722,8 @@ func TestTerrainProfile_LeavingDenmarkIsPartial(t *testing.T) {
 		{"Kattegat, Grenaa→Anholt", "56.41580,10.87830", "56.71670,11.51670"},
 		{"Kattegat, Hesselø→Gilleleje", "56.19800,11.71000", "56.12100,12.31000"},
 		{"Øresund, Copenhagen→Saltholm east", "55.67610,12.56830", "55.66000,12.86000"},
+		{"Øresund, Helsingør→Copenhagen", "56.03610,12.61360", "55.67610,12.56830"},
+		{"Øresund, Copenhagen→Saltholm", "55.67610,12.56830", "55.64000,12.76000"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			src := newFakeElevation(t, flatElev(0))

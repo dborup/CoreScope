@@ -16,14 +16,16 @@ import (
 // land polygon. These pin the polygon, its index and the gate in the
 // planner.
 
-// Reference places. The windows in the path tests below are where the
-// real coast or border lies along each path, with the polygon's accuracy
-// (Natural Earth 1:10m, simplified at 150 m) on top.
+// Reference places. The windows in the path tests below end at the real
+// coast or border along each path: the polygon is grown 1250 m out to sea
+// (#693 review round 2, F1), so the gap starts up to about 1.4 km before
+// a foreign coast, never after it.
 var (
 	copenhagen  = LatLon{55.6761, 12.5683}
 	malmo       = LatLon{55.6050, 13.0038}
 	helsingor   = LatLon{56.0361, 12.6136}
-	helsingborg = LatLon{56.0500, 12.7200} // inland of the 1:10m coast
+	helsingborg = LatLon{56.0465, 12.6945} // city centre
+	karnan      = LatLon{56.0475, 12.6969} // Kärnan, Helsingborg
 	aabenraa    = LatLon{55.0443, 9.4174}
 	flensburg   = LatLon{54.7836, 9.4321}
 	tonder      = LatLon{54.9330, 8.8660}
@@ -74,6 +76,8 @@ func TestCoversPlaces(t *testing.T) {
 		// The sea, Danish or foreign.
 		{"Øresund east of Saltholm", LatLon{55.6600, 12.8600}, true},
 		{"Øresund off Landskrona", LatLon{55.8700, 12.7700}, true},
+		{"Øresund mid-strait, Vedbæk–Bjärred", LatLon{55.7500, 12.8000}, true},
+		{"Kattegat mid", LatLon{56.5000, 11.8000}, true},
 		{"Baltic between Møn and Rügen", LatLon{54.8500, 13.6000}, true},
 		{"Baltic between Bornholm and Skåne", LatLon{55.3500, 14.3000}, true},
 		{"Kattegat off Varberg", LatLon{57.1000, 11.9000}, true},
@@ -81,6 +85,17 @@ func TestCoversPlaces(t *testing.T) {
 		// Foreign land.
 		{"Malmö", malmo, false},
 		{"Helsingborg", helsingborg, false},
+		// #693 review round 2, F1: real coordinates up to 1 km inland of
+		// the 1:10m coast.
+		{"Kärnan", karnan, false},
+		{"Helsingborg Knutpunkten", LatLon{56.0436, 12.6950}, false},
+		{"Landskrona", LatLon{55.8708, 12.8302}, false},
+		{"Turning Torso", LatLon{55.6131, 12.9764}, false},
+		{"Falsterbo lighthouse", LatLon{55.3833, 12.8167}, false},
+		{"Sylt, List", LatLon{55.0167, 8.4333}, false},
+		// F3: Swedish islands in neither Natural Earth layer.
+		{"Hallands Väderö", LatLon{56.4470, 12.5600}, false},
+		{"Peberholm", LatLon{55.5980, 12.7450}, false},
 		{"Ven (Swedish, mid-Øresund)", LatLon{55.9070, 12.6950}, false},
 		{"Falsterbo", LatLon{55.4000, 12.8300}, false},
 		{"Ystad", ystad, false},
@@ -122,16 +137,18 @@ func TestPlanGapStartsAtTheForeignCoast(t *testing.T) {
 		a, b   LatLon
 		lo, hi float64 // km along the path where the gap must start
 	}{
-		// All of the Øresund is covered; the gap starts on the Swedish
-		// shore, about 1.4 km before Malmö centre.
-		{"Copenhagen→Malmö", copenhagen, malmo, 26, 28},
-		{"Helsingør→Helsingborg", helsingor, helsingborg, 4.5, 6.3},
+		// The Øresund is covered up to about 1.4 km off the Swedish shore,
+		// which lies about 1.8 km before Malmö centre.
+		{"Copenhagen→Malmö", copenhagen, malmo, 24.5, 27},
+		// The Helsingborg shore is about 0.4 km before Kärnan.
+		{"Helsingør→Helsingborg", helsingor, helsingborg, 3.5, 4.8},
+		{"Helsingør→Kärnan", helsingor, karnan, 3.5, 4.9},
 		// The land border meets Flensburg Fjord near 54.81°N here.
 		{"Aabenraa→Flensburg", aabenraa, flensburg, 24, 27.5},
 		// Land border at Rudbøl/Møgeltønder, about 54.905°N.
 		{"Tønder→Niebüll", tonder, niebull, 2, 4.5},
-		// The Baltic is covered all the way to the Swedish coast at Ystad.
-		{"Rønne→Ystad", ronne, ystad, 63.5, 66.5},
+		// The Baltic is covered up to about 1.4 km off the coast at Ystad.
+		{"Rønne→Ystad", ronne, ystad, 62.5, 65},
 		// The Polish coast (54.06°N) lies south of the raster extent
 		// (northing 6048000, about 54.5°N here), so on this path the sea is
 		// covered up to the extent edge, 62.6 km out, and the gap is the
@@ -171,6 +188,11 @@ func TestPlanDanishPathsStayFull(t *testing.T) {
 		{"Kattegat, Læsø→Gilleleje", laeso, gilleleje},
 		{"Kattegat, Hesselø→Sjællands Odde", hesselo, sjOdde},
 		{"Kattegat, Hesselø→Gilleleje", hesselo, gilleleje},
+		// The nearest Danish sea paths to foreign land: the polygon's
+		// 1250 m buffer must leave them covered.
+		{"Øresund, Helsingør→Copenhagen", helsingor, copenhagen},
+		{"Øresund, Copenhagen→Saltholm", copenhagen, LatLon{55.6400, 12.7600}},
+		{"Flensborg Fjord, Kollund→Egernsund", LatLon{54.8350, 9.4680}, LatLon{54.9040, 9.5980}},
 	} {
 		p := PlanProfile(c.a, c.b, defaultPlan())
 		if p.Covered() != len(p.E) {
@@ -268,7 +290,7 @@ func TestBoundaryCellRangeEps(t *testing.T) {
 // after a deliberate regeneration (see scripts/gen-dhm-foreign-land.py)
 // update this hash and the windows of the path tests above if the coast
 // moved.
-const foreignLandSHA256 = "c2ef95888155813210cac7f5e00c82138f785bebaf6e85db4ebe8a899bd84cb1"
+const foreignLandSHA256 = "764ea5d73dc694e3153e1cea50217f8bcb49593b8c94083d7059b13124c0c51d"
 
 func TestForeignLandIsPinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(foreignLandText))

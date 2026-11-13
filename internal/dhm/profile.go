@@ -15,8 +15,9 @@ import (
 // diagonal path costs O(L²) pixels. Splitting the path into chunks of
 // about ChunkM keeps the total near O(L), at most MaxCallsPerModel
 // rasters per elevation model. Samples DHM does not cover (Covers: outside
-// the raster extent, or on Swedish, German, Polish or Norwegian land,
-// where upstream answers 0.0, not nodata, #692) are never requested: a
+// the raster extent, or on Swedish, German, Polish or Norwegian land or
+// within about 1.25 km of its coast, where upstream answers 0.0, not
+// nodata, #692) are never requested: a
 // path onto foreign land gets a gap there, and a path with no covered
 // sample makes no upstream call at all.
 
