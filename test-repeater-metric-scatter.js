@@ -75,6 +75,8 @@ assert(!/traffic_share_score\s*!=\s*null\s*\?\s*n\.traffic_share_score\s*:\s*\(n
   'this tab\'s _toScatterPoints must NOT fall back traffic to usefulness_score (the #1760 semantic fix)');
 const esc = s => s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') : '';
 const windowStub = { ROLE_COLORS: { repeater: '#3b82f6', room: '#a855f7' } };
+// Busiest Repeaters formats estimated airtime with the real ObserverAirtime.
+new Function('window', fs.readFileSync(path.join(__dirname, 'public', 'observer-airtime.js'), 'utf8'))(windowStub);
 let _regionQS = '', _areaQS = '';
 const RegionFilter = { regionQueryString: () => _regionQS };
 const AreaFilter = { areaQueryString: () => _areaQS };
@@ -545,11 +547,11 @@ function makeElement(id) {
     assert((top.match(/<tr><td/g) || []).length === M.BUSIEST_DEFAULT_ROWS, 'the default limit shows the top 50 rows');
     assert(!top.includes('<img src=x') && top.includes('&lt;img src=x'), 'a node name is escaped');
     assert(/id="busiestLimitToggle"[^>]*>Show all 60</.test(top), 'a "Show all 60" button follows the truncated list');
-    assert(/aria-sort="descending">Relayed 24h</.test(top) && !/aria-sort="descending">Relayed 1h</.test(top),
+    assert(/aria-sort="descending">24h</.test(top) && !/aria-sort="descending">1h</.test(top),
       'the sorted column is marked aria-sort="descending"');
     const all = M.renderBusiestRepeatersTable(rows, '1h', 'all');
     assert((all.match(/<tr><td/g) || []).length === 60 && /Show top 50</.test(all), '"all" shows every row and offers the top 50 again');
-    assert(/aria-sort="descending">Relayed 1h</.test(all), 'sorting by 1h marks the 1h column');
+    assert(/aria-sort="descending">1h</.test(all), 'sorting by 1h marks the 1h column');
     const few = M.renderBusiestRepeatersTable(rows.slice(0, 3), '24h', '50');
     assert(!few.includes('busiestLimitToggle'), 'no limit button when every row fits');
     assert(/No repeater in this view relayed/.test(M.renderBusiestRepeatersTable([], '24h', '50')), 'an empty list says so');
@@ -615,6 +617,51 @@ function makeElement(id) {
     assert(/Alpha/.test(el.querySelector('#busiestRepeatersTable').innerHTML) && /Include observer repeaters \(0\)/.test(el.innerHTML),
       'without an observer list the table still renders and hides nobody');
     observersData = failingApi;
+  }
+
+  console.log('\n=== [B5] seen airtime columns and the busiest-hour sort (#697 M2) ===');
+  {
+    const nodes = [
+      { public_key: 'a1', name: 'Quiet', role: 'repeater', relay_count_1h: 50, relay_count_24h: 900, est_airtime_pct_24h: 0.4, est_airtime_peak_pct: 1.2 },
+      { public_key: 'b2', name: 'Busy', role: 'repeater', relay_count_1h: 5, relay_count_24h: 100, est_airtime_pct_24h: 3.1, est_airtime_peak_pct: 10.04 },
+      { public_key: 'c3', name: 'OldServer', role: 'repeater', relay_count_1h: 99, relay_count_24h: 999 },
+      { public_key: 'd4', name: 'Tiny', role: 'repeater', relay_count_1h: 0, relay_count_24h: 1, est_airtime_pct_24h: 0.0012, est_airtime_peak_pct: '0.03' },
+    ];
+    const peak = M._busiestRepeaterRows(nodes, new Set(), 'peak', false);
+    assert(peak.map(r => r.name).join(',') === 'Busy,Quiet,Tiny,OldServer',
+      'peak: ranked by the estimated busiest hour, rows without an estimate last; got ' + peak.map(r => r.name).join(','));
+    assert(peak[2].estPeak === 0.03, 'a string estimate from the API is cast to a number');
+    assert(peak[3].estAvg === null && peak[3].estPeak === null, 'a missing estimate stays null, not 0');
+    const html = M.renderBusiestRepeatersTable(peak, 'peak', '50');
+    const row = name => (html.split('<tr>').find(tr => tr.includes('>' + name + '<')) || '');
+    assert(/airtime-pct airtime-over[^>]*>≥10\.0%</.test(row('Busy')), 'a seen busiest hour at the 10% limit reads ≥10.0% and is flagged like observer TX airtime');
+    assert(/airtime-pct"[^>]*>≥1\.2%</.test(row('Quiet')) && !/airtime-over/.test(row('Quiet')), 'below the limit it reads ≥1.2%, not flagged');
+    assert(/>&lt;0\.1%</.test(row('Tiny')) && !/≥&lt;/.test(row('Tiny')), 'a very small value reads <0.1%, escaped, without ≥');
+    assert(/>0\.0%</.test(M.renderBusiestRepeatersTable([{ pk: 'z', name: 'Zero', role: 'repeater', relay1h: 0, relay24h: 1, estAvg: 0, estPeak: 0, observer: false }], 'peak', '50')),
+      'zero seen airtime reads 0.0%, not ≥0.0%');
+    assert((row('OldServer').match(/<span class="text-muted">—<\/span>/g) || []).length === 2, 'no estimate shows a dash in both airtime columns');
+    assert(/aria-sort="descending">Busiest hour</.test(html), 'sorting by peak marks the Busiest hour column');
+    assert(/colspan="2"[^>]*>Relayed<\/th>/.test(html) && /colspan="2"[^>]*>Seen airtime<\/th>/.test(html),
+      'the counts and the estimates are grouped under two header cells');
+    assert((html.match(/<tr><td/g) || []).length === peak.length && (html.split('<tr><td')[1].match(/<td/g) || []).length === 5,
+      'every row has six cells, matching the six columns');
+  }
+  {
+    nodesData = [{ public_key: 'a1', name: 'A', role: 'repeater', relay_count_1h: 1, relay_count_24h: 2, est_airtime_pct_24h: 1, est_airtime_peak_pct: 2 }];
+    observersData = { observers: [] };
+    Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    assert(/option value="peak">Busiest hour \(seen airtime\)</.test(el.innerHTML), 'the sort select offers the busiest hour');
+    const sel = el.querySelector('#busiestSort');
+    sel.value = 'peak';
+    sel.fireChange();
+    assert(viewParams.bsort === 'peak', 'choosing it writes bsort=peak');
+    viewParams.bsort = 'peak';
+    const el2 = makeElement('root');
+    await M.renderRepeaterMetricsTab(el2);
+    assert(/option value="peak" selected/.test(el2.innerHTML), 'bsort=peak from the URL selects it');
+    Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
   }
 
   console.log('\n=== [B4] wiring (structural) ===');

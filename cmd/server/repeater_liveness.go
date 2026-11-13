@@ -1,9 +1,12 @@
 package main
 
 import (
+	"math"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/meshcore-analyzer/lora"
 )
 
 // RepeaterRelayInfo describes whether a repeater has been observed
@@ -32,6 +35,14 @@ type RepeaterRelayInfo struct {
 	// `flood.max.unscoped 0` and should not forward these, so a non-trivial
 	// count flags a base-config problem (consumed by the ArcScope advisor).
 	UnscopedRelayCount24h int `json:"unscopedRelayCount24h"`
+	// EstAirtimePct24h and EstAirtimePeakPct estimate the repeater's relay
+	// duty cycle (#697): LoRa time-on-air of every packet it relayed in the
+	// last 24 h, adverts included, as a percentage of 24 h and of its busiest
+	// rolling hour. A lower bound: only flood packets an observer heard with
+	// the repeater in the raw path count; its own adverts and direct-routed
+	// traffic do not.
+	EstAirtimePct24h  float64 `json:"estAirtimePct24h"`
+	EstAirtimePeakPct float64 `json:"estAirtimePeakPct"`
 	// TransportedScopes is the deduplicated, sorted set of region scope
 	// names (transmissions.scope_name) across ALL non-advert packets in
 	// which this pubkey appears as a path hop. Unlike RelayCount1h/24h this
@@ -134,11 +145,42 @@ type relayEntry struct {
 	// claims.
 	fromPrefix bool
 	parsed     bool
-	t          time.Time
 	valid      bool
+	// self marks an entry whose key sent the advert (see origin), which is
+	// not relay airtime. It is set per key, where the entry is collected.
+	self bool
+	t    time.Time
+	// airtime is the packet's LoRa time-on-air for the configured preset.
+	airtime time.Duration
+	// origin is an ADVERT's lower-case sender key ("" for other packets).
+	origin string
 }
 
-func newRelayEntry(tx *StoreTx, fromPrefix bool) relayEntry {
+// relayToA is LoRa time-on-air by packet length for one preset, filled on
+// first use: a packet is at most 255 bytes, so a relay snapshot computes
+// each length once instead of once per packet.
+type relayToA struct {
+	preset lora.Preset
+	byLen  [256]time.Duration
+}
+
+func (r *relayToA) of(bytes int) time.Duration {
+	if bytes < 0 || bytes >= len(r.byLen) {
+		return lora.TimeOnAir(bytes, r.preset)
+	}
+	if r.byLen[bytes] == 0 {
+		r.byLen[bytes] = lora.TimeOnAir(bytes, r.preset)
+	}
+	return r.byLen[bytes]
+}
+
+// isSelfAdvert reports whether key (a full key or a raw hop prefix) sent
+// the advert whose sender is origin.
+func isSelfAdvert(origin, key string) bool {
+	return origin != "" && key != "" && strings.HasPrefix(origin, key)
+}
+
+func newRelayEntry(tx *StoreTx, fromPrefix bool, toa *relayToA) relayEntry {
 	pt, rt := -1, -1
 	if tx.PayloadType != nil {
 		pt = *tx.PayloadType
@@ -146,7 +188,12 @@ func newRelayEntry(tx *StoreTx, fromPrefix bool) relayEntry {
 	if tx.RouteType != nil {
 		rt = *tx.RouteType
 	}
-	return relayEntry{ts: tx.FirstSeen, pt: pt, rt: rt, scope: tx.ScopeName, fromPrefix: fromPrefix}
+	e := relayEntry{ts: tx.FirstSeen, pt: pt, rt: rt, scope: tx.ScopeName, fromPrefix: fromPrefix,
+		airtime: toa.of(len(tx.RawHex) / 2)}
+	if pt == payloadTypeAdvert {
+		e.origin = strings.ToLower(advertSenderKey(tx.ParsedDecoded()))
+	}
+	return e
 }
 
 // collectRelayEntriesLocked returns one relayEntry per transmission that is a
@@ -163,13 +210,16 @@ func (s *PacketStore) collectRelayEntriesLocked(key string, snapshots ...pathNod
 		return entries
 	}
 	seen := make(map[int]struct{})
+	toa := &relayToA{preset: s.resolveLoRaPreset()}
 	forEachRelayCandidate(s.byPathHop, s.byNode, m, func(tx *StoreTx, fromPrefix bool) {
 		if _, done := seen[tx.ID]; done {
 			return
 		}
 		seen[tx.ID] = struct{}{}
 		if txConfirmsRelay(tx, m) {
-			entries = append(entries, newRelayEntry(tx, fromPrefix))
+			e := newRelayEntry(tx, fromPrefix, toa)
+			e.self = isSelfAdvert(e.origin, m.key)
+			entries = append(entries, e)
 		}
 	})
 	return entries
@@ -221,7 +271,18 @@ func computeRelayInfoFromEntriesAt(entries []relayEntry, windowHours float64, no
 	var scopeSet map[string]struct{}
 	var scopeLatest map[string]time.Time
 	var regionLatest map[string]time.Time
+	var airtime relayAirtimeHours
 	for _, e := range entries {
+		t, ok := e.t, e.valid
+		if !e.parsed {
+			t, ok = parseRelayTS(e.ts)
+		}
+		// A relayed advert costs the same airtime as any other packet, so it
+		// counts here, before adverts leave the relay counts below. The
+		// repeater's own adverts are not relaying.
+		if ok && !e.self {
+			airtime.add(now, t, e.airtime)
+		}
 		// Self-originated adverts are not relay activity.
 		if e.pt == payloadTypeAdvert {
 			continue
@@ -235,10 +296,6 @@ func computeRelayInfoFromEntriesAt(entries []relayEntry, windowHours float64, no
 				scopeSet = map[string]struct{}{}
 			}
 			scopeSet[e.scope] = struct{}{}
-		}
-		t, ok := e.t, e.valid
-		if !e.parsed {
-			t, ok = parseRelayTS(e.ts)
 		}
 		if !ok {
 			continue
@@ -278,6 +335,7 @@ func computeRelayInfoFromEntriesAt(entries []relayEntry, windowHours float64, no
 			}
 		}
 	}
+	info.EstAirtimePct24h, info.EstAirtimePeakPct = airtime.percents()
 	// #1751: emit transported scopes regardless of whether any timestamp
 	// parsed, and before the latestRaw early-return below.
 	info.TransportedScopes = sortedCappedScopes(scopeSet)
@@ -303,6 +361,38 @@ func computeRelayInfoFromEntriesAt(entries []relayEntry, windowHours float64, no
 		}
 	}
 	return info
+}
+
+// relayAirtimeHours sums relay time-on-air into the 24 rolling hours before
+// now: index 0 is the last hour. Packets older than 24 h or dated in the
+// future are left out.
+type relayAirtimeHours [24]time.Duration
+
+func (h *relayAirtimeHours) add(now, t time.Time, airtime time.Duration) {
+	age := now.Sub(t)
+	if age < 0 || age >= 24*time.Hour {
+		return
+	}
+	h[int(age/time.Hour)] += airtime
+}
+
+// percents returns the airtime as a share of 24 h and of the busiest hour,
+// in percent.
+func (h *relayAirtimeHours) percents() (avg24h, peakHour float64) {
+	var total, peak time.Duration
+	for _, d := range h {
+		total += d
+		if d > peak {
+			peak = d
+		}
+	}
+	return airtimePct(total, 24*time.Hour), airtimePct(peak, time.Hour)
+}
+
+// airtimePct is d as a percentage of of, rounded to four decimals: fine
+// enough that a repeater relaying one packet a day does not read as 0.
+func airtimePct(d, of time.Duration) float64 {
+	return math.Round(float64(d)/float64(of)*100*1e4) / 1e4
 }
 
 // GetRepeaterRelayInfo returns relay-activity information for a node by

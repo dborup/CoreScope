@@ -75,6 +75,8 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 	// Node metadata (SQL) is read BEFORE s.mu so no query runs under the
 	// packet-store lock (#412/#495).
 	metadata := s.snapshotPathNodes()
+	// One preset for every packet's time-on-air (#697); config only, no lock.
+	toa := &relayToA{preset: s.resolveLoRaPreset()}
 	// Everything that reads store data happens under the read lock: ingest
 	// appends to and eviction compacts byPathHop/byNode slices in place, so a
 	// copied slice header is not a stable snapshot, and StoreTx observations
@@ -106,7 +108,7 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 			if _, ok := index[tx.ID]; ok {
 				continue
 			}
-			b := bulkRelayTx{entry: newRelayEntry(tx, false)}
+			b := bulkRelayTx{entry: newRelayEntry(tx, false, toa)}
 			b.entry.parsed = true
 			b.entry.t, b.entry.valid = parseRelayTS(tx.FirstSeen)
 			forEachObservedRelayHop(tx, func(token string) bool {
@@ -201,6 +203,7 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 		for _, ref := range refs[k.start:k.end] {
 			e := txs[ref.tx].entry
 			e.fromPrefix = ref.fromPrefix
+			e.self = isSelfAdvert(e.origin, k.key)
 			entries = append(entries, e)
 		}
 		out[k.key] = computeRelayInfoFromEntriesAt(entries, windowHours, now)
