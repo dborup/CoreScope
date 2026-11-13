@@ -418,6 +418,13 @@
   // 'none' keeps the server's order.
   var HASHSTATS_MB_SORT = { param: 'mbsort', allowed: ['none', 'name', 'role', 'status', 'hashSize', 'packets', 'lastSeen'], dflt: 'none' };
   var HASHSTATS_MB_DIR = { param: 'mbdir', allowed: ['asc', 'desc'], dflt: 'asc' };
+  // Repeater Metrics' Busiest Repeaters table: sort window, whether
+  // repeaters that are also observers are listed, and the row limit. URL
+  // only, like mbf=.
+  var BUSIEST_SORT = { param: 'bsort', allowed: ['24h', '1h'], dflt: '24h' };
+  var BUSIEST_OBSERVERS = { param: 'bobs', allowed: ['hide', 'show'], dflt: 'hide' };
+  var BUSIEST_LIMIT = { param: 'blimit', allowed: ['50', 'all'], dflt: '50' };
+  // === BUSIEST SPECS END ===
 
   // The hash keys each tab owns; _updateAnalyticsUrl drops them when
   // another tab is selected. Hash Issues' bytes= is deliberately not listed:
@@ -430,6 +437,7 @@
     hashsizes: [HASHSTATS_MB_FILTER.param, HASHSTATS_MB_SORT.param, HASHSTATS_MB_DIR.param],
     scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param, 'saq', 'sap', 'sav', 'scope'],
     wardriving: [WARDRIVING_WINDOW.param],
+    'repeater-metrics': [BUSIEST_SORT.param, BUSIEST_OBSERVERS.param, BUSIEST_LIMIT.param],
   };
 
   // A value from the URL wins; an unknown one falls back to the default,
@@ -3207,11 +3215,71 @@
     return svg;
   }
 
+  // === Busiest Repeaters — repeaters ranked by packets relayed ===
+  // relay_count_1h/24h come with every repeater/room row of /api/nodes
+  // (cmd/server/repeater_liveness.go): distinct non-advert packets in which
+  // the node was resolved as a path hop. A repeater that is also an observer
+  // reports its real TX airtime (RF Health), so it is left out by default;
+  // the list is for the repeaters we only see through paths.
+  const BUSIEST_DEFAULT_ROWS = 50;
+
+  // observerIds: lower-case observer ids, which are node public keys.
+  // Ranks by the chosen window; ties go to the other window, then the name.
+  function _busiestRepeaterRows(nodes, observerIds, sortKey, includeObservers) {
+    const primary = sortKey === '1h' ? 'relay1h' : 'relay24h';
+    const secondary = primary === 'relay1h' ? 'relay24h' : 'relay1h';
+    return nodes
+      .filter(n => (n.role === 'repeater' || n.role === 'room') && Number(n.relay_count_24h) > 0)
+      .map(n => ({
+        pk: n.public_key,
+        name: n.name || (n.public_key ? n.public_key.slice(0, 12) : '?'),
+        role: n.role,
+        relay1h: Number(n.relay_count_1h) || 0,
+        relay24h: Number(n.relay_count_24h) || 0,
+        observer: !!n.public_key && observerIds.has(String(n.public_key).toLowerCase()),
+      }))
+      .filter(r => includeObservers || !r.observer)
+      .sort((a, b) => (b[primary] - a[primary]) || (b[secondary] - a[secondary]) || a.name.localeCompare(b.name));
+  }
+
+  function renderBusiestRepeatersTable(rows, sortKey, limit) {
+    if (!rows.length) {
+      return '<div class="text-muted" style="padding:16px">No repeater in this view relayed a packet in the last 24 hours.</div>';
+    }
+    const shown = limit === 'all' ? rows : rows.slice(0, BUSIEST_DEFAULT_ROWS);
+    const countTh = (key, label) => `<th scope="col" style="text-align:right"${key === sortKey ? ' aria-sort="descending"' : ''}>${label}</th>`;
+    // In the #206 scroll wrapper already, so a redraw keeps it. Long names
+    // wrap anywhere, and busiest-repeaters-table lifts the wrapper's 480px
+    // minimum: the four columns fit a phone.
+    let html = '<div class="analytics-table-scroll"><table class="analytics-table busiest-repeaters-table" data-testid="busiest-repeaters-table"><thead><tr>'
+      + '<th scope="col" style="text-align:right;width:3em">#</th><th scope="col">Repeater</th>'
+      + countTh('24h', 'Relayed 24h') + countTh('1h', 'Relayed 1h') + '</tr></thead><tbody>';
+    shown.forEach((r, i) => {
+      const tags = (r.role === 'room' ? ' <span class="text-muted">room</span>' : '')
+        + (r.observer ? ' <span class="text-muted">observer</span>' : '');
+      html += `<tr><td style="text-align:right">${i + 1}</td>`
+        + `<td style="overflow-wrap:anywhere"><a href="#/nodes/${encodeURIComponent(r.pk)}/analytics" class="analytics-link">${esc(r.name)}</a>${tags}</td>`
+        + `<td style="text-align:right">${r.relay24h.toLocaleString()}</td>`
+        + `<td style="text-align:right">${r.relay1h.toLocaleString()}</td></tr>`;
+    });
+    html += '</tbody></table></div>';
+    if (rows.length > BUSIEST_DEFAULT_ROWS) {
+      const label = limit === 'all' ? 'Show top ' + BUSIEST_DEFAULT_ROWS : 'Show all ' + rows.length.toLocaleString();
+      html += `<div style="margin-top:6px;text-align:right"><button type="button" id="busiestLimitToggle" class="btn-link" style="font-size:12px">${label}</button></div>`;
+    }
+    return html;
+  }
+
   async function renderRepeaterMetricsTab(el) {
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading repeater metrics…</div>';
     try {
       const rq = RegionFilter.regionQueryString() + AreaFilter.areaQueryString();
-      const resp = await fetchAllNodes('&sortBy=lastSeen' + rq, { ttl: CLIENT_TTL.nodeList });
+      // The observer list only marks rows in Busiest Repeaters; without it
+      // every repeater is listed as a non-observer.
+      const [resp, obsResp] = await Promise.all([
+        fetchAllNodes('&sortBy=lastSeen' + rq, { ttl: CLIENT_TTL.nodeList }),
+        api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null),
+      ]);
       const nodes = resp.nodes || resp;
       const favs = new Set(typeof getFavorites === 'function' ? getFavorites() : []);
       const points = _toScatterPoints(nodes, favs);
@@ -3231,6 +3299,11 @@
       let yKey = localStorage.getItem('meshcore-repeater-scatter-y') || 'usefulness';
       const opts = sel => REPEATER_METRIC_AXES.map(a => `<option value="${a.key}"${a.key === sel ? ' selected' : ''}>${esc(a.label)}</option>`).join('');
 
+      const observerIds = new Set(((obsResp && obsResp.observers) || [])
+        .map(o => String(o.id || '').toLowerCase()).filter(Boolean));
+      let [bSort, bObs, bLimit] = restoreViewParams([BUSIEST_SORT, BUSIEST_OBSERVERS, BUSIEST_LIMIT]);
+      const observerRepeaters = _busiestRepeaterRows(nodes, observerIds, bSort, true).filter(r => r.observer).length;
+
       el.innerHTML = `
         <div class="analytics-section">
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-target"/></svg> Repeater Metric Scatter</h3>
@@ -3247,7 +3320,50 @@
           </div>
           <div id="metricScatterPlot"></div>
           <div id="metricScatterLegend" style="display:flex;gap:16px;flex-wrap:wrap;margin-top:10px;font-size:12px"></div>
+        </div>
+        <div class="analytics-section" id="busiestRepeaters">
+          <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-list-numbers"/></svg> Busiest Repeaters</h3>
+          <p class="text-muted">Repeaters ranked by packets relayed: distinct non-advert packets in which the observers saw the repeater as a hop. It is a lower bound, since a packet no observer heard is not counted, and a hop sent as a short (1-byte) prefix can be credited to the wrong repeater. A repeater that is also an observer reports its real airtime under RF Health, so it is hidden here unless included.</p>
+          <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+            <label style="display:flex;gap:6px;align-items:center">Sort by
+              <select id="busiestSort" class="time-window-select" aria-label="Sort busiest repeaters by">
+                <option value="24h"${bSort === '24h' ? ' selected' : ''}>Relayed 24h</option>
+                <option value="1h"${bSort === '1h' ? ' selected' : ''}>Relayed 1h</option>
+              </select>
+            </label>
+            <label style="display:flex;gap:6px;align-items:center">
+              <input type="checkbox" id="busiestObservers"${bObs === 'show' ? ' checked' : ''}> Include observer repeaters (${observerRepeaters})
+            </label>
+          </div>
+          <div id="busiestRepeatersTable"></div>
         </div>`;
+
+      const busiestEl = el.querySelector('#busiestRepeatersTable');
+      const busiestSort = el.querySelector('#busiestSort');
+      const busiestObservers = el.querySelector('#busiestObservers');
+      // Redraws only the table; the limit button is recreated each time, so
+      // it is wired again here.
+      function drawBusiest() {
+        const rows = _busiestRepeaterRows(nodes, observerIds, bSort, bObs === 'show');
+        busiestEl.innerHTML = renderBusiestRepeatersTable(rows, bSort, bLimit);
+        const toggle = busiestEl.querySelector('#busiestLimitToggle');
+        if (toggle) toggle.addEventListener('click', () => {
+          bLimit = bLimit === 'all' ? BUSIEST_LIMIT.dflt : 'all';
+          setViewParam(BUSIEST_LIMIT, bLimit);
+          drawBusiest();
+        });
+      }
+      busiestSort.addEventListener('change', () => {
+        bSort = BUSIEST_SORT.allowed.indexOf(busiestSort.value) >= 0 ? busiestSort.value : BUSIEST_SORT.dflt;
+        setViewParam(BUSIEST_SORT, bSort);
+        drawBusiest();
+      });
+      busiestObservers.addEventListener('change', () => {
+        bObs = busiestObservers.checked ? 'show' : 'hide';
+        setViewParam(BUSIEST_OBSERVERS, bObs);
+        drawBusiest();
+      });
+      drawBusiest();
 
       const plotEl = el.querySelector('#metricScatterPlot');
       const legendEl = el.querySelector('#metricScatterLegend');
