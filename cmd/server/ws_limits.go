@@ -186,38 +186,10 @@ func ipInAny(ip net.IP, nets []*net.IPNet) bool {
 	return false
 }
 
-// clientIP resolves the address the limits are counted against, and reports
-// whether that address actually identifies a client.
-//
-// distinct is false when the peer is a loopback or private address and no
-// trustedProxies is configured: the request has almost certainly crossed a
-// reverse proxy whose X-Forwarded-For we are not allowed to believe, so every
-// visitor looks identical and per-IP limits would punish the wrong people.
+// clientIP resolves the address the limits are counted against; see
+// clientAddr.
 func (l *wsLimiter) clientIP(r *http.Request) (ip net.IP, distinct bool) {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	peer := net.ParseIP(strings.TrimSpace(host))
-	if peer == nil {
-		return nil, false
-	}
-	if ipInAny(peer, l.trustedProxies) {
-		// First hop is the client; later hops were appended by intermediaries
-		// we have no reason to trust individually.
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first := strings.TrimSpace(strings.Split(xff, ",")[0])
-			if fwd := net.ParseIP(first); fwd != nil {
-				return fwd, true
-			}
-		}
-		// A trusted proxy that forwarded no XFF still identifies itself.
-		return peer, true
-	}
-	if peer.IsLoopback() || peer.IsPrivate() || peer.IsLinkLocalUnicast() {
-		return peer, false
-	}
-	return peer, true
+	return clientAddr(r, l.trustedProxies)
 }
 
 // allow decides whether an upgrade may proceed. On rejection it returns the

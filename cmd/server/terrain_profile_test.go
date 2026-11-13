@@ -401,7 +401,7 @@ func TestTerrainProfile_SingleflightCollapses20Requests(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			// 20 visitors.
+			// 20 visitors: each has its own rate-limit budget.
 			w := env.get(q, func(r *http.Request) { r.RemoteAddr = fmt.Sprintf("198.51.100.%d:1000", i+1) })
 			codes[i], bodies[i] = w.Code, w.Body.String()
 		}(i)
@@ -979,16 +979,20 @@ func TestTerrainProfile_SettingsDefaultsAndClamps(t *testing.T) {
 	logs := &dhmLogSink{}
 	s := resolveTerrainSettings(dhm.ProfileConfig{}, logs.logf)
 	if s.maxPathM != 80000 || s.plan.MaxSamples != 3200 || s.plan.ChunkM != 2500 || s.cacheEntries != 256 ||
-		s.cacheTTL != 24*time.Hour || s.upstreamTimeout != 10*time.Second {
+		s.cacheTTL != 24*time.Hour || s.upstreamTimeout != 10*time.Second || s.rateLimitPerMin != 10 {
 		t.Fatalf("defaults %+v", s)
 	}
 	s = resolveTerrainSettings(dhm.ProfileConfig{MaxPathKm: floatp(500), MaxSamples: intp(99999), ChunkKm: floatp(0),
-		CacheEntries: intp(-1), CacheTTLHours: floatp(math.Inf(1)), UpstreamTimeoutMs: intp(60000)}, logs.logf)
+		CacheEntries: intp(-1), CacheTTLHours: floatp(math.Inf(1)), UpstreamTimeoutMs: intp(60000), RateLimitPerMin: intp(0)}, logs.logf)
 	if s.maxPathM != 80000 || s.plan.MaxSamples != 3200 || s.plan.ChunkM != 0 || s.cacheEntries != 256 ||
-		s.cacheTTL != 24*time.Hour || s.upstreamTimeout != 10*time.Second {
+		s.cacheTTL != 24*time.Hour || s.upstreamTimeout != 10*time.Second || s.rateLimitPerMin != 0 {
 		t.Fatalf("clamped %+v", s)
 	}
-	for _, k := range []string{"maxPathKm", "maxSamples", "cacheEntries", "cacheTTLHours", "upstreamTimeoutMs"} {
+	s = resolveTerrainSettings(dhm.ProfileConfig{RateLimitPerMin: intp(-1)}, logs.logf)
+	if s.rateLimitPerMin != 10 {
+		t.Fatalf("negative rateLimitPerMin → %d", s.rateLimitPerMin)
+	}
+	for _, k := range []string{"maxPathKm", "maxSamples", "cacheEntries", "cacheTTLHours", "upstreamTimeoutMs", "rateLimitPerMin"} {
 		if !strings.Contains(logs.String(), k) {
 			t.Fatalf("out-of-range %s not warned: %q", k, logs.String())
 		}
@@ -997,8 +1001,8 @@ func TestTerrainProfile_SettingsDefaultsAndClamps(t *testing.T) {
 
 func TestTerrainProfile_ConfigLoadsAndStaysServerSide(t *testing.T) {
 	dir := t.TempDir()
-	cfgJSON := `{"map":{"dhm":{"enabled":true,"token":"` + dhmTestToken + `",
-		"profile":{"enabled":true,"maxPathKm":40,"chunkKm":5}}},
+	cfgJSON := `{"map":{"dhm":{"enabled":true,"token":"` + dhmTestToken + `","tileRateLimitPerMin":300,
+		"profile":{"enabled":true,"maxPathKm":40,"chunkKm":5,"rateLimitPerMin":4}}},
 		"radio":{"defaultFreqMHz":868.1,"kFactor":1,"antennaHeightsM":{"repeater":12}}}`
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfgJSON), 0o600); err != nil {
 		t.Fatal(err)
@@ -1008,7 +1012,7 @@ func TestTerrainProfile_ConfigLoadsAndStaysServerSide(t *testing.T) {
 		t.Fatal(err)
 	}
 	pc := cfg.DHM.Profile
-	if !pc.Enabled || *pc.MaxPathKm != 40 || *pc.ChunkKm != 5 {
+	if !pc.Enabled || *pc.MaxPathKm != 40 || *pc.ChunkKm != 5 || *pc.RateLimitPerMin != 4 || *cfg.DHM.TileRateLimitPerMin != 300 {
 		t.Fatalf("profile config %+v", pc)
 	}
 	if cfg.Radio == nil || *cfg.Radio.DefaultFreqMHz != 868.1 || cfg.Radio.AntennaHeightsM["repeater"] != 12 {
@@ -1018,11 +1022,14 @@ func TestTerrainProfile_ConfigLoadsAndStaysServerSide(t *testing.T) {
 	if srv.terrain == nil || srv.dhm == nil || srv.terrain.set.maxPathM != 40000 {
 		t.Fatal("profile not wired from config")
 	}
+	if srv.dhm.limiter == nil || srv.terrain.limiter == nil {
+		t.Fatal("rate limits not wired from config")
+	}
 	router := mux.NewRouter()
 	srv.RegisterRoutes(router)
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, httptest.NewRequest("GET", "/api/config/client", nil))
-	for _, leak := range []string{dhmTestToken, "maxPathKm", "antennaHeightsM"} {
+	for _, leak := range []string{dhmTestToken, "maxPathKm", "rateLimitPerMin", "antennaHeightsM"} {
 		if strings.Contains(w.Body.String(), leak) {
 			t.Fatalf("%q in /api/config/client", leak)
 		}
@@ -1047,12 +1054,15 @@ func TestTerrainProfile_ExampleConfigMatchesDefaults(t *testing.T) {
 	if cfg.DHM.Profile.Enabled || newTerrainProfilerFromConfig(cfg, newDHMProxy(dhm.Config{Enabled: true, Token: "t"}, defaultDHMProxyOptions()), nil) != nil {
 		t.Fatal("example config enables the terrain profile")
 	}
-	if cfg.DHM.Profile.MaxPathKm == nil {
+	if cfg.DHM.Profile.MaxPathKm == nil || cfg.DHM.TileRateLimitPerMin == nil {
 		t.Fatal("example config does not document the profile limits")
 	}
 	logs := &dhmLogSink{}
 	if got, want := resolveTerrainSettings(cfg.DHM.Profile, logs.logf), resolveTerrainSettings(dhm.ProfileConfig{}, logs.logf); got != want {
 		t.Fatalf("example profile %+v, defaults %+v", got, want)
+	}
+	if got := dhmTileRateLimit(cfg.DHM); got != dhmTileRateLimitDefault {
+		t.Fatalf("example tile limit %d, default %d", got, dhmTileRateLimitDefault)
 	}
 	if cfg.Radio == nil || cfg.Radio.DefaultFreqMHz != nil || cfg.Radio.KFactor != nil || len(cfg.Radio.AntennaHeightsM) != 0 {
 		t.Fatalf("example radio %+v", cfg.Radio)
@@ -1079,11 +1089,15 @@ func TestTerrainProfile_OpenAPI(t *testing.T) {
 	if !have["a"] || !have["b"] {
 		t.Fatal("a and b not required")
 	}
+	tile := routeDescriptions()["GET /api/map/dhm/wms"]
+	if len(tile.Errors) == 0 || tile.Errors[0].Status != "429" {
+		t.Fatal("tile rate limit undocumented")
+	}
 	codes := map[string]bool{}
 	for _, e := range m.Errors {
 		codes[e.Status] = true
 	}
-	for _, c := range []string{"400", "404", "502", "504"} {
+	for _, c := range []string{"400", "404", "429", "502", "504"} {
 		if !codes[c] {
 			t.Fatalf("error %s undocumented", c)
 		}

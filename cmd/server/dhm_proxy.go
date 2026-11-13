@@ -26,6 +26,9 @@ package main
 //   - Bounded LRU cache (entries + bytes + TTL), a per-request timeout,
 //     a concurrency limit towards upstream and coalescing of identical
 //     in-flight tiles.
+//   - A per-client budget for tiles that would go upstream
+//     (map.dhm.tileRateLimitPerMin, #682 review F3): 429 with Retry-After
+//     beyond it. Cached tiles and tiles outside Denmark are not charged.
 //
 // The endpoint never touches SQLite.
 
@@ -35,6 +38,7 @@ import (
 	"image"
 	"image/png"
 	"log"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -144,6 +148,30 @@ type dhmProxyOptions struct {
 	cacheMaxEntries int
 	cacheMaxBytes   int
 	cacheTTL        time.Duration
+	// rateLimitPerMin is the per-client budget of upstream-bound tiles;
+	// 0 is off. newDHMProxyFromConfig sets it from the config.
+	rateLimitPerMin int
+	trustedProxies  []*net.IPNet
+}
+
+// dhmTileRateLimitDefault is the shipped per-client budget of tiles that
+// miss the server cache, per minute. Measured with
+// test-issue-681-dhm-tile-budget-e2e.js on a 1920×1080 Map with the HTTP
+// cache off (so upper bounds): a normal session — load, three zoom steps
+// in, four pans, two out — requested 308 tiles; an aggressive one through
+// the whole zoom range 8→16→8 with sixteen pans requested 812 in 18 s.
+// 1200 is 3.9× the normal session and covers the aggressive one, so a
+// person using the map never meets it, while a script walking the ~97 M
+// tiles of DHM coverage is held to 20 per second per address.
+const dhmTileRateLimitDefault = 1200
+
+// dhmTileRateLimit is map.dhm.tileRateLimitPerMin: unset or negative is
+// the default, 0 is off.
+func dhmTileRateLimit(c dhm.Config) int {
+	if c.TileRateLimitPerMin == nil || *c.TileRateLimitPerMin < 0 {
+		return dhmTileRateLimitDefault
+	}
+	return *c.TileRateLimitPerMin
 }
 
 func defaultDHMProxyOptions() dhmProxyOptions {
@@ -156,10 +184,11 @@ func defaultDHMProxyOptions() dhmProxyOptions {
 }
 
 type dhmProxy struct {
-	client *dhm.Client
-	layer  dhm.Hillshade // configured upstream layer
-	cache  *dhm.Cache[dhmCacheKey]
-	now    func() time.Time
+	client  *dhm.Client
+	layer   dhm.Hillshade // configured upstream layer
+	cache   *dhm.Cache[dhmCacheKey]
+	limiter *ipRateLimiter // nil: no per-client limit
+	now     func() time.Time
 }
 
 // dhmCacheKey is a tile of the upstream layer it was actually fetched
@@ -185,7 +214,9 @@ func newDHMProxy(cfg dhm.Config, opts dhmProxyOptions) *dhmProxy {
 		client: client,
 		layer:  layer,
 		cache:  dhm.NewCache[dhmCacheKey](opts.cacheMaxEntries, opts.cacheMaxBytes, opts.cacheTTL),
-		now:    opts.client.Now,
+		limiter: newIPRateLimiter("map.dhm.tileRateLimitPerMin", opts.rateLimitPerMin,
+			opts.trustedProxies, opts.client.Logf),
+		now: opts.client.Now,
 	}
 }
 
@@ -228,6 +259,13 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !key.IntersectsCoverage() {
 		writeDHMTile(w, dhmTransparentPNG, dhmBrowserMaxAge, "outside")
 		return
+	}
+	// Only a tile that will go upstream is charged to the client.
+	if _, cached := p.cache.Get(dhmCacheKey{Layer: p.layer, Tile: key}, p.now()); !cached {
+		if ok, retry := p.limiter.allow(r); !ok {
+			writeRateLimited(w, retry)
+			return
+		}
 	}
 	data, hit, err := p.layerTile(p.layer, key)
 	if err == nil {
@@ -291,7 +329,10 @@ func newDHMProxyFromConfig(cfg *Config) *dhmProxy {
 	if cfg == nil {
 		return nil
 	}
-	return newDHMProxy(cfg.DHM, defaultDHMProxyOptions())
+	opts := defaultDHMProxyOptions()
+	opts.rateLimitPerMin = dhmTileRateLimit(cfg.DHM)
+	opts.trustedProxies = parseCIDRListQuiet(cfg.WSTrustedProxies())
+	return newDHMProxy(cfg.DHM, opts)
 }
 
 func (s *Server) dhmClientConfig() *DHMClientConfig {
