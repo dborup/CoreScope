@@ -57,6 +57,14 @@
   "_comment_ingestorStats": "Ingestor publishes a 1-Hz stats snapshot consumed by the server's /api/perf/io and /api/perf/write-sources endpoints (#1120). Path is configured via the CORESCOPE_INGESTOR_STATS environment variable on the INGESTOR process. Default: /tmp/corescope-ingestor-stats.json. The writer uses O_NOFOLLOW + 0o600, so a pre-planted symlink in /tmp cannot be used to clobber an arbitrary file. SECURITY: in shared-tmp environments (multi-tenant hosts), point CORESCOPE_INGESTOR_STATS at a private directory like /var/lib/corescope/ingestor-stats.json that only the corescope user can write to.",
   "corsAllowedOrigins": [],
   "_comment_corsAllowedOrigins": "Cross-origin allowlist for embed scenarios (#1369) AND for /ws WebSocket upgrades (#1793 — CSWSH defense per OWASP WebSocket Security Cheat Sheet). Exact-match origins, e.g. [\"https://blog.example.com\", \"https://embed.example.com\"]. Same-origin requests (Origin host == request Host) and non-browser clients (no Origin header) are always allowed for /ws. When empty (default), no Access-Control-* headers are sent and browsers enforce same-origin; cross-origin /ws upgrades are rejected. When non-empty, only the listed origins receive CORS headers, and Access-Control-Allow-Methods is limited to GET, HEAD, OPTIONS (the cross-domain surface is read-only — same-origin admin writes are unaffected). Use [\"*\"] to allow any origin for CORS XHR (NOT recommended for write-capable deployments); note that \"*\" is deliberately NOT honored for /ws upgrades — list explicit origins to permit cross-origin WebSocket clients (OWASP guidance: avoid wildcards in CSWSH defense). Operators can override per-deployment with the CORS_ALLOWED_ORIGINS environment variable (comma-separated). No credentialed CORS is enabled. To embed the map or channels pages cross-domain, add the embedding origin here and use the URL pattern '/#/map?embed=1' or '/#/channels?embed=1' — embed mode hides the top-nav, bottom-nav, and side drawer for full-bleed iframe rendering.",
+  "radio": {
+    "defaultFreqMHz": null,
+    "_comment_defaultFreqMHz": "#681 - frequency in MHz used for the terrain profile's Fresnel zone. null = automatic: the most common frequency in the radio string of observers seen in the last 7 days, else the MeshCore firmware default 869.618 MHz. Set it to pin the value (150-2500). A request's own freq parameter still wins.",
+    "kFactor": null,
+    "_comment_kFactor": "#681 - effective earth-radius factor for the curvature bulge (0.5-10). null = 4/3, the standard atmosphere; 1 is geometric, 0.6 a pessimistic sub-refraction case.",
+    "antennaHeightsM": {},
+    "_comment_antennaHeightsM": "#681 - antenna heights above ground in metres (0-100) for the terrain profile, keyed by role (repeater, room, companion, sensor, point = a free map point) or by a node's 64-hex public key, e.g. {\"repeater\": 12, \"<public key>\": 18}. Built-in role defaults are repeater 10, room 5, companion 2, sensor 2, point 2. A per-node value counts as known; role values are shown as assumed. Mesh adverts carry no height, so these are always estimates unless you set them."
+  },
   "webSocket": {
     "maxClients": 512,
     "_comment_maxClients": "#369 - GLOBAL ceiling on concurrent /ws clients, across every address. On by default at 512, because unlike the per-IP limits below it still works behind a reverse proxy: it counts connections, not clients. Sizing: the web UI opens exactly one socket per browser tab, and each accepted client costs roughly 12 KB of server heap, two goroutines, one file descriptor and a 256-message send queue (the queue is the part worth bounding — a stalled client can hold a quarter of a megabyte of pending broadcasts). 512 therefore sits far above any realistic tab count for a regional mesh while capping the worst case at a few hundred MB and keeping descriptors to half of the common 1024 soft limit. Excess clients get 503 with Retry-After before the handshake, and the refusals are counted in /api/stats under websocket.rejectedGlobalCap - watch that together with websocket.clients and raise this if real visitors are being turned away. Set 0 to remove the ceiling entirely (not recommended on a public instance).",
@@ -115,7 +123,23 @@
       "_comment_layer": "#687 — which DHM hillshade the server fetches: 'exaggerated' (default; the clearer quickDHM_skyggekort_terraen_overdrevet from wms/dhm_temp) or 'terrain' (dhm_terraen_skyggekort from dhm_DAF). With 'exaggerated', any tile that fails upstream is served from the terrain layer instead. Any other value logs a warning and uses 'terrain'. Browsers are unaffected either way.",
       "enabled": false,
       "token": "",
-      "layer": "exaggerated"
+      "layer": "exaggerated",
+      "profile": {
+        "_comment": "#681 - GET /api/terrain/profile: terrain, line of sight and first Fresnel zone between two nodes or map points, from the DHM elevation model (WCS) on the same token. Off unless enabled is true AND map.dhm is enabled with a token. Public: every uncached profile spends up to 16 upstream requests per elevation model on your token (a per-client rate limit is a separate change). All values are bounded; an out-of-range value logs a warning and uses the default shown here.",
+        "enabled": false,
+        "maxPathKm": 80,
+        "_comment_maxPathKm": "Longest path in km, at most 80 (the largest raster the WCS client requests). Longer paths are refused with 400 before any upstream call.",
+        "maxSamples": 3200,
+        "_comment_maxSamples": "Most elevation samples computed along a path (16-3200). The step is 10 m, growing to 25 m on long paths; at most 1024 samples are returned, always including the worst point.",
+        "chunkKm": 2.5,
+        "_comment_chunkKm": "Path length per upstream raster. WCS rasters are axis-aligned, so smaller chunks fetch fewer pixels for a diagonal path; a profile never uses more than 16 rasters per elevation model (32 with both DTM and DSM). 0 = one raster per model below about 79 km; every raster edge must stay inside the 80 km WCS span, so a path at the 80 km maximum splits into 2. Cheaper in requests but coarser (about 39 m per pixel at 20 km, 156 m at 80 km).",
+        "cacheEntries": 256,
+        "_comment_cacheEntries": "Profiles kept in memory (1-4096), about 25 KB each at most (model=both, maxSamples=3200): about 105 MB worst case at the documented maxima of both settings. Antenna heights, k and frequency are computed per request, so changing them is a cache hit.",
+        "cacheTTLHours": 24,
+        "_comment_cacheTTLHours": "How long a cached profile is reused (up to 168). DHM is re-flown every few years.",
+        "upstreamTimeoutMs": 10000,
+        "_comment_upstreamTimeoutMs": "Timeout per upstream raster, 500-10000 ms (the shared DHM client's own limit is 10 s). A whole profile is also cut off after 25 s."
+      }
     },
     "tiles": {
       "_comment_defaults": "#332 — the built-in defaults are 'osm-dark' / 'osm-standard' (keyless OpenStreetMap, tiles to zoom 18). Set darkDefault/lightDefault to any enabled style id to override; they take priority over the built-in fallback. Carto is NOT the default any more: since August 2026 keyless Carto raster tiles come back HTTP 200 with 'API KEY REQUIRED' stamped into the PNG, and CoreScope has no Carto basemap-key plumbing.",

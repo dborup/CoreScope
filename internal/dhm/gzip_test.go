@@ -3,6 +3,7 @@ package dhm
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"net/http"
 	"slices"
 	"strings"
@@ -62,7 +63,7 @@ func TestClientDisablesCompressionForHillshadeTile(t *testing.T) {
 func TestClientDisablesCompressionForRaster(t *testing.T) {
 	u, aeCh := truncatedGzipUpstream(t, "image/tiff", tiffStub)
 	src := NewWCSSource(newTestClient(t, u, &logSink{}))
-	g, err := src.FetchRaster(someRaster())
+	g, err := src.FetchRaster(context.Background(), someRaster())
 	if err != nil {
 		t.Fatalf("FetchRaster: %v", err)
 	}

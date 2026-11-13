@@ -155,22 +155,6 @@ func (k TileKey) upstreamQuery() url.Values {
 	return q
 }
 
-// checkTileQuery accepts q only if it is exactly the upstreamQuery of the
-// tile its bbox names, so Client.Get cannot send any other WMS request.
-func checkTileQuery(q url.Values) error {
-	if len(q["bbox"]) != 1 {
-		return ErrBadRequest
-	}
-	k, err := TileFromBBox(q["bbox"][0])
-	if err != nil {
-		return err
-	}
-	if q.Encode() != k.upstreamQuery().Encode() {
-		return ErrBadRequest
-	}
-	return nil
-}
-
 var pngSignature = []byte("\x89PNG\r\n\x1a\n")
 
 // FetchHillshadeTile fetches one #680 terrain hillshade tile. Only a real

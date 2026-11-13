@@ -1,6 +1,7 @@
 package dhm
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -66,7 +67,7 @@ func TestWCSSourceIsAnElevationSource(t *testing.T) {
 func TestWCSFetchSendsExactGetCoverage(t *testing.T) {
 	u := tiffUpstream(t)
 	src := newTestSource(t, u, &logSink{})
-	g, err := src.FetchRaster(someRaster())
+	g, err := src.FetchRaster(context.Background(), someRaster())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +110,7 @@ func TestWCSModelSelectsCoverage(t *testing.T) {
 		u := tiffUpstream(t)
 		r := someRaster()
 		r.Model = model
-		if _, err := newTestSource(t, u, &logSink{}).FetchRaster(r); err != nil {
+		if _, err := newTestSource(t, u, &logSink{}).FetchRaster(context.Background(), r); err != nil {
 			t.Fatalf("%s: %v", model, err)
 		}
 		q, _ := url.ParseQuery(u.rawQuery[0])
@@ -122,7 +123,7 @@ func TestWCSModelSelectsCoverage(t *testing.T) {
 	for _, m := range []Model{"", "dhm_terraen", "DTM", "dsm ", "dhm_punktoprindelse"} {
 		r := someRaster()
 		r.Model = m
-		if _, err := src.FetchRaster(r); !errors.Is(err, ErrBadRequest) {
+		if _, err := src.FetchRaster(context.Background(), r); !errors.Is(err, ErrBadRequest) {
 			t.Fatalf("model %q: err %v, want ErrBadRequest", m, err)
 		}
 	}
@@ -159,7 +160,7 @@ func TestWCSRasterRequestBounds(t *testing.T) {
 		if err := r.Validate(); !errors.Is(err, ErrBadRequest) {
 			t.Errorf("%s: Validate err %v, want ErrBadRequest", name, err)
 		}
-		if _, err := src.FetchRaster(r); !errors.Is(err, ErrBadRequest) {
+		if _, err := src.FetchRaster(context.Background(), r); !errors.Is(err, ErrBadRequest) {
 			t.Errorf("%s: FetchRaster err %v, want ErrBadRequest", name, err)
 		}
 	}
@@ -188,7 +189,7 @@ func TestWCSRasterRequestBounds(t *testing.T) {
 		if err := r.Validate(); err != nil {
 			t.Errorf("%s: Validate err %v", name, err)
 		}
-		if _, err := src.FetchRaster(r); err != nil {
+		if _, err := src.FetchRaster(context.Background(), r); err != nil {
 			t.Errorf("%s: FetchRaster err %v", name, err)
 		}
 	}
@@ -253,7 +254,7 @@ func TestWCSTokenNeverInURLErrorOrLog(t *testing.T) {
 	u := tiffUpstream(t)
 	logs := &logSink{}
 	src := newTestSource(t, u, logs)
-	if _, err := src.FetchRaster(someRaster()); err != nil {
+	if _, err := src.FetchRaster(context.Background(), someRaster()); err != nil {
 		t.Fatal(err)
 	}
 	if u.tokens[0] != testToken {
@@ -268,7 +269,7 @@ func TestWCSTokenNeverInURLErrorOrLog(t *testing.T) {
 		io.WriteString(w, "error for token "+r.Header.Get("token"))
 	})
 	fc := newTestClient(t, failing, logs)
-	_, err := NewWCSSource(fc).FetchRaster(someRaster())
+	_, err := NewWCSSource(fc).FetchRaster(context.Background(), someRaster())
 	if err == nil || strings.Contains(err.Error(), testToken) {
 		t.Fatalf("err %v", err)
 	}
@@ -294,7 +295,7 @@ func TestWCS403IsCategoryOnly(t *testing.T) {
 		})
 		logs := &logSink{}
 		c := newTestClient(t, u, logs)
-		_, err := NewWCSSource(c).FetchRaster(someRaster())
+		_, err := NewWCSSource(c).FetchRaster(context.Background(), someRaster())
 		var fe FetchError
 		if !errors.As(err, &fe) || fe.Reason != "status 403" {
 			t.Fatalf("%s: err %v, want FetchError status 403", ct, err)
@@ -331,7 +332,7 @@ func TestWCSRejectsNonTIFFResponses(t *testing.T) {
 			w.Header()["Content-Type"] = []string{tc.ct}
 			w.Write(tc.body)
 		})
-		_, err := newTestSource(t, u, &logSink{}).FetchRaster(someRaster())
+		_, err := newTestSource(t, u, &logSink{}).FetchRaster(context.Background(), someRaster())
 		var fe FetchError
 		if !errors.As(err, &fe) || fe.Reason != tc.reason {
 			t.Errorf("%s: err %v, want FetchError %q", tc.name, err, tc.reason)
@@ -351,7 +352,7 @@ func TestWCSRejectsNonTIFFResponses(t *testing.T) {
 			w.Header().Set("Content-Type", a.ct)
 			w.Write(a.body)
 		})
-		if _, err := newTestSource(t, u, &logSink{}).FetchRaster(someRaster()); err != nil {
+		if _, err := newTestSource(t, u, &logSink{}).FetchRaster(context.Background(), someRaster()); err != nil {
 			t.Errorf("%s: %v", a.ct, err)
 		}
 	}
@@ -362,7 +363,7 @@ func TestWCSDoesNotFollowRedirects(t *testing.T) {
 	u := newUpstream(t, func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, elsewhere.srv.URL+"/steal", http.StatusFound)
 	})
-	if _, err := newTestSource(t, u, &logSink{}).FetchRaster(someRaster()); err == nil {
+	if _, err := newTestSource(t, u, &logSink{}).FetchRaster(context.Background(), someRaster()); err == nil {
 		t.Fatal("redirect response accepted")
 	}
 	if elsewhere.hits.Load() != 0 {
@@ -390,11 +391,11 @@ func TestBodyCapIsPerService(t *testing.T) {
 			w.Write(append(append([]byte{}, body...), make([]byte, n-len(body))...))
 		})
 	}
-	if _, err := newTestSource(t, serve("image/tiff", tiffStub, big), &logSink{}).FetchRaster(someRaster()); err != nil {
+	if _, err := newTestSource(t, serve("image/tiff", tiffStub, big), &logSink{}).FetchRaster(context.Background(), someRaster()); err != nil {
 		t.Fatalf("raster of %d bytes rejected: %v", big, err)
 	}
 	var fe FetchError
-	_, err := newTestSource(t, serve("image/tiff", tiffStub, o.MaxCoverageBodyBytes+1), &logSink{}).FetchRaster(someRaster())
+	_, err := newTestSource(t, serve("image/tiff", tiffStub, o.MaxCoverageBodyBytes+1), &logSink{}).FetchRaster(context.Background(), someRaster())
 	if !errors.As(err, &fe) || fe.Reason != "oversize response" {
 		t.Fatalf("raster over the WCS cap: err %v", err)
 	}

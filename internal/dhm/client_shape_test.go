@@ -1,6 +1,7 @@
 package dhm
 
 import (
+	"context"
 	"errors"
 	"math"
 	"net/http"
@@ -32,7 +33,7 @@ func TestFetchRasterReturnsGeoreferencedGrid(t *testing.T) {
 	// Georeferenced and snapped by a fraction of a pixel, one pixel larger.
 	snapped := newFixture(r.Width+1, r.Height+1, ramp(r.Width+1, r.Height+1, func(c, row int) float32 { return 1 })).
 		georeferenced(r.BBox[0]-px/3, r.BBox[3]+px/3, px)
-	g, err := newTestSource(t, serve(snapped.bytes()), &logSink{}).FetchRaster(r)
+	g, err := newTestSource(t, serve(snapped.bytes()), &logSink{}).FetchRaster(context.Background(), r)
 	if err != nil {
 		t.Fatalf("snapped raster: %v", err)
 	}
@@ -42,14 +43,14 @@ func TestFetchRasterReturnsGeoreferencedGrid(t *testing.T) {
 
 	// Snapped inward by a third of a pixel: still within one pixel.
 	inward := newFixture(r.Width, r.Height, vals).georeferenced(r.BBox[0]+px/3, r.BBox[3]-px/3, px)
-	if _, err := newTestSource(t, serve(inward.bytes()), &logSink{}).FetchRaster(r); err != nil {
+	if _, err := newTestSource(t, serve(inward.bytes()), &logSink{}).FetchRaster(context.Background(), r); err != nil {
 		t.Fatalf("raster snapped inward: %v", err)
 	}
 
 	// No georeferencing in the file: the request is the grid.
 	bare := newFixture(r.Width, r.Height, vals)
 	bare.compression, bare.predictor = compressionDeflate, predictorFloatingPoint
-	g, err = newTestSource(t, serve(bare.bytes()), &logSink{}).FetchRaster(r)
+	g, err = newTestSource(t, serve(bare.bytes()), &logSink{}).FetchRaster(context.Background(), r)
 	if err != nil {
 		t.Fatalf("bare raster: %v", err)
 	}
@@ -69,7 +70,7 @@ func TestFetchRasterReturnsGeoreferencedGrid(t *testing.T) {
 		"half the size":      newFixture(r.Width/2, r.Height/2, vals[:(r.Width/2)*(r.Height/2)]).georeferenced(r.BBox[0], r.BBox[3], px).bytes(),
 		"somewhere else":     newFixture(r.Width, r.Height, vals).georeferenced(700000, 6100000, px).bytes(),
 	} {
-		_, err := newTestSource(t, serve(body), &logSink{}).FetchRaster(r)
+		_, err := newTestSource(t, serve(body), &logSink{}).FetchRaster(context.Background(), r)
 		if !errors.As(err, &fe) || fe.Reason != "raster mismatch" {
 			t.Errorf("%s: err %v, want raster mismatch", name, err)
 		}
@@ -96,7 +97,7 @@ func TestFetchRasterReturnsGeoreferencedGrid(t *testing.T) {
 		"2 px fewer, same extent": pyr(r.Width-2, r.Height, r.BBox[0], r.BBox[3], B/float64(r.Width-2), px),
 		"twice as fine":           pyr(2*r.Width, 2*r.Height, r.BBox[0], r.BBox[3], px/2, px/2),
 	} {
-		_, err := newTestSource(t, serve(body), &logSink{}).FetchRaster(r)
+		_, err := newTestSource(t, serve(body), &logSink{}).FetchRaster(context.Background(), r)
 		if !errors.As(err, &fe) || fe.Reason != "raster mismatch" {
 			t.Errorf("N4 %s: err %v, want raster mismatch", name, err)
 		}
@@ -106,14 +107,14 @@ func TestFetchRasterReturnsGeoreferencedGrid(t *testing.T) {
 		"one px larger, offset": pyr(r.Width+1, r.Height+1, r.BBox[0]-0.9*px, r.BBox[3]+0.9*px, px, px),
 		"pixel 0.5% larger":     pyr(r.Width, r.Height, r.BBox[0], r.BBox[3], px*1.005, px*1.005),
 	} {
-		if _, err := newTestSource(t, serve(body), &logSink{}).FetchRaster(r); err != nil {
+		if _, err := newTestSource(t, serve(body), &logSink{}).FetchRaster(context.Background(), r); err != nil {
 			t.Errorf("N4 %s: %v, want accepted", name, err)
 		}
 	}
 
 	bad := newFixture(r.Width, r.Height, vals)
 	bad.fields = map[uint16]*fixtureField{tagSampleFormat: bad.shorts(1)}
-	if _, err := newTestSource(t, serve(bad.bytes()), &logSink{}).FetchRaster(r); !errors.As(err, &fe) || fe.Reason != "invalid raster" {
+	if _, err := newTestSource(t, serve(bad.bytes()), &logSink{}).FetchRaster(context.Background(), r); !errors.As(err, &fe) || fe.Reason != "invalid raster" {
 		t.Errorf("uint raster: err %v, want invalid raster", err)
 	}
 }
@@ -168,11 +169,11 @@ func TestCoverageBodyCapZeroValueFallsBack(t *testing.T) {
 			Logf:         (&logSink{}).logf,
 		})
 	}
-	if _, err := NewWCSSource(client(serve(1<<20 + 4096))).FetchRaster(someRaster()); err != nil {
+	if _, err := NewWCSSource(client(serve(1<<20+4096))).FetchRaster(context.Background(), someRaster()); err != nil {
 		t.Fatalf("raster over the tile cap with a zero raster cap: %v", err)
 	}
 	var fe FetchError
-	if _, err := NewWCSSource(client(serve(maxRasterBodyBytes + 1))).FetchRaster(someRaster()); !errors.As(err, &fe) || fe.Reason != "oversize response" {
+	if _, err := NewWCSSource(client(serve(maxRasterBodyBytes+1))).FetchRaster(context.Background(), someRaster()); !errors.As(err, &fe) || fe.Reason != "oversize response" {
 		t.Fatalf("raster over the default cap: %v", err)
 	}
 }
@@ -190,7 +191,7 @@ func TestClientSendsAcceptHeader(t *testing.T) {
 			w.Write(body)
 		})
 	}
-	if _, err := newTestSource(t, record("image/tiff", tiffStub), &logSink{}).FetchRaster(someRaster()); err != nil {
+	if _, err := newTestSource(t, record("image/tiff", tiffStub), &logSink{}).FetchRaster(context.Background(), someRaster()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := newTestClient(t, record("image/png", pngStub), &logSink{}).FetchHillshadeTile(someTile()); err != nil {

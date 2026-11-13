@@ -100,6 +100,9 @@ type Server struct {
 	// dhm is the #680 terrain hillshade proxy; nil while map.dhm is
 	// disabled or has no token (the endpoint then answers 404).
 	dhm *dhmProxy
+	// terrain is the #681 terrain profile; nil unless the proxy is active
+	// and map.dhm.profile.enabled (the endpoint then answers 404).
+	terrain *terrainProfiler
 
 	// Cached /api/analytics/wardriving response — per-window, recomputed at most once every 30s
 	wardrivingStatsMu       sync.Mutex
@@ -212,7 +215,7 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 	if cfg != nil {
 		cfg.applyListLimitsDefaults()
 	}
-	return &Server{
+	s := &Server{
 		db:        db,
 		cfg:       cfg,
 		hub:       hub,
@@ -229,6 +232,8 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 
 		dhm: newDHMProxyFromConfig(cfg),
 	}
+	s.terrain = newTerrainProfilerFromConfig(cfg, s.dhm, db)
+	return s
 }
 
 const memStatsTTL = 5 * time.Second
@@ -329,6 +334,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/config/theme", s.handleConfigTheme).Methods("GET")
 	r.HandleFunc("/api/config/map", s.handleConfigMap).Methods("GET")
 	r.HandleFunc("/api/map/dhm/wms", s.handleDHMTile).Methods("GET")
+	r.HandleFunc("/api/terrain/profile", s.handleTerrainProfile).Methods("GET")
 	r.HandleFunc("/api/config/geo-filter", s.handleConfigGeoFilter).Methods("GET")
 	r.HandleFunc("/api/config/areas", s.handleConfigAreas).Methods("GET")
 	r.HandleFunc("/api/config/areas/polygons", s.handleConfigAreasPolygons).Methods("GET")

@@ -6,7 +6,8 @@
 // upstream through one shared Client that adds the token. The package holds
 // what every DHM feature needs exactly once:
 //
-//   - Config: the operator's `map.dhm` block (enabled, token, layer).
+//   - Config: the operator's `map.dhm` block (enabled, token, layer,
+//     terrain profile).
 //   - Client: the upstream HTTP client. The token goes in the `token`
 //     request header (Dataforsyningen's recommended method), never in a
 //     URL, so no upstream URL can leak it. The client also enforces the
@@ -21,7 +22,9 @@
 // shape for the terrain profile (#681) lives in wcs.go, behind the
 // ElevationSource interface, which returns a decoded Grid (grid.go) read by
 // a stdlib-only float32 GeoTIFF decoder (geotiff.go); utm.go projects
-// lat/lon to the rasters' EPSG:25832. Further features add their own
+// lat/lon to the rasters' EPSG:25832. profile.go plans the samples and
+// rasters of a terrain profile, physics.go assesses the link, and flight.go
+// coalesces calls with cancellation. Further features add their own
 // request shape next to them and reuse the rest.
 package dhm
 
@@ -46,6 +49,20 @@ type Config struct {
 	// Layer is the hillshade upstream (#687): "exaggerated" (default) or
 	// "terrain"; see ParseHillshade.
 	Layer string `json:"layer"`
+	// Profile is the terrain profile endpoint (#681).
+	Profile ProfileConfig `json:"profile"`
+}
+
+// ProfileConfig is config.json `map.dhm.profile`. A nil field takes the
+// server default; cmd/server resolves and bounds every value.
+type ProfileConfig struct {
+	Enabled           bool     `json:"enabled"`
+	MaxPathKm         *float64 `json:"maxPathKm"`
+	MaxSamples        *int     `json:"maxSamples"`
+	ChunkKm           *float64 `json:"chunkKm"`
+	CacheEntries      *int     `json:"cacheEntries"`
+	CacheTTLHours     *float64 `json:"cacheTTLHours"`
+	UpstreamTimeoutMs *int     `json:"upstreamTimeoutMs"`
 }
 
 // Active reports whether DHM features may be offered: enabled with a token.

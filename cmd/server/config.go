@@ -288,6 +288,9 @@ type Config struct {
 	// never rides along when Map is shipped to the browser (#680).
 	DHM DHMConfig `json:"-"`
 
+	// Radio holds the link-physics defaults of the terrain profile (#681).
+	Radio *RadioConfig `json:"radio,omitempty"`
+
 	LiveMap struct {
 		PropagationBufferMs int `json:"propagationBufferMs"`
 		MaxNodes            int `json:"maxNodes"`
