@@ -3,6 +3,7 @@ package dhm
 import (
 	"bytes"
 	"errors"
+	"image/png"
 	"net/url"
 	"strings"
 )
@@ -94,32 +95,61 @@ func hillshadeQueryCheck(h Hillshade) func(url.Values) error {
 	}
 }
 
-// FetchHillshade fetches one tile of layer h. Only a real PNG is returned;
-// anything else is a FetchError.
+// FetchHillshade fetches one tile of layer h. Only a complete 256×256 PNG
+// is returned; anything else is a FetchError, so the proxy, which caches
+// only successes, never caches a bad tile.
 func (c *Client) FetchHillshade(h Hillshade, k TileKey) ([]byte, error) {
 	data, err := c.Get(h.service(), k.hillshadeQuery(h), "image/png")
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.HasPrefix(data, pngSignature) {
-		return nil, FetchError{"non-image response"}
+	if err := checkTilePNG(data); err != nil {
+		return nil, err
 	}
 	return data, nil
 }
 
+// checkTilePNG accepts data only if it decodes completely as a TileSize ×
+// TileSize PNG (#695). A body without the PNG signature is "non-image
+// response"; one with it that is truncated, corrupt (any chunk CRC, the
+// zlib stream, a missing IEND) or the wrong size is "invalid image".
+//
+// The signature alone let truncated bodies (#684) through, and the IHDR
+// alone (image.DecodeConfig) still does: it sits in the first 33 bytes.
+// So the whole image is decoded. DecodeConfig runs first so a body that
+// declares a huge image is rejected before the decoder allocates its
+// pixels; after it, the decode allocates at most one 256×256 image.
+// BenchmarkCheckTilePNG measures about 0.8 ms and 315 KB of short-lived
+// allocations per ~52 KB tile (Apple M5), paid only on an upstream fetch
+// that already took a network round trip; cache hits are not re-checked.
+func checkTilePNG(data []byte) error {
+	if !bytes.HasPrefix(data, pngSignature) {
+		return FetchError{"non-image response"}
+	}
+	cfg, err := png.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width != TileSize || cfg.Height != TileSize {
+		return FetchError{"invalid image"}
+	}
+	if _, err := png.Decode(bytes.NewReader(data)); err != nil {
+		return FetchError{"invalid image"}
+	}
+	return nil
+}
+
 // FallbackEligible reports whether err from the exaggerated layer may be
 // answered with the terrain layer (#687): the upstream answered with a
-// non-200 status, a wrong content type or an invalid PNG, or the connection
-// failed. A timeout or a full concurrency budget (busy) is not eligible: a
-// second attempt would wait on the same budget for another Timeout (#688
-// review F1). Neither is an oversize response or a request we refused.
+// non-200 status, a wrong content type, a non-PNG body or a PNG that does
+// not decode as a 256×256 tile (#695), or the connection failed. A timeout
+// or a full concurrency budget (busy) is not eligible: a second attempt
+// would wait on the same budget for another Timeout (#688 review F1).
+// Neither is an oversize response or a request we refused.
 func FallbackEligible(err error) bool {
 	var fe FetchError
 	if !errors.As(err, &fe) {
 		return false
 	}
 	switch fe.Reason {
-	case "transport", "read", "unexpected content type", "non-image response":
+	case "transport", "read", "unexpected content type", "non-image response", "invalid image":
 		return true
 	}
 	code, ok := strings.CutPrefix(fe.Reason, "status ")
