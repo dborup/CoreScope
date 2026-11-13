@@ -1,82 +1,106 @@
 package dhm
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"math"
 	"math/rand"
 	"sync"
 	"testing"
 )
 
-// #692 — the DHM WCS answers 0.0, not nodata, outside Denmark, so the
-// profile gates every sample with the embedded Danish boundary polygon
-// (land plus territorial waters). These pin the polygon, its index and
-// the gate in the planner.
+// #692 — the DHM WCS answers 0.0, not nodata, outside Denmark. On the sea
+// that is the true height, Danish sea or not; on Swedish, German, Polish
+// or Norwegian land it is not. The profile therefore counts a sample as
+// covered inside the raster extent unless it lies on the embedded foreign
+// land polygon. These pin the polygon, its index and the gate in the
+// planner.
 
 // Reference places. The windows in the path tests below are where the
-// real boundary lies along each path, with the polygon's ≈ 1 km accuracy
+// real coast or border lies along each path, with the polygon's accuracy
 // (Natural Earth 1:10m, simplified at 150 m) on top.
 var (
-	copenhagen    = LatLon{55.6761, 12.5683}
-	malmo         = LatLon{55.6050, 13.0038}
-	aabenraa      = LatLon{55.0443, 9.4174}
-	flensburg     = LatLon{54.7836, 9.4321}
-	tonder        = LatLon{54.9330, 8.8660}
-	niebull       = LatLon{54.7880, 8.8290}
-	dueodde       = LatLon{54.9900, 15.0750}
-	pobierowo     = LatLon{54.0600, 14.9300} // Polish coast south of Bornholm
-	kolobrzeg     = LatLon{54.1760, 15.5830}
-	nyborg        = LatLon{55.3127, 10.7897}
-	korsor        = LatLon{55.3297, 11.1393}
-	grenaa        = LatLon{56.4158, 10.8783}
-	anholt        = LatLon{56.7167, 11.5167}
-	sjOdde        = LatLon{55.9740, 11.2960}
-	ebeltoft      = LatLon{56.1944, 10.6797}
-	laeso         = LatLon{57.2667, 11.0167}
-	frederikshavn = LatLon{57.4407, 10.5366}
-	himmelbjerget = LatLon{56.1050, 9.6830}
-	silkeborg     = LatLon{56.1697, 9.5451}
+	copenhagen  = LatLon{55.6761, 12.5683}
+	malmo       = LatLon{55.6050, 13.0038}
+	helsingor   = LatLon{56.0361, 12.6136}
+	helsingborg = LatLon{56.0500, 12.7200} // inland of the 1:10m coast
+	aabenraa    = LatLon{55.0443, 9.4174}
+	flensburg   = LatLon{54.7836, 9.4321}
+	tonder      = LatLon{54.9330, 8.8660}
+	niebull     = LatLon{54.7880, 8.8290}
+	ronne       = LatLon{55.1009, 14.7067}
+	ystad       = LatLon{55.4400, 13.8300}
+	dueodde     = LatLon{54.9900, 15.0750}
+	pobierowo   = LatLon{54.0600, 14.9300} // Polish coast south of Bornholm
+	nyborg      = LatLon{55.3127, 10.7897}
+	korsor      = LatLon{55.3297, 11.1393}
+	grenaa      = LatLon{56.4158, 10.8783}
+	anholt      = LatLon{56.7167, 11.5167}
+	hundested   = LatLon{55.9650, 11.8500}
+	laeso       = LatLon{57.2667, 11.0167}
+	gilleleje   = LatLon{56.1210, 12.3100}
+	hesselo     = LatLon{56.1980, 11.7100}
+	sjOdde      = LatLon{55.9740, 11.2960}
+	himmelbjerg = LatLon{56.1050, 9.6830}
+	silkeborg   = LatLon{56.1697, 9.5451}
 )
 
-func inDenmarkLL(p LatLon) bool {
+func coversLL(p LatLon) bool {
 	e, n := ToUTM32(p.Lat, p.Lon)
-	return InDenmark(e, n)
+	return Covers(e, n)
 }
 
-func TestInDenmarkPlaces(t *testing.T) {
+func TestCoversPlaces(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		p    LatLon
 		want bool
 	}{
+		// Danish land, islands included (Natural Earth lacks Hesselø and
+		// Ertholmene; they are covered because nothing foreign is there).
 		{"Copenhagen", copenhagen, true},
-		{"Saltholm (Øresund, Danish side)", LatLon{55.6400, 12.7600}, true},
-		{"Helsingør", LatLon{56.0361, 12.6136}, true},
 		{"Padborg", LatLon{54.8256, 9.3640}, true},
-		{"Great Belt mid-strait", LatLon{55.3200, 10.9600}, true},
-		{"Kattegat, Sjællands Odde–Ebeltoft midpoint", LatLon{56.0842, 10.9879}, true},
+		{"Tønder", tonder, true},
+		{"Saltholm", LatLon{55.6400, 12.7600}, true},
+		{"Hesselø", hesselo, true},
+		{"Christiansø", LatLon{55.3205, 15.1872}, true},
 		{"Anholt", anholt, true},
 		{"Læsø", laeso, true},
-		{"Skagen", LatLon{57.7209, 10.5839}, true},
+		{"Ærø", LatLon{54.8800, 10.4100}, true},
+		{"Fanø", LatLon{55.4200, 8.4000}, true},
+		{"Rømø", LatLon{55.1500, 8.5300}, true},
+		{"Rønne", ronne, true},
 		{"Gedser", LatLon{54.5747, 11.9269}, true},
-		{"Rønne", LatLon{55.1009, 14.7067}, true},
+		// The sea, Danish or foreign.
+		{"Øresund east of Saltholm", LatLon{55.6600, 12.8600}, true},
+		{"Øresund off Landskrona", LatLon{55.8700, 12.7700}, true},
+		{"Baltic between Møn and Rügen", LatLon{54.8500, 13.6000}, true},
+		{"Baltic between Bornholm and Skåne", LatLon{55.3500, 14.3000}, true},
+		{"Kattegat off Varberg", LatLon{57.1000, 11.9000}, true},
+		{"Skagerrak off Hirtshals", LatLon{57.7000, 10.0000}, true},
+		// Foreign land.
 		{"Malmö", malmo, false},
-		{"Helsingborg", LatLon{56.0465, 12.6945}, false},
-		{"Ven (Swedish island in Øresund)", LatLon{55.9070, 12.6900}, false},
+		{"Helsingborg", helsingborg, false},
+		{"Ven (Swedish, mid-Øresund)", LatLon{55.9070, 12.6950}, false},
+		{"Falsterbo", LatLon{55.4000, 12.8300}, false},
+		{"Ystad", ystad, false},
+		{"Varberg", LatLon{57.1000, 12.2500}, false},
 		{"Flensburg", flensburg, false},
 		{"Niebüll", niebull, false},
-		{"Rostock", LatLon{54.0887, 12.1405}, false},
+		{"Sylt, Westerland", LatLon{54.9070, 8.3200}, false},
+		{"Rügen, Bergen", LatLon{54.4170, 13.4330}, false},
+		// Outside the raster extent: no data at all.
 		{"Hamburg", LatLon{53.5500, 9.9900}, false},
-		{"Kołobrzeg", kolobrzeg, false},
-		{"Gothenburg", LatLon{57.7089, 11.9746}, false},
+		{"Kołobrzeg", LatLon{54.1760, 15.5830}, false},
 		{"North Sea, 60 km off Hvide Sande", LatLon{56.0000, 7.1500}, false},
 	} {
-		if got := inDenmarkLL(c.p); got != c.want {
-			t.Errorf("%s: InDenmark = %v, want %v", c.name, got, c.want)
+		if got := coversLL(c.p); got != c.want {
+			t.Errorf("%s: Covers = %v, want %v", c.name, got, c.want)
 		}
 	}
 	for _, p := range [][2]float64{{math.NaN(), 6200000}, {600000, math.NaN()}, {math.Inf(1), 6200000}, {600000, math.Inf(-1)}} {
-		if InDenmark(p[0], p[1]) {
-			t.Errorf("InDenmark(%v, %v) = true", p[0], p[1])
+		if Covers(p[0], p[1]) {
+			t.Errorf("Covers(%v, %v) = true", p[0], p[1])
 		}
 	}
 }
@@ -92,21 +116,27 @@ func firstGapM(p *Plan) float64 {
 	return -1
 }
 
-func TestPlanGapStartsAtTheBorder(t *testing.T) {
+func TestPlanGapStartsAtTheForeignCoast(t *testing.T) {
 	for _, c := range []struct {
 		name   string
 		a, b   LatLon
 		lo, hi float64 // km along the path where the gap must start
 	}{
-		// The DK–SE boundary in Øresund runs east of Saltholm, about 12.79°E.
-		{"Copenhagen→Malmö", copenhagen, malmo, 13.5, 18},
-		// The land border meets Flensburg Fjord near 54.815°N here.
+		// All of the Øresund is covered; the gap starts on the Swedish
+		// shore, about 1.4 km before Malmö centre.
+		{"Copenhagen→Malmö", copenhagen, malmo, 26, 28},
+		{"Helsingør→Helsingborg", helsingor, helsingborg, 4.5, 6.3},
+		// The land border meets Flensburg Fjord near 54.81°N here.
 		{"Aabenraa→Flensburg", aabenraa, flensburg, 24, 27.5},
 		// Land border at Rudbøl/Møgeltønder, about 54.905°N.
 		{"Tønder→Niebüll", tonder, niebull, 2, 4.5},
-		// Bornholm's 12 nm (22.2 km) territorial sea, from its southern tip.
-		// (Toward Kołobrzeg, the RasterExtent edge at 15.2°E comes first.)
-		{"Dueodde→Pobierowo", dueodde, pobierowo, 21, 24},
+		// The Baltic is covered all the way to the Swedish coast at Ystad.
+		{"Rønne→Ystad", ronne, ystad, 63.5, 66.5},
+		// The Polish coast (54.06°N) lies south of the raster extent
+		// (northing 6048000, about 54.5°N here), so on this path the sea is
+		// covered up to the extent edge, 62.6 km out, and the gap is the
+		// extent's. No Polish land is inside the extent.
+		{"Dueodde→Pobierowo", dueodde, pobierowo, 61.5, 63.5},
 	} {
 		p := PlanProfile(c.a, c.b, defaultPlan())
 		gap := firstGapM(&p) / 1000
@@ -126,16 +156,21 @@ func TestPlanGapStartsAtTheBorder(t *testing.T) {
 	}
 }
 
+// Paths over Danish land and any sea with no foreign land on them are
+// covered end to end, however far from a Danish coast (#692 review F1:
+// Anholt→Hundested and Læsø→Gilleleje cross the open Kattegat).
 func TestPlanDanishPathsStayFull(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		a, b LatLon
 	}{
-		{"Himmelbjerget→Silkeborg", himmelbjerget, silkeborg},
+		{"Himmelbjerget→Silkeborg", himmelbjerg, silkeborg},
 		{"Great Belt, Nyborg→Korsør", nyborg, korsor},
 		{"Kattegat, Grenaa→Anholt", grenaa, anholt},
-		{"Kattegat, Sjællands Odde→Ebeltoft", sjOdde, ebeltoft},
-		{"Kattegat, Læsø→Frederikshavn", laeso, frederikshavn},
+		{"Kattegat, Anholt→Hundested", anholt, hundested},
+		{"Kattegat, Læsø→Gilleleje", laeso, gilleleje},
+		{"Kattegat, Hesselø→Sjællands Odde", hesselo, sjOdde},
+		{"Kattegat, Hesselø→Gilleleje", hesselo, gilleleje},
 	} {
 		p := PlanProfile(c.a, c.b, defaultPlan())
 		if p.Covered() != len(p.E) {
@@ -144,25 +179,27 @@ func TestPlanDanishPathsStayFull(t *testing.T) {
 	}
 }
 
-// A point exactly on the boundary is inside (the polygon is closed); a
-// metre off the edge, one side is inside and the other is not.
-func TestInDenmarkOnTheBoundary(t *testing.T) {
-	b := denmarkBoundary()
+// A point exactly on the foreign coast is on foreign land (the polygon is
+// closed), so it is not covered; a metre off the edge, one side is covered
+// and the other is not.
+func TestCoversOnTheCoast(t *testing.T) {
+	b := foreignLand()
+	ext := RasterExtent
 	checked := 0
-	for i := 0; i < len(b.segs); i += 7 {
+	for i := 0; i < len(b.segs); i += 5 {
 		s := b.segs[i]
-		if !InDenmark(s.e0, s.n0) {
-			t.Errorf("vertex (%v, %v) is not inside", s.e0, s.n0)
-		}
 		me, mn := (s.e0+s.e1)/2, (s.n0+s.n1)/2
-		if !InDenmark(me, mn) {
-			t.Errorf("edge midpoint (%v, %v) is not inside", me, mn)
+		// Clipped edges of the polygon lie outside the extent.
+		if !(me > ext[0]+10 && me < ext[2]-10 && mn > ext[1]+10 && mn < ext[3]-10) {
+			continue
+		}
+		if Covers(s.e0, s.n0) || Covers(me, mn) {
+			t.Errorf("coast point (%v, %v) or (%v, %v) is covered", s.e0, s.n0, me, mn)
 		}
 		l := math.Hypot(s.e1-s.e0, s.n1-s.n0)
 		ne, nn := -(s.n1-s.n0)/l, (s.e1-s.e0)/l // unit normal
-		left, right := InDenmark(me+ne, mn+nn), InDenmark(me-ne, mn-nn)
-		if left == right {
-			t.Errorf("edge (%v,%v)–(%v,%v): both sides 1 m off are inside=%v", s.e0, s.n0, s.e1, s.n1, left)
+		if Covers(me+ne, mn+nn) == Covers(me-ne, mn-nn) {
+			t.Errorf("edge (%v,%v)–(%v,%v): both sides 1 m off cover alike", s.e0, s.n0, s.e1, s.n1)
 		}
 		checked++
 	}
@@ -173,14 +210,14 @@ func TestInDenmarkOnTheBoundary(t *testing.T) {
 
 // The cell index answers exactly as a plain even-odd test over every
 // edge, including near edges and in the bbox margins.
-func TestInDenmarkIndexMatchesBruteForce(t *testing.T) {
-	b := denmarkBoundary()
+func TestForeignLandIndexMatchesBruteForce(t *testing.T) {
+	b := foreignLand()
 	rng := rand.New(rand.NewSource(692))
 	w, h := b.maxE-b.minE, b.maxN-b.minN
 	for i := 0; i < 200000; i++ {
 		e := b.minE - 1000 + rng.Float64()*(w+2000)
 		n := b.minN - 1000 + rng.Float64()*(h+2000)
-		if got, want := InDenmark(e, n), b.bruteForce(e, n); got != want {
+		if got, want := b.has(e, n), b.bruteForce(e, n); got != want {
 			t.Fatalf("(%v, %v): index %v, brute force %v", e, n, got, want)
 		}
 	}
@@ -188,19 +225,64 @@ func TestInDenmarkIndexMatchesBruteForce(t *testing.T) {
 	for _, s := range b.segs {
 		for k := 0; k < 8; k++ {
 			e, n := s.e0+rng.Float64()*400-200, s.n0+rng.Float64()*400-200
-			if got, want := InDenmark(e, n), b.bruteForce(e, n); got != want {
+			if got, want := b.has(e, n), b.bruteForce(e, n); got != want {
 				t.Fatalf("(%v, %v) near a vertex: index %v, brute force %v", e, n, got, want)
 			}
 		}
 	}
 }
 
+// #692 review N5: cellRange widens each edge's cells by the onSegment
+// tolerance. Here the square's east edge lies 0.5 mm west of the cell
+// boundary at e = 1000, so a point 0.4 mm east of the boundary is on the
+// edge (0.9 mm off) but in the next cell. Without the widening that cell
+// is not an edge cell, and its centre answers "outside". A tiny second
+// square keeps the point inside the bbox, which is checked first. The
+// mirror case tests the low side.
+func TestBoundaryCellRangeEps(t *testing.T) {
+	east, err := parseBoundary("ring 0,0 999.9995,0 999.9995,5000 0,5000\nring 5000,0 5001,0 5001,1 5000,1\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !east.has(1000.0004, 2500) {
+		t.Error("point 0.9 mm east of the east edge, in the next cell, is not on the edge")
+	}
+	if east.has(1000.002, 2500) {
+		t.Error("point 2.5 mm east of the east edge is inside")
+	}
+	// The low side: a tiny square at the origin fixes the grid, and the
+	// second square's west edge lies 0.5 mm east of the cell boundary.
+	west, err := parseBoundary("ring 0,0 1,0 1,1 0,1\nring 1000.0005,2000 3000,2000 3000,4000 1000.0005,4000\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !west.has(999.9996, 3000) {
+		t.Error("point 0.9 mm west of the west edge, in the previous cell, is not on the edge")
+	}
+	if west.has(999.998, 3000) {
+		t.Error("point 2.5 mm west of the west edge is inside")
+	}
+}
+
+// #692 review N3: the polygon itself is pinned. It is byte-reproducible;
+// after a deliberate regeneration (see scripts/gen-dhm-foreign-land.py)
+// update this hash and the windows of the path tests above if the coast
+// moved.
+const foreignLandSHA256 = "c2ef95888155813210cac7f5e00c82138f785bebaf6e85db4ebe8a899bd84cb1"
+
+func TestForeignLandIsPinned(t *testing.T) {
+	sum := sha256.Sum256([]byte(foreignLandText))
+	if got := hex.EncodeToString(sum[:]); got != foreignLandSHA256 {
+		t.Fatalf("foreign_land.txt sha256 %s, pinned %s: regenerate with scripts/gen-dhm-foreign-land.py and update the pin", got, foreignLandSHA256)
+	}
+}
+
 // The embedded polygon and its index stay bounded.
-func TestDenmarkBoundaryIsBounded(t *testing.T) {
-	if n := len(denmarkBoundaryText); n > 64<<10 {
+func TestForeignLandIsBounded(t *testing.T) {
+	if n := len(foreignLandText); n > 64<<10 {
 		t.Fatalf("embedded polygon is %d bytes", n)
 	}
-	b := denmarkBoundary()
+	b := foreignLand()
 	if len(b.segs) < 100 || len(b.segs) > 5000 {
 		t.Fatalf("%d edges", len(b.segs))
 	}
@@ -250,22 +332,22 @@ func borderPlan(b *testing.B) Plan {
 	return p
 }
 
-func BenchmarkInDenmark3200(b *testing.B) {
+func BenchmarkCovers3200(b *testing.B) {
 	p := borderPlan(b)
-	denmarkBoundary()
+	foreignLand()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for j := range p.E {
-			InDenmark(p.E[j], p.N[j])
+			Covers(p.E[j], p.N[j])
 		}
 	}
 }
 
 // The same 3200 samples through the plain even-odd test over every edge,
 // for comparison with the indexed gate.
-func BenchmarkInDenmarkBruteForce3200(b *testing.B) {
+func BenchmarkForeignLandBruteForce3200(b *testing.B) {
 	p := borderPlan(b)
-	bd := denmarkBoundary()
+	bd := foreignLand()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for j := range p.E {
@@ -276,7 +358,7 @@ func BenchmarkInDenmarkBruteForce3200(b *testing.B) {
 
 // The whole planner for 3200 samples, gate included.
 func BenchmarkPlanProfile3200(b *testing.B) {
-	denmarkBoundary()
+	foreignLand()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		PlanProfile(copenhagen, toward(copenhagen, 80000, 80), defaultPlan())
@@ -285,25 +367,26 @@ func BenchmarkPlanProfile3200(b *testing.B) {
 
 // Parsing the embedded polygon and building its cell index (once per
 // process).
-func BenchmarkDenmarkBoundaryLoad(b *testing.B) {
+func BenchmarkForeignLandLoad(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		if _, err := parseBoundary(denmarkBoundaryText); err != nil {
+		if _, err := parseBoundary(foreignLandText); err != nil {
 			b.Fatal(err)
 		}
 	}
 }
 
 var allSegs = sync.OnceValue(func() []int32 {
-	all := make([]int32, len(denmarkBoundary().segs))
+	all := make([]int32, len(foreignLand().segs))
 	for i := range all {
 		all[i] = int32(i)
 	}
 	return all
 })
 
-// bruteForce is contains over every edge, without the index: the
-// reference for the index test and the benchmark baseline.
+// bruteForce is contains over every edge of the foreign land polygon,
+// without the index: the reference for the index test and the benchmark
+// baseline.
 func (b *boundary) bruteForce(e, n float64) bool {
 	return b.contains(e, n, allSegs())
 }

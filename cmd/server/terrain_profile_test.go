@@ -680,18 +680,18 @@ func TestTerrainProfile_CoverageGating(t *testing.T) {
 	})
 }
 
-// #692: the DHM WCS answers 0.0, not nodata, for foreign land and sea, so
-// the fake source is flat 0 everywhere, as upstream is. A path that leaves
-// Denmark must still be partial with no verdict on either model, the gap
-// starting near the border; a path inside Danish land and waters is full.
+// #692: the DHM WCS answers 0.0, not nodata, outside Denmark, so the fake
+// source is flat 0 everywhere, as upstream is. A path onto foreign land
+// must be partial with no verdict on either model, the gap starting at the
+// foreign coast or border; a path over Danish land and any sea is full.
 func TestTerrainProfile_LeavingDenmarkIsPartial(t *testing.T) {
 	for _, c := range []struct {
 		name, a, b string
 		lo, hi     float64 // where the gap must start, metres along the path
 	}{
-		{"Copenhagen→Malmö", "55.67610,12.56830", "55.60500,13.00380", 13500, 18000},
+		{"Copenhagen→Malmö", "55.67610,12.56830", "55.60500,13.00380", 26000, 28000},
 		{"Aabenraa→Flensburg", "55.04430,9.41740", "54.78360,9.43210", 24000, 27500},
-		{"Dueodde→toward the Polish coast", "54.99000,15.07500", "54.30000,14.90000", 21000, 24000},
+		{"Rønne→Ystad", "55.10090,14.70670", "55.44000,13.83000", 63500, 66500},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			src := newFakeElevation(t, flatElev(0))
@@ -718,6 +718,8 @@ func TestTerrainProfile_LeavingDenmarkIsPartial(t *testing.T) {
 	for _, c := range []struct{ name, a, b string }{
 		{"Great Belt, Nyborg→Korsør", "55.31270,10.78970", "55.32970,11.13930"},
 		{"Kattegat, Grenaa→Anholt", "56.41580,10.87830", "56.71670,11.51670"},
+		{"Kattegat, Hesselø→Gilleleje", "56.19800,11.71000", "56.12100,12.31000"},
+		{"Øresund, Copenhagen→Saltholm east", "55.67610,12.56830", "55.66000,12.86000"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			src := newFakeElevation(t, flatElev(0))

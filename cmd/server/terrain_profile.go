@@ -19,9 +19,10 @@ package main
 //     call, and neither does a cache hit. A cache miss is charged to the
 //     client's per-IP budget (map.dhm.profile.rateLimitPerMin, see
 //     ip_rate_limit.go) before it goes upstream.
-//   - A sample outside Danish land and waters (dhm.InDenmark) has no data,
-//     on both models: upstream answers 0.0 there, not nodata, so a path
-//     into Sweden, Germany or Poland is partial with no verdict (#692).
+//   - A sample on Swedish, German, Polish or Norwegian land (dhm.Covers)
+//     has no data, on both models: upstream answers 0.0 there, not nodata,
+//     so a path onto foreign land is partial with no verdict (#692). The
+//     sea is covered, Danish or not: 0.0 is its true height.
 //   - Identical concurrent requests share one fetch (dhm.Flight), which
 //     stops when every requester has gone or after the 25 s profile
 //     deadline, releasing the client's concurrency slots (#683 review N3).

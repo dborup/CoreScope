@@ -14,11 +14,11 @@ import (
 // WCS 1.0 only serves axis-aligned rasters, so one raster around a
 // diagonal path costs O(L²) pixels. Splitting the path into chunks of
 // about ChunkM keeps the total near O(L), at most MaxCallsPerModel
-// rasters per elevation model. Samples outside the DHM raster extent, or
-// outside Danish land and waters (InDenmark, #692: upstream answers 0.0
-// there, not nodata), are never requested: a path that leaves Denmark
-// gets a gap there, and a path with no sample inside makes no upstream
-// call at all.
+// rasters per elevation model. Samples DHM does not cover (Covers: outside
+// the raster extent, or on Swedish, German, Polish or Norwegian land,
+// where upstream answers 0.0, not nodata, #692) are never requested: a
+// path onto foreign land gets a gap there, and a path with no covered
+// sample makes no upstream call at all.
 
 const (
 	MinStepM = 10 // finer than any Fresnel radius needs (plan §1.3)
@@ -58,8 +58,7 @@ type PlanOptions struct {
 }
 
 // Plan is the sampling of one path: evenly spaced samples from A to B in
-// EPSG:25832, and the rasters that cover the ones DHM covers (inside the
-// raster extent and InDenmark).
+// EPSG:25832, and the rasters for the ones DHM covers (Covers).
 type Plan struct {
 	DistanceM float64
 	StepM     float64
@@ -91,15 +90,12 @@ func PlanProfile(a, b LatLon, o PlanOptions) Plan {
 	// against 10–25 m steps and 20–60 m Fresnel radii.
 	ea, na := ToUTM32(a.Lat, a.Lon)
 	eb, nb := ToUTM32(b.Lat, b.Lon)
-	ext := RasterExtent
 	for i := range p.E {
 		t := float64(i) / float64(n-1)
 		e, nn := ea+(eb-ea)*t, na+(nb-na)*t
 		p.E[i], p.N[i] = e, nn
-		// Written so NaN (a projection far outside zone 32) is outside.
-		// The extent check is first: it is cheaper, and InDenmark is only
-		// meaningful where DHM serves rasters at all.
-		p.inside[i] = e >= ext[0] && e <= ext[2] && nn >= ext[1] && nn <= ext[3] && InDenmark(e, nn)
+		// NaN (a projection far outside zone 32) is not covered.
+		p.inside[i] = Covers(e, nn)
 	}
 
 	// Chunks of about ChunkM: rounding, so a path a few metres over a
