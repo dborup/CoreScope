@@ -7,7 +7,7 @@
  * the top 50 with a "Show all" button, and keeps sort, observer choice and
  * limit in the URL (bsort=, bobs=, blimit=).
  *
- * #697 M2 adds the estimated airtime columns and a busiest-hour sort
+ * #697 M2 adds the seen-airtime columns (a lower bound, shown as "≥") and a busiest-hour sort
  * (bsort=peak) from est_airtime_pct_24h / est_airtime_peak_pct.
  *
  * Every check reads the table's own cells and compares them with the API
@@ -171,7 +171,7 @@ function assertOrdered(rows, key) {
     const cells = await page.evaluate(() => Array.from(document.querySelectorAll('#busiestRepeatersTable tbody tr'))
       .map((tr) => ({ text: tr.children[5].textContent.trim(), over: !!tr.children[5].querySelector('.airtime-over') })));
     cells.forEach((c, i) => {
-      assert(/^(<0\.1|\d+\.\d)%$/.test(c.text), `row ${i + 1} busiest hour "${c.text}" is not a percentage`);
+      assert(/^(<0\.1|0\.0|≥\d+\.\d)%$/.test(c.text), `row ${i + 1} busiest hour "${c.text}" is not a lower-bound percentage`);
       const over = Math.round(est[i] * 10) / 10 >= 10;
       assert(c.over === over, `row ${i + 1} ${est[i]}%: flagged=${c.over}, want ${over}`);
     });

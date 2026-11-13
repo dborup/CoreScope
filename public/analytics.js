@@ -3249,13 +3249,17 @@
       .sort((a, b) => (rank(b[primary]) - rank(a[primary])) || (rank(b[secondary]) - rank(a[secondary])) || a.name.localeCompare(b.name));
   }
 
-  // An estimated airtime cell, formatted and flagged like the observers'
-  // real TX airtime (ObserverAirtime, default 10% limit).
-  const BUSIEST_AIRTIME_TITLE = 'Estimated: LoRa time-on-air of the packets this repeater relayed. A lower bound, flagged at or above the 10% duty-cycle limit.';
+  // A seen-airtime cell: a lower bound, so it reads "≥". Formatted and
+  // flagged like the observers' real TX airtime (ObserverAirtime, default
+  // 10% limit); the flag holds because a lower bound at the limit means the
+  // repeater is over it.
+  const BUSIEST_AIRTIME_TITLE = 'Seen airtime: LoRa time-on-air of the relayed packets the observers saw. A lower bound: on staging data the real airtime was about 1.5 to 2 times higher for well-observed repeaters and up to 50 times for others. Flagged when even the seen part is at or above the 10% duty-cycle limit.';
   function _busiestAirtimeCell(pct) {
     const oa = window.ObserverAirtime;
     if (pct == null || !oa) return '<span class="text-muted">—</span>';
-    return `<span class="airtime-pct${oa.isOver(pct) ? ' airtime-over' : ''}" title="${BUSIEST_AIRTIME_TITLE}">${oa.format(pct).replace('<', '&lt;')}</span>`;
+    const shown = oa.format(pct);
+    const text = pct > 0 && shown.charAt(0) !== '<' ? '≥' + shown : shown.replace('<', '&lt;');
+    return `<span class="airtime-pct${oa.isOver(pct) ? ' airtime-over' : ''}" title="${BUSIEST_AIRTIME_TITLE}">${text}</span>`;
   }
 
   function renderBusiestRepeatersTable(rows, sortKey, limit) {
@@ -3272,7 +3276,7 @@
     let html = '<div class="analytics-table-scroll"><table class="analytics-table busiest-repeaters-table" data-testid="busiest-repeaters-table"><thead><tr>'
       + '<th scope="col" rowspan="2" style="text-align:right;width:3em">#</th><th scope="col" rowspan="2">Repeater</th>'
       + '<th scope="colgroup" colspan="2" style="text-align:center">Relayed</th>'
-      + `<th scope="colgroup" colspan="2" style="text-align:center" title="${BUSIEST_AIRTIME_TITLE}">Est. airtime</th></tr><tr>`
+      + `<th scope="colgroup" colspan="2" style="text-align:center" title="${BUSIEST_AIRTIME_TITLE}">Seen airtime</th></tr><tr>`
       + countTh('24h', '24h') + countTh('1h', '1h')
       + '<th scope="col" style="text-align:right">24h</th>' + countTh('peak', 'Busiest hour') + '</tr></thead><tbody>';
     shown.forEach((r, i) => {
@@ -3347,13 +3351,13 @@
         <div class="analytics-section" id="busiestRepeaters">
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-list-numbers"/></svg> Busiest Repeaters</h3>
           <p class="text-muted">Repeaters ranked by packets relayed: distinct non-advert packets in which the observers saw the repeater as a hop. It is a lower bound, since a packet no observer heard is not counted, and a hop sent as a short (1-byte) prefix can be credited to the wrong repeater. A repeater that is also an observer reports its real airtime under RF Health, so it is hidden here unless included.</p>
-          <p class="text-muted" style="font-size:12px;margin-top:4px"><strong>Est. airtime</strong>: LoRa time-on-air of the packets relayed (other nodes' adverts included), as a share of the last 24 hours and of the busiest hour in them. The 10% duty-cycle limit applies per hour, so the busiest hour is the one to watch. It is an estimate and a lower bound like the counts: the repeater's own adverts and direct-routed traffic are not included.</p>
+          <p class="text-muted" style="font-size:12px;margin-top:4px"><strong>Seen airtime</strong>: LoRa time-on-air of the relayed packets the observers saw (other nodes' adverts included), as a share of the last 24 hours and of the busiest hour in them. It is a lower bound, shown as "≥": the repeater's own adverts, direct-routed traffic and packets no observer heard are missing. Compared with repeaters that report their own airtime, the real figure was about 1.5 to 2 times higher for well-observed repeaters and up to 50 times for others. So a low value does not mean a repeater is safely under the 10% duty-cycle limit (which applies per hour); a value flagged at the limit does mean it is over.</p>
           <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
             <label style="display:flex;gap:6px;align-items:center">Sort by
               <select id="busiestSort" class="time-window-select" aria-label="Sort busiest repeaters by">
                 <option value="24h"${bSort === '24h' ? ' selected' : ''}>Relayed 24h</option>
                 <option value="1h"${bSort === '1h' ? ' selected' : ''}>Relayed 1h</option>
-                <option value="peak"${bSort === 'peak' ? ' selected' : ''}>Busiest hour (est.)</option>
+                <option value="peak"${bSort === 'peak' ? ' selected' : ''}>Busiest hour (seen airtime)</option>
               </select>
             </label>
             <label style="display:flex;gap:6px;align-items:center">
