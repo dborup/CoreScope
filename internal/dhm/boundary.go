@@ -24,7 +24,11 @@ import (
 // (public domain, no attribution required; Minor Islands adds Ven), plus
 // hand-made outlines of Peberholm and Hallands Väderö: that land grown
 // 1250 m out to sea, clipped to the extent plus 2 km, simplified with a
-// 150 m Douglas-Peucker tolerance, minus Danish land. The 1:10m coast lies
+// 150 m Douglas-Peucker tolerance, minus Danish land. Danish land is
+// Admin 0 Denmark, every minor island nearer Denmark than foreign land,
+// and the hand-made Okseøerne in Flensborg Fjord, which neither layer has
+// (#704), so the buffer around a nearby foreign coast cannot swallow a
+// Danish islet. The 1:10m coast lies
 // up to 1 km seaward of real land (Falsterbo, Malmö, Helsingborg), and the
 // errors are not symmetric: sea marked foreign only makes a path partial,
 // foreign land read as sea gives a confident wrong verdict. So the gap
