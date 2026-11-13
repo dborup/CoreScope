@@ -583,6 +583,10 @@ func componentSchemas() map[string]interface{} {
 			"description": desc,
 		}
 	}
+	// prop is a plain typed property with a description.
+	prop := func(typ, desc string) map[string]interface{} {
+		return map[string]interface{}{"type": typ, "description": desc}
+	}
 	str := func(desc string) map[string]interface{} {
 		m := map[string]interface{}{"type": "string"}
 		if desc != "" {
@@ -621,14 +625,16 @@ func componentSchemas() map[string]interface{} {
 				"flood_advert_count_7d":       map[string]interface{}{"type": "integer", "description": "Distinct FLOOD adverts originated in the last 7 days (zero-hop adverts excluded). Present on the node detail endpoint."},
 				"battery_mv":                  map[string]interface{}{"type": "integer", "nullable": true},
 				"temperature_c":               map[string]interface{}{"type": "number", "nullable": true},
-				"relay_active":                map[string]interface{}{"type": "boolean", "description": "Repeater/room only: relayed traffic within the active window."},
-				"relay_count_1h":              map[string]interface{}{"type": "integer", "description": "Repeater/room only: relay-hop appearances in the last hour."},
-				"relay_count_24h":             map[string]interface{}{"type": "integer", "description": "Repeater/room only: relay-hop appearances in the last 24 hours."},
-				"unscoped_relay_count_24h":    map[string]interface{}{"type": "integer", "description": "Repeater/room only: subset of relay_count_24h that were unscoped floods (route_type FLOOD). A well-configured repeater sets flood.max.unscoped 0, so a non-trivial count flags a base-config problem."},
+				"relay_active":                prop("boolean", "Repeater/room only: relayed traffic within the active window."),
+				"relay_count_1h":              prop("integer", "Repeater/room only: relay-hop appearances in the last hour."),
+				"relay_count_24h":             prop("integer", "Repeater/room only: relay-hop appearances in the last 24 hours."),
+				"unscoped_relay_count_24h":    prop("integer", "Repeater/room only: subset of relay_count_24h that were unscoped floods (route_type FLOOD). A well-configured repeater sets flood.max.unscoped 0, so a non-trivial count flags a base-config problem."),
+				"est_airtime_pct_24h":         prop("number", "Repeater/room only (#697): estimated relay duty cycle over the last 24 hours, in percent. LoRa time-on-air of every packet the node relayed (adverts of other nodes included) at the configured loraPreset, divided by 24 h. A lower bound: only flood packets an observer heard with the node in the raw path count; its own adverts and direct-routed traffic do not."),
+				"est_airtime_peak_pct":        prop("number", "Repeater/room only (#697): the same estimate for the node's busiest rolling hour in the last 24 hours, in percent of that hour. Compare with the 10% duty-cycle limit, which applies per hour."),
 				"last_relayed":                str("Repeater/room only: RFC3339 time this node last appeared as a relay hop."),
 				"transported_scopes":          map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Repeater/room only: sorted, deduplicated region scopes this node has ever carried as a relay hop, while still resident in the in-memory index (NOT time-windowed -- can include scopes last carried weeks ago). Absent when empty."},
 				"transported_scopes_recent":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Repeater/room only: subset of transported_scopes last carried within the relay-activity window (same window as relay_active) -- a live signal, not just ever-seen. Absent when empty."},
-				"relay_window_hours":          map[string]interface{}{"type": "integer", "description": "Repeater/room only, /api/nodes/{pubkey} detail endpoint only: width (hours) of the relay-activity window the relay_count_* values cover."},
+				"relay_window_hours":          prop("integer", "Repeater/room only, /api/nodes/{pubkey} detail endpoint only: width (hours) of the relay-activity window the relay_count_* values cover."),
 				"traffic_share_score":         score01("#672 Traffic axis: share of non-advert traffic relayed through this repeater. Repeater/room only."),
 				"bridge_score":                score01("#672 Bridge axis: normalized betweenness centrality (chokepoint importance). Repeater/room only."),
 				"coverage_score":              score01("#672 Coverage axis: normalized harmonic reach centrality (how much of the mesh the node can reach). Repeater/room only."),

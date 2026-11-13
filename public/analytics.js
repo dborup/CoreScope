@@ -421,7 +421,7 @@
   // Repeater Metrics' Busiest Repeaters table: sort window, whether
   // repeaters that are also observers are listed, and the row limit. URL
   // only, like mbf=.
-  var BUSIEST_SORT = { param: 'bsort', allowed: ['24h', '1h'], dflt: '24h' };
+  var BUSIEST_SORT = { param: 'bsort', allowed: ['24h', '1h', 'peak'], dflt: '24h' };
   var BUSIEST_OBSERVERS = { param: 'bobs', allowed: ['hide', 'show'], dflt: 'hide' };
   var BUSIEST_LIMIT = { param: 'blimit', allowed: ['50', 'all'], dflt: '50' };
   // === BUSIEST SPECS END ===
@@ -3223,11 +3223,16 @@
   // the list is for the repeaters we only see through paths.
   const BUSIEST_DEFAULT_ROWS = 50;
 
+  // Sort key → [primary, secondary] row fields; the name breaks the last tie.
+  const BUSIEST_ORDER = { '24h': ['relay24h', 'relay1h'], '1h': ['relay1h', 'relay24h'], peak: ['estPeak', 'relay24h'] };
+
   // observerIds: lower-case observer ids, which are node public keys.
-  // Ranks by the chosen window; ties go to the other window, then the name.
+  // est_airtime_* (#697 M2) are absent on an older server; such a row sorts
+  // last by airtime and shows a dash.
   function _busiestRepeaterRows(nodes, observerIds, sortKey, includeObservers) {
-    const primary = sortKey === '1h' ? 'relay1h' : 'relay24h';
-    const secondary = primary === 'relay1h' ? 'relay24h' : 'relay1h';
+    const [primary, secondary] = BUSIEST_ORDER[sortKey] || BUSIEST_ORDER['24h'];
+    const pct = v => (v == null || isNaN(Number(v)) ? null : Number(v));
+    const rank = v => (v == null ? -1 : v);
     return nodes
       .filter(n => (n.role === 'repeater' || n.role === 'room') && Number(n.relay_count_24h) > 0)
       .map(n => ({
@@ -3236,10 +3241,21 @@
         role: n.role,
         relay1h: Number(n.relay_count_1h) || 0,
         relay24h: Number(n.relay_count_24h) || 0,
+        estAvg: pct(n.est_airtime_pct_24h),
+        estPeak: pct(n.est_airtime_peak_pct),
         observer: !!n.public_key && observerIds.has(String(n.public_key).toLowerCase()),
       }))
       .filter(r => includeObservers || !r.observer)
-      .sort((a, b) => (b[primary] - a[primary]) || (b[secondary] - a[secondary]) || a.name.localeCompare(b.name));
+      .sort((a, b) => (rank(b[primary]) - rank(a[primary])) || (rank(b[secondary]) - rank(a[secondary])) || a.name.localeCompare(b.name));
+  }
+
+  // An estimated airtime cell, formatted and flagged like the observers'
+  // real TX airtime (ObserverAirtime, default 10% limit).
+  const BUSIEST_AIRTIME_TITLE = 'Estimated: LoRa time-on-air of the packets this repeater relayed. A lower bound, flagged at or above the 10% duty-cycle limit.';
+  function _busiestAirtimeCell(pct) {
+    const oa = window.ObserverAirtime;
+    if (pct == null || !oa) return '<span class="text-muted">—</span>';
+    return `<span class="airtime-pct${oa.isOver(pct) ? ' airtime-over' : ''}" title="${BUSIEST_AIRTIME_TITLE}">${oa.format(pct).replace('<', '&lt;')}</span>`;
   }
 
   function renderBusiestRepeatersTable(rows, sortKey, limit) {
@@ -3251,16 +3267,23 @@
     // In the #206 scroll wrapper already, so a redraw keeps it. Long names
     // wrap anywhere, and busiest-repeaters-table lifts the wrapper's 480px
     // minimum: the four columns fit a phone.
+    // Two header rows: the group names sit over short column names, which
+    // keeps the six columns inside a phone screen.
     let html = '<div class="analytics-table-scroll"><table class="analytics-table busiest-repeaters-table" data-testid="busiest-repeaters-table"><thead><tr>'
-      + '<th scope="col" style="text-align:right;width:3em">#</th><th scope="col">Repeater</th>'
-      + countTh('24h', 'Relayed 24h') + countTh('1h', 'Relayed 1h') + '</tr></thead><tbody>';
+      + '<th scope="col" rowspan="2" style="text-align:right;width:3em">#</th><th scope="col" rowspan="2">Repeater</th>'
+      + '<th scope="colgroup" colspan="2" style="text-align:center">Relayed</th>'
+      + `<th scope="colgroup" colspan="2" style="text-align:center" title="${BUSIEST_AIRTIME_TITLE}">Est. airtime</th></tr><tr>`
+      + countTh('24h', '24h') + countTh('1h', '1h')
+      + '<th scope="col" style="text-align:right">24h</th>' + countTh('peak', 'Busiest hour') + '</tr></thead><tbody>';
     shown.forEach((r, i) => {
       const tags = (r.role === 'room' ? ' <span class="text-muted">room</span>' : '')
         + (r.observer ? ' <span class="text-muted">observer</span>' : '');
       html += `<tr><td style="text-align:right">${i + 1}</td>`
         + `<td style="overflow-wrap:anywhere"><a href="#/nodes/${encodeURIComponent(r.pk)}/analytics" class="analytics-link">${esc(r.name)}</a>${tags}</td>`
         + `<td style="text-align:right">${r.relay24h.toLocaleString()}</td>`
-        + `<td style="text-align:right">${r.relay1h.toLocaleString()}</td></tr>`;
+        + `<td style="text-align:right">${r.relay1h.toLocaleString()}</td>`
+        + `<td style="text-align:right">${_busiestAirtimeCell(r.estAvg)}</td>`
+        + `<td style="text-align:right">${_busiestAirtimeCell(r.estPeak)}</td></tr>`;
     });
     html += '</tbody></table></div>';
     if (rows.length > BUSIEST_DEFAULT_ROWS) {
@@ -3324,11 +3347,13 @@
         <div class="analytics-section" id="busiestRepeaters">
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-list-numbers"/></svg> Busiest Repeaters</h3>
           <p class="text-muted">Repeaters ranked by packets relayed: distinct non-advert packets in which the observers saw the repeater as a hop. It is a lower bound, since a packet no observer heard is not counted, and a hop sent as a short (1-byte) prefix can be credited to the wrong repeater. A repeater that is also an observer reports its real airtime under RF Health, so it is hidden here unless included.</p>
+          <p class="text-muted" style="font-size:12px;margin-top:4px"><strong>Est. airtime</strong>: LoRa time-on-air of the packets relayed (other nodes' adverts included), as a share of the last 24 hours and of the busiest hour in them. The 10% duty-cycle limit applies per hour, so the busiest hour is the one to watch. It is an estimate and a lower bound like the counts: the repeater's own adverts and direct-routed traffic are not included.</p>
           <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
             <label style="display:flex;gap:6px;align-items:center">Sort by
               <select id="busiestSort" class="time-window-select" aria-label="Sort busiest repeaters by">
                 <option value="24h"${bSort === '24h' ? ' selected' : ''}>Relayed 24h</option>
                 <option value="1h"${bSort === '1h' ? ' selected' : ''}>Relayed 1h</option>
+                <option value="peak"${bSort === 'peak' ? ' selected' : ''}>Busiest hour (est.)</option>
               </select>
             </label>
             <label style="display:flex;gap:6px;align-items:center">

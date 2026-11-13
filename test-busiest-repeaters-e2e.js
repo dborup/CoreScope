@@ -7,6 +7,9 @@
  * the top 50 with a "Show all" button, and keeps sort, observer choice and
  * limit in the URL (bsort=, bobs=, blimit=).
  *
+ * #697 M2 adds the estimated airtime columns and a busiest-hour sort
+ * (bsort=peak) from est_airtime_pct_24h / est_airtime_peak_pct.
+ *
  * Every check reads the table's own cells and compares them with the API
  * rows the page itself fetches, so a wrong order, a missing filter or a
  * stale URL fails here.
@@ -62,7 +65,7 @@ function expected(page, sortKey, includeObservers) {
     ]);
     const nodes = nodesResp.nodes || nodesResp;
     const obs = new Set((obsResp.observers || []).map((o) => String(o.id || '').toLowerCase()));
-    const k = sortKey === '1h' ? 'relay_count_1h' : 'relay_count_24h';
+    const k = { '1h': 'relay_count_1h', peak: 'est_airtime_peak_pct' }[sortKey] || 'relay_count_24h';
     const rows = nodes
       .filter((n) => (n.role === 'repeater' || n.role === 'room') && Number(n.relay_count_24h) > 0)
       .map((n) => ({ pk: n.public_key, v: Number(n[k]) || 0, observer: obs.has(String(n.public_key).toLowerCase()) }));
@@ -154,6 +157,26 @@ function assertOrdered(rows, key) {
     assert((await hashParams(page)).blimit === 'all', 'blimit=all back in the URL');
   });
 
+  await step('sorting by the busiest hour ranks by the estimate and flags the 10% limit', async () => {
+    await open(page);
+    await page.selectOption('#busiestSort', 'peak');
+    assert((await hashParams(page)).bsort === 'peak', 'bsort=peak missing from the URL');
+    const exp = await expected(page, 'peak', false);
+    const rows = await readRows(page);
+    const est = rows.map((r) => exp.byPk[r.pk].v);
+    assert(est.some((v) => v > 0), 'fixture repeaters have no estimated airtime');
+    for (let i = 1; i < est.length; i++) {
+      assert(est[i - 1] >= est[i], `row ${i + 1} (${est[i]}%) ranks below row ${i} (${est[i - 1]}%) by busiest hour`);
+    }
+    const cells = await page.evaluate(() => Array.from(document.querySelectorAll('#busiestRepeatersTable tbody tr'))
+      .map((tr) => ({ text: tr.children[5].textContent.trim(), over: !!tr.children[5].querySelector('.airtime-over') })));
+    cells.forEach((c, i) => {
+      assert(/^(<0\.1|\d+\.\d)%$/.test(c.text), `row ${i + 1} busiest hour "${c.text}" is not a percentage`);
+      const over = Math.round(est[i] * 10) / 10 >= 10;
+      assert(c.over === over, `row ${i + 1} ${est[i]}%: flagged=${c.over}, want ${over}`);
+    });
+  });
+
   await step('another tab drops bsort, bobs and blimit from the URL', async () => {
     await page.click('.tab-btn[data-tab="topology"]');
     await page.waitForFunction(() => !/[?&]tab=repeater-metrics/.test(location.hash));
@@ -161,17 +184,17 @@ function assertOrdered(rows, key) {
     assert(!p.bsort && !p.bobs && !p.blimit, 'leftover params: ' + JSON.stringify(p));
   });
 
-  await step('phone width: all four columns fit, the page does not scroll sideways', async () => {
+  await step('phone width: all six columns fit, the page does not scroll sideways', async () => {
     await page.setViewportSize({ width: 375, height: 812 });
     await open(page);
     const m = await page.evaluate(() => {
       const t = document.querySelector('[data-testid="busiest-repeaters-table"]');
-      const last = t.querySelector('thead th:last-child').getBoundingClientRect();
+      const last = t.querySelector('thead tr:last-child th:last-child').getBoundingClientRect();
       return { over: document.documentElement.scrollWidth - window.innerWidth, table: t.getBoundingClientRect().width, box: t.parentElement.clientWidth, lastRight: last.right, vw: window.innerWidth };
     });
     assert(m.over <= 1, `page scrolls ${m.over}px sideways`);
     assert(m.table <= m.box + 1, `table ${m.table}px is wider than its ${m.box}px box`);
-    assert(m.lastRight <= m.vw, `the Relayed 1h column ends at ${m.lastRight}px, past the ${m.vw}px screen`);
+    assert(m.lastRight <= m.vw, `the last column ends at ${m.lastRight}px, past the ${m.vw}px screen`);
   });
 
   await step('no page errors', async () => {

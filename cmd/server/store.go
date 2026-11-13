@@ -2453,19 +2453,20 @@ func (s *PacketStore) trackAdvertPubkey(tx *StoreTx) {
 	if tx.PayloadType == nil || *tx.PayloadType != PayloadADVERT || tx.DecodedJSON == "" {
 		return
 	}
-	d := tx.ParsedDecoded()
-	if d == nil {
-		return
-	}
-	pk := ""
-	if v, ok := d["pubKey"].(string); ok {
-		pk = v
-	} else if v, ok := d["public_key"].(string); ok {
-		pk = v
-	}
-	if pk != "" {
+	if pk := advertSenderKey(tx.ParsedDecoded()); pk != "" {
 		s.advertPubkeys[pk]++
 	}
+}
+
+// advertSenderKey is the sender public key of a decoded ADVERT, or "".
+func advertSenderKey(d map[string]interface{}) string {
+	if v, ok := d["pubKey"].(string); ok {
+		return v
+	}
+	if v, ok := d["public_key"].(string); ok {
+		return v
+	}
+	return ""
 }
 
 // untrackAdvertPubkey decrements the advertPubkeys refcount for ADVERT packets.
@@ -2478,13 +2479,7 @@ func (s *PacketStore) untrackAdvertPubkey(tx *StoreTx) {
 	if json.Unmarshal([]byte(tx.DecodedJSON), &d) != nil {
 		return
 	}
-	pk := ""
-	if v, ok := d["pubKey"].(string); ok {
-		pk = v
-	} else if v, ok := d["public_key"].(string); ok {
-		pk = v
-	}
-	if pk != "" {
+	if pk := advertSenderKey(d); pk != "" {
 		if s.advertPubkeys[pk] <= 1 {
 			delete(s.advertPubkeys, pk)
 		} else {
