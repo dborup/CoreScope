@@ -12,7 +12,11 @@
  *   3. verdict → chip mapping, including unknown on a partial profile;
  *   4. SVG geometry: a known profile gives known coordinates;
  *   5. localStorage that is absent or throws;
- *   6. XSS escaping of node names in the chart <title>.
+ *   6. XSS escaping of node names in the chart <title>;
+ *   7. review round 2: the coverage gate on the chip (F5), intrusion bands
+ *      that cannot contradict it (F8), the worst-sample marker (F3), the
+ *      stale-response guard (F4), HTML chart labels (F7) and the plain
+ *      decimal grammar for k and freq (F9).
  *
  * Usage: node test-issue-681-profile-tool.js
  */
@@ -33,6 +37,11 @@ function test(name, fn) {
   try { fn(); passed++; console.log('  ✅ ' + name); }
   catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
 }
+// The request path is asynchronous, so those cases are queued here and
+// drained after the synchronous ones, just before the summary.
+const asyncTests = [];
+function atest(name, fn) { asyncTests.push([name, fn]); }
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ── Sandbox ────────────────────────────────────────────────────────────────
 
@@ -226,6 +235,32 @@ test('the deep link clamps an out-of-range height instead of dropping the link',
   assert.strictEqual(state.hb, 0);
 });
 
+// ── 2b. k and freq follow the coordinate grammar (review F9) ───────────────
+
+console.log('\n=== #681 M4: k and freq are plain decimals ===');
+
+function ctrl(qs) { return TP.parseState('profile=' + PK_A + ',' + PK_B + '&' + qs); }
+
+test('a hex literal is not a k factor', () => {
+  assert.strictEqual(ctrl('k=0x5').k, null, '0x5 was accepted as k');
+  assert.strictEqual(ctrl('freq=0x368').freq, null, '0x368 was accepted as freq');
+});
+
+test('exponent notation is not a k factor either', () => {
+  assert.strictEqual(ctrl('k=1e0').k, null, '1e0 was accepted as k');
+  assert.strictEqual(ctrl('freq=8.69618e2').freq, null, 'exponent accepted as freq');
+  assert.strictEqual(ctrl('k=Infinity').k, null);
+  assert.strictEqual(ctrl('k= 2 ').k, null, 'whitespace padding was coerced');
+});
+
+test('plain decimals still parse, and the bounds still hold', () => {
+  assert.strictEqual(ctrl('k=1.3333').k, 1.3333);
+  assert.strictEqual(ctrl('freq=869.618').freq, 869.618);
+  assert.strictEqual(ctrl('k=0.4').k, null, 'below the 0.5 floor');
+  assert.strictEqual(ctrl('freq=2500').freq, 2500);
+  assert.strictEqual(ctrl('freq=2500.1').freq, null, 'above the 2500 ceiling');
+});
+
 // ── 3. Verdict chip ────────────────────────────────────────────────────────
 
 console.log('\n=== #681 M4: verdict chip ===');
@@ -279,6 +314,31 @@ test('an unrecognised verdict state degrades to unknown, never to clear', () => 
   const c = TP.verdictChip(resp({ state: 'totally-new-state' }));
   assert.strictEqual(c.tone, 'unknown');
   assert.strictEqual(c.label, 'No verdict');
+});
+
+test('partial coverage is never clear, whatever the verdict says', () => {
+  // The server forces unknown on a gap today; the client must hold that
+  // line by itself, so a stale cache or a future server cannot paint a
+  // confident green over a path that was never measured end to end.
+  const c = TP.verdictChip(resp({ state: 'clear' }, { state: 'partial', pct: 62.5 }));
+  assert.strictEqual(c.state, 'unknown', 'a partial profile reported ' + c.state);
+  assert.strictEqual(c.tone, 'unknown');
+  assert.strictEqual(c.label, 'No verdict');
+  assert.ok(/leaves Denmark/i.test(c.detail), c.detail);
+});
+
+test('no coverage at all is never a verdict either', () => {
+  ['clear', 'fresnel100', 'fresnel60', 'blocked'].forEach((state) => {
+    const c = TP.verdictChip(resp({ state: state }, { state: 'none', pct: 0 }));
+    assert.strictEqual(c.state, 'unknown', state + ' survived a coverage of none');
+  });
+});
+
+test('a response with no coverage block is not treated as a gap', () => {
+  // Absence of the block is absence of evidence, not evidence of a hole:
+  // downgrading there would make every verdict unknown.
+  const c = TP.verdictChip({ verdict: { state: 'clear', criterion: 0.6 } });
+  assert.strictEqual(c.state, 'clear');
 });
 
 test('a missing response is unknown, not a crash', () => {
@@ -358,6 +418,45 @@ test('terrain above the 60 % line is reported as an intrusion run', () => {
   assert.strictEqual(g.intrusions[0].toM, 500);
 });
 
+// A profile whose decimated samples rise through the 60 % zone at mid-path.
+// The server judged the *full-resolution* profile, so its verdict is the
+// authority; what these cases pin is that the chart never argues with it.
+function intrudingPath(verdictState, coverage) {
+  const d = flatPath();
+  d.samples = [{ d: 0, dtm: 0 }, { d: 500, dtm: 6 }, { d: 1000, dtm: 0 }];
+  d.verdict = { state: verdictState, model: 'dtm', criterion: 0.6, worstClearanceM: 3.98, worstAtM: 500, worstF1Fraction: 0.43 };
+  if (coverage) d.coverage = coverage;
+  return d;
+}
+
+test('a clear verdict never gets intrusion bands, even if the samples say otherwise', () => {
+  const d = intrudingPath('clear');
+  eq(TP.chartGeometry(d).intrusions, [], 'bands drawn under a Clear chip');
+  assert.strictEqual(TP.buildChart(d, {}).indexOf('tp-intrusion'), -1, 'an intrusion rect reached a clear chart');
+});
+
+test('fresnel100 asserts the 60 % zone is clear, so it gets no bands either', () => {
+  eq(TP.chartGeometry(intrudingPath('fresnel100')).intrusions, []);
+});
+
+test('a gap in the coverage removes the bands with the verdict', () => {
+  // The chip is unknown here (coverage gate), so bands would contradict it.
+  const d = intrudingPath('blocked', { state: 'partial', pct: 62.5, firstGapM: 800 });
+  eq(TP.chartGeometry(d).intrusions, [], 'bands drawn on an unjudgeable profile');
+  assert.strictEqual(TP.verdictChip(d).state, 'unknown');
+});
+
+test('bands and a warning chip can only appear together', () => {
+  [['clear', false], ['fresnel100', false], ['fresnel60', true], ['blocked', true],
+   ['unknown', false], ['totally-new-state', false]].forEach(([state, want]) => {
+    const d = intrudingPath(state);
+    const banded = TP.chartGeometry(d).intrusions.length > 0;
+    const tone = TP.verdictChip(d).tone;
+    assert.strictEqual(banded, want, state + ' bands = ' + banded);
+    if (banded) assert.ok(tone === 'warn' || tone === 'bad', state + ' banded with a ' + tone + ' chip');
+  });
+});
+
 test('out-of-coverage samples break the terrain into segments, not a straight line', () => {
   const d = flatPath();
   d.coverage = { state: 'partial', pct: 66.7, firstGapM: 500 };
@@ -406,10 +505,75 @@ test('the chart is an accessible image with the verdict in its title', () => {
   assert.ok(/clear/i.test(m[1]), m[1]);
 });
 
-test('the chart footer carries the CC BY 4.0 attribution', () => {
-  const svg = TP.buildChart(flatPath(), {});
-  assert.ok(svg.indexOf('Indeholder data fra Klimadatastyrelsen') >= 0, 'missing attribution');
+test('the CC BY 4.0 credit is the shared constant, not micro text in the SVG', () => {
+  // Review F7: a 9px label inside an 820-unit viewBox stretched onto a
+  // 340px panel renders about 3px tall. A licence credit nobody can read
+  // is not a credit, so it is the panel's HTML line now; the E2E pins
+  // that it is visible, and visible exactly once.
   assert.strictEqual(TP.ATTRIBUTION, 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0');
+  const svg = TP.buildChart(flatPath(), {});
+  assert.strictEqual(svg.indexOf('Klimadatastyrelsen'), -1, 'the credit is back inside the stretched chart');
+});
+
+test('no chart text is drawn as SVG text at all', () => {
+  const d = flatPath();
+  d.coverage = { state: 'partial', pct: 66.7, firstGapM: 500 };
+  d.samples = [{ d: 0, dtm: 0 }, { d: 500, dtm: null }, { d: 1000, dtm: 0 }];
+  d.verdict = { state: 'unknown', model: 'dtm', criterion: 0.6, worstClearanceM: null, worstAtM: null, worstF1Fraction: null };
+  const html = TP.buildChart(d, { nameA: 'Alfa', nameB: 'Bravo' });
+  const svg = html.slice(html.indexOf('<svg'), html.indexOf('</svg>'));
+  assert.strictEqual(/<text\b/.test(svg), false, 'SVG <text> survives in the stretched chart');
+  // <title> is not drawn, it is what a screen reader reads out.
+  assert.ok(/<title>/.test(svg), 'the accessible title was lost with the labels');
+});
+
+test('every chart label is HTML positioned over the plot in percentages', () => {
+  const d = flatPath();
+  d.coverage = { state: 'partial', pct: 66.7, firstGapM: 500 };
+  d.samples = [{ d: 0, dtm: 0 }, { d: 500, dtm: null }, { d: 1000, dtm: 0 }];
+  d.verdict = { state: 'unknown', model: 'dtm', criterion: 0.6, worstClearanceM: null, worstAtM: null, worstF1Fraction: null };
+  const html = TP.buildChart(d, {});
+  assert.ok(/^<div class="tp-plot">/.test(html), 'the chart is not wrapped in a positioning box');
+  ['tp-ax-y', 'tp-ax-x0', 'tp-ax-x1', 'tp-ax-gap', 'tp-pin-a', 'tp-pin-b'].forEach((cls) => {
+    assert.ok(html.indexOf(cls) >= 0, 'missing HTML label ' + cls);
+  });
+  // Five elevation ticks, one per gridline.
+  assert.strictEqual((html.match(/class="tp-ax tp-ax-y"/g) || []).length, 5);
+  assert.ok(html.indexOf('>no data</span>') >= 0, 'the gap label is not HTML');
+  // x = 425 of 820 and y = 262 of 300 for the gap label.
+  assert.ok(/left:51\.829%/.test(html), 'label x is not a percentage of the viewBox: ' + html.slice(html.indexOf('tp-ax-gap') - 40, html.indexOf('tp-ax-gap') + 80));
+  // Both endpoint tags survive as readable text.
+  assert.ok(html.indexOf('>A</span>') >= 0 && html.indexOf('>B</span>') >= 0, 'the A/B pin labels were lost');
+});
+
+test('a hostile node name cannot escape through an HTML label', () => {
+  const html = TP.buildChart(flatPath(), { nameA: '<img src=x onerror=alert(1)>', nameB: 'ok' });
+  assert.strictEqual(html.indexOf('<img'), -1, 'raw tag reached the chart HTML');
+});
+
+test('the worst sample is marked, at the distance the server reported', () => {
+  const d = flatPath();
+  d.samples = [{ d: 0, dtm: 0 }, { d: 500, dtm: 30 }, { d: 1000, dtm: 0 }];
+  d.verdict = { state: 'blocked', model: 'dtm', criterion: 0.6, worstClearanceM: -20.02, worstAtM: 500, worstF1Fraction: -2.16 };
+  const svg = TP.buildChart(d, {});
+  const m = svg.match(/<line class="tp-worst"[^>]*>/);
+  assert.ok(m, 'no worst-sample marker on a blocked profile');
+  // worstAtM 500 of 1000 m → the middle of the 758-wide plot box at x=46.
+  assert.ok(/x1="425"/.test(m[0]) && /x2="425"/.test(m[0]), 'marker is not at 500 m: ' + m[0]);
+  assert.ok(/y1="14"/.test(m[0]) && /y2="270"/.test(m[0]), 'marker does not span the plot: ' + m[0]);
+  assert.ok(/stroke="var\(--profile-blocked\)/.test(m[0]), 'marker is not drawn in the blocked token');
+});
+
+test('a clear path carries no worst-sample marker', () => {
+  assert.strictEqual(TP.buildChart(flatPath(), {}).indexOf('tp-worst'), -1,
+    'the worst-sample marker was drawn without an intrusion');
+});
+
+test('the chart emits no zero-radius dead markup', () => {
+  const d = flatPath();
+  d.samples = [{ d: 0, dtm: 0 }, { d: 500, dtm: 30 }, { d: 1000, dtm: 0 }];
+  d.verdict = { state: 'blocked', model: 'dtm', criterion: 0.6, worstClearanceM: -20.02, worstAtM: 500, worstF1Fraction: -2.16 };
+  assert.strictEqual(/r="0"/.test(TP.buildChart(d, {})), false, 'an invisible r="0" circle is still emitted');
 });
 
 test('a blocked path draws intrusion markers', () => {
@@ -519,7 +683,226 @@ test('escaping covers every HTML metacharacter', () => {
   assert.ok(svg.indexOf('&lt;&gt;&amp;&quot;&#39;') >= 0, 'incomplete escaping');
 });
 
+// ── 7. The request sequence guard (review F4) ──────────────────────────────
+
+console.log('\n=== #681 M4: a newer answer always wins ===');
+
+/* A DOM just real enough for create(): elements that remember children,
+ * classes, attributes and listeners. The panel never reaches a browser
+ * here — what is under test is which response ends up in the chip. */
+function fakeDom() {
+  const made = [];
+  function mkEl(tag) {
+    const on = {};
+    const classes = new Set();
+    const e = {
+      tagName: String(tag).toUpperCase(), children: [], attrs: {}, style: {},
+      className: '', textContent: '', innerHTML: '', value: '', hidden: false,
+      parentNode: null,
+      classList: {
+        add: (c) => classes.add(c),
+        remove: (c) => classes.delete(c),
+        contains: (c) => classes.has(c),
+        toggle: (c, want) => { const on2 = want === undefined ? !classes.has(c) : !!want; if (on2) classes.add(c); else classes.delete(c); },
+      },
+      setAttribute: (k, v) => { e.attrs[k] = String(v); },
+      getAttribute: (k) => (Object.prototype.hasOwnProperty.call(e.attrs, k) ? e.attrs[k] : null),
+      appendChild: (c) => { e.children.push(c); c.parentNode = e; return c; },
+      removeChild: (c) => { e.children = e.children.filter(x => x !== c); c.parentNode = null; return c; },
+      addEventListener: (t, fn) => { (on[t] || (on[t] = [])).push(fn); },
+      removeEventListener: (t, fn) => { on[t] = (on[t] || []).filter(f => f !== fn); },
+      fire: (t) => { (on[t] || []).slice().forEach(fn => fn({ target: e, preventDefault() {} })); },
+    };
+    made.push(e);
+    return e;
+  }
+  const body = mkEl('body');
+  return {
+    doc: { createElement: mkEl, body: body, addEventListener() {}, querySelector: () => null, querySelectorAll: () => [] },
+    body: body,
+    find: (id) => made.filter(e => e.attrs['data-testid'] === id).pop() || null,
+  };
+}
+
+function loadLive() {
+  const dom = fakeDom();
+  const win = {
+    addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
+    localStorage: makeStorage('ok'),
+    innerWidth: 1280, innerHeight: 800,
+    document: dom.doc,
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (t) => clearTimeout(t),
+  };
+  const ctx = {
+    window: win, console, Math, Date, JSON, Array, Object, String, Number,
+    RegExp, Error, TypeError, Boolean, isNaN, isFinite, parseInt, parseFloat,
+    URLSearchParams, Map, Set, Promise, encodeURIComponent, decodeURIComponent,
+    setTimeout, clearTimeout, document: dom.doc,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync('public/terrain-profile.js', 'utf8'), ctx);
+  return { TP: ctx.window.TerrainProfile, dom: dom };
+}
+
+/* A fetchJSON whose answers are handed out one at a time, so a test can
+ * land them in whatever order it likes. */
+function deferredFetch() {
+  const calls = [];
+  const fn = (url) => {
+    let settle;
+    const promise = new Promise((resolve, reject) => { settle = { resolve, reject }; });
+    calls.push({ url: url, settle: settle });
+    return promise;
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+function chipOf(dom) {
+  const chip = dom.find('tp-verdict');
+  return chip ? { label: chip.textContent, state: chip.attrs['data-state'] } : null;
+}
+
+function answer(verdictState, coverageState) {
+  return {
+    a: { kind: 'node', groundM: 0, antennaM: 10, antennaSource: 'request', assumed: false },
+    b: { kind: 'node', groundM: 0, antennaM: 10, antennaSource: 'request', assumed: false },
+    distanceM: 1000, model: 'dtm', stepM: 500, sampleCount: 3,
+    coverage: { state: coverageState || 'full', pct: 100, firstGapM: null },
+    samples: [{ d: 0, dtm: 0 }, { d: 500, dtm: 0 }, { d: 1000, dtm: 0 }],
+    physics: { freqMHz: 869.618, freqSource: 'firmware', lambdaM: 0.34474, k: 1, kSource: 'request', f1MaxM: 9.28 },
+    verdict: { state: verdictState, model: 'dtm', criterion: 0.6, worstClearanceM: 9.98, worstAtM: 500, worstF1Fraction: 1.07 },
+    attribution: 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0',
+  };
+}
+
+function openPair(T, dom, fetchJSON) {
+  const tool = T.create({ mount: dom.body, fetchJSON: fetchJSON, syncHash: false,
+    resolveNode: (pk) => ({ name: pk.slice(0, 4), lat: 56, lon: 10, role: 'repeater' }) });
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_B });
+  return tool;
+}
+
+atest('a slow answer landing after a model switch never reaches the chip', async () => {
+  const { TP: T, dom } = loadLive();
+  const fetchJSON = deferredFetch();
+  openPair(T, dom, fetchJSON);
+  assert.strictEqual(fetchJSON.calls.length, 1, 'the pair did not measure');
+  assert.ok(/model=both/.test(fetchJSON.calls[0].url) || fetchJSON.calls[0].url.indexOf('model=') === -1,
+    'first call was not the default model: ' + fetchJSON.calls[0].url);
+
+  // Switch to terrain-only while the first request is still in flight.
+  dom.find('tp-model-dtm').fire('click');
+  assert.strictEqual(fetchJSON.calls.length, 2, 'the model switch did not re-measure');
+  assert.ok(/model=dtm/.test(fetchJSON.calls[1].url), 'second call = ' + fetchJSON.calls[1].url);
+
+  // The newer answer lands first and is drawn.
+  fetchJSON.calls[1].settle.resolve(answer('clear'));
+  await sleep(0);
+  assert.strictEqual(chipOf(dom).state, 'clear', 'the dtm answer was not drawn');
+
+  // The older "both" answer now arrives, carrying a different verdict.
+  fetchJSON.calls[0].settle.resolve(answer('blocked'));
+  await sleep(0);
+  assert.strictEqual(chipOf(dom).state, 'clear',
+    'a stale answer overwrote the newer one: chip = ' + JSON.stringify(chipOf(dom)));
+});
+
+atest('a slow answer landing after a height change never reaches the chip', async () => {
+  const { TP: T, dom } = loadLive();
+  const fetchJSON = deferredFetch();
+  openPair(T, dom, fetchJSON);
+  assert.strictEqual(fetchJSON.calls.length, 1);
+
+  // Raise antenna A while the first request is in flight; the stepper is
+  // debounced, so the second request only goes out after the delay.
+  dom.find('tp-h-a-plus').fire('click');
+  await sleep(500);
+  assert.strictEqual(fetchJSON.calls.length, 2, 'the height change did not re-measure');
+  assert.ok(/ha=1/.test(fetchJSON.calls[1].url), 'the new height was not sent: ' + fetchJSON.calls[1].url);
+
+  fetchJSON.calls[1].settle.resolve(answer('fresnel60'));
+  await sleep(0);
+  assert.strictEqual(chipOf(dom).state, 'fresnel60', 'the newer answer was not drawn');
+
+  fetchJSON.calls[0].settle.resolve(answer('clear'));
+  await sleep(0);
+  assert.strictEqual(chipOf(dom).state, 'fresnel60', 'the pre-height answer overwrote the newer one');
+});
+
+atest('a stale failure cannot wipe a newer answer either', async () => {
+  const { TP: T, dom } = loadLive();
+  const fetchJSON = deferredFetch();
+  openPair(T, dom, fetchJSON);
+  dom.find('tp-model-dtm').fire('click');
+  fetchJSON.calls[1].settle.resolve(answer('clear'));
+  await sleep(0);
+  fetchJSON.calls[0].settle.reject(new Error('upstream timed out'));
+  await sleep(0);
+  assert.strictEqual(chipOf(dom).state, 'clear', 'a stale rejection replaced the newer answer');
+});
+
+atest('closing the panel drops every answer still in flight', async () => {
+  const { TP: T, dom } = loadLive();
+  const fetchJSON = deferredFetch();
+  const tool = openPair(T, dom, fetchJSON);
+  tool.close();
+  fetchJSON.calls[0].settle.resolve(answer('blocked'));
+  await sleep(0);
+  assert.notStrictEqual(chipOf(dom).state, 'blocked', 'a closed panel still took an answer');
+});
+
+// ── 8. The "assumed heights" caveat (review F10, plan §3.2) ────────────────
+
+console.log('\n=== #681 M4: assumed heights are flagged beside the verdict ===');
+
+atest('the verdict carries an "assumed heights" caveat until both ends are set', async () => {
+  const { TP: T, dom } = loadLive();
+  const fetchJSON = deferredFetch();
+  openPair(T, dom, fetchJSON);
+  const withDefaults = answer('clear');
+  withDefaults.a.assumed = true;
+  withDefaults.a.antennaSource = 'role-default';
+  fetchJSON.calls[0].settle.resolve(withDefaults);
+  await sleep(0);
+  const badge = dom.find('tp-assumed-chip');
+  assert.ok(badge, 'no assumed-heights caveat in the panel');
+  assert.strictEqual(badge.hidden, false, 'the caveat is hidden while A is a role default');
+  assert.strictEqual(badge.textContent, T.ASSUMED_LABEL);
+  assert.strictEqual(T.ASSUMED_LABEL, 'assumed heights');
+});
+
+atest('the caveat clears once the server confirms both heights', async () => {
+  const { TP: T, dom } = loadLive();
+  const fetchJSON = deferredFetch();
+  openPair(T, dom, fetchJSON);
+  const asked = answer('clear');           // both ends assumed:false
+  fetchJSON.calls[0].settle.resolve(asked);
+  await sleep(0);
+  assert.strictEqual(dom.find('tp-assumed-chip').hidden, true,
+    'the caveat stayed up with both heights confirmed');
+});
+
+atest('one assumed end is enough to caveat the verdict', async () => {
+  const { TP: T, dom } = loadLive();
+  const fetchJSON = deferredFetch();
+  openPair(T, dom, fetchJSON);
+  const half = answer('blocked');
+  half.b.assumed = true;
+  fetchJSON.calls[0].settle.resolve(half);
+  await sleep(0);
+  assert.strictEqual(dom.find('tp-assumed-chip').hidden, false, 'B being a default was not flagged');
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
-console.log(`\n#681 M4 unit: ${passed} passed, ${failed} failed`);
-process.exit(failed ? 1 : 0);
+(async () => {
+  for (const [name, fn] of asyncTests) {
+    try { await fn(); passed++; console.log('  ✅ ' + name); }
+    catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  console.log(`\n#681 M4 unit: ${passed} passed, ${failed} failed`);
+  process.exit(failed ? 1 : 0);
+})();

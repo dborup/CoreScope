@@ -23,7 +23,12 @@
  *   8. exactly one /api/terrain/profile call per profile;
  *   9. 360px portrait, 568x320 and 740x360 keep every control reachable and
  *      at least 48px, and the panel never covers the bottom nav;
- *  10. axe clean on the panel in light and dark.
+ *  10. axe clean on the panel in light and dark;
+ *  11. review round 2: measured text contrast on every panel label in both
+ *      themes (F1), Escape while the second end is being picked (F2), an
+ *      observer-only marker picked as a point rather than a 404 (F6),
+ *      legible chart text and credit at 360px (F7) and the "assumed
+ *      heights" caveat beside the verdict (F10).
  *
  * Usage:
  *   BASE_URL=http://localhost:13700 node test-issue-681-profile-tool-e2e.js
@@ -126,6 +131,19 @@ function profileFor(scenario, q) {
   return baseProfile(q);
 }
 
+/* Review F6. The committed fixture has no observer that is not also a node,
+ * so the one case where marker picking and endpoint resolution disagree
+ * cannot be reached without planting it. This id is 64 hex, exactly like a
+ * node public key, and is in no node row — picking it as a node would come
+ * back 404 "node not found". The spot is empty in the fixture (no node
+ * within ~6 km) so the marker stands alone and is clickable. */
+const OBS_ONLY_ID = 'e2e0b5e4'.repeat(8);
+const OBS_ONLY = {
+  id: OBS_ONLY_ID, observer_id: OBS_ONLY_ID, name: 'E2E Observer Only',
+  lat: 37.95, lon: -121.45, iata: null, last_seen: new Date().toISOString(),
+  packet_count: 7, is_active: true,
+};
+
 // ── Harness ─────────────────────────────────────────────────────────────────
 
 (async () => {
@@ -143,7 +161,7 @@ function profileFor(scenario, q) {
       hasTouch: !!o.touch,
       isMobile: !!o.touch,
     });
-    const rec = { profile: [], consoleErrors: [], all: [], scenario: o.scenario || 'clear' };
+    const rec = { profile: [], notFound: [], consoleErrors: [], all: [], scenario: o.scenario || 'clear' };
     await ctx.route(BASE + '/api/config/client', async (route) => {
       const response = await route.fetch();
       const config = await response.json();
@@ -152,9 +170,28 @@ function profileFor(scenario, q) {
       else if (o.dhm !== 'off') config.dhm = DHM_BLOCK;
       await route.fulfill({ response, json: config });
     });
+    if (o.observerOnly) {
+      await ctx.route(url => new URL(url).pathname === '/api/observers', async (route) => {
+        const response = await route.fetch();
+        const data = await response.json();
+        (data.observers || data).push(OBS_ONLY);
+        await route.fulfill({ response, json: data });
+      });
+    }
     await ctx.route(url => new URL(url).pathname === PROFILE_PATH, async (route) => {
       const u = new URL(route.request().url());
       rec.profile.push(u);
+      // The real endpoint resolves a 64-hex endpoint against the node store
+      // and 404s when it is not there (cmd/server/terrain_profile.go), so an
+      // observer id sent as a node must fail here too.
+      const unknown = ['a', 'b'].map(k => u.searchParams.get(k))
+        .filter(v => /^[0-9a-f]{64}$/.test(v || '') && v === OBS_ONLY_ID);
+      if (unknown.length) {
+        rec.notFound.push(u.toString());
+        await route.fulfill({ status: 404, contentType: 'application/json',
+          body: JSON.stringify({ error: 'node not found' }) });
+        return;
+      }
       await route.fulfill({ status: 200, contentType: 'application/json',
         body: JSON.stringify(profileFor(rec.scenario, u.searchParams)) });
     });
@@ -190,8 +227,9 @@ function profileFor(scenario, q) {
   // The committed fixture's nodes are in the Bay Area; the stubbed profile
 // answers for any pair, so the viewport only has to put markers on screen.
 const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
-  async function gotoMap(page, extra) {
-    const qs = `lat=${VIEW.lat}&lon=${VIEW.lon}&zoom=${VIEW.zoom}` + (extra ? '&' + extra : '');
+  async function gotoMap(page, extra, view) {
+    const v = view || VIEW;
+    const qs = `lat=${v.lat}&lon=${v.lon}&zoom=${v.zoom}` + (extra ? '&' + extra : '');
     await page.goto(`${BASE}/#/map?${qs}`, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
     await page.waitForFunction(() => window.MeshConfigReady !== undefined, null, { timeout: 15000 });
@@ -199,6 +237,9 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
   }
 
   const TOGGLE = '[data-testid="map-profile-toggle"]';
+  // Two synthetic keys; the stub answers for any pair, so this opens the
+  // panel without having to land two clicks on a small viewport.
+  const PAIR_LINK = 'profile=' + 'a'.repeat(64) + ',' + 'b'.repeat(64);
   const PANEL = '[data-testid="tp-panel"]';
   const CHART = '[data-testid="tp-chart"]';
 
@@ -261,6 +302,10 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
         svgTitle: svg ? (svg.querySelector('title') || {}).textContent || '' : null,
         svgRole: svg ? svg.getAttribute('role') : null,
         status: (q('[data-testid="tp-status"]') || {}).textContent || '',
+        assumedChip: (() => {
+          const b = q('[data-testid="tp-assumed-chip"]');
+          return b ? { text: b.textContent, shown: !b.hidden && getComputedStyle(b).display !== 'none' } : null;
+        })(),
         credit: (panel && panel.textContent.indexOf('Klimadatastyrelsen') >= 0) || false,
         // Counted over visible leaf elements, so the chart footer and the
         // empty-state paragraph never both show the credit.
@@ -327,6 +372,11 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
       assert(/MeshCore firmware default/.test(st.meta), 'the frequency source is not shown: ' + st.meta);
       assert(/k = 1\.33/.test(st.meta), 'the k factor is not shown: ' + st.meta);
       assert(st.credits === 1, 'the CC BY 4.0 credit appears ' + st.credits + ' times');
+      // Plan §3.2 (review F10): neither height was asked for, so both are
+      // role defaults and the verdict must say so.
+      assert(st.assumedChip, 'no assumed-heights caveat in the panel');
+      assert(st.assumedChip.shown, 'the verdict is shown without the assumed-heights caveat');
+      assert(st.assumedChip.text === 'assumed heights', 'caveat text = ' + st.assumedChip.text);
       assert(rec.profile.length === 1, 'profile requests = ' + rec.profile.length);
       const q = rec.profile[0].searchParams;
       assert(/^[0-9a-f]{64}$/.test(q.get('a')), 'endpoint a is not a public key: ' + q.get('a'));
@@ -416,6 +466,34 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
       assert(idle.max <= 1, 'a marker kept ' + idle.max + ' click handlers after disarming');
     });
 
+    /* Review F2. After A is picked the panel is already open, so "Escape
+     * disarms, Escape again closes" has a second shape the old suite never
+     * exercised: the one where both the picker and the panel are live. A
+     * fall-through in the key handler collapses the two presses into one,
+     * which throws away a half-made measurement on a stray keypress. */
+    await step('Escape while picking B disarms only, and leaves the panel open', async () => {
+      await page.click(TOGGLE);
+      await clickMarkers(page, 1);
+      await page.waitForTimeout(500);
+      assert((await panelState(page)).open, 'the panel did not open after picking A');
+      assert(await page.getAttribute(TOGGLE, 'aria-pressed') === 'true', 'not armed for B');
+      const armed = await markerClickHandlers(page);
+      assert(armed.max >= 1, 'no picker on the markers while picking B');
+
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(300);
+      const after = await panelState(page);
+      assert(after.open, 'the first Escape closed the panel instead of only disarming');
+      assert(await page.getAttribute(TOGGLE, 'aria-pressed') === 'false', 'still armed after Escape');
+      assert(!(await page.$('[data-testid="map-profile-hint"]:not([hidden])')), 'hint still up after Escape');
+      const idle = await markerClickHandlers(page);
+      assert(idle.max <= 1, 'a marker kept ' + idle.max + ' click handlers after disarming');
+
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(300);
+      assert(!(await panelState(page)).open, 'the second Escape did not close the panel');
+    });
+
     await step('no token in any request, and nothing reaches dataforsyningen.dk', async () => {
       const bad = rec.all.filter(u => /dataforsyningen\.dk/i.test(u));
       assert(bad.length === 0, 'requests to the upstream service: ' + bad.join(', '));
@@ -486,6 +564,10 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
       assert(q.get('b') === '56.16290,10.20390', 'b = ' + q.get('b'));
       assert(q.get('model') === 'dtm' && q.get('ha') === '12' && q.get('hb') === '4'
         && q.get('k') === '1.2' && q.get('freq') === '868.5', 'controls not forwarded: ' + q.toString());
+      // Both heights came from the link, so the server reports them as
+      // confirmed and the caveat must clear itself.
+      assert(st.assumedChip && !st.assumedChip.shown,
+        'the assumed-heights caveat stayed up with both heights given');
     });
     await step('the hash still carries the same link after the tool rewrites it', async () => {
       const st = await panelState(page);
@@ -514,6 +596,25 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
     await ctx.close();
   }
 
+  // ── 4b. hex and exponent controls in the link (review F9) ─────────────────
+  {
+    const { ctx, page, rec } = await newCtx({});
+    await gotoMap(page, PAIR_LINK + '&k=0x5&freq=0x368&ha=4');
+    await step('a hex k or freq in the link is dropped, never coerced to a number', async () => {
+      await page.waitForTimeout(900);
+      assert((await panelState(page)).open, 'the pair itself should still open the panel');
+      assert(rec.profile.length === 1, 'profile requests = ' + rec.profile.length);
+      const q = rec.profile[0].searchParams;
+      assert(q.get('k') === null, 'k reached the wire as ' + q.get('k'));
+      assert(q.get('freq') === null, 'freq reached the wire as ' + q.get('freq'));
+      assert(q.get('ha') === '4', 'the valid control beside them was dropped too: ' + q.toString());
+      const p = new URLSearchParams(((await panelState(page)).hash.split('?')[1]) || '');
+      assert(p.get('k') === null && p.get('freq') === null, 'the hash kept a coerced value: ' + p.toString());
+      assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
   // ── 5. partial coverage ───────────────────────────────────────────────────
   {
     const { ctx, page, rec } = await newCtx({ scenario: 'partial' });
@@ -528,11 +629,18 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
       assert(/leaves Denmark/i.test(st.detail), 'detail = ' + st.detail);
       assert(/62\.5\s?%/.test(st.detail), 'coverage percentage missing: ' + st.detail);
       const gap = await page.evaluate(() => {
-        const svg = document.querySelector('[data-testid="tp-chart"] svg');
+        const chart = document.querySelector('[data-testid="tp-chart"]');
+        const svg = chart && chart.querySelector('svg');
         if (!svg) return null;
-        const texts = Array.from(svg.querySelectorAll('text')).map(t => t.textContent);
-        return { noData: texts.filter(t => t === 'no data').length, polygons: svg.querySelectorAll('polygon').length };
+        // The labels are HTML over the plot (F7), not SVG <text>.
+        const texts = Array.from(chart.querySelectorAll('.tp-ax-gap')).map(t => t.textContent);
+        return {
+          noData: texts.filter(t => t === 'no data').length,
+          polygons: svg.querySelectorAll('polygon').length,
+          svgText: svg.querySelectorAll('text').length,
+        };
       });
+      assert(gap && gap.svgText === 0, 'the chart still draws stretched SVG text: ' + JSON.stringify(gap));
       assert(gap && gap.noData >= 1, 'no gap marked in the chart: ' + JSON.stringify(gap));
       assert(!/Clear|Blocked|Marginal|Usable/.test(st.chip), 'a verdict was shown on a partial profile');
       assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
@@ -559,13 +667,220 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
     await ctx.close();
   }
 
+  // ── 11a. an observer-only marker (review F6) ──────────────────────────────
+  {
+    const { ctx, page, rec } = await newCtx({ observerOnly: true });
+    // Centred south of the planted marker so it sits in open canvas: at the
+    // default viewport it lands under the map-controls panel and the click
+    // never reaches it.
+    await gotoMap(page, null, { lat: 37.80, lon: -121.45, zoom: 10 });
+    await step('an observer-only marker is picked as a point, not as a 404 node', async () => {
+      const where = await page.evaluate((id) => {
+        const map = window.__mc_map;
+        let hit = null;
+        map.eachLayer((l) => {
+          if (l._nodeKey && String(l._nodeKey).toLowerCase() === id && l._icon) hit = l;
+        });
+        if (!hit) return null;
+        const r = hit._icon.getBoundingClientRect();
+        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+      }, OBS_ONLY_ID);
+      assert(where, 'the planted observer-only marker never reached the map');
+
+      await page.click(TOGGLE);
+      await page.waitForTimeout(150);
+      await page.mouse.click(where.x, where.y);
+      await page.waitForTimeout(400);
+      // Second end: any free spot well away from the observer.
+      const spot = await page.evaluate(() => {
+        const box = document.getElementById('leaflet-map').getBoundingClientRect();
+        const marks = Array.from(document.querySelectorAll('.leaflet-marker-icon')).map(el => el.getBoundingClientRect());
+        const BLOCKERS = '.leaflet-control, .map-controls, .map-controls-toggle, .map-profile-toggle, .map-profile-hint, .tp-panel, .leaflet-marker-icon';
+        for (let dx = 60; dx < box.width * 0.8; dx += 20) {
+          for (let dy = 60; dy < box.height / 2; dy += 20) {
+            const x = Math.round(box.x + dx), y = Math.round(box.y + dy);
+            if (!marks.every(r => x < r.x - 30 || x > r.right + 30 || y < r.y - 30 || y > r.bottom + 30)) continue;
+            const el = document.elementFromPoint(x, y);
+            if (el && !el.closest(BLOCKERS)) return { x, y };
+          }
+        }
+        return null;
+      });
+      assert(spot, 'no free spot for the second end');
+      await page.mouse.click(spot.x, spot.y);
+      await page.waitForTimeout(900);
+
+      assert(rec.notFound.length === 0, 'the observer id was sent as a node: ' + rec.notFound.join(', '));
+      assert(rec.profile.length === 1, 'profile requests = ' + rec.profile.length);
+      const q = rec.profile[0].searchParams;
+      assert(q.get('a') !== OBS_ONLY_ID, 'endpoint a is still the observer id');
+      assert(/^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/.test(q.get('a')), 'a is not a lat,lon point: ' + q.get('a'));
+      // The point must be the marker's own position, not some other place.
+      const [lat, lon] = q.get('a').split(',').map(Number);
+      // Marker deconfliction nudges a pin by a few tens of metres, so this
+      // is "the marker's own position", not the observer row's to 5 places.
+      assert(Math.abs(lat - 37.95) < 0.005 && Math.abs(lon - (-121.45)) < 0.005,
+        'the point is not where the observer sits: ' + q.get('a'));
+      const st = await panelState(page);
+      assert(st.open, 'the panel did not open');
+      assert(st.chip === 'Clear', 'chip = ' + st.chip + ' (a 404 would read "No profile")');
+      assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  // ── 11b. measured text contrast, both themes (review F1) ──────────────────
+  /* axe reports color-contrast on these as "incomplete" rather than as a
+   * violation, so the 10-rule gate above cannot see a failure here. These
+   * cells compute the ratio from the browser's own computed styles and hold
+   * every piece of panel text to WCAG AA 4.5:1. */
+  const CONTRAST_TARGETS = [
+    { sel: '[data-testid="tp-end-a"] .tp-end-tag', what: 'the A endpoint tag' },
+    { sel: '[data-testid="tp-end-b"] .tp-end-tag', what: 'the B endpoint tag' },
+    { sel: '[data-testid="tp-verdict"]', what: 'the verdict chip' },
+    { sel: '[data-testid="tp-assumed-chip"]', what: 'the assumed-heights caveat' },
+    { sel: '.tp-title', what: 'the panel title' },
+    { sel: '[data-testid="tp-detail"]', what: 'the verdict detail' },
+    { sel: '[data-testid="tp-meta"]', what: 'the physics line' },
+    { sel: '[data-testid="tp-assumed-a"]', what: 'the A height source' },
+    { sel: '.tp-credit-line', what: 'the CC BY 4.0 credit' },
+    { sel: '.tp-ax-y', what: 'an elevation tick' },
+    { sel: '.tp-ax-x1', what: 'the distance label' },
+    { sel: '.tp-pin-a', what: 'the A pin label' },
+    { sel: '.tp-seg-btn', what: 'a model button' },
+    { sel: '.tp-height', what: 'a height input' },
+    { sel: '.tp-step', what: 'a stepper' },
+  ];
+  for (const theme of ['light', 'dark']) {
+    const { ctx, page } = await newCtx({ theme: theme });
+    await gotoMap(page, PAIR_LINK);
+    await step('every panel label clears WCAG AA 4.5:1 in ' + theme, async () => {
+      await page.waitForTimeout(900);
+      assert((await panelState(page)).open, 'panel did not open');
+      const rows = await page.evaluate((targets) => {
+        const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+        const lum = (p) => 0.2126 * lin(p[0]) + 0.7152 * lin(p[1]) + 0.0722 * lin(p[2]);
+        const parse = (v) => { const m = (v || '').match(/[\d.]+/g); return m ? m.slice(0, 4).map(Number) : null; };
+        const over = (fg, bg) => { const a = fg.length > 3 ? fg[3] : 1; return [0, 1, 2].map(i => fg[i] * a + bg[i] * (1 - a)); };
+        // Composite every translucent background down to the opaque one
+        // underneath it, so a ratio is never read off a see-through layer.
+        const bgOf = (el) => {
+          const stack = [];
+          for (let n = el; n; n = n.parentElement) {
+            const c = parse(getComputedStyle(n).backgroundColor);
+            if (!c) continue;
+            const a = c.length > 3 ? c[3] : 1;
+            if (a === 0) continue;
+            stack.push(c);
+            if (a === 1) break;
+          }
+          let base = [255, 255, 255];
+          for (let i = stack.length - 1; i >= 0; i--) base = over(stack[i], base);
+          return base;
+        };
+        return targets.map((t) => {
+          const el = document.querySelector(t.sel);
+          if (!el) return { sel: t.sel, what: t.what, missing: true };
+          const cs = getComputedStyle(el);
+          const bg = bgOf(el);
+          const fg = over(parse(cs.color), bg);
+          const l1 = lum(fg), l2 = lum(bg);
+          const ratio = (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+          return {
+            sel: t.sel, what: t.what,
+            visible: el.getClientRects().length > 0,
+            color: cs.color, bg: 'rgb(' + bg.map(Math.round).join(', ') + ')',
+            size: parseFloat(cs.fontSize), weight: cs.fontWeight,
+            ratio: Math.round(ratio * 100) / 100,
+          };
+        });
+      }, CONTRAST_TARGETS);
+      for (const r of rows) {
+        assert(!r.missing, 'missing contrast target ' + r.sel + ' (' + r.what + ')');
+        assert(r.visible, r.what + ' is not rendered, so its contrast cannot be judged');
+        // Everything here is under 18.66px bold / 24px regular, so AA is 4.5.
+        assert(r.size < 24, r.what + ' is ' + r.size + 'px, which would change the AA threshold');
+        assert(r.ratio >= 4.5,
+          `${r.what} is ${r.ratio}:1 in ${theme} (${r.color} on ${r.bg}, ${r.size}px/${r.weight}), AA needs 4.5:1`);
+      }
+    });
+    await ctx.close();
+  }
+
+  // ── 11c. the chart's text is legible on a phone (review F7) ───────────────
+  {
+    const { ctx, page, rec } = await newCtx({ viewport: { width: 360, height: 740 }, touch: true });
+    await gotoMap(page, PAIR_LINK);
+    await step('360px portrait: the chart labels and the CC BY 4.0 credit are legible', async () => {
+      await page.waitForTimeout(900);
+      assert((await panelState(page)).open, 'panel did not open');
+      const report = await page.evaluate(() => {
+        const panel = document.querySelector('[data-testid="tp-panel"]');
+        const chart = document.querySelector('[data-testid="tp-chart"]');
+        const credit = panel.querySelector('.tp-credit-line');
+        const measure = (el) => {
+          const cs = getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          return {
+            text: el.textContent || '',
+            size: parseFloat(cs.fontSize), h: Math.round(r.height * 10) / 10,
+            w: Math.round(r.width * 10) / 10,
+            // A squashed glyph has a transform that is not 1:1 in x.
+            scaleX: new DOMMatrixReadOnly(cs.transform).a,
+            visible: el.getClientRects().length > 0 && cs.visibility !== 'hidden',
+            insidePanel: panel.getBoundingClientRect().left - 1 <= r.left && r.right <= panel.getBoundingClientRect().right + 1,
+          };
+        };
+        return {
+          svgText: chart.querySelectorAll('svg text').length,
+          credit: credit ? Object.assign(measure(credit), { hidden: credit.hidden }) : null,
+          labels: Array.from(chart.querySelectorAll('.tp-ax, .tp-pin-lab')).map(measure),
+          panelWidth: Math.round(panel.getBoundingClientRect().width),
+        };
+      });
+      assert(report.panelWidth <= 360, 'panel is wider than the viewport: ' + report.panelWidth);
+      assert(report.svgText === 0, report.svgText + ' stretched SVG labels survive in the chart');
+
+      assert(report.credit, 'the CC BY 4.0 credit line is not in the panel');
+      assert(!report.credit.hidden && report.credit.visible, 'the credit line is hidden behind the chart');
+      assert(/CC BY 4\.0/.test(report.credit.text), 'credit text = ' + report.credit.text);
+      assert(report.credit.size >= 10, 'the credit renders at ' + report.credit.size + 'px');
+      assert(report.credit.insidePanel, 'the credit line runs outside the panel');
+      // A licence line has to be readable where it sits, not merely present:
+      // on screen, inside the viewport and not covered by anything.
+      const creditOnScreen = await page.evaluate(() => {
+        const el = document.querySelector('[data-testid="tp-panel"] .tp-credit-line');
+        const r = el.getBoundingClientRect();
+        const hit = document.elementFromPoint(Math.round(r.x + 8), Math.round(r.y + r.height / 2));
+        return {
+          inViewport: r.top >= 0 && r.bottom <= window.innerHeight + 1 && r.height > 0,
+          covered: !(hit && (el === hit || el.contains(hit))),
+          cover: hit ? hit.tagName + '.' + (hit.className.baseVal !== undefined ? hit.className.baseVal : hit.className) : 'none',
+          top: Math.round(r.top), bottom: Math.round(r.bottom), vh: window.innerHeight,
+        };
+      });
+      assert(creditOnScreen.inViewport, 'the credit sits outside the viewport: ' + JSON.stringify(creditOnScreen));
+      assert(!creditOnScreen.covered, 'the credit is covered by ' + creditOnScreen.cover);
+
+      assert(report.labels.length >= 7, 'only ' + report.labels.length + ' chart labels found');
+      for (const l of report.labels) {
+        assert(l.visible, 'chart label "' + l.text + '" is not rendered');
+        assert(l.text.trim() !== '', 'an empty chart label was emitted');
+        assert(l.size >= 10, 'chart label "' + l.text + '" renders at ' + l.size + 'px, below the 10px floor');
+        assert(l.h >= 10, 'chart label "' + l.text + '" is only ' + l.h + 'px tall');
+        assert(Math.abs(l.scaleX - 1) < 0.01, 'chart label "' + l.text + '" is squashed by ' + l.scaleX + 'x');
+      }
+      assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
   // ── 9. small viewports ────────────────────────────────────────────────────
   const SMALL = [
     { name: '360x740 portrait', viewport: { width: 360, height: 740 } },
     { name: '568x320 landscape', viewport: { width: 568, height: 320 } },
     { name: '740x360 landscape', viewport: { width: 740, height: 360 } },
   ];
-  const PAIR_LINK = 'profile=' + 'a'.repeat(64) + ',' + 'b'.repeat(64);
   for (const vp of SMALL) {
     const { ctx, page, rec } = await newCtx({ viewport: vp.viewport, touch: true });
     await gotoMap(page, PAIR_LINK);

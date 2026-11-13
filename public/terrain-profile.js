@@ -24,6 +24,7 @@
 
   // The single CC BY 4.0 credit line, same text as internal/dhm (#680).
   var ATTRIBUTION = 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0';
+  var ASSUMED_LABEL = 'assumed heights';
   var ENDPOINT = '/api/terrain/profile';
   var HASH_PARAM = 'profile';
   var MAX_HEIGHT_M = 100;
@@ -40,6 +41,10 @@
   // decimals only, so NaN, Infinity, hex floats and exponents never parse.
   var PUBKEY_RE = /^[0-9a-f]{64}$/;
   var COORD_RE = /^-?[0-9]{1,3}(\.[0-9]{1,10})?$/;
+  // k and freq ride the same link, so they get the same grammar as the
+  // coordinates rather than Number()'s: "0x5", "1e1", "  5" and "Infinity"
+  // are link junk, not values. Four integer digits cover freq up to 2500.
+  var DECIMAL_RE = /^-?[0-9]{1,6}(\.[0-9]{1,10})?$/;
 
   // ── Numbers ──────────────────────────────────────────────────────────────
 
@@ -62,6 +67,7 @@
 
   function boundedNumber(v, lo, hi, places) {
     if (v === null || v === undefined || v === '' || typeof v === 'object' || typeof v === 'boolean') return null;
+    if (typeof v === 'string' && !DECIMAL_RE.test(v)) return null;
     var n = Number(v);
     if (!isFinite(n) || n < lo || n > hi) return null;
     return round(n, places);
@@ -197,9 +203,25 @@
     blocked: { label: 'Blocked', tone: 'bad', detail: 'Terrain rises through the line of sight.' }
   };
 
+  /* The verdict states that assert terrain inside the criterion zone, and
+   * so the only ones whose chart may carry intrusion bands. */
+  var INTRUDING_VERDICTS = { fresnel60: true, blocked: true };
+
   function fmtPct(v) {
     var n = Number(v);
     return isFinite(n) ? String(round(n, 1)) : '0';
+  }
+
+  /* covered answers "is this profile judgeable at all". Coverage outranks
+   * verdict.state: a path with a hole in it was never measured end to end,
+   * so no verdict on it can be trusted, whatever the response says. The
+   * server already forces unknown in that case (internal/dhm), and holding
+   * the same line here means a stale cache, a proxy or a future server
+   * cannot make this panel show a confident green on an unmeasured path.
+   * A response with no coverage block at all is not evidence of a gap. */
+  function covered(data) {
+    var cov = (data && data.coverage) || {};
+    return !cov.state || cov.state === 'full';
   }
 
   /* verdictChip maps the server's verdict to the chip. Anything the server
@@ -208,7 +230,7 @@
   function verdictChip(data) {
     var v = (data && data.verdict) || {};
     var cov = (data && data.coverage) || {};
-    var known = Object.prototype.hasOwnProperty.call(VERDICTS, v.state) ? VERDICTS[v.state] : null;
+    var known = covered(data) && Object.prototype.hasOwnProperty.call(VERDICTS, v.state) ? VERDICTS[v.state] : null;
     if (known) return { state: v.state, label: known.label, tone: known.tone, detail: known.detail };
     var detail;
     if (cov.state === 'partial') {
@@ -319,14 +341,21 @@
     if (gap) gaps.push(gap);
 
     /* Intrusion runs: where the clearance below the line of sight is under
-     * the server's criterion fraction of the Fresnel radius. Only drawn
-     * when the server actually reached a verdict — a profile with a gap is
-     * unknown, and marking "obstructions" on it would invent a judgement. */
+     * the server's criterion fraction of the Fresnel radius.
+     *
+     * These runs are the server's verdict made visible, never a second
+     * opinion on it. The server judged the profile at full resolution;
+     * `samples` is decimated for transport, so a verdict recomputed from
+     * it could disagree with the chip. The drawing is therefore gated on
+     * the two states that already assert an intrusion into the criterion
+     * zone: "clear" and "fresnel100" assert the opposite, "unknown"
+     * asserts nothing, and a profile with a gap is unjudgeable. Bands and
+     * chip tone can only appear together. */
     var intrusions = [];
     var verdict = data.verdict || {};
     var criterion = Number(verdict.criterion);
     if (!isFinite(criterion)) criterion = 0.6;
-    if (verdict.state && verdict.state !== 'unknown') {
+    if (covered(data) && INTRUDING_VERDICTS[verdict.state] === true) {
       var cur = null;
       for (i = 0; i < n; i++) {
         var hit = terrain[i] !== null && f1[i] > 0 && (los[i] - terrain[i]) < criterion * f1[i];
@@ -369,6 +398,21 @@
     return (Math.abs(n) >= 10000 ? round(n / 1000, 1) + ' km' : round(n, 1) + ' m');
   }
 
+  /* The chart box is a fixed 820x300 viewBox stretched to whatever width
+   * the panel has. SVG <text> inside it is stretched with everything else,
+   * so on a 360 px phone the axis labels came out about 3 px tall and
+   * squashed sideways. Every label is therefore HTML, absolutely
+   * positioned over the plot in percentages of the very same box: real
+   * text at a real font size, selectable, and honouring the viewer's font
+   * scaling. The percentages are exact because preserveAspectRatio="none"
+   * maps the viewBox onto the box linearly in each axis. */
+  function pctX(x) { return round(x / VIEW.w * 100, 3); }
+  function pctY(y) { return round(y / VIEW.h * 100, 3); }
+
+  function label(cls, x, y, text) {
+    return '<span class="' + cls + '" style="left:' + pctX(x) + '%;top:' + pctY(y) + '%">' + esc(text) + '</span>';
+  }
+
   function polyline(xs, ys, from, to) {
     var pts = [];
     for (var i = from; i <= to; i++) pts.push(xs[i] + ',' + ys[i]);
@@ -396,13 +440,15 @@
     var g = chartGeometry(data);
     var chip = verdictChip(data);
     if (!g) {
-      return '<svg viewBox="0 0 ' + VIEW.w + ' ' + VIEW.h + '" class="tp-svg" role="img" aria-label="No terrain profile">'
-        + '<title>' + esc(chip.detail) + '</title>'
-        + '<text x="' + (VIEW.w / 2) + '" y="' + (VIEW.h / 2) + '" text-anchor="middle" font-size="14" fill="var(--text-muted)">'
-        + esc(chip.detail) + '</text></svg>';
+      return '<div class="tp-plot tp-plot-empty">'
+        + '<svg viewBox="0 0 ' + VIEW.w + ' ' + VIEW.h + '" class="tp-svg" role="img" aria-label="No terrain profile">'
+        + '<title>' + esc(chip.detail) + '</title></svg>'
+        + '<p class="tp-plot-msg">' + esc(chip.detail) + '</p></div>';
     }
     var p = g.plot;
-    var out = ['<svg viewBox="0 0 ' + VIEW.w + ' ' + VIEW.h + '" class="tp-svg" preserveAspectRatio="none" role="img" aria-label="Terrain profile chart">'];
+    var labels = [];
+    var out = ['<div class="tp-plot">'];
+    out.push('<svg viewBox="0 0 ' + VIEW.w + ' ' + VIEW.h + '" class="tp-svg" preserveAspectRatio="none" role="img" aria-label="Terrain profile chart">');
     out.push('<title>' + esc(chartTitle(data, chip, names)) + '</title>');
 
     // Horizontal grid + elevation ticks.
@@ -410,7 +456,7 @@
       var z = g.domain.zMax - (g.domain.zMax - g.domain.zMin) * t / 4;
       var y = r2(p.y + p.h * t / 4);
       out.push('<line x1="' + p.x + '" y1="' + y + '" x2="' + (p.x + p.w) + '" y2="' + y + '" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="2 3"/>');
-      out.push('<text x="' + (p.x - 5) + '" y="' + (y + 3) + '" text-anchor="end" font-size="9" fill="var(--text-muted)">' + Math.round(z) + '</text>');
+      labels.push(label('tp-ax tp-ax-y', p.x, y, String(Math.round(z))));
     }
 
     // 1. DTM fill, one polygon per covered stretch so a gap stays a gap.
@@ -454,32 +500,32 @@
     var worstAt = data.verdict && data.verdict.worstAtM;
     if (g.intrusions.length && worstAt !== null && worstAt !== undefined && isFinite(Number(worstAt))) {
       var wx = r2(p.x + p.w * Math.min(1, Math.max(0, Number(worstAt) / g.domain.dMax)));
-      out.push('<line x1="' + wx + '" y1="' + p.y + '" x2="' + wx + '" y2="' + g.baseY + '" stroke="var(--profile-blocked)" stroke-width="1" stroke-dasharray="3 3"/>');
-      out.push('<circle cx="' + wx + '" cy="' + g.losY[0] + '" r="0"/>');
+      out.push('<line class="tp-worst" x1="' + wx + '" y1="' + p.y + '" x2="' + wx + '" y2="' + g.baseY + '" stroke="var(--profile-blocked)" stroke-width="1" stroke-dasharray="3 3"/>');
     }
 
     // 7. Out-of-coverage stretches: left blank, labelled once.
     g.gaps.forEach(function (gp) {
       var mid = r2((gp.x1 + gp.x2) / 2);
       out.push('<rect x="' + gp.x1 + '" y="' + p.y + '" width="' + Math.max(2, r2(gp.x2 - gp.x1)) + '" height="' + p.h + '" fill="none" stroke="var(--border)" stroke-width="0.8" stroke-dasharray="3 4"/>');
-      out.push('<text x="' + mid + '" y="' + r2(g.baseY - 8) + '" text-anchor="middle" font-size="9" fill="var(--text-muted)">no data</text>');
+      labels.push(label('tp-ax tp-ax-gap', mid, r2(g.baseY - 8), 'no data'));
     });
 
     // 8. Endpoint pins: the mast from ground to antenna, with the label.
-    [{ x: g.x[0], y: g.losY[0], g: g.terrainY[0], label: 'A', anchor: 'start', dx: 3 },
-     { x: g.x[g.x.length - 1], y: g.losY[g.losY.length - 1], g: g.terrainY[g.terrainY.length - 1], label: 'B', anchor: 'end', dx: -3 }]
+    [{ x: g.x[0], y: g.losY[0], g: g.terrainY[0], tag: 'A', cls: 'tp-pin-a', dx: 3 },
+     { x: g.x[g.x.length - 1], y: g.losY[g.losY.length - 1], g: g.terrainY[g.terrainY.length - 1], tag: 'B', cls: 'tp-pin-b', dx: -3 }]
       .forEach(function (pin) {
         var foot = pin.g === null ? g.baseY : pin.g;
         out.push('<line x1="' + pin.x + '" y1="' + foot + '" x2="' + pin.x + '" y2="' + pin.y + '" stroke="var(--los-line)" stroke-width="1.6"/>');
         out.push('<circle cx="' + pin.x + '" cy="' + pin.y + '" r="3" fill="var(--los-line)"/>');
-        out.push('<text x="' + r2(pin.x + pin.dx) + '" y="' + r2(pin.y - 7) + '" text-anchor="' + pin.anchor + '" font-size="11" font-weight="600" fill="var(--text)">' + pin.label + '</text>');
+        labels.push(label('tp-pin-lab ' + pin.cls, r2(pin.x + pin.dx), r2(pin.y - 7), pin.tag));
       });
 
-    // Distance axis and the required CC BY 4.0 credit.
-    out.push('<text x="' + p.x + '" y="' + (VIEW.h - 14) + '" font-size="9" fill="var(--text-muted)">0</text>');
-    out.push('<text x="' + (p.x + p.w) + '" y="' + (VIEW.h - 14) + '" text-anchor="end" font-size="9" fill="var(--text-muted)">' + esc(fmtMetres(data.distanceM)) + '</text>');
-    out.push('<text x="' + (VIEW.w / 2) + '" y="' + (VIEW.h - 3) + '" text-anchor="middle" font-size="8" fill="var(--text-muted)" class="tp-credit">' + esc(data.attribution || ATTRIBUTION) + '</text>');
+    // Distance axis, as HTML for the same reason as the elevation ticks.
+    labels.push(label('tp-ax tp-ax-x0', p.x, VIEW.h - 14, '0'));
+    labels.push(label('tp-ax tp-ax-x1', p.x + p.w, VIEW.h - 14, fmtMetres(data.distanceM)));
     out.push('</svg>');
+    out.push(labels.join(''));
+    out.push('</div>');
     return out.join('');
   }
 
@@ -545,6 +591,17 @@
       ui.chip = el('span', 'tp-chip');
       ui.chip.setAttribute('data-testid', 'tp-verdict');
       head.appendChild(ui.chip);
+      /* Plan §3.2: the verdict must read "assumed heights" until the viewer
+       * has confirmed both ends. A 10 m error in an assumed antenna height
+       * swamps the 0.05 m DHM accuracy and can flip the verdict outright,
+       * so the caveat sits next to the verdict rather than only beside the
+       * height inputs. It clears itself: as soon as a height is typed the
+       * request carries it and the server answers assumed:false. */
+      ui.assumed = el('span', 'tp-chip tp-chip-assumed', ASSUMED_LABEL);
+      ui.assumed.setAttribute('data-testid', 'tp-assumed-chip');
+      ui.assumed.title = 'At least one antenna height is a default, not a measured value. Set both heights to confirm them.';
+      ui.assumed.hidden = true;
+      head.appendChild(ui.assumed);
       var close = el('button', 'tp-close');
       close.type = 'button';
       close.setAttribute('aria-label', 'Close path profile');
@@ -561,6 +618,9 @@
       ui.chart = el('div', 'tp-chart');
       ui.chart.setAttribute('data-testid', 'tp-chart');
       body.appendChild(ui.chart);
+
+      ui.credit = el('p', 'tp-credit-line', ATTRIBUTION);
+      body.appendChild(ui.credit);
 
       ui.detail = el('p', 'tp-detail');
       ui.detail.setAttribute('data-testid', 'tp-detail');
@@ -600,8 +660,6 @@
       controls.appendChild(ui.meta);
       body.appendChild(controls);
 
-      ui.credit = el('p', 'tp-credit-line', ATTRIBUTION);
-      body.appendChild(ui.credit);
       panel.appendChild(body);
       syncModelButtons();
       return panel;
@@ -729,9 +787,13 @@
       setChip(chip);
       var names = { nameA: nodes.a && nodes.a.name, nameB: nodes.b && nodes.b.name };
       var drawn = !!(data.samples && data.samples.length);
-      // The credit lives in the chart footer; the paragraph is its stand-in
-      // when there is no chart, so it is shown exactly once either way.
-      ui.credit.hidden = drawn;
+      /* The credit is a licence obligation, so it is one HTML line under
+       * the chart rather than text inside the SVG: the chart box is
+       * stretched to the panel width and in-SVG text came out ~3 px tall
+       * on a 360 px phone, which is not an attribution anybody can read. */
+      ui.credit.hidden = false;
+      // Either end on a default height caveats the whole verdict.
+      ui.assumed.hidden = !((data.a && data.a.assumed) || (data.b && data.b.assumed));
       if (!drawn) {
         setStatus(chip.detail, 'tp-empty');
       } else {
@@ -770,12 +832,14 @@
       var mine = ++seq;
       setStatus('Measuring the terrain along the path…', 'tp-loading');
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
+      if (ui.assumed) ui.assumed.hidden = true;
       return fetchJSON(requestURL(state)).then(function (data) {
         if (mine !== seq || !open) return;
         render(data);
       }).catch(function (err) {
         if (mine !== seq || !open) return;
         setChip({ state: 'error', tone: 'unknown', label: 'No profile', detail: String(err && err.message || err) });
+        if (ui.assumed) ui.assumed.hidden = true;
         setStatus(String((err && err.message) || 'Could not load the terrain profile.'), 'tp-error');
         ui.detail.textContent = 'Could not load the terrain profile.';
       });
@@ -853,6 +917,7 @@
 
   global.TerrainProfile = {
     ATTRIBUTION: ATTRIBUTION,
+    ASSUMED_LABEL: ASSUMED_LABEL,
     ENDPOINT: ENDPOINT,
     HASH_PARAM: HASH_PARAM,
     MAX_HEIGHT_M: MAX_HEIGHT_M,

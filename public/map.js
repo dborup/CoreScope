@@ -2743,6 +2743,20 @@
     return null;
   }
 
+  /* An observer-only marker carries obs.id in _nodeKey, which is 64 hex
+   * just like a node public key — but /api/terrain/profile resolves `a`
+   * and `b` against the node store only, so sending one back would come
+   * home as 404 "node not found". Picking the marker's own position is
+   * both honest and useful: the profile is measured from exactly where
+   * the observer sits, it just is not labelled with its name. */
+  function profileIsNode(pubkey) {
+    var want = String(pubkey || '').toLowerCase();
+    for (var i = 0; i < nodes.length; i++) {
+      if ((nodes[i].public_key || '').toLowerCase() === want) return true;
+    }
+    return false;
+  }
+
   function profileRefLatLng(ref) {
     if (!ref) return null;
     if (ref.kind === 'point') return [ref.lat, ref.lon];
@@ -2820,7 +2834,7 @@
     L.DomEvent.stopPropagation(e);
     var key = mk._nodeKey ? String(mk._nodeKey).toLowerCase() : '';
     var ll = mk.getLatLng();
-    profilePick(/^[0-9a-f]{64}$/.test(key)
+    profilePick(/^[0-9a-f]{64}$/.test(key) && profileIsNode(key)
       ? { kind: 'node', pubkey: key }
       : { kind: 'point', lat: Number(ll.lat.toFixed(5)), lon: Number(ll.lng.toFixed(5)) });
   }

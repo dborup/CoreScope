@@ -6228,6 +6228,7 @@ body.embed #app.app-fixed {
 .tp-head {
   flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
@@ -6264,10 +6265,60 @@ body.embed #app.app-fixed {
 }
 .tp-chart { width: 100%; }
 .tp-chart .tp-svg { width: 100%; height: 180px; display: block; }
+
+/* The chart's text is HTML, not SVG <text>. The 820x300 viewBox is
+   stretched to the panel width with preserveAspectRatio="none", which
+   squashed every in-SVG label to about 3px tall on a 360px phone. These
+   spans are positioned in percentages of the same box — exact, because
+   the mapping is linear per axis — and render at a real font size. */
+.tp-plot { position: relative; width: 100%; }
+.tp-plot > span {
+  position: absolute;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-muted);
+  white-space: nowrap;
+  pointer-events: none;
+  /* A halo in the panel's own surface colour: these labels float over the
+     chart, and a tall profile can push the terrain fill under any of them. */
+  text-shadow: 0 0 3px var(--card-bg), 0 0 3px var(--card-bg), 0 0 2px var(--card-bg);
+}
+/* Right-aligned into the plot's left gutter, centred on its gridline. */
+.tp-ax-y { transform: translate(-100%, -50%); padding-right: 4px; }
+.tp-ax-x0 { transform: translateY(-50%); }
+.tp-ax-x1 { transform: translate(-100%, -50%); }
+.tp-ax-gap { transform: translate(-50%, -100%); }
+.tp-plot > .tp-pin-lab {
+  position: absolute;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: var(--fw-semibold, 600);
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+  text-shadow: 0 0 3px var(--card-bg), 0 0 3px var(--card-bg), 0 0 2px var(--card-bg);
+}
+.tp-pin-a { transform: translateY(-100%); }
+.tp-pin-b { transform: translate(-100%, -100%); }
+.tp-plot-msg {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 12px;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
 .tp-status { margin: 0; padding: 18px 8px; text-align: center; color: var(--text-muted); font-size: var(--fs-sm); }
 .tp-detail { margin: 6px 0; font-size: var(--fs-sm); color: var(--text-muted); }
 .tp-meta { margin: 6px 0 0; font-size: var(--fs-sm); color: var(--text-muted); }
-.tp-credit-line { margin: 8px 0 0; font-size: 11px; color: var(--text-muted); }
+/* The chart's footer: directly under the plot it credits, so the licence
+   line is on screen with the chart rather than at the foot of a scroll box
+   the viewer may never reach. */
+.tp-credit-line { margin: 4px 0 0; font-size: 11px; line-height: 1.3; color: var(--text-muted); }
 
 .tp-chip {
   display: inline-flex;
@@ -6284,6 +6335,10 @@ body.embed #app.app-fixed {
 .tp-chip-warn { border-color: var(--warning); color: var(--warning); }
 .tp-chip-bad { border-color: var(--danger); color: var(--danger); }
 .tp-chip-unknown { border-color: var(--border); color: var(--text-muted); }
+/* Plan §3.2 — the caveat that rides alongside the verdict until the viewer
+   has set both antenna heights. */
+.tp-chip-assumed { border-color: var(--warning); color: var(--warning); font-style: italic; }
+.tp-chip[hidden] { display: none; }
 
 .tp-controls {
   display: flex;
@@ -6295,10 +6350,17 @@ body.embed #app.app-fixed {
 .tp-field { display: flex; flex-direction: column; gap: 4px; min-width: 160px; }
 .tp-field-label { font-size: 11px; color: var(--text-muted); }
 .tp-end-head { display: flex; align-items: baseline; gap: 6px; }
+/* The A/B tag is white text on a solid blue disc, so it follows the
+   #1668 M2 rule for exactly that: --accent-strong (#2563eb in both themes)
+   carries --text-on-accent at 4.83:1. --los-line is a *line* colour and
+   lightens to #60a5fa on dark, where white on it is ~2.4:1 — a WCAG AA
+   failure that axe only reports as "incomplete" because the disc is
+   small and rounded. The chart's own A/B pins keep --los-line: they are
+   the line, not text on it. */
 .tp-end-tag {
   display: inline-flex; align-items: center; justify-content: center;
   width: 18px; height: 18px; border-radius: 50%;
-  background: var(--los-line); color: var(--text-on-accent, #fff);
+  background: var(--accent-strong); color: var(--text-on-accent, #fff);
   font-size: 11px; font-weight: var(--fw-semibold, 600);
 }
 .tp-end-name { font-size: var(--fs-sm); font-weight: var(--fw-medium, 500); word-break: break-word; }
