@@ -24,7 +24,10 @@ package main
 //     text, and the token never appears in a response or a log line.
 //   - The verdict comes from the terrain model (DTM); the surface model
 //     (DSM) is assessed for information only (#681 owner decision 6).
-//     A profile with any gap gets no verdict.
+//     A profile with any gap gets no verdict, on either model: the DSM
+//     can be a separate, complete coverage while the DTM has a hole, so
+//     a partial profile forces the surface verdict to "unknown" too
+//     (#689 review N1).
 //
 // The endpoint reads node positions from the in-memory node snapshot and
 // observer radios through a read-only query; it writes nothing.
@@ -215,6 +218,21 @@ type terrainProfilerDeps struct {
 	observers  func() ([]Observer, error)
 }
 
+// terrainCacheMaxBytes is the cache's byte bound: one entry holds n DTM + n
+// DSM float32 plus a 5-byte header, n at most maxSamples. dhm.Cache evicts
+// on entry count OR total bytes; by construction every entry here is at
+// most 1/cacheEntries of this bound, so the byte condition can never fire
+// before the entry count does (#689 review N3). It is kept anyway,
+// deliberately redundant, as defense-in-depth against a future change
+// decoupling entry size from maxSamples, and because dhm.Cache is shared
+// with the DHM tile cache (dhm_proxy.go), where variable tile sizes make
+// the byte bound load-bearing — the two call sites should stay consistent.
+// At the documented maxima (cacheEntries 4096, maxSamples 3200) this is
+// ~105 MB; see config.example.json's _comment_cacheEntries.
+func terrainCacheMaxBytes(cacheEntries, maxSamples int) int {
+	return cacheEntries * (5 + 8*maxSamples)
+}
+
 // newTerrainProfiler returns nil unless the profile is enabled.
 func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfilerDeps) *terrainProfiler {
 	if !pc.Enabled || d.src == nil {
@@ -227,8 +245,7 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 		d.observers = func() ([]Observer, error) { return nil, nil }
 	}
 	set := resolveTerrainSettings(pc, d.logf)
-	// One entry holds n DTM + n DSM float32 plus a 5-byte header.
-	maxBytes := set.cacheEntries * (5 + 8*set.plan.MaxSamples)
+	maxBytes := terrainCacheMaxBytes(set.cacheEntries, set.plan.MaxSamples)
 	return &terrainProfiler{
 		src:        d.src,
 		set:        set,
@@ -425,6 +442,11 @@ type TerrainClearance struct {
 	WorstF1Fraction *float64 `json:"worstF1Fraction"`
 }
 
+// TerrainSurfaceInfo is forced to "unknown" with null clearance numbers
+// whenever Coverage.State is not "full", even though it is assessed
+// against the DSM, not the deciding DTM: the two models can have
+// different coverage, and a partial profile must never report a
+// confident verdict on either (#689 review N1).
 type TerrainSurfaceInfo struct {
 	State string `json:"state"`
 	TerrainClearance
@@ -721,6 +743,12 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 	keep := []int{terrain.WorstIndex}
 	if e.dsm != nil {
 		surface := link.Assess(e.dsm)
+		// A partial profile never reports a confident verdict, even on the
+		// model that only informs: the DSM can be a separate, complete
+		// coverage while the deciding DTM has a gap (#689 review N1).
+		if resp.Coverage.State != "full" {
+			surface = dhm.Assessment{State: dhm.VerdictUnknown, WorstIndex: -1}
+		}
 		resp.Verdict.Surface = &TerrainSurfaceInfo{State: string(surface.State), TerrainClearance: clearanceOf(surface)}
 		keep = append(keep, surface.WorstIndex)
 	}
