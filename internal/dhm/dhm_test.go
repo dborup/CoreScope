@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/meshcore-analyzer/dhm/dhmtest"
 )
 
 // Every test runs against a fake upstream (httptest); none reaches
@@ -21,7 +23,9 @@ import (
 
 const testToken = "tok-dhm-SECRET-do-not-leak"
 
-var pngStub = append([]byte("\x89PNG\r\n\x1a\n"), []byte("stub")...)
+// pngStub is a real 256×256 PNG tile: FetchHillshade decodes every tile
+// before returning it (#695), so a signature-only stand-in would fail.
+var pngStub = dhmtest.PNG(TileSize, TileSize, 1)
 
 type upstream struct {
 	srv      *httptest.Server

@@ -53,7 +53,7 @@ func TestClientDisablesCompressionForHillshadeTile(t *testing.T) {
 		t.Fatalf("FetchHillshadeTile: %v", err)
 	}
 	if !bytes.Equal(data, pngStub) {
-		t.Fatalf("body %q, want %q", data, pngStub)
+		t.Fatalf("body %d bytes, want the %d-byte tile", len(data), len(pngStub))
 	}
 	if ae := <-aeCh; strings.Contains(ae, "gzip") {
 		t.Fatalf("upstream request Accept-Encoding %q carries gzip", ae)

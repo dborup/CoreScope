@@ -1,6 +1,7 @@
 package dhm
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -88,8 +89,8 @@ func TestFetchHillshadeUpstreamPerLayer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(data) != string(pngStub) {
-				t.Fatalf("body %q", data)
+			if !bytes.Equal(data, pngStub) {
+				t.Fatalf("body %d bytes, want the %d-byte tile", len(data), len(pngStub))
 			}
 			if u.paths[0] != c.path {
 				t.Fatalf("upstream path %q, want %q", u.paths[0], c.path)
@@ -236,7 +237,7 @@ func TestExaggeratedDoesNotFollowRedirects(t *testing.T) {
 // #684: the exaggerated service also uses the transport without
 // transparent gzip.
 func TestExaggeratedDisablesTransparentGzip(t *testing.T) {
-	body := append(append([]byte{}, pngStub...), make([]byte, 4096)...)
+	body := pngStub // a real ~52 KB tile: a truncated one would not decode
 	u, aeCh := truncatedGzipUpstream(t, "image/png", body)
 	data, err := newTestClient(t, u, &logSink{}).FetchHillshade(HillshadeExaggerated, someTile())
 	if err != nil {
@@ -255,12 +256,14 @@ func TestExaggeratedDisablesTransparentGzip(t *testing.T) {
 
 // #688 review F1: only the failures the issue lists trigger the terrain
 // fallback: non-200, a transport error, a wrong content type or an invalid
-// PNG. A timeout or a full concurrency budget (busy) does not: a second
-// attempt would wait on the same budget again.
+// PNG (no signature, or not a complete 256×256 PNG, #695). A timeout or a
+// full concurrency budget (busy) does not: a second attempt would wait on
+// the same budget again.
 func TestFallbackEligible(t *testing.T) {
 	for reason, want := range map[string]bool{
 		"status 404": true, "status 500": true, "status 302": true, "status 401": true,
-		"transport": true, "read": true, "unexpected content type": true, "non-image response": true,
+		"transport": true, "read": true, "unexpected content type": true,
+		"non-image response": true, "invalid image": true, // #695
 		"timeout": false, "busy": false, "oversize response": false, "request": false,
 		"unknown": false, "": false, "status": false, "status404": false,
 	} {

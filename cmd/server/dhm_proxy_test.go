@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/meshcore-analyzer/dhm"
+	"github.com/meshcore-analyzer/dhm/dhmtest"
 )
 
 // #680 — DHM terrain hillshade proxy. Every test runs against a fake
@@ -26,9 +27,9 @@ import (
 
 const dhmTestToken = "tok-680-SECRET-do-not-leak"
 
-// pngStub is a minimal valid PNG signature + IHDR start; the proxy only
-// checks the signature, so this stands in for an upstream tile.
-var pngStub = append([]byte("\x89PNG\r\n\x1a\n"), []byte("stub-hillshade-tile-bytes")...)
+// pngStub is a real 256×256 PNG standing in for an upstream tile: the
+// client decodes every tile before the proxy caches it (#695).
+var pngStub = dhmtest.PNG(256, 256, 1)
 
 // webMercatorTileBBox is the test's own, independent tile→EPSG:3857 bbox
 // formula, so a bug in the proxy's tile math cannot also hide in the test.
