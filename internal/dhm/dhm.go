@@ -7,7 +7,7 @@
 // what every DHM feature needs exactly once:
 //
 //   - Config: the operator's `map.dhm` block (enabled, token, layer,
-//     terrain profile).
+//     tile rate limit, terrain profile).
 //   - Client: the upstream HTTP client. The token goes in the `token`
 //     request header (Dataforsyningen's recommended method), never in a
 //     URL, so no upstream URL can leak it. The client also enforces the
@@ -49,6 +49,10 @@ type Config struct {
 	// Layer is the hillshade upstream (#687): "exaggerated" (default) or
 	// "terrain"; see ParseHillshade.
 	Layer string `json:"layer"`
+	// TileRateLimitPerMin caps the hillshade tiles one client may pull
+	// from upstream per minute (#682 review F3). nil: the server default;
+	// 0: off.
+	TileRateLimitPerMin *int `json:"tileRateLimitPerMin"`
 	// Profile is the terrain profile endpoint (#681).
 	Profile ProfileConfig `json:"profile"`
 }
@@ -63,6 +67,7 @@ type ProfileConfig struct {
 	CacheEntries      *int     `json:"cacheEntries"`
 	CacheTTLHours     *float64 `json:"cacheTTLHours"`
 	UpstreamTimeoutMs *int     `json:"upstreamTimeoutMs"`
+	RateLimitPerMin   *int     `json:"rateLimitPerMin"`
 }
 
 // Active reports whether DHM features may be offered: enabled with a token.

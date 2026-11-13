@@ -73,7 +73,7 @@
     "upgradesPerMinPerIP": 30,
     "_comment_upgradesPerMinPerIP": "#1794 - handshakes per minute from one client address. On by default. Safe under CGNAT: a real client upgrades a handful of times per minute even while reconnecting, so 30 leaves ordinary traffic alone while flattening a scraper reconnect loop. Set 0 to disable.",
     "trustedProxies": [],
-    "_comment_trustedProxies": "#1794 - addresses or CIDRs of YOUR reverse proxy. REQUIRED for the per-IP limits to do anything behind nginx/Caddy/Traefik/ingress: without it every visitor shares the proxy's address, so the limits are skipped and one warning is logged at startup. X-Forwarded-For is believed only from these addresses, because anyone else can forge it. Never list an address you do not control.",
+    "_comment_trustedProxies": "#1794 - addresses or CIDRs of YOUR reverse proxy. REQUIRED for the per-IP limits to do anything behind nginx/Caddy/Traefik/ingress: without it every visitor shares the proxy's address, so the limits are skipped and one warning is logged at startup. X-Forwarded-For is believed only from these addresses, because anyone else can forge it; specifically, only the LEFT-MOST entry is trusted as the client address, so your proxy MUST REPLACE X-Forwarded-For coming from an untrusted client, not append to it -- the common nginx $proxy_add_x_forwarded_for idiom appends, which lets a client prefix its own forged entry and keep every per-IP limit bypassable (#691 tracks walking the header from the right instead). Never list an address you do not control.",
     "deny": [],
     "_comment_deny": "#1794 - addresses or CIDRs refused at the /ws upgrade, before the handshake. Accepts both \"1.2.3.4\" and \"1.2.3.0/24\". Applies even behind an unconfigured proxy, since it is your explicit instruction. Rejections are counted in /api/stats under websocket.rejectedDeny."
   },
@@ -124,8 +124,10 @@
       "enabled": false,
       "token": "",
       "layer": "exaggerated",
+      "tileRateLimitPerMin": 1200,
+      "_comment_tileRateLimitPerMin": "#682/#681 - tiles one client address may pull from upstream per minute; beyond it the proxy answers 429 with Retry-After. Tiles already in the server cache and tiles outside Denmark are not counted. Measured on a large 1920x1080 map: looking around (load, a few zoom steps and pans) takes about 300 tiles, and zooming through the whole range and back with 16 pans about 800, so people never meet 1200; a script walking DHM's ~97 million tiles on your token is held to 20 per second. 0-60000 (0 = off); out of range warns and uses the default, like profile.rateLimitPerMin. 60000 is about 50x the shipped default, comfortably under the point where perMin/minute arithmetic would silently stop limiting. Like the /ws limits it needs webSocket.trustedProxies behind a reverse proxy, otherwise every visitor shares one address and the limit is skipped with a warning.",
       "profile": {
-        "_comment": "#681 - GET /api/terrain/profile: terrain, line of sight and first Fresnel zone between two nodes or map points, from the DHM elevation model (WCS) on the same token. Off unless enabled is true AND map.dhm is enabled with a token. Public: every uncached profile spends up to 16 upstream requests per elevation model on your token (a per-client rate limit is a separate change). All values are bounded; an out-of-range value logs a warning and uses the default shown here.",
+        "_comment": "#681 - GET /api/terrain/profile: terrain, line of sight and first Fresnel zone between two nodes or map points, from the DHM elevation model (WCS) on the same token. Off unless enabled is true AND map.dhm is enabled with a token. Public, but each client address may only start rateLimitPerMin uncached profiles per minute, since every one spends upstream requests on your token. All values are bounded; an out-of-range value logs a warning and uses the default shown here.",
         "enabled": false,
         "maxPathKm": 80,
         "_comment_maxPathKm": "Longest path in km, at most 80 (the largest raster the WCS client requests). Longer paths are refused with 400 before any upstream call.",
@@ -138,7 +140,9 @@
         "cacheTTLHours": 24,
         "_comment_cacheTTLHours": "How long a cached profile is reused (up to 168). DHM is re-flown every few years.",
         "upstreamTimeoutMs": 10000,
-        "_comment_upstreamTimeoutMs": "Timeout per upstream raster, 500-10000 ms (the shared DHM client's own limit is 10 s). A whole profile is also cut off after 25 s."
+        "_comment_upstreamTimeoutMs": "Timeout per upstream raster, 500-10000 ms (the shared DHM client's own limit is 10 s). A whole profile is also cut off after 25 s.",
+        "rateLimitPerMin": 10,
+        "_comment_rateLimitPerMin": "Uncached profiles one client address may request per minute; beyond it 429 with Retry-After. Cache hits are not counted. 0 = off. Needs webSocket.trustedProxies behind a reverse proxy, like tileRateLimitPerMin."
       }
     },
     "tiles": {

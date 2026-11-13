@@ -16,7 +16,9 @@ package main
 //   - Every parameter is validated against a strict grammar and range;
 //     errors are fixed strings that echo nothing back.
 //   - An over-length path and a path outside Denmark make no upstream
-//     call, and neither does a cache hit.
+//     call, and neither does a cache hit. A cache miss is charged to the
+//     client's per-IP budget (map.dhm.profile.rateLimitPerMin, see
+//     ip_rate_limit.go) before it goes upstream.
 //   - Identical concurrent requests share one fetch (dhm.Flight), which
 //     stops when every requester has gone or after the 25 s profile
 //     deadline, releasing the client's concurrency slots (#683 review N3).
@@ -39,6 +41,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -104,6 +107,7 @@ type terrainSettings struct {
 	cacheEntries    int
 	cacheTTL        time.Duration
 	upstreamTimeout time.Duration
+	rateLimitPerMin int
 }
 
 // resolveTerrainSettings applies the defaults and bounds. An out-of-range
@@ -141,6 +145,7 @@ func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface
 		cacheTTL:     time.Duration(num("cacheTTLHours", pc.CacheTTLHours, 24, 0, 168, true) * float64(time.Hour)),
 		// Capped at the shared client's own 10 s per-request timeout.
 		upstreamTimeout: time.Duration(integer("upstreamTimeoutMs", pc.UpstreamTimeoutMs, 10000, 500, 10000)) * time.Millisecond,
+		rateLimitPerMin: integer("rateLimitPerMin", pc.RateLimitPerMin, 10, 0, 6000),
 	}
 }
 
@@ -199,6 +204,7 @@ type terrainProfiler struct {
 	radio      terrainRadio
 	cache      *dhm.Cache[terrainKey]
 	flight     dhm.Flight[[]byte]
+	limiter    *ipRateLimiter // nil: no per-client limit
 	deadline   time.Duration
 	now        func() time.Time
 	logf       func(string, ...interface{})
@@ -216,6 +222,7 @@ type terrainProfilerDeps struct {
 	logf       func(string, ...interface{})
 	logFailure func(what string, err error)
 	observers  func() ([]Observer, error)
+	trusted    []*net.IPNet
 }
 
 // terrainCacheMaxBytes is the cache's byte bound: one entry holds n DTM + n
@@ -251,6 +258,7 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 		set:        set,
 		radio:      resolveTerrainRadio(rc, d.logf),
 		cache:      dhm.NewCache[terrainKey](set.cacheEntries, maxBytes, set.cacheTTL),
+		limiter:    newIPRateLimiter("map.dhm.profile.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
 		deadline:   terrainDeadline,
 		now:        time.Now,
 		logf:       d.logf,
@@ -269,6 +277,7 @@ func newTerrainProfilerFromConfig(cfg *Config, proxy *dhmProxy, db *DB) *terrain
 	d := terrainProfilerDeps{
 		src:        dhm.NewWCSSource(proxy.client),
 		logFailure: proxy.client.LogFailure,
+		trusted:    parseCIDRListQuiet(cfg.WSTrustedProxies()),
 	}
 	if db != nil {
 		d.observers = db.GetObservers
@@ -517,7 +526,7 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 	var elev terrainElevation
 	state := "none"
 	if plan.Calls() == 0 {
-		// Nothing of the path is inside DHM: no upstream call.
+		// Nothing of the path is inside DHM: no upstream call, no charge.
 		elev = terrainElevation{dtm: nanSlice(n)}
 		if tq.both {
 			elev.dsm = nanSlice(n)
@@ -528,6 +537,10 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 		state = "hit"
 		if !hit {
 			state = "miss"
+			if ok, retry := p.limiter.allow(r); !ok {
+				writeRateLimited(w, retry)
+				return
+			}
 			data, _, err = p.flight.Do(r.Context(), key.String(), p.deadline, func(ctx context.Context) ([]byte, error) {
 				e, err := p.fetch(ctx, &plan, tq.both)
 				if err != nil {

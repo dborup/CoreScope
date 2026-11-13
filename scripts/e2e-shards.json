@@ -10,6 +10,14 @@
       "measurementNote": "New suite; #680 DHM terrain hillshade overlay on Map and Live with an intercepted dhm client-config block and a stubbed /api/map/dhm/wms: not offered unless enabled, off by default with zero terrain requests, toggle on/off (tiles, opacity, pane z-order, attribution, hash, storage), marker hit-tests, hash/storage round-trip across pages and reload, allow-listed request shape with no token, and no requests or console errors outside Denmark. About 45s locally; no CI duration measured yet. Assigned to shard 1, which runs the fewest suites."
     },
     {
+      "file": "test-issue-681-dhm-tile-budget-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #681 M3 / #682 F3 DHM tile budget: a normal and an aggressive one-minute Map session at 1920x1080 with the overlay on (intercepted dhm client-config block, stubbed /api/map/dhm/wms), counting tile requests against the default map.dhm.tileRateLimitPerMin. About 50s locally; no CI duration measured yet. Assigned to shard 1 next to #680."
+    },
+    {
       "file": "test-issue-674-1byte-hop-modes-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },
