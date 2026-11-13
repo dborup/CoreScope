@@ -170,7 +170,7 @@ func TestWSRate_RejectedUpgradeDoesNotConsumeBudget(t *testing.T) {
 func TestWSClientIP_TrustedProxyUsesForwardedFor(t *testing.T) {
 	l := limiter(0, 1, []string{"10.0.0.0/8"}, nil)
 	if ok, _, key, _ := l.allow(req("10.0.0.2:1", "203.0.113.20, 10.0.0.2")); !ok || key != "203.0.113.20" {
-		t.Fatalf("key = %q (ok=%v), want the first XFF hop 203.0.113.20", key, ok)
+		t.Fatalf("key = %q (ok=%v), want 203.0.113.20, the first untrusted XFF hop from the right (#691)", key, ok)
 	}
 	// Budget of 1 is now spent for that client, but a different client behind
 	// the SAME proxy must be unaffected. This is the whole point of honouring

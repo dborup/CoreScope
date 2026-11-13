@@ -21,6 +21,9 @@ package main
 //     address the operator listed in trustedProxies. Otherwise it is an
 //     attacker-supplied header, and trusting it would let anyone forge a
 //     fresh source IP per connection, which is worse than no limit at all.
+//     Even then the header is walked from the right past trusted hops, and
+//     the first untrusted address is the client (#691): the left-most entry
+//     is client-written behind a proxy that appends to the header.
 //   - If the peer looks like a local reverse proxy and no trustedProxies is
 //     configured, clients cannot be distinguished, so the per-IP limits are
 //     SKIPPED and one warning is logged telling the operator what to set.
