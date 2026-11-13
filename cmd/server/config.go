@@ -815,6 +815,34 @@ type ThemeFile struct {
 	MarkerStroke map[string]interface{} `json:"markerStroke,omitempty"`
 }
 
+// newDefaultConfig is the starting point of every config candidate: the
+// shipped defaults, before any file is decoded on top of them. Port is the
+// only field that cannot be defaulted after the decode, because an operator
+// setting it to 3000 explicitly is indistinguishable from leaving it out.
+func newDefaultConfig() *Config { return &Config{Port: 3000} }
+
+// describeConfigDecodeError summarizes why a candidate file failed to
+// decode. It reports the error *category* and where in the file it sits --
+// never the file's content: the rejected file is exactly the one that may
+// carry map.dhm's token (#694). Field names are part of the schema, not of
+// the data, so naming the offending key is safe and is what makes the line
+// actionable.
+func describeConfigDecodeError(err error) string {
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return fmt.Sprintf("invalid JSON at byte offset %d", syntaxErr.Offset)
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		field := typeErr.Field
+		if field == "" {
+			field = "(document root)"
+		}
+		return fmt.Sprintf("wrong JSON type for field %s at byte offset %d", field, typeErr.Offset)
+	}
+	return "it could not be decoded as JSON"
+}
+
 func LoadConfig(baseDirs ...string) (*Config, error) {
 	if len(baseDirs) == 0 {
 		baseDirs = []string{"."}
@@ -825,7 +853,7 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		paths = append(paths, filepath.Join(d, "data", "config.json"))
 	}
 
-	cfg := &Config{Port: 3000}
+	cfg := newDefaultConfig()
 	for _, p := range paths {
 		data, err := os.ReadFile(p)
 		if err != nil {
@@ -834,9 +862,22 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		if err := validateEstimatedPositionsConfig(data); err != nil {
 			return nil, fmt.Errorf("config %s: %w", p, err)
 		}
-		if err := json.Unmarshal(data, cfg); err != nil {
+		// #694: every candidate decodes into its OWN Config, and the loop
+		// commits it only once the decode succeeded. encoding/json fills
+		// fields as it walks the document and keeps going past a type
+		// error, so a candidate decoded into the shared struct left its
+		// fields -- and its maps, which the next decode merges into rather
+		// than replaces -- behind for whichever file was accepted next.
+		// With map.dhm that was a rejected file switching the terrain
+		// overlay and the profile proxy on, with its own token, under a
+		// config that has no map.dhm at all.
+		candidate := newDefaultConfig()
+		if err := json.Unmarshal(data, candidate); err != nil {
+			log.Printf("[config] %s ignored: %s", p, describeConfigDecodeError(err))
 			continue
 		}
+		// Committed: everything below runs on the accepted candidate only.
+		cfg = candidate
 		cfg.NormalizeTimestampConfig()
 		cfg.migrateDeprecatedConfig()
 		cfg.extractDHMConfig()
@@ -848,9 +889,10 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 	}
 	cfg.NormalizeTimestampConfig()
 	cfg.migrateDeprecatedConfig()
-	// A config.json that failed to parse above may still have filled Map
-	// (encoding/json keeps decoding past a type error), so map.dhm and its
-	// token must be lifted out on this path too (#680).
+	// No candidate was committed, so Map is whatever newDefaultConfig left
+	// it: nil. extractDHMConfig stays on this path as a no-op guard -- the
+	// contract is that no path out of LoadConfig may hand back a Config
+	// whose client-visible Map still holds map.dhm (#680, #694).
 	cfg.extractDHMConfig()
 	cfg.applyListLimitsDefaults()
 	applyCORSEnv(cfg)
@@ -952,8 +994,11 @@ type WebSocketConfig struct {
 	// X-Forwarded-For may be believed. REQUIRED for the limits to do anything
 	// behind nginx/Caddy/Traefik/ingress: without it every visitor shares the
 	// proxy's address, so the limits are skipped and a warning is logged.
-	// Never list an address you do not control; anyone reaching the server
-	// from a trusted address can name any client IP they like.
+	// X-Forwarded-For is walked from the right, skipping these addresses;
+	// the first untrusted entry is the client (#691), so a proxy may append
+	// to the header or replace it. Never list an address you do not control;
+	// anyone reaching the server from a trusted address can name any client
+	// IP they like.
 	TrustedProxies []string `json:"trustedProxies,omitempty"`
 
 	// Deny blocks addresses outright at the upgrade, before the handshake.

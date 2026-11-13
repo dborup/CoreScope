@@ -680,6 +680,63 @@ func TestTerrainProfile_CoverageGating(t *testing.T) {
 	})
 }
 
+// #692: the DHM WCS answers 0.0, not nodata, outside Denmark, so the fake
+// source is flat 0 everywhere, as upstream is. A path onto foreign land
+// must be partial with no verdict on either model, the gap starting at the
+// foreign coast or border; a path over Danish land and any sea is full.
+func TestTerrainProfile_LeavingDenmarkIsPartial(t *testing.T) {
+	for _, c := range []struct {
+		name, a, b string
+		lo, hi     float64 // where the gap must start, metres along the path
+	}{
+		{"Copenhagen→Malmö", "55.67610,12.56830", "55.60500,13.00380", 24500, 27000},
+		// #693 review round 2, F1: the likeliest cross-border path.
+		{"Helsingør→Kärnan", "56.03610,12.61360", "56.04750,12.69690", 3500, 4900},
+		{"Aabenraa→Flensburg", "55.04430,9.41740", "54.78360,9.43210", 24000, 27500},
+		{"Rønne→Ystad", "55.10090,14.70670", "55.44000,13.83000", 62500, 65000},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			src := newFakeElevation(t, flatElev(0))
+			env := newTerrainEnv(t, src, dhm.ProfileConfig{}, nil)
+			resp := decodeProfile(t, env.get(pathQuery(c.a, c.b, "model=both", "ha=10", "hb=10")))
+			if resp.Coverage.State != "partial" || resp.Verdict.State != "unknown" || resp.Verdict.WorstClearanceM != nil {
+				t.Fatalf("coverage %+v verdict %+v", resp.Coverage, resp.Verdict)
+			}
+			if resp.Verdict.Surface == nil || resp.Verdict.Surface.State != "unknown" {
+				t.Fatalf("surface verdict %+v, want unknown", resp.Verdict.Surface)
+			}
+			if g := resp.Coverage.FirstGapM; g == nil || *g < c.lo || *g > c.hi {
+				t.Fatalf("first gap %v, want %v–%v m", resp.Coverage, c.lo, c.hi)
+			}
+			if resp.A.GroundM == nil || resp.B.GroundM != nil {
+				t.Fatalf("ground A %v (want 0), B %v (want null)", resp.A.GroundM, resp.B.GroundM)
+			}
+			last := resp.Samples[len(resp.Samples)-1]
+			if last.DTM != nil || last.DSM != nil {
+				t.Fatalf("foreign sample has dtm %v dsm %v", last.DTM, last.DSM)
+			}
+		})
+	}
+	for _, c := range []struct{ name, a, b string }{
+		{"Great Belt, Nyborg→Korsør", "55.31270,10.78970", "55.32970,11.13930"},
+		{"Kattegat, Grenaa→Anholt", "56.41580,10.87830", "56.71670,11.51670"},
+		{"Kattegat, Hesselø→Gilleleje", "56.19800,11.71000", "56.12100,12.31000"},
+		{"Øresund, Copenhagen→Saltholm east", "55.67610,12.56830", "55.66000,12.86000"},
+		{"Øresund, Helsingør→Copenhagen", "56.03610,12.61360", "55.67610,12.56830"},
+		{"Øresund, Copenhagen→Saltholm", "55.67610,12.56830", "55.64000,12.76000"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			src := newFakeElevation(t, flatElev(0))
+			env := newTerrainEnv(t, src, dhm.ProfileConfig{}, nil)
+			resp := decodeProfile(t, env.get(pathQuery(c.a, c.b, "model=both", "ha=10", "hb=10")))
+			if resp.Coverage.State != "full" || resp.Coverage.FirstGapM != nil || resp.Verdict.State == "unknown" ||
+				resp.Verdict.Surface == nil || resp.Verdict.Surface.State == "unknown" {
+				t.Fatalf("coverage %+v verdict %+v", resp.Coverage, resp.Verdict)
+			}
+		})
+	}
+}
+
 // ── Physics ────────────────────────────────────────────────────────────────
 
 func TestTerrainProfile_PhysicsAndVerdict(t *testing.T) {
