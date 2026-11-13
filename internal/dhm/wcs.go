@@ -1,6 +1,7 @@
 package dhm
 
 import (
+	"context"
 	"net/url"
 	"strconv"
 	"strings"
@@ -64,8 +65,9 @@ type RasterRequest struct {
 // WCS is a drop-in (#681 owner decision 8). FetchRaster returns a decoded,
 // georeferenced Grid in EPSG:25832 that covers r.BBox at r's resolution,
 // up to one pixel of snapping; the wire format is the source's business.
+// It stops when ctx is done (#683 review N3).
 type ElevationSource interface {
-	FetchRaster(r RasterRequest) (Grid, error)
+	FetchRaster(ctx context.Context, r RasterRequest) (Grid, error)
 }
 
 // Validate accepts r only if every field is inside the allow-list.
@@ -187,12 +189,19 @@ func NewWCSSource(c *Client) *WCSSource { return &WCSSource{c} }
 
 // FetchRaster fetches and decodes one raster. A request outside the
 // allow-list is ErrBadRequest before any upstream call (Client.Get checks
-// the query); every upstream or decoding failure is a FetchError.
-func (s *WCSSource) FetchRaster(r RasterRequest) (Grid, error) {
-	data, err := s.c.get(WCSService, r.coverageQuery(), geoTIFFContentTypes)
+// the query); every upstream or decoding failure is a FetchError, and so
+// is a done ctx ("canceled" or "timeout").
+func (s *WCSSource) FetchRaster(ctx context.Context, r RasterRequest) (Grid, error) {
+	data, err := s.c.get(ctx, WCSService, r.coverageQuery(), geoTIFFContentTypes)
 	if err != nil {
 		return Grid{}, err
 	}
+	return rasterGrid(data, r)
+}
+
+// rasterGrid decodes the GeoTIFF answering r and places it: a file without
+// georeferencing is the requested grid, a georeferenced one must fit r.
+func rasterGrid(data []byte, r RasterRequest) (Grid, error) {
 	g, err := decodeGeoTIFF(data)
 	if err != nil {
 		return Grid{}, FetchError{"invalid raster"}

@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
 // DefaultBaseURL is Dataforsyningen's API root. Services are paths below it.
@@ -25,7 +23,7 @@ const DefaultBaseURL = "https://api.dataforsyningen.dk/"
 var allowedServices = map[string]serviceShape{
 	// The tile proxy rebuilds every WMS query from a validated TileKey;
 	// the check holds any other caller to that shape too.
-	WMSService: {check: checkTileQuery},
+	WMSService: {check: hillshadeQueryCheck(HillshadeTerrain)},
 	WCSService: {check: checkCoverageQuery, raster: true},
 	// #687: only the exaggerated hillshade's exact tile shape.
 	ExaggeratedWMSService: {check: hillshadeQueryCheck(HillshadeExaggerated)},
@@ -76,7 +74,7 @@ type Client struct {
 	opts    ClientOptions
 	http    *http.Client
 	sem     chan struct{}
-	flight  singleflight.Group
+	flight  Flight[[]byte]
 	lastLog atomic.Int64 // unix nanos of the last failure log line
 }
 
@@ -122,12 +120,18 @@ func (e FetchError) Error() string { return e.Reason }
 // error bodies in any format (OGC XML, plain text, JSON), is a FetchError.
 // Identical concurrent requests share one upstream call. A service with a
 // request shape (the WCS) only accepts exactly that shape.
+//
+// Get has no context: a tile request runs to Timeout whatever the browser
+// does, as it did in #680.
 func (c *Client) Get(service string, q url.Values, contentType string) ([]byte, error) {
-	return c.get(service, q, []string{contentType})
+	return c.get(context.Background(), service, q, []string{contentType})
 }
 
-// get is Get accepting any of contentTypes.
-func (c *Client) get(service string, q url.Values, contentTypes []string) ([]byte, error) {
+// get is Get accepting any of contentTypes, stopping when ctx is done: a
+// cancelled ctx is FetchError "canceled", a passed deadline "timeout".
+// The shared upstream call stops once every caller waiting on it has gone
+// (#683 review N3), which frees its concurrency slot.
+func (c *Client) get(ctx context.Context, service string, q url.Values, contentTypes []string) ([]byte, error) {
 	shape, ok := allowedServices[service]
 	if !ok {
 		return nil, ErrBadRequest
@@ -150,17 +154,32 @@ func (c *Client) get(service string, q url.Values, contentTypes []string) ([]byt
 		}
 	}
 	target := c.opts.BaseURL + service + "?" + q.Encode()
-	v, err, _ := c.flight.Do(strings.Join(contentTypes, ",")+" "+target, func() (interface{}, error) {
-		return c.fetch(target, contentTypes, maxBody)
+	data, _, err := c.flight.Do(ctx, strings.Join(contentTypes, ",")+" "+target, 0, func(work context.Context) ([]byte, error) {
+		return c.fetch(work, target, contentTypes, maxBody)
 	})
 	if err != nil {
-		return nil, err
+		return nil, ctxFailure(err)
 	}
-	return v.([]byte), nil
+	return data, nil
 }
 
-func (c *Client) fetch(target string, contentTypes []string, maxBody int) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.opts.Timeout)
+// ctxFailure maps the caller's context error, when ctx ended its wait, to
+// a FetchError category; any other error passes through.
+func ctxFailure(err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return FetchError{"canceled"}
+	case errors.Is(err, context.DeadlineExceeded):
+		return FetchError{"timeout"}
+	}
+	return err
+}
+
+// fetch runs one upstream request. work is cancelled once every caller
+// has given up (get maps that for them, so fetch's own result is unread
+// then); Timeout bounds the request on top of it.
+func (c *Client) fetch(work context.Context, target string, contentTypes []string, maxBody int) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(work, c.opts.Timeout)
 	defer cancel()
 	select {
 	case c.sem <- struct{}{}:
