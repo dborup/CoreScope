@@ -582,6 +582,23 @@ See `config.example.json` in the repository for all available options including:
 - Geo-filtering
 - Map tile providers (OSM, Stamen, Carto, etc.)
 
+**A `config.json` that does not parse is ignored whole** (#694). The server
+tries `config.json` and then `data/config.json`; a file that fails to decode
+is dropped in full -- not partially applied, and never merged into the file
+accepted after it -- and the reason is logged as, e.g.:
+
+```
+[config] data/config.json ignored: wrong JSON type for field areas at byte offset 155
+```
+
+The log line names the file and the offending field or byte offset, never a
+value, so it is safe to paste into an issue. If every candidate is rejected
+the built-in defaults are served, so a typo shows up as "my settings are not
+applied" rather than as half a config. Note that this includes the
+documentation notes: a `"_comment"` string is fine inside a block that maps
+to a fixed set of fields, but not inside one whose keys are all objects of
+the same shape (`areas`), where it makes the whole file fail to decode.
+
 ### Disable estimated node positions
 
 Neighbor-derived position estimates are enabled by default. To disable them

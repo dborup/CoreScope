@@ -337,8 +337,8 @@
   },
   "geoFilterExemptNodeList": false,
   "_comment_geoFilterExemptNodeList": "Optional, default false. When geo_filter is configured, GET /api/nodes (and therefore the live map) excludes out-of-polygon nodes by default — the long-standing #730 declutter behavior, preserved automatically for every deployment upgrading from before this field existed. Set to true if you want geo_filter purely for foreign_advert classification/analytics (e.g. a 'Foreign Traffic' investigation) WITHOUT also hiding out-of-polygon nodes from the node list/map. Per-request ?geoFilter=0 / ?geoFilter=1 on /api/nodes overrides either default for a single call. Has no effect on ingestion (foreignAdverts.mode) or the prune-geo-filter admin flow, both of which are unaffected by this flag.",
+  "_comment_areas": "Optional. GPS-based display filter. Each entry defines a geographic area by polygon ([lat, lon] pairs) or bounding box (latMin/latMax/lonMin/lonMax). Packets and nodes are attributed to an area based on the transmitting node's own GPS coordinates — not the observer's location. Areas appear as a filter pill bar in the dashboard. Remove this section to disable the area filter UI. NOTE: every key under \"areas\" must be an area object, so this note lives outside the block (#694) — a string in there makes the whole file fail to decode and the server ignores it.",
   "areas": {
-    "_comment": "Optional. GPS-based display filter. Each entry defines a geographic area by polygon ([lat, lon] pairs) or bounding box (latMin/latMax/lonMin/lonMax). Packets and nodes are attributed to an area based on the transmitting node's own GPS coordinates — not the observer's location. Areas appear as a filter pill bar in the dashboard. Remove this section to disable the area filter UI.",
     "BAY": {
       "label": "Bay Area",
       "polygon": [
