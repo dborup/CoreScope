@@ -169,6 +169,13 @@ func TestHeritageQuery_RejectsJunkWithoutEcho(t *testing.T) {
 		"lat=<script>&lon=9.42",
 		"LAT=55.75&lon=9.42",
 		"lat=55.75&lon=9.42&cql_filter=INCLUDE",
+		// Pairs url.Values would silently drop (#762 review finding 4).
+		"lat=55.75&lon=9.42&%zz",
+		"lat=55.75&lon=9.42&a;b=1",
+		"lat=55.75&lon=9.42&",
+		"lat=55.75&&lon=9.42",
+		"&lat=55.75&lon=9.42",
+		"lat=55.75&lon=9.42&=1",
 	} {
 		w := env.get(q)
 		wantError(t, w, http.StatusBadRequest, "invalid heritage request")

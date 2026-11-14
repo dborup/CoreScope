@@ -15,7 +15,8 @@ package main
 //
 // Properties, each pinned by heritage_query_723_test.go:
 //   - lat and lon only, plain decimals in range, each exactly once; any
-//     other request is one fixed 400 and makes no upstream call.
+//     other query string, a malformed or empty pair included, is one
+//     fixed 400 and makes no upstream call.
 //   - A point outside the layers' extent is answered empty without an
 //     upstream call or a charge.
 //   - Bounded LRU cache per cell (map.heritage.cacheEntries, TTL
@@ -49,6 +50,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -177,8 +179,14 @@ var errHeritageQuery = errors.New("invalid heritage request")
 var errHeritageBusy = errors.New("heritage lookups busy")
 
 // parseHeritageQuery accepts exactly lat and lon, each once, as plain
-// decimals (the terrain profile's coordinate grammar) in range.
-func parseHeritageQuery(q url.Values) (lat, lon float64, err error) {
+// decimals (the terrain profile's coordinate grammar) in range. raw is the
+// whole query string: a pair url.Values would drop (bad escape,
+// semicolon, empty) is refused too.
+func parseHeritageQuery(raw string) (lat, lon float64, err error) {
+	q, err := url.ParseQuery(raw)
+	if err != nil || strings.Contains("&"+raw+"&", "&&") {
+		return 0, 0, errHeritageQuery
+	}
 	v, err := dhm.ExactQuery(q, nil, "lat", "lon")
 	if err != nil {
 		return 0, 0, errHeritageQuery
@@ -245,7 +253,7 @@ func (s *Server) handleHeritageInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
-	lat, lon, err := parseHeritageQuery(r.URL.Query())
+	lat, lon, err := parseHeritageQuery(r.URL.RawQuery)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, errHeritageQuery.Error())
 		return
