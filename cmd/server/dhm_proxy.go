@@ -233,11 +233,27 @@ type dhmProxy struct {
 	now     func() time.Time
 }
 
-// dhmCacheKey is a tile of the upstream layer it was actually fetched
-// from, so a terrain fallback is never served as an exaggerated tile.
+// dhmProduct is what a cached tile shows (#728).
+type dhmProduct uint8
+
+const (
+	dhmProductTerrain     dhmProduct = iota // #680 hillshade
+	dhmProductExaggerated                   // #687 hillshade
+)
+
+func hillshadeProduct(h dhm.Hillshade) dhmProduct {
+	if h == dhm.HillshadeExaggerated {
+		return dhmProductExaggerated
+	}
+	return dhmProductTerrain
+}
+
+// dhmCacheKey is a tile of the product it actually is, so a terrain
+// fallback is never served as an exaggerated tile (#687), nor any tile as
+// another product's.
 type dhmCacheKey struct {
-	Layer dhm.Hillshade
-	Tile  dhm.TileKey
+	Product dhmProduct
+	Tile    dhm.TileKey
 }
 
 // newDHMProxy returns nil unless map.dhm is enabled with a token: an
@@ -304,7 +320,7 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Only a tile that will go upstream is charged to the client.
-	if _, cached := p.cache.Get(dhmCacheKey{Layer: p.layer, Tile: key}, p.now()); !cached {
+	if _, cached := p.cache.Get(dhmCacheKey{Product: hillshadeProduct(p.layer), Tile: key}, p.now()); !cached {
 		if ok, retry := p.limiter.allow(r); !ok {
 			writeRateLimited(w, retry)
 			return
@@ -358,7 +374,7 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // upstream, and whether it was a cache hit. Only successes are cached. A
 // cold tile is admitted against p.admit and waited for until ctx is done.
 func (p *dhmProxy) layerTile(ctx context.Context, h dhm.Hillshade, k dhm.TileKey) ([]byte, bool, error) {
-	ck := dhmCacheKey{Layer: h, Tile: k}
+	ck := dhmCacheKey{Product: hillshadeProduct(h), Tile: k}
 	if data, ok := p.cache.Get(ck, p.now()); ok {
 		return data, true, nil
 	}
