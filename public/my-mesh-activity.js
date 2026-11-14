@@ -67,12 +67,25 @@
     'Any other copy carries the signal of whichever node the observer actually heard.';
 
   // ─── point 5: traffic ───
-  var TRAFFIC_LABEL = 'Transmissions · 24 h';
+  // #716: this is every distinct transmission associated with the node
+  // (adverts included), which for a repeater is a larger number than its
+  // "Relayed" count on Busiest Repeaters (relay_count_24h: forwarded,
+  // non-advert packets only). The label and tip both say "All traffic" so
+  // the two 24h figures stop reading as contradictory.
+  var TRAFFIC_LABEL = 'All traffic · 24 h';
   var TRAFFIC_TIP = 'Distinct transmissions associated with this node in the rolling 24-hour window: its own, ' +
     'those addressed to it, and those whose resolved path names it. It is not a count of what this node forwarded, ' +
     'and repeated observations of one transmission count once.';
+  var TRAFFIC_REPEATER_NOTE = 'For a repeater this is larger than its relayed count on Busiest Repeaters, which counts only forwarded non-advert packets.';
   var TRAFFIC_PARTIAL_TIP = 'The in-memory history does not cover the whole window, so this is a lower bound (≥) over an incomplete window, not a total.';
   var TRAFFIC_UNAVAILABLE_TIP = 'The rolling window is unavailable for this node, so no 24-hour count is shown. An unknown window is not a quiet one.';
+
+  // Rooms are listed alongside repeaters on Busiest Repeaters (#697), so
+  // both roles get the cross-reference; any other role has no row there.
+  function isRelayRole(role) {
+    var r = String(role || '').toLowerCase();
+    return r === 'repeater' || r === 'room';
+  }
   var COMPARE_ROW_LABEL = 'Change vs previous 24 h';
   var COMPARE_NO_HISTORY = 'no comparable 24 h history';
   var COMPARE_TIP = 'Compares the rolling 24-hour count with the previous 24 h, the equally long window right before it. Shown only when both windows are fully covered, ' +
@@ -200,10 +213,11 @@
     return total;
   }
 
-  function traffic24h(activity) {
+  function traffic24h(activity, role) {
+    var note = isRelayRole(role) ? ' ' + TRAFFIC_REPEATER_NOTE : '';
     var b = buckets(activity);
     if (!b) {
-      return { available: false, exact: false, count: null, value: UNKNOWN_VALUE, label: TRAFFIC_LABEL, tip: TRAFFIC_UNAVAILABLE_TIP };
+      return { available: false, exact: false, count: null, value: UNKNOWN_VALUE, label: TRAFFIC_LABEL, tip: TRAFFIC_UNAVAILABLE_TIP + note };
     }
     var total = sum(b);
     var exact = activity.complete === true;
@@ -213,7 +227,7 @@
       count: total,
       value: (exact ? '' : '≥ ') + count(total),
       label: TRAFFIC_LABEL,
-      tip: TRAFFIC_TIP + ' ' + (exact ? windowText(activity) : TRAFFIC_PARTIAL_TIP + ' ' + windowText(activity))
+      tip: TRAFFIC_TIP + note + ' ' + (exact ? windowText(activity) : TRAFFIC_PARTIAL_TIP + ' ' + windowText(activity))
     };
   }
 
@@ -289,6 +303,7 @@
     SNR_TIP: SNR_TIP,
     TRAFFIC_LABEL: TRAFFIC_LABEL,
     TRAFFIC_TIP: TRAFFIC_TIP,
+    TRAFFIC_REPEATER_NOTE: TRAFFIC_REPEATER_NOTE,
     COMPARE_ROW_LABEL: COMPARE_ROW_LABEL,
     COMPARE_NO_HISTORY: COMPARE_NO_HISTORY,
     COMPARE_TIP: COMPARE_TIP,

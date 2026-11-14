@@ -547,11 +547,15 @@ function makeElement(id) {
     assert((top.match(/<tr><td/g) || []).length === M.BUSIEST_DEFAULT_ROWS, 'the default limit shows the top 50 rows');
     assert(!top.includes('<img src=x') && top.includes('&lt;img src=x'), 'a node name is escaped');
     assert(/id="busiestLimitToggle"[^>]*>Show all 60</.test(top), 'a "Show all 60" button follows the truncated list');
-    assert(/aria-sort="descending">24h</.test(top) && !/aria-sort="descending">1h</.test(top),
+    assert(/aria-sort="descending">Relayed 24h</.test(top) && !/aria-sort="descending">Relayed 1h</.test(top),
       'the sorted column is marked aria-sort="descending"');
+    // #716: the column headers name what they count (not just "24h"/"1h"),
+    // so they stay unambiguous even read in isolation from the "Relayed"
+    // group header above them.
+    assert(/aria-sort="descending">Relayed 24h</.test(top), 'the 24h column header says "Relayed 24h", not just "24h"');
     const all = M.renderBusiestRepeatersTable(rows, '1h', 'all');
     assert((all.match(/<tr><td/g) || []).length === 60 && /Show top 50</.test(all), '"all" shows every row and offers the top 50 again');
-    assert(/aria-sort="descending">1h</.test(all), 'sorting by 1h marks the 1h column');
+    assert(/aria-sort="descending">Relayed 1h</.test(all), 'sorting by 1h marks the 1h column');
     const few = M.renderBusiestRepeatersTable(rows.slice(0, 3), '24h', '50');
     assert(!few.includes('busiestLimitToggle'), 'no limit button when every row fits');
     assert(/No repeater in this view relayed/.test(M.renderBusiestRepeatersTable([], '24h', '50')), 'an empty list says so');
@@ -662,6 +666,38 @@ function makeElement(id) {
     await M.renderRepeaterMetricsTab(el2);
     assert(/option value="peak" selected/.test(el2.innerHTML), 'bsort=peak from the URL selects it');
     Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
+  }
+
+  console.log('\n=== [B6] #716: Relayed vs Home "All traffic" cross-reference ===');
+  {
+    // The column headers must say what they count even read on their own,
+    // not only via the "Relayed" group header sitting above them.
+    const rows = [{ pk: 'a', name: 'A', role: 'repeater', relay1h: 1, relay24h: 2, estAvg: null, estPeak: null, observer: false }];
+    const html = M.renderBusiestRepeatersTable(rows, '24h', '50');
+    assert(/>Relayed 24h</.test(html) && />Relayed 1h</.test(html),
+      'the 24h/1h column headers read "Relayed 24h"/"Relayed 1h", not just "24h"/"1h"');
+    const relayedTh = (html.match(/<th scope="colgroup" colspan="2"[^>]*>Relayed<\/th>/) || [''])[0];
+    assert(/title="[^"]*forwarded[^"]*"/.test(relayedTh), 'the "Relayed" group header carries a tooltip explaining what it counts');
+    assert(/Adverts are not counted/.test(relayedTh), 'the tooltip says adverts are excluded');
+    assert(/\blag\b/.test(relayedTh), 'the tooltip says the figure can lag, since it is a periodic snapshot');
+  }
+  {
+    nodesData = [{ public_key: 'a1', name: 'A', role: 'repeater', relay_count_1h: 1, relay_count_24h: 2 }];
+    observersData = { observers: [] };
+    Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
+    const el = makeElement('root');
+    await M.renderRepeaterMetricsTab(el);
+    assert(/This is not the same number as a repeater's/.test(el.innerHTML),
+      'a short line under the table title explains the difference from the node\'s total traffic');
+    assert(/All traffic · 24 h/.test(el.innerHTML),
+      'the explanatory line names the Home/My Mesh metric by its own label (window.MyMeshActivity.TRAFFIC_LABEL), not a paraphrase that can drift out of sync (DRY)');
+    Object.keys(viewParams).forEach(k => { delete viewParams[k]; });
+    // DRY: the source itself must read the label from MyMeshActivity, not
+    // carry its own copy of the string — a hardcoded duplicate would still
+    // pass the innerHTML assertion above but silently drift if Home's
+    // label is ever renamed again.
+    assert(/window\.MyMeshActivity\s*\?\s*window\.MyMeshActivity\.TRAFFIC_LABEL/.test(src),
+      'the Busiest Repeaters cross-reference line reads window.MyMeshActivity.TRAFFIC_LABEL rather than a hardcoded copy of the Home label text');
   }
 
   console.log('\n=== [B4] wiring (structural) ===');

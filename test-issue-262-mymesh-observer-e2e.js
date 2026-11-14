@@ -196,7 +196,7 @@ async function render(page, { observersFail = false, holdObservers = false } = {
       assert.deepEqual(await obsCard.locator('.mnc-section-lbl').evaluateAll(els => els.map(e => e.textContent)),
         ['Observer reporting', 'Node activity']);
       assert.deepEqual(await obsCard.locator('.mnc-section-lbl').allInnerTexts(), ['OBSERVER REPORTING', 'NODE ACTIVITY']);
-      assert.equal(await obsCard.locator('.mnc-metrics .mnc-lbl').first().innerText(), 'Transmissions · 24 h');
+      assert.equal(await obsCard.locator('.mnc-metrics .mnc-lbl').first().innerText(), 'All traffic · 24 h');
       assert.equal(await obsCard.locator('.mnc-metrics .mnc-val').first().innerText(), '276 +20%');
       assert.match(await obsCard.locator('.mnc-spark').innerText(), /Node-associated transmissions.*last 24h/);
       assert.equal(await plainCard.locator('.mnc-section-lbl').count(), 0, 'a non-observer card gains no section labels');
