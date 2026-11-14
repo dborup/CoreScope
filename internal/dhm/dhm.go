@@ -7,7 +7,7 @@
 // what every DHM feature needs exactly once:
 //
 //   - Config: the operator's `map.dhm` block (enabled, token, layer,
-//     tile rate limit, terrain profile).
+//     tile rate limit, terrain profile, orthophoto).
 //   - Client: the upstream HTTP client. The token goes in the `token`
 //     request header (Dataforsyningen's recommended method), never in a
 //     URL, so no upstream URL can leak it. The client also enforces the
@@ -93,6 +93,14 @@ type Config struct {
 	TileRateLimitPerMin *int `json:"tileRateLimitPerMin"`
 	// Profile is the terrain profile endpoint (#681).
 	Profile ProfileConfig `json:"profile"`
+	// Ortho is the orthophoto base layer (#728).
+	Ortho OrthoConfig `json:"ortho"`
+}
+
+// OrthoConfig is config.json `map.dhm.ortho` (#728). Off unless Enabled;
+// it uses map.dhm's token, so it is also off while map.dhm is inactive.
+type OrthoConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 // ProfileConfig is config.json `map.dhm.profile`. A nil field takes the
