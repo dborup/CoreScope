@@ -429,6 +429,27 @@
     return a;
   }
 
+  // ── Fitting a linked path into view (#746) ───────────────────────────────
+
+  var FIT_MARGIN_PX = 32;
+  // Below this much map between the panel and the top edge there is no
+  // useful strip to fit a path into.
+  var FIT_MIN_FREE_PX = 120;
+
+  /* fitPadding is the Leaflet fitBounds padding that puts a path in the
+   * part of a mapH-tall map the panel leaves free. The panel is anchored to
+   * the bottom at full width, so it costs bottom padding only, and it is
+   * reserved at panelMaxH (its CSS cap, --tp-panel-max-h) even while it is
+   * shorter: it grows to the cap when the chart arrives. With no useful
+   * strip left (a short landscape screen) the panel is not reserved, and
+   * the path fits the whole map rather than a sliver. */
+  function fitPadding(mapH, panelH, panelMaxH) {
+    var m = FIT_MARGIN_PX;
+    var reserve = Math.max(Number(panelH) || 0, isFinite(panelMaxH) ? Number(panelMaxH) : 0);
+    var bottom = (reserve > 0 && mapH - reserve - 2 * m >= FIT_MIN_FREE_PX) ? reserve + m : m;
+    return { paddingTopLeft: [m, m], paddingBottomRight: [m, bottom] };
+  }
+
   // ── Per-viewer height memory ─────────────────────────────────────────────
 
   function storage() {
@@ -1719,6 +1740,7 @@
     snapEndpoint: snapEndpoint,
     shareURL: shareURL,
     shareOffered: shareOffered,
+    fitPadding: fitPadding,
     parseProfilePair: parseProfilePair,
     offered: offered,
     nodeEntryHash: nodeEntryHash,

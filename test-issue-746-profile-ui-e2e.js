@@ -19,6 +19,10 @@
  *   4. N2 — the accessibility tree reads the terrain and surface chips as two
  *      sentences ("Terrain: Clear. Buildings/trees: Blocked"), while the
  *      separator takes no visible room.
+ *   5. Map fit (owner decision) — starting from a stored view elsewhere, a
+ *      deep link (desktop) and a /p handoff (360x740 phone) put both ends
+ *      inside the map and above the panel; a pan or a Move afterwards is
+ *      not undone by a second fit; without a profile the stored view stays.
  *
  * Usage:
  *   BASE_URL=http://localhost:13581 node test-issue-746-profile-ui-e2e.js
@@ -273,6 +277,93 @@ function hashParams(hash) {
       });
       assert(sep.cls === 'sr-only' && sep.text === '. ' && sep.next === 'tp-surface-chip', 'separator ' + JSON.stringify(sep));
       assert(sep.w <= 1 && sep.h <= 1, 'the separator takes visible room: ' + JSON.stringify(sep));
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  // ── 5. Map fit: a linked path is in view above the panel ──────────────
+  // The owner's case: the stored view was near 56.08, 9.62, about 37 km
+  // from the path, so the profile opened somewhere off screen.
+  const ELSEWHERE = { 'map-view': JSON.stringify({ lat: 56.08, lng: 9.62, zoom: 12 }) };
+
+  /* endsInView reports where the A/B markers sit against the map and the
+   * panel, in page pixels. */
+  async function endsInView(page) {
+    return page.evaluate(() => {
+      const box = (sel) => { const e = document.querySelector(sel); return e ? e.getBoundingClientRect() : null; };
+      const map = box('#leaflet-map'), panel = box('[data-testid="tp-panel"]');
+      const mid = (r) => r && { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      const a = mid(box('[data-testid="tp-end-marker-a"]')), b = mid(box('[data-testid="tp-end-marker-b"]'));
+      const inside = (p) => !!p && p.x >= map.left && p.x <= map.right && p.y >= map.top && p.y < panel.top;
+      return { a, b, ok: inside(a) && inside(b),
+        map: { left: Math.round(map.left), right: Math.round(map.right), top: Math.round(map.top) }, panelTop: Math.round(panel.top) };
+    });
+  }
+
+  {
+    const { ctx, page, rec } = await newCtx({ storage: ELSEWHERE });
+    await step('fit: a deep link puts both ends above the panel (desktop)', async () => {
+      await page.goto(`${BASE}/#/map?profile=${P1}&ha=19&hb=19`, { waitUntil: 'domcontentloaded' });
+      await waitForRequestFor(page, rec, P1);
+      await page.waitForTimeout(400);
+      const v = await endsInView(page);
+      assert(v.ok, 'an end is off the map or under the panel: ' + JSON.stringify(v));
+    });
+    await step('fit: a pan afterwards is not undone', async () => {
+      const before = await endsInView(page);
+      const box = await page.locator('#leaflet-map').boundingBox();
+      await page.mouse.move(box.x + 300, box.y + 120);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 420, box.y + 170, { steps: 8 });
+      await page.mouse.up();
+      await page.waitForTimeout(1000); // drag inertia settles
+      const panned = await endsInView(page);
+      await page.waitForTimeout(1500);
+      const after = await endsInView(page);
+      assert(Math.hypot(panned.a.x - before.a.x, panned.a.y - before.a.y) > 60, 'setup: the pan did not move the map');
+      assert(Math.abs(after.a.x - panned.a.x) <= 1 && Math.abs(after.a.y - panned.a.y) <= 1,
+        'the map moved after the pan: ' + JSON.stringify({ before: before.a, panned: panned.a, after: after.a }));
+    });
+    await step('fit: a Move afterwards is not followed by a second fit', async () => {
+      const before = await endsInView(page);
+      const n = rec.profile.length;
+      await page.click('[data-testid="tp-move-a"]');
+      const box = await page.locator('#leaflet-map').boundingBox();
+      await page.mouse.click(box.x + 700, box.y + 140);
+      const t0 = Date.now();
+      while (rec.profile.length === n && Date.now() - t0 < 5000) await page.waitForTimeout(100);
+      await page.waitForTimeout(800);
+      const after = await endsInView(page);
+      assert(rec.profile.length === n + 1, 'the move was not measured');
+      assert(Math.abs(after.b.x - before.b.x) <= 1 && Math.abs(after.b.y - before.b.y) <= 1,
+        'the map moved after Move A: ' + JSON.stringify({ before: before.b, after: after.b }));
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  {
+    const { ctx, page } = await newCtx({ storage: ELSEWHERE });
+    await step('fit: without a profile in the URL the stored view is kept', async () => {
+      await page.goto(`${BASE}/#/map`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
+      await page.waitForTimeout(1500);
+      const v = JSON.parse(await page.evaluate(() => localStorage.getItem('map-view')));
+      assert(Math.abs(v.lat - 56.08) < 1e-6 && Math.abs(v.lng - 9.62) < 1e-6 && v.zoom === 12, 'the stored view moved: ' + JSON.stringify(v));
+    });
+    await ctx.close();
+  }
+
+  {
+    const { ctx, page, rec } = await newCtx({ storage: ELSEWHERE, viewport: { width: 360, height: 740 }, touch: true });
+    await step('fit: a /p link on a phone puts both ends above the panel', async () => {
+      await page.goto(`${BASE}/p?profile=${encodeURIComponent(P1)}&ha=19&hb=19`, { waitUntil: 'domcontentloaded' });
+      await page.waitForFunction(() => location.pathname === '/' && location.hash.indexOf('#/map?') === 0, null, { timeout: 15000 });
+      await waitForRequestFor(page, rec, P1);
+      await page.waitForTimeout(400);
+      const v = await endsInView(page);
+      assert(v.ok, 'an end is off the map or under the panel: ' + JSON.stringify(v));
       assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     });
     await ctx.close();

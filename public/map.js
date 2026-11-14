@@ -2720,6 +2720,9 @@
   var profileDrag = null;     // { side } while an end is dragged
   // A drop this close to a marker lands on it: half the 48px touch target.
   var PROFILE_SNAP_PX = 24;
+  // A linked path is fitted no closer than this: a 20 m path at zoom 19
+  // would show nothing around it (#746).
+  var PROFILE_FIT_MAX_ZOOM = 16;
   // #711: the one node a half link named that the Map page's own list does
   // not hold (an area filter or the last-heard window left it out). One
   // entry, replaced by the next half link, so it cannot grow.
@@ -3135,6 +3138,23 @@
     if (!tool) return;
     tool.setState(st);
     profileDrawLine();
+    profileFitPath();
+  }
+
+  /* profileFitPath brings a profile opened from the URL (a deep link or a
+   * /p handoff) into view above the panel (#746): someone who receives a
+   * link sees where the path is, not their own last view. Once, when the
+   * link is opened: a move or a pan afterwards is the viewer's own view.
+   * A node end the Map page's list does not hold has no position here, and
+   * the stored view stays. */
+  function profileFitPath() {
+    var st = profileTool && profileTool.getState();
+    var a = st && profileRefLatLng(st.a), b = st && profileRefLatLng(st.b);
+    var panel = profileTool && profileTool.el();
+    if (!map || !a || !b || !panel) return;
+    var cap = parseFloat(getComputedStyle(panel).getPropertyValue('--tp-panel-max-h'));
+    var pad = window.TerrainProfile.fitPadding(map.getSize().y, panel.offsetHeight, cap);
+    map.fitBounds(L.latLngBounds([a, b]), Object.assign(pad, { maxZoom: PROFILE_FIT_MAX_ZOOM, animate: false }));
   }
 
   function destroyProfileTool() {

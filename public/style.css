@@ -6246,6 +6246,9 @@ body.embed #app.app-fixed {
 .tp-end-marker.leaflet-drag-target .tp-end-dot { transform: scale(1.15); }
 
 .tp-panel {
+  /* The cap is a variable so the Map page can keep a linked path clear of
+     the panel before the chart has grown it to the cap (#746). */
+  --tp-panel-max-h: 420px;
   position: absolute;
   left: 0;
   right: 0;
@@ -6256,7 +6259,7 @@ body.embed #app.app-fixed {
   min-height: 0;
   /* Never taller than the map area minus a strip of map, and never taller
      than the chart plus its controls need. */
-  max-height: min(420px, calc(100% - 24px));
+  max-height: min(var(--tp-panel-max-h), calc(100% - 24px));
   background: var(--card-bg);
   color: var(--text);
   border-top: 1px solid var(--border);

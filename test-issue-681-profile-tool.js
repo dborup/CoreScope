@@ -1852,6 +1852,36 @@ atest('the separator goes with the surface chip', async () => {
   assert.strictEqual(sep.hidden, true, 'a separator with nothing after it');
 });
 
+// ── #746: fit a linked profile above the panel ─────────────────────────────
+
+console.log('\n=== #746: the map fits a linked path into the room the panel leaves ===');
+
+/* Sizes measured on the Map page: the panel is anchored to the bottom at
+ * full width and capped at 420 px, which it reaches once the chart is in;
+ * while pending on a desktop it is 295 px. */
+test('desktop, panel still pending: the padding reserves the panel at its cap', () => {
+  const p = TP.fitPadding(848, 295, 420);
+  eq(p.paddingTopLeft, [32, 32]);
+  eq(p.paddingBottomRight, [32, 452]);
+});
+
+test('phone portrait: the path fits in the strip above the panel', () => {
+  eq(TP.fitPadding(632, 420, 420).paddingBottomRight, [32, 452]);
+});
+
+test('a panel taller than its cap counts as it is', () => {
+  eq(TP.fitPadding(900, 500, 420).paddingBottomRight, [32, 532]);
+});
+
+test('short landscape: with no useful strip left, the panel is not reserved', () => {
+  eq(TP.fitPadding(252, 240, 420).paddingBottomRight, [32, 32]);
+});
+
+test('an unreadable cap falls back to the panel as it is', () => {
+  eq(TP.fitPadding(848, 295, NaN).paddingBottomRight, [32, 327]);
+  eq(TP.fitPadding(848, 0, NaN).paddingBottomRight, [32, 32]);
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 (async () => {
