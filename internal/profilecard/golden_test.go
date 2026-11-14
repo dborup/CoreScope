@@ -2,6 +2,8 @@ package profilecard
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -141,6 +143,17 @@ func encodePNG(t testing.TB, img image.Image) []byte {
 	return b
 }
 
+// inputDigest fingerprints a fixture, so a failing golden says whether the
+// input or the drawing moved (JSON prints floats exactly, shortest form).
+func inputDigest(resp TerrainProfileResponse) string {
+	b, err := json.Marshal(resp)
+	if err != nil {
+		return err.Error()
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
+
 // samePixels decodes both PNGs and compares their RGBA bytes exactly.
 func samePixels(a, b []byte) bool {
 	ia, err1 := png.Decode(bytes.NewReader(a))
@@ -154,7 +167,9 @@ func samePixels(a, b []byte) bool {
 	return bytes.Equal(ra.Pix, rb.Pix)
 }
 
-// pixelDiff says where two PNGs differ, to make a byte mismatch readable.
+// pixelDiff says where two PNGs differ: a count, a bounding box, and a
+// map of the card in 40 px cells ('#' = some pixel in the cell differs),
+// so a CI log shows which layer moved without anyone fetching an image.
 func pixelDiff(a, b []byte) string {
 	ia, err1 := png.Decode(bytes.NewReader(a))
 	ib, err2 := png.Decode(bytes.NewReader(b))
@@ -164,18 +179,34 @@ func pixelDiff(a, b []byte) string {
 	if ia.Bounds() != ib.Bounds() {
 		return fmt.Sprintf("bounds %v vs %v", ia.Bounds(), ib.Bounds())
 	}
+	const cell = 40
+	r := ia.Bounds()
+	grid := make([][]byte, (r.Dy()+cell-1)/cell)
+	for i := range grid {
+		grid[i] = bytes.Repeat([]byte{'.'}, (r.Dx()+cell-1)/cell)
+	}
 	n := 0
 	box := image.Rectangle{}
-	r := ia.Bounds()
+	var first []string
 	for y := r.Min.Y; y < r.Max.Y; y++ {
 		for x := r.Min.X; x < r.Max.X; x++ {
-			if ia.At(x, y) != ib.At(x, y) {
+			ca, cb := ia.At(x, y), ib.At(x, y)
+			if ca != cb {
 				n++
 				box = box.Union(image.Rect(x, y, x+1, y+1))
+				grid[(y-r.Min.Y)/cell][(x-r.Min.X)/cell] = '#'
+				if len(first) < 5 {
+					first = append(first, fmt.Sprintf("(%d,%d) want %v got %v", x, y, ca, cb))
+				}
 			}
 		}
 	}
-	return fmt.Sprintf("%d pixels differ within %v", n, box)
+	var m strings.Builder
+	for _, row := range grid {
+		m.Write(row)
+		m.WriteByte('\n')
+	}
+	return fmt.Sprintf("%d pixels differ within %v; first %s\n%s", n, box, strings.Join(first, ", "), m.String())
 }
 
 func TestGolden(t *testing.T) {
@@ -243,7 +274,7 @@ func TestGolden(t *testing.T) {
 					t.Fatalf("%v (run with -update to create it)", err)
 				}
 				if !samePixels(want, got) {
-					t.Errorf("pixels differ from %s.png: %s", base, pixelDiff(want, got))
+					t.Errorf("pixels differ from %s.png (input digest %s): %s", base, inputDigest(c.resp), pixelDiff(want, got))
 				} else if exactBytes && !bytes.Equal(got, want) {
 					t.Errorf("PNG bytes differ from %s.png with identical pixels (same toolchain %s)", base, runtime.Version())
 				}
