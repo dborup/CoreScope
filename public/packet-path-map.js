@@ -480,11 +480,9 @@
     var center = primaryChain[Math.floor(primaryChain.length / 2)];
     var map = L.map('packetPathMapContainer', { zoomControl: true, attributionControl: false })
       .setView([center.lat, center.lon], 10);
-    if (typeof window._applyTilesToNodeMap === 'function') {
-      window._applyTilesToNodeMap(map);
-    } else {
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
-    }
+    // nodes.js always loads first. No uncredited OSM fallback (#764): without
+    // the helper the inset draws no tiles rather than tiles with no credit.
+    if (typeof window._applyTilesToNodeMap === 'function') window._applyTilesToNodeMap(map);
 
     var outline = cssVar('--surface-0');
     var accent = cssVar('--accent');
