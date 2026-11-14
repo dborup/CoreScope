@@ -36,17 +36,19 @@ const (
 // The orthophoto credit (#728), in the style of the DHM credit (#733): the
 // tiles are shown as served, so there is no DerivedNote.
 //
-// UNVERIFIED: the wording is the #728 plan's proposal, after kortoverblik.dk's
-// "(CC BY) GeoDanmark". It has not been checked against the product page or
-// the terms; that is required before #728 M2 merges.
+// Verified 2026-11-15 against the product page
+// https://dataforsyningen.dk/data/981 ("Forårsbilleder Ortofoto -
+// GeoDanmark"): its terms section names the data owner GeoDanmark and the
+// CC BY 4.0 licence, and the page lists the orto_foraar_webm_DAF WMTS used
+// here. The page gives no fixed citation string; the wording follows the
+// DHM credit's "Indeholder data fra <owner>, <dataset>, <licence>" form.
 const (
 	// OrthoOwner is the data owner the credit names.
 	OrthoOwner = "GeoDanmark"
 	// OrthoDatasetName is the dataset the credit names.
 	OrthoDatasetName = "Ortofoto forår"
-	// OrthoDatasetURL is Dataforsyningen's data overview, which the terms
-	// accept in place of the dataset page (see DatasetURL).
-	OrthoDatasetURL = "https://dataforsyningen.dk/data"
+	// OrthoDatasetURL is the dataset's own product page on Dataforsyningen.
+	OrthoDatasetURL = "https://dataforsyningen.dk/data/981"
 	// OrthoAttribution is the plain-text credit line of the orthophoto
 	// base layer. Its licence is LicenseName / LicenseURL.
 	OrthoAttribution = "Indeholder data fra " + OrthoOwner + ", " + OrthoDatasetName + ", " + LicenseName

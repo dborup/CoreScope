@@ -322,9 +322,12 @@ func TestOrthoCredit(t *testing.T) {
 			t.Errorf("%s must be non-empty plain text: %q", name, v)
 		}
 	}
-	// The terms accept the data overview in place of the dataset page.
-	if OrthoDatasetURL != "https://dataforsyningen.dk/data" {
-		t.Errorf("OrthoDatasetURL = %q, want Dataforsyningen's data overview", OrthoDatasetURL)
+	// The credit links the dataset's own product page (verified 2026-11-15).
+	if OrthoDatasetURL != "https://dataforsyningen.dk/data/981" {
+		t.Errorf("OrthoDatasetURL = %q, want the product page /data/981", OrthoDatasetURL)
+	}
+	if OrthoOwner != "GeoDanmark" || LicenseName != "CC BY 4.0" {
+		t.Errorf("owner/licence = %q/%q, want GeoDanmark/CC BY 4.0 (product page terms)", OrthoOwner, LicenseName)
 	}
 }
 
