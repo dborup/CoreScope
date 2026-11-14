@@ -512,6 +512,105 @@ test('the panel credit links "CC BY 4.0" to the licence in a new tab', () => {
   assert.strictEqual(line.children.map(c => c.textContent).join(''), T.ATTRIBUTION);
 });
 
+// ── 7. #711 polish ─────────────────────────────────────────────────────────
+
+console.log('\n=== #711: the half link, one URL builder, the entry href ===');
+
+/* A history stub that records every replaceState and moves location.hash
+ * the way a browser does, so writeHash is observed rather than trusted. */
+function loadWithHistory(loc) {
+  const urls = [];
+  const location = Object.assign({ origin: 'http://localhost:13700', pathname: '/', search: '', hash: '#/map' }, loc || {});
+  const history = {
+    state: null,
+    replaceState: (s, t, url) => {
+      urls.push(url);
+      const hi = url.indexOf('#');
+      location.hash = hi >= 0 ? url.slice(hi) : '';
+    },
+  };
+  const env = load({ location, history });
+  return Object.assign(env, { urls, location });
+}
+
+function hashQuery(location) { return location.hash.split('?')[1] || ''; }
+
+atest('N2: the half link keeps profile=<A> in the hash while B is picked', async () => {
+  const { TP: T, dom, location } = loadWithHistory();
+  const tool = openTool(T, dom, deferredFetch(), { syncHash: true });
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  assert.strictEqual(location.hash, '#/map?profile=' + PK_A);
+  // A reload reads it back as "A is this node, pick B", and never as a pair.
+  assert.deepStrictEqual(Object.assign({}, T.parseStart(hashQuery(location))), { kind: 'node', pubkey: PK_A });
+  assert.strictEqual(T.parseState(hashQuery(location)), null);
+});
+
+atest('N2: the half link keeps the other hash parameters', async () => {
+  const { TP: T, dom, location } = loadWithHistory({ hash: '#/map?node=x' });
+  openTool(T, dom, deferredFetch(), { syncHash: true }).setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  assert.strictEqual(location.hash, '#/map?node=x&profile=' + PK_A);
+});
+
+atest('N2: picking B turns the half link into the pair; closing drops it', async () => {
+  const { TP: T, dom, location } = loadWithHistory();
+  const tool = openTool(T, dom, deferredFetch(), { syncHash: true });
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_B });
+  assert.strictEqual(location.hash, '#/map?profile=' + PK_A + '%2C' + PK_B);
+  tool.close();
+  assert.strictEqual(location.hash, '#/map');
+});
+
+atest('N2: a point as A writes no half link (parseStart reads node keys only)', async () => {
+  const { TP: T, dom, location } = loadWithHistory();
+  openTool(T, dom, deferredFetch(), { syncHash: true }).setEndpoint('a', { kind: 'point', lat: 56.1, lon: 10.2 });
+  assert.strictEqual(location.hash, '#/map');
+});
+
+test('N3: the entry href is the hash itself, not an HTML-escaped copy', () => {
+  const node = { public_key: PK_A, lat: 56.1, lon: 10.2 };
+  assert.strictEqual(TP.nodeEntryAction(node, ON).attrs.href, TP.nodeEntryHash(node, ON));
+  // esc() is identity on today's hash, so only the source can show it: an
+  // escaped href would turn a future second parameter's & into &amp;.
+  assert.ok(!/esc\(/.test(TP.nodeEntryAction.toString()), 'nodeEntryAction still HTML-escapes the href');
+});
+
+test('N5: shareURL keeps the page query, like the address bar does', () => {
+  const st = TP.parseState('profile=' + PK_A + ',' + PK_B);
+  assert.strictEqual(TP.shareURL(st, { origin: 'http://h', pathname: '/app/', search: '?lang=da' }),
+    'http://h/app/?lang=da#/map?profile=' + PK_A + '%2C' + PK_B);
+});
+
+atest('N5: the copied link and the address bar are built by one builder', async () => {
+  const copied = [];
+  const { TP: T, dom, urls, location } = loadWithHistory({ pathname: '/app/', search: '?lang=da' });
+  location.hash = '#/map';
+  const tool = openTool(T, dom, deferredFetch(), { syncHash: true, copyText: (t, ok) => { copied.push(t); ok(); } });
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  tool.setEndpoint('b', { kind: 'point', lat: 56.1629, lon: 10.2039 });
+  dom.find('tp-copy-link').fire('click');
+  await sleep(0);
+  assert.strictEqual(copied.length, 1);
+  assert.strictEqual(copied[0], 'http://localhost:13700' + urls[urls.length - 1]);
+});
+
+console.log('\n=== #711: the copy status clears on re-render ===');
+
+atest('N6: "Link copied" clears when the profile is measured again', async () => {
+  const { TP: T, dom } = load({ copyToClipboard: (t, ok) => ok() });
+  const f = deferredFetch();
+  const tool = openTool(T, dom, f);
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_B });
+  await settleLast(f);
+  dom.find('tp-copy-link').fire('click');
+  await sleep(0);
+  assert.strictEqual(dom.find('tp-copy-status').textContent, 'Link copied');
+  // A new B is a new profile: the old "copied" no longer describes it.
+  tool.setEndpoint('b', { kind: 'point', lat: 56.1, lon: 10.2 });
+  assert.strictEqual(dom.find('tp-copy-status').textContent, '');
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 (async () => {

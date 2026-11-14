@@ -6355,8 +6355,12 @@ body.embed #app.app-fixed {
 .tp-copy-status:empty { display: none; }
 /* The licence link keeps the credit line's size, but gets a 48 px hit box
    from padding cancelled by negative margins, so the line height is not
-   disturbed. */
+   disturbed. position + z-index lift that padding band above the chart and
+   the detail line it overlaps; without them it is a 48 px box but only a
+   ~36-40 px target (#711). */
 .tp-credit-link {
+  position: relative;
+  z-index: 1;
   display: inline-block;
   min-width: 48px;
   padding: 18px 4px;
@@ -6400,7 +6404,13 @@ body.embed #app.app-fixed {
   text-decoration: none;
   vertical-align: middle;
 }
-.node-full-actions .node-terrain-action { margin-left: 0; }
+/* The side pane gives it a row of its own under the 20 px Details /
+   Analytics / Reach buttons, rather than letting it wrap there and double
+   the height of that row (#711). */
+.node-detail-actions { margin: -4px 0 12px; }
+.node-detail-actions:empty { display: none; }
+.node-full-actions .node-terrain-action,
+.node-detail-actions .node-terrain-action { margin-left: 0; }
 .node-terrain-icon { display: inline-flex; }
 
 .tp-controls {

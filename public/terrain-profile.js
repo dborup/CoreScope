@@ -274,12 +274,45 @@
     return ENDPOINT + '?' + p.toString();
   }
 
+  /* hashParams is what the address bar carries for a state: the full pair
+   * once both ends are set, and while B is still being picked the half link
+   * profile=<A> that parseStart reads back, so a reload keeps A. A point as
+   * A has no half link: parseStart only takes a node key. */
+  function hashParams(state, defaults) {
+    if (state && state.a && state.b) return serializeState(state, defaults);
+    var out = {};
+    if (state && state.a && !state.b && state.a.kind === 'node') out[HASH_PARAM] = refToParam(state.a);
+    return out;
+  }
+
+  var PROFILE_KEYS = [HASH_PARAM, 'model', 'ha', 'hb', 'k', 'freq'];
+
+  /* withProfileParams is the one place a profile link is written into a
+   * hash: the tool's own keys are replaced, every other key is kept. */
+  function withProfileParams(hash, ser) {
+    hash = String(hash || '');
+    var qi = hash.indexOf('?');
+    var base = qi >= 0 ? hash.slice(0, qi) : hash;
+    var params = new URLSearchParams(qi >= 0 ? hash.slice(qi + 1) : '');
+    PROFILE_KEYS.forEach(function (key) { params.delete(key); });
+    Object.keys(ser || {}).forEach(function (key) { params.set(key, ser[key]); });
+    var qs = params.toString();
+    return qs ? (base || '#') + '?' + qs : base;
+  }
+
+  /* profileURL is the one URL builder: the address bar (writeHash) and the
+   * copy button (shareURL) both keep the page's path and query. */
+  function profileURL(loc, hash, ser, absolute) {
+    return (absolute ? String(loc.origin || '') : '') + String(loc.pathname || '/') + String(loc.search || '')
+      + withProfileParams(hash, ser);
+  }
+
   /* shareURL is the link the panel's copy button hands out: built from the
    * state, not read off the address bar, so it is the same whether or not
    * the host lets the panel write the hash. */
   function shareURL(state, loc, defaults) {
     if (!state || !state.a || !state.b || !loc) return null;
-    return String(loc.origin || '') + String(loc.pathname || '/') + '#/map?' + new URLSearchParams(serializeState(state, defaults)).toString();
+    return profileURL(loc, '#/map', serializeState(state, defaults), true);
   }
 
   // ── Node-detail entry point ──────────────────────────────────────────────
@@ -309,20 +342,19 @@
     if (!offered(cfg) || !hasFix(node)) return null;
     var pk = String(node.public_key || '').toLowerCase();
     if (!PUBKEY_RE.test(pk)) return null;
-    var p = new URLSearchParams();
-    p.set(HASH_PARAM, refToParam({ kind: 'node', pubkey: pk }));
-    return '#/map?' + p.toString();
+    return withProfileParams('#/map', hashParams({ a: { kind: 'node', pubkey: pk }, b: null }));
   }
 
   /* nodeEntryAction is the node-detail button, built as DOM so no node
    * field ever passes through an HTML string. */
   function nodeEntryAction(node, cfg) {
-    var hash = nodeEntryHash(node, cfg);
-    if (!hash) return null;
+    var entryHref = nodeEntryHash(node, cfg);
+    if (!entryHref) return null;
     var a = el('a', 'btn-primary node-terrain-action');
-    // hash is '#/map?profile=' + 64 hex, so esc() changes nothing; it keeps
-    // the href sink provably clean for the XSS preflight.
-    a.setAttribute('href', esc(hash));
+    // Not HTML-escaped: an attribute set through the DOM is not HTML,
+    // and escaping would turn a second parameter's & into &amp;. It is
+    // safe as built: '#/map?profile=' plus a PUBKEY_RE-checked key.
+    a.setAttribute('href', entryHref);
     a.setAttribute('data-testid', 'node-terrain-profile');
     a.setAttribute('title', 'Path profile from this node: terrain, line of sight and Fresnel zone. Pick the other end on the map.');
     // Static markup, no interpolation: the Phosphor sprite icon.
@@ -1065,17 +1097,8 @@
     function writeHash() {
       if (!syncHash) return;
       try {
-        var hash = (global.location && global.location.hash) || '';
-        var qi = hash.indexOf('?');
-        var base = qi >= 0 ? hash.slice(0, qi) : hash;
-        var params = new URLSearchParams(qi >= 0 ? hash.slice(qi + 1) : '');
-        ['profile', 'model', 'ha', 'hb', 'k', 'freq'].forEach(function (key) { params.delete(key); });
-        if (open && state.a && state.b) {
-          var ser = serializeState(state, themeDefaults());
-          Object.keys(ser).forEach(function (key) { params.set(key, ser[key]); });
-        }
-        var qs = params.toString();
-        var next = global.location.pathname + global.location.search + (qs ? (base || '#') + '?' + qs : base);
+        var loc = global.location;
+        var next = profileURL(loc, loc.hash, open ? hashParams(state, themeDefaults()) : {}, false);
         global.history.replaceState(global.history.state, '', next);
       } catch (_) { /* a hash we cannot write is not worth breaking the tool for */ }
     }
