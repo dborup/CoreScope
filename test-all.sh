@@ -48,6 +48,7 @@ run test-privacy-page.js
 run test-issue-336-external-asset-pinning.js
 run test-issue-628-vendor-gitattributes.js
 run test-issue-442-instrumented-vendor-copy.js
+run test-issue-715-og-denmark.js
 run test-nav-dynamic-link-lifecycle.js
 run test-nav-first-load-fit.js
 run test-nav-priority-scheduler.js
