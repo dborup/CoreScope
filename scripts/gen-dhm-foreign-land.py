@@ -78,13 +78,19 @@ FOREIGN = ("SWE", "DEU", "POL", "NOR")
 
 # Swedish islands missing from both Natural Earth layers (#693 review round
 # 2, F3), as hand-made ellipses: centre (lat, lon), length and width in
-# metres, and the bearing of the long axis. Not survey data: the centres
-# are the review's, the sizes the commonly published ones (Peberholm,
-# the artificial island of the Øresund link: about 4 km x 0.5 km, its
-# long axis along the link toward Lernacken; Hallands Väderö: about
-# 3 km2). BUFFER_M on top makes the outline uncritical.
+# metres, and the bearing of the long axis. Not survey data: the centre is
+# the review's, the size the commonly published one (Hallands Väderö:
+# about 3 km2). BUFFER_M on top makes the outline uncritical.
+# Peberholm, the artificial island of the Øresund link, which F3 also
+# listed here, must not be (#763): it is Danish, in Tårnby Kommune. It is
+# part of the "Danmark" country unit and of Region Hovedstaden in the
+# INSPIRE administrative units of Klimadatastyrelsen (Dataforsyningen,
+# au_inspire), and en.wikipedia "Peberholm" says it "belongs to Denmark".
+# As Swedish land, grown by BUFFER_M, it marked Peberholm, the southern
+# tip of Saltholm and the sea off Dragør as foreign. Nor does it need a
+# DANISH_ISLANDS entry: the foreign-land polygon is 8.4 km or more from
+# any point of its bbox (12.726-12.777 E, 55.588-55.611 N).
 EXTRA_ISLANDS = (
-    ("Peberholm", 55.598, 12.745, 4000.0, 500.0, 110.0),
     ("Hallands Väderö", 56.447, 12.560, 2000.0, 2000.0, 0.0),
 )
 
