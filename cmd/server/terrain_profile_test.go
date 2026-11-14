@@ -1228,8 +1228,8 @@ func TestTerrainProfile_SettingsDefaultsAndClamps(t *testing.T) {
 	if s.rateLimitPerMin != 10 {
 		t.Fatalf("negative rateLimitPerMin → %d", s.rateLimitPerMin)
 	}
-	// maxInFlight is 1-64: 0 would refuse every uncached profile.
-	for v, want := range map[int]int{0: 4, 65: 4, 1: 1, 64: 64} {
+	// maxInFlight is 1-16: 0 would refuse every uncached profile (#707).
+	for v, want := range map[int]int{0: 4, 17: 4, 65: 4, 1: 1, 16: 16} {
 		if got := resolveTerrainSettings(dhm.ProfileConfig{MaxInFlight: intp(v)}, logs.logf).maxInFlight; got != want {
 			t.Fatalf("maxInFlight %d → %d, want %d", v, got, want)
 		}
@@ -1343,5 +1343,114 @@ func TestTerrainProfile_OpenAPI(t *testing.T) {
 		if !codes[c] {
 			t.Fatalf("error %s undocumented", c)
 		}
+	}
+}
+
+// ── #707: admission bound nits ─────────────────────────────────────────────
+
+// fillAdmission occupies every admission slot, so the next uncached
+// profile is refused with 503 without any upstream call or goroutine.
+func fillAdmission(env *terrainEnv) {
+	for i := 0; i < cap(env.p.admit); i++ {
+		env.p.admit <- struct{}{}
+	}
+}
+
+func busyQuery(i int) string {
+	return pathQuery(aarhusPt, offsetPt(56.1629, 10.2039, 5000+float64(i), 0))
+}
+
+// #707 nit 1: the clamp's upper end is 4x the upstream budget (4), not 64.
+// At 64 a blocked source held ~1280 goroutines above baseline. The value
+// itself is pinned, so raising it is a deliberate, reviewed change.
+func TestTerrainProfile_MaxInFlightClampIsPinned(t *testing.T) {
+	if terrainMaxInFlightCap != 16 {
+		t.Fatalf("terrainMaxInFlightCap = %d, want 16 (4x the upstream budget of 4)", terrainMaxInFlightCap)
+	}
+	logs := &dhmLogSink{}
+	for v, want := range map[int]int{16: 16, 17: 4, 64: 4} {
+		if got := resolveTerrainSettings(dhm.ProfileConfig{MaxInFlight: intp(v)}, logs.logf).maxInFlight; got != want {
+			t.Fatalf("maxInFlight %d → %d, want %d", v, got, want)
+		}
+	}
+}
+
+// #707 nit 2: a 503 refusal does no upstream work, so it must not spend the
+// client's per-IP budget. An obedient client retrying every Retry-After
+// during a long refusal window must still get its fetch once a slot frees,
+// not a 429. Default budget is 10/min; 40 refusals would exhaust it.
+func TestTerrainProfile_AdmissionRefusalDoesNotChargePerIP(t *testing.T) {
+	src := newFakeElevation(t, flatElev(0))
+	env := newTerrainEnv(t, src, dhm.ProfileConfig{}, nil)
+	fillAdmission(env)
+	client := func(r *http.Request) { r.RemoteAddr = "198.51.100.7:1000" }
+	for i := 0; i < 40; i++ {
+		w := env.get(busyQuery(0), client)
+		wantError(t, w, http.StatusServiceUnavailable, "terrain profiles busy")
+		if w.Header().Get("Retry-After") != "5" {
+			t.Fatalf("Retry-After %q", w.Header().Get("Retry-After"))
+		}
+	}
+	for len(env.p.admit) > 0 {
+		<-env.p.admit
+	}
+	// The budget is intact: the full 10 admitted fetches still succeed.
+	for i := 0; i < 10; i++ {
+		decodeProfile(t, env.get(busyQuery(i), client))
+	}
+	// ...and the budget still limits admitted fetches.
+	wantError(t, env.get(busyQuery(99), client), http.StatusTooManyRequests, "rate limit exceeded")
+}
+
+// #707 nit 3: refusals are counted and logged throttled (first at once,
+// then at most one line per interval carrying the count), so an operator
+// sees the bound biting. The line names the setting, never the token.
+func TestTerrainProfile_AdmissionRefusalsAreObservable(t *testing.T) {
+	src := newFakeElevation(t, flatElev(0))
+	env := newTerrainEnv(t, src, dhm.ProfileConfig{RateLimitPerMin: intp(0)}, nil)
+	clock := time.Unix(1_700_000_000, 0)
+	env.p.now = func() time.Time { return clock }
+	fillAdmission(env)
+	for i := 0; i < 30; i++ {
+		wantError(t, env.get(busyQuery(i)), http.StatusServiceUnavailable, "terrain profiles busy")
+	}
+	if got := env.p.refused.Load(); got != 30 {
+		t.Fatalf("refused counter %d, want 30", got)
+	}
+	lines := func() []string {
+		var out []string
+		for _, l := range strings.Split(env.logs.String(), "\n") {
+			if strings.Contains(l, "admission") {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+	if got := lines(); len(got) != 1 {
+		t.Fatalf("%d admission log lines for 30 refusals in one interval, want 1: %q", len(got), got)
+	}
+	clock = clock.Add(terrainRefusalLogEvery + time.Second)
+	wantError(t, env.get(busyQuery(31)), http.StatusServiceUnavailable, "terrain profiles busy")
+	got := lines()
+	// 29 refused since the first line, plus this one.
+	if len(got) != 2 || !strings.Contains(got[1], "30 request") {
+		t.Fatalf("second report %q", got)
+	}
+	if !strings.Contains(got[0], "maxInFlight") || strings.Contains(strings.ToLower(env.logs.String()), "token") {
+		t.Fatalf("log line must name maxInFlight and never the token: %q", env.logs.String())
+	}
+}
+
+// #707 nit 4: the leader is refused, so its joiners are refused with it.
+func TestTerrainProfile_OpenAPI503DoesNotOverstateSharing(t *testing.T) {
+	_, router := setupTestServer(t)
+	spec := buildOpenAPISpec(router, "test")
+	raw, _ := json.Marshal(spec)
+	text := string(raw)
+	if strings.Contains(text, "share it and are not refused") {
+		t.Fatal("503 text still claims joiners are never refused")
+	}
+	if !strings.Contains(text, "refused with it") {
+		t.Fatal("503 text must say joiners of a refused fetch are refused with it")
 	}
 }
