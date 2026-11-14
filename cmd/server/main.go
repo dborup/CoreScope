@@ -709,7 +709,10 @@ func newHTTPRouter(srv *Server, hub *Hub, publicDir string) *mux.Router {
 	absPublic, _ := filepath.Abs(publicDir)
 	if _, err := os.Stat(absPublic); err == nil {
 		fs := http.FileServer(http.Dir(absPublic))
-		router.PathPrefix("/").Handler(wsOrStatic(hub, spaHandler(absPublic, fs, ogMetaFromConfig(srv.cfg, absPublic, "."))))
+		doc := newIndexDoc(absPublic, ogMetaFromConfig(srv.cfg, absPublic, "."))
+		// /p must be matched before the SPA catch-all (#727).
+		srv.registerShareRoutes(router, doc)
+		router.PathPrefix("/").Handler(wsOrStatic(hub, spaHandlerDoc(absPublic, fs, doc)))
 		log.Printf("[static] serving %s", absPublic)
 	} else {
 		log.Printf("[static] directory %s not found — API-only mode", absPublic)
@@ -734,21 +737,50 @@ var vendorVersionedAssetRe = regexp.MustCompile(`^/vendor/[^/]+/\d+\.\d+\.\d+(?:
 // Open Graph / Twitter / <title> placeholders are filled from og (#646); omit
 // it for the defaults.
 func spaHandler(root string, fs http.Handler, ogOpt ...*ogMeta) http.Handler {
-	og := newOGMeta(nil, root, nil)
-	if len(ogOpt) > 0 && ogOpt[0] != nil {
+	var og *ogMeta
+	if len(ogOpt) > 0 {
 		og = ogOpt[0]
 	}
-	// Pre-process index.html: replace __BUST__ with a cache-bust timestamp
-	indexPath := filepath.Join(root, "index.html")
-	rawHTML, err := os.ReadFile(indexPath)
+	return spaHandlerDoc(root, fs, newIndexDoc(root, og))
+}
+
+// indexDoc is index.html, read once at startup with __BUST__ replaced by a
+// cache-bust timestamp: the site document with every Open Graph
+// placeholder filled (prepared), and the same document with the
+// placeholders still in place (profile), which the /p share route fills
+// per request (#727).
+type indexDoc struct {
+	og       *ogMeta
+	prepared []byte
+	profile  string
+}
+
+// newIndexDoc reads root/index.html; og nil means the default branding.
+func newIndexDoc(root string, og *ogMeta) *indexDoc {
+	if og == nil {
+		og = newOGMeta(nil, root, nil)
+	}
+	rawHTML, err := os.ReadFile(filepath.Join(root, "index.html"))
 	if err != nil {
 		log.Printf("[static] warning: could not read index.html for cache-bust: %v", err)
 		rawHTML = []byte("<!DOCTYPE html><html><body><h1>CoreScope</h1><p>index.html not found</p></body></html>")
 	}
 	bustValue := fmt.Sprintf("%d", time.Now().Unix())
-	indexHTML := []byte(og.prepare(strings.ReplaceAll(string(rawHTML), "__BUST__", bustValue)))
+	busted := strings.ReplaceAll(string(rawHTML), "__BUST__", bustValue)
 	log.Printf("[static] cache-bust value: %s", bustValue)
+	return &indexDoc{og: og, prepared: []byte(og.prepare(busted)), profile: busted}
+}
 
+// serveSite writes the site document with the given status.
+func (d *indexDoc) serveSite(w http.ResponseWriter, r *http.Request, status int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.WriteHeader(status)
+	w.Write(d.og.render(d.prepared, r))
+}
+
+// spaHandlerDoc is spaHandler over an already-read index.html.
+func spaHandlerDoc(root string, fs http.Handler, doc *indexDoc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Defense-in-depth: explicitly reject path-traversal attempts before
 		// we touch the filesystem. gorilla/mux + http.FileServer already clean
@@ -762,18 +794,14 @@ func spaHandler(root string, fs http.Handler, ogOpt ...*ogMeta) http.Handler {
 		}
 		// Serve pre-processed index.html for root and /index.html
 		if r.URL.Path == "/" || r.URL.Path == "/index.html" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.Write(og.render(indexHTML, r))
+			doc.serveSite(w, r, http.StatusOK)
 			return
 		}
 
 		path := filepath.Join(root, r.URL.Path)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			// SPA fallback — serve pre-processed index.html
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-			w.Write(og.render(indexHTML, r))
+			doc.serveSite(w, r, http.StatusOK)
 			return
 		}
 		// A vendored browser dependency (public/vendor/<name>/<exact

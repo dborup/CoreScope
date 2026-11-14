@@ -345,12 +345,31 @@
       + withProfileParams(hash, ser);
   }
 
+  /* SHARE_PATH is the server's share route (#727, cmd/server/share_profile.go):
+   * one path segment next to index.html, so its relative assets resolve. */
+  var SHARE_PATH = 'p';
+
   /* shareURL is the link the panel's copy button hands out: built from the
    * state, not read off the address bar, so it is the same whether or not
-   * the host lets the panel write the hash. */
-  function shareURL(state, loc, defaults) {
+   * the host lets the panel write the hash. With `route` (the server serves
+   * /p, see shareOffered) it is a /p link that previews the profile in a
+   * chat; otherwise the plain #/map link, exactly as before #727. Both carry
+   * the same serializeState decisions, so a customizer default never rides
+   * either one. */
+  function shareURL(state, loc, defaults, route) {
     if (!state || !state.a || !state.b || !loc) return null;
-    return profileURL(loc, '#/map', serializeState(state, defaults), true);
+    var ser = serializeState(state, defaults);
+    if (route !== true) return profileURL(loc, '#/map', ser, true);
+    var p = new URLSearchParams();
+    Object.keys(ser).forEach(function (key) { p.set(key, ser[key]); });
+    var path = String(loc.pathname || '/');
+    return String(loc.origin || '') + path.slice(0, path.lastIndexOf('/') + 1) + SHARE_PATH + '?' + p.toString();
+  }
+
+  /* shareOffered: the server advertises the /p route as dhm.share only when
+   * the profile is served and map.dhm.profile.share.enabled is set. */
+  function shareOffered(cfg) {
+    return offered(cfg) && cfg.share === true;
   }
 
   // ── Node-detail entry point ──────────────────────────────────────────────
@@ -1314,7 +1333,7 @@
     }
 
     function onCopy() {
-      var url = shareURL(state, global.location, themeDefaults());
+      var url = shareURL(state, global.location, themeDefaults(), opts.shareRoute === true);
       if (!url) return;
       copyLink(url, opts.copyText || global.copyToClipboard).then(function (ok) {
         if (!ui.copyStatus) return;
@@ -1599,6 +1618,8 @@
     markerRef: markerRef,
     snapEndpoint: snapEndpoint,
     shareURL: shareURL,
+    shareOffered: shareOffered,
+    parseProfilePair: parseProfilePair,
     offered: offered,
     nodeEntryHash: nodeEntryHash,
     nodeEntryAction: nodeEntryAction,

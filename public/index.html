@@ -10,7 +10,7 @@
   <!-- Open Graph / Discord embed. OG placeholders are filled by the Go server
        (cmd/server/og_meta.go, #646) from branding config; crawlers do not run JS. -->
   <meta property="og:title" content="__OG_TITLE__">
-  <meta property="og:site_name" content="__OG_TITLE__">
+  <meta property="og:site_name" content="__OG_SITE_NAME__">
   <meta property="og:description" content="__OG_DESCRIPTION__">
   <meta property="og:image" content="__OG_IMAGE__">
   __OG_IMAGE_DIMS__
@@ -21,7 +21,11 @@
        itself decide what a click navigates to. Omitting it lets each
        instance's own crawled URL serve as the canonical reference instead;
        this does not refresh previews a consumer already cached under the
-       old, incorrect value. -->
+       old, incorrect value. The one exception is a /p share link (#727),
+       whose og:url and robots noindex the server writes into the page-meta
+       placeholder below from the request's own origin; on every other page
+       that placeholder is empty. -->
+  __OG_PAGE_META__
   <meta property="og:type" content="website">
   <meta name="theme-color" content="#0a0a0a">
 
@@ -30,6 +34,29 @@
   <meta name="twitter:title" content="__OG_TITLE__">
   <meta name="twitter:description" content="__OG_DESCRIPTION__">
   <meta name="twitter:image" content="__OG_IMAGE__">
+  <!-- #727: /p?profile=… is a terrain-profile share link. Its only job is
+       to carry per-profile preview tags for link crawlers, which never run
+       this. A browser moves on to the #/map deep link before anything else
+       loads, keeping only the profile's own keys (an allow-list, so no
+       other parameter reaches the hash), with replaceState: no reload, no
+       history entry for /p, and the app boots once. The relative asset
+       URLs below resolve the same at /p as at /. Tracking keys (fbclid,
+       utm_*, ...) are not on the allow-list, so they never reach the hash.
+       A path starting with // is left alone: built into the target it
+       would read as another host (defence in depth; the server already
+       cleans such paths with a 301). -->
+  <script data-share-handoff>
+    (function () {
+      var path = location.pathname;
+      if (path.indexOf('//') === 0 || !/\/p$/.test(path)) return;
+      var keep = ['profile', 'model', 'ha', 'hb', 'k', 'freq'];
+      var src = new URLSearchParams(location.search), out = new URLSearchParams();
+      keep.forEach(function (k) { if (src.has(k)) out.set(k, src.get(k)); });
+      var qs = out.toString();
+      var next = path.slice(0, -1) + '#/map' + (qs ? '?' + qs : '');
+      try { history.replaceState(null, '', next); } catch (_) { location.replace(next); }
+    })();
+  </script>
   <!-- PR #893 follow-up: apply persisted theme before stylesheet/paint to prevent
        FOUC (light flash for users who chose dark). Matches keys used by app.js. -->
   <script>

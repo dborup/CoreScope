@@ -142,6 +142,7 @@ run test-issue-681-profile-tool.js
 run test-issue-681-m5-node-entry.js
 run test-issue-681-m6-customizer-terrain.js
 run test-issue-721-move-endpoints.js
+run test-issue-727-share-link.js
 run test-issue-390-legacy-tile-followups.js
 run test-issue-728-esri-imagery.js
 run test-issue-1438-marker-css-vars.js

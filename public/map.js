@@ -2796,6 +2796,8 @@
     profileTool = window.TerrainProfile.create({
       mount: wrap,
       resolveNode: profileResolveNode,
+      // #727: the copy button hands out a /p link when the server serves it.
+      shareRoute: window.TerrainProfile.shareOffered(window.MC_DHM_CFG),
       onMoveStart: function (side) { profileArmFor(side, true); },
       onMoveCancel: profileDisarm,
       onEndpointsChange: profileDrawLine,

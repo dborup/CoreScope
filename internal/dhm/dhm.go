@@ -69,6 +69,17 @@ type ProfileConfig struct {
 	UpstreamTimeoutMs *int     `json:"upstreamTimeoutMs"`
 	RateLimitPerMin   *int     `json:"rateLimitPerMin"`
 	MaxInFlight       *int     `json:"maxInFlight"`
+	// Share is the /p share route with per-profile link previews (#727).
+	Share ShareConfig `json:"share"`
+}
+
+// ShareConfig is config.json `map.dhm.profile.share` (#727). Off unless
+// Enabled; a nil UpstreamPerMin takes the server default.
+type ShareConfig struct {
+	Enabled bool `json:"enabled"`
+	// UpstreamPerMin is the plan's shareUpstreamPerMin: the server-wide
+	// budget of upstream profile fetches that sharing may cause.
+	UpstreamPerMin *int `json:"upstreamPerMin"`
 }
 
 // Active reports whether DHM features may be offered: enabled with a token.

@@ -129,7 +129,22 @@ type terrainSettings struct {
 	upstreamTimeout time.Duration
 	rateLimitPerMin int
 	maxInFlight     int
+	// share is map.dhm.profile.share (#727), see share_profile.go.
+	share shareSettings
 }
+
+// shareSettings are map.dhm.profile.share, resolved and bounded.
+type shareSettings struct {
+	enabled bool
+	// upstreamPerMin is the server-wide budget of upstream profile
+	// fetches that sharing may cause. In #727 M1 the /p route makes no
+	// upstream call at all, which is within any value of it; the budget
+	// is enforced once a share request may fetch (#727 M3).
+	upstreamPerMin int
+}
+
+// shareUpstreamPerMinMax bounds share.upstreamPerMin: one fetch a second.
+const shareUpstreamPerMinMax = 60
 
 // resolveTerrainSettings applies the defaults and bounds. An out-of-range
 // value logs a warning and takes the default.
@@ -171,6 +186,12 @@ func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface
 		// profile has up to 32 rasters, so it can fill all 4 slots on its
 		// own, and more profiles in flight would only queue goroutines.
 		maxInFlight: integer("maxInFlight", pc.MaxInFlight, 4, 1, terrainMaxInFlightCap),
+		// Off unless the operator opts in (#727 owner decision 7); 0 is a
+		// legitimate budget: sharing never goes upstream.
+		share: shareSettings{
+			enabled:        pc.Share.Enabled,
+			upstreamPerMin: integer("share.upstreamPerMin", pc.Share.UpstreamPerMin, 2, 0, shareUpstreamPerMinMax),
+		},
 	}
 }
 
@@ -519,6 +540,57 @@ type terrainEnd struct {
 	kind   string
 	role   string
 	pubkey string
+	// name is the node's display name, for the share preview (#727). It
+	// is only ever set for a node that passed the visibility gate in
+	// resolveTerrainEnd; the JSON response never carries it.
+	name string
+}
+
+// terrainRequest is a validated, resolved profile request: everything a
+// handler needs before any elevation work. One path builds it
+// (resolveTerrainRequest), whichever route the query came in on.
+type terrainRequest struct {
+	q      terrainQuery
+	ends   [2]terrainEnd
+	ka, kb [2]int64   // the snapped endpoints of the cache key
+	a, b   dhm.LatLon // the same, as coordinates
+	plan   dhm.Plan
+}
+
+// terrainRequestError is a refusal: its status and a fixed message that
+// echoes nothing from the request.
+type terrainRequestError struct {
+	status int
+	msg    string
+}
+
+// resolveTerrainRequest is the shared prelude after parsing: resolve both
+// ends (hidden, unknown and unpositioned nodes are 404), snap them to the
+// cache key's 5 decimals, gate the distance and plan the samples. It makes
+// no upstream call and charges nothing. ctx bounds the identity-visibility
+// lookup in resolveTerrainEnd (#743).
+func (s *Server) resolveTerrainRequest(ctx context.Context, p *terrainProfiler, tq terrainQuery) (terrainRequest, *terrainRequestError) {
+	req := terrainRequest{q: tq}
+	for i, ref := range [2]terrainRef{tq.a, tq.b} {
+		e, ok := s.resolveTerrainEnd(ctx, ref)
+		if !ok {
+			return req, &terrainRequestError{http.StatusNotFound, "node not found"}
+		}
+		req.ends[i] = e
+	}
+	req.ka = [2]int64{terrainSnapCoord(req.ends[0].pt.Lat), terrainSnapCoord(req.ends[0].pt.Lon)}
+	req.kb = [2]int64{terrainSnapCoord(req.ends[1].pt.Lat), terrainSnapCoord(req.ends[1].pt.Lon)}
+	req.a = dhm.LatLon{Lat: float64(req.ka[0]) / terrainSnap, Lon: float64(req.ka[1]) / terrainSnap}
+	req.b = dhm.LatLon{Lat: float64(req.kb[0]) / terrainSnap, Lon: float64(req.kb[1]) / terrainSnap}
+	d := dhm.GroundDistance(req.a, req.b)
+	if !(d >= 1) {
+		return req, &terrainRequestError{http.StatusBadRequest, dhm.ErrBadRequest.Error()}
+	}
+	if d > p.set.maxPathM {
+		return req, &terrainRequestError{http.StatusBadRequest, "path too long"}
+	}
+	req.plan = dhm.PlanProfile(req.a, req.b, p.set.plan)
+	return req, nil
 }
 
 func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
@@ -532,29 +604,12 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, dhm.ErrBadRequest.Error())
 		return
 	}
-	var ends [2]terrainEnd
-	for i, ref := range [2]terrainRef{tq.a, tq.b} {
-		e, ok := s.resolveTerrainEnd(r.Context(), ref)
-		if !ok {
-			writeError(w, http.StatusNotFound, "node not found")
-			return
-		}
-		ends[i] = e
-	}
-	ka := [2]int64{terrainSnapCoord(ends[0].pt.Lat), terrainSnapCoord(ends[0].pt.Lon)}
-	kb := [2]int64{terrainSnapCoord(ends[1].pt.Lat), terrainSnapCoord(ends[1].pt.Lon)}
-	a := dhm.LatLon{Lat: float64(ka[0]) / terrainSnap, Lon: float64(ka[1]) / terrainSnap}
-	b := dhm.LatLon{Lat: float64(kb[0]) / terrainSnap, Lon: float64(kb[1]) / terrainSnap}
-	d := dhm.GroundDistance(a, b)
-	if !(d >= 1) {
-		writeError(w, http.StatusBadRequest, dhm.ErrBadRequest.Error())
+	req, rerr := s.resolveTerrainRequest(r.Context(), p, tq)
+	if rerr != nil {
+		writeError(w, rerr.status, rerr.msg)
 		return
 	}
-	if d > p.set.maxPathM {
-		writeError(w, http.StatusBadRequest, "path too long")
-		return
-	}
-	plan := dhm.PlanProfile(a, b, p.set.plan)
+	plan := req.plan
 	n := len(plan.E)
 
 	var elev terrainElevation
@@ -566,7 +621,7 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 			elev.dsm = nanSlice(n)
 		}
 	} else {
-		key := terrainKey{A: ka, B: kb, Both: tq.both, Samples: n, StepCm: int64(math.Round(plan.StepM * 100))}
+		key := terrainKey{A: req.ka, B: req.kb, Both: tq.both, Samples: n, StepCm: int64(math.Round(plan.StepM * 100))}
 		data, hit := p.cache.Get(key, p.now())
 		state = "hit"
 		if !hit {
@@ -603,7 +658,7 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("X-CoreScope-Cache", state)
-	writeJSON(w, p.buildResponse(tq, ends, a, b, &plan, elev))
+	writeJSON(w, p.buildResponse(tq, req.ends, req.a, req.b, &plan, elev))
 }
 
 // writeFetchError maps a failed fetch: a client that left gets nothing,
@@ -682,7 +737,7 @@ func (s *Server) resolveTerrainEnd(ctx context.Context, ref terrainRef) (terrain
 		if !n.HasGPS || !isValidNodePosition(n.Lat, n.Lon) || identityHidden(s.cfg, ref.pubkey, n.Name) {
 			return terrainEnd{}, false
 		}
-		return terrainEnd{pt: dhm.LatLon{Lat: n.Lat, Lon: n.Lon}, kind: "node", role: n.Role, pubkey: ref.pubkey}, true
+		return terrainEnd{pt: dhm.LatLon{Lat: n.Lat, Lon: n.Lon}, kind: "node", role: n.Role, pubkey: ref.pubkey, name: n.Name}, true
 	}
 	return terrainEnd{}, false
 }
