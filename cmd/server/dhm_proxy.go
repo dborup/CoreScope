@@ -242,7 +242,7 @@ func newDHMProxy(cfg dhm.Config, opts dhmProxyOptions) *dhmProxy {
 		client: client,
 		layer:  layer,
 		cache:  dhm.NewCache[dhmCacheKey](opts.cacheMaxEntries, opts.cacheMaxBytes, opts.cacheTTL),
-		limiter: newIPRateLimiter("map.dhm.tileRateLimitPerMin", opts.rateLimitPerMin,
+		limiter: newIPRateLimiter("dhm", "map.dhm.tileRateLimitPerMin", opts.rateLimitPerMin,
 			opts.trustedProxies, opts.client.Logf),
 		admit: dhm.NewAdmission(opts.tileMaxInFlight),
 		now:   opts.client.Now,

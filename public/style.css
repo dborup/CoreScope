@@ -188,6 +188,10 @@
   --fresnel-100: #6d28d9;                        /* first Fresnel zone */
   --fresnel-60: #a78bfa;                         /* the 60 % criterion */
   --profile-blocked: #b91c1c;                    /* terrain in the way */
+  /* #724 M3 — Mastedatabasen antenna sites on the map (canvas markers read
+     these). Dark values live in BOTH dark blocks below. */
+  --mast-site: #0e7490;                          /* every antenna site */
+  --mast-interference: #c2410c;                  /* 700/800/900 MHz ring */
   /* Node-quality link strength colours (bottleneck tiers). Dark-theme
      overrides live in the [data-theme="dark"] block below (brighter hues). */
   --link-strong: #1a7f37;
@@ -432,6 +436,9 @@
     --fresnel-100: #c4b5fd;
     --fresnel-60: #8b5cf6;
     --profile-blocked: #f87171;
+    /* #724 M3 — antenna sites on dark tiles. */
+    --mast-site: #22d3ee;
+    --mast-interference: #fb923c;
     --status-green: #22c55e;
     /* #1719 — on dark card-bg (#232340) #22c55e gives 6.65:1, AA pass.
        Keep the bright hue for text rather than darkening it. */
@@ -502,6 +509,9 @@
   --fresnel-100: #c4b5fd;
   --fresnel-60: #8b5cf6;
   --profile-blocked: #f87171;
+  /* #724 M3 — antenna sites on dark tiles (mirror of the @media block). */
+  --mast-site: #22d3ee;
+  --mast-interference: #fb923c;
   /* Brighter link-strength hues for contrast on dark map tiles + surfaces. */
   --link-strong: #3fb950;
   --link-medium: #d29922;
@@ -2895,6 +2905,24 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   mix-blend-mode: var(--terrain-overlay-blend);
   filter: var(--terrain-overlay-filter);
 }
+
+/* #724 M3 — antenna sites: the status line under the overlay toggles and
+   the site popup. */
+.mc-masts-status {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 0 0 4px 20px;
+  max-width: 220px;
+}
+.mc-masts-popup .mc-masts-popup-title { font-weight: 600; margin-bottom: 2px; }
+.mc-masts-popup .mc-masts-popup-addr,
+.mc-masts-popup .mc-masts-popup-stations { font-size: 12px; }
+.mc-masts-popup .mc-masts-popup-table { border-collapse: collapse; margin: 6px 0; font-size: 12px; }
+.mc-masts-popup .mc-masts-popup-table th,
+.mc-masts-popup .mc-masts-popup-table td { padding: 1px 6px 1px 0; text-align: left; }
+.mc-masts-popup .mc-masts-popup-table tr.mc-masts-int td { color: var(--mast-interference); font-weight: 600; }
+.mc-masts-popup .mc-masts-popup-hint { font-size: 12px; margin: 6px 0; padding-left: 6px; border-left: 3px solid var(--mast-interference); }
+.mc-masts-popup .mc-masts-popup-note { font-size: 11px; color: var(--text-muted); margin: 6px 0 0; }
 
 /* ---- Leaflet overrides for theme ---- */
 .leaflet-control-zoom a {

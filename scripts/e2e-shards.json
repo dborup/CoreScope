@@ -92,6 +92,14 @@
       "measurementNote": "New suite; #723 M1 protected ancient monuments overlay on Map and Live with an intercepted heritage client-config block and every request to the agency's WMS answered by a synthetic PNG (the real service is never contacted): not offered without the block, off by default with zero requests, on/off/on (tiles, opacity, pane above the hillshade and below overlays/markers, credit including Live's second 'on', hash, storage), the exact pinned GetMap parameter set, zoom 11 silent and zoom 12 drawing, ?heritage=1 deep link across reload and pages, ?heritage=0 over a stored 'on', dark theme not inverting the overlay pane, independence from the DHM hillshade, and no requests or console errors outside Denmark. About 50s locally; no CI duration measured yet. Assigned to shard 1 next to the #680/#681 DHM suites."
     },
     {
+      "file": "test-issue-724-masts-layer-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #724 M3 Mastedatabasen antenna sites layer on Map and Live with an intercepted masts client-config block and a stubbed /api/masts that generates synthetic sites inside each requested cell (neither the proxy's upstream nor Mastedatabasen is ever contacted): not offered without the block and no request, the two toggles with the sites on and the interference layer off by default plus the credit, the zoom-13 gate (no request, status line), every request a single in-extent cell=E,N with at most 4 in flight and no cell twice on a z13 1920x1080 view, the interference and sites toggles with ?mastsInt=1 / ?masts=0 and the deep link, a clicked site's popup with published fields only and hostile stub text inert, and a pan away and back with no repeated request. About 35s locally; no CI duration measured yet. Assigned to shard 1 next to the #680/#723 overlay suites."
+    },
+    {
       "file": "test-issue-674-1byte-hop-modes-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },
