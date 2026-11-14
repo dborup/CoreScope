@@ -13,6 +13,9 @@
  *      page's teardown no longer rewrites the new hash.
  *   2. §4 — a gap in the surface model (DSM) over complete terrain is drawn
  *      as two surface lines and two clutter bands, not one bridging it.
+ *   3. §5 — with a customizer point height (30 m) unlike the server's
+ *      (2 m), a link of two free points and a Move A onto a free point each
+ *      cost exactly one request, which carries the 30 m.
  *
  * Usage:
  *   BASE_URL=http://localhost:13581 node test-issue-746-profile-ui-e2e.js
@@ -201,6 +204,43 @@ function hashParams(hash) {
         };
       });
       assert(got.lines === 2 && got.bands === 2, 'surface drawn as ' + JSON.stringify(got));
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  // ── 3. §5: one request per drop with a customizer point height ────────
+  {
+    const { ctx, page, rec } = await newCtx({
+      dhm: { pointAntenna: { m: 2, source: 'point-default' } },
+      storage: {
+        'cs-theme-overrides': JSON.stringify({ terrain: { heightPoint: 30 } }),
+        'map-view': JSON.stringify({ lat: 56.154, lng: 10.214, zoom: 15 }),
+      },
+    });
+    await step('§5: a link of two free points is measured once, with the customizer height', async () => {
+      await page.goto(`${BASE}/#/map?profile=${P1}`, { waitUntil: 'domcontentloaded' });
+      await waitForRequestFor(page, rec, P1);
+      await page.waitForTimeout(800); // a second request would show up here
+      assert(rec.profile.length === 1, 'requests: ' + rec.profile.map(u => u.search).join(' | '));
+      const q = lastAsked(rec);
+      assert(q.get('ha') === '30' && q.get('hb') === '30', 'measured with ' + q.toString());
+      assert(hashParams(await page.evaluate(() => location.hash)).get('ha') === null, 'a customizer default reached the link');
+    });
+    await step('§5: Move A onto a free point is one request, with the customizer height', async () => {
+      const before = rec.profile.length;
+      await page.click('[data-testid="tp-move-a"]');
+      const box = await page.locator('#leaflet-map').boundingBox();
+      await page.mouse.click(box.x + 320, box.y + 140);
+      const t0 = Date.now();
+      while (rec.profile.length === before && Date.now() - t0 < 5000) await page.waitForTimeout(100);
+      await page.waitForTimeout(800);
+      const after = rec.profile.slice(before);
+      assert(after.length === 1, 'requests after the drop: ' + after.map(u => u.search).join(' | '));
+      const q = after[0].searchParams;
+      assert(q.get('a') !== P1.split(',').slice(0, 2).join(','), 'A did not move: ' + q.toString());
+      assert(/^-?\d+\.\d{5},-?\d+\.\d{5}$/.test(q.get('a')), 'A is not a free point: ' + q.get('a'));
+      assert(q.get('ha') === '30', 'measured with ' + q.toString());
       assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     });
     await ctx.close();

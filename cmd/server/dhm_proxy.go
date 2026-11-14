@@ -77,9 +77,24 @@ type DHMClientConfig struct {
 	// previews (#727): the profile is served and map.dhm.profile.share.
 	// enabled is set. Without it the copy button hands out the plain
 	// #/map?profile= link, exactly as before.
-	Share       bool          `json:"share"`
-	Bounds      [2][2]float64 `json:"bounds"` // [[south, west], [north, east]]
-	Attribution string        `json:"attribution"`
+	Share bool `json:"share"`
+	// PointAntenna is how the profile resolves a free map point's antenna
+	// height when the request names none (#746): radio.antennaHeightsM.point,
+	// else the built-in default. A point has no per-node key, so this is the
+	// whole rule, and the Map page can apply a customizer point default in
+	// the one request a drop makes instead of asking twice. Present only
+	// with Profile.
+	PointAntenna *DHMPointAntenna `json:"pointAntenna,omitempty"`
+	Bounds       [2][2]float64    `json:"bounds"` // [[south, west], [north, east]]
+	Attribution  string           `json:"attribution"`
+}
+
+// DHMPointAntenna is a free point's antenna height without a request
+// height, and its source: "operator-role" or "point-default", as in a
+// profile response's antennaSource.
+type DHMPointAntenna struct {
+	M      float64 `json:"m"`
+	Source string  `json:"source"`
 }
 
 func dhmClientConfig() *DHMClientConfig {
@@ -346,6 +361,10 @@ func (s *Server) dhmClientConfig() *DHMClientConfig {
 	c := dhmClientConfig()
 	c.Profile = s.terrain != nil
 	c.Share = s.terrain != nil && s.terrain.set.share.enabled
+	if s.terrain != nil {
+		h, src, _ := s.terrain.antenna(terrainEnd{kind: "point"}, nil)
+		c.PointAntenna = &DHMPointAntenna{M: h, Source: src}
+	}
 	return c
 }
 

@@ -2798,6 +2798,9 @@
       resolveNode: profileResolveNode,
       // #727: the copy button hands out a /p link when the server serves it.
       shareRoute: window.TerrainProfile.shareOffered(window.MC_DHM_CFG),
+      // #746: the server's rule for a free point's height, so a drop onto
+      // one is measured with the customizer's point default in one request.
+      pointAntenna: window.MC_DHM_CFG.pointAntenna || null,
       onMoveStart: function (side) { profileArmFor(side, true); },
       onMoveCancel: profileDisarm,
       onEndpointsChange: profileDrawLine,

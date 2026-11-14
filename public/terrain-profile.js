@@ -1065,27 +1065,46 @@
       };
     }
 
-    /* adoptThemeDefaults applies a customizer height to an endpoint the
-     * server answered out of its own built-in default, and reports whether
-     * anything moved. An operator value, a remembered height and a link are
-     * all more specific and are left alone; a customizer value equal to what
-     * the server already returned is not worth a second request. Called once
-     * per measurement, so it cannot loop. */
+    /* adoptThemeDefault applies a customizer height to one end the server
+     * resolves out of its own built-in default — `end` is that resolution:
+     * kind, role, antennaM and antennaSource — and reports whether anything
+     * moved. An operator value, a remembered height and a link are all more
+     * specific and are left alone; a customizer value equal to the server's
+     * own is not worth sending. */
+    function adoptThemeDefault(side, end, defs) {
+      if (!end || themeH[side] !== null) return false;
+      if ((side === 'a' ? state.ha : state.hb) !== null) return false;
+      if (!PROMOTABLE_SOURCES[end.antennaSource]) return false;
+      var h = themeHeight(end, defs);
+      if (h === null || h === clampHeight(end.antennaM)) return false;
+      themeH[side] = h;
+      origin[side] = 'theme';
+      return true;
+    }
+
+    /* adoptThemeDefaults applies adoptThemeDefault to both ends of an
+     * answer. Called once per measurement, so it cannot loop. */
     function adoptThemeDefaults(data) {
       var defs = themeDefaults();
-      var changed = false;
+      var a = adoptThemeDefault('a', data && data.a, defs);
+      var b = adoptThemeDefault('b', data && data.b, defs);
+      return a || b;
+    }
+
+    /* presetPointDefaults decides a free point's customizer height before
+     * asking (#746). A point has no per-node key, so the server's whole
+     * rule for it is known up front (dhm.pointAntenna, passed in as
+     * opts.pointAntenna), and the first request can carry the height
+     * instead of a second one after the answer. A node can have an operator
+     * height of its own, so it still waits for the answer. */
+    function presetPointDefaults() {
+      var rule = opts.pointAntenna;
+      if (!rule || typeof rule !== 'object') return;
+      var defs = themeDefaults();
       ['a', 'b'].forEach(function (side) {
-        var end = (data && data[side]) || null;
-        if (!end || themeH[side] !== null) return;
-        if ((side === 'a' ? state.ha : state.hb) !== null) return;
-        if (!PROMOTABLE_SOURCES[end.antennaSource]) return;
-        var h = themeHeight(end, defs);
-        if (h === null || h === clampHeight(end.antennaM)) return;
-        themeH[side] = h;
-        origin[side] = 'theme';
-        changed = true;
+        if (!state[side] || state[side].kind !== 'point') return;
+        adoptThemeDefault(side, { kind: 'point', antennaM: rule.m, antennaSource: rule.source }, defs);
       });
-      return changed;
     }
 
     /* The customizer can move these defaults while the panel is open. Drop
@@ -1494,6 +1513,7 @@
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
       setSurfaceChip(null);
       if (ui.assumed) ui.assumed.hidden = true;
+      presetPointDefaults();
       return fetchJSON(requestURL(effectiveState())).then(function (data) {
         if (mine !== seq || !open) return;
         /* The server answers which height it used and where it came from,
