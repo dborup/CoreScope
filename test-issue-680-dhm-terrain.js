@@ -11,13 +11,16 @@
  *     toggling saves + rewrites the hash;
  *   - roles.js hands cfg.dhm to the registry.
  *
+ * The sandbox and Leaflet stub live in tests/map-overlay-sandbox.js, shared
+ * with the #723 heritage overlay tests.
+ *
  * Runs via: node test-issue-680-dhm-terrain.js
  */
 'use strict';
-const vm = require('vm');
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
+const { makeMap, makeSandbox, buildControl } = require('./tests/map-overlay-sandbox');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -25,143 +28,11 @@ function test(name, fn) {
   catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
 }
 
-const SRC = fs.readFileSync(path.join(__dirname, 'public', 'map-tile-providers.js'), 'utf8');
 const ENABLED = {
   enabled: true, url: '/api/map/dhm/wms', layer: 'dhm_terraen_skyggekort',
   minZoom: 7, maxZoom: 19, bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
   attribution: 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0',
 };
-
-function makeStorage(init) {
-  const store = Object.assign({}, init || {});
-  return {
-    getItem(k) { return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; },
-    setItem(k, v) { store[k] = String(v); },
-    removeItem(k) { delete store[k]; },
-    _raw: store,
-  };
-}
-
-// Minimal Leaflet: records layers, panes and the control's overlays, and
-// fires overlayadd/overlayremove the way L.Control.Layers does for layers
-// it lists.
-function makeLeaflet() {
-  function evented(o) {
-    const h = {};
-    o.on = (types, fn) => { types.split(' ').forEach(t => (h[t] = h[t] || []).push(fn)); return o; };
-    o.off = () => o;
-    o.fire = (t, e) => { (h[t] || []).slice().forEach(fn => fn(Object.assign({ type: t }, e || {}))); return o; };
-    return o;
-  }
-  const L = {
-    CRS: { EPSG3857: { code: 'EPSG:3857' } },
-    latLngBounds: (b) => ({ _bounds: b }),
-    tileLayer: (url, opts) => evented({ _url: url, options: opts || {}, kind: 'tile' }),
-    control: {
-      layers: (base, overlays, opts) => {
-        const overlayLabels = Object.keys(overlays || {}).map(name => {
-          const attrs = {};
-          return { name, setAttribute: (k, v) => { attrs[k] = v; }, attrs };
-        });
-        const ctl = {
-          base, overlays, opts, overlayLabels,
-          addTo(map) { ctl._map = map; map._controls.push(ctl); return ctl; },
-          remove() { ctl._removed = true; },
-          getContainer() {
-            return {
-              querySelectorAll: () => [],
-              querySelector: (sel) => sel === '.leaflet-control-layers-overlays label' ? (overlayLabels[0] || null) : null,
-            };
-          },
-        };
-        return ctl;
-      },
-    },
-  };
-  L.tileLayer.wms = (url, opts) => evented({ _url: url, options: opts || {}, kind: 'wms' });
-  L.control.attribution = (opts) => {
-    const c = { opts, addTo(map) { c._map = map; map._attributionControls.push(c); return c; }, remove() { c._removed = true; } };
-    return c;
-  };
-  return L;
-}
-
-function makeMap() {
-  const panes = { tilePane: { zIndex: 200, attrs: {}, setAttribute() {}, removeAttribute() {}, style: {} } };
-  const layers = new Set();
-  const map = {
-    _controls: [], _attributionControls: [], panes, layers,
-    getPane: (n) => panes[n],
-    createPane: (n) => {
-      const classes = [];
-      panes[n] = { style: {}, classList: { add: (c) => classes.push(c) }, classes };
-      return panes[n];
-    },
-    hasLayer: (l) => layers.has(l),
-    // Like Leaflet: a layer listed in the control fires overlayadd/remove.
-    addLayer(l) {
-      if (layers.has(l)) return map;
-      layers.add(l);
-      if (map._controls.some(c => !c._removed && Object.values(c.overlays || {}).includes(l))) map.fire('overlayadd', { layer: l });
-      return map;
-    },
-    removeLayer(l) {
-      if (!layers.has(l)) return map;
-      layers.delete(l);
-      if (map._controls.some(c => !c._removed && Object.values(c.overlays || {}).includes(l))) map.fire('overlayremove', { layer: l });
-      return map;
-    },
-  };
-  const h = {};
-  map.on = (types, fn) => { types.split(' ').forEach(t => (h[t] = h[t] || []).push(fn)); return map; };
-  map.off = () => map;
-  map.fire = (t, e) => { (h[t] || []).slice().forEach(fn => fn(Object.assign({ type: t }, e || {}))); return map; };
-  return map;
-}
-
-function makeSandbox(opts) {
-  opts = opts || {};
-  const listeners = {};
-  const replaced = [];
-  const loc = { hash: 'hash' in opts ? opts.hash : '#/map', pathname: '/', search: opts.search || '' };
-  const ctx = {
-    console, URLSearchParams, JSON, Math, Object, Array, String, Number, Boolean,
-    location: loc,
-    history: {
-      state: null,
-      replaceState(_s, _t, url) { replaced.push(url); const i = url.indexOf('#'); loc.hash = i >= 0 ? url.slice(i) : ''; },
-    },
-    localStorage: makeStorage(opts.storage),
-    document: {
-      documentElement: { getAttribute: () => opts.theme || 'light' },
-      querySelector: () => null,
-      createElement: () => ({}),
-    },
-    CustomEvent: function (type, init) { this.type = type; this.detail = (init && init.detail) || null; },
-    L: makeLeaflet(),
-  };
-  ctx.window = {
-    addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
-    dispatchEvent: (ev) => { (listeners[ev.type] || []).slice().forEach(fn => fn(ev)); return true; },
-    matchMedia: () => ({ matches: false }),
-    localStorage: ctx.localStorage,
-  };
-  if (opts.dhm !== undefined) ctx.window.MC_DHM_CFG = opts.dhm;
-  ctx.globalThis = ctx;
-  vm.createContext(ctx);
-  vm.runInContext(SRC, ctx);
-  ctx.replaced = replaced;
-  return ctx;
-}
-
-function buildControl(ctx, withAttribution) {
-  const map = makeMap();
-  if (withAttribution) map.attributionControl = { builtIn: true };
-  const auto = { _auto: true };
-  ctx.window.MC_createLayerControl(map, auto, 'topleft');
-  const ctl = map._controls[map._controls.length - 1];
-  return { map, ctl };
-}
 
 function terrainLayer(ctl) {
   return ctl && ctl.overlays ? ctl.overlays['Terrain (DHM hillshade)'] : undefined;
@@ -373,9 +244,9 @@ test('initial restore happens before the layer control exists (no label re-rende
   assert.strictEqual(controlsAtAdd, 0, 'terrain added after the control was created');
 });
 
-test('resolveTerrainOn precedence table', () => {
+test('resolveOverlayOn precedence table', () => {
   const ctx = makeSandbox({});
-  const r = ctx.window.MC_resolveTerrainOn;
+  const r = ctx.window.MC_resolveOverlayOn;
   assert.strictEqual(r(null, null), false);
   assert.strictEqual(r(null, '1'), true);
   assert.strictEqual(r(null, '0'), false);

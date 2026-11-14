@@ -34,7 +34,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"image"
 	"image/png"
 	"log"
@@ -42,7 +41,6 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/meshcore-analyzer/dhm"
@@ -115,36 +113,15 @@ func dhmTileQueryParams() []paramMeta {
 // extractDHMConfig moves map.dhm into the typed DHM field, because the
 // free-form Map block is shipped verbatim by /api/config/client. The raw
 // block is deleted even when it is malformed: it must never reach clients.
-//
-// Map is a map[string]interface{}, so key lookup is case-sensitive. A
-// case variant (`DHM`, `Dhm`, …) is removed too, with a warning, but it
-// does not enable the overlay: only the documented spelling does, so the
-// result never depends on which of several spellings map iteration meets
-// first.
 func (c *Config) extractDHMConfig() {
-	if c.Map == nil {
-		return
-	}
-	for k := range c.Map {
-		if k != "dhm" && strings.EqualFold(k, "dhm") {
-			delete(c.Map, k)
-			log.Printf("[dhm] config map.%s ignored and removed from the client config; the key must be spelled map.dhm", k)
-		}
-	}
-	raw, ok := c.Map["dhm"]
-	if !ok {
-		return
-	}
-	delete(c.Map, "dhm")
-	c.DHM = dhm.Config{}
-	b, err := json.Marshal(raw)
-	if err == nil {
-		err = json.Unmarshal(b, &c.DHM)
-	}
-	if err != nil {
-		c.DHM = dhm.Config{}
-		log.Printf("[dhm] config map.dhm is malformed; terrain overlay disabled")
-	}
+	liftMapBlock(c, "dhm", "terrain overlay", &c.DHM)
+}
+
+// extractTypedMapBlocks lifts every typed block out of the client-visible
+// Map: map.dhm (#680) and map.heritage (#723).
+func (c *Config) extractTypedMapBlocks() {
+	c.extractDHMConfig()
+	c.extractHeritageConfig()
 }
 
 // ── Proxy ──────────────────────────────────────────────────────────────────
