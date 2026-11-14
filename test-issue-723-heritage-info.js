@@ -11,7 +11,11 @@
  *     previous one aborted, a stale answer never rendered;
  *   - the popup for inside / nearby / nothing / truncated / 429 / failure,
  *     built with textContent only: dataset text is never parsed as HTML;
- *   - the overlay going off closes the popup and aborts its request;
+ *   - the overlay going off closes the popup and aborts its request; another
+ *     layer going off leaves both alone;
+ *   - closing the popup aborts its pending request, so a late answer never
+ *     reopens it; a failure of an older request never replaces a newer
+ *     answer;
  *   - the popup CSS uses CSS variables only and a 44px close button on
  *     touch screens;
  *   - Map and Live attach it, and index.html loads it before them.
@@ -72,7 +76,8 @@ function makeMap({ zoom = 13, overlayOn = true } = {}) {
     getZoom() { return map._zoom; },
     hasLayer(l) { return map._layers.has(l); },
     getContainer() { return container; },
-    closePopup(p) { if (p) p._open = false; },
+    // Like Leaflet: a popup that leaves the map fires 'remove'.
+    closePopup(p) { if (p && p._open) { p._open = false; p.fire('remove'); } },
     popups, container, heritageLayer,
   };
   return map;
@@ -267,6 +272,39 @@ test('the overlay going off closes the popup and aborts the request', () => {
   s.map.fire('overlayremove', { layer: s.map.heritageLayer });
   assert(s.fetch.calls[0].init.signal.aborted, 'request not aborted');
   assert.strictEqual(s.map.popups[0]._open, false, 'popup left open');
+});
+
+test('another layer going off leaves the popup and its request alone', () => {
+  const s = setup();
+  s.click();
+  s.map.fire('overlayremove', { layer: { id: 'hillshade' } });
+  assert(!s.fetch.calls[0].init.signal.aborted, 'request aborted for another layer');
+  assert.strictEqual(s.map.popups[0]._open, true, 'popup closed for another layer');
+});
+
+test('closing the popup aborts its request; a late answer does not reopen it', async () => {
+  const s = setup();
+  s.click();
+  // The viewer's close button: Leaflet removes the popup from the map.
+  s.map.closePopup(s.map.popups[0]);
+  assert(s.fetch.calls[0].init.signal.aborted, 'request not aborted');
+  answer(s.fetch.calls[0], 200, INSIDE);
+  await tick(); await tick();
+  assert.strictEqual(s.map.popups[0]._open, false, 'late answer reopened the popup');
+  assert.strictEqual(s.map.popups.length, 1, 'popup opened again');
+  assert(!/Rundhøj/.test(s.map.popups[0]._content.textContent), 'late answer rendered');
+});
+
+test('a failure of an older request does not replace a newer answer', async () => {
+  const s = setup();
+  s.click();
+  s.click();
+  answer(s.fetch.calls[1], 200, INSIDE);
+  await tick(); await tick();
+  s.fetch.calls[0].reject(new Error('network down'));
+  await tick(); await tick();
+  const t = s.map.popups[0]._content.textContent;
+  assert(/Rundhøj/.test(t) && !/unavailable/.test(t), 'older failure rendered: ' + t);
 });
 
 test('detach removes the listeners', () => {

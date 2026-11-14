@@ -18,6 +18,8 @@
  *      requests and no lookup; once both ends are set, a click looks up;
  *   6. 360x740 touch: a tap opens the popup, its close button is 44x44 px
  *      and closes it;
+ *   6b. closing the popup while its lookup is still pending: the late
+ *      answer does not reopen it (#762 review finding 5);
  *   7. light and dark: the popup's colours are the theme's variables;
  *   8. no console errors.
  *
@@ -81,7 +83,7 @@ function profileFor(q) {
   async function newCtx(o) {
     o = o || {};
     const ctx = await browser.newContext({ viewport: o.viewport || { width: 1280, height: 800 }, hasTouch: !!o.touch, isMobile: !!o.touch });
-    const rec = { info: [], profile: [], agency: 0, consoleErrors: [] };
+    const rec = { info: [], profile: [], agency: 0, consoleErrors: [], held: [], infoFailed: 0 };
     await ctx.route(BASE + '/api/config/client', async (route) => {
       const response = await route.fetch();
       const config = await response.json();
@@ -92,7 +94,10 @@ function profileFor(q) {
     await ctx.route(url => new URL(url).pathname === INFO_PATH, async (route) => {
       const u = new URL(route.request().url());
       rec.info.push(u);
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(o.answer || MONUMENT) });
+      // o.hold: the answer waits until the test releases it.
+      if (o.hold) await new Promise(r => rec.held.push(r));
+      // A request the page aborted can no longer be fulfilled.
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(o.answer || MONUMENT) }).catch(() => {});
     });
     await ctx.route(url => new URL(url).pathname === '/api/terrain/profile', async (route) => {
       const u = new URL(route.request().url());
@@ -119,6 +124,7 @@ function profileFor(q) {
     const page = await ctx.newPage();
     page.on('console', m => { if (m.type() === 'error') rec.consoleErrors.push(m.text()); });
     page.on('pageerror', e => rec.consoleErrors.push(String(e)));
+    page.on('requestfailed', r => { if (new URL(r.url()).pathname === INFO_PATH) rec.infoFailed++; });
     return { ctx, page, rec };
   }
 
@@ -286,6 +292,26 @@ function profileFor(q) {
         assert(!(await page.$('.mc-heritage-popup')), 'popup still open after tapping close');
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
         assert(!overflow, 'horizontal page scroll');
+      } finally { await ctx.close(); }
+    });
+  }
+
+  for (const p of PAGES) {
+    await step(`${p.name}: closing the popup while the lookup is pending — the late answer does not reopen it`, async () => {
+      const { ctx, page, rec } = await newCtx({ hold: true });
+      try {
+        await gotoMap(page, p.hash + '?heritage=1');
+        await clickMap(page, 40, 30);
+        assert(rec.info.length === 1, 'lookups: ' + rec.info.length);
+        await page.waitForFunction(() => /Looking up/.test((document.querySelector('.mc-heritage-popup') || {}).textContent || ''), null, { timeout: 5000 });
+        await page.click('.mc-heritage-popup .leaflet-popup-close-button');
+        await page.waitForTimeout(300);
+        assert(!(await page.$('.mc-heritage-popup')), 'popup still open after its close button');
+        rec.held.splice(0).forEach(r => r());
+        await page.waitForTimeout(800);
+        assert(!(await page.$('.mc-heritage-popup')), 'the late answer reopened the closed popup');
+        assert(rec.infoFailed === 1, 'the pending lookup was not aborted: ' + rec.infoFailed);
+        assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
       } finally { await ctx.close(); }
     });
   }
