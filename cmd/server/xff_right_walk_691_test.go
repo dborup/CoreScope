@@ -57,7 +57,7 @@ func TestXFF691_AppendingProxyIgnoresForgedLeftmost(t *testing.T) {
 	trusted := trustedNets691(t, "127.0.0.1/32")
 	wantClient691(t, xffReq691("127.0.0.1:1", "198.51.100.66, 203.0.113.9"), trusted, "203.0.113.9")
 
-	l := newIPRateLimiter("test", 1, trusted, nil)
+	l := newIPRateLimiter("dhm", "test", 1, trusted, nil)
 	if ok, _ := l.allow(xffReq691("127.0.0.1:1", "198.51.100.1, 203.0.113.9")); !ok {
 		t.Fatal("first request refused")
 	}
@@ -82,7 +82,7 @@ func TestXFF691_ReplacingProxyUnchanged(t *testing.T) {
 	// Trusted proxy that forwards nothing still identifies itself.
 	wantClient691(t, xffReq691("127.0.0.1:1"), trusted, "127.0.0.1")
 
-	l := newIPRateLimiter("test", 1, trusted, nil)
+	l := newIPRateLimiter("dhm", "test", 1, trusted, nil)
 	if ok, _ := l.allow(xffReq691("127.0.0.1:1", "203.0.113.9")); !ok {
 		t.Fatal("first client refused")
 	}
@@ -144,7 +144,7 @@ func TestXFF691_MalformedAndEmptyEntries(t *testing.T) {
 // prefix does not escape it.
 func TestXFF691_IPv6Per64BehindAppendingProxy(t *testing.T) {
 	trusted := trustedNets691(t, "::1/128")
-	l := newIPRateLimiter("test", 1, trusted, nil)
+	l := newIPRateLimiter("dhm", "test", 1, trusted, nil)
 	if ok, _ := l.allow(xffReq691("[::1]:1", "2001:db8:ffff::1, 2001:db8:1:2::5")); !ok {
 		t.Fatal("first refused")
 	}
@@ -161,7 +161,7 @@ func TestXFF691_IPv6Per64BehindAppendingProxy(t *testing.T) {
 // served.
 func TestXFF691_TableFillFromOneSourceDoesNotLockOutOthers(t *testing.T) {
 	trusted := trustedNets691(t, "127.0.0.1/32")
-	l := newIPRateLimiter("test", 1, trusted, nil)
+	l := newIPRateLimiter("dhm", "test", 1, trusted, nil)
 	for i := 0; i < ipLimiterMaxClients+100; i++ {
 		forged := "198.51." + strconv.Itoa(i/256) + "." + strconv.Itoa(i%256)
 		l.allow(xffReq691("127.0.0.1:1", forged+", 203.0.113.9"))

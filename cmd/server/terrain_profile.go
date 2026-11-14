@@ -58,6 +58,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/meshcore-analyzer/dhm"
@@ -77,7 +78,8 @@ const (
 	// terrainRefusalLogEvery throttles the admission-refusal log line.
 	terrainRefusalLogEvery = time.Minute
 	// terrainMaxReturned is the most samples a response carries; the
-	// worst points are always among them (dhm.Decimate).
+	// worst points are always among them, and the data gaps stay visible
+	// (dhm.Decimate, terrainGapKeep).
 	terrainMaxReturned = 1024
 	// terrainObserverWindow is how recently an observer must have been
 	// seen for its radio to count towards the modal frequency.
@@ -231,7 +233,9 @@ type terrainProfiler struct {
 	cache      *dhm.Cache[terrainKey]
 	flight     dhm.Flight[[]byte]
 	limiter    *ipRateLimiter // nil: no per-client limit
-	admission                 // maxInFlight profile fetches; refusals are 503
+	admit      chan struct{}  // one token per profile fetch in flight (maxInFlight)
+	refused    atomic.Int64   // admission refusals (503) since start
+	refuseLog  logThrottle    // the refusal report, once per terrainRefusalLogEvery
 	deadline   time.Duration
 	now        func() time.Time
 	logf       func(string, ...interface{})
@@ -285,8 +289,8 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 		set:        set,
 		radio:      resolveTerrainRadio(rc, d.logf),
 		cache:      dhm.NewCache[terrainKey](set.cacheEntries, maxBytes, set.cacheTTL),
-		limiter:    newIPRateLimiter("map.dhm.profile.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
-		admission:  newAdmission(set.maxInFlight),
+		limiter:    newIPRateLimiter("dhm", "map.dhm.profile.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
+		admit:      make(chan struct{}, set.maxInFlight),
 		deadline:   terrainDeadline,
 		now:        time.Now,
 		logf:       d.logf,
@@ -475,7 +479,8 @@ type TerrainVerdict struct {
 }
 
 // TerrainClearance is the worst point of an assessment; null without a
-// verdict.
+// verdict. WorstF1Fraction is also null when the worst point is a surface
+// above an antenna: the zone has no radius at an endpoint (#745).
 type TerrainClearance struct {
 	WorstClearanceM *float64 `json:"worstClearanceM"`
 	WorstAtM        *float64 `json:"worstAtM"`
@@ -487,10 +492,19 @@ type TerrainClearance struct {
 // against the DSM, not the deciding DTM: the two models can have
 // different coverage, and a partial profile must never report a
 // confident verdict on either (#689 review N1).
+//
+// Reason is "antennaBelowSurface" when the surface is above the antenna
+// at an endpoint (#745): the state is then blocked, and Endpoint is "A",
+// "B" or "both". The worst point stays the worst interior obstruction (by
+// F1 ratio, as everywhere) when there is one. Both are absent otherwise.
 type TerrainSurfaceInfo struct {
 	State string `json:"state"`
 	TerrainClearance
+	Reason   string `json:"reason,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
 }
+
+const terrainReasonAntennaBelowSurface = "antennaBelowSurface"
 
 // ── Handler ────────────────────────────────────────────────────────────────
 
@@ -609,10 +623,12 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 			data, _, err = p.flight.Do(r.Context(), key.String(), p.deadline, func(ctx context.Context) ([]byte, error) {
 				// Admission is per fetch, not per request: callers that
 				// join a running fetch add no work and are not counted.
-				if !p.tryAdmit() {
+				select {
+				case p.admit <- struct{}{}:
+					defer func() { <-p.admit }()
+				default:
 					return nil, errTerrainBusy
 				}
-				defer p.release()
 				e, err := p.fetch(ctx, &plan, tq.both)
 				if err != nil {
 					return nil, err
@@ -665,8 +681,9 @@ func (p *terrainProfiler) writeFetchError(w http.ResponseWriter, r *http.Request
 // terrainRefusalLogEvery: the first at once, then the number since the last
 // report. Neither the token nor any URL is involved.
 func (p *terrainProfiler) noteRefusal() {
-	n := p.refusal(p.now(), terrainRefusalLogEvery)
-	if n == 0 {
+	total := p.refused.Add(1)
+	n, ok := p.refuseLog.note(p.now(), total, terrainRefusalLogEvery)
+	if !ok {
 		return
 	}
 	p.logf("[dhm] terrain profile admission: refused %d request(s) since the last report because map.dhm.profile.maxInFlight (%d) fetches are running; raise it if this persists", n, cap(p.admit))
@@ -794,7 +811,9 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 	n := len(e.dtm)
 	resp := TerrainProfileResponse{
 		DistanceM: round2(plan.DistanceM), StepM: round2(plan.StepM), SampleCount: n,
-		Model: "dtm", Attribution: dhm.Attribution, Samples: []TerrainSample{},
+		// The profile is computed from DHM, not shown as served, so the
+		// credit is the derived one (#733).
+		Model: "dtm", Attribution: dhm.AttributionDerived, Samples: []TerrainSample{},
 	}
 	if tq.both {
 		resp.Model = "both"
@@ -867,11 +886,21 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 		if resp.Coverage.State != "full" {
 			surface = dhm.Assessment{State: dhm.VerdictUnknown, WorstIndex: -1}
 		}
-		resp.Verdict.Surface = &TerrainSurfaceInfo{State: string(surface.State), TerrainClearance: clearanceOf(surface)}
+		resp.Verdict.Surface = surfaceInfo(surface)
 		keep = append(keep, surface.WorstIndex)
 	}
 
 	if resp.Coverage.State != "none" {
+		// The gaps get the places the endpoints and the worst points leave
+		// (#745 review N4). The two worst points can only coincide on a
+		// profile without gaps, so neither is counted twice.
+		room := terrainMaxReturned - 2
+		for _, k := range keep {
+			if k > 0 && k < n-1 {
+				room--
+			}
+		}
+		keep = append(keep, terrainGapKeep(room, e.dtm, e.dsm)...)
 		idx := dhm.Decimate(n, terrainMaxReturned, keep...)
 		resp.Samples = make([]TerrainSample, len(idx))
 		for j, i := range idx {
@@ -885,12 +914,87 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 	return resp
 }
 
+// terrainGapKeep lists the samples that keep the data gaps of the series
+// visible through dhm.Decimate (#745), most important first, for room
+// places: the first missing sample of each gap, then its last missing
+// sample and the samples just outside it, so a chart gap starts and ends
+// where the data does. Decimate takes them while they fit, and then has
+// no room for evenly spaced samples that could join two valid ones across
+// a gap. With more gaps than room, the room goes to missing samples spread
+// evenly over all of them: a gap left without a sample of its own merges
+// into its neighbours, none is bridged by a line, and no evenly spaced
+// sample is left. All series have the same length; a nil
+// one after the first is skipped, but series[0] must not be nil, since
+// the overflow walks its indices.
+func terrainGapKeep(room int, series ...[]float32) []int {
+	var starts, edges []int
+	for _, s := range series {
+		for i := 0; i < len(s); i++ {
+			if !math.IsNaN(float64(s[i])) {
+				continue
+			}
+			j := i
+			for j+1 < len(s) && math.IsNaN(float64(s[j+1])) {
+				j++
+			}
+			starts = append(starts, i)
+			edges = append(edges, j, i-1, j+1)
+			i = j
+		}
+	}
+	if len(starts) <= room {
+		return append(starts, edges...)
+	}
+	if room <= 0 {
+		return nil
+	}
+	var missing []int
+	for i := range series[0] {
+		for _, s := range series {
+			if s != nil && math.IsNaN(float64(s[i])) {
+				missing = append(missing, i)
+				break
+			}
+		}
+	}
+	out := make([]int, room)
+	for j := range out {
+		out[j] = missing[int(math.Round(float64(j)*float64(len(missing)-1)/float64(max(room-1, 1))))]
+	}
+	return out
+}
+
+// surfaceInfo is the informational DSM verdict, with the reason when an
+// antenna is below the surface (#745).
+func surfaceInfo(a dhm.Assessment) *TerrainSurfaceInfo {
+	out := &TerrainSurfaceInfo{State: string(a.State), TerrainClearance: clearanceOf(a)}
+	switch {
+	case a.AntennaBelowA && a.AntennaBelowB:
+		out.Endpoint = "both"
+	case a.AntennaBelowA:
+		out.Endpoint = "A"
+	case a.AntennaBelowB:
+		out.Endpoint = "B"
+	}
+	if out.Endpoint != "" {
+		out.Reason = terrainReasonAntennaBelowSurface
+	}
+	return out
+}
+
 func clearanceOf(a dhm.Assessment) TerrainClearance {
 	if a.State == dhm.VerdictUnknown {
 		return TerrainClearance{}
 	}
-	c, at, f := round2(a.WorstClearanceM), round2(a.WorstAtM), math.Round(a.WorstRatio*1000)/1000
-	return TerrainClearance{WorstClearanceM: &c, WorstAtM: &at, WorstF1Fraction: &f}
+	c, at := round2(a.WorstClearanceM), round2(a.WorstAtM)
+	out := TerrainClearance{WorstClearanceM: &c, WorstAtM: &at}
+	// An obstruction at an antenna has no fraction: F1 has no radius
+	// there, and the ratio is −Inf (#745), which JSON cannot carry.
+	if !math.IsInf(a.WorstRatio, 0) {
+		f := math.Round(a.WorstRatio*1000) / 1000
+		out.WorstF1Fraction = &f
+	}
+	return out
 }
 
 // antenna is the antenna height above ground for an endpoint, most

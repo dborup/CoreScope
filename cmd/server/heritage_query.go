@@ -141,7 +141,7 @@ func newHeritageQuery(set heritageSettings, d heritageQueryDeps) *heritageQuery 
 		src:       d.src,
 		set:       set,
 		cache:     dhm.NewCache[heritage.Cell](set.cacheEntries, heritageCacheMaxBytes, set.cacheTTL),
-		limiter:   newIPRateLimiter("map.heritage.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
+		limiter:   newIPRateLimiter("heritage", "map.heritage.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
 		admission: newAdmission(set.maxInFlight),
 		now:       time.Now,
 		logf:      d.logf,

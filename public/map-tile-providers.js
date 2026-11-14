@@ -9,8 +9,8 @@
  *   - MC_applyTileFilter() applies/clears the CSS filter on
  *     `.leaflet-tile-pane` based on current theme + selected provider.
  *   - MC_createLayerControl() builds a Leaflet control mapping providers,
- *     plus the optional DHM terrain hillshade (#680) and protected ancient
- *     monuments (#723) overlays.
+ *     plus the optional DHM terrain hillshade (#680), protected ancient
+ *     monuments (#723) and Mastedatabasen antenna site (#724) overlays.
  *
  * No new deps — URL-only providers.
  */
@@ -325,10 +325,11 @@
   }
 
   /* Optional map overlays: #680 DHM terrain hillshade, #723 protected
-   * ancient monuments (both Denmark only).
+   * ancient monuments, #724 antenna sites (all Denmark only).
    *
    * Each is offered only when /api/config/client carries its enabled block
-   * (roles.js stores them as window.MC_DHM_CFG / window.MC_HERITAGE_CFG).
+   * (roles.js stores them as window.MC_DHM_CFG / window.MC_HERITAGE_CFG /
+   * window.MC_MASTS_CFG).
    * The plumbing below is shared: an overlay is one entry in OVERLAYS,
    * never a second copy of it.
    *
@@ -336,9 +337,13 @@
    *     tiles (tilePane, 200) and the vector overlays/markers (overlayPane
    *     400, markerPane 600). That also keeps it out of the dark-theme
    *     invert filter on the tile pane.
+   *   - The antenna sites are not tiles: their entries bring their own
+   *     `create` (public/masts-layer.js, canvas markers) instead.
    *   - On/off is remembered per viewer (localStorage) and mirrored in the
-   *     hash (?terrain=1, ?heritage=1). A =1 / =0 in the hash wins over the
-   *     stored choice and is saved, like Live's ?heard= (#660).
+   *     hash (?terrain=1, ?heritage=1, ?masts=0, ?mastsInt=1). A =1 / =0 in
+   *     the hash wins over the stored choice and is saved, like Live's
+   *     ?heard= (#660). An overlay is off until chosen, except one marked
+   *     defaultOn, whose "off" is then written to the hash as =0.
    *   - A map without an attribution control (Live) gets one for its
    *     lifetime (_ensureAttribution), because the base map's credit and
    *     every overlay's credit are required.
@@ -367,8 +372,23 @@
     return c;
   }
 
+  // #724 — the masts block as cmd/server/masts_proxy.go sends it: a
+  // same-origin path, integer zoom gate and cell size, the four-index cell
+  // extent and an https source link. Needs public/masts-layer.js.
+  function getMastsConfig() {
+    var c = window.MC_MASTS_CFG;
+    if (!c || c.enabled !== true || !window.MastsLayer) return null;
+    if (typeof c.url !== 'string' || c.url.charAt(0) !== '/' || c.url.charAt(1) === '/') return null;
+    if (!_isZoom(c.minZoom) || typeof c.cellSizeM !== 'number' || !(c.cellSizeM > 0) || Math.floor(c.cellSizeM) !== c.cellSizeM) return null;
+    if (!Array.isArray(c.cellExtent) || c.cellExtent.length !== 4) return null;
+    for (var i = 0; i < 4; i++) if (typeof c.cellExtent[i] !== 'number' || Math.floor(c.cellExtent[i]) !== c.cellExtent[i]) return null;
+    if (typeof c.sourceUrl !== 'string' || c.sourceUrl.indexOf('https://') !== 0 || typeof c.attribution !== 'string') return null;
+    return c;
+  }
+
   // #723 — opacity (and whether an overlay starts on) is hard-coded here;
-  // exposing them in the customizer is tracked as #723 M4.
+  // exposing them in the customizer is tracked as #723 M4 (and #724 M5 for
+  // the antenna sites).
   var OVERLAYS = [
     {
       id: TERRAIN_ID, storageKey: 'mc-terrain-dhm', hashParam: 'terrain', layerProp: '_mcTerrainLayer',
@@ -385,13 +405,31 @@
       config: getHeritageConfig,
       label: function (cfg) { return 'Protected ancient monuments (zoom ' + cfg.minZoom + '+)'; },
       layers: function (cfg) { return cfg.layers; }
+    },
+    {
+      // #724 option A: every site, honestly labelled, on when offered.
+      id: 'masts-sites', storageKey: 'mc-masts', hashParam: 'masts', layerProp: '_mcMastsSitesLayer', defaultOn: true,
+      config: getMastsConfig,
+      label: function () { return window.MastsLayer.SITE_LABEL; },
+      create: function (map, cfg) { return window.MastsLayer.layer(map, cfg, 'sites'); }
+    },
+    {
+      // Sites with a 700/800/900 MHz entry; off until chosen. The status
+      // line (zoom gate, loading, unavailable) sits under this, the last
+      // of the pair.
+      id: 'masts-interference', storageKey: 'mc-masts-int', hashParam: 'mastsInt', layerProp: '_mcMastsIntLayer',
+      config: getMastsConfig,
+      label: function () { return window.MastsLayer.INTERFERENCE_LABEL; },
+      create: function (map, cfg) { return window.MastsLayer.layer(map, cfg, 'interference'); },
+      decorate: function (map, cfg, labelEl) { window.MastsLayer.decorate(map, cfg, labelEl); }
     }
   ];
 
-  function resolveOverlayOn(hashValue, stored) {
+  function resolveOverlayOn(hashValue, stored, defaultOn) {
     if (hashValue === '1') return true;
     if (hashValue === '0') return false;
-    return stored === '1';
+    if (stored === '1' || stored === '0') return stored === '1';
+    return !!defaultOn;
   }
 
   function _hashParts() {
@@ -404,7 +442,7 @@
     var hv = null, stored = null;
     try { hv = _hashParts().params.get(o.hashParam); } catch (_) {}
     try { stored = window.localStorage && window.localStorage.getItem(o.storageKey); } catch (_) {}
-    var on = resolveOverlayOn(hv, stored);
+    var on = resolveOverlayOn(hv, stored, o.defaultOn);
     if (hv === '1' || hv === '0') {
       try { if (window.localStorage) window.localStorage.setItem(o.storageKey, on ? '1' : '0'); } catch (_) {}
     }
@@ -417,6 +455,7 @@
     try {
       var h = _hashParts();
       if (on) h.params.set(o.hashParam, '1');
+      else if (o.defaultOn) h.params.set(o.hashParam, '0');
       else h.params.delete(o.hashParam);
       var qs = h.params.toString();
       // An empty hash gets a bare '#', so the parameter never lands in the
@@ -425,7 +464,64 @@
     } catch (_) {}
   }
 
+  /* #733 — Dataforsyningen's terms for Klimadatastyrelsen data under
+   * CC BY 4.0 ("Vilkår for brug af data", v3.1,
+   * https://dataforsyningen.dk/Vilkaar) require the credit to link the
+   * dataset and the licence, so the hillshade credit renders those two
+   * marks inside its own text as anchors. The marks and their targets come
+   * from the server's dhm block (cmd/server/dhm_proxy.go), which takes them
+   * from internal/dhm — the one credit definition.
+   *
+   * Leaflet's attribution control takes an HTML string, so the anchors are
+   * built with createElement in a detached container and handed over as its
+   * innerHTML: no credit string is ever concatenated into markup, and the
+   * DOM does the escaping. Only an absolute https target becomes a link;
+   * anything else leaves the text alone, so a credit never silently turns
+   * into a javascript: link and a block without the fields degrades to the
+   * plain credit.
+   *
+   * The rendered TEXT stays byte-identical to the plain credit — only the
+   * markup differs — which matters because Leaflet's control counts, finds
+   * and removes a credit by its string.
+   */
+  function buildCredit(text, links) {
+    var plain = typeof text === 'string' ? text : '';
+    if (!plain || typeof document === 'undefined' || !document.createElement) return plain;
+    var box, rest = plain, linked = 0;
+    try { box = document.createElement('div'); } catch (_) { return plain; }
+    (links || []).forEach(function (l) {
+      if (!l || typeof l.mark !== 'string' || !l.mark) return;
+      if (typeof l.href !== 'string' || l.href.indexOf('https://') !== 0) return;
+      var i = rest.indexOf(l.mark);
+      if (i < 0) return;
+      if (i > 0) box.appendChild(document.createTextNode(rest.slice(0, i)));
+      var a = document.createElement('a');
+      a.setAttribute('href', l.href);
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', l.rel || 'noopener noreferrer');
+      a.textContent = l.mark;
+      box.appendChild(a);
+      rest = rest.slice(i + l.mark.length);
+      linked++;
+    });
+    if (!linked) return plain;
+    if (rest) box.appendChild(document.createTextNode(rest));
+    return box.innerHTML;
+  }
+
+  /* The credit links an overlay's config offers, in the order they occur in
+   * the credit text. An overlay whose owner's terms ask for no link (the
+   * #723 monuments: free use under the agency's own rules, textual data
+   * CC0) carries none of these fields and keeps its plain credit. */
+  function _overlayCredit(cfg) {
+    return buildCredit(cfg.attribution, [
+      { mark: cfg.datasetName, href: cfg.datasetUrl, rel: 'noopener noreferrer' },
+      { mark: cfg.licenseName, href: cfg.licenseUrl, rel: 'noopener noreferrer license' }
+    ]);
+  }
+
   function _createOverlayLayer(map, o, cfg) {
+    if (o.create) return o.create(map, cfg);
     if (!map.getPane(o.pane)) {
       var pane = map.createPane(o.pane);
       pane.style.zIndex = String(o.paneZ);
@@ -450,10 +546,15 @@
       minZoom: cfg.minZoom,
       maxZoom: cfg.maxZoom,
       bounds: L.latLngBounds(cfg.bounds),
-      attribution: cfg.attribution,
+      attribution: _overlayCredit(cfg),
       className: o.className
     });
   }
+
+  // The class the compact (inset) credit is styled by; public/style.css
+  // owns its size, and MC_CREDIT_COMPACT_CLASS exposes the name so a test
+  // or a caller never spells it a second time.
+  var CREDIT_COMPACT_CLASS = 'mc-credit-compact';
 
   // Live runs without Leaflet's default attribution control, so it gets
   // one here, once, when its layer control is built, and keeps it: the
@@ -465,13 +566,27 @@
   // gives later layers, so they get that hook here, or picking another base
   // map would leave the old credit behind. The Map page has its own control
   // and is left alone.
-  function _ensureAttribution(map) {
-    if (map.attributionControl) return;
+  //
+  // #752: the inset maps (node detail, node-reach, packet-path, area-nodes,
+  // rx-coverage and the Analytics subpath minimap) are built the same way
+  // and render the same provider, so they call this through
+  // MC_ensureAttribution with compact: true. That only adds the
+  // MC_CREDIT_COMPACT_CLASS to the control's container; the sizing lives in
+  // CSS, so a 200px inset is not swallowed by a long credit.
+  function _ensureAttribution(map, compact) {
+    if (map.attributionControl) return null;
     var control = L.control.attribution({ position: 'bottomright', prefix: false }).addTo(map);
+    if (compact) {
+      try {
+        var el = control.getContainer && control.getContainer();
+        if (el && el.classList) el.classList.add(CREDIT_COMPACT_CLASS);
+      } catch (_) {}
+    }
     map.eachLayer(function (layer) {
       if (!layer.getAttribution || !layer.getAttribution()) return;
       layer.once('remove', function () { control.removeAttribution(layer.getAttribution()); });
     });
+    return control;
   }
 
   // Changes a layer's credit in place: Live's Auto layer switches provider
@@ -524,6 +639,17 @@
     return ids;
   }
 
+  // An overlay's own addition to its label in the control (the antenna
+  // sites' status line), after every control build.
+  function _decorateOverlay(map, id, labelEl) {
+    for (var i = 0; i < OVERLAYS.length; i++) {
+      var o = OVERLAYS[i];
+      if (o.id !== id || !o.decorate) continue;
+      var cfg = o.config();
+      if (cfg) o.decorate(map, cfg, labelEl);
+    }
+  }
+
   // ── Public surface ──────────────────────────────────────────────────────
   
   window.MC_DARK_TILE_DEFAULT           = DEFAULT_ID;
@@ -539,8 +665,20 @@
   window.MC_getTileSpec                 = getTileSpec;
   window.MC_getTerrainConfig            = getTerrainConfig;
   window.MC_getHeritageConfig           = getHeritageConfig;
+  window.MC_getMastsConfig              = getMastsConfig;
   window.MC_resolveOverlayOn            = resolveOverlayOn;
   window.MC_setLayerAttribution         = setLayerAttribution;
+  window.MC_CREDIT_COMPACT_CLASS        = CREDIT_COMPACT_CLASS;
+  // #733 — exposed so a caller (and the unit tests) build an overlay credit
+  // the one way, rather than assembling the links a second time.
+  window.MC_buildCredit                 = buildCredit;
+  // #752 — every map without Leaflet's own attribution control needs one,
+  // not just Live: the inset maps call this (compact: true) right after
+  // they attach the viewer's provider.
+  window.MC_ensureAttribution           = function (map, opts) {
+    if (!map || typeof L === 'undefined') return null;
+    return _ensureAttribution(map, !!(opts && opts.compact));
+  };
 
 
   /**
@@ -645,6 +783,7 @@
           var overlayLabels = _control.getContainer().querySelectorAll('.leaflet-control-layers-overlays label');
           for (var oi = 0; oi < overlayLabels.length && oi < overlayIds.length; oi++) {
             overlayLabels[oi].setAttribute('data-overlay-id', overlayIds[oi]);
+            try { _decorateOverlay(map, overlayIds[oi], overlayLabels[oi]); } catch (_) {}
           }
         } catch (_) {}
       }

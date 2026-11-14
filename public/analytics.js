@@ -2571,13 +2571,10 @@
       // map's own tile pane. A bare L.tileLayer(getTileUrl()) skipped the
       // filter, so the keyless-OSM dark default (the light OSM template
       // plus an invert filter) rendered a light basemap in a dark page.
-      if (typeof window._applyTilesToNodeMap === 'function') {
-        window._applyTilesToNodeMap(map);
-      } else {
-        // Loud, not silent: the shared tile helper is missing.
-        console.warn('subpath minimap: _applyTilesToNodeMap unavailable — using OSM fallback');
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
-      }
+      // #756 — nodes.js (which defines this) always loads before this file
+      // (index.html), so the uncredited OSM fallback this used to have on a
+      // missing helper was dead code.
+      window._applyTilesToNodeMap(map);
 
       const latlngs = [];
       nodesWithLoc.forEach((n, i) => {

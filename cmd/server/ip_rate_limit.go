@@ -124,6 +124,7 @@ func parseForwardedHop(s string) net.IP {
 // ipRateLimiter is a per-client budget of perMin requests per minute. A nil
 // *ipRateLimiter allows everything.
 type ipRateLimiter struct {
+	tag        string // the log prefix, e.g. "masts" for "[masts]"
 	what       string // the config key, named in the warning
 	interval   time.Duration
 	burst      time.Duration // perMin × interval: one minute
@@ -142,7 +143,7 @@ type ipRateLimiter struct {
 }
 
 // newIPRateLimiter returns nil when perMin ≤ 0 (off).
-func newIPRateLimiter(what string, perMin int, trusted []*net.IPNet, logf func(string, ...interface{})) *ipRateLimiter {
+func newIPRateLimiter(tag, what string, perMin int, trusted []*net.IPNet, logf func(string, ...interface{})) *ipRateLimiter {
 	if perMin <= 0 {
 		return nil
 	}
@@ -151,7 +152,7 @@ func newIPRateLimiter(what string, perMin int, trusted []*net.IPNet, logf func(s
 	}
 	interval := time.Minute / time.Duration(perMin)
 	return &ipRateLimiter{
-		what: what, interval: interval, burst: interval * time.Duration(perMin),
+		tag: tag, what: what, interval: interval, burst: interval * time.Duration(perMin),
 		trusted: trusted, logf: logf, now: time.Now, maxClients: ipLimiterMaxClients,
 		clients: make(map[string]time.Time),
 	}
@@ -176,9 +177,9 @@ func (l *ipRateLimiter) allow(r *http.Request) (bool, time.Duration) {
 	ip, distinct := clientAddr(r, l.trusted)
 	if !distinct {
 		l.warnIndistinct.Do(func() {
-			l.logf("[dhm] WARNING: %s is set but requests arrive from a local or private address, "+
+			l.logf("[%s] WARNING: %s is set but requests arrive from a local or private address, "+
 				"so clients cannot be told apart and the limit is NOT enforced. "+
-				"Set webSocket.trustedProxies to your reverse proxy's address to enable it.", l.what)
+				"Set webSocket.trustedProxies to your reverse proxy's address to enable it.", l.tag, l.what)
 		})
 		return true, 0
 	}
