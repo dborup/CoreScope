@@ -292,18 +292,34 @@ for (const [file, containers] of Object.entries(INSET_FILES)) {
   });
 }
 
-test('I4 the only uncredited map left in public/ is the one #752 names out of scope', () => {
-  // home.js's My-Mesh health minimap hardcodes OSM tiles instead of the
-  // shared helper, so it is not one of the inset maps #752 lists; its OSM
-  // credit gap is recorded in the PR, not fixed here. Any OTHER uncredited
-  // map is a regression.
-  const known = { 'home.js': ['mapEl'] };
+// #756: home.js's My-Mesh health minimap was the one map #752/#754 left out
+// of scope (hardcoded OSM, not the registry's active provider), recorded as
+// a named exception below. It is now wired the same way the other insets
+// are — the control itself, via MC_ensureAttribution.
+test('I4 home.js: the My-Mesh minimap (#756) is routed through the helper', () => {
+  const src = read('home.js');
+  const sites = creditedMapSites(src);
+  assert.deepStrictEqual(sites.map((s) => s.container), ['mapEl'], 'the map found in home.js');
+  assert.ok(sites[0].credited, 'home.js: mapEl attaches no credit');
+  // MC_ensureAttribution adds no credit of its own — Leaflet's own control
+  // reads getAttribution() from each layer already on the map, so the tile
+  // layer itself must carry the OSM credit text.
+  assert.ok(/L\.tileLayer\([^)]*attribution\s*:\s*['"]© OpenStreetMap contributors['"]/s.test(src),
+    'home.js: the OSM tile layer carries no attribution text for the control to show');
+});
+
+test('I4 no uncredited map is left in public/ (#756 closes the home.js exception)', () => {
+  // #752 named home.js's My-Mesh health minimap (hardcoded OSM, not the
+  // shared helper) as its one known exception. #756 routes it through
+  // MC_ensureAttribution too (test-issue-756-attribution-followups.js), so
+  // there is no longer any exception to list: any uncredited map now found
+  // here is a regression.
   const found = {};
   for (const file of fs.readdirSync(PUBLIC_DIR).filter((f) => f.endsWith('.js'))) {
     const bad = creditedMapSites(read(file)).filter((s) => !s.credited).map((s) => s.container);
     if (bad.length) found[file] = bad.sort();
   }
-  assert.deepStrictEqual(found, known);
+  assert.deepStrictEqual(found, {});
 });
 
 // ── I5: the compact credit is sized, and overlays clear it ─────────────────
@@ -323,6 +339,21 @@ test('I5 style.css sizes .leaflet-control-attribution.mc-credit-compact from var
     assert.ok(new RegExp('\\n\\s*' + name + '\\s*:').test(css), name + ' is not defined');
   }
   assert.ok(!/#[0-9a-fA-F]{3,8}\b|rgba?\(/.test(rule[1]), 'no hardcoded colour in the rule: ' + rule[1]);
+});
+
+// #756 (review of #754, finding 1): the control is box-sizing: border-box,
+// so its vertical padding eats into the content height the font-size x
+// line-height budget assumed. Without the padding in the cap, every
+// two-line credit (Esri World Imagery, on every inset) is 2px taller than
+// --mc-credit-compact-max-height and scrolls even though it only has two
+// lines — the E2E's "clipped" check accepts overflow-y: auto as fine, so
+// this has to be pinned here and differentially in the E2E.
+test('I5 the compact cap includes the vertical padding (#756 — no 2px scroll)', () => {
+  const css = read('style.css');
+  const decl = css.match(/\n\s*--mc-credit-compact-max-height\s*:\s*([^;]+);/);
+  assert.ok(decl, 'no --mc-credit-compact-max-height declaration');
+  assert.ok(/--mc-credit-compact-padding-v/.test(decl[1]),
+    'the cap does not add the vertical padding, so a border-box two-line credit is 2px short: ' + decl[1].trim());
 });
 
 test('I5 the node-detail QR overlays clear the credit in the same corner', () => {

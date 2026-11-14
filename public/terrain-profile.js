@@ -26,6 +26,25 @@
   var ATTRIBUTION = 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0';
   var LICENCE_MARK = 'CC BY 4.0';
   var ATTRIBUTION_URL = 'https://creativecommons.org/licenses/by/4.0/';
+  /* #733 — Dataforsyningen's terms ("Vilkår for brug af data", v3.1,
+   * https://dataforsyningen.dk/Vilkaar) also want the credit to link the
+   * dataset and to say whether the data was changed. The profile is
+   * computed from DHM — sampled, interpolated and assessed — so this line
+   * carries the derived note; the hillshade tiles are the agency's own
+   * rendering and do not (public/map-tile-providers.js).
+   *
+   * internal/dhm owns all of these strings; test-issue-733-dhm-credit.js
+   * keeps this copy and the Go one equal. */
+  var DATASET_MARK = 'Danmarks Højdemodel';
+  var DATASET_URL = 'https://dataforsyningen.dk/data/930';
+  var DERIVED_NOTE = 'data bearbejdet';
+  var ATTRIBUTION_DERIVED = ATTRIBUTION + ' — ' + DERIVED_NOTE;
+  // In the order they occur in the line: the walk below takes each mark's
+  // first occurrence in what is left of the text.
+  var CREDIT_LINKS = [
+    { mark: DATASET_MARK, href: DATASET_URL, rel: 'noopener noreferrer', testid: 'tp-credit-dataset' },
+    { mark: LICENCE_MARK, href: ATTRIBUTION_URL, rel: 'noopener noreferrer license', testid: 'tp-credit-link' }
+  ];
   var ASSUMED_LABEL = 'assumed heights';
   var ENDPOINT = '/api/terrain/profile';
   var HASH_PARAM = 'profile';
@@ -919,6 +938,29 @@
     return e;
   }
 
+  /* #733 — appends `text` to `parent`, with each link's mark turned into an
+   * anchor, taking each mark's first occurrence in what is left of the
+   * text. Text nodes and elements only: nothing here builds markup, so a
+   * credit string can never become HTML. A mark that is not in the text is
+   * skipped, so the line still renders if the wording changes. */
+  function appendCredit(parent, text, links) {
+    var rest = text == null ? '' : String(text);
+    (links || []).forEach(function (l) {
+      var i = rest.indexOf(l.mark);
+      if (i < 0) return;
+      if (i > 0) parent.appendChild(el('span', null, rest.slice(0, i)));
+      var a = el('a', 'tp-credit-link', l.mark);
+      a.setAttribute('href', l.href);
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', l.rel);
+      a.setAttribute('data-testid', l.testid);
+      parent.appendChild(a);
+      rest = rest.slice(i + l.mark.length);
+    });
+    if (rest) parent.appendChild(el('span', null, rest));
+    return parent;
+  }
+
   function endpointLabel(ref, name) {
     if (!ref) return 'not picked';
     if (ref.kind === 'node') return name || (ref.pubkey.slice(0, 8) + '…');
@@ -1153,16 +1195,12 @@
       ui.chart.setAttribute('data-testid', 'tp-chart');
       body.appendChild(ui.chart);
 
-      // The shared credit text, with its licence marker as a link to the
-      // licence itself: the CC BY 4.0 obligation, spelled out once.
+      // The shared credit text, with the dataset and the licence marks as
+      // links to the dataset page and the licence itself, and the note that
+      // the profile is derived from DHM: the CC BY 4.0 obligations, spelled
+      // out once (#680, #733).
       ui.credit = el('p', 'tp-credit-line');
-      ui.credit.appendChild(el('span', null, ATTRIBUTION.slice(0, ATTRIBUTION.length - LICENCE_MARK.length)));
-      var licence = el('a', 'tp-credit-link', LICENCE_MARK);
-      licence.setAttribute('href', ATTRIBUTION_URL);
-      licence.setAttribute('target', '_blank');
-      licence.setAttribute('rel', 'noopener noreferrer license');
-      licence.setAttribute('data-testid', 'tp-credit-link');
-      ui.credit.appendChild(licence);
+      appendCredit(ui.credit, ATTRIBUTION_DERIVED, CREDIT_LINKS);
       body.appendChild(ui.credit);
 
       ui.detail = el('p', 'tp-detail');
@@ -1650,6 +1688,12 @@
   global.TerrainProfile = {
     ATTRIBUTION: ATTRIBUTION,
     ATTRIBUTION_URL: ATTRIBUTION_URL,
+    ATTRIBUTION_DERIVED: ATTRIBUTION_DERIVED,
+    DATASET_MARK: DATASET_MARK,
+    DATASET_URL: DATASET_URL,
+    DERIVED_NOTE: DERIVED_NOTE,
+    CREDIT_LINKS: CREDIT_LINKS,
+    appendCredit: appendCredit,
     ASSUMED_LABEL: ASSUMED_LABEL,
     ENDPOINT: ENDPOINT,
     HASH_PARAM: HASH_PARAM,

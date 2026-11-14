@@ -377,7 +377,7 @@ func (p *terrainProfiler) cardElevation(r *http.Request, req terrainRequest) (te
 // noteDegraded counts a degraded card served for a spent share budget and
 // reports it at most once per cardDegradedLogEvery, naming the setting.
 func (c *profileCards) noteDegraded(now time.Time) {
-	if n, due := c.degradedLog.note(c.degraded.Add(1), now, cardDegradedLogEvery); due {
+	if n, due := c.degradedLog.note(now, c.degraded.Add(1), cardDegradedLogEvery); due {
 		c.logf("[dhm] terrain share card: served %d degraded card(s) since the last report because map.dhm.profile.share.upstreamPerMin (%d) is spent; they refresh within a minute, raise it if previews stay incomplete", n, c.budget.perMin)
 	}
 }

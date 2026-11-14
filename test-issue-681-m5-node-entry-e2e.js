@@ -15,12 +15,12 @@
  *      for B, with no profile request until B is picked;
  *   3. picking B measures once, from that node, and shows the height
  *      source badge, the copy-link button (≥48 px, copies the pair) and the
- *      CC BY 4.0 licence link;
+ *      credit's CC BY 4.0 and dataset links (#733);
  *   4. the same round trip at 360 px portrait on a touch device;
  *   5. no action for a node without a fix;
  *   6. no action, no panel and no request with the profile disabled, even
  *      when the half link is opened directly;
- *   7. #711: the licence link is hit-testable over its whole 48 px box
+ *   7. #711: each credit link is hit-testable over its whole 48 px box
  *      (elementFromPoint, not just the bounding box), copy and close sit
  *      side by side, the half link stays in the address bar and survives a
  *      reload, A outside the Map page's node list is still named and
@@ -38,11 +38,19 @@ const BASE = process.env.BASE_URL || 'http://localhost:13700';
 const SHOT_DIR = process.env.SCREENSHOT_DIR || '';
 const PROFILE_PATH = '/api/terrain/profile';
 const ATTRIBUTION = 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0';
+// #733 — the profile is computed from DHM, so its footer adds the dataset
+// link and the statement that the data was changed (internal/dhm).
+const DATASET_MARK = 'Danmarks Højdemodel';
+const DATASET_URL = 'https://dataforsyningen.dk/data/930';
+const DERIVED_NOTE = 'data bearbejdet';
+const ATTRIBUTION_DERIVED = ATTRIBUTION + ' — ' + DERIVED_NOTE;
 const DHM_BLOCK = {
   enabled: true, url: '/api/map/dhm/wms', layer: 'dhm_terraen_skyggekort',
   minZoom: 7, maxZoom: 19, profile: true,
   bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
   attribution: ATTRIBUTION,
+  datasetName: DATASET_MARK, datasetUrl: DATASET_URL,
+  licenseName: 'CC BY 4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
 };
 const PNG_1X1 = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGM4ceIEAAS0AlkWLoFAAAAAAElFTkSuQmCC',
@@ -330,17 +338,27 @@ function profileAnswer(q) {
       assert(u.hash.indexOf('#/map?') === 0, 'hash = ' + u.hash);
       assert((qs.get('profile') || '').indexOf(PK + ',') === 0, 'profile = ' + qs.get('profile'));
     });
-    await step(`${label}: the credit links CC BY 4.0 to the licence`, async () => {
-      const l = await page.$eval('[data-testid="tp-credit-link"]', e => ({ href: e.getAttribute('href'), text: e.textContent, rel: e.getAttribute('rel'), target: e.getAttribute('target'), line: e.parentNode.textContent }));
+    // #733: the credit links the licence AND the dataset, and says the
+    // profile is derived from DHM.
+    await step(`${label}: the credit links CC BY 4.0 and the dataset, and says the data is derived`, async () => {
+      const read = (sel) => page.$eval(sel, e => ({ href: e.getAttribute('href'), text: e.textContent, rel: e.getAttribute('rel'), target: e.getAttribute('target'), line: e.parentNode.textContent }));
+      const l = await read('[data-testid="tp-credit-link"]');
       assert(l.href === 'https://creativecommons.org/licenses/by/4.0/', 'href = ' + l.href);
       assert(l.text === 'CC BY 4.0' && l.target === '_blank' && /noopener/.test(l.rel), JSON.stringify(l));
-      assert(l.line === ATTRIBUTION, 'credit = ' + l.line);
-      const b = await box(page, '[data-testid="tp-credit-link"]');
-      assert(b.h >= 48 && b.w >= 48, `licence link target ${b.w}x${b.h}`);
-      // #711 N1: and all of that box is the link's, not a neighbour's.
-      const hit = await hitArea(page, '[data-testid="tp-credit-link"]');
-      assert(hit.probes > 50 && hit.missCount === 0,
-        `licence link ${hit.w}x${hit.h}: ${hit.missCount}/${hit.probes} probes hit something else, e.g. ${JSON.stringify(hit.miss)}`);
+      assert(l.line === ATTRIBUTION_DERIVED, 'credit = ' + l.line);
+      const d = await read('[data-testid="tp-credit-dataset"]');
+      assert(d.href === DATASET_URL, 'dataset href = ' + d.href);
+      assert(d.text === DATASET_MARK && d.target === '_blank' && /noopener/.test(d.rel), JSON.stringify(d));
+      // #711 N1, for both links: a 48 px box that is all the link's own,
+      // hit-tested with elementFromPoint and not merely measured. The two
+      // links now share one line, so neither may eat the other's box.
+      for (const sel of ['[data-testid="tp-credit-link"]', '[data-testid="tp-credit-dataset"]']) {
+        const b = await box(page, sel);
+        assert(b.h >= 48 && b.w >= 48, `${sel} target ${b.w}x${b.h}`);
+        const hit = await hitArea(page, sel);
+        assert(hit.probes > 50 && hit.missCount === 0,
+          `${sel} ${hit.w}x${hit.h}: ${hit.missCount}/${hit.probes} probes hit something else, e.g. ${JSON.stringify(hit.miss)}`);
+      }
     });
     await step(`${label}: no page errors`, async () => {
       assert(rec.errors.length === 0, rec.errors.join(' | '));

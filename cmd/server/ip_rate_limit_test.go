@@ -41,7 +41,7 @@ func limiterReq(remote string, xff string) *http.Request {
 func TestIPRateLimiter_BudgetRefillAndRetryAfter(t *testing.T) {
 	clock := &limiterClock{t: time.Unix(1_800_000_000, 0)}
 	logs := &dhmLogSink{}
-	l := newIPRateLimiter("test", 6, nil, logs.logf)
+	l := newIPRateLimiter("dhm", "test", 6, nil, logs.logf)
 	l.now = clock.now
 	for i := 0; i < 6; i++ {
 		if ok, _ := l.allow(limiterReq("192.0.2.7:1", "")); !ok {
@@ -83,7 +83,7 @@ func TestIPRateLimiter_BudgetRefillAndRetryAfter(t *testing.T) {
 // allowed. A refund that returned 2 intervals would allow 5.
 func TestIPRateLimiter_RefundReturnsExactlyOneCharge(t *testing.T) {
 	clock := &limiterClock{t: time.Unix(1_800_000_000, 0)}
-	l := newIPRateLimiter("test", 6, nil, (&dhmLogSink{}).logf)
+	l := newIPRateLimiter("dhm", "test", 6, nil, (&dhmLogSink{}).logf)
 	l.now = clock.now
 	const client = "192.0.2.9:1"
 	for i := 0; i < 3; i++ {
@@ -104,7 +104,7 @@ func TestIPRateLimiter_RefundReturnsExactlyOneCharge(t *testing.T) {
 }
 
 func TestIPRateLimiter_OffAndNil(t *testing.T) {
-	if newIPRateLimiter("test", 0, nil, nil) != nil {
+	if newIPRateLimiter("dhm", "test", 0, nil, nil) != nil {
 		t.Fatal("perMin 0 built a limiter")
 	}
 	var l *ipRateLimiter
@@ -118,7 +118,7 @@ func TestIPRateLimiter_OffAndNil(t *testing.T) {
 // warning, exactly like the /ws limits (#1794).
 func TestIPRateLimiter_IndistinctClientsAreNotLimited(t *testing.T) {
 	logs := &dhmLogSink{}
-	l := newIPRateLimiter("map.dhm.profile.rateLimitPerMin", 1, nil, logs.logf)
+	l := newIPRateLimiter("dhm", "map.dhm.profile.rateLimitPerMin", 1, nil, logs.logf)
 	for i := 0; i < 5; i++ {
 		if ok, _ := l.allow(limiterReq("127.0.0.1:"+strconv.Itoa(1000+i), "203.0.113.9")); !ok {
 			t.Fatal("loopback peer limited without trustedProxies")
@@ -136,7 +136,7 @@ func TestIPRateLimiter_IndistinctClientsAreNotLimited(t *testing.T) {
 // resolution the /ws limiter uses (clientAddr).
 func TestIPRateLimiter_TrustedProxyXFF(t *testing.T) {
 	_, proxyNet, _ := net.ParseCIDR("127.0.0.1/32")
-	l := newIPRateLimiter("test", 1, []*net.IPNet{proxyNet}, nil)
+	l := newIPRateLimiter("dhm", "test", 1, []*net.IPNet{proxyNet}, nil)
 	if ok, _ := l.allow(limiterReq("127.0.0.1:1", "203.0.113.9")); !ok {
 		t.Fatal("first request refused")
 	}
@@ -165,7 +165,7 @@ func TestIPRateLimiter_TrustedProxyXFF(t *testing.T) {
 // IPv6 clients are counted per /64, the smallest block a subscriber gets,
 // so rotating addresses inside it buys no budget.
 func TestIPRateLimiter_IPv6Per64(t *testing.T) {
-	l := newIPRateLimiter("test", 1, nil, nil)
+	l := newIPRateLimiter("dhm", "test", 1, nil, nil)
 	if ok, _ := l.allow(limiterReq("[2001:db8:1:2::1]:1", "")); !ok {
 		t.Fatal("first refused")
 	}
@@ -182,7 +182,7 @@ func TestIPRateLimiter_IPv6Per64(t *testing.T) {
 // budget by evicting someone.
 func TestIPRateLimiter_TableIsBounded(t *testing.T) {
 	clock := &limiterClock{t: time.Unix(1_800_000_000, 0)}
-	l := newIPRateLimiter("test", 60, nil, nil)
+	l := newIPRateLimiter("dhm", "test", 60, nil, nil)
 	l.now = clock.now
 	l.maxClients = 3
 	for i := 1; i <= 3; i++ {
@@ -215,7 +215,7 @@ func TestIPRateLimiter_DefaultMaxClientsIsTheConstant(t *testing.T) {
 	if ipLimiterMaxClients != 4096 {
 		t.Fatalf("ipLimiterMaxClients = %d, want 4096", ipLimiterMaxClients)
 	}
-	l := newIPRateLimiter("test", 60, nil, nil)
+	l := newIPRateLimiter("dhm", "test", 60, nil, nil)
 	if l.maxClients != ipLimiterMaxClients {
 		t.Fatalf("newIPRateLimiter maxClients = %d, want ipLimiterMaxClients (%d)", l.maxClients, ipLimiterMaxClients)
 	}

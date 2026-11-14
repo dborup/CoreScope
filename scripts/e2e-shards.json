@@ -18,6 +18,14 @@
       "measurementNote": "New suite; #728 M1 Esri World Imagery base map and the Esri opt-in gate on Map and Live with an intercepted map.tiles client-config block, every third-party tile stubbed and a stubbed /api/map/dhm/wms: no Esri entry, customizer option or arcgisonline request while Esri is off; an Esri darkDefault/lightDefault or stored choice while off falls back to OSM with a console warning; with Esri on the imagery is offered, not requested until selected, loads {z}/{y}/{x} tiles to z19 with the exact credit and no filter in either theme; the customizer choice persists across a reload on Map and Live; and the DHM hillshade loads above it with both credits. Review round 3 adds Live's base-map credit: shown with no overlay, through every on/off order of the hillshade and the protected monuments (stubbed agency WMS), after explicit base picks and in-place Auto provider/theme swaps, in one control that no Live panel covers at 390x844, 740x360, 844x390 and 768x1024. About 70s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
     },
     {
+      "file": "test-issue-733-dhm-credit-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #733 DHM credit compliance with an intercepted map.dhm client-config block (credit link fields + profile: true), a stubbed /api/map/dhm/wms tile and a stubbed /api/terrain/profile: on Map and Live the hillshade credit names Klimadatastyrelsen, links the Danmarks Hojdemodel dataset and the CC BY 4.0 licence with target=_blank and rel=noopener, renders exactly the server's plain credit text, is visible and uncovered, and goes away with the overlay; a pre-#733 block without the link fields still shows the plain credit with no links; the profile chart footer carries the same two links plus the 'data bearbejdet' derived note, exactly once; and at 360x740 that footer stays inside the panel and the viewport, legible and uncovered, with both links at least 44px and hit by themselves. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds, next to the #728 credit suite."
+    },
+    {
       "file": "test-issue-752-inset-attribution-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
@@ -102,6 +110,14 @@
       "output": "e2e",
       "meanSeconds": 0,
       "measurementNote": "New suite; #723 M1 protected ancient monuments overlay on Map and Live with an intercepted heritage client-config block and every request to the agency's WMS answered by a synthetic PNG (the real service is never contacted): not offered without the block, off by default with zero requests, on/off/on (tiles, opacity, pane above the hillshade and below overlays/markers, credit including Live's second 'on', hash, storage), the exact pinned GetMap parameter set, zoom 11 silent and zoom 12 drawing, ?heritage=1 deep link across reload and pages, ?heritage=0 over a stored 'on', dark theme not inverting the overlay pane, independence from the DHM hillshade, and no requests or console errors outside Denmark. About 50s locally; no CI duration measured yet. Assigned to shard 1 next to the #680/#681 DHM suites."
+    },
+    {
+      "file": "test-issue-724-masts-layer-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #724 M3 Mastedatabasen antenna sites layer on Map and Live with an intercepted masts client-config block and a stubbed /api/masts that generates synthetic sites inside each requested cell (neither the proxy's upstream nor Mastedatabasen is ever contacted): not offered without the block and no request, the two toggles with the sites on and the interference layer off by default plus the credit, the zoom-13 gate (no request, status line), every request a single in-extent cell=E,N with at most 4 in flight and no cell twice on a z13 1920x1080 view, the interference and sites toggles with ?mastsInt=1 / ?masts=0 and the deep link, a clicked site's popup with published fields only and hostile stub text inert, and a pan away and back with no repeated request. About 35s locally; no CI duration measured yet. Assigned to shard 1 next to the #680/#723 overlay suites."
     },
     {
       "file": "test-issue-674-1byte-hop-modes-e2e.js",

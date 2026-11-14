@@ -253,15 +253,15 @@ func validAntennaM(h float64) bool { return h >= 0 && h <= terrainMaxAntennaM }
 // ── Profiler ───────────────────────────────────────────────────────────────
 
 type terrainProfiler struct {
-	src        dhm.ElevationSource
-	set        terrainSettings
-	radio      terrainRadio
-	cache      *dhm.Cache[terrainKey]
-	flight     dhm.Flight[[]byte]
-	limiter    *ipRateLimiter // nil: no per-client limit
-	admit      *dhm.Admission // one slot per profile fetch in flight (maxInFlight)
-	refused    atomic.Int64   // admission refusals (503) since start
-	refusalLog logThrottle    // the admission-refusal log line
+	src       dhm.ElevationSource
+	set       terrainSettings
+	radio     terrainRadio
+	cache     *dhm.Cache[terrainKey]
+	flight    dhm.Flight[[]byte]
+	limiter   *ipRateLimiter // nil: no per-client limit
+	admit     *dhm.Admission // one slot per profile fetch in flight (maxInFlight)
+	refused   atomic.Int64   // admission refusals (503) since start
+	refuseLog logThrottle    // the refusal report, once per terrainRefusalLogEvery
 	// card is the share card (#727 M3); nil unless sharing is enabled.
 	card       *profileCards
 	deadline   time.Duration
@@ -320,7 +320,7 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 		set:        set,
 		radio:      resolveTerrainRadio(rc, d.logf),
 		cache:      dhm.NewCache[terrainKey](set.cacheEntries, maxBytes, set.cacheTTL),
-		limiter:    newIPRateLimiter("map.dhm.profile.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
+		limiter:    newIPRateLimiter("dhm", "map.dhm.profile.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
 		admit:      dhm.NewAdmission(set.maxInFlight),
 		deadline:   terrainDeadline,
 		now:        time.Now,
@@ -664,31 +664,11 @@ func (p *terrainProfiler) writeFetchError(w http.ResponseWriter, r *http.Request
 // terrainRefusalLogEvery: the first at once, then the number since the last
 // report. Neither the token nor any URL is involved.
 func (p *terrainProfiler) noteRefusal() {
-	n, due := p.refusalLog.note(p.refused.Add(1), p.now(), terrainRefusalLogEvery)
-	if due {
-		p.logf("[dhm] terrain profile admission: refused %d request(s) since the last report because map.dhm.profile.maxInFlight (%d) fetches are running; raise it if this persists", n, p.admit.Cap())
+	n, ok := p.refuseLog.note(p.now(), p.refused.Add(1), terrainRefusalLogEvery)
+	if !ok {
+		return
 	}
-}
-
-// logThrottle reports a running count at most once per interval: the
-// first event at once, then the number of events since the last report.
-type logThrottle struct {
-	mu       sync.Mutex
-	at       time.Time // last report
-	reported int64     // events already reported
-}
-
-// note records that total events have happened so far and returns how
-// many to report now, if a report is due.
-func (l *logThrottle) note(total int64, now time.Time, every time.Duration) (int64, bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if !l.at.IsZero() && now.Sub(l.at) < every {
-		return 0, false
-	}
-	n := total - l.reported
-	l.at, l.reported = now, total
-	return n, true
+	p.logf("[dhm] terrain profile admission: refused %d request(s) since the last report because map.dhm.profile.maxInFlight (%d) fetches are running; raise it if this persists", n, p.admit.Cap())
 }
 
 // resolveTerrainEnd resolves a public key to a positioned, visible node,
@@ -813,7 +793,9 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 	n := len(e.dtm)
 	resp := TerrainProfileResponse{
 		DistanceM: round2(plan.DistanceM), StepM: round2(plan.StepM), SampleCount: n,
-		Model: "dtm", Attribution: dhm.Attribution, Samples: []TerrainSample{},
+		// The profile is computed from DHM, not shown as served, so the
+		// credit is the derived one (#733).
+		Model: "dtm", Attribution: dhm.AttributionDerived, Samples: []TerrainSample{},
 	}
 	if tq.both {
 		resp.Model = "both"

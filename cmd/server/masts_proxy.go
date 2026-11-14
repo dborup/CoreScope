@@ -24,9 +24,13 @@ package main
 //   - A miss is charged to the client's per-IP budget
 //     (map.masts.cellRateLimitPerMin, ipRateLimiter, #690/#702); a hit is
 //     free. At most map.masts.maxInFlight distinct cell fetches are
-//     admitted server-wide; beyond that a miss is 503 with Retry-After
-//     before any upstream work, and its charge is refunded (#705). Of the
-//     admitted fetches, at most mastsUpstreamSlots talk to the WFS at once.
+//     admitted server-wide (dhm.Admission, #744); beyond that a miss is
+//     503 with Retry-After before any upstream work, and its charge is
+//     refunded (#705). Of the admitted fetches, at most mastsUpstreamSlots
+//     talk to the WFS at once; one that gets no slot before mastsDeadline
+//     did no upstream work either, so it is the same refunded 503 (#753
+//     review N2). The browser paces its cell requests (public/masts-layer.js)
+//     so one viewer stays well inside maxInFlight.
 //   - Fail closed: an upstream failure or anything but a well-formed
 //     MasteIBrug page is 502 (504 on a timeout) with a fixed body and no
 //     upstream text, logged by category at most once per minute.
@@ -44,7 +48,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -91,8 +94,13 @@ const (
 // errMastsBadRequest is the single 400 body. It never carries client input.
 var errMastsBadRequest = errors.New("invalid masts request")
 
-// errMastsBusy is an admission refusal: maxInFlight fetches are running.
+// errMastsBusy is the 503 body: the fetch was refused admission, or was
+// admitted but never got an upstream slot. Neither reached upstream.
 var errMastsBusy = errors.New("antenna data busy")
+
+// errMastsStarved is an admitted fetch that waited for an upstream slot
+// until its deadline.
+var errMastsStarved = errors.New("masts: no upstream slot before the deadline")
 
 // mastsCellRe is "E,N" in plain decimal: no sign, no leading zero, no
 // spaces, no exponent. Six digits is ample for the extent and keeps Atoi
@@ -120,6 +128,10 @@ type MastsClientConfig struct {
 	CellSizeM   int    `json:"cellSizeM"`
 	Attribution string `json:"attribution"`
 	SourceURL   string `json:"sourceUrl"`
+	// CellExtent is the valid cell index range [minE, minN, maxE, maxN]
+	// (mastedb.Cell.Valid), so the browser never asks for a cell the
+	// server would refuse.
+	CellExtent [4]int `json:"cellExtent"`
 }
 
 // MastsCellResponse is the body of GET /api/masts.
@@ -200,15 +212,15 @@ type mastsProxy struct {
 	cache    *dhm.Cache[mastedb.Cell]
 	flight   dhm.Flight[[]byte]
 	limiter  *ipRateLimiter // nil: no per-client limit
-	admit    chan struct{}  // one token per admitted fetch (maxInFlight)
+	admit    *dhm.Admission // admitted fetches (maxInFlight)
 	upstream chan struct{}  // one token per open upstream request
 	deadline time.Duration
 	now      func() time.Time
 	logf     func(string, ...interface{})
 
-	failLog    mastsLogThrottle
-	refuseLog  mastsLogThrottle
-	refusedAll atomic.Int64 // admission refusals since start
+	failLog    logThrottle
+	refuseLog  logThrottle
+	refusedAll atomic.Int64 // 503s (refused or starved) since start
 }
 
 // newMastsProxy returns nil unless map.masts is enabled: the layer is then
@@ -226,8 +238,8 @@ func newMastsProxy(cfg MastsConfig, opts mastsProxyOptions) *mastsProxy {
 	return &mastsProxy{
 		client:   mastedb.NewClient(opts.client),
 		cache:    dhm.NewCache[mastedb.Cell](opts.cacheMaxEntries, opts.cacheMaxBytes, opts.cacheTTL),
-		limiter:  newIPRateLimiter("map.masts.cellRateLimitPerMin", opts.rateLimitPerMin, opts.trustedProxies, opts.logf),
-		admit:    make(chan struct{}, opts.maxInFlight),
+		limiter:  newIPRateLimiter("masts", "map.masts.cellRateLimitPerMin", opts.rateLimitPerMin, opts.trustedProxies, opts.logf),
+		admit:    dhm.NewAdmission(opts.maxInFlight),
 		upstream: make(chan struct{}, mastsUpstreamSlots),
 		deadline: mastsDeadline,
 		now:      opts.now,
@@ -283,20 +295,14 @@ func (p *mastsProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := strconv.Itoa(cell.E) + "," + strconv.Itoa(cell.N)
-	data, _, err := p.flight.Do(r.Context(), key, p.deadline, func(ctx context.Context) ([]byte, error) {
-		// Admission is per fetch, not per request: callers that join a
-		// running fetch add no work and are not counted.
-		select {
-		case p.admit <- struct{}{}:
-			defer func() { <-p.admit }()
-		default:
-			return nil, errMastsBusy
-		}
+	// Admission is per fetch, not per request: callers that join a
+	// running fetch add no work and take no slot.
+	data, _, err := p.flight.DoAdmitted(r.Context(), key, p.deadline, p.admit, func(ctx context.Context) ([]byte, error) {
 		select {
 		case p.upstream <- struct{}{}:
 			defer func() { <-p.upstream }()
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, errMastsStarved
 		}
 		page, err := p.client.FetchCell(ctx, cell)
 		if err != nil {
@@ -333,13 +339,13 @@ func (p *mastsProxy) writeFetchError(w http.ResponseWriter, r *http.Request, err
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
-	if errors.Is(err, errMastsBusy) {
-		// A refusal did no upstream work: give the per-IP charge back, so
-		// a client that retries as told never reaches 429 through 503s.
+	if errors.Is(err, dhm.ErrAdmissionFull) || errors.Is(err, errMastsStarved) {
+		// Neither did upstream work: give the per-IP charge back, so a
+		// client that retries as told never reaches 429 through 503s.
 		p.limiter.refund(r)
 		total := p.refusedAll.Add(1)
-		if n, ok := p.refuseLog.note(p.now(), total); ok {
-			p.logf("[masts] admission: refused %d request(s) since the last report because map.masts.maxInFlight (%d) fetches are running; raise it if this persists", n, cap(p.admit))
+		if n, ok := p.refuseLog.note(p.now(), total, mastsLogEvery); ok {
+			p.logf("[masts] busy: answered %d request(s) with 503 since the last report because map.masts.maxInFlight (%d) fetches were admitted and %d talk upstream at once; raise maxInFlight if this persists", n, p.admit.Cap(), mastsUpstreamSlots)
 		}
 		setRetryAfter(w, mastsBusyRetry)
 		writeError(w, http.StatusServiceUnavailable, errMastsBusy.Error())
@@ -350,7 +356,7 @@ func (p *mastsProxy) writeFetchError(w http.ResponseWriter, r *http.Request, err
 	if timeout {
 		reason = "timeout"
 	}
-	if _, ok := p.failLog.note(p.now(), 0); ok {
+	if p.failLog.allow(p.now(), mastsLogEvery) {
 		p.logf("[masts] upstream cell failed (%s)", reason)
 	}
 	if timeout {
@@ -358,26 +364,6 @@ func (p *mastsProxy) writeFetchError(w http.ResponseWriter, r *http.Request, err
 		return
 	}
 	writeError(w, http.StatusBadGateway, "antenna data unavailable")
-}
-
-// mastsLogThrottle lets a log line through at most once per mastsLogEvery.
-// note takes a running total and returns how much it grew since the last
-// line that went through.
-type mastsLogThrottle struct {
-	mu    sync.Mutex
-	at    time.Time
-	count int64
-}
-
-func (t *mastsLogThrottle) note(now time.Time, total int64) (int64, bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if !t.at.IsZero() && now.Sub(t.at) < mastsLogEvery {
-		return 0, false
-	}
-	n := total - t.count
-	t.at, t.count = now, total
-	return n, true
 }
 
 func (s *Server) mastsClientConfig() *MastsClientConfig {
@@ -391,6 +377,7 @@ func (s *Server) mastsClientConfig() *MastsClientConfig {
 		CellSizeM:   mastedb.CellSizeM,
 		Attribution: mastedb.Attribution,
 		SourceURL:   mastedb.SourceURL,
+		CellExtent:  [4]int{mastedb.MinCellE, mastedb.MinCellN, mastedb.MaxCellE, mastedb.MaxCellN},
 	}
 }
 

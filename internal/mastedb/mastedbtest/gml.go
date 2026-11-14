@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// cellSizeM is mastedb.CellSizeM; TestGMLRowsInsideCell in mastedb pins
+// cellSizeM is mastedb.CellSizeM; TestGMLHelperRowsInsideCell in mastedb pins
 // that the two agree.
 const cellSizeM = 2000
 
