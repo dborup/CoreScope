@@ -5,6 +5,11 @@ import (
 	"encoding/hex"
 	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -61,6 +66,16 @@ var (
 	// the partial they produce is correct, not the bug #704 reports.
 	holnisN = LatLon{54.847, 9.558}
 	holnisS = LatLon{54.842, 9.562}
+	// #763 — Peberholm, the artificial island of the Øresund link, is
+	// Danish (Tårnby Kommune), yet the generator listed it as Swedish.
+	// The positions are those of the #739 M0 research: Peberholm is the
+	// vertex centroid of its polygon in the INSPIRE administrative units
+	// ("Danmark" country unit), and saltholmSouth is a coast vertex at the
+	// southern tip of Saltholm in the same layer.
+	dragor        = LatLon{55.5930, 12.6720}
+	saltholm      = LatLon{55.6400, 12.7600}
+	saltholmSouth = LatLon{55.6065, 12.7636}
+	peberholm     = LatLon{55.5990, 12.7527}
 )
 
 func coversLL(p LatLon) bool {
@@ -79,7 +94,9 @@ func TestCoversPlaces(t *testing.T) {
 		{"Copenhagen", copenhagen, true},
 		{"Padborg", LatLon{54.8256, 9.3640}, true},
 		{"Tønder", tonder, true},
-		{"Saltholm", LatLon{55.6400, 12.7600}, true},
+		{"Saltholm", saltholm, true},
+		{"Saltholm, south tip", saltholmSouth, true},
+		{"Peberholm", peberholm, true},
 		{"Hesselø", hesselo, true},
 		// #704: Danish islets 2.1 km from the German shore of Flensborg
 		// Fjord, outside the 1250 m buffer. See
@@ -116,7 +133,6 @@ func TestCoversPlaces(t *testing.T) {
 		{"Sylt, List", LatLon{55.0167, 8.4333}, false},
 		// F3: Swedish islands in neither Natural Earth layer.
 		{"Hallands Väderö", LatLon{56.4470, 12.5600}, false},
-		{"Peberholm", LatLon{55.5980, 12.7450}, false},
 		{"Ven (Swedish, mid-Øresund)", LatLon{55.9070, 12.6950}, false},
 		{"Falsterbo", LatLon{55.4000, 12.8300}, false},
 		{"Ystad", ystad, false},
@@ -215,7 +231,13 @@ func TestPlanDanishPathsStayFull(t *testing.T) {
 		// The nearest Danish sea paths to foreign land: the polygon's
 		// 1250 m buffer must leave them covered.
 		{"Øresund, Helsingør→Copenhagen", helsingor, copenhagen},
-		{"Øresund, Copenhagen→Saltholm", copenhagen, LatLon{55.6400, 12.7600}},
+		{"Øresund, Copenhagen→Saltholm", copenhagen, saltholm},
+		// #763: these were partial while Peberholm was Swedish (617/763,
+		// 193/598, 209/514 and 0/109 samples covered).
+		{"Øresund, Dragør→Saltholm", dragor, saltholm},
+		{"Øresund, Dragør→Saltholm south tip", dragor, saltholmSouth},
+		{"Øresund, Dragør→Peberholm", dragor, peberholm},
+		{"Øresund, Saltholm south tip→Peberholm", saltholmSouth, peberholm},
 		{"Flensborg Fjord, Kollund→Egernsund", kollund, LatLon{54.9040, 9.5980}},
 		// #704: a path that ends on a Danish islet, not past it.
 		{"Flensborg Fjord, Kollund→Store Okseø", kollund, storeOkseo},
@@ -262,6 +284,118 @@ func TestOkseoerneClearTheForeignPolygon(t *testing.T) {
 		}
 		t.Logf("%s: %.0f m clear of the foreign-land polygon", c.name, best)
 	}
+}
+
+// #763 — all of Peberholm is covered: a 0.001° grid over the bbox of its
+// INSPIRE polygon (12.726–12.777 E, 55.588–55.611 N, from the #739 M0
+// research), which also takes in the sea around it. While the generator
+// listed it as Swedish, 1109 of these 1248 points were uncovered.
+func TestPeberholmIsCovered(t *testing.T) {
+	n, out := 0, 0
+	for i := 0; i <= 23; i++ {
+		for j := 0; j <= 51; j++ {
+			p := LatLon{55.588 + float64(i)*0.001, 12.726 + float64(j)*0.001}
+			n++
+			if !coversLL(p) {
+				out++
+				if out <= 3 {
+					t.Errorf("%.3f, %.3f is not covered", p.Lat, p.Lon)
+				}
+			}
+		}
+	}
+	if out > 0 {
+		t.Errorf("%d of %d points in Peberholm's bbox are not covered", out, n)
+	}
+}
+
+// #763 — dropping Peberholm leaves the foreign side alone: Swedish land
+// near Malmö and Falsterbo, and Øresund sea 0.7 km west of Kärnan (about
+// 0.3 km off the Helsingborg shore, inside the 1250 m buffer), stay
+// uncovered, and well inside the polygon, not just on its edge.
+func TestPeberholmFixKeepsTheForeignSide(t *testing.T) {
+	b := foreignLand()
+	for _, c := range []struct {
+		name string
+		p    LatLon
+	}{
+		{"Malmö", malmo},
+		{"Falsterbo lighthouse", LatLon{55.3833, 12.8167}},
+		{"Øresund off Helsingborg", LatLon{56.0478, 12.6857}},
+	} {
+		e, n := ToUTM32(c.p.Lat, c.p.Lon)
+		if Covers(e, n) {
+			t.Errorf("%s: covered", c.name)
+			continue
+		}
+		best := math.Inf(1)
+		for i := range b.segs {
+			best = math.Min(best, pointSegM(&b.segs[i], e, n))
+		}
+		if best < 100 {
+			t.Errorf("%s: %.0f m inside the foreign-land polygon, want at least 100 m", c.name, best)
+		}
+		t.Logf("%s: %.0f m inside the foreign-land polygon", c.name, best)
+	}
+}
+
+// #763 — the generator's hand-made islands agree with the embedded
+// polygon: every EXTRA_ISLANDS centre (foreign) lies on it, and every
+// DANISH_ISLANDS centre is covered. CI cannot run the generator (it needs
+// the Natural Earth files), so this is what ties a change to those lists
+// to a regenerated foreign_land.txt. With TestPeberholmIsCovered, it also
+// keeps Peberholm out of EXTRA_ISLANDS.
+func TestGeneratorHandMadeIslandsMatchThePolygon(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "scripts", "gen-dhm-foreign-land.py"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		list    string
+		foreign bool
+	}{
+		{"EXTRA_ISLANDS", true},
+		{"DANISH_ISLANDS", false},
+	} {
+		islands := handMadeIslands(t, string(src), c.list)
+		if len(islands) == 0 {
+			t.Fatalf("%s: no islands parsed", c.list)
+		}
+		for name, p := range islands {
+			if got := coversLL(p); got == c.foreign {
+				t.Errorf("%s %q at %v: Covers = %v", c.list, name, p, got)
+			}
+		}
+	}
+}
+
+var islandRow = regexp.MustCompile(`^\s*\("([^"]+)",\s*(-?[0-9.]+),\s*(-?[0-9.]+),`)
+
+// handMadeIslands reads the centres of the tuple list name = (...) from
+// the generator's source, comment lines skipped.
+func handMadeIslands(t *testing.T, src, name string) map[string]LatLon {
+	_, body, ok := strings.Cut(src, "\n"+name+" = (\n")
+	body, _, ok2 := strings.Cut(body, "\n)\n")
+	if !ok || !ok2 {
+		t.Fatalf("%s not found in the generator", name)
+	}
+	out := map[string]LatLon{}
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		m := islandRow.FindStringSubmatch(line)
+		if m == nil {
+			t.Fatalf("%s: unparsed line %q", name, line)
+		}
+		lat, err1 := strconv.ParseFloat(m[2], 64)
+		lon, err2 := strconv.ParseFloat(m[3], 64)
+		if err1 != nil || err2 != nil {
+			t.Fatalf("%s: line %q", name, line)
+		}
+		out[m[1]] = LatLon{lat, lon}
+	}
+	return out
 }
 
 // pointSegM is the distance from (e, n) to the segment s, in metres.
