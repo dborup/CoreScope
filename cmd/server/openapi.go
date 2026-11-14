@@ -78,6 +78,19 @@ func routeDescriptions() map[string]routeMeta {
 				{Status: "503", Description: "map.dhm.profile.maxInFlight uncached profiles (default 4) are already being fetched, server-wide; no upstream call. Requests for a profile already being fetched share that fetch, so when its fetch is refused they are refused with it. A refusal is not charged to the per-client budget. Retry-After gives the seconds to wait."},
 				{Status: "504", Description: "The elevation service timed out (per raster, or 25 s for the whole profile)."},
 			}},
+		"GET /api/terrain/heritage": {Summary: "Protected ancient monument at a map point (Denmark)", Description: "What the Slots- og Kulturstyrelsen register of protected ancient monuments (Fund og Fortidsminder) says about one point: the protection zone (layer fundogfortidsminder_areal_beskyttelse) holding it, or else the nearest one whose edge lies within map.heritage.radiusM (default 100 m). nearest carries the dataset's own anlaegstype (type), datering (dating), fred_status (status), frednr (protectionNumber) and systemnr (systemNumber), the distance to the zone's edge in whole metres (0 inside) and insideZone; it is null when no zone qualifies. count is the zones holding the point or within the radius; truncated means the area held more zones than one upstream page. Nothing from the request is echoed. The server asks the agency's public WFS for one fixed 250 m EPSG:25832 cell grown by the radius and computes the answer locally; cells are cached (default 168 h) and X-CoreScope-Cache says hit, miss or none (outside the layers' extent: answered empty with no upstream call). Credit: (c) Slots- og Kulturstyrelsen. 404 unless map.heritage.enabled. (#723 M2)", Tag: "config",
+			QueryParams: []paramMeta{
+				{Name: "lat", Description: "latitude in decimal degrees, plain decimal", Type: "number", Required: true},
+				{Name: "lon", Description: "longitude in decimal degrees, plain decimal", Type: "number", Required: true},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Missing, repeated, malformed or unknown parameter (no upstream call)."},
+				{Status: "404", Description: "map.heritage is not enabled."},
+				{Status: "429", Description: "Per-client budget of lookups not in the cache exceeded (map.heritage.rateLimitPerMin, default 20/min). Retry-After gives the seconds to wait."},
+				{Status: "502", Description: "The register's service failed or answered something unexpected; no upstream detail is returned."},
+				{Status: "503", Description: "map.heritage.maxInFlight upstream lookups (default 4) are already running, server-wide; no upstream call, not charged to the per-client budget. Retry-After: 5."},
+				{Status: "504", Description: "The register's service timed out (map.heritage.upstreamTimeoutMs)."},
+			}},
 
 		// Admin / system
 		"GET /api/health": {Summary: "Health check", Description: "Returns server health, uptime, and memory stats.", Tag: "admin"},

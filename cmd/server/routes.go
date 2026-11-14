@@ -103,6 +103,9 @@ type Server struct {
 	// terrain is the #681 terrain profile; nil unless the proxy is active
 	// and map.dhm.profile.enabled (the endpoint then answers 404).
 	terrain *terrainProfiler
+	// heritage is the #723 M2 click-for-info query; nil unless
+	// map.heritage is enabled.
+	heritage *heritageQuery
 
 	// Cached /api/analytics/wardriving response — per-window, recomputed at most once every 30s
 	wardrivingStatsMu       sync.Mutex
@@ -233,6 +236,7 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 		dhm: newDHMProxyFromConfig(cfg),
 	}
 	s.terrain = newTerrainProfilerFromConfig(cfg, s.dhm, db)
+	s.heritage = newHeritageQueryFromConfig(cfg)
 	return s
 }
 
@@ -335,6 +339,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/config/map", s.handleConfigMap).Methods("GET")
 	r.HandleFunc("/api/map/dhm/wms", s.handleDHMTile).Methods("GET")
 	r.HandleFunc("/api/terrain/profile", s.handleTerrainProfile).Methods("GET")
+	r.HandleFunc("/api/terrain/heritage", s.handleHeritageInfo).Methods("GET")
 	r.HandleFunc("/api/config/geo-filter", s.handleConfigGeoFilter).Methods("GET")
 	r.HandleFunc("/api/config/areas", s.handleConfigAreas).Methods("GET")
 	r.HandleFunc("/api/config/areas/polygons", s.handleConfigAreasPolygons).Methods("GET")

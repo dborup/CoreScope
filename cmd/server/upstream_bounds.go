@@ -51,11 +51,9 @@ func (k configKnobs) integer(key string, v *int, def, lo, hi int) int {
 // throttled report. The leader of a dhm.Flight takes the slot, so callers
 // that join a running fetch are free.
 type admission struct {
-	admit    chan struct{} // one token per fetch in flight
-	refused  atomic.Int64  // refusals since start
-	logMu    sync.Mutex    // guards the throttle below
-	logAt    time.Time     // last refusal report
-	logCount int64         // refusals already reported
+	admit   chan struct{} // one token per fetch in flight
+	refused atomic.Int64  // refusals since start
+	report  eventReport   // throttles the refusal report
 }
 
 func newAdmission(slots int) admission {
@@ -74,17 +72,30 @@ func (a *admission) tryAdmit() bool {
 
 func (a *admission) release() { <-a.admit }
 
-// refusal counts one refusal and returns how many to report now: all
-// those since the last report, at most once per every (the first at
-// once); 0 while throttled.
+// refusal counts one refusal and returns how many to report now (see
+// eventReport.due); 0 while throttled.
 func (a *admission) refusal(now time.Time, every time.Duration) int64 {
-	total := a.refused.Add(1)
-	a.logMu.Lock()
-	defer a.logMu.Unlock()
-	if !a.logAt.IsZero() && now.Sub(a.logAt) < every {
+	return a.report.due(a.refused.Add(1), now, every)
+}
+
+// eventReport throttles the log line of a counted event: the first at
+// once, then at most one per interval, each carrying the number of events
+// since the previous line.
+type eventReport struct {
+	mu       sync.Mutex
+	at       time.Time // last report
+	reported int64     // events already reported
+}
+
+// due takes the running total and returns how many events to report now:
+// all those since the last report, or 0 while throttled.
+func (r *eventReport) due(total int64, now time.Time, every time.Duration) int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.at.IsZero() && now.Sub(r.at) < every {
 		return 0
 	}
-	n := total - a.logCount
-	a.logAt, a.logCount = now, total
+	n := total - r.reported
+	r.at, r.reported = now, total
 	return n
 }
