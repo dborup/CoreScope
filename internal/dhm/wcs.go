@@ -192,7 +192,7 @@ func NewWCSSource(c *Client) *WCSSource { return &WCSSource{c} }
 // the query); every upstream or decoding failure is a FetchError, and so
 // is a done ctx ("canceled" or "timeout").
 func (s *WCSSource) FetchRaster(ctx context.Context, r RasterRequest) (Grid, error) {
-	data, err := s.c.get(ctx, WCSService, r.coverageQuery(), geoTIFFContentTypes)
+	data, err := s.c.get(ctx, nil, WCSService, r.coverageQuery(), geoTIFFContentTypes)
 	if err != nil {
 		return Grid{}, err
 	}
