@@ -10,11 +10,16 @@
  *   - root.style: --mc-role-{role}, --mc-role-{role}-text, --node-{role},
  *     --mc-marker-stroke-{color,width,opacity}, --mc-mb-{confirmed,suspected,unknown},
  *     --mc-rt-ramp-{0..4}, --logo-accent, --logo-accent-hi, theme vars
+ *   - #681 M6: the `terrain` override section, and the six path-profile
+ *     chart vars (--terrain-fill, --terrain-clutter, --los-line,
+ *     --fresnel-100, --fresnel-60, --profile-blocked)
  *
  * Must NOT touch:
  *   - localStorage: meshcore-theme (theme light/dark),
  *     meshcore-gesture-hints-* (own button), meshcore-favorites,
- *     mc-channels-* selection state
+ *     mc-channels-* selection state, mc-terrain-h:* (the viewer's own
+ *     per-endpoint antenna heights — the profile panel's data, not the
+ *     customizer's, exactly like favorites)
  */
 'use strict';
 
@@ -246,6 +251,56 @@ test('clears --mc-mb-* and --mc-rt-ramp-* preset vars from root.style', () => {
   for (let i = 0; i < 5; i++) {
     assert.strictEqual(env.rootStyle.getPropertyValue('--mc-rt-ramp-' + i), '', '--mc-rt-ramp-' + i);
   }
+});
+
+// ── #681 M6 — the terrain-profile section and its chart colours ──
+
+test('clears the terrain override section with cs-theme-overrides', () => {
+  const env = loadCustomizer();
+  env.localStorage.setItem('cs-theme-overrides', JSON.stringify({
+    terrain: { heightRepeater: 25, model: 'dtm' },
+    theme: { terrainFill: '#123456' },
+  }));
+  env.api.resetAll();
+  assert.strictEqual(env.localStorage.getItem('cs-theme-overrides'), null);
+});
+
+test('clears the six path-profile chart vars from root.style', () => {
+  const env = loadCustomizer();
+  const vars = ['--terrain-fill', '--terrain-clutter', '--los-line',
+    '--fresnel-100', '--fresnel-60', '--profile-blocked'];
+  vars.forEach((v) => env.rootStyle.setProperty(v, '#abcdef'));
+  env.api.resetAll();
+  vars.forEach((v) => {
+    assert.strictEqual(env.rootStyle.getPropertyValue(v), '', v + ' survived reset');
+  });
+});
+
+test('every THEME_CSS_MAP variable is covered by reset, terrain included', () => {
+  // The reset walks THEME_CSS_MAP, so a key added without a variable — or a
+  // variable written outside the map — would quietly survive a reset.
+  const env = loadCustomizer();
+  const map = env.api.THEME_CSS_MAP;
+  Object.keys(map).forEach((k) => env.rootStyle.setProperty(map[k], 'x'));
+  env.api.resetAll();
+  Object.keys(map).forEach((k) => {
+    assert.strictEqual(env.rootStyle.getPropertyValue(map[k]), '', map[k] + ' survived reset');
+  });
+  env.api.TERRAIN_COLOR_KEYS.forEach((k) => {
+    assert.ok(map[k], k + ' is not in THEME_CSS_MAP, so reset would miss it');
+  });
+});
+
+test('does NOT clear the viewer’s own remembered antenna heights', () => {
+  // mc-terrain-h:* is the Path profile panel's per-endpoint memory, not a
+  // customizer setting: a height somebody measured for their own mast is
+  // their data, like meshcore-favorites, and #1496 leaves that alone.
+  const env = loadCustomizer();
+  env.localStorage.setItem('mc-terrain-h:' + 'a'.repeat(64), '18');
+  env.localStorage.setItem('mc-terrain-h:point', '2');
+  env.api.resetAll();
+  assert.strictEqual(env.localStorage.getItem('mc-terrain-h:' + 'a'.repeat(64)), '18');
+  assert.strictEqual(env.localStorage.getItem('mc-terrain-h:point'), '2');
 });
 
 test('does NOT clear theme (meshcore-theme) localStorage key', () => {

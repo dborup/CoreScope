@@ -42,6 +42,16 @@
       "measurementNote": "New suite; #681 M5 node-detail entry into the Map Path profile tool with an intercepted dhm client-config block and a stubbed /api/terrain/profile: the full page and side pane offer 'Terrain profile to…' as a 48px #/map?profile=<key> link, following it opens the tool with A named and the picker armed for B and no request until B, one request after B, the default height-source badges, copy link (48px, recording clipboard, same row as close at 360px), the CC BY 4.0 licence link, the same round trip at 360x740 touch, the half link opened directly, no action for a node without a fix, and no action, panel or request with the profile disabled. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681 DHM suites."
     },
     {
+      "file": "test-issue-681-m6-customizer-terrain-e2e.js",
+      "shard": 1,
+      "env": {
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #681 M6 customizer terrain settings with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile that resolves ha/hb/model the way the server does: the five antenna-height defaults and the elevation-model select on the Display tab, the six chart colours on the Theme tab in light and dark, a changed antenna default re-measuring and redrawing an open profile without overruling an operator-set height or reaching the link, a changed chart colour becoming the chart's computed fill, a terrain-only default opening a terrain-only profile while a link that states the model still wins, 48px touch targets at 360x740 and 740x360, the export carrying the terrain section and no token with nothing under map.dhm in the client, and axe plus measured label contrast in light and dark. About 75s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681 DHM suites."
+    },
+    {
       "file": "test-issue-674-1byte-hop-modes-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

@@ -36,8 +36,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke'];
+  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain'];
+  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -53,10 +53,23 @@
     cardBg: '--card-bg', contentBg: '--content-bg', detailBg: '--detail-bg',
     inputBg: '--input-bg', rowStripe: '--row-stripe', rowHover: '--row-hover', selectedBg: '--selected-bg',
     pathHashWarn: '--path-hash-warn',
+    // #681 M6 — the terrain-profile chart. These live in the theme /
+    // themeDark sections like every other colour, so light and dark are
+    // edited separately and _resetAll strips them with the rest.
+    terrainFill: '--terrain-fill', terrainClutter: '--terrain-clutter',
+    losLine: '--los-line', fresnel100: '--fresnel-100',
+    fresnel60: '--fresnel-60', profileBlocked: '--profile-blocked',
     font: '--font', mono: '--mono'
   };
 
-  var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) { return k !== 'font' && k !== 'mono'; });
+  // #681 M6 — the terrain keys are themeable but no PRESET defines them,
+  // so they must stay out of preset detection: an operator who recolours
+  // the profile chart has not stopped using the preset they picked.
+  var TERRAIN_COLOR_KEYS = ['terrainFill', 'terrainClutter', 'losLine', 'fresnel100', 'fresnel60', 'profileBlocked'];
+
+  var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) {
+    return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1;
+  });
 
   // ── Brand logo swap helper (PR #1137) ──
   // The default navbar brand logo is an inline <svg class="brand-logo"> so it
@@ -315,6 +328,9 @@
     surface1: 'Cards', surface2: 'Panels', surface3: 'Tertiary Surface', sectionBg: 'Section Header', cardBg: 'Card Fill', contentBg: 'Content Area',
     detailBg: 'Detail Panels', inputBg: 'Inputs', rowStripe: 'Table Stripe',
     rowHover: 'Row Hover', selectedBg: 'Selected', pathHashWarn: '1-byte Path Hash',
+    terrainFill: 'Terrain (DTM)', terrainClutter: 'Trees & Buildings (DSM)',
+    losLine: 'Line of Sight', fresnel100: 'Fresnel Zone', fresnel60: 'Fresnel 60 %',
+    profileBlocked: 'Obstruction',
     font: 'Body Font', mono: 'Mono Font'
   };
 
@@ -333,6 +349,12 @@
     detailBg: 'Modal, packet detail, side panels', inputBg: 'Text inputs, dropdowns',
     rowStripe: 'Alternating table rows', rowHover: 'Table row hover', selectedBg: 'Selected/active rows',
     pathHashWarn: 'Amber accent recommending a 2/3-byte over a 1-byte path hash (channels, packet detail, node badge)',
+    terrainFill: 'Path profile: the bare ground from the terrain model',
+    terrainClutter: 'Path profile: what the surface model adds over the ground — canopy, rooftops',
+    losLine: 'Path profile: the straight line between the two antennas, and the map line while picking',
+    fresnel100: 'Path profile: the outline of the first Fresnel zone',
+    fresnel60: 'Path profile: the 60 % criterion a link has to clear',
+    profileBlocked: 'Path profile: where terrain rises into the zone',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
   };
 
@@ -396,6 +418,57 @@
   var BASIC_KEYS = ['accent', 'navBg', 'navText', 'background', 'text', 'statusGreen', 'statusYellow', 'statusRed'];
   var ADVANCED_KEYS = ['accentHover', 'navBg2', 'navTextMuted', 'navActiveBg', 'textMuted', 'border', 'surface1', 'surface2', 'cardBg', 'contentBg', 'detailBg', 'inputBg', 'rowStripe', 'rowHover', 'selectedBg', 'pathHashWarn'];
   var FONT_KEYS = ['font', 'mono'];
+
+  // ── #681 M6 — terrain-profile defaults ──
+  // The customizer owns the DEFAULT antenna height per endpoint kind and
+  // the default elevation model. Everything that decides physics or costs
+  // money — the k-factor, the frequency, and the whole map.dhm block with
+  // its Dataforsyningen token — stays in server config and is deliberately
+  // absent here (#681 owner decision on M6).
+  //
+  // Height precedence, most specific first (see public/terrain-profile.js):
+  //   1. the deep link (?ha=/?hb=)            badge "link"
+  //   2. the viewer's own remembered height   badge "yours"
+  //   3. the operator's radio.antennaHeightsM badge "operator"
+  //   4. THIS section                         badge "default"
+  //   5. the server's built-in role defaults  badge "default"
+  // The customizer is a default, so it yields to an operator who named a
+  // real height for a node or a role in config.json, and it is never
+  // written into a shared link.
+  var TERRAIN_HEIGHT_FIELDS = [
+    { key: 'heightRepeater', label: 'Repeater', hint: 'Mast-mounted infrastructure' },
+    { key: 'heightRoom', label: 'Room server', hint: 'Usually indoors, on a shelf or wall' },
+    { key: 'heightCompanion', label: 'Companion', hint: 'Handheld, roughly head height' },
+    { key: 'heightSensor', label: 'Sensor', hint: 'Telemetry nodes' },
+    { key: 'heightPoint', label: 'Map point', hint: 'A spot picked on the map, not a node' }
+  ];
+  var TERRAIN_MODELS = ['dtm', 'both'];
+  // Mirrors terrainRoleAntennaM and the model default in
+  // cmd/server/terrain_profile.go: the customizer starts from exactly what
+  // the server would have answered, so an untouched section changes nothing.
+  var TERRAIN_DEFAULTS = {
+    heightRepeater: 10, heightRoom: 5, heightCompanion: 2, heightSensor: 2,
+    heightPoint: 2, model: 'both'
+  };
+  var TERRAIN_MAX_HEIGHT_M = 100;
+
+  /** Antenna height above ground, in metres: a finite number in 0-100. */
+  function isValidAntennaHeight(val) {
+    var n = typeof val === 'string' ? parseFloat(val) : val;
+    return typeof n === 'number' && isFinite(n) && n >= 0 && n <= TERRAIN_MAX_HEIGHT_M;
+  }
+
+  /** The effective terrain settings: this section over the built-ins. */
+  function terrainSettings(effectiveConfig) {
+    var src = (effectiveConfig && effectiveConfig.terrain) || {};
+    var out = {};
+    for (var i = 0; i < TERRAIN_HEIGHT_FIELDS.length; i++) {
+      var k = TERRAIN_HEIGHT_FIELDS[i].key;
+      out[k] = isValidAntennaHeight(src[k]) ? Number(src[k]) : TERRAIN_DEFAULTS[k];
+    }
+    out.model = TERRAIN_MODELS.indexOf(src.model) >= 0 ? src.model : TERRAIN_DEFAULTS.model;
+    return out;
+  }
 
   // ── Validation helpers ──
 
@@ -556,14 +629,43 @@
           }
         }
         if (Object.keys(ts).length) clean[key] = ts;
+      } else if (key === 'terrain' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #681 M6 — antenna-height defaults and the elevation model.
+        var tIn = delta[key];
+        var tOut = {};
+        for (var thi = 0; thi < TERRAIN_HEIGHT_FIELDS.length; thi++) {
+          var hk = TERRAIN_HEIGHT_FIELDS[thi].key;
+          if (tIn[hk] == null) continue;
+          if (isValidAntennaHeight(tIn[hk])) {
+            tOut[hk] = Number(tIn[hk]);
+          } else {
+            console.warn('[customizer-v2] Invalid antenna height rejected:', 'terrain.' + hk, tIn[hk]);
+          }
+        }
+        if (tIn.model != null) {
+          if (TERRAIN_MODELS.indexOf(tIn.model) >= 0) {
+            tOut.model = tIn.model;
+          } else {
+            console.warn('[customizer-v2] Invalid terrain model rejected:', tIn.model);
+          }
+        }
+        if (Object.keys(tOut).length) clean[key] = tOut;
       } else if (key === 'branding' || key === 'home') {
         // Pass through as-is (object shape)
         if (typeof delta[key] === 'object' && delta[key] !== null) {
           clean[key] = JSON.parse(JSON.stringify(delta[key]));
         }
-      } else {
-        // Unknown key — pass through for forward compatibility
+      } else if (VALID_SECTIONS.indexOf(key) !== -1) {
+        // A known section with no validator of its own (distanceUnit,
+        // favorites, myNodes).
         clean[key] = delta[key];
+      } else {
+        // #681 M6 — an unknown top-level section is DROPPED, never stored.
+        // computeEffective merges whatever survives into window.SITE_CONFIG,
+        // so passing unknown sections through let an imported theme file
+        // plant server-only config in the client — map.dhm.token above all.
+        // VALID_SECTIONS is the whole surface the customizer owns.
+        console.warn('[customizer-v2] Unknown section dropped:', key);
       }
     }
     return clean;
@@ -1035,6 +1137,21 @@
           }
         }
       }
+      // #681 M6 — terrain: antenna heights in metres, and the model enum.
+      if (key === 'terrain' && typeof obj[key] === 'object' && obj[key] !== null) {
+        for (var trk in obj[key]) {
+          if (!obj[key].hasOwnProperty(trk)) continue;
+          if (trk === 'model') {
+            if (TERRAIN_MODELS.indexOf(obj[key][trk]) === -1) {
+              errors.push('Invalid terrain model: "' + obj[key][trk] + '" \u2014 must be dtm or both');
+            }
+          } else if (!TERRAIN_DEFAULTS.hasOwnProperty(trk)) {
+            console.warn('[customizer-v2] Unknown terrain key in import:', trk);
+          } else if (!isValidAntennaHeight(obj[key][trk])) {
+            errors.push('Invalid antenna height: terrain.' + trk + ' = "' + obj[key][trk] + '" \u2014 must be 0-' + TERRAIN_MAX_HEIGHT_M + ' m');
+          }
+        }
+      }
       // Validate distanceUnit
       if (key === 'distanceUnit' && DISTANCE_UNIT_VALUES.indexOf(obj[key]) === -1) {
         errors.push('Invalid distanceUnit: "' + obj[key] + '" — must be km, mi, or auto');
@@ -1165,6 +1282,18 @@
       '.cust-hint{font-size:10px;color:var(--text-muted);margin-top:1px;line-height:1.2}',
       '.cust-color-row input[type="color"]{width:40px;height:32px;border:1px solid var(--border);border-radius:6px;cursor:pointer;padding:2px;background:var(--input-bg)}',
       '.cust-color-row .cust-hex{font-family:var(--mono);font-size:12px;color:var(--text-muted);min-width:70px}',
+      // #681 M6 — terrain-profile antenna defaults. 48px is the house
+      // minimum for a tap target (#235, #2052, #666), and a number input
+      // that wide keeps the stepper arrows reachable on a phone.
+      '.cust-terrain-row{display:flex;align-items:center;gap:8px;margin-bottom:10px}',
+      '.cust-terrain-row>div:first-child{min-width:160px;flex:1}',
+      '.cust-terrain-row label{font-size:12px;font-weight:600;margin:0;display:block}',
+      '.cust-terrain-row input[type="number"]{width:88px;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--input-bg);color:var(--text);box-sizing:border-box;touch-action:manipulation}',
+      '.cust-terrain-row input[type="number"]:focus{outline:none;border-color:var(--accent)}',
+      '#cv2-terrain-model{min-height:48px;touch-action:manipulation}',
+      // Colour swatches are a compact 40x32 on a pointer device. On touch
+      // they are the tap target, so they take the 48px floor there.
+      '@media(pointer:coarse){.cust-color-row input[type="color"]{width:48px;height:48px}}',
       '.cv2-override-dot{color:var(--link-color);cursor:pointer;font-size:10px;margin-left:4px;vertical-align:middle;title:"Reset to server default"}',
       '.cv2-override-dot:hover{color:var(--status-red)}',
       '.cust-node-dot{display:inline-block;width:16px;height:16px;border-radius:50%;vertical-align:middle}',
@@ -1200,6 +1329,15 @@
     document.head.appendChild(_styleEl);
   }
 
+  /* #681 M6 — tell an open Path profile panel that its defaults moved.
+   * Fired only for an actual terrain change, so the panel never re-measures
+   * because somebody dragged a colour picker. */
+  function _notifyTerrainDefaults() {
+    try {
+      window.dispatchEvent(new CustomEvent('terrain-defaults-changed'));
+    } catch (_e) { /* no CustomEvent: the next profile picks it up anyway */ }
+  }
+
   function _tabBadge(section) {
     var n = _countOverrides(section);
     return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : '';
@@ -1211,7 +1349,7 @@
       { id: 'theme', glyph: 'ph:palette', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', glyph: 'ph:target', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'home', glyph: 'ph:house', title: 'Home', badge: _tabBadge('home') },
-      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
+      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', glyph: 'ph:map-trifold', title: 'GeoFilter' },
       { id: 'export', glyph: 'ph:download-simple', title: 'Export' }
     ];
@@ -1332,6 +1470,12 @@
     for (var j = 0; j < ADVANCED_KEYS.length; j++) advancedRows += _renderColorRow(ADVANCED_KEYS[j], section, current[ADVANCED_KEYS[j]], serverCurrent[ADVANCED_KEYS[j]]);
     var fontRows = '';
     for (var f = 0; f < FONT_KEYS.length; f++) fontRows += _renderColorRow(FONT_KEYS[f], section, current[FONT_KEYS[f]], serverCurrent[FONT_KEYS[f]]);
+    // #681 M6 — the path-profile chart, in its own group so the Advanced
+    // list stays a list of page colours.
+    var terrainRows = '';
+    for (var t = 0; t < TERRAIN_COLOR_KEYS.length; t++) {
+      terrainRows += _renderColorRow(TERRAIN_COLOR_KEYS[t], section, current[TERRAIN_COLOR_KEYS[t]], serverCurrent[TERRAIN_COLOR_KEYS[t]]);
+    }
 
     return '<div class="cust-panel' + (_activeTab === 'theme' ? ' active' : '') + '" data-panel="theme">' +
       _renderPresets() +
@@ -1339,6 +1483,7 @@
       '<p style="font-size:11px;color:var(--text-muted);margin:0 0 10px">Toggle ' + renderConfigGlyph('ph:sun') + '/' + renderConfigGlyph('ph:moon') + ' in nav to edit the other mode.</p>' +
       basicRows +
       '<details class="cust-advanced"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Advanced (' + ADVANCED_KEYS.length + ' options)</summary>' + advancedRows + '</details>' +
+      '<details class="cust-terrain-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Terrain profile chart (' + TERRAIN_COLOR_KEYS.length + ' options)</summary>' + terrainRows + '</details>' +
       '<details class="cust-fonts" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Fonts</summary>' + fontRows + '</details>' +
     '</div>';
   }
@@ -1597,7 +1742,42 @@
       _renderChannelsShowEncryptedToggle() +
       _renderHide1ByteHopsToggle() +
       _renderTileProviderSelector() +
+      _renderTerrainSettings() +
     '</div>';
+  }
+
+  // ── #681 M6 Terrain profile defaults ──
+  // Antenna heights are the dominant error term in a path profile: the
+  // elevation model is accurate to centimetres, while nothing in the mesh
+  // says how high an antenna is. These are the defaults the Path profile
+  // tool starts from; the panel's own inputs, a remembered height and a
+  // shared link all still win over them, and an operator who set a real
+  // height in config.json wins too.
+  function _renderTerrainSettings() {
+    var t = terrainSettings(_getEffective());
+    var rows = '';
+    for (var i = 0; i < TERRAIN_HEIGHT_FIELDS.length; i++) {
+      var f = TERRAIN_HEIGHT_FIELDS[i];
+      var id = 'cv2-terrain-' + f.key;
+      rows += '<div class="cust-terrain-row">' +
+        '<div><label for="' + id + '">' + f.label + ' (m)' + _overrideDot('terrain', f.key) + '</label>' +
+          '<div class="cust-hint">' + f.hint + '</div></div>' +
+        '<input type="number" id="' + id + '" class="cust-terrain-h" min="0" max="' + TERRAIN_MAX_HEIGHT_M + '" step="0.5" ' +
+          'inputmode="decimal" data-cv2-terrain-height="' + f.key + '" value="' + escAttr(String(t[f.key])) + '">' +
+      '</div>';
+    }
+    var modelOpt = function (value, label) {
+      return '<option value="' + value + '"' + (t.model === value ? ' selected' : '') + '>' + label + '</option>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Terrain Profile</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Default antenna heights above ground for the Map page\u2019s Path profile tool. Mesh adverts carry no height, so these are assumptions \u2014 the panel labels them as such. A height you type, one this browser remembers, one in a link you open, and one the operator set in server config all take precedence.</p>' +
+      rows +
+      '<div class="cust-field" style="margin-top:10px"><label for="cv2-terrain-model">Elevation model' + _overrideDot('terrain', 'model') + '</label>' +
+        '<select id="cv2-terrain-model" data-cv2-terrain-model style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">' +
+          modelOpt('both', 'Terrain and surface (trees, buildings)') +
+          modelOpt('dtm', 'Terrain only') +
+        '</select>' +
+        '<div class="cust-hint">Terrain always decides the verdict. Surface is drawn for information and costs a second elevation request.</div></div>';
   }
 
   // ── #1633 / #674 1-byte path hops: Show / Mark / Hide ──
@@ -2319,6 +2499,34 @@
       });
     });
 
+    // #681 M6 — terrain antenna-height defaults. A value back at the
+    // built-in default is a cleared override, not a stored one, so the
+    // section only ever holds what the viewer actually changed.
+    container.querySelectorAll('[data-cv2-terrain-height]').forEach(function (inp) {
+      var key = inp.dataset.cv2TerrainHeight;
+      inp.addEventListener('change', function () {
+        var raw = parseFloat(inp.value);
+        if (!isValidAntennaHeight(raw)) {
+          // Put the effective value back rather than storing nonsense.
+          inp.value = String(terrainSettings(_getEffective())[key]);
+          return;
+        }
+        if (raw === TERRAIN_DEFAULTS[key]) clearOverride('terrain', key);
+        else setOverride('terrain', key, raw);
+        _notifyTerrainDefaults();
+      });
+    });
+
+    // #681 M6 — default elevation model (terrain only, or with the surface).
+    container.querySelectorAll('[data-cv2-terrain-model]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        if (TERRAIN_MODELS.indexOf(sel.value) === -1) return;
+        if (sel.value === TERRAIN_DEFAULTS.model) clearOverride('terrain', 'model');
+        else setOverride('terrain', 'model', sel.value);
+        _notifyTerrainDefaults();
+      });
+    });
+
     // #1633 / #674 1-byte path hops select — persists + fires
     // mc-hide-1byte-hops-changed through hop-filter.js; consumers re-render
     // or rely on the next navigation refresh (analytics tab, packets list).
@@ -2929,6 +3137,13 @@
     // #1380 — exposed for unit tests; see test-issue-1380-*.
     applyCbSim: _applyCbSim,
     resetCbPreset: _resetCbPreset,
-    THEME_CSS_MAP: THEME_CSS_MAP
+    THEME_CSS_MAP: THEME_CSS_MAP,
+    // #681 M6 — exposed for tests; see test-issue-681-m6-customizer-terrain.js.
+    TERRAIN_DEFAULTS: TERRAIN_DEFAULTS,
+    TERRAIN_COLOR_KEYS: TERRAIN_COLOR_KEYS,
+    TERRAIN_MAX_HEIGHT_M: TERRAIN_MAX_HEIGHT_M,
+    VALID_SECTIONS: VALID_SECTIONS,
+    isValidAntennaHeight: isValidAntennaHeight,
+    terrainSettings: terrainSettings
   };
 })();
