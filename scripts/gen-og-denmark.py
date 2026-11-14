@@ -56,6 +56,9 @@ NODES = {
     'skagen':    (10.34, 57.58, 9, 0),
     'aalborg':   (9.92, 56.94, 9, 0),
     'viborg':    (9.40, 56.45, 9, 0),
+    # Lemvig is 56.548 N on the Nissum Bredning shore; nudged 3 km south so
+    # the dot clears the coast by MARGIN_PX.
+    'lemvig':    (8.31, 56.52, 9, 0),
     'aarhus':    (10.02, 56.25, 14, 26),
     'herning':   (8.98, 56.14, 9, 0),
     'esbjerg':   (8.62, 55.55, 9, 0),
@@ -72,6 +75,7 @@ LINKS = [
     ('skagen', 'aalborg'), ('aalborg', 'aarhus'), ('aarhus', 'kolding'),
     ('kolding', 'sonderborg'), ('aarhus', 'viborg'), ('viborg', 'aalborg'),
     ('aarhus', 'herning'), ('herning', 'esbjerg'), ('esbjerg', 'kolding'),
+    ('herning', 'lemvig'),
     ('kolding', 'odense'), ('odense', 'slagelse'), ('slagelse', 'copenhagen'),
     ('copenhagen', 'helsingor'), ('copenhagen', 'nykobing'),
     ('nykobing', 'ronne'), ('odense', 'nykobing'), ('aalborg', 'copenhagen'),
