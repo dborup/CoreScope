@@ -195,7 +195,7 @@ func (c *Client) fetch(work context.Context, target string, contentTypes []strin
 	req.Header.Set("Accept", strings.Join(contentTypes, ", "))
 	resp, err := c.http.Do(req)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
+		if errors.Is(err, context.DeadlineExceeded) || IsTimeout(err) {
 			return nil, FetchError{"timeout"}
 		}
 		return nil, FetchError{"transport"}
@@ -205,12 +205,12 @@ func (c *Client) fetch(work context.Context, target string, contentTypes []strin
 		io.Copy(io.Discard, io.LimitReader(resp.Body, int64(maxBody)))
 		return nil, FetchError{"status " + strconv.Itoa(resp.StatusCode)}
 	}
-	if !hasContentType(resp.Header.Get("Content-Type"), contentTypes) {
+	if !HasContentType(resp.Header.Get("Content-Type"), contentTypes) {
 		return nil, FetchError{"unexpected content type"}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBody)+1))
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
+		if errors.Is(err, context.DeadlineExceeded) || IsTimeout(err) {
 			return nil, FetchError{"timeout"}
 		}
 		return nil, FetchError{"read"}
@@ -221,9 +221,10 @@ func (c *Client) fetch(work context.Context, target string, contentTypes []strin
 	return data, nil
 }
 
-// hasContentType reports whether the media type of got is exactly one of
-// want; parameters such as `; subtype=geotiff` are allowed.
-func hasContentType(got string, want []string) bool {
+// HasContentType reports whether the media type of got is exactly one of
+// want; parameters such as `; subtype=geotiff` are allowed. It is shared
+// with internal/mastedb.
+func HasContentType(got string, want []string) bool {
 	mt, _, err := mime.ParseMediaType(got)
 	if err != nil {
 		return false
@@ -236,7 +237,9 @@ func hasContentType(got string, want []string) bool {
 	return false
 }
 
-func isTimeout(err error) bool {
+// IsTimeout reports whether err is a network timeout. It is shared with
+// internal/mastedb.
+func IsTimeout(err error) bool {
 	var te interface{ Timeout() bool }
 	return errors.As(err, &te) && te.Timeout()
 }

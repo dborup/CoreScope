@@ -68,6 +68,14 @@
       "measurementNote": "New suite; #727 M1 shareable /p links for the Map Path profile with an intercepted dhm client-config block (profile: true, share on or off) and a stubbed /api/terrain/profile: /p?profile=... lands on #/map with the panel open and one request carrying only the allow-listed keys, one document request and app.js loaded once with every asset below 400, Back leaves /p behind, the copy button hands out a /p link with dhm.share (and that link reopens the profile) and the #/map link without it, the raw /p HTML for a crawler User-Agent has the handoff script and filled OG tags, /p/ is a 301 to /p, and the same landing at 360x740. About 15s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681/#721 DHM suites."
     },
     {
+      "file": "test-issue-723-heritage-overlay-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #723 M1 protected ancient monuments overlay on Map and Live with an intercepted heritage client-config block and every request to the agency's WMS answered by a synthetic PNG (the real service is never contacted): not offered without the block, off by default with zero requests, on/off/on (tiles, opacity, pane above the hillshade and below overlays/markers, credit including Live's second 'on', hash, storage), the exact pinned GetMap parameter set, zoom 11 silent and zoom 12 drawing, ?heritage=1 deep link across reload and pages, ?heritage=0 over a stored 'on', dark theme not inverting the overlay pane, independence from the DHM hillshade, and no requests or console errors outside Denmark. About 50s locally; no CI duration measured yet. Assigned to shard 1 next to the #680/#681 DHM suites."
+    },
+    {
       "file": "test-issue-674-1byte-hop-modes-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

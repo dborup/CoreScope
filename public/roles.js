@@ -824,6 +824,8 @@
       (cfg.map && cfg.map.tiles && cfg.map.tiles.darkUrl) || null;
     // #680 — terrain overlay offer; absent unless the server's DHM proxy is on.
     window.MC_DHM_CFG = cfg.dhm || null;
+    // #723 — protected ancient monuments overlay; absent unless map.heritage is on.
+    window.MC_HERITAGE_CFG = cfg.heritage || null;
     if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);
     if (cfg.snrThresholds) Object.assign(SNR_THRESHOLDS, cfg.snrThresholds);
     if (cfg.distThresholds) Object.assign(DIST_THRESHOLDS, cfg.distThresholds);
