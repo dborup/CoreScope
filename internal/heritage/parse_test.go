@@ -132,6 +132,22 @@ func TestParseNumericPropertyRuneCap(t *testing.T) {
 	}
 }
 
+// TestParseDropsFormatCharacters (#762 review finding 5): Unicode format
+// characters (Cf), bidi overrides and isolates included, are dropped, so a
+// value cannot reorder the popup text around it.
+func TestParseDropsFormatCharacters(t *testing.T) {
+	body := fc(featureJSON("Polygon", square,
+		`"anlaegstype":"Rund\u202ehøj\u202c","datering":"\u2066Old\u200btid\u2069","fred_status":"\ufeffFredet\u061c"`), "")
+	page, err := Parse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	z := page.Zones[0]
+	if z.Type != "Rundhøj" || z.Dating != "Oldtid" || z.Status != "Fredet" {
+		t.Fatalf("format characters kept: %+q %+q %+q", z.Type, z.Dating, z.Status)
+	}
+}
+
 func TestParseTruncation(t *testing.T) {
 	var fs []string
 	for i := 0; i < MaxFeatures; i++ {

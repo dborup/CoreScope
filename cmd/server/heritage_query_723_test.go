@@ -576,6 +576,20 @@ func TestHeritageQuery_SettingsDefaultsAndClamps(t *testing.T) {
 	}
 }
 
+// cacheTTLHours excludes its lower bound: 0 would cache nothing, so it
+// warns and takes the default (#762 review finding 5; configKnobs.num's
+// loOpen, shared with map.dhm.profile).
+func TestHeritageQuery_CacheTTLZeroTakesTheDefault(t *testing.T) {
+	logs := &dhmLogSink{}
+	s := resolveHeritageSettings(HeritageConfig{CacheTTLHours: floatp(0)}, logs.logf)
+	if s.cacheTTL != 168*time.Hour {
+		t.Fatalf("cacheTTL %v, want the 168h default", s.cacheTTL)
+	}
+	if !strings.Contains(logs.String(), "[heritage] config map.heritage.cacheTTLHours is out of range; using 168") {
+		t.Fatalf("not warned: %q", logs.String())
+	}
+}
+
 // The knobs load from config.json, never reach the browser, and the
 // example documents exactly the defaults.
 func TestHeritageQuery_ConfigLoadsStaysServerSideAndExampleMatches(t *testing.T) {

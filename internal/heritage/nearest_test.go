@@ -79,6 +79,22 @@ func TestNearestOverlapPrefersTheDeeperZone(t *testing.T) {
 	}
 }
 
+// A tie goes to the lower system number, compared as a number when both
+// are digit strings (#762 review finding 5): "9" before "10", in either
+// input order, while non-numeric ones compare as text.
+func TestNearestTieOrdersSystemNumbersNumerically(t *testing.T) {
+	a := Zone{Type: "nine", SystemNo: "9", Polygons: [][][][2]float64{{rect(0, 0, 100, 100)}}}
+	b := Zone{Type: "ten", SystemNo: "10", Polygons: [][][][2]float64{{rect(0, 0, 100, 100)}}}
+	for _, zs := range [][]Zone{{a, b}, {b, a}} {
+		if r := Nearest(zs, 50, 50, 10); r.Zone == nil || r.Zone.Type != "nine" || r.Count != 2 {
+			t.Fatalf("%s/%s: %+v", zs[0].SystemNo, zs[1].SystemNo, r)
+		}
+	}
+	if !lessID("9", "10") || lessID("10", "9") || lessID("9", "10a") || !lessID("A10", "A9") {
+		t.Fatal("lessID order")
+	}
+}
+
 // A hole is outside the zone: its edge is the distance.
 func TestNearestHoleIsOutside(t *testing.T) {
 	z := Zone{Type: "ring", Polygons: [][][][2]float64{{rect(0, 0, 300, 300), rect(100, 100, 200, 200)}}}
