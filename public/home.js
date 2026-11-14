@@ -753,7 +753,16 @@
         const mapEl = document.getElementById('healthMap');
         if (mapEl) {
           miniMap = L.map(mapEl, { zoomControl: false, attributionControl: false }).setView([node.lat, node.lon], 12);
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(miniMap);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+          }).addTo(miniMap);
+          // #756 — this minimap was the one map #752/#754 left out of scope
+          // (it hardcodes OSM, not the registry's provider), but it still
+          // needs a credit; route it through the same shared control as
+          // every other inset, compact so it fits a 150px card.
+          if (typeof window.MC_ensureAttribution === 'function') {
+            window.MC_ensureAttribution(miniMap, { compact: true });
+          }
           L.marker([node.lat, node.lon]).addTo(miniMap);
           setTimeout(() => miniMap.invalidateSize(), 100);
         }

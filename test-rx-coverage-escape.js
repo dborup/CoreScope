@@ -39,7 +39,7 @@ async function mountPage(hash) {
   const sandbox = {
     console: { log() {}, warn() {}, error() {} },
     Promise, Math, JSON, Number, String, Array, Object, Date, isFinite, parseFloat, parseInt, URLSearchParams,
-    window: { MeshConfigReady: Promise.resolve(), MC_CLIENT_RX_COVERAGE: true },
+    window: { MeshConfigReady: Promise.resolve(), MC_CLIENT_RX_COVERAGE: true, _applyTilesToNodeMap: () => {} },
     document: { getElementById: (id) => els[id] || (els[id] = el()), documentElement: {} },
     location,
     history: { replaceState: (_s, _t, url) => { location.hash = url; } },

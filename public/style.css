@@ -173,8 +173,14 @@
   --mc-credit-compact-font-size: 10px;
   --mc-credit-compact-line-height: 1.3;
   --mc-credit-compact-max-width: 70%;
-  --mc-credit-compact-max-height: calc(2 * var(--mc-credit-compact-font-size) * var(--mc-credit-compact-line-height));
-  --mc-credit-compact-padding: 1px 5px;
+  --mc-credit-compact-padding-v: 1px;
+  --mc-credit-compact-padding-h: 5px;
+  /* #756 — box-sizing is border-box, so the vertical padding eats into the
+     content height the font-size/line-height product budgets for. Without
+     it, every two-line credit (Esri World Imagery) is 2px taller than the
+     cap and scrolls even though it only ever has two lines. */
+  --mc-credit-compact-max-height: calc(2 * var(--mc-credit-compact-font-size) * var(--mc-credit-compact-line-height) + 2 * var(--mc-credit-compact-padding-v));
+  --mc-credit-compact-padding: var(--mc-credit-compact-padding-v) var(--mc-credit-compact-padding-h);
   /* How far a bottom-right inset overlay (the node-detail QR) must sit
      above the map's bottom edge to clear the credit: the cap plus the 8px
      the overlay used to have plus 4px of air. Static, because the cap is a
