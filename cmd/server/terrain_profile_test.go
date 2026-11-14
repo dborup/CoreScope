@@ -1084,6 +1084,55 @@ func TestTerrainProfile_DecimationKeepsInteriorPeakWithEndpointBelow(t *testing.
 	}
 }
 
+// #745 review N4: the gap budget is what the worst points leave. With a
+// full DTM the terrain worst point holds a place, so 1022 one-sample DSM
+// gaps no longer fit beside it and terrainGapKeep must spread its missing
+// samples over all of them: one gap merges into its neighbours somewhere,
+// and the first and the last gap are both in the response. Given the old
+// fixed room of 1022, every gap seemed to fit, Decimate silently cut the
+// tail of the keep list, and the last gap was the one that went.
+func TestTerrainProfile_GapRoomCountsWorstPoints(t *testing.T) {
+	a, b := dhm.LatLon{Lat: 56, Lon: 8.6}, dhm.LatLon{Lat: 56, Lon: 9.85}
+	plan := dhm.PlanProfile(a, b, dhm.PlanOptions{MaxSamples: 3200, ChunkM: 2500})
+	n := len(plan.E)
+	const gaps = terrainMaxReturned - 2
+	e := terrainElevation{dtm: make([]float32, n), dsm: make([]float32, n)}
+	var gapAt []int
+	for i := n - 3; i > 0 && len(gapAt) < gaps; i -= 3 {
+		e.dsm[i] = float32(math.NaN())
+		gapAt = append(gapAt, i)
+	}
+	if len(gapAt) != gaps {
+		t.Fatalf("fixture: %d samples hold only %d gaps", n, len(gapAt))
+	}
+	p := newTerrainProfiler(dhm.ProfileConfig{Enabled: true}, nil, terrainProfilerDeps{src: newFakeElevation(t, flatElev(0))})
+	r := p.buildResponse(terrainQuery{both: true}, [2]terrainEnd{{pt: a, kind: "point"}, {pt: b, kind: "point"}}, a, b, &plan, e)
+	if r.Coverage.State != "full" || r.Verdict.WorstAtM == nil {
+		t.Fatalf("fixture: want a full DTM with an interior terrain worst point, got %+v %+v", r.Coverage, r.Verdict)
+	}
+	returned := map[int]bool{}
+	for _, s := range r.Samples {
+		returned[int(math.Round(s.D/r.StepM))] = true
+	}
+	if w := int(math.Round(*r.Verdict.WorstAtM / r.StepM)); !returned[w] || math.IsNaN(float64(e.dsm[w])) {
+		t.Fatalf("fixture: terrain worst point %d returned %t, on a gap %t", w, returned[w], math.IsNaN(float64(e.dsm[w])))
+	}
+	if len(r.Samples) > terrainMaxReturned {
+		t.Fatalf("%d samples returned", len(r.Samples))
+	}
+	assertGapsVisible(t, "dsm", r, e.dsm, func(s TerrainSample) *float64 { return s.DSM }, false)
+	var absent []int
+	for _, g := range gapAt {
+		if !returned[g] {
+			absent = append(absent, g)
+		}
+	}
+	first, last := gapAt[len(gapAt)-1], gapAt[0]
+	if len(absent) > 1 || !returned[first] || !returned[last] {
+		t.Fatalf("gaps absent from the response: %v; want at most one, and never the first (%d) or the last (%d)", absent, first, last)
+	}
+}
+
 // modelSplit serves DTM and DSM from different sources.
 type modelSplit struct{ dtm, dsm dhm.ElevationSource }
 
