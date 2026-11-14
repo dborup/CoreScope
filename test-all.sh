@@ -140,6 +140,7 @@ run test-issue-680-dhm-terrain.js
 run test-issue-681-profile-tool.js
 run test-issue-681-m5-node-entry.js
 run test-issue-681-m6-customizer-terrain.js
+run test-issue-721-move-endpoints.js
 run test-issue-390-legacy-tile-followups.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js

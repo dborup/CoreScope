@@ -2713,7 +2713,13 @@
   var profileBtn = null;
   var profileHintEl = null;
   var profileKeyHandler = null;
-  var profileAnchor = null;   // [lat, lon] of A while picking B
+  var profileAnchor = null;   // [lat, lon] of the fixed end while picking the other
+  // #721: move one end of an open measurement without starting over.
+  var profileEnds = { a: null, b: null }; // draggable A/B markers
+  var profileMoving = null;   // 'a' | 'b' while a Move button has the picker armed
+  var profileDrag = null;     // { side } while an end is dragged
+  // A drop this close to a marker lands on it: half the 48px touch target.
+  var PROFILE_SNAP_PX = 24;
   // #711: the one node a half link named that the Map page's own list does
   // not hold (an area filter or the last-heard window left it out). One
   // entry, replaced by the next half link, so it cannot grow.
@@ -2790,6 +2796,9 @@
     profileTool = window.TerrainProfile.create({
       mount: wrap,
       resolveNode: profileResolveNode,
+      onMoveStart: function (side) { profileArmFor(side, true); },
+      onMoveCancel: profileDisarm,
+      onEndpointsChange: profileDrawLine,
       onClose: function () {
         profileDisarm();
         profileClearLine();
@@ -2797,9 +2806,11 @@
       }
     });
     if (!profileKeyHandler) {
-      // Escape disarms the picker; a second Escape closes the panel.
+      // Escape drops a drag or disarms the picker, either way keeping the
+      // old end (#721); a second Escape closes the panel.
       profileKeyHandler = function (e) {
         if (e.key !== 'Escape') return;
+        if (profileDrag) { profileCancelDrag(); return; }
         if (profileArm) { profileDisarm(); return; }
         if (profileTool && profileTool.isOpen()) profileTool.close();
       };
@@ -2851,20 +2862,19 @@
     var mk = e && e.target;
     if (!profileArm || !mk) return;
     L.DomEvent.stopPropagation(e);
-    var key = mk._nodeKey ? String(mk._nodeKey).toLowerCase() : '';
     var ll = mk.getLatLng();
-    profilePick(/^[0-9a-f]{64}$/.test(key) && profileIsNode(key)
-      ? { kind: 'node', pubkey: key }
-      : { kind: 'point', lat: Number(ll.lat.toFixed(5)), lon: Number(ll.lng.toFixed(5)) });
+    var ref = window.TerrainProfile.markerRef(mk._nodeKey, ll.lat, ll.lng, profileIsNode);
+    if (ref) profilePick(ref);
   }
 
   function onProfileMapClick(e) {
     if (!profileArm || !e || !e.latlng) return;
-    profilePick({ kind: 'point', lat: Number(e.latlng.lat.toFixed(5)), lon: Number(e.latlng.lng.toFixed(5)) });
+    var ref = window.TerrainProfile.pointRef(e.latlng.lat, e.latlng.lng);
+    if (ref) profilePick(ref);
   }
 
   function onProfilePointerMove(e) {
-    if (profileArm !== 'b' || !profileAnchor || !e || !e.latlng) return;
+    if (!profileArm || !profileAnchor || !e || !e.latlng) return;
     var pts = [profileAnchor, [e.latlng.lat, e.latlng.lng]];
     if (profileGhost) { profileGhost.setLatLngs(pts); return; }
     profileGhost = L.polyline(pts, { className: 'tp-path-ghost', interactive: false, weight: 2, dashArray: '6 6' }).addTo(map);
@@ -2873,6 +2883,14 @@
   function profilePick(ref) {
     var tool = ensureProfileTool();
     if (!tool) return;
+    if (profileMoving) {
+      // #721: only this end changes; the tool redraws through
+      // onEndpointsChange and measures once.
+      var moveSide = profileMoving;
+      profileDisarm();
+      tool.moveEndpoint(moveSide, ref);
+      return;
+    }
     var side = profileArm === 'b' ? 'b' : 'a';
     tool.setEndpoint(side, ref);
     if (side === 'a') {
@@ -2886,9 +2904,21 @@
     profileDrawLine();
   }
 
-  function profileArmFor(side) {
-    if (!ensureProfileTool()) return;
+  /* profileArmFor arms the one picker for an end. With `move` it replaces
+   * that end of an open measurement (#721) and the other end anchors the
+   * preview line; without it, it is the first pick of a new one. */
+  function profileArmFor(side, move) {
+    var tool = ensureProfileTool();
+    if (!tool) return;
+    // Re-arming (Move A while Move B was armed) must not stack listeners.
+    if (profileArm && map) {
+      map.off('click', onProfileMapClick);
+      map.off('mousemove', onProfilePointerMove);
+    }
+    profileClearGhost();
     profileArm = side;
+    profileMoving = move ? side : null;
+    if (move) profileAnchor = profileRefLatLng(tool.getState()[side === 'a' ? 'b' : 'a']);
     if (map) {
       map.getContainer().classList.add('tp-picking');
       map.on('click', onProfileMapClick);
@@ -2896,15 +2926,22 @@
     }
     profileSyncPickers();
     profileSyncButton();
-    profileShowHint(side === 'a'
-      ? 'Pick the first end: a node marker or any point.'
-      : 'Now pick the other end: a node marker or any point.');
+    profileShowHint(move
+      ? 'Pick the new position for ' + side.toUpperCase() + ': a node marker or any point. Escape or Move '
+        + side.toUpperCase() + ' again cancels.'
+      : side === 'a'
+        ? 'Pick the first end: a node marker or any point.'
+        : 'Now pick the other end: a node marker or any point.');
   }
 
   function profileDisarm() {
     if (!profileArm) return;
     profileArm = null;
     profileAnchor = null;
+    profileMoving = null;
+    // The panel's Move button goes back up; cancelMove calls back here and
+    // returns at once, since the picker is already disarmed.
+    if (profileTool && profileTool.movingSide()) profileTool.cancelMove();
     if (map) {
       map.getContainer().classList.remove('tp-picking');
       map.off('click', onProfileMapClick);
@@ -2923,19 +2960,118 @@
 
   function profileClearLine() {
     profileClearGhost();
+    profileDrag = null;
     if (profileLine && map) { try { map.removeLayer(profileLine); } catch (_) {} }
     profileLine = null;
+    ['a', 'b'].forEach(function (side) {
+      if (profileEnds[side] && map) { try { map.removeLayer(profileEnds[side]); } catch (_) {} }
+      profileEnds[side] = null;
+    });
   }
 
+  /* profileDrawLine puts the measured path and its two draggable ends on the
+   * map, updating the layers in place when they already exist — a drop
+   * redraws from inside the marker's own dragend. */
   function profileDrawLine() {
-    profileClearLine();
-    if (!map || !profileTool) return;
+    if (!map || !profileTool) { profileClearLine(); return; }
     var st = profileTool.getState();
     var a = profileRefLatLng(st.a), b = profileRefLatLng(st.b);
-    if (!a || !b) return;
+    if (!a || !b) { profileClearLine(); return; }
+    profileClearGhost();
     // No `color` option: the stroke comes from --los-line in style.css, so
     // the line follows the theme and the customizer like everything else.
-    profileLine = L.polyline([a, b], { className: 'tp-path-line', interactive: false, weight: 3 }).addTo(map);
+    if (profileLine) profileLine.setLatLngs([a, b]);
+    else profileLine = L.polyline([a, b], { className: 'tp-path-line', interactive: false, weight: 3 }).addTo(map);
+    profileEndMarker('a', a);
+    profileEndMarker('b', b);
+  }
+
+  // ── #721: drag an end ──
+  // Dragging only moves the marker and the line on the map: no request, no
+  // panel work. The drop resolves the end once (a node marker under it, or
+  // the free point) and the tool measures once, debounced.
+  function profileEndMarker(side, ll) {
+    var mk = profileEnds[side];
+    if (mk) { if (!(profileDrag && profileDrag.side === side)) mk.setLatLng(ll); return; }
+    var tag = side.toUpperCase();
+    mk = L.marker(ll, {
+      // Static markup, no interpolation: the tag is 'A' or 'B'.
+      icon: L.divIcon({ className: 'tp-end-marker tp-end-marker-' + side,
+        html: '<span class="tp-end-dot">' + tag + '</span>', iconSize: [48, 48], iconAnchor: [24, 24] }),
+      draggable: true, autoPan: true, zIndexOffset: 2000,
+      title: 'Drag to move ' + tag + '. Drop on a node marker to use that node.',
+    }).addTo(map);
+    var icon = mk.getElement();
+    if (icon) {
+      icon.setAttribute('aria-label', 'Endpoint ' + tag + ', drag to move');
+      icon.setAttribute('data-testid', 'tp-end-marker-' + side);
+    }
+    mk.on('dragstart', function () { onProfileDragStart(side); });
+    mk.on('drag', function () { onProfileDrag(side); });
+    mk.on('dragend', function () { onProfileDragEnd(side); });
+    profileEnds[side] = mk;
+  }
+
+  function onProfileDragStart(side) {
+    var mk = profileEnds[side];
+    if (!mk) return;
+    // A drag replaces whatever the picker was waiting for.
+    profileDisarm();
+    profileDrag = { side: side };
+    map.getContainer().classList.add('tp-dragging');
+    profileShowHint('Drop ' + side.toUpperCase() + ' on a node marker or any point. Escape cancels.');
+  }
+
+  function onProfileDrag(side) {
+    var mk = profileEnds[side], other = profileEnds[side === 'a' ? 'b' : 'a'];
+    if (!profileDrag || !mk || !other || !profileLine) return;
+    var pts = [mk.getLatLng(), other.getLatLng()];
+    profileLine.setLatLngs(side === 'a' ? pts : pts.reverse());
+  }
+
+  function onProfileDragEnd(side) {
+    var drag = profileDrag, mk = profileEnds[side];
+    profileDrag = null;
+    if (map) map.getContainer().classList.remove('tp-dragging');
+    profileHideHint();
+    if (!drag || !mk || !profileTool) return;
+    var ll = mk.getLatLng();
+    var at = map.latLngToContainerPoint(ll);
+    var moved = profileTool.moveEndpoint(side, window.TerrainProfile.snapEndpoint(
+      { x: at.x, y: at.y, lat: ll.lat, lon: ll.lng }, profileSnapCandidates(), PROFILE_SNAP_PX, profileIsNode));
+    // A refused drop (onto the other end) is redrawn from the unchanged
+    // state, which puts the marker back; a snapped one moves onto its node
+    // through onEndpointsChange.
+    if (!moved) profileDrawLine();
+  }
+
+  /* profileSnapCandidates lists the node markers drawn on screen right now:
+   * one pass over the rendered markers, once per drop. A marker folded into
+   * a cluster has no icon and cannot be dropped on. */
+  function profileSnapCandidates() {
+    var out = [];
+    for (var i = 0; i < _currentMarkerData.length; i++) {
+      var mk = _currentMarkerData[i]._leafletMarker;
+      if (!mk || !mk._icon || !mk._nodeKey) continue;
+      var ll = mk.getLatLng(), p = map.latLngToContainerPoint(ll);
+      out.push({ x: p.x, y: p.y, key: mk._nodeKey, lat: ll.lat, lon: ll.lng });
+    }
+    return out;
+  }
+
+  /* profileCancelDrag is Escape mid-drag: the end goes back where it was
+   * and nothing is measured. Re-enabling the handler ends Leaflet's live
+   * drag; it unhooks the marker before it does, so no dragend reaches
+   * onProfileDragEnd and the redraw from the unchanged state happens here. */
+  function profileCancelDrag() {
+    var drag = profileDrag;
+    if (!drag) return;
+    profileDrag = null;
+    var mk = profileEnds[drag.side];
+    if (mk && mk.dragging) { mk.dragging.disable(); mk.dragging.enable(); }
+    if (map) map.getContainer().classList.remove('tp-dragging');
+    profileHideHint();
+    profileDrawLine();
   }
 
   function onProfileToggle() {
