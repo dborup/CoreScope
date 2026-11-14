@@ -44,7 +44,9 @@
  *   EXPECT_TILE_HOST_DARK=server.arcgisonline.com \
  *   EXPECT_TILE_HOST_LIGHT=tile.opentopomap.org node <this file>
  * against a server whose config.json sets darkDefault/lightDefault to
- * 'esri-darkgray-labels' / 'opentopomap'.
+ * 'esri-darkgray-labels' / 'opentopomap' and enables both providers
+ * (map.tiles.providers.esri.enabled and .opentopomap.enabled; both are
+ * opt-in, Esri since #728).
  */
 'use strict';
 const { chromium } = require('playwright');

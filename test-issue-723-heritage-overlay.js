@@ -13,8 +13,9 @@
  *     hash wins over storage and is persisted, toggles write storage + hash,
  *     an empty hash never leaks the parameter into the query string (#682
  *     review F4);
- *   - the two overlays are independent, and Live's conjured attribution
- *     control follows "any overlay on" (and comes back on a second toggle);
+ *   - the two overlays are independent, and Live's attribution control
+ *     (one, for the map's lifetime) shows each overlay's credit exactly
+ *     while it is on, also on a second toggle;
  *   - roles.js hands cfg.heritage to the registry.
  *
  * The exact request Leaflet sends is pinned by the E2E suite
@@ -111,13 +112,14 @@ test('dropped (and switched off) when the server stops offering it', () => {
   const { map, ctl } = buildControl(ctx, false);
   const l = heritageLayer(ctl);
   assert.strictEqual(map.hasLayer(l), true);
-  assert.strictEqual(liveAttributions(map).length, 1);
+  assert.deepStrictEqual(liveCredits(map), [HERITAGE.attribution]);
   ctx.window.MC_HERITAGE_CFG = null;
   ctx.window.MC_initTileRegistry(true);
   assert.strictEqual(map.hasLayer(l), false, 'layer left on the map');
   assert.strictEqual(map._mcHeritageLayer, null);
   assert.strictEqual(map._controls[map._controls.length - 1].overlays, null);
-  assert.strictEqual(liveAttributions(map).length, 0, 'credit left without an overlay');
+  assert.deepStrictEqual(liveCredits(map), [], 'credit left without an overlay');
+  assert.strictEqual(liveAttributions(map).length, 1);
 });
 
 // ── Request shape, opacity, z-order ────────────────────────────────────────
@@ -281,17 +283,20 @@ test('independent: toggling one keeps the other\'s hash parameter and storage', 
   assert.strictEqual(map.hasLayer(terrainLayer(ctl)), true);
 });
 
-test('Live: one credit control while any overlay is on, none when all are off', () => {
+// #728 review round 3: the control stays when all overlays are off, so
+// the base map's credit (not on this bare map) is always shown.
+test('Live: exactly one credit control, with any or no overlay on', () => {
   const ctx = makeSandbox({ dhm: DHM, heritage: HERITAGE });
   const { map, ctl } = buildControl(ctx, false);
-  assert.strictEqual(liveAttributions(map).length, 0);
+  assert.strictEqual(liveAttributions(map).length, 1, 'none on');
   map.addLayer(terrainLayer(ctl));
   map.addLayer(heritageLayer(ctl));
   assert.strictEqual(liveAttributions(map).length, 1, 'both on');
   map.removeLayer(terrainLayer(ctl));
   assert.strictEqual(liveAttributions(map).length, 1, 'monuments still on');
   map.removeLayer(heritageLayer(ctl));
-  assert.strictEqual(liveAttributions(map).length, 0, 'all off');
+  assert.strictEqual(liveAttributions(map).length, 1, 'all off');
+  assert.strictEqual(map.attributionControl, liveAttributions(map)[0]);
 });
 
 // Leaflet's control counts the credits already on the map when it is added
@@ -315,17 +320,18 @@ test('Live: the credit text follows the overlays that are on (no stale credit)',
 });
 
 // Leaflet's attribution control claims map.attributionControl on add and
-// never releases it, so a second "on" used to find the dead control and add
-// no credit at all.
+// never releases it; a control rebuilt per toggle once found that dead
+// control on the second "on" and added no credit at all.
 for (const ov of OVERLAYS) {
   test(`Live: ${ov.name} on → off → on shows the credit again`, () => {
     const ctx = makeSandbox(ov.cfg);
     const { map, ctl } = buildControl(ctx, false);
     map.addLayer(ov.layer(ctl));
     map.removeLayer(ov.layer(ctl));
-    assert.strictEqual(liveAttributions(map).length, 0);
+    assert.deepStrictEqual(liveCredits(map), [], 'credit left after off');
     map.addLayer(ov.layer(ctl));
-    assert.strictEqual(liveAttributions(map).length, 1, 'no credit on the second toggle');
+    assert.deepStrictEqual(liveCredits(map), [ov.layer(ctl).options.attribution], 'no credit on the second toggle');
+    assert.strictEqual(liveAttributions(map).length, 1);
     assert.strictEqual(map.attributionControl, liveAttributions(map)[0]);
   });
 }

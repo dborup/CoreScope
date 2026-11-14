@@ -116,6 +116,7 @@ function makeMap() {
       return panes[n];
     },
     hasLayer: (l) => layers.has(l),
+    eachLayer(fn) { Array.from(layers).forEach(l => fn(l)); return map; },
     // Like Leaflet: a layer listed in the control fires overlayadd/remove,
     // after the map's layer set already reflects the change.
     addLayer(l) {
@@ -141,7 +142,8 @@ function makeMap() {
   return map;
 }
 
-// opts: hash, search, storage, theme, dhm (MC_DHM_CFG), heritage (MC_HERITAGE_CFG).
+// opts: hash, search, storage, theme, dhm (MC_DHM_CFG), heritage (MC_HERITAGE_CFG),
+// mapCfg (MC_MAP_CFG, read when the registry loads).
 function makeSandbox(opts) {
   opts = opts || {};
   const listeners = {};
@@ -171,6 +173,7 @@ function makeSandbox(opts) {
   };
   if (opts.dhm !== undefined) ctx.window.MC_DHM_CFG = opts.dhm;
   if (opts.heritage !== undefined) ctx.window.MC_HERITAGE_CFG = opts.heritage;
+  if (opts.mapCfg !== undefined) ctx.window.MC_MAP_CFG = opts.mapCfg;
   ctx.globalThis = ctx;
   vm.createContext(ctx);
   vm.runInContext(SRC, ctx);
@@ -179,10 +182,12 @@ function makeSandbox(opts) {
 }
 
 // withAttribution: the map has its own attribution control (Map page);
-// without it the map is like Live.
-function buildControl(ctx, withAttribution) {
+// without it the map is like Live. base: a layer put on the map before the
+// layer control is built, as Live does with its Auto tile layer.
+function buildControl(ctx, withAttribution, base) {
   const map = makeMap();
   if (withAttribution) map.attributionControl = { builtIn: true };
+  if (base) map.addLayer(base);
   const auto = { _auto: true };
   ctx.window.MC_createLayerControl(map, auto, 'topleft');
   const ctl = map._controls[map._controls.length - 1];
