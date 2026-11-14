@@ -45,10 +45,17 @@ func TestOGMetaFromConfigUsesConfigBranding(t *testing.T) {
 		"siteName": "Cfg Name", "tagline": "Cfg tagline", "publicBaseUrl": "https://cfg.example",
 	}}
 	body := ogServe(t, pub, ogMetaFromConfig(cfg, pub, ogWriteTheme(t, "")), nil)
-	for _, want := range []string{"<title>Cfg Name</title>", `content="Cfg tagline"`, `content="https://cfg.example/og-image.png"`} {
+	for _, want := range []string{"<title>Cfg Name</title>", `content="Cfg tagline"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("config.json branding not reflected, missing %q:\n%s", want, body)
 		}
+	}
+	m := ogImageRe.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("og:image missing:\n%s", body)
+	}
+	if vm := ogVersionedImageRe.FindStringSubmatch(m[1]); vm == nil || vm[1] != "https://cfg.example/og-image.png" {
+		t.Errorf("og:image -> %q, want https://cfg.example/og-image.png?v=<hash>", m[1])
 	}
 }
 
