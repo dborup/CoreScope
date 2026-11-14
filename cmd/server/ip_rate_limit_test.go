@@ -78,6 +78,31 @@ func TestIPRateLimiter_BudgetRefillAndRetryAfter(t *testing.T) {
 	}
 }
 
+// #710 gap 1: refund gives back exactly one charge. From a partly spent
+// bucket (3 charged, 1 refunded = 2 spent of 6) exactly 4 more requests are
+// allowed. A refund that returned 2 intervals would allow 5.
+func TestIPRateLimiter_RefundReturnsExactlyOneCharge(t *testing.T) {
+	clock := &limiterClock{t: time.Unix(1_800_000_000, 0)}
+	l := newIPRateLimiter("test", 6, nil, (&dhmLogSink{}).logf)
+	l.now = clock.now
+	const client = "192.0.2.9:1"
+	for i := 0; i < 3; i++ {
+		if ok, _ := l.allow(limiterReq(client, "")); !ok {
+			t.Fatalf("charge %d refused", i+1)
+		}
+	}
+	l.refund(limiterReq(client, ""))
+	allowed := 0
+	for i := 0; i < 10; i++ {
+		if ok, _ := l.allow(limiterReq(client, "")); ok {
+			allowed++
+		}
+	}
+	if allowed != 4 {
+		t.Fatalf("after 3 charges and 1 refund, %d further requests allowed, want exactly 4 (6 - 2 spent)", allowed)
+	}
+}
+
 func TestIPRateLimiter_OffAndNil(t *testing.T) {
 	if newIPRateLimiter("test", 0, nil, nil) != nil {
 		t.Fatal("perMin 0 built a limiter")
