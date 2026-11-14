@@ -206,6 +206,31 @@ function profileAnswer(q) {
     return page.$eval(sel, (e) => { const r = e.getBoundingClientRect(); return { w: r.width, h: r.height, x: r.x, y: r.y }; });
   }
 
+  // Boxes of several elements, read only once they hold still: two
+  // consecutive animation frames give identical rects. The side pane slides
+  // in, so a box read straight after it appears can be mid-transition.
+  async function stableBoxes(page, sels, timeoutMs) {
+    return page.evaluate(({ sels, timeoutMs }) => new Promise((resolve, reject) => {
+      const read = () => sels.map((s) => {
+        const e = document.querySelector(s);
+        if (!e) return null;
+        const r = e.getBoundingClientRect();
+        return { w: r.width, h: r.height, x: r.x, y: r.y };
+      });
+      const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+      const t0 = performance.now();
+      let prev = read();
+      const tick = () => {
+        const cur = read();
+        if (!cur.includes(null) && same(prev, cur)) return resolve(cur);
+        if (performance.now() - t0 > timeoutMs) return reject(new Error('boxes never settled: ' + JSON.stringify(cur)));
+        prev = cur;
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }), { sels, timeoutMs });
+  }
+
   // Click/tap an empty spot in the visible upper map, away from markers.
   async function pickPoint(page, touch) {
     const pt = await page.evaluate(() => {
@@ -342,11 +367,10 @@ function profileAnswer(q) {
       await page.waitForSelector(sel, { timeout: 10000 });
       const href = await page.$eval(sel, e => e.getAttribute('href'));
       assert(href === '#/map?profile=' + PK, 'href = ' + href);
-      const b = await box(page, sel);
+      const [b, role] = await stableBoxes(page, [sel, '#nodesRight .node-detail-role'], 5000);
       assert(b.h >= 48 && b.w >= 48, `target ${b.w}x${b.h}`);
       // #711 N7: the 48 px action no longer wraps under the 20 px
       // Details/Analytics/Reach buttons and doubles the header row.
-      const role = await box(page, '#nodesRight .node-detail-role');
       assert(await page.$('#nodesRight .node-detail-role ' + ACTION) === null, 'the action is still inside the button row');
       assert(role.h < 48, `button row grew to ${role.h}px`);
       assert(b.y >= role.y + role.h, `action (y=${b.y}) overlaps the button row (ends ${role.y + role.h})`);
