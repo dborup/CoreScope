@@ -144,7 +144,7 @@
         "rateLimitPerMin": 10,
         "_comment_rateLimitPerMin": "Uncached profiles one client address may request per minute; beyond it 429 with Retry-After. Cache hits are not counted. 0 = off. Needs webSocket.trustedProxies behind a reverse proxy, like tileRateLimitPerMin.",
         "maxInFlight": 4,
-        "_comment_maxInFlight": "Uncached profiles fetched at once across all clients (1-64); beyond it 503 with Retry-After: 5, before any upstream request. Requests for a profile already being fetched share it and are not counted. Each profile runs up to 32 rasters, and the shared DHM upstream budget is 4 requests at a time, so a higher value mostly queues work."
+        "_comment_maxInFlight": "Uncached profiles fetched at once across all clients (1-16); beyond it 503 with Retry-After: 5, before any upstream request; such a refusal is not charged to the per-client budget, and is counted and logged (at most one line a minute). Requests for a profile already being fetched share it and are not counted, but are refused with it if its fetch is. Each profile runs up to 32 rasters, and the shared DHM upstream budget is 4 requests at a time, so a higher value mostly queues work; 16 is 4x that budget, and each blocked profile holds about 20 goroutines."
       }
     },
     "tiles": {

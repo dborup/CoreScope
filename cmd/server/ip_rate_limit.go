@@ -207,6 +207,32 @@ func (l *ipRateLimiter) allow(r *http.Request) (bool, time.Duration) {
 	return true, 0
 }
 
+// refund gives back one charge made by allow for r's client, for a request
+// that was refused before it did any upstream work (#707). It is a no-op
+// for a nil limiter, an indistinct client (never charged) or an unknown one.
+func (l *ipRateLimiter) refund(r *http.Request) {
+	if l == nil {
+		return
+	}
+	ip, distinct := clientAddr(r, l.trusted)
+	if !distinct {
+		return
+	}
+	key := clientKey(ip)
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	tat, known := l.clients[key]
+	if !known {
+		return
+	}
+	if tat = tat.Add(-l.interval); tat.After(now) {
+		l.clients[key] = tat
+	} else {
+		delete(l.clients, key) // budget full again: no state
+	}
+}
+
 // collectLocked drops clients whose budget is full again: they carry no
 // state. Caller holds l.mu.
 func (l *ipRateLimiter) collectLocked(now time.Time) {

@@ -58,6 +58,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/meshcore-analyzer/dhm"
@@ -70,6 +71,12 @@ const (
 	// terrainBusyRetry is the Retry-After of a 503 when maxInFlight
 	// profiles are already being fetched: a few cold profiles' time.
 	terrainBusyRetry = 5 * time.Second
+	// terrainMaxInFlightCap is the top of the maxInFlight range: 4x the
+	// shared upstream budget of 4 requests (#707). Each admitted profile
+	// holds ~20 goroutines while blocked, so the old cap of 64 meant ~1280 above baseline.
+	terrainMaxInFlightCap = 16
+	// terrainRefusalLogEvery throttles the admission-refusal log line.
+	terrainRefusalLogEvery = time.Minute
 	// terrainMaxReturned is the most samples a response carries; the
 	// worst points are always among them (dhm.Decimate).
 	terrainMaxReturned = 1024
@@ -163,7 +170,7 @@ func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface
 		// 4 matches the shared DHM client's upstream budget: one model=both
 		// profile has up to 32 rasters, so it can fill all 4 slots on its
 		// own, and more profiles in flight would only queue goroutines.
-		maxInFlight: integer("maxInFlight", pc.MaxInFlight, 4, 1, 64),
+		maxInFlight: integer("maxInFlight", pc.MaxInFlight, 4, 1, terrainMaxInFlightCap),
 	}
 }
 
@@ -224,6 +231,10 @@ type terrainProfiler struct {
 	flight     dhm.Flight[[]byte]
 	limiter    *ipRateLimiter // nil: no per-client limit
 	admit      chan struct{}  // one token per profile fetch in flight (maxInFlight)
+	refused    atomic.Int64   // admission refusals (503) since start
+	logMu      sync.Mutex     // guards the throttle below
+	logAt      time.Time      // last refusal report
+	logCount   int64          // refusals already reported
 	deadline   time.Duration
 	now        func() time.Time
 	logf       func(string, ...interface{})
@@ -603,6 +614,10 @@ func (p *terrainProfiler) writeFetchError(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if errors.Is(err, errTerrainBusy) {
+		// A refusal did no upstream work: give the per-IP charge back, so
+		// a client that retries as told never reaches 429 through 503s.
+		p.limiter.refund(r)
+		p.noteRefusal()
 		setRetryAfter(w, terrainBusyRetry)
 		writeError(w, http.StatusServiceUnavailable, errTerrainBusy.Error())
 		return
@@ -615,6 +630,23 @@ func (p *terrainProfiler) writeFetchError(w http.ResponseWriter, r *http.Request
 		return
 	}
 	writeError(w, http.StatusBadGateway, "terrain data unavailable")
+}
+
+// noteRefusal counts an admission refusal and reports it at most once per
+// terrainRefusalLogEvery: the first at once, then the number since the last
+// report. Neither the token nor any URL is involved.
+func (p *terrainProfiler) noteRefusal() {
+	total := p.refused.Add(1)
+	now := p.now()
+	p.logMu.Lock()
+	if !p.logAt.IsZero() && now.Sub(p.logAt) < terrainRefusalLogEvery {
+		p.logMu.Unlock()
+		return
+	}
+	n := total - p.logCount
+	p.logAt, p.logCount = now, total
+	p.logMu.Unlock()
+	p.logf("[dhm] terrain profile admission: refused %d request(s) since the last report because map.dhm.profile.maxInFlight (%d) fetches are running; raise it if this persists", n, cap(p.admit))
 }
 
 // resolveTerrainEnd resolves a public key to a positioned, visible node,

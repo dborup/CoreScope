@@ -75,7 +75,7 @@ func routeDescriptions() map[string]routeMeta {
 				{Status: "404", Description: "Profile disabled, or a public key that is unknown, hidden or has no position."},
 				{Status: "429", Description: "Per-client budget of profiles not in the cache exceeded (map.dhm.profile.rateLimitPerMin, default 10/min). Retry-After gives the seconds to wait."},
 				{Status: "502", Description: "The elevation service failed; no upstream detail is returned."},
-				{Status: "503", Description: "map.dhm.profile.maxInFlight uncached profiles (default 4) are already being fetched, server-wide; no upstream call. Requests for a profile already being fetched share it and are not refused. Retry-After gives the seconds to wait."},
+				{Status: "503", Description: "map.dhm.profile.maxInFlight uncached profiles (default 4) are already being fetched, server-wide; no upstream call. Requests for a profile already being fetched share that fetch, so when its fetch is refused they are refused with it. A refusal is not charged to the per-client budget. Retry-After gives the seconds to wait."},
 				{Status: "504", Description: "The elevation service timed out (per raster, or 25 s for the whole profile)."},
 			}},
 
