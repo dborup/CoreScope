@@ -642,6 +642,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		Privacy:             privacy,
 		EstimatedPositions:  EstimatedPositionsClientConfig{Enabled: s.estimatedPositionsEnabled()},
 		DHM:                 s.dhmClientConfig(),
+		Heritage:            s.heritageClientConfig(),
 	})
 }
 

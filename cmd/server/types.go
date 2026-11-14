@@ -1677,6 +1677,10 @@ type ClientConfigResponse struct {
 	// DHM offers the #680 terrain hillshade overlay. Omitted unless map.dhm
 	// is enabled with a token; it never carries the token itself.
 	DHM *DHMClientConfig `json:"dhm,omitempty"`
+
+	// Heritage offers the #723 protected ancient monuments overlay. Omitted
+	// unless map.heritage.enabled is true.
+	Heritage *HeritageClientConfig `json:"heritage,omitempty"`
 }
 
 // PrivacyClientConfig is the privacy block of /api/config/client. It carries

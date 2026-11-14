@@ -115,35 +115,50 @@ func dhmTileQueryParams() []paramMeta {
 // extractDHMConfig moves map.dhm into the typed DHM field, because the
 // free-form Map block is shipped verbatim by /api/config/client. The raw
 // block is deleted even when it is malformed: it must never reach clients.
-//
-// Map is a map[string]interface{}, so key lookup is case-sensitive. A
-// case variant (`DHM`, `Dhm`, …) is removed too, with a warning, but it
-// does not enable the overlay: only the documented spelling does, so the
-// result never depends on which of several spellings map iteration meets
-// first.
 func (c *Config) extractDHMConfig() {
-	if c.Map == nil {
+	liftMapBlock(c, "dhm", "terrain overlay", &c.DHM)
+}
+
+// extractTypedMapBlocks lifts every typed block out of the client-visible
+// Map: map.dhm (#680) and map.heritage (#723).
+func (c *Config) extractTypedMapBlocks() {
+	c.extractDHMConfig()
+	c.extractHeritageConfig()
+}
+
+// liftMapBlock moves c.Map[key] into *dst and deletes it from c.Map, which
+// /api/config/client ships verbatim. The raw block is deleted even when it
+// is malformed; *dst is then left zero (feature off) with a warning.
+//
+// Key lookup in c.Map is case-sensitive. A case variant (`DHM`, `Dhm`, …)
+// is removed too, with a warning, but it does not fill *dst: only the
+// documented spelling does, so the result never depends on which of several
+// spellings map iteration meets first.
+func liftMapBlock[T any](c *Config, key, feature string, dst *T) {
+	m := c.Map
+	if m == nil {
 		return
 	}
-	for k := range c.Map {
-		if k != "dhm" && strings.EqualFold(k, "dhm") {
-			delete(c.Map, k)
-			log.Printf("[dhm] config map.%s ignored and removed from the client config; the key must be spelled map.dhm", k)
+	for k := range m {
+		if k != key && strings.EqualFold(k, key) {
+			delete(m, k)
+			log.Printf("[%s] config map.%s ignored and removed from the client config; the key must be spelled map.%s", key, k, key)
 		}
 	}
-	raw, ok := c.Map["dhm"]
+	raw, ok := m[key]
 	if !ok {
 		return
 	}
-	delete(c.Map, "dhm")
-	c.DHM = dhm.Config{}
+	delete(m, key)
+	var zero T
+	*dst = zero
 	b, err := json.Marshal(raw)
 	if err == nil {
-		err = json.Unmarshal(b, &c.DHM)
+		err = json.Unmarshal(b, dst)
 	}
 	if err != nil {
-		c.DHM = dhm.Config{}
-		log.Printf("[dhm] config map.dhm is malformed; terrain overlay disabled")
+		*dst = zero
+		log.Printf("[%s] config map.%s is malformed; %s disabled", key, key, feature)
 	}
 }
 
