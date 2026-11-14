@@ -16,6 +16,8 @@
  *     hook), then listens to layeradd, counting each later layer's credit
  *     and dropping it again on that layer's 'remove'. remove() only stops
  *     listening to layeradd and does not give map.attributionControl back.
+ *     getContainer() returns a stub element whose classList records the
+ *     classes added to it (#752 adds the compact class there).
  */
 'use strict';
 const vm = require('vm');
@@ -35,6 +37,23 @@ function makeStorage(init) {
   };
 }
 
+// A light stand-in for L.Control.Attribution, for the suites that drive a
+// single call site with a tile-layer spy rather than the whole registry
+// (#332, #390, #1470). It records what the control was given; the fuller
+// model inside makeLeaflet() counts credits the way Leaflet does.
+function makeAttributionStub() {
+  const credits = [];
+  const classes = [];
+  const c = {
+    credits, classes, opts: null,
+    addTo(map) { map.attributionControl = c; (map._attributionControls = map._attributionControls || []).push(c); return c; },
+    addAttribution(t) { if (t) credits.push(t); return c; },
+    removeAttribution(t) { const i = credits.indexOf(t); if (i >= 0) credits.splice(i, 1); return c; },
+    getContainer() { return { classList: { add: (cl) => { if (!classes.includes(cl)) classes.push(cl); }, contains: (cl) => classes.includes(cl) } }; },
+  };
+  return (opts) => { c.opts = opts || null; return c; };
+}
+
 function makeLeaflet() {
   function evented(o) {
     const h = {};
@@ -42,8 +61,9 @@ function makeLeaflet() {
     o.off = (t, fn) => { if (h[t]) h[t] = h[t].filter(f => f !== fn); return o; };
     o.once = (t, fn) => { const w = (e) => { o.off(t, w); fn(e); }; return o.on(t, w); };
     o.fire = (t, e) => { (h[t] || []).slice().forEach(fn => fn(Object.assign({ type: t }, e || {}))); return o; };
-    // Leaflet's Layer.getAttribution.
+    // Leaflet's Layer.getAttribution and Layer.addTo.
     o.getAttribution = () => (o.options || {}).attribution;
+    o.addTo = (map) => { map.addLayer(o); return o; };
     return o;
   }
   const L = {
@@ -74,8 +94,20 @@ function makeLeaflet() {
   L.tileLayer.wms = (url, opts) => evented({ _url: url, options: opts || {}, kind: 'wms' });
   L.control.attribution = (opts) => {
     const counts = {};
+    // Leaflet's Control.getContainer(): the registry adds the compact class
+    // to it for the inset maps (#752).
+    const classes = [];
+    const container = {
+      classList: {
+        add: (cl) => { if (!classes.includes(cl)) classes.push(cl); },
+        contains: (cl) => classes.includes(cl),
+      },
+      classes,
+    };
     const c = {
       opts,
+      getContainer() { return container; },
+      classes,
       addAttribution(t) { if (t) counts[t] = (counts[t] || 0) + 1; return c; },
       removeAttribution(t) { if (t && counts[t]) counts[t]--; return c; },
       // Leaflet 1.9.4 Control.Attribution._addAttribution.
@@ -203,4 +235,4 @@ function liveCredits(map) {
   return liveAttributions(map).flatMap(c => c.credits()).sort();
 }
 
-module.exports = { makeStorage, makeLeaflet, makeMap, makeSandbox, buildControl, liveAttributions, liveCredits };
+module.exports = { makeStorage, makeLeaflet, makeAttributionStub, makeMap, makeSandbox, buildControl, liveAttributions, liveCredits };
