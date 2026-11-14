@@ -101,7 +101,7 @@ func (s *Server) handleShareProfile(doc *indexDoc) http.HandlerFunc {
 			doc.serveSite(w, r, http.StatusBadRequest)
 			return
 		}
-		req, rerr := s.resolveTerrainRequest(p, tq)
+		req, rerr := s.resolveTerrainRequest(r.Context(), p, tq)
 		if rerr != nil {
 			doc.serveSite(w, r, rerr.status)
 			return

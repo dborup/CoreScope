@@ -450,12 +450,38 @@
 
   // ── Verdict ──────────────────────────────────────────────────────────────
 
+  /* `detail` speaks for the deciding terrain model (DTM); `surface` is the
+   * same state read off the surface model (DSM), which carries buildings
+   * and trees. One table, so the two chips can never drift apart. */
   var VERDICTS = {
-    clear: { label: 'Clear', tone: 'ok', detail: 'The whole first Fresnel zone is clear of terrain.' },
-    fresnel100: { label: 'Usable', tone: 'ok', detail: 'The first Fresnel zone is partly obstructed, but at least 60 % of it stays clear.' },
-    fresnel60: { label: 'Marginal', tone: 'warn', detail: 'Line of sight is clear, but less than 60 % of the first Fresnel zone is.' },
-    blocked: { label: 'Blocked', tone: 'bad', detail: 'Terrain rises through the line of sight.' }
+    clear: { label: 'Clear', tone: 'ok', detail: 'The whole first Fresnel zone is clear of terrain.',
+      surface: 'Buildings and trees stay clear of the whole first Fresnel zone.' },
+    fresnel100: { label: 'Usable', tone: 'ok', detail: 'The first Fresnel zone is partly obstructed, but at least 60 % of it stays clear.',
+      surface: 'Buildings or trees reach into the first Fresnel zone, but at least 60 % of it stays clear.' },
+    fresnel60: { label: 'Marginal', tone: 'warn', detail: 'Line of sight is clear, but less than 60 % of the first Fresnel zone is.',
+      surface: 'Line of sight clears the buildings and trees, but less than 60 % of the first Fresnel zone does.' },
+    blocked: { label: 'Blocked', tone: 'bad', detail: 'Terrain rises through the line of sight.',
+      surface: 'Buildings or trees rise through the line of sight.' }
   };
+
+  /* #729. The server's verdict is the terrain one and only the terrain one:
+   * the DTM decides and the DSM informs (#681 owner decision 6), because a
+   * forest canopy in the DSM would mark most rural links blocked. That is
+   * the right call for the verdict and the wrong one for the words, so a
+   * link straight through a 28 m building used to read "Clear" with the
+   * building visible only as a hatched band in the chart.
+   *
+   * So: the main chip says which model it speaks for, and the surface gets
+   * a chip of its own whenever it is WORSE than the terrain — never a
+   * second verdict (it keeps the warn tone whatever it says, and it can
+   * only ever add a caveat, never soften a bad terrain verdict). */
+  var TERRAIN_PREFIX = 'Terrain: ';
+  var SURFACE_PREFIX = 'Buildings/trees: ';
+  var SURFACE_NOTE = 'Buildings block the signal. Trees mostly attenuate it, so a link through forest can still work.';
+  var SURFACE_UNKNOWN_DETAIL = 'No surface verdict: the path was not measured end to end.';
+  // Worst first. Only states on this ladder can be compared; "unknown" is
+  // deliberately absent, so an unjudged surface is never ranked at all.
+  var SURFACE_RANK = { blocked: 0, fresnel60: 1, fresnel100: 2, clear: 3 };
 
   /* The verdict states that assert terrain inside the criterion zone, and
    * so the only ones whose chart may carry intrusion bands. */
@@ -485,7 +511,14 @@
     var v = (data && data.verdict) || {};
     var cov = (data && data.coverage) || {};
     var known = covered(data) && Object.prototype.hasOwnProperty.call(VERDICTS, v.state) ? VERDICTS[v.state] : null;
-    if (known) return { state: v.state, label: known.label, tone: known.tone, detail: known.detail };
+    /* #729: with the surface model in play the bare word is ambiguous —
+     * "Clear" next to a building is what sent us here — so the chip names
+     * the model it speaks for. With "Terrain only" there is nothing to
+     * disambiguate and the bare label stays. */
+    if (known) {
+      var prefix = (data && data.model === 'both') ? TERRAIN_PREFIX : '';
+      return { state: v.state, label: prefix + known.label, tone: known.tone, detail: known.detail };
+    }
     var detail;
     if (cov.state === 'partial') {
       detail = 'No verdict, path leaves Denmark. The profile covers ' + fmtPct(cov.pct) + ' % of the path.';
@@ -495,6 +528,45 @@
       detail = 'No elevation data for this path, so there is no clearance verdict.';
     }
     return { state: 'unknown', label: 'No verdict', tone: 'unknown', detail: detail };
+  }
+
+  /* surfaceState is the DSM state the panel is allowed to speak, which is
+   * not always the one the response carries: #689 review N1 forces the
+   * surface to "unknown" on anything but full coverage, and this file holds
+   * the same line locally (see covered()) so a stale cache or a future
+   * server can never paint a confident surface verdict on a path that was
+   * never measured end to end. */
+  function surfaceState(data) {
+    var s = data && data.verdict && data.verdict.surface;
+    if (!s) return null;
+    if (!covered(data) || !Object.prototype.hasOwnProperty.call(VERDICTS, s.state)) return 'unknown';
+    return s.state;
+  }
+
+  /* surfaceChip maps verdict.surface to the second chip. It returns null
+   * when there is no surface to speak of at all — "Terrain only", or a
+   * response without the block — and otherwise a chip whose `show` says
+   * whether it adds anything: it is shown only when the surface is strictly
+   * worse than the terrain, so two agreeing models stay one chip. */
+  function surfaceChip(data) {
+    if (!data || data.model !== 'both') return null;
+    var state = surfaceState(data);
+    if (state === null) return null;
+    var known = state === 'unknown' ? null : VERDICTS[state];
+    var terrain = verdictChip(data);
+    var show = !!known
+      && Object.prototype.hasOwnProperty.call(SURFACE_RANK, terrain.state)
+      && SURFACE_RANK[state] < SURFACE_RANK[terrain.state];
+    return {
+      state: state,
+      label: SURFACE_PREFIX + (known ? known.label : 'No verdict'),
+      // Never a second verdict: the surface informs, so it caveats in the
+      // warn tone whatever state it is in, rather than going red beside a
+      // terrain chip that is green.
+      tone: 'warn',
+      detail: known ? known.surface : SURFACE_UNKNOWN_DETAIL,
+      show: show
+    };
   }
 
   // ── Physics, for drawing only ────────────────────────────────────────────
@@ -673,15 +745,25 @@
     return pts.join(' ');
   }
 
-  /* chartTitle is the words a screen reader gets instead of the picture. */
-  function chartTitle(data, chip, names) {
+  /* chartTitle is the words a screen reader gets instead of the picture.
+   * Both verdicts belong in it (#729): the hatched surface band is the one
+   * part of this chart that carries no text at all. */
+  function chartTitle(data, chip, names, surf) {
     var a = names.nameA || 'A', b = names.nameB || 'B';
-    var txt = 'Terrain profile from ' + a + ' to ' + b + ', ' + fmtMetres(data.distanceM) + '. ' + chip.label + ': ' + chip.detail;
+    var txt = 'Terrain profile from ' + a + ' to ' + b + ', ' + fmtMetres(data.distanceM) + '. ' + chip.label + '. ' + chip.detail;
     var worst = data.verdict && data.verdict.worstClearanceM;
     if (worst !== null && worst !== undefined && isFinite(Number(worst))) {
       txt += ' Worst clearance ' + fmtMetres(worst) + ' at ' + fmtMetres(data.verdict.worstAtM) + ' along the path.';
     }
+    if (surf && surf.show) txt += ' ' + surf.label + '. ' + surf.detail + ' ' + SURFACE_NOTE;
     return txt;
+  }
+
+  /* chartLabel is the chart's accessible NAME. role="img" + aria-label puts
+   * the label ahead of <title>, so a verdict that lives only in the title
+   * is never announced; both verdicts go here as well (#729). */
+  function chartLabel(chip, surf) {
+    return 'Terrain profile chart. ' + chip.label + ((surf && surf.show) ? '. ' + surf.label : '');
   }
 
   /* buildChart renders the profile as one inline SVG string, following the
@@ -693,6 +775,7 @@
     names = names || {};
     var g = chartGeometry(data);
     var chip = verdictChip(data);
+    var surf = surfaceChip(data);
     if (!g) {
       return '<div class="tp-plot tp-plot-empty">'
         + '<svg viewBox="0 0 ' + VIEW.w + ' ' + VIEW.h + '" class="tp-svg" role="img" aria-label="No terrain profile">'
@@ -702,8 +785,10 @@
     var p = g.plot;
     var labels = [];
     var out = ['<div class="tp-plot">'];
-    out.push('<svg viewBox="0 0 ' + VIEW.w + ' ' + VIEW.h + '" class="tp-svg" preserveAspectRatio="none" role="img" aria-label="Terrain profile chart">');
-    out.push('<title>' + esc(chartTitle(data, chip, names)) + '</title>');
+    // Sink: a quoted SVG attribute. Both pieces are this file's own fixed
+    // strings, but they go through esc() like every other interpolation.
+    out.push('<svg viewBox="0 0 ' + VIEW.w + ' ' + VIEW.h + '" class="tp-svg" preserveAspectRatio="none" role="img" aria-label="' + esc(chartLabel(chip, surf)) + '">');
+    out.push('<title>' + esc(chartTitle(data, chip, names, surf)) + '</title>');
 
     // Horizontal grid + elevation ticks.
     for (var t = 0; t <= 4; t++) {
@@ -976,6 +1061,14 @@
       ui.chip = el('span', 'tp-chip');
       ui.chip.setAttribute('data-testid', 'tp-verdict');
       head.appendChild(ui.chip);
+      /* #729: the surface (buildings and trees) verdict, when it is worse
+       * than the terrain one. It rides beside the verdict rather than under
+       * the chart because "Clear" beside an obvious building is read in the
+       * title row and nowhere else. */
+      ui.surface = el('span', 'tp-chip tp-chip-surface');
+      ui.surface.setAttribute('data-testid', 'tp-surface-chip');
+      ui.surface.hidden = true;
+      head.appendChild(ui.surface);
       /* Plan §3.2: the verdict must read "assumed heights" until the viewer
        * has confirmed both ends. A 10 m error in an assumed antenna height
        * swamps the 0.05 m DHM accuracy and can flip the verdict outright,
@@ -1033,6 +1126,14 @@
       ui.detail = el('p', 'tp-detail');
       ui.detail.setAttribute('data-testid', 'tp-detail');
       body.appendChild(ui.detail);
+
+      /* #729: what a surface verdict actually means for a radio link. It
+       * only appears with the chip it explains, so a profile where the two
+       * models agree is not padded with a line about nothing. */
+      ui.surfaceNote = el('p', 'tp-surface-note', SURFACE_NOTE);
+      ui.surfaceNote.setAttribute('data-testid', 'tp-surface-note');
+      ui.surfaceNote.hidden = true;
+      body.appendChild(ui.surfaceNote);
 
       var controls = el('div', 'tp-controls');
       ui.endA = endpointControl('a', 'A');
@@ -1184,6 +1285,7 @@
       renderNames();
       setStatus('Measuring the terrain along the path…', 'tp-loading');
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
+      setSurfaceChip(null);
       if (ui.assumed) ui.assumed.hidden = true;
       scheduleRequest();
       if (opts.onEndpointsChange) opts.onEndpointsChange();
@@ -1205,6 +1307,20 @@
       ui.chip.textContent = chip.label;
       ui.chip.setAttribute('data-state', chip.state);
       ui.chip.title = chip.detail;
+    }
+
+    /* setSurfaceChip shows the second chip and its explanatory line, or
+     * takes both away together: the line exists to explain the chip. */
+    function setSurfaceChip(surf) {
+      var show = !!(surf && surf.show);
+      if (ui.surface) {
+        ui.surface.hidden = !show;
+        ui.surface.className = 'tp-chip tp-chip-surface tp-chip-' + (show ? surf.tone : 'unknown');
+        ui.surface.textContent = show ? surf.label : '';
+        ui.surface.setAttribute('data-state', show ? surf.state : '');
+        ui.surface.title = show ? surf.detail : '';
+      }
+      if (ui.surfaceNote) ui.surfaceNote.hidden = !show;
     }
 
     function writeHash() {
@@ -1256,6 +1372,7 @@
     function render(data) {
       var chip = verdictChip(data);
       setChip(chip);
+      setSurfaceChip(surfaceChip(data));
       var names = { nameA: nodes.a && nodes.a.name, nameB: nodes.b && nodes.b.name };
       var drawn = !!(data.samples && data.samples.length);
       /* The credit is a licence obligation, so it is one HTML line under
@@ -1313,6 +1430,7 @@
       var mine = ++seq;
       setStatus('Measuring the terrain along the path…', 'tp-loading');
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
+      setSurfaceChip(null);
       if (ui.assumed) ui.assumed.hidden = true;
       return fetchJSON(requestURL(effectiveState())).then(function (data) {
         if (mine !== seq || !open) return;
@@ -1327,6 +1445,7 @@
       }).catch(function (err) {
         if (mine !== seq || !open) return;
         setChip({ state: 'error', tone: 'unknown', label: 'No profile', detail: String(err && err.message || err) });
+        setSurfaceChip(null);
         if (ui.assumed) ui.assumed.hidden = true;
         setStatus(String((err && err.message) || 'Could not load the terrain profile.'), 'tp-error');
         ui.detail.textContent = 'Could not load the terrain profile.';
@@ -1516,6 +1635,8 @@
     recallHeight: recallHeight,
     rememberHeight: rememberHeight,
     verdictChip: verdictChip,
+    surfaceChip: surfaceChip,
+    SURFACE_NOTE: SURFACE_NOTE,
     chartGeometry: chartGeometry,
     buildChart: buildChart,
     create: create,

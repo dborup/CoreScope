@@ -567,11 +567,12 @@ type terrainRequestError struct {
 // resolveTerrainRequest is the shared prelude after parsing: resolve both
 // ends (hidden, unknown and unpositioned nodes are 404), snap them to the
 // cache key's 5 decimals, gate the distance and plan the samples. It makes
-// no upstream call and charges nothing.
-func (s *Server) resolveTerrainRequest(p *terrainProfiler, tq terrainQuery) (terrainRequest, *terrainRequestError) {
+// no upstream call and charges nothing. ctx bounds the identity-visibility
+// lookup in resolveTerrainEnd (#743).
+func (s *Server) resolveTerrainRequest(ctx context.Context, p *terrainProfiler, tq terrainQuery) (terrainRequest, *terrainRequestError) {
 	req := terrainRequest{q: tq}
 	for i, ref := range [2]terrainRef{tq.a, tq.b} {
-		e, ok := s.resolveTerrainEnd(ref)
+		e, ok := s.resolveTerrainEnd(ctx, ref)
 		if !ok {
 			return req, &terrainRequestError{http.StatusNotFound, "node not found"}
 		}
@@ -603,7 +604,7 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, dhm.ErrBadRequest.Error())
 		return
 	}
-	req, rerr := s.resolveTerrainRequest(p, tq)
+	req, rerr := s.resolveTerrainRequest(r.Context(), p, tq)
 	if rerr != nil {
 		writeError(w, rerr.status, rerr.msg)
 		return
@@ -705,10 +706,24 @@ func (p *terrainProfiler) noteRefusal() {
 
 // resolveTerrainEnd resolves a public key to a positioned, visible node,
 // or passes a point through. Hidden, unknown and unpositioned nodes all
-// look the same: not found.
-func (s *Server) resolveTerrainEnd(ref terrainRef) (terrainEnd, bool) {
+// look the same: not found. Visibility is the identity policy Reach uses
+// (identityHidden over hiddenIdentityNames: blacklists plus the live node,
+// inactive-node and observer-alias names, #743), decided before any
+// coordinate is read. The lookup runs for every node endpoint, known or
+// not, so the work done does not tell a hidden identity apart from a
+// missing one; a failed lookup fails closed. Unlike isIdentityHidden it
+// does not skip the lookup for a blacklisted key, which would make
+// blacklisted endpoints measurably cheaper than unknown ones.
+func (s *Server) resolveTerrainEnd(ctx context.Context, ref terrainRef) (terrainEnd, bool) {
 	if ref.pubkey == "" {
 		return terrainEnd{pt: ref.pt, kind: "point"}, true
+	}
+	names, err := s.hiddenIdentityNames(ctx, []string{ref.pubkey})
+	if err != nil || identityHidden(s.cfg, ref.pubkey, names[strings.ToLower(ref.pubkey)]...) {
+		if err != nil && s.terrain != nil {
+			s.terrain.logf("[dhm] terrain profile: node visibility lookup failed; endpoint refused")
+		}
+		return terrainEnd{}, false
 	}
 	if s.store == nil {
 		return terrainEnd{}, false
