@@ -279,6 +279,35 @@ func TestAssessSurfaceAboveAntennaIsBlocked(t *testing.T) {
 	}
 }
 
+// TestAssessEndpointTieGoesToA (#746 N-b, #750 delta review): with the
+// surface above the antenna at both ends by the same depth, and nothing in
+// the path, the worst point is A, as the Assess doc says. Equal depth is
+// equal clearance in metres, whatever the antennas and surfaces are.
+func TestAssessEndpointTieGoesToA(t *testing.T) {
+	l, surface := flatLink() // 10 m antennas over flat ground at 0 m
+	n := len(surface)
+	for _, c := range []struct {
+		name           string
+		ha, hb, sa, sb float64
+	}{
+		{"same antennas, same surface", 10, 10, 15, 15},
+		{"different antennas, same depth", 10, 20, 15, 25},
+	} {
+		l2 := l
+		l2.HeightA, l2.HeightB = c.ha, c.hb
+		s := append([]float32(nil), surface...)
+		s[0], s[n-1] = float32(c.sa), float32(c.sb)
+		a := l2.Assess(s)
+		if a.State != VerdictBlocked || a.WorstIndex != 0 || a.WorstAtM != 0 || !math.IsInf(a.WorstRatio, -1) {
+			t.Errorf("%s: %+v, want blocked at A (index 0, 0 m) with ratio −Inf", c.name, a)
+		}
+		near(t, c.name+" clearance", a.WorstClearanceM, -5, 1e-4)
+		if !a.AntennaBelowA || !a.AntennaBelowB {
+			t.Errorf("%s: flags A %t, B %t, want both", c.name, a.AntennaBelowA, a.AntennaBelowB)
+		}
+	}
+}
+
 // TestDecimateKeepIndicesWhileTheyFit (#745): keep indices are taken in
 // the order given while they fit, so a caller can pass every gap edge of
 // a fragmented profile without breaking the bound. Before, the evenly
