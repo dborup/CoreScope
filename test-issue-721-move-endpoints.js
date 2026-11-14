@@ -278,6 +278,12 @@ test('just outside the radius is a free point, not a snap', () => {
   assert.strictEqual(r.kind, 'point', 'snapped from 25px away');
 });
 
+test('exactly on the radius still snaps (24 px), one pixel further does not', () => {
+  // 24 px straight below A; C is 46 px away, so only the boundary decides.
+  eq(envS.TP.snapEndpoint({ x: 100, y: 124, lat: 1, lon: 2 }, CANDS, 24, isNode), { kind: 'node', pubkey: PK_A });
+  eq(envS.TP.snapEndpoint({ x: 100, y: 125, lat: 1, lon: 2 }, CANDS, 24, isNode), { kind: 'point', lat: 1, lon: 2 });
+});
+
 test('an observer-only marker snaps to its position as a point, never as a 404 node', () => {
   eq(envS.TP.snapEndpoint({ x: 301, y: 301, lat: 0, lon: 0 }, CANDS, 24, isNode),
     { kind: 'point', lat: 57.12346, lon: 9.87654 });
@@ -403,6 +409,102 @@ atest('swap exchanges the ends with their heights and measures once', async () =
   assert.strictEqual(fetchJSON.params(1).get('a'), '56.10000,10.20000');
   assert.strictEqual(fetchJSON.params(1).get('ha'), '4');
   assert.strictEqual(env.dom.find('tp-hsrc-a').attrs['data-source'], 'link', 'the badge did not travel with the height');
+});
+
+atest('swap moves the height-source badges with the heights (typed vs link)', async () => {
+  const env = load();
+  const { tool } = openTool(env);
+  // B's height comes from the link; A's is typed here ("yours").
+  tool.setState(env.TP.parseState('profile=' + PK_A + ',' + PK_B + '&hb=4'));
+  await sleep(0);
+  env.dom.find('tp-h-a-plus').fire('click');
+  await sleep(SETTLE_MS);
+  assert.strictEqual(env.dom.find('tp-hsrc-a').attrs['data-source'], 'yours', 'setup: A is not "yours"');
+  assert.strictEqual(env.dom.find('tp-hsrc-b').attrs['data-source'], 'link', 'setup: B is not "link"');
+  env.dom.find('tp-swap').fire('click');
+  await sleep(SETTLE_MS);
+  assert.strictEqual(env.dom.find('tp-hsrc-a').attrs['data-source'], 'link', 'the link badge stayed on the old A');
+  assert.strictEqual(env.dom.find('tp-hsrc-b').attrs['data-source'], 'yours', 'the "yours" badge stayed on the old B');
+});
+
+// ── 5b. Moving an end that stands on a customizer (M6) default ────────────
+
+console.log('\n=== #725: a moved end drops the old end’s customizer default ===');
+
+const PK_D = 'd'.repeat(64);
+// What the stubbed server knows about each node: its role and how it answers.
+const NODE_KIND = {
+  [PK_A]: { role: 'repeater' },
+  [PK_B]: { role: 'repeater' },
+  [PK_C]: { role: 'companion' },
+  [PK_D]: { role: 'repeater', source: 'operator-node', antennaM: 20 },
+};
+function themedFetch() {
+  const calls = [];
+  const fn = (url) => {
+    calls.push(url);
+    const q = new URLSearchParams(url.split('?')[1]);
+    const end = (side) => {
+      const ref = q.get(side), h = q.get('h' + side);
+      const k = NODE_KIND[ref] || { role: 'repeater' };
+      if (h !== null) return { kind: 'node', role: k.role, groundM: 0, antennaM: Number(h), antennaSource: 'request', assumed: false };
+      const src = k.source || 'role-default';
+      return { kind: 'node', role: k.role, groundM: 0, antennaM: k.antennaM || 10, antennaSource: src, assumed: src === 'role-default' };
+    };
+    return Promise.resolve({
+      a: end('a'), b: end('b'), distanceM: 1000, model: q.get('model'),
+      coverage: { state: 'full', pct: 100 },
+      samples: [{ d: 0, dtm: 0 }, { d: 500, dtm: 0 }, { d: 1000, dtm: 0 }],
+      physics: { freqMHz: 869.618, freqSource: 'firmware', lambdaM: 0.34474, k: 1, f1MaxM: 9 },
+      verdict: { state: 'clear', criterion: 0.6 },
+    });
+  };
+  fn.calls = calls;
+  fn.params = (i) => new URLSearchParams(calls[i].split('?')[1]);
+  return fn;
+}
+function openThemed() {
+  const env = load();
+  env.win.SITE_CONFIG = { terrain: { heightRepeater: 7, heightCompanion: 3 } };
+  const fetchJSON = themedFetch();
+  const tool = env.TP.create({
+    mount: env.dom.body, fetchJSON,
+    resolveNode: (pk) => ({ name: pk.slice(0, 4), lat: 56, lon: 10, role: (NODE_KIND[pk] || {}).role || 'repeater' }),
+    onMoveStart() {}, onMoveCancel() {}, onEndpointsChange() {},
+  });
+  return { env, tool, fetchJSON };
+}
+const lastParams = (f) => f.params(f.calls.length - 1);
+
+atest('moving B off a customizer default gives the new end its own default and badge', async () => {
+  const { env, tool, fetchJSON } = openThemed();
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_B });
+  await sleep(SETTLE_MS);
+  assert.strictEqual(lastParams(fetchJSON).get('hb'), '7', 'setup: the repeater default was not adopted on B');
+  assert.strictEqual(env.dom.find('tp-hsrc-b').attrs['data-source'], 'theme', 'setup: B is not on a customizer default');
+  tool.moveEndpoint('b', { kind: 'node', pubkey: PK_C });   // a companion: customizer default 3
+  assert.strictEqual(tool.getState().hb, null, 'a customizer default leaked into the shared state');
+  await sleep(SETTLE_MS);
+  assert.strictEqual(lastParams(fetchJSON).get('b'), PK_C);
+  assert.strictEqual(lastParams(fetchJSON).get('hb'), '3', 'B was measured with ' + lastParams(fetchJSON).get('hb') + ', not the new end’s own default');
+  assert.strictEqual(lastParams(fetchJSON).get('ha'), '7', 'A lost its own default');
+  assert.strictEqual(env.dom.find('tp-hsrc-b').attrs['data-source'], 'theme');
+  assert.strictEqual(env.dom.find('tp-h-b').value, '3', 'the B input does not show the new default');
+});
+
+atest('moving B off a customizer default onto an operator height does not leave it "assumed"', async () => {
+  const { env, tool, fetchJSON } = openThemed();
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_B });
+  await sleep(SETTLE_MS);
+  assert.strictEqual(env.dom.find('tp-hsrc-b').attrs['data-source'], 'theme', 'setup: B is not on a customizer default');
+  tool.moveEndpoint('b', { kind: 'node', pubkey: PK_D });   // the server has a real operator height for D
+  await sleep(SETTLE_MS);
+  assert.strictEqual(lastParams(fetchJSON).get('hb'), null, 'the old default was sent for the new end');
+  assert.strictEqual(env.dom.find('tp-hsrc-b').attrs['data-source'], 'operator', 'B badge is ' + env.dom.find('tp-hsrc-b').attrs['data-source']);
+  assert.strictEqual(env.dom.find('tp-assumed-b').classList.contains('is-assumed'), false,
+    'the new end is still marked as an assumed height (stale "theme" origin)');
 });
 
 // ── 6. The buttons exist only when the host can pick ──────────────────────
