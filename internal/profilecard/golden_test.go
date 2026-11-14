@@ -37,7 +37,7 @@ type goldenCase struct {
 	resp  TerrainProfileResponse
 	names [2]string
 	opt   Options
-	theme string // "" = shipped palette; "operator" = testdata/theme.json
+	theme string // "" = shipped palette; "operator" = testdata/operator-theme.json
 	// want are text fragments that must appear, by run role.
 	want map[string]string
 	// lightPNG also keeps a byte-exact PNG of the light theme. Every case
@@ -77,7 +77,7 @@ func goldenCases() []goldenCase {
 	}
 }
 
-// operatorTheme is the theme.json fixture's two sections, as the server's
+// operatorTheme is the operator-theme.json fixture: the two theme.json sections, as the server's
 // LoadTheme would hand them over (string values only).
 type operatorTheme struct {
 	Theme     map[string]string `json:"theme"`
@@ -86,7 +86,7 @@ type operatorTheme struct {
 
 func loadOperatorTheme(t testing.TB) operatorTheme {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", "theme.json"))
+	b, err := os.ReadFile(filepath.Join("testdata", "operator-theme.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

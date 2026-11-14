@@ -2,6 +2,7 @@ package profilecard
 
 import (
 	"bytes"
+	"fmt"
 	"image"
 	"image/png"
 	"math"
@@ -189,12 +190,14 @@ func mustRender(t testing.TB, resp TerrainProfileResponse, names [2]string) *ima
 }
 
 // Render is a pure function: the same input gives the same bytes, also
-// from many goroutines at once (run under -race in CI).
+// from many goroutines at once. The concurrent renders run first, on
+// different names, so any state shared between calls (a glyph cache, a
+// font buffer) would be written concurrently and trip -race (CI) or the
+// runtime's map check; the sequential renders afterwards must match them.
 func TestRenderIsPure(t *testing.T) {
 	resp := fxMarginal()
-	want, err := Render(resp, [2]string{"Ridge North", "Valley Node"}, DefaultPalette(true), Options{})
-	if err != nil {
-		t.Fatal(err)
+	names := func(i int) [2]string {
+		return [2]string{fmt.Sprintf("Ridge %c%c", 'A'+i, 'k'+i), fmt.Sprintf("Valley %c", 'Q'+i)}
 	}
 	var wg sync.WaitGroup
 	got := make([][]byte, 8)
@@ -202,13 +205,17 @@ func TestRenderIsPure(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			got[i], _ = Render(resp, [2]string{"Ridge North", "Valley Node"}, DefaultPalette(true), Options{})
+			got[i], _ = Render(resp, names(i), DefaultPalette(i%2 == 0), Options{})
 		}(i)
 	}
 	wg.Wait()
 	for i, b := range got {
+		want, err := Render(resp, names(i), DefaultPalette(i%2 == 0), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
 		if !bytes.Equal(b, want) {
-			t.Fatalf("render %d differs from the first", i)
+			t.Fatalf("concurrent render %d differs from the same render run alone", i)
 		}
 	}
 	// And the input is not modified.
