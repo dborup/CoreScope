@@ -238,6 +238,44 @@
     return x.kind === 'node' ? x.pubkey === y.pubkey : (x.lat === y.lat && x.lon === y.lon);
   }
 
+  // ── Endpoints from the map (#721) ────────────────────────────────────────
+
+  /* pointRef is a free map point as an endpoint: five decimals (~1 m), the
+   * precision the link carries, or null for anything that is not a real
+   * coordinate. */
+  function pointRef(lat, lon) {
+    var la = Number(lat), lo = Number(lon);
+    if (lat === null || lon === null || !isFinite(la) || !isFinite(lo)
+      || la < -90 || la > 90 || lo < -180 || lo > 180) return null;
+    return { kind: 'point', lat: round(la, 5), lon: round(lo, 5) };
+  }
+
+  /* markerRef is the one rule for "which endpoint is this marker": a node
+   * key the node store knows becomes that node, anything else (an
+   * observer-only marker, a marker without a key) the point it stands on.
+   * The server resolves a key against the node store only, so an observer
+   * id sent as a node would come back 404. */
+  function markerRef(key, lat, lon, isNode) {
+    var k = key ? String(key).toLowerCase() : '';
+    if (PUBKEY_RE.test(k) && typeof isNode === 'function' && isNode(k)) return { kind: 'node', pubkey: k };
+    return pointRef(lat, lon);
+  }
+
+  /* snapEndpoint resolves a drop: onto the nearest marker within radiusPx
+   * (by markerRef), else the free point under the drop. drop and every
+   * candidate carry container pixels {x, y} and their {lat, lon}. One pass,
+   * once per drop — never per pointer move. */
+  function snapEndpoint(drop, candidates, radiusPx, isNode) {
+    if (!drop) return null;
+    var best = null, bestD = radiusPx * radiusPx;
+    for (var i = 0; candidates && i < candidates.length; i++) {
+      var c = candidates[i];
+      var dx = c.x - drop.x, dy = c.y - drop.y, d = dx * dx + dy * dy;
+      if (d <= bestD) { best = c; bestD = d; }
+    }
+    return best ? markerRef(best.key, best.lat, best.lon, isNode) : pointRef(drop.lat, drop.lon);
+  }
+
   /* serializeState writes only what differs from the defaults, so a plain
    * two-node link stays short and the round trip is exact. */
   function serializeState(state, defaults) {
@@ -836,9 +874,14 @@
       });
     };
     var syncHash = opts.syncHash !== false;
+    /* #721: the host owns picking, so Move A / Move B exist only when it can
+     * arm a picker for one end. Swap needs nothing from the host. */
+    var canPick = typeof opts.onMoveStart === 'function';
 
     var state = { a: null, b: null, model: themeDefaults().model, ha: null, hb: null, k: null, freq: null };
     var open = false, seq = 0, debounceTimer = null, panel = null, nodes = { a: null, b: null };
+    // The end whose Move button is armed ('a' | 'b'), else null (#721).
+    var moving = null;
     // Where each height in `state` came from on this side of the wire:
     // 'yours' (typed, or remembered in localStorage), 'link', 'theme' (the
     // customizer's default for this kind of endpoint), or null.
@@ -977,6 +1020,7 @@
       ui.endB = endpointControl('b', 'B');
       controls.appendChild(ui.endA.wrap);
       controls.appendChild(ui.endB.wrap);
+      controls.appendChild(swapControl());
 
       var modelWrap = el('div', 'tp-field');
       modelWrap.appendChild(el('span', 'tp-field-label', 'Model'));
@@ -1021,6 +1065,19 @@
       name.setAttribute('data-testid', 'tp-name-' + side);
       head.appendChild(name);
       wrap.appendChild(head);
+      var move = null;
+      if (canPick) {
+        move = el('button', 'tp-seg-btn tp-move', 'Move ' + label);
+        move.type = 'button';
+        move.disabled = true;
+        move.title = 'Pick a new position for ' + label + ' on the map: a node marker or any point. Escape, or this button again, cancels.';
+        move.setAttribute('aria-pressed', 'false');
+        move.setAttribute('data-testid', 'tp-move-' + side);
+        move.addEventListener('click', function () {
+          if (moving === side) api.cancelMove(); else api.beginMove(side);
+        });
+        wrap.appendChild(move);
+      }
 
       var id = 'tpHeight' + label;
       var lab = el('label', 'tp-field-label', 'Antenna height (m)');
@@ -1073,7 +1130,44 @@
       plus.addEventListener('click', function () { commit((clampHeight(input.value) || 0) + 1); });
       input.addEventListener('input', function () { commit(input.value); });
       input.addEventListener('change', function () { commit(input.value); });
-      return { wrap: wrap, name: name, input: input, source: source, badge: badge };
+      return { wrap: wrap, name: name, input: input, source: source, badge: badge, move: move };
+    }
+
+    function swapControl() {
+      var wrap = el('div', 'tp-field tp-swap-field');
+      ui.swap = el('button', 'tp-seg-btn tp-swap', 'Swap A/B');
+      ui.swap.type = 'button';
+      ui.swap.disabled = true;
+      ui.swap.setAttribute('aria-label', 'Swap A and B');
+      ui.swap.setAttribute('data-testid', 'tp-swap');
+      ui.swap.addEventListener('click', function () { api.swap(); });
+      wrap.appendChild(ui.swap);
+      return wrap;
+    }
+
+    function syncMoveButtons() {
+      var both = !!(state.a && state.b);
+      [['a', ui.endA], ['b', ui.endB]].forEach(function (pair) {
+        var b = pair[1] && pair[1].move;
+        if (!b) return;
+        b.disabled = !both;
+        b.classList.toggle('active', moving === pair[0]);
+        b.setAttribute('aria-pressed', moving === pair[0] ? 'true' : 'false');
+      });
+      if (ui.swap) ui.swap.disabled = !both;
+    }
+
+    /* endpointsChanged is the shared tail of a move and a swap: the panel
+     * names, the hash at once (replaceState), and one debounced request. An
+     * answer still in flight belongs to the old ends, so it is dropped. */
+    function endpointsChanged() {
+      seq++;
+      renderNames();
+      setStatus('Measuring the terrain along the path…', 'tp-loading');
+      setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
+      if (ui.assumed) ui.assumed.hidden = true;
+      scheduleRequest();
+      if (opts.onEndpointsChange) opts.onEndpointsChange();
     }
 
     function syncModelButtons() {
@@ -1129,6 +1223,7 @@
       });
       ui.copy.disabled = !(state.a && state.b);
       ui.copyStatus.textContent = '';
+      syncMoveButtons();
     }
 
     function setStatus(text, cls) {
@@ -1272,6 +1367,64 @@
         renderNames();
         if (state.a && state.b) request();
       },
+      /* moveEndpoint replaces one end of an open measurement and keeps the
+       * other end, the model, k, freq and the heights (#721). The moved end
+       * keeps a height the viewer or the link set, unless this browser
+       * remembers one for the new end, which is more specific; a default
+       * height stays a default, now the new end's own. Returns false, and
+       * costs nothing, for a move onto either end or without both ends. */
+      moveEndpoint: function (side, ref) {
+        if ((side !== 'a' && side !== 'b') || !ref || !open || !state.a || !state.b) return false;
+        var other = side === 'a' ? 'b' : 'a';
+        if (sameRef(ref, state[side]) || sameRef(ref, state[other])) return false;
+        moving = null;
+        var hk = side === 'a' ? 'ha' : 'hb';
+        var recalled = recallHeight(ref);
+        if (recalled !== null) {
+          state[hk] = recalled;
+          origin[side] = 'yours';
+        } else if (origin[side] !== 'yours' && origin[side] !== 'link') {
+          state[hk] = null;
+          origin[side] = null;
+        }
+        state[side] = ref;
+        // A default the old end adopted says nothing about the new one.
+        themeH[side] = null;
+        if (panel) (side === 'a' ? ui.endA : ui.endB).input.value = state[hk] === null ? '' : String(state[hk]);
+        endpointsChanged();
+        return true;
+      },
+      /* swap exchanges A and B with everything that belongs to each end. */
+      swap: function () {
+        if (!open || !state.a || !state.b) return false;
+        var t = state.a; state.a = state.b; state.b = t;
+        t = state.ha; state.ha = state.hb; state.hb = t;
+        t = origin.a; origin.a = origin.b; origin.b = t;
+        t = themeH.a; themeH.a = themeH.b; themeH.b = t;
+        if (panel) {
+          t = ui.endA.input.value; ui.endA.input.value = ui.endB.input.value; ui.endB.input.value = t;
+        }
+        if (moving) api.cancelMove();
+        endpointsChanged();
+        return true;
+      },
+      /* beginMove arms the host's picker for one end; the panel only shows
+       * which. Nothing changes until the host calls moveEndpoint. */
+      beginMove: function (side) {
+        if ((side !== 'a' && side !== 'b') || !canPick || !open || !state.a || !state.b) return;
+        moving = side;
+        syncMoveButtons();
+        opts.onMoveStart(side);
+      },
+      /* cancelMove is Escape: the end stays where it was, nothing is
+       * fetched, the hash is untouched, and the host disarms. */
+      cancelMove: function () {
+        if (!moving) return;
+        moving = null;
+        syncMoveButtons();
+        if (opts.onMoveCancel) opts.onMoveCancel();
+      },
+      movingSide: function () { return moving; },
       open: function () {
         if (open) return;
         open = true;
@@ -1287,6 +1440,7 @@
         if (debounceTimer) { global.clearTimeout(debounceTimer); debounceTimer = null; }
         state.a = null;
         state.b = null;
+        moving = null;
         themeH.a = null;
         themeH.b = null;
         if (panel) panel.classList.remove('is-open');
@@ -1322,6 +1476,9 @@
     MAX_HEIGHT_M: MAX_HEIGHT_M,
     parseState: parseState,
     parseStart: parseStart,
+    pointRef: pointRef,
+    markerRef: markerRef,
+    snapEndpoint: snapEndpoint,
     shareURL: shareURL,
     offered: offered,
     nodeEntryHash: nodeEntryHash,
