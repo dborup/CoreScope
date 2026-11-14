@@ -1494,6 +1494,23 @@
       });
     }
 
+    /* shut closes the panel and drops every answer still in flight. Only
+     * an explicit Close takes the profile out of the hash. */
+    function shut(rewriteHash) {
+      if (!open) return;
+      open = false;
+      seq++;
+      if (debounceTimer) { global.clearTimeout(debounceTimer); debounceTimer = null; }
+      state.a = null;
+      state.b = null;
+      moving = null;
+      themeH.a = null;
+      themeH.b = null;
+      if (panel) panel.classList.remove('is-open');
+      if (rewriteHash) writeHash();
+      if (opts.onClose) opts.onClose();
+    }
+
     var api = {
       el: function () { return panel; },
       isOpen: function () { return open; },
@@ -1613,22 +1630,13 @@
         renderNames();
         writeHash();
       },
-      close: function () {
-        if (!open) return;
-        open = false;
-        seq++;
-        if (debounceTimer) { global.clearTimeout(debounceTimer); debounceTimer = null; }
-        state.a = null;
-        state.b = null;
-        moving = null;
-        themeH.a = null;
-        themeH.b = null;
-        if (panel) panel.classList.remove('is-open');
-        writeHash();
-        if (opts.onClose) opts.onClose();
-      },
+      close: function () { shut(true); },
+      /* destroy is teardown, not a Close: the router updates the address
+       * bar before it destroys the old page (public/app.js navigate), so
+       * the hash already belongs to the destination and is left alone
+       * (#746). */
       destroy: function () {
-        api.close();
+        shut(false);
         if (global.removeEventListener) {
           global.removeEventListener('terrain-defaults-changed', onDefaultsChanged);
         }

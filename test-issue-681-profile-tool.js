@@ -1554,6 +1554,73 @@ atest('destroy unhooks the customizer listener', async () => {
   assert.ok(!hooks.some(([t]) => t === 'terrain-defaults-changed'), 'the subscription outlived the tool');
 });
 
+// ── #746 §1: teardown leaves the destination hash alone ────────────────────
+
+console.log('\n=== #746: teardown never rewrites the next page\'s hash ===');
+
+/* loadRouted is loadLive with an address bar: a location whose hash
+ * replaceState writes, the way the browser does. The router changes the
+ * hash first and destroys the old page after (public/app.js navigate), so
+ * by the time destroy() runs the hash belongs to the destination. */
+function loadRouted(hash) {
+  const live = loadLive();
+  const location = { protocol: 'https:', host: 'fixture.invalid', origin: 'https://fixture.invalid',
+    pathname: '/', search: '', hash: hash || '#/map' };
+  live.win.location = location;
+  live.win.history = { state: null, replaceState(_s, _t, url) { location.hash = url.slice(url.indexOf('#')); } };
+  return live;
+}
+
+function hashParamsOf(location) {
+  return new URLSearchParams(location.hash.split('?')[1] || '');
+}
+
+atest('destroy after the router moved to another profile keeps that profile', async () => {
+  const live = loadRouted('#/map');
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=both'));
+  assert.strictEqual(hashParamsOf(live.win.location).get('profile'), PK_A + ',' + PK_B, 'setup: the open profile is not in the hash');
+  const next = '#/map?region=AAR&profile=' + PK_B + ',' + PK_A + '&model=dtm&ha=12';
+  live.win.location.hash = next;
+  tool.destroy();
+  assert.strictEqual(live.win.location.hash, next, 'teardown rewrote the destination hash');
+});
+
+atest('destroy after leaving for another page writes nothing either', async () => {
+  const live = loadRouted('#/map');
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B));
+  // History back to a page that happens to carry a key the tool owns.
+  live.win.location.hash = '#/nodes?model=dtm';
+  tool.destroy();
+  assert.strictEqual(live.win.location.hash, '#/nodes?model=dtm');
+});
+
+atest('the Close button still takes the profile out of the hash, and only it', async () => {
+  const live = loadRouted('#/map?region=AAR');
+  let closed = 0;
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch(), onClose: () => { closed++; } });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B + '&ha=12'));
+  live.dom.find('tp-close').fire('click');
+  assert.strictEqual(live.win.location.hash, '#/map?region=AAR', 'an explicit Close left the profile behind');
+  assert.strictEqual(closed, 1, 'the host was not told about the close');
+  assert.strictEqual(tool.isOpen(), false);
+});
+
+atest('destroy still closes the panel, drops answers in flight and tells the host', async () => {
+  const live = loadRouted('#/map');
+  const f = deferredFetch();
+  let closed = 0;
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: f, onClose: () => { closed++; } });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B));
+  tool.destroy();
+  assert.strictEqual(tool.isOpen(), false);
+  assert.strictEqual(closed, 1, 'the host lost its cleanup call');
+  f.calls[0].settle.resolve(answer('blocked'));
+  await sleep(0);
+  assert.notStrictEqual(chipOf(live.dom).state, 'blocked', 'a destroyed panel still took an answer');
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 (async () => {
