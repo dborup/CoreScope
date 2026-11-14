@@ -71,14 +71,20 @@ type TerrainVerdict struct {
 }
 
 // TerrainClearance is the worst point of an assessment; nil without one.
+// WorstF1Fraction is also nil when the worst point is a surface above an
+// antenna (#745).
 type TerrainClearance struct {
 	WorstClearanceM *float64 `json:"worstClearanceM"`
 	WorstAtM        *float64 `json:"worstAtM"`
 	WorstF1Fraction *float64 `json:"worstF1Fraction"`
 }
 
-// TerrainSurfaceInfo is the surface model's assessment.
+// TerrainSurfaceInfo is the surface model's assessment. Reason is
+// "antennaBelowSurface" when the surface is above the antenna at an
+// endpoint (#745); Endpoint is then "A", "B" or "both".
 type TerrainSurfaceInfo struct {
 	State string `json:"state"`
 	TerrainClearance
+	Reason   string `json:"reason,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
 }

@@ -60,11 +60,67 @@ func clearanceOf(a dhm.Assessment) TerrainClearance {
 	if a.State == dhm.VerdictUnknown {
 		return TerrainClearance{}
 	}
-	return TerrainClearance{
-		WorstClearanceM: ptr(round2(a.WorstClearanceM)),
-		WorstAtM:        ptr(round2(a.WorstAtM)),
-		WorstF1Fraction: ptr(math.Round(float64(a.WorstRatio*1000)) / 1000),
+	out := TerrainClearance{WorstClearanceM: ptr(round2(a.WorstClearanceM)), WorstAtM: ptr(round2(a.WorstAtM))}
+	if !math.IsInf(a.WorstRatio, 0) {
+		out.WorstF1Fraction = ptr(math.Round(float64(a.WorstRatio*1000)) / 1000)
 	}
+	return out
+}
+
+// surfaceInfo and gapKeep follow cmd/server's surfaceInfo and
+// terrainGapKeep (#745), so a fixture is shaped like a real response.
+func surfaceInfo(a dhm.Assessment) *TerrainSurfaceInfo {
+	out := &TerrainSurfaceInfo{State: string(a.State), TerrainClearance: clearanceOf(a)}
+	switch {
+	case a.AntennaBelowA && a.AntennaBelowB:
+		out.Endpoint = "both"
+	case a.AntennaBelowA:
+		out.Endpoint = "A"
+	case a.AntennaBelowB:
+		out.Endpoint = "B"
+	}
+	if out.Endpoint != "" {
+		out.Reason = "antennaBelowSurface"
+	}
+	return out
+}
+
+func gapKeep(room int, series ...[]float32) []int {
+	var starts, edges []int
+	for _, s := range series {
+		for i := 0; i < len(s); i++ {
+			if !math.IsNaN(float64(s[i])) {
+				continue
+			}
+			j := i
+			for j+1 < len(s) && math.IsNaN(float64(s[j+1])) {
+				j++
+			}
+			starts = append(starts, i)
+			edges = append(edges, j, i-1, j+1)
+			i = j
+		}
+	}
+	if len(starts) <= room {
+		return append(starts, edges...)
+	}
+	if room <= 0 {
+		return nil
+	}
+	var missing []int
+	for i := range series[0] {
+		for _, s := range series {
+			if s != nil && math.IsNaN(float64(s[i])) {
+				missing = append(missing, i)
+				break
+			}
+		}
+	}
+	out := make([]int, room)
+	for j := range out {
+		out[j] = missing[int(math.Round(float64(j)*float64(len(missing)-1)/float64(max(room-1, 1))))]
+	}
+	return out
 }
 
 func build(s spec) TerrainProfileResponse {
@@ -166,7 +222,7 @@ func build(s spec) TerrainProfileResponse {
 		if resp.Coverage.State != "full" {
 			surface = dhm.Assessment{State: dhm.VerdictUnknown, WorstIndex: -1}
 		}
-		resp.Verdict.Surface = &TerrainSurfaceInfo{State: string(surface.State), TerrainClearance: clearanceOf(surface)}
+		resp.Verdict.Surface = surfaceInfo(surface)
 		keep = append(keep, surface.WorstIndex)
 	}
 	if resp.Coverage.State != "none" {
@@ -174,6 +230,13 @@ func build(s spec) TerrainProfileResponse {
 		if maxRet == 0 {
 			maxRet = 1024
 		}
+		room := maxRet - 2
+		for _, k := range keep {
+			if k > 0 && k < n-1 {
+				room--
+			}
+		}
+		keep = append(keep, gapKeep(room, dtm, dsm)...)
 		idx := dhm.Decimate(n, maxRet, keep...)
 		resp.Samples = make([]TerrainSample, len(idx))
 		for j, i := range idx {

@@ -191,12 +191,18 @@ func verdictChip(resp TerrainProfileResponse) chip {
 }
 
 // surfaceChip is the second chip, shown only when buildings and trees are
-// strictly worse than the terrain (#729). It never softens the terrain
-// verdict and always has the warn tone.
+// strictly worse than the terrain (#729), or always when an antenna is
+// below the surface (#745, antennaBelowLabel). It never softens the
+// terrain verdict and always has the warn tone.
 func surfaceChip(resp TerrainProfileResponse) (chip, bool) {
 	s := resp.Verdict.Surface
 	if resp.Model != "both" || s == nil || !covered(resp) {
 		return chip{}, false
+	}
+	if s.State == "blocked" {
+		if label, ok := antennaBelowLabel(s); ok {
+			return chip{"blocked", label, "warn", ""}, true
+		}
 	}
 	w, ok := verdictWords(s.State)
 	sr, ok1 := surfaceRank(s.State)
@@ -205,6 +211,21 @@ func surfaceChip(resp TerrainProfileResponse) (chip, bool) {
 		return chip{}, false
 	}
 	return chip{s.State, "Buildings/trees: " + w.label, "warn", ""}, true
+}
+
+// antennaBelowLabel is the panel's antennaBelowChip label: a surface above
+// the antenna at an endpoint is far more often a roof-top node with a
+// default antenna height than a building in the link, so the chip says
+// what to check instead of "Blocked".
+func antennaBelowLabel(s *TerrainSurfaceInfo) (string, bool) {
+	if s.Reason != "antennaBelowSurface" {
+		return "", false
+	}
+	at := map[string]string{"A": "A", "B": "B", "both": "A and B"}[s.Endpoint]
+	if at == "" {
+		return "", false
+	}
+	return "Buildings/trees: antenna below the surface at " + at + " — check the antenna height", true
 }
 
 func (r *renderer) toneColor(tone string) color.NRGBA {
