@@ -372,14 +372,28 @@ func TestHeritageQuery_PerIPLimit(t *testing.T) {
 	}
 }
 
-// At most maxInFlight distinct upstream fetches run at once, server-wide;
-// beyond that a click is 503 with Retry-After before any upstream call,
-// the per-IP charge is given back, and refusals are logged throttled.
+// At most maxInFlight distinct upstream fetches run at once, server-wide,
+// through the shared dhm.Admission (#744): beyond that a click is 503 with
+// Retry-After before a worker starts or any upstream call, the per-IP
+// charge is given back, and refusals are logged throttled. A click on a
+// cell already being fetched joins that fetch and takes no slot.
 func TestHeritageQuery_GlobalAdmissionBound(t *testing.T) {
-	src := &fakeHeritage{page: heritageFixturePage(t)}
-	env := newHeritageEnv(t, HeritageConfig{RateLimitPerMin: intp(3)}, src)
-	for i := 0; i < cap(env.q.admit); i++ {
-		env.q.admit <- struct{}{}
+	src := &fakeHeritage{page: heritageFixturePage(t), gate: make(chan struct{})}
+	env := newHeritageEnv(t, HeritageConfig{RateLimitPerMin: intp(3), MaxInFlight: intp(1)}, src)
+	if env.q.admit.Cap() != 1 {
+		t.Fatalf("admission cap %d, want maxInFlight 1", env.q.admit.Cap())
+	}
+	held := at(540400, 6179600)
+	var wg sync.WaitGroup
+	codes := make(chan int, 2)
+	for _, ip := range []string{"198.51.100.8", "198.51.100.9"} {
+		wg.Add(1)
+		go func(ip string) {
+			defer wg.Done()
+			codes <- env.get(held, fromIP(ip)).Code
+		}(ip)
+		// The first holds the only slot; the second joins its fetch.
+		waitUntil(t, "fetch admitted", func() bool { return env.q.admit.InUse() == 1 && src.total.Load() == 1 })
 	}
 	client := fromIP("198.51.100.7")
 	for i := 0; i < 10; i++ {
@@ -389,18 +403,24 @@ func TestHeritageQuery_GlobalAdmissionBound(t *testing.T) {
 			t.Fatalf("Retry-After %q", w.Header().Get("Retry-After"))
 		}
 	}
-	if n := src.total.Load(); n != 0 {
-		t.Fatalf("%d upstream calls while full", n)
+	if n := src.total.Load(); n != 1 {
+		t.Fatalf("%d upstream calls while full, want only the held one", n)
 	}
 	if got := env.q.refused.Load(); got != 10 {
 		t.Fatalf("refused %d", got)
 	}
-	if n := strings.Count(env.logs.String(), "admission"); n != 1 || !strings.Contains(env.logs.String(), "map.heritage.maxInFlight") {
+	if n := strings.Count(env.logs.String(), "admission"); n != 1 || !strings.Contains(env.logs.String(), "map.heritage.maxInFlight (1)") {
 		t.Fatalf("refusal log %q", env.logs.String())
 	}
-	for len(env.q.admit) > 0 {
-		<-env.q.admit
+	close(src.gate)
+	wg.Wait()
+	close(codes)
+	for c := range codes {
+		if c != http.StatusOK {
+			t.Fatalf("held or joined click got %d", c)
+		}
 	}
+	waitUntil(t, "slot released", func() bool { return env.q.admit.InUse() == 0 })
 	// The per-IP budget of 3 is intact.
 	for i := 0; i < 3; i++ {
 		decodeHeritage(t, env.get(at(526400+float64(i)*1000, 6179600), client))
@@ -420,7 +440,7 @@ func TestHeritageQuery_CancelFreesTheSlot(t *testing.T) {
 		req := httptest.NewRequest("GET", "/api/terrain/heritage?"+at(526400, 6179600), nil).WithContext(ctx)
 		env.router.ServeHTTP(httptest.NewRecorder(), req)
 	}()
-	waitUntil(t, "fetch admitted", func() bool { return len(env.q.admit) == 1 })
+	waitUntil(t, "fetch admitted", func() bool { return env.q.admit.InUse() == 1 })
 	cancel()
 	<-done
 	select {
@@ -431,7 +451,7 @@ func TestHeritageQuery_CancelFreesTheSlot(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("upstream call not cancelled")
 	}
-	waitUntil(t, "slot released", func() bool { return len(env.q.admit) == 0 })
+	waitUntil(t, "slot released", func() bool { return env.q.admit.InUse() == 0 })
 	close(src.gate)
 	decodeHeritage(t, env.get(at(526400, 6179600)))
 }

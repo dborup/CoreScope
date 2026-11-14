@@ -1,15 +1,8 @@
 package main
 
-// Shared plumbing of the endpoints that query a third-party upstream on a
-// visitor's behalf: the terrain profile (#681) and the heritage query
-// (#723 M2). Each resolves its own config block with configKnobs and
-// bounds its distinct upstream fetches server-wide with an admission.
-
-import (
-	"sync"
-	"sync/atomic"
-	"time"
-)
+// The bounded optional numbers of a config block, shared by the terrain
+// profile (map.dhm.profile, #681) and the heritage query (map.heritage,
+// #723 M2).
 
 // configKnobs reads optional numeric values of one config block. A nil
 // value takes the default; an out-of-range one logs a warning that names
@@ -43,59 +36,4 @@ func (k configKnobs) integer(key string, v *int, def, lo, hi int) int {
 		return def
 	}
 	return *v
-}
-
-// admission bounds the distinct upstream fetches running at once,
-// server-wide (#696). A fetch takes a slot without waiting or is refused,
-// so nothing queues behind a full gate, and refusals are counted for a
-// throttled report. The leader of a dhm.Flight takes the slot, so callers
-// that join a running fetch are free.
-type admission struct {
-	admit   chan struct{} // one token per fetch in flight
-	refused atomic.Int64  // refusals since start
-	report  eventReport   // throttles the refusal report
-}
-
-func newAdmission(slots int) admission {
-	return admission{admit: make(chan struct{}, slots)}
-}
-
-// tryAdmit takes a slot if one is free; release gives it back.
-func (a *admission) tryAdmit() bool {
-	select {
-	case a.admit <- struct{}{}:
-		return true
-	default:
-		return false
-	}
-}
-
-func (a *admission) release() { <-a.admit }
-
-// refusal counts one refusal and returns how many to report now (see
-// eventReport.due); 0 while throttled.
-func (a *admission) refusal(now time.Time, every time.Duration) int64 {
-	return a.report.due(a.refused.Add(1), now, every)
-}
-
-// eventReport throttles the log line of a counted event: the first at
-// once, then at most one per interval, each carrying the number of events
-// since the previous line.
-type eventReport struct {
-	mu       sync.Mutex
-	at       time.Time // last report
-	reported int64     // events already reported
-}
-
-// due takes the running total and returns how many events to report now:
-// all those since the last report, or 0 while throttled.
-func (r *eventReport) due(total int64, now time.Time, every time.Duration) int64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.at.IsZero() && now.Sub(r.at) < every {
-		return 0
-	}
-	n := total - r.reported
-	r.at, r.reported = now, total
-	return n
 }

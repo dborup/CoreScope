@@ -25,9 +25,10 @@ package main
 //   - A cache miss is charged to the client's per-IP budget
 //     (rateLimitPerMin, ip_rate_limit.go) before it goes upstream: 429
 //     with Retry-After beyond it.
-//   - At most maxInFlight distinct upstream calls run at once, server-wide;
-//     beyond that 503 with Retry-After before any upstream call, and the
-//     per-IP charge is given back (#696/#707).
+//   - At most maxInFlight distinct upstream calls run at once, server-wide
+//     (dhm.Admission, #744); beyond that 503 with Retry-After before a
+//     worker starts or any upstream call, and the per-IP charge is given
+//     back (#696/#707).
 //   - Upstream failures are 502, timeouts 504, never with upstream text,
 //     and logged by category at most once a minute. Failures are not
 //     cached.
@@ -117,9 +118,11 @@ type heritageQuery struct {
 	cache     *dhm.Cache[heritage.Cell]
 	flight    dhm.Flight[[]byte]
 	limiter   *ipRateLimiter // nil: no per-client limit
-	admission                // maxInFlight upstream calls; refusals are 503
+	admit     *dhm.Admission // maxInFlight upstream calls; refusals are 503
+	refused   atomic.Int64   // admission refusals (503) since start
 	failures  atomic.Int64   // upstream failures since start
-	failLog   eventReport
+	refuseLog logThrottle
+	failLog   logThrottle
 	now       func() time.Time
 	logf      func(string, ...interface{})
 }
@@ -138,13 +141,13 @@ func newHeritageQuery(set heritageSettings, d heritageQueryDeps) *heritageQuery 
 		d.logf = log.Printf
 	}
 	return &heritageQuery{
-		src:       d.src,
-		set:       set,
-		cache:     dhm.NewCache[heritage.Cell](set.cacheEntries, heritageCacheMaxBytes, set.cacheTTL),
-		limiter:   newIPRateLimiter("heritage", "map.heritage.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
-		admission: newAdmission(set.maxInFlight),
-		now:       time.Now,
-		logf:      d.logf,
+		src:     d.src,
+		set:     set,
+		cache:   dhm.NewCache[heritage.Cell](set.cacheEntries, heritageCacheMaxBytes, set.cacheTTL),
+		limiter: newIPRateLimiter("heritage", "map.heritage.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
+		admit:   dhm.NewAdmission(set.maxInFlight),
+		now:     time.Now,
+		logf:    d.logf,
 	}
 }
 
@@ -169,7 +172,8 @@ func newHeritageQueryFromConfig(cfg *Config) *heritageQuery {
 
 var errHeritageQuery = errors.New("invalid heritage request")
 
-// errHeritageBusy: maxInFlight upstream calls are already running.
+// errHeritageBusy is the 503 body: maxInFlight upstream calls are
+// already running.
 var errHeritageBusy = errors.New("heritage lookups busy")
 
 // parseHeritageQuery accepts exactly lat and lon, each once, as plain
@@ -278,13 +282,9 @@ func (q *heritageQuery) cellPage(r *http.Request, cell heritage.Cell) ([]byte, s
 		return nil, "", rateLimited{retry}
 	}
 	key := strconv.Itoa(cell.E) + "," + strconv.Itoa(cell.N)
-	data, _, err := q.flight.Do(r.Context(), key, q.set.upstreamTimeout, func(ctx context.Context) ([]byte, error) {
-		// Admission is per upstream call, not per request: callers that
-		// join a running call add no work and are not counted.
-		if !q.tryAdmit() {
-			return nil, errHeritageBusy
-		}
-		defer q.release()
+	// Admission is per upstream call, not per request: callers that join a
+	// running call add no work and take no slot.
+	data, _, err := q.flight.DoAdmitted(r.Context(), key, q.set.upstreamTimeout, q.admit, func(ctx context.Context) ([]byte, error) {
 		page, err := q.src.FetchCell(ctx, cell)
 		if err != nil {
 			return nil, err
@@ -315,17 +315,17 @@ func (q *heritageQuery) writeFetchError(w http.ResponseWriter, r *http.Request, 
 		return
 	case r.Context().Err() != nil:
 		return
-	case errors.Is(err, errHeritageBusy):
+	case errors.Is(err, dhm.ErrAdmissionFull):
 		// A refusal did no upstream work: give the per-IP charge back.
 		q.limiter.refund(r)
-		if n := q.refusal(q.now(), heritageLogEvery); n > 0 {
-			q.logf("[heritage] admission: refused %d lookup(s) since the last report because map.heritage.maxInFlight (%d) upstream calls are running; raise it if this persists", n, cap(q.admit))
+		if n, ok := q.refuseLog.note(q.now(), q.refused.Add(1), heritageLogEvery); ok {
+			q.logf("[heritage] admission: refused %d lookup(s) since the last report because map.heritage.maxInFlight (%d) upstream calls are running; raise it if this persists", n, q.admit.Cap())
 		}
 		setRetryAfter(w, heritageBusyRetry)
 		writeError(w, http.StatusServiceUnavailable, errHeritageBusy.Error())
 		return
 	}
-	if n := q.failLog.due(q.failures.Add(1), q.now(), heritageLogEvery); n > 0 {
+	if n, ok := q.failLog.note(q.now(), q.failures.Add(1), heritageLogEvery); ok {
 		q.logf("[heritage] upstream lookup failed (%s); %d failure(s) since the last report", dhm.FailureReason(err), n)
 	}
 	if dhm.FailureReason(err) == "timeout" || errors.Is(err, context.DeadlineExceeded) {
