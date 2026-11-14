@@ -131,4 +131,10 @@ func TestLoadConfigWarnsGatedEsriDefault728(t *testing.T) {
 	if out := load(`{"map":{"tiles":{"darkDefault":"esri-darkgray-labels","providers":{"esri":{"enabled":true}}}}}`); strings.Contains(out, "#728") {
 		t.Fatalf("warned although Esri is enabled:\n%s", out)
 	}
+	// The legacy key only reaches map.tiles.darkDefault through
+	// migrateDeprecatedConfig, so this fails if LoadConfig runs the check
+	// before the migration.
+	if out := load(`{"mapDarkTileProvider":"esri-darkgray-labels"}`); !strings.Contains(out, `map.tiles.darkDefault is "esri-darkgray-labels"`) {
+		t.Fatalf("LoadConfig did not warn about a legacy mapDarkTileProvider Esri default; log was:\n%s", out)
+	}
 }
