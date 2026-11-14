@@ -21,7 +21,9 @@
  *       map's credit: with no overlay on, through every on/off order of
  *       the two overlays, across a base swap and an in-place credit change
  *       (MC_setLayerAttribution), with one control; the Map page, which has
- *       its own control, never gets a second one (review round 3).
+ *       its own control, never gets a second one (review round 3). A credit
+ *       swapped in place and then removed leaves the control empty (#752
+ *       N1: the removal hook must read the credit at removal time).
  *
  * Runs via: node test-issue-728-esri-imagery.js  (pure vm sandbox)
  */
@@ -384,6 +386,22 @@ test('E6 MC_setLayerAttribution swaps an on-map layer\'s credit in the control',
   assert.deepStrictEqual(liveCredits(map), [CREDIT, DHM.attribution].sort());
   map.removeLayer(base);
   assert.deepStrictEqual(liveCredits(map), [DHM.attribution], 'swapped layer removed');
+});
+
+// #752 N1 — the removal hook _ensureAttribution gives a layer that was
+// already on the map must read getAttribution() at removal time, not the
+// text it saw when the hook was added. Real sequence: Live opens in dark
+// (osm-dark), the theme turns light (Auto becomes imagery, credit swapped
+// in place), then the viewer picks OSM explicitly; a captured text would
+// leave the Esri credit behind for ever.
+test('E6 base layer swapped in place, then removed before any other removal: the control is empty', () => {
+  const { ctx, map, base } = liveWithImagery();
+  assert.deepStrictEqual(liveCredits(map), [CREDIT]);
+  ctx.window.MC_setLayerAttribution(map, base, '© OpenStreetMap contributors');
+  assert.deepStrictEqual(liveCredits(map), ['© OpenStreetMap contributors']);
+  map.removeLayer(base);
+  assert.deepStrictEqual(liveCredits(map), [], 'the swapped-in credit must go with the layer');
+  assert.strictEqual(liveAttributions(map).length, 1);
 });
 
 test('E6 MC_setLayerAttribution on a layer that is off the map only changes its option', () => {
