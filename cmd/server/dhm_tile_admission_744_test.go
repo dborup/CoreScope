@@ -7,9 +7,12 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"runtime/pprof"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/meshcore-analyzer/dhm"
 )
 
 // #744 — cold hillshade tiles are admitted against a global bound before a
@@ -144,11 +147,10 @@ func TestDHMTileAdmission744_FloodStaysBounded(t *testing.T) {
 }
 
 // Callers that leave take their queued and running work with them: the
-// workers end, their slots return, and nothing reaches upstream later.
+// workers end, their slots return, and no upstream request completes.
 func TestDHMTileAdmission744_CancellationRemovesQueuedWork(t *testing.T) {
 	const n = 12
 	up, release, abandoned := heldUpstream(t)
-	defer close(release)
 	p := newTestDHMProxy(t, up, &dhmLogSink{}, func(o *dhmProxyOptions) {
 		o.tileMaxInFlight = 16
 		o.client.Timeout = 5 * time.Second
@@ -180,10 +182,82 @@ func TestDHMTileAdmission744_CancellationRemovesQueuedWork(t *testing.T) {
 	eventually744(t, "workers gone and slots returned", func() bool {
 		return goroutineStacks(fetchFrame) == 0 && p.admit.InUse() == 0
 	})
-	eventually744(t, "active upstream requests cancelled", func() bool { return abandoned.Load() == 4 })
+	// #749 review F1: during the mass cancel, a queued worker whose caller
+	// has not processed its own cancel yet may take an upstream slot freed
+	// by a cancelled one and start a request, and a request the transport
+	// had already written may reach upstream after its worker is gone. So
+	// the invariant is not "exactly 4 requests" but: every request that
+	// reached upstream is abandoned, and none completes for anyone — no
+	// tile is cached even once upstream would answer. (Upstream's own
+	// count of answered requests cannot show this: a handler whose client
+	// is gone but not yet noticed may still pick release and write to the
+	// dead connection.)
+	eventually744(t, "every upstream request abandoned", func() bool {
+		return up.inFlight.Load() == 0 && abandoned.Load() == up.hits.Load()
+	})
+	close(release)
 	time.Sleep(50 * time.Millisecond)
-	if h := up.hits.Load(); h != 4 {
-		t.Fatalf("queued work reached upstream after its clients left: %d requests", h)
+	for i := 0; i < n; i++ {
+		k, err := dhm.ParseTileRequest(aarhusTile(i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := p.cache.Get(dhmCacheKey{Layer: p.layer, Tile: k}, p.now()); ok {
+			t.Fatalf("tile %d completed and was cached after its client left", i)
+		}
+	}
+	if n := goroutineStacks(fetchFrame); n != 0 {
+		t.Fatalf("%d fetch workers after upstream answered", n)
+	}
+}
+
+// #749 review F2: the exaggerated → terrain fallback (#687) goes through
+// the same bound. With the exaggerated layer failing at once and terrain
+// held, each fallback holds a slot; once the bound is full a new tile is
+// refused at once, and live workers never exceed the bound.
+func TestDHMTileAdmission744_FallbackStaysWithinBound(t *testing.T) {
+	const limit = 2
+	u := newDHMUpstreams(t)
+	release := make(chan struct{})
+	defer close(release)
+	u.exaggerated.set(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) })
+	u.terrain.set(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	})
+	p := newLayerProxy(t, u, "", &dhmLogSink{}, func(o *dhmProxyOptions) {
+		o.tileMaxInFlight = limit
+		o.client.Timeout = 5 * time.Second
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for i := 0; i < limit; i++ {
+		go p.ServeHTTP(httptest.NewRecorder(), tileRequest(ctx, aarhusTile(i), ""))
+		eventually744(t, "fallback held upstream", func() bool { return u.terrain.hits() == i+1 })
+	}
+	if n := p.admit.InUse(); n != limit {
+		t.Fatalf("admission holds %d with %d fallbacks held, want %d", n, limit, limit)
+	}
+	got := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, tileRequest(ctx, aarhusTile(limit), ""))
+		got <- w
+	}()
+	select {
+	case w := <-got:
+		assertBusyTile(t, w)
+	case <-time.After(2 * time.Second):
+		t.Fatalf("a tile past the bound was not refused; %d fetch workers live, bound %d",
+			goroutineStacks(fetchFrame), limit)
+	}
+	if n := goroutineStacks(fetchFrame); n > limit {
+		t.Fatalf("%d fetch workers live, bound is %d", n, limit)
+	}
+	if e := u.exaggerated.hits(); e != limit {
+		t.Fatalf("exaggerated upstream calls %d, want %d (the refused tile goes nowhere)", e, limit)
 	}
 }
 
@@ -258,7 +332,8 @@ func TestDHMTileAdmission744_CoalescedCallersShareOneCall(t *testing.T) {
 func TestDHMTileAdmission744_RefusalIsNotCharged(t *testing.T) {
 	const client = "198.51.100.44:1000"
 	up, release, _ := heldUpstream(t)
-	p := newTestDHMProxy(t, up, &dhmLogSink{}, func(o *dhmProxyOptions) {
+	logs := &dhmLogSink{}
+	p := newTestDHMProxy(t, up, logs, func(o *dhmProxyOptions) {
 		o.tileMaxInFlight = 1
 		o.rateLimitPerMin = 2
 		o.client.Timeout = 5 * time.Second
@@ -292,6 +367,11 @@ func TestDHMTileAdmission744_RefusalIsNotCharged(t *testing.T) {
 	}
 	if h := up.hits.Load(); h != 2 {
 		t.Fatalf("upstream calls %d, want 2", h)
+	}
+	// #749 review F4: a refusal is not an upstream failure.
+	if l := logs.String(); strings.Count(l, "[dhm] hillshade tile refused: admission full, no upstream request\n") != 5 ||
+		strings.Contains(l, "failed") {
+		t.Fatalf("refusal log lines:\n%s", l)
 	}
 }
 

@@ -18,6 +18,9 @@ import (
 type Flight[V any] struct {
 	mu    sync.Mutex
 	calls map[string]*flightCall[V]
+	// beforeDone, set only by tests before any call, runs in a call's
+	// worker just before its waiters are woken.
+	beforeDone func()
 }
 
 type flightCall[V any] struct {
@@ -60,10 +63,16 @@ func (g *Flight[V]) DoAdmitted(ctx context.Context, key string, timeout time.Dur
 		c = &flightCall[V]{done: make(chan struct{}), waiters: 1, cancel: cancel}
 		g.calls[key] = c
 		go func() {
-			defer adm.release()
 			c.val, c.err = fn(work)
 			g.forget(key, c)
 			cancel()
+			// The slot goes back before any waiter wakes (#749 review
+			// F3), so a woken caller's next call, such as its terrain
+			// fallback, never meets its own finished call's slot.
+			adm.release()
+			if g.beforeDone != nil {
+				g.beforeDone()
+			}
 			close(c.done)
 		}()
 	}

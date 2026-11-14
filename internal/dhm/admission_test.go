@@ -86,6 +86,26 @@ func TestFlightAdmissionHeldUntilWorkerReturns(t *testing.T) {
 	waitFor(t, "slot returned", func() bool { return adm.InUse() == 0 })
 }
 
+// #749 review F3: a call's slot is back before its waiters wake, so a
+// caller at a full bound can start its next call (the terrain fallback)
+// as soon as the first returns. The hook observes the worker at the last
+// moment before close(done), which makes the order deterministic.
+func TestFlightAdmissionReleasedBeforeWaitersWake(t *testing.T) {
+	var g Flight[int]
+	adm := NewAdmission(1)
+	var inUseAtWake = -1
+	g.beforeDone = func() { inUseAtWake = adm.InUse() }
+	if _, _, err := g.DoAdmitted(context.Background(), "a", 0, adm, func(context.Context) (int, error) { return 1, nil }); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	if inUseAtWake != 0 {
+		t.Fatalf("waiters woken with %d slot(s) still taken, want 0", inUseAtWake)
+	}
+	if _, _, err := g.DoAdmitted(context.Background(), "b", 0, adm, func(context.Context) (int, error) { return 2, nil }); err != nil {
+		t.Fatalf("next call right after the first returned: %v", err)
+	}
+}
+
 // A tile caller waiting for a concurrency slot that leaves removes its
 // queued worker: nothing reaches upstream and the admission slot returns.
 func TestClientHillshadeCancelRemovesQueuedWorker(t *testing.T) {
@@ -124,5 +144,27 @@ func TestClientHillshadeAdmissionFullIsNotFallbackEligible(t *testing.T) {
 	}
 	if u.hits.Load() != 0 {
 		t.Fatal("refused tile reached upstream")
+	}
+}
+
+// #749 review F4: a refusal made no upstream request, so it is not logged
+// as an upstream failure, and it is throttled on its own clock: a flood of
+// refusals does not hide the next real upstream failure.
+func TestClientLogRefusalHasItsOwnTextAndThrottle(t *testing.T) {
+	logs := &logSink{}
+	o := DefaultClientOptions()
+	o.Logf = logs.logf
+	o.LogEvery = time.Minute
+	o.Now = func() time.Time { return time.Unix(1_000_000, 0) } // one instant
+	c := NewClient(Config{Enabled: true, Token: testToken}, o)
+	for i := 0; i < 100; i++ {
+		c.LogRefusal("hillshade tile")
+	}
+	c.LogFailure("hillshade tile", FetchError{"timeout"})
+	got := logs.String()
+	want := "[dhm] hillshade tile refused: admission full, no upstream request\n" +
+		"[dhm] upstream hillshade tile failed (timeout)\n"
+	if got != want {
+		t.Fatalf("log:\n%s\nwant:\n%s", got, want)
 	}
 }

@@ -76,6 +76,9 @@ type Client struct {
 	sem     chan struct{}
 	flight  Flight[[]byte]
 	lastLog atomic.Int64 // unix nanos of the last failure log line
+	// lastRefusalLog throttles admission refusals on their own (#749
+	// review F4), so a refusal flood never hides an upstream failure.
+	lastRefusalLog atomic.Int64
 }
 
 // disableCompressionTransport clones the default transport with
@@ -262,12 +265,24 @@ func (c *Client) LogFailure(what string, err error) {
 	c.logThrottled("[dhm] upstream %s failed (%s)", what, FailureReason(err))
 }
 
+// LogRefusal logs that what was refused by a full Admission (#744): no
+// upstream request was made. It is throttled per LogEvery like
+// LogFailure, but on its own clock (#749 review F4).
+func (c *Client) LogRefusal(what string) {
+	c.logEvery(&c.lastRefusalLog, "[dhm] %s refused: admission full, no upstream request", what)
+}
+
 // logThrottled logs at most once per LogEvery, across all callers.
 func (c *Client) logThrottled(format string, args ...interface{}) {
+	c.logEvery(&c.lastLog, format, args...)
+}
+
+// logEvery logs at most once per LogEvery per clock last.
+func (c *Client) logEvery(last *atomic.Int64, format string, args ...interface{}) {
 	if c.opts.LogEvery > 0 {
 		now := c.opts.Now().UnixNano()
-		last := c.lastLog.Load()
-		if now-last < int64(c.opts.LogEvery) || !c.lastLog.CompareAndSwap(last, now) {
+		prev := last.Load()
+		if now-prev < int64(c.opts.LogEvery) || !last.CompareAndSwap(prev, now) {
 			return
 		}
 	}

@@ -303,7 +303,7 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// #744: refused before any upstream work, so the charge is given
 		// back, as for a refused profile (#705/#707).
 		p.limiter.refund(r)
-		p.client.LogFailure("hillshade tile admission", err)
+		p.client.LogRefusal("hillshade tile")
 		writeDHMTile(w, dhmTransparentPNG, 0, "busy")
 		return
 	}
