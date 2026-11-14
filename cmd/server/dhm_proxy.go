@@ -26,6 +26,12 @@ package main
 //   - Bounded LRU cache (entries + bytes + TTL), a per-request timeout,
 //     a concurrency limit towards upstream and coalescing of identical
 //     in-flight tiles.
+//   - A global admission bound on distinct cold tiles (#744): at most
+//     dhmTileMaxInFlight fetch workers exist, running or queued for an
+//     upstream slot. Beyond it a tile is refused at once (transparent,
+//     no-store, X-CoreScope-Tile: busy) and the per-client charge is given
+//     back. A client that leaves stops waiting, and the fetch stops once
+//     no client waits for it, so queued work does not outlive its callers.
 //   - A per-client budget for tiles that would go upstream
 //     (map.dhm.tileRateLimitPerMin, #682 review F3): 429 with Retry-After
 //     beyond it. Cached tiles and tiles outside Denmark are not charged.
@@ -34,6 +40,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"image"
 	"image/png"
 	"log"
@@ -140,7 +148,20 @@ type dhmProxyOptions struct {
 	// 0 is off. newDHMProxyFromConfig sets it from the config.
 	rateLimitPerMin int
 	trustedProxies  []*net.IPNet
+	// tileMaxInFlight bounds distinct cold-tile fetches, running or
+	// queued (#744); defaultDHMProxyOptions sets dhmTileMaxInFlight.
+	tileMaxInFlight int
 }
+
+// dhmTileMaxInFlight is the shipped bound on cold-tile fetch workers
+// (#744): 16x the upstream concurrency of 4, like the profile's
+// maxInFlight cap is a multiple of the same budget. A cold 1920x1080 Map
+// view is 8x5 visible tiles plus Leaflet's edge buffer, so at least one
+// full view always fits, while a flood holds at most 64 goroutines that
+// read no body until they have an upstream slot. An admitted tile waits
+// behind at most 15 others for one of the 4 slots, and the 10 s Timeout
+// still bounds that wait.
+const dhmTileMaxInFlight = 64
 
 // dhmTileRateLimitDefault is the shipped per-client budget of tiles that
 // miss the server cache, per minute. Measured with
@@ -184,6 +205,7 @@ func defaultDHMProxyOptions() dhmProxyOptions {
 		cacheMaxEntries: 2048,
 		cacheMaxBytes:   64 << 20,
 		cacheTTL:        24 * time.Hour,
+		tileMaxInFlight: dhmTileMaxInFlight,
 	}
 }
 
@@ -192,6 +214,7 @@ type dhmProxy struct {
 	layer   dhm.Hillshade // configured upstream layer
 	cache   *dhm.Cache[dhmCacheKey]
 	limiter *ipRateLimiter // nil: no per-client limit
+	admit   *dhm.Admission // bound on cold-tile fetch workers (#744)
 	now     func() time.Time
 }
 
@@ -220,7 +243,8 @@ func newDHMProxy(cfg dhm.Config, opts dhmProxyOptions) *dhmProxy {
 		cache:  dhm.NewCache[dhmCacheKey](opts.cacheMaxEntries, opts.cacheMaxBytes, opts.cacheTTL),
 		limiter: newIPRateLimiter("map.dhm.tileRateLimitPerMin", opts.rateLimitPerMin,
 			opts.trustedProxies, opts.client.Logf),
-		now: opts.client.Now,
+		admit: dhm.NewAdmission(opts.tileMaxInFlight),
+		now:   opts.client.Now,
 	}
 }
 
@@ -271,9 +295,21 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	data, hit, err := p.layerTile(p.layer, key)
+	ctx := r.Context()
+	data, hit, err := p.layerTile(ctx, p.layer, key)
 	if err == nil {
 		writeDHMTile(w, data, dhmBrowserMaxAge, tileState("", hit))
+		return
+	}
+	if ctx.Err() != nil {
+		return // the client left: nobody to answer, nothing to log
+	}
+	if errors.Is(err, dhm.ErrAdmissionFull) {
+		// #744: refused before any upstream work, so the charge is given
+		// back, as for a refused profile (#705/#707).
+		p.limiter.refund(r)
+		p.client.LogRefusal("hillshade tile")
+		writeDHMTile(w, dhmTransparentPNG, 0, "busy")
 		return
 	}
 	if p.layer == dhm.HillshadeTerrain {
@@ -289,7 +325,10 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// #687: the exaggerated tile failed; serve the terrain tile instead.
-	data, hit, fallbackErr := p.layerTile(dhm.HillshadeTerrain, key)
+	data, hit, fallbackErr := p.layerTile(ctx, dhm.HillshadeTerrain, key)
+	if ctx.Err() != nil {
+		return
+	}
 	if fallbackErr != nil {
 		p.client.LogFailure("hillshade tile", dhm.FetchError{Reason: "exaggerated " + dhm.FailureReason(err) +
 			", terrain " + dhm.FailureReason(fallbackErr)})
@@ -301,13 +340,14 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // layerTile returns the tile of one upstream layer, from the cache or
-// upstream, and whether it was a cache hit. Only successes are cached.
-func (p *dhmProxy) layerTile(h dhm.Hillshade, k dhm.TileKey) ([]byte, bool, error) {
+// upstream, and whether it was a cache hit. Only successes are cached. A
+// cold tile is admitted against p.admit and waited for until ctx is done.
+func (p *dhmProxy) layerTile(ctx context.Context, h dhm.Hillshade, k dhm.TileKey) ([]byte, bool, error) {
 	ck := dhmCacheKey{Layer: h, Tile: k}
 	if data, ok := p.cache.Get(ck, p.now()); ok {
 		return data, true, nil
 	}
-	data, err := p.client.FetchHillshade(h, k)
+	data, err := p.client.FetchHillshadeAdmitted(ctx, p.admit, h, k)
 	if err != nil {
 		return nil, false, err
 	}

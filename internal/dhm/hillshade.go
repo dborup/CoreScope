@@ -2,6 +2,7 @@ package dhm
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"image/png"
 	"net/url"
@@ -99,7 +100,16 @@ func hillshadeQueryCheck(h Hillshade) func(url.Values) error {
 // is returned; anything else is a FetchError, so the proxy, which caches
 // only successes, never caches a bad tile.
 func (c *Client) FetchHillshade(h Hillshade, k TileKey) ([]byte, error) {
-	data, err := c.Get(h.service(), k.hillshadeQuery(h), "image/png")
+	return c.FetchHillshadeAdmitted(context.Background(), nil, h, k)
+}
+
+// FetchHillshadeAdmitted is FetchHillshade for a waiting caller (#744): a
+// new upstream call takes an adm slot first, or fails at once with
+// ErrAdmissionFull, and the caller stops waiting when ctx is done
+// (FetchError "canceled"/"timeout"). The shared call stops once no
+// caller waits for it any more, which removes queued work.
+func (c *Client) FetchHillshadeAdmitted(ctx context.Context, adm *Admission, h Hillshade, k TileKey) ([]byte, error) {
+	data, err := c.get(ctx, adm, h.service(), k.hillshadeQuery(h), []string{"image/png"})
 	if err != nil {
 		return nil, err
 	}
