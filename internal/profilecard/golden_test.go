@@ -143,15 +143,24 @@ func encodePNG(t testing.TB, img image.Image) []byte {
 	return b
 }
 
-// inputDigest fingerprints a fixture, so a failing golden says whether the
-// input or the drawing moved (JSON prints floats exactly, shortest form).
+// inputDigest fingerprints a fixture part by part, so a failing golden
+// says whether the input or the drawing moved, and which part of the input
+// (JSON prints floats exactly, shortest form).
 func inputDigest(resp TerrainProfileResponse) string {
-	b, err := json.Marshal(resp)
-	if err != nil {
-		return err.Error()
+	d := func(v any) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err.Error()
+		}
+		sum := sha256.Sum256(b)
+		return hex.EncodeToString(sum[:4])
 	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:8])
+	dtm, dsm, dd := make([]any, len(resp.Samples)), make([]any, len(resp.Samples)), make([]float64, len(resp.Samples))
+	for i, s := range resp.Samples {
+		dtm[i], dsm[i], dd[i] = s.DTM, s.DSM, s.D
+	}
+	return fmt.Sprintf("all=%s n=%d d=%s dtm=%s dsm=%s ends=%s physics=%s verdict=%s",
+		d(resp), len(resp.Samples), d(dd), d(dtm), d(dsm), d([2]TerrainEndpoint{resp.A, resp.B}), d(resp.Physics), d(resp.Verdict))
 }
 
 // samePixels decodes both PNGs and compares their RGBA bytes exactly.
