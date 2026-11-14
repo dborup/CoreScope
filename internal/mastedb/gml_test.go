@@ -176,3 +176,90 @@ func TestParseBand(t *testing.T) {
 		}
 	}
 }
+
+// TestParseTrailingContent (#748): the whole document is validated to EOF.
+// xml.Unmarshal stopped after the first root, so junk, a second root or an
+// unfinished tag after it was accepted.
+func TestParseTrailingContent(t *testing.T) {
+	good := collection("1", fmt.Sprintf(oneMember, "1", "527000"))
+	withTail := func(tail string) []byte { return append(append([]byte{}, good...), tail...) }
+	rejects := map[string][]byte{
+		"second root":           withTail(`<second/>`),
+		"second collection":     withTail(string(good)),
+		"trailing text":         withTail(`junk`),
+		"unfinished tag":        withTail(`<unclosed`),
+		"stray end tag":         withTail(`</x>`),
+		"cdata after root":      withTail(`<![CDATA[x]]>`),
+		"unfinished comment":    withTail(`<!-- never closed`),
+		"junk after whitespace": withTail("\n  \t junk"),
+		"NUL after root":        withTail("\x00"),
+	}
+	for name, body := range rejects {
+		page, err := Parse(body, testCell)
+		if !errors.Is(err, ErrBadResponse) {
+			t.Errorf("%s: err %v, want ErrBadResponse", name, err)
+		}
+		if page.Rows != nil {
+			t.Errorf("%s: rows returned alongside the error", name)
+		}
+	}
+	// Same rule for the real fixture.
+	full := readFixture(t, "cell_small.gml")
+	if _, err := Parse(append(append([]byte{}, full...), `<unclosed`...), testCell); !errors.Is(err, ErrBadResponse) {
+		t.Errorf("fixture + <unclosed: err %v, want ErrBadResponse", err)
+	}
+
+	accepts := map[string][]byte{
+		"none":               good,
+		"newline":            withTail("\n"),
+		"mixed whitespace":   withTail(" \r\n\t "),
+		"comment":            withTail(`<!-- done -->`),
+		"comments + space":   withTail("\n<!-- a -->\n<!-- b -->\n"),
+		"processing instr":   withTail(`<?audit ok?>`),
+		"all legal together": withTail("\n<!--c--><?pi x?> \n"),
+	}
+	for name, body := range accepts {
+		if _, err := Parse(body, testCell); err != nil {
+			t.Errorf("%s: %v, want accepted", name, err)
+		}
+	}
+	// Leading prolog comment/PI/whitespace is untouched by the change.
+	if _, err := Parse(append([]byte("<!-- x -->\n"), good...), testCell); err != nil {
+		t.Errorf("leading comment: %v", err)
+	}
+}
+
+// TestParseFixtureTrailingMalformedMutant (#748): appending malformed XML
+// to any response that parses must turn it into ErrBadResponse.
+func TestParseFixtureTrailingMalformedMutant(t *testing.T) {
+	bodies := map[string][]byte{
+		"small": readFixture(t, "cell_small.gml"),
+		"empty": collection("0"),
+		"gen":   genGML(30, "30"),
+	}
+	for name, body := range bodies {
+		if _, err := Parse(body, testCell); err != nil {
+			t.Fatalf("%s: control: %v", name, err)
+		}
+		for _, tail := range []string{"<unclosed", "junk", "<a/>", "</x>"} {
+			mut := append(append([]byte{}, body...), tail...)
+			if _, err := Parse(mut, testCell); !errors.Is(err, ErrBadResponse) {
+				t.Errorf("%s + %q: err %v, want ErrBadResponse", name, tail, err)
+			}
+		}
+	}
+}
+
+// FuzzParse: Parse never panics and never returns rows with an error.
+func FuzzParse(f *testing.F) {
+	f.Add(readFixture(f, "cell_small.gml"))
+	f.Add(collection("1", fmt.Sprintf(oneMember, "1", "527000")))
+	f.Add(append(collection("0"), `<!-- c --><?pi?> `...))
+	f.Add(append(collection("0"), `<unclosed`...))
+	f.Fuzz(func(t *testing.T, body []byte) {
+		page, err := Parse(body, testCell)
+		if err != nil && (page.Rows != nil || !errors.Is(err, ErrBadResponse)) {
+			t.Fatalf("err %v with rows %v", err, page.Rows)
+		}
+	})
+}
