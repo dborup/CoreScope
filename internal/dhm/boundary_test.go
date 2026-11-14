@@ -500,8 +500,10 @@ func TestBoundaryCellRangeEps(t *testing.T) {
 // moved. #704 added the Danish-islet subtraction to the generator and
 // regenerated with the pinned dependency and Natural Earth versions: the
 // output is byte-identical, because no Danish islet lies inside the
-// 1250 m buffer today, so the hash is deliberately unchanged.
-const foreignLandSHA256 = "764ea5d73dc694e3153e1cea50217f8bcb49593b8c94083d7059b13124c0c51d"
+// 1250 m buffer today, so the hash is deliberately unchanged. #763
+// dropped Peberholm (Danish) from EXTRA_ISLANDS: the eighth ring, its
+// buffered outline, is gone and nothing else changed.
+const foreignLandSHA256 = "7b4858264c596980b9103c96aad918c9c715df65046f012b18e8304a1fc91c9f"
 
 func TestForeignLandIsPinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(foreignLandText))
