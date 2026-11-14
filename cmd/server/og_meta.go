@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"html"
 	"image"
@@ -49,6 +52,10 @@ type ogMeta struct {
 	imageNeedsOrigin bool
 	imagePath        string
 	imageAbs         string
+	// imageVer is a #719 cache-bust value for imagePath: the first 12 hex
+	// chars of the SHA-256 of the file's bytes, computed once at startup.
+	// Empty when imagePath could not be read.
+	imageVer string
 }
 
 func ogString(v any) string {
@@ -98,11 +105,11 @@ func newOGMeta(pick func(string) any, publicDir string, trusted []*net.IPNet) *o
 	}
 	if o.imagePath != "" {
 		o.imageNeedsOrigin = true
-		if f, err := os.Open(filepath.Join(publicDir, filepath.FromSlash(o.imagePath))); err == nil {
-			if cfg, _, err := image.DecodeConfig(f); err == nil && cfg.Width > 0 && cfg.Height > 0 {
+		if data, err := os.ReadFile(filepath.Join(publicDir, filepath.FromSlash(o.imagePath))); err == nil {
+			if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil && cfg.Width > 0 && cfg.Height > 0 {
 				o.dims = fmt.Sprintf(`<meta property="og:image:width" content="%d">`+"\n  "+`<meta property="og:image:height" content="%d">`, cfg.Width, cfg.Height)
 			}
-			f.Close()
+			o.imageVer = ogContentHashHex(data)
 		}
 	}
 
@@ -113,6 +120,15 @@ func newOGMeta(pick func(string) any, publicDir string, trusted []*net.IPNet) *o
 		"__OG_IMAGE_DIMS__", o.dims,
 	)
 	return o
+}
+
+// ogContentHashHex returns the first 12 hex characters of the SHA-256 of
+// data — a short, content-stable cache-bust value for a local og:image
+// (#719): it changes only when the image itself changes, not on every
+// deploy or restart, unlike the __BUST__ asset cache-buster in main.go.
+func ogContentHashHex(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])[:12]
 }
 
 func ogIsAbsoluteURL(s string) bool {
@@ -187,7 +203,11 @@ func (o *ogMeta) origin(r *http.Request) string {
 func (o *ogMeta) prepare(doc string) string {
 	doc = o.replacer.Replace(doc)
 	if o.imageNeedsOrigin {
-		return strings.ReplaceAll(doc, "__OG_IMAGE__", ogOriginPlaceholder+"/"+html.EscapeString(o.imagePath))
+		imagePath := o.imagePath
+		if o.imageVer != "" {
+			imagePath += "?v=" + o.imageVer
+		}
+		return strings.ReplaceAll(doc, "__OG_IMAGE__", ogOriginPlaceholder+"/"+html.EscapeString(imagePath))
 	}
 	return strings.ReplaceAll(doc, "__OG_IMAGE__", html.EscapeString(o.imageAbs))
 }

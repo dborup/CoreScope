@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -118,12 +119,20 @@ func TestOGMetaEscapesHostileValues(t *testing.T) {
 var ogImageRe = regexp.MustCompile(`property="og:image" content="([^"]*)"`)
 var twImageRe = regexp.MustCompile(`name="twitter:image" content="([^"]*)"`)
 
+// ogVersionedImageRe matches a local og:image URL with the #719 content-hash
+// query param: <path>?v=<12 lowercase hex chars>, nothing else after it.
+var ogVersionedImageRe = regexp.MustCompile(`^(https?://[^?]+)\?v=([0-9a-f]{12})$`)
+
 func TestOGImageAbsoluteAndNeverGithub(t *testing.T) {
 	dir := ogTestDir(t)
 	body := ogGet(t, dir, brandPick(nil), nil, nil)
 	m := ogImageRe.FindStringSubmatch(body)
-	if m == nil || m[1] != "http://example.test/og-image.png" {
+	if m == nil {
 		t.Fatalf("default og:image = %v", m)
+	}
+	vm := ogVersionedImageRe.FindStringSubmatch(m[1])
+	if vm == nil || vm[1] != "http://example.test/og-image.png" {
+		t.Fatalf("default og:image = %q, want http://example.test/og-image.png?v=<hash>", m[1])
 	}
 	if tw := twImageRe.FindStringSubmatch(body); tw == nil || tw[1] != m[1] {
 		t.Errorf("twitter:image %v != og:image", tw)
@@ -133,8 +142,10 @@ func TestOGImageAbsoluteAndNeverGithub(t *testing.T) {
 	}
 	// path under public/
 	body = ogGet(t, dir, brandPick(map[string]string{"ogImageUrl": "og-image-meshview.png"}), nil, nil)
-	if m := ogImageRe.FindStringSubmatch(body); m == nil || m[1] != "http://example.test/og-image-meshview.png" {
-		t.Errorf("path ogImageUrl -> %v", m)
+	if m := ogImageRe.FindStringSubmatch(body); m == nil {
+		t.Fatalf("path ogImageUrl -> %v", m)
+	} else if vm := ogVersionedImageRe.FindStringSubmatch(m[1]); vm == nil || vm[1] != "http://example.test/og-image-meshview.png" {
+		t.Errorf("path ogImageUrl -> %q, want .../og-image-meshview.png?v=<hash>", m[1])
 	}
 	// absolute URL used verbatim, no dims claimed (unknown)
 	body = ogGet(t, dir, brandPick(map[string]string{"ogImageUrl": "https://cdn.example.org/p.png"}), nil, nil)
@@ -155,8 +166,13 @@ func TestOGImageAbsoluteAndNeverGithub(t *testing.T) {
 		"//evil.example/x.png",
 	} {
 		body = ogGet(t, dir, brandPick(map[string]string{"ogImageUrl": bad}), nil, nil)
-		if m := ogImageRe.FindStringSubmatch(body); m == nil || m[1] != "http://example.test/og-image.png" {
+		m := ogImageRe.FindStringSubmatch(body)
+		if m == nil {
 			t.Errorf("ogImageUrl %q -> %v, want bundled default", bad, m)
+			continue
+		}
+		if vm := ogVersionedImageRe.FindStringSubmatch(m[1]); vm == nil || vm[1] != "http://example.test/og-image.png" {
+			t.Errorf("ogImageUrl %q -> %q, want bundled default with ?v=<hash>", bad, m[1])
 		}
 	}
 	if strings.Contains(strings.ToLower(body), "githubusercontent") {
@@ -168,8 +184,12 @@ func TestOGImageBaseURL(t *testing.T) {
 	dir := ogTestDir(t)
 	// configured public base wins over Host
 	body := ogGet(t, dir, brandPick(map[string]string{"publicBaseUrl": "https://meshview.example/"}), nil, nil)
-	if m := ogImageRe.FindStringSubmatch(body); m == nil || m[1] != "https://meshview.example/og-image.png" {
-		t.Errorf("publicBaseUrl -> %v", m)
+	m := ogImageRe.FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("publicBaseUrl -> %v", m)
+	}
+	if vm := ogVersionedImageRe.FindStringSubmatch(m[1]); vm == nil || vm[1] != "https://meshview.example/og-image.png" {
+		t.Errorf("publicBaseUrl -> %q, want .../og-image.png?v=<hash>", m[1])
 	}
 	// X-Forwarded-Proto ignored from an untrusted peer
 	fwd := func(r *http.Request) { r.RemoteAddr = "203.0.113.9:1234"; r.Header.Set("X-Forwarded-Proto", "https") }
@@ -217,8 +237,12 @@ func TestOGMetaServedOnSPAFallbackToo(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "<title>X1</title>") {
 		t.Errorf("deep link did not get rendered tags:\n%s", w.Body.String())
 	}
-	if m := ogImageRe.FindStringSubmatch(w.Body.String()); m == nil || m[1] != "http://example.test/og-image.png" {
-		t.Errorf("deep link og:image not absolute: %v", m)
+	m := ogImageRe.FindStringSubmatch(w.Body.String())
+	if m == nil {
+		t.Fatalf("deep link og:image not absolute: %v", m)
+	}
+	if vm := ogVersionedImageRe.FindStringSubmatch(m[1]); vm == nil || vm[1] != "http://example.test/og-image.png" {
+		t.Errorf("deep link og:image -> %q, want .../og-image.png?v=<hash>", m[1])
 	}
 }
 
@@ -240,5 +264,79 @@ func TestShippedIndexHasNoExternalOGImage(t *testing.T) {
 	}
 	if strings.Contains(s, "githubusercontent") {
 		t.Errorf("index.html still references githubusercontent")
+	}
+}
+
+// #719 — a local og:image gets a ?v=<content hash> so link-preview caches
+// bust on a real image change, not on every deploy or restart.
+
+func TestOGImageLocalHasVersionParam(t *testing.T) {
+	dir := ogTestDir(t)
+	body := ogGet(t, dir, brandPick(nil), nil, nil)
+	m := ogImageRe.FindStringSubmatch(body)
+	if m == nil || !ogVersionedImageRe.MatchString(m[1]) {
+		t.Fatalf("og:image = %v, want <url>?v=<12-hex>", m)
+	}
+}
+
+func TestOGImageExternalURLUnchanged(t *testing.T) {
+	dir := ogTestDir(t)
+	body := ogGet(t, dir, brandPick(map[string]string{"ogImageUrl": "https://cdn.example.org/p.png"}), nil, nil)
+	if m := ogImageRe.FindStringSubmatch(body); m == nil || m[1] != "https://cdn.example.org/p.png" {
+		t.Errorf("absolute ogImageUrl must stay unchanged, got %v", m)
+	}
+}
+
+func TestOGImageVersionTracksContent(t *testing.T) {
+	dir := t.TempDir()
+	imgPath := filepath.Join(dir, "og-image.png")
+	write := func(content string) {
+		if err := os.WriteFile(imgPath, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write("content-a")
+	verA1 := newOGMeta(brandPick(nil), dir, nil).imageVer
+	verA2 := newOGMeta(brandPick(nil), dir, nil).imageVer
+	if verA1 == "" {
+		t.Fatal("expected a non-empty content hash for a local og:image")
+	}
+	if verA1 != verA2 {
+		t.Errorf("hash changed across two reads of identical content: %q != %q", verA1, verA2)
+	}
+
+	write("content-b")
+	verB := newOGMeta(brandPick(nil), dir, nil).imageVer
+	if verB == "" {
+		t.Fatal("expected a non-empty content hash after the file changed")
+	}
+	if verB == verA1 {
+		t.Errorf("hash did not change when file content changed: still %q", verB)
+	}
+}
+
+func TestOGImageServedWithVersionQueryString(t *testing.T) {
+	dir := ogTestDir(t)
+	o := newOGMeta(brandPick(nil), dir, nil)
+	if o.imageVer == "" {
+		t.Fatal("expected a content hash for the bundled og-image.png")
+	}
+	h := spaHandler(dir, http.FileServer(http.Dir(dir)), o)
+	req := httptest.NewRequest("GET", "http://example.test/"+o.imagePath+"?v="+o.imageVer, nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /%s?v=%s = %d, want 200", o.imagePath, o.imageVer, w.Code)
+	}
+	want, err := os.ReadFile(filepath.Join(dir, o.imagePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(w.Body.Bytes(), want) {
+		t.Error("served body does not match the file on disk when the query string is present")
+	}
+	if cc := w.Header().Get("Cache-Control"); cc != "" {
+		t.Errorf("unexpected Cache-Control on a versioned image response: %q", cc)
 	}
 }
