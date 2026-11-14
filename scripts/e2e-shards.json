@@ -34,6 +34,14 @@
       "measurementNote": "New suite; #681 M4 Map page Path profile tool with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile: hidden without the flag and with no requests at all, arm/pick/close, two node markers and node-plus-free-point, one request per profile with debounced height steppers, deep-link restore across a reload, partial coverage drawing a gap with no verdict, the none empty state, no token and no dataforsyningen.dk request, 360x740/568x320/740x360 control reachability at 48px, and axe on the panel in light and dark. Review round 2 adds: Escape while the second end is being picked, a planted observer-only marker picked as a point rather than a 404 node, a hex k/freq in the link, computed text contrast on every panel label in both themes, and chart-label plus CC BY 4.0 legibility at 360px. About 110s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681 DHM suites."
     },
     {
+      "file": "test-issue-681-m5-node-entry-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #681 M5 node-detail entry into the Map Path profile tool with an intercepted dhm client-config block and a stubbed /api/terrain/profile: the full page and side pane offer 'Terrain profile to…' as a 48px #/map?profile=<key> link, following it opens the tool with A named and the picker armed for B and no request until B, one request after B, the default height-source badges, copy link (48px, recording clipboard, same row as close at 360px), the CC BY 4.0 licence link, the same round trip at 360x740 touch, the half link opened directly, no action for a node without a fix, and no action, panel or request with the profile disabled. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681 DHM suites."
+    },
+    {
       "file": "test-issue-674-1byte-hop-modes-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

@@ -279,6 +279,20 @@
     return table ? `<tr><td>Hash Prefix</td><td>${value}</td></tr>` : `<dt>Hash Prefix</dt><dd>${value}</dd>`;
   }
 
+  /* #681 M5 — "Terrain profile to…" on node detail. terrain-profile.js owns
+   * the link and the gate (profile switched on, node has a fix), so this
+   * only waits for the client config and appends what it hands back. A
+   * re-render that replaced the row first gets nothing. */
+  function mountTerrainProfileAction(row, n) {
+    var tp = window.TerrainProfile;
+    if (!row || !tp || typeof tp.nodeEntryAction !== 'function') return;
+    Promise.resolve(window.MeshConfigReady).catch(function () {}).then(function () {
+      if (!row.isConnected || row.querySelector('[data-testid="node-terrain-profile"]')) return;
+      var action = tp.nodeEntryAction(n, window.MC_DHM_CFG);
+      if (action) row.appendChild(action);
+    });
+  }
+
   // Tablet slide-over body. The API's node object carries `name`; advert_name
   // is only the legacy fallback.
   function renderSlideOverBody(n) {
@@ -1030,7 +1044,7 @@
           <div style="margin:4px 0 6px">${renderNodeBadges(n, roleColor)}</div>
           ${renderHashInconsistencyWarning(n)}
           <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:6px">${n.public_key}</div>
-          <div style="display:flex;flex-wrap:wrap;gap:6px">
+          <div class="node-full-actions" style="display:flex;flex-wrap:wrap;gap:6px">
             <button class="btn-primary" id="copyUrlBtn" style="flex:0 0 auto;font-size:12px;padding:4px 10px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-clipboard-text"/></svg> Copy URL</button>
             <button class="btn-primary" id="copyShortUrlBtn" title="Short URL using an 8-char pubkey prefix — easier to send over the mesh (issue #772)" style="flex:0 0 auto;font-size:12px;padding:4px 10px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Copy short URL</button>
             <a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="flex:0 0 auto;text-decoration:none;font-size:12px;padding:4px 10px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chart-bar"/></svg> Analytics</a>
@@ -1176,6 +1190,8 @@
           setTimeout(() => btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Copy short URL', 2000);
         });
       });
+
+      mountTerrainProfileAction(body.querySelector('.node-full-actions'), n);
 
       bindNodeAdverts(document.getElementById('node-packets'));
 
@@ -2188,6 +2204,8 @@
         }
       } catch {}
     }
+
+    mountTerrainProfileAction(panel.querySelector('.node-detail-role'), n);
 
     // Wire "Details" button via the unified navigateToNode helper
     var detailBtn = panel.querySelector('.node-detail-btn');
