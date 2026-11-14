@@ -1912,6 +1912,18 @@ test('the title carries the antenna-below detail, the remedy included', () => {
   assert.ok(title.indexOf(surf.detail) >= 0, 'title = ' + title);
 });
 
+// ── #746 N-d (#750 review): one antenna or two ─────────────────────────────
+
+console.log('\n=== #746 N-d: "antennas" for both ends, "antenna" for one ===');
+
+[['A', 'higher than the antenna there.'], ['B', 'higher than the antenna there.'],
+ ['both', 'higher than the antennas there.']].forEach(([endpoint, words]) => {
+  test('reason at ' + endpoint + ': the detail says "' + words + '"', () => {
+    const detail = TP.surfaceChip(below(endpoint)).detail;
+    assert.ok(detail.indexOf(words) >= 0, detail);
+  });
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 (async () => {
