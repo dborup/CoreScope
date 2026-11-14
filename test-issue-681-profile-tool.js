@@ -1882,6 +1882,36 @@ test('an unreadable cap falls back to the panel as it is', () => {
   eq(TP.fitPadding(848, 0, NaN).paddingBottomRight, [32, 32]);
 });
 
+// ── #746 N-c (#750 review): the chart title carries the explanation ────────
+
+console.log('\n=== #746 N-c: the chart <title> says why, not only what ===');
+
+const titleOf = (svg) => ((svg.match(/<title>([\s\S]*?)<\/title>/) || [])[1] || '');
+
+test('the title carries the terrain verdict\'s detail', () => {
+  const d = flatPath();
+  const title = titleOf(TP.buildChart(d, { nameA: 'Alfa', nameB: 'Bravo' }));
+  const chip = TP.verdictChip(d);
+  assert.ok(title.indexOf(chip.label + '. ' + chip.detail) >= 0, 'title = ' + title);
+});
+
+test('the title carries the surface chip\'s detail and its note', () => {
+  const d = dokk1Path();
+  const title = titleOf(TP.buildChart(d, { nameA: 'Alfa', nameB: 'Bravo' }));
+  const surf = TP.surfaceChip(d);
+  assert.ok(title.indexOf(surf.label + '. ' + surf.detail + ' ' + TP.SURFACE_NOTE) >= 0, 'title = ' + title);
+});
+
+test('the title carries the antenna-below detail, the remedy included', () => {
+  const d = Object.assign(flatPath(), { model: 'both' });
+  d.samples = [{ d: 0, dtm: 0, dsm: 19.99 }, { d: 500, dtm: 0, dsm: 0 }, { d: 1000, dtm: 0, dsm: 0 }];
+  d.verdict.surface = below('A').verdict.surface;
+  const title = titleOf(TP.buildChart(d, {}));
+  const surf = TP.surfaceChip(d);
+  assert.ok(/set its antenna height above the ground/.test(surf.detail), 'setup: ' + surf.detail);
+  assert.ok(title.indexOf(surf.detail) >= 0, 'title = ' + title);
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 (async () => {
