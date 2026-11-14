@@ -240,6 +240,28 @@ func TestAssessSurfaceAboveAntennaIsBlocked(t *testing.T) {
 		near(t, c.name+" clearance", a.WorstClearanceM, c.wantClearance, 1e-4)
 	}
 
+	// Each endpoint is held against its own antenna: 20 m of surface is
+	// above a 10 m antenna but below a 30 m one.
+	for _, c := range []struct {
+		name           string
+		ha, hb, sa, sb float64
+		blockedAt      int // -1: not blocked at an endpoint
+	}{
+		{"A low, surface at B", 10, 30, 0, 20, -1},
+		{"B low, surface at A", 30, 10, 20, 0, -1},
+		{"A high, surface at B", 30, 10, 0, 20, n - 1},
+		{"B high, surface at A", 10, 30, 20, 0, 0},
+	} {
+		l2 := l
+		l2.HeightA, l2.HeightB = c.ha, c.hb
+		s := append([]float32(nil), surface...)
+		s[0], s[n-1] = float32(c.sa), float32(c.sb)
+		a := l2.Assess(s)
+		if blocked := a.State == VerdictBlocked && math.IsInf(a.WorstRatio, -1); blocked != (c.blockedAt >= 0) || (blocked && a.WorstIndex != c.blockedAt) {
+			t.Errorf("%s: %+v, want endpoint obstruction at %d", c.name, a, c.blockedAt)
+		}
+	}
+
 	// Exactly at the antenna is grazing, not blocked: the interior decides.
 	// This is also the DTM's own case with a 0 m antenna, so the deciding
 	// verdict, whose endpoint heights are DTM + antenna ≥ 0, never changes.
