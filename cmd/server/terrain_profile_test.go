@@ -1159,6 +1159,11 @@ func TestTerrainGapKeepTinyRoom(t *testing.T) {
 	if got := terrainGapKeep(3, s, nil); !reflect.DeepEqual(got, []int{1, 3, 5, 1, 0, 2, 3, 2, 4, 5, 4, 6}) {
 		t.Fatalf("room 3, all gaps fit: %v", got)
 	}
+	// A run of missing samples is one gap: its interior takes no room.
+	run := []float32{0, nan, nan, nan, 0}
+	if got := terrainGapKeep(1, run); !reflect.DeepEqual(got, []int{1, 3, 0, 4}) {
+		t.Fatalf("one run, room 1: %v", got)
+	}
 }
 
 // BenchmarkTerrainBuildResponse is the per-request work after the
