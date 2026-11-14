@@ -104,6 +104,7 @@ function load(extra) {
     setTimeout, clearTimeout, document: dom.doc,
   };
   vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync('public/antenna-height.js', 'utf8'), ctx);
   vm.runInContext(fs.readFileSync('public/terrain-profile.js', 'utf8'), ctx);
   const TP = ctx.window.TerrainProfile;
   assert.ok(TP, 'terrain-profile.js must define window.TerrainProfile');

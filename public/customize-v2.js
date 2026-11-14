@@ -36,8 +36,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke'];
+  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain'];
+  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -53,10 +53,23 @@
     cardBg: '--card-bg', contentBg: '--content-bg', detailBg: '--detail-bg',
     inputBg: '--input-bg', rowStripe: '--row-stripe', rowHover: '--row-hover', selectedBg: '--selected-bg',
     pathHashWarn: '--path-hash-warn',
+    // #681 M6 — the terrain-profile chart. These live in the theme /
+    // themeDark sections like every other colour, so light and dark are
+    // edited separately and _resetAll strips them with the rest.
+    terrainFill: '--terrain-fill', terrainClutter: '--terrain-clutter',
+    losLine: '--los-line', fresnel100: '--fresnel-100',
+    fresnel60: '--fresnel-60', profileBlocked: '--profile-blocked',
     font: '--font', mono: '--mono'
   };
 
-  var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) { return k !== 'font' && k !== 'mono'; });
+  // #681 M6 — the terrain keys are themeable but no PRESET defines them,
+  // so they must stay out of preset detection: an operator who recolours
+  // the profile chart has not stopped using the preset they picked.
+  var TERRAIN_COLOR_KEYS = ['terrainFill', 'terrainClutter', 'losLine', 'fresnel100', 'fresnel60', 'profileBlocked'];
+
+  var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) {
+    return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1;
+  });
 
   // ── Brand logo swap helper (PR #1137) ──
   // The default navbar brand logo is an inline <svg class="brand-logo"> so it
@@ -315,6 +328,9 @@
     surface1: 'Cards', surface2: 'Panels', surface3: 'Tertiary Surface', sectionBg: 'Section Header', cardBg: 'Card Fill', contentBg: 'Content Area',
     detailBg: 'Detail Panels', inputBg: 'Inputs', rowStripe: 'Table Stripe',
     rowHover: 'Row Hover', selectedBg: 'Selected', pathHashWarn: '1-byte Path Hash',
+    terrainFill: 'Terrain (DTM)', terrainClutter: 'Trees & Buildings (DSM)',
+    losLine: 'Line of Sight', fresnel100: 'Fresnel Zone', fresnel60: 'Fresnel 60 %',
+    profileBlocked: 'Obstruction',
     font: 'Body Font', mono: 'Mono Font'
   };
 
@@ -333,6 +349,12 @@
     detailBg: 'Modal, packet detail, side panels', inputBg: 'Text inputs, dropdowns',
     rowStripe: 'Alternating table rows', rowHover: 'Table row hover', selectedBg: 'Selected/active rows',
     pathHashWarn: 'Amber accent recommending a 2/3-byte over a 1-byte path hash (channels, packet detail, node badge)',
+    terrainFill: 'Path profile: the bare ground from the terrain model',
+    terrainClutter: 'Path profile: what the surface model adds over the ground — canopy, rooftops',
+    losLine: 'Path profile: the straight line between the two antennas, and the map line while picking',
+    fresnel100: 'Path profile: the outline of the first Fresnel zone',
+    fresnel60: 'Path profile: the 60 % criterion a link has to clear',
+    profileBlocked: 'Path profile: where terrain rises into the zone',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
   };
 
@@ -397,7 +419,71 @@
   var ADVANCED_KEYS = ['accentHover', 'navBg2', 'navTextMuted', 'navActiveBg', 'textMuted', 'border', 'surface1', 'surface2', 'cardBg', 'contentBg', 'detailBg', 'inputBg', 'rowStripe', 'rowHover', 'selectedBg', 'pathHashWarn'];
   var FONT_KEYS = ['font', 'mono'];
 
+  // ── #681 M6 — terrain-profile defaults ──
+  // The customizer owns the DEFAULT antenna height per endpoint kind and
+  // the default elevation model. Everything that decides physics or costs
+  // money — the k-factor, the frequency, and the whole map.dhm block with
+  // its Dataforsyningen token — stays in server config and is deliberately
+  // absent here (#681 owner decision on M6).
+  //
+  // Height precedence, most specific first (see public/terrain-profile.js):
+  //   1. the deep link (?ha=/?hb=)            badge "link"
+  //   2. the viewer's own remembered height   badge "yours"
+  //   3. the operator's radio.antennaHeightsM badge "operator"
+  //   4. THIS section                         badge "default"
+  //   5. the server's built-in role defaults  badge "default"
+  // The customizer is a default, so it yields to an operator who named a
+  // real height for a node or a role in config.json, and it is never
+  // written into a shared link.
+  var TERRAIN_HEIGHT_FIELDS = [
+    { key: 'heightRepeater', label: 'Repeater', hint: 'Mast-mounted infrastructure' },
+    { key: 'heightRoom', label: 'Room server', hint: 'Usually indoors, on a shelf or wall' },
+    { key: 'heightCompanion', label: 'Companion', hint: 'Handheld, roughly head height' },
+    { key: 'heightSensor', label: 'Sensor', hint: 'Telemetry nodes' },
+    { key: 'heightPoint', label: 'Map point', hint: 'A spot picked on the map, not a node' }
+  ];
+  var TERRAIN_MODELS = ['dtm', 'both'];
+  // Mirrors terrainRoleAntennaM and the model default in
+  // cmd/server/terrain_profile.go: the customizer starts from exactly what
+  // the server would have answered, so an untouched section changes nothing.
+  var TERRAIN_DEFAULTS = {
+    heightRepeater: 10, heightRoom: 5, heightCompanion: 2, heightSensor: 2,
+    heightPoint: 2, model: 'both'
+  };
+
+  /* Antenna height above ground, in metres, or null when `val` is not one.
+   * The rule lives in public/antenna-height.js, shared with the Path profile
+   * so the customizer stores exactly the value the profile will use (review
+   * PR#714: a looser parseFloat check here let "0x1F4" through as 500).
+   * Without the rule on the page no height is accepted at all. */
+  function _parseAntennaHeight(val) {
+    return window.MCAntennaHeight ? window.MCAntennaHeight.parse(val) : null;
+  }
+
+  function _maxAntennaHeight() {
+    return window.MCAntennaHeight ? window.MCAntennaHeight.MAX_M : 0;
+  }
+
+  function isValidAntennaHeight(val) { return _parseAntennaHeight(val) !== null; }
+
+  /** The effective terrain settings: this section over the built-ins. */
+  function terrainSettings(effectiveConfig) {
+    var src = (effectiveConfig && effectiveConfig.terrain) || {};
+    var out = {};
+    for (var i = 0; i < TERRAIN_HEIGHT_FIELDS.length; i++) {
+      var k = TERRAIN_HEIGHT_FIELDS[i].key;
+      var h = _parseAntennaHeight(src[k]);
+      out[k] = h !== null ? h : TERRAIN_DEFAULTS[k];
+    }
+    out.model = TERRAIN_MODELS.indexOf(src.model) >= 0 ? src.model : TERRAIN_DEFAULTS.model;
+    return out;
+  }
+
   // ── Validation helpers ──
+
+  /* An imported file is plain JSON, so a key may well be "hasOwnProperty";
+   * never call the method off the object itself (review PR#714). */
+  function _own(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
 
   var COLOR_RE = /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
   var CSS_FUNC_RE = /^(?:rgb|rgba|hsl|hsla)\s*\(.*\)$/i;
@@ -460,12 +546,21 @@
   var _initDone = false;
   var _saveStatus = 'saved'; // 'saved' | 'saving' | 'error'
   var _writeTimer = null;
+  // #681 M6 — the terrain settings the last pipeline run produced, so the
+  // next one can tell whether they actually moved. null = never run.
+  var _lastTerrain = null;
 
   function readOverrides() {
     try {
       var raw = localStorage.getItem(STORAGE_KEY);
       var parsed = (raw != null) ? JSON.parse(raw) : {};
       if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) parsed = {};
+      // Overrides saved before unknown sections were dropped on write can
+      // still hold one (a `map` section, say). They are filtered here too,
+      // so they never reach SITE_CONFIG or an export (#681 M6).
+      for (var pk in parsed) {
+        if (_own(parsed, pk) && VALID_SECTIONS.indexOf(pk) === -1) delete parsed[pk];
+      }
       // Include favorites and claimed nodes from their own localStorage keys
       try {
         var favs = JSON.parse(localStorage.getItem('meshcore-favorites') || '[]');
@@ -487,12 +582,12 @@
     var clean = {};
     var colorSections = ['theme', 'themeDark', 'nodeColors', 'typeColors'];
     for (var key in delta) {
-      if (!delta.hasOwnProperty(key)) continue;
+      if (!_own(delta, key)) continue;
       if (colorSections.indexOf(key) !== -1 && typeof delta[key] === 'object' && delta[key] !== null) {
         var section = {};
         var src = delta[key];
         for (var sk in src) {
-          if (!src.hasOwnProperty(sk)) continue;
+          if (!_own(src, sk)) continue;
           // font/mono are not colors
           if ((key === 'theme' || key === 'themeDark') && (sk === 'font' || sk === 'mono')) {
             if (typeof src[sk] === 'string') section[sk] = src[sk];
@@ -542,7 +637,7 @@
         var ts = {};
         var tsrc = delta[key];
         for (var tk in tsrc) {
-          if (!tsrc.hasOwnProperty(tk)) continue;
+          if (!_own(tsrc, tk)) continue;
           if (TS_ENUMS[tk]) {
             if (TS_ENUMS[tk].indexOf(tsrc[tk]) !== -1) {
               ts[tk] = tsrc[tk];
@@ -556,14 +651,44 @@
           }
         }
         if (Object.keys(ts).length) clean[key] = ts;
+      } else if (key === 'terrain' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #681 M6 — antenna-height defaults and the elevation model.
+        var tIn = delta[key];
+        var tOut = {};
+        for (var thi = 0; thi < TERRAIN_HEIGHT_FIELDS.length; thi++) {
+          var hk = TERRAIN_HEIGHT_FIELDS[thi].key;
+          if (tIn[hk] == null) continue;
+          var th = _parseAntennaHeight(tIn[hk]);
+          if (th !== null) {
+            tOut[hk] = th;
+          } else {
+            console.warn('[customizer-v2] Invalid antenna height rejected:', 'terrain.' + hk, tIn[hk]);
+          }
+        }
+        if (tIn.model != null) {
+          if (TERRAIN_MODELS.indexOf(tIn.model) >= 0) {
+            tOut.model = tIn.model;
+          } else {
+            console.warn('[customizer-v2] Invalid terrain model rejected:', tIn.model);
+          }
+        }
+        if (Object.keys(tOut).length) clean[key] = tOut;
       } else if (key === 'branding' || key === 'home') {
         // Pass through as-is (object shape)
         if (typeof delta[key] === 'object' && delta[key] !== null) {
           clean[key] = JSON.parse(JSON.stringify(delta[key]));
         }
-      } else {
-        // Unknown key — pass through for forward compatibility
+      } else if (VALID_SECTIONS.indexOf(key) !== -1) {
+        // A known section with no validator of its own (distanceUnit,
+        // favorites, myNodes).
         clean[key] = delta[key];
+      } else {
+        // #681 M6 — an unknown top-level section is DROPPED, never stored.
+        // computeEffective merges whatever survives into window.SITE_CONFIG,
+        // so passing unknown sections through let an imported theme file
+        // plant server-only config in the client — map.dhm.token above all.
+        // VALID_SECTIONS is the whole surface the customizer owns.
+        console.warn('[customizer-v2] Unknown section dropped:', key);
       }
     }
     return clean;
@@ -581,7 +706,7 @@
     // Build theme-only delta (without favorites/myNodes)
     var themeDelta = {};
     for (var k in delta) {
-      if (delta.hasOwnProperty(k) && k !== 'favorites' && k !== 'myNodes') {
+      if (_own(delta, k) && k !== 'favorites' && k !== 'myNodes') {
         themeDelta[k] = delta[k];
       }
     }
@@ -612,14 +737,14 @@
     }
     if (!userOverrides || typeof userOverrides !== 'object') return effective;
     for (var key in userOverrides) {
-      if (!userOverrides.hasOwnProperty(key)) continue;
+      if (!_own(userOverrides, key)) continue;
       var uv = userOverrides[key];
       if (uv != null && typeof uv === 'object' && !Array.isArray(uv)) {
         // Object section — shallow merge
         if (!effective[key] || typeof effective[key] !== 'object') effective[key] = {};
         var val = userOverrides[key];
         for (var sk in val) {
-          if (val.hasOwnProperty(sk)) {
+          if (_own(val, sk)) {
             if (Array.isArray(val[sk])) {
               effective[key][sk] = JSON.parse(JSON.stringify(val[sk])); // array: full replace
             } else {
@@ -816,6 +941,20 @@
       _setBrandHomeUrl(br.homeUrl);
     }
 
+    /* #681 M6 — tell an open Path profile panel that its defaults moved,
+     * and only then: a colour pick is pure CSS and must not cost a
+     * re-measure. This sits at the end of the pipeline rather than in the
+     * field handlers because setOverride is debounced — a listener fired
+     * from there would still read the previous settings off SITE_CONFIG.
+     * The first run only records the baseline. */
+    var terrainNow = JSON.stringify(terrainSettings(effectiveConfig));
+    if (_lastTerrain !== null && _lastTerrain !== terrainNow) {
+      try {
+        window.dispatchEvent(new CustomEvent('terrain-defaults-changed'));
+      } catch (_e) { /* no CustomEvent: the next profile reads them anyway */ }
+    }
+    _lastTerrain = terrainNow;
+
     // Dispatch theme-changed event (bare, no payload — matches existing behavior)
     window.dispatchEvent(new CustomEvent('theme-changed'));
   }
@@ -998,7 +1137,7 @@
 
     var colorSections = ['theme', 'themeDark', 'nodeColors', 'typeColors'];
     for (var key in obj) {
-      if (!obj.hasOwnProperty(key)) continue;
+      if (!_own(obj, key)) continue;
       if (VALID_SECTIONS.indexOf(key) === -1) {
         console.warn('[customizer-v2] Unknown top-level key in import:', key);
         continue; // warning, not error
@@ -1020,7 +1159,7 @@
       // Validate colors in color sections
       if (colorSections.indexOf(key) !== -1 && typeof obj[key] === 'object') {
         for (var ck in obj[key]) {
-          if (!obj[key].hasOwnProperty(ck)) continue;
+          if (!_own(obj[key], ck)) continue;
           if ((key === 'theme' || key === 'themeDark') && (ck === 'font' || ck === 'mono')) continue;
           if (typeof obj[key][ck] === 'string' && !isValidColor(obj[key][ck])) {
             errors.push('Invalid color: ' + key + '.' + ck + ' = "' + obj[key][ck] + '"');
@@ -1032,6 +1171,21 @@
         for (var tk in obj[key]) {
           if (TS_ENUMS[tk] && TS_ENUMS[tk].indexOf(obj[key][tk]) === -1) {
             errors.push('Invalid timestamp enum: ' + tk + ' = "' + obj[key][tk] + '"');
+          }
+        }
+      }
+      // #681 M6 — terrain: antenna heights in metres, and the model enum.
+      if (key === 'terrain' && typeof obj[key] === 'object' && obj[key] !== null) {
+        for (var trk in obj[key]) {
+          if (!_own(obj[key], trk)) continue;
+          if (trk === 'model') {
+            if (TERRAIN_MODELS.indexOf(obj[key][trk]) === -1) {
+              errors.push('Invalid terrain model: "' + obj[key][trk] + '" \u2014 must be dtm or both');
+            }
+          } else if (!_own(TERRAIN_DEFAULTS, trk)) {
+            console.warn('[customizer-v2] Unknown terrain key in import:', trk);
+          } else if (!isValidAntennaHeight(obj[key][trk])) {
+            errors.push('Invalid antenna height: terrain.' + trk + ' = "' + obj[key][trk] + '" \u2014 must be 0-' + _maxAntennaHeight() + ' m');
           }
         }
       }
@@ -1098,7 +1252,7 @@
     var overrides = _getOverrides();
     var server = _getServer();
     if (section) {
-      if (!overrides[section] || !overrides[section].hasOwnProperty(key)) return false;
+      if (!overrides[section] || !_own(overrides[section], key)) return false;
       var serverSection = server[section] || {};
       var ov = overrides[section][key];
       var sv = serverSection[key];
@@ -1108,7 +1262,7 @@
       }
       return ov !== sv;
     }
-    if (!overrides.hasOwnProperty(key)) return false;
+    if (!_own(overrides, key)) return false;
     var ov2 = overrides[key];
     var sv2 = server[key];
     if (typeof ov2 === 'object' || typeof sv2 === 'object') {
@@ -1165,6 +1319,20 @@
       '.cust-hint{font-size:10px;color:var(--text-muted);margin-top:1px;line-height:1.2}',
       '.cust-color-row input[type="color"]{width:40px;height:32px;border:1px solid var(--border);border-radius:6px;cursor:pointer;padding:2px;background:var(--input-bg)}',
       '.cust-color-row .cust-hex{font-family:var(--mono);font-size:12px;color:var(--text-muted);min-width:70px}',
+      // #681 M6 — terrain-profile antenna defaults. 48px is the house
+      // minimum for a tap target (#235, #2052, #666), and a number input
+      // that wide keeps the stepper arrows reachable on a phone.
+      '.cust-terrain-row{display:flex;align-items:center;gap:8px;margin-bottom:10px}',
+      '.cust-terrain-row>div:first-child{min-width:160px;flex:1}',
+      '.cust-terrain-row label{font-size:12px;font-weight:600;margin:0;display:block}',
+      '.cust-terrain-row input[type="number"]{width:88px;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--input-bg);color:var(--text);box-sizing:border-box;touch-action:manipulation}',
+      '.cust-terrain-row input[type="number"]:focus{outline:none;border-color:var(--accent)}',
+      '#cv2-terrain-model{min-height:48px;touch-action:manipulation}',
+      // Colour swatches are a compact 40x32 on a pointer device. On touch
+      // they are the tap target, so they take the 48px floor there.
+      // flex:none so a narrow row cannot squeeze the swatch below the
+      // floor: the hex text beside it competes for the same width.
+      '@media(pointer:coarse){.cust-color-row input[type="color"]{width:48px;height:48px;min-width:48px;flex:none}}',
       '.cv2-override-dot{color:var(--link-color);cursor:pointer;font-size:10px;margin-left:4px;vertical-align:middle;title:"Reset to server default"}',
       '.cv2-override-dot:hover{color:var(--status-red)}',
       '.cust-node-dot{display:inline-block;width:16px;height:16px;border-radius:50%;vertical-align:middle}',
@@ -1211,7 +1379,7 @@
       { id: 'theme', glyph: 'ph:palette', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', glyph: 'ph:target', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'home', glyph: 'ph:house', title: 'Home', badge: _tabBadge('home') },
-      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
+      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', glyph: 'ph:map-trifold', title: 'GeoFilter' },
       { id: 'export', glyph: 'ph:download-simple', title: 'Export' }
     ];
@@ -1229,6 +1397,80 @@
     }).join('') + '</div>';
   }
 
+  /* #681 M6 — a colour an <input type="color"> will take: 6-digit hex only.
+   * An rgb()/rgba() value (--terrain-clutter's default is one) has to be
+   * converted, and its alpha is dropped because the native picker has no
+   * alpha channel; the text beside the swatch keeps the real value. */
+  function _cssColorToHex(val) {
+    if (typeof val !== 'string') return '';
+    var s = val.trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(s)) return s;
+    if (/^#[0-9a-fA-F]{8}$/.test(s)) return s.slice(0, 7);
+    if (/^#[0-9a-fA-F]{3,4}$/.test(s)) return '#' + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+    var m = s.match(/^rgba?\(([^)]*)\)$/i);
+    if (!m) return '';
+    var parts = m[1].split(/[\s,/]+/).filter(function (x) { return x !== ''; });
+    if (parts.length < 3) return '';
+    var hex = '#';
+    for (var i = 0; i < 3; i++) {
+      var n = parseFloat(parts[i]);
+      if (!isFinite(n)) return '';
+      if (parts[i].charAt(parts[i].length - 1) === '%') n = n * 255 / 100;
+      n = Math.max(0, Math.min(255, Math.round(n)));
+      hex += (n < 16 ? '0' : '') + n.toString(16);
+    }
+    return hex;
+  }
+
+  /* Review PR#714 — the alpha of a CSS colour, 0-1, or 1 when it has none
+   * or is not one we can read. */
+  function _cssColorAlpha(val) {
+    if (typeof val !== 'string') return 1;
+    var s = val.trim();
+    var a = null;
+    if (/^#[0-9a-fA-F]{8}$/.test(s)) a = parseInt(s.slice(7), 16) / 255;
+    else if (/^#[0-9a-fA-F]{4}$/.test(s)) a = parseInt(s[4] + s[4], 16) / 255;
+    else {
+      var m = s.match(/^rgba?\(([^)]*)\)$/i);
+      var parts = m ? m[1].split(/[\s,/]+/).filter(function (x) { return x !== ''; }) : [];
+      if (parts.length === 4) {
+        a = parseFloat(parts[3]);
+        if (parts[3].charAt(parts[3].length - 1) === '%') a = a / 100;
+      }
+    }
+    if (a === null || !isFinite(a) || a < 0 || a >= 1) return 1;
+    return Math.round(a * 1000) / 1000;
+  }
+
+  /* Review PR#714 — the native picker hands back an opaque #rrggbb, so a
+   * pick over a translucent colour (--terrain-clutter is rgba(..., 0.55))
+   * would make it opaque. Carry the alpha of the colour being replaced over
+   * to the pick; an opaque colour stays a plain hex, as before. */
+  function _colorWithAlpha(picked, current) {
+    return _hexWithAlpha(picked, _cssColorAlpha(current));
+  }
+
+  function _hexWithAlpha(picked, a) {
+    var hex = _cssColorToHex(picked);
+    if (!(a >= 0 && a < 1) || !hex) return picked;
+    return 'rgba(' + parseInt(hex.slice(1, 3), 16) + ', ' + parseInt(hex.slice(3, 5), 16) + ', ' +
+      parseInt(hex.slice(5, 7), 16) + ', ' + a + ')';
+  }
+
+  /* #681 M6 — what a theme key resolves to on the page right now. The six
+   * chart colours have no server default by design (they are chart ink, not
+   * page chrome), and a row with no value renders a black swatch and an
+   * empty hex — showing a colour the chart is not using. style.css holds
+   * the real defaults for light and dark, so read them back rather than
+   * repeating them here: no colour is hard-coded in this file. */
+  function _cssVarValue(key) {
+    var name = THEME_CSS_MAP[key];
+    if (!name || typeof getComputedStyle !== 'function') return '';
+    try {
+      return (getComputedStyle(document.documentElement).getPropertyValue(name) || '').trim();
+    } catch (_e) { return ''; }
+  }
+
   function _renderColorRow(key, section, effectiveVal, serverDefault) {
     var isFont = key === 'font' || key === 'mono';
     var val = effectiveVal || '';
@@ -1239,9 +1481,13 @@
       inputHtml = '<input type="text" data-cv2-field="' + section + '.' + key + '" value="' + escAttr(val) + '" style="width:160px;font-size:11px;font-family:var(--mono);padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--text)">';
     } else {
       // Ensure hex is 7 chars for color input
-      var hexVal = val.length === 7 ? val : (val.length === 4 ? '#' + val[1] + val[1] + val[2] + val[2] + val[3] + val[3] : val);
-      inputHtml = '<input type="color" data-cv2-field="' + section + '.' + key + '" value="' + hexVal + '">' +
-        '<span class="cust-hex">' + val + '</span>';
+      var hexVal = val.length === 7 ? val : (val.length === 4 ? '#' + val[1] + val[1] + val[2] + val[2] + val[3] + val[3] : _cssColorToHex(val));
+      // data-cv2-alpha carries a translucent colour's alpha over to the
+      // pick, which the native picker cannot express (review PR#714).
+      var alpha = _cssColorAlpha(val);
+      inputHtml = '<input type="color" data-cv2-field="' + section + '.' + key + '" value="' + escAttr(hexVal) + '"' +
+        (alpha < 1 ? ' data-cv2-alpha="' + alpha + '"' : '') + '>' +
+        '<span class="cust-hex">' + esc(val) + '</span>';
     }
     return '<div class="cust-color-row">' +
       '<div><label>' + (THEME_LABELS[key] || key) + dot + '</label>' +
@@ -1332,6 +1578,15 @@
     for (var j = 0; j < ADVANCED_KEYS.length; j++) advancedRows += _renderColorRow(ADVANCED_KEYS[j], section, current[ADVANCED_KEYS[j]], serverCurrent[ADVANCED_KEYS[j]]);
     var fontRows = '';
     for (var f = 0; f < FONT_KEYS.length; f++) fontRows += _renderColorRow(FONT_KEYS[f], section, current[FONT_KEYS[f]], serverCurrent[FONT_KEYS[f]]);
+    // #681 M6 — the path-profile chart, in its own group so the Advanced
+    // list stays a list of page colours.
+    var terrainRows = '';
+    for (var t = 0; t < TERRAIN_COLOR_KEYS.length; t++) {
+      var tk = TERRAIN_COLOR_KEYS[t];
+      // No server default for these, so fall back to what the page is
+      // actually drawing with (style.css), not to an empty black swatch.
+      terrainRows += _renderColorRow(tk, section, current[tk] || _cssVarValue(tk), serverCurrent[tk]);
+    }
 
     return '<div class="cust-panel' + (_activeTab === 'theme' ? ' active' : '') + '" data-panel="theme">' +
       _renderPresets() +
@@ -1339,6 +1594,7 @@
       '<p style="font-size:11px;color:var(--text-muted);margin:0 0 10px">Toggle ' + renderConfigGlyph('ph:sun') + '/' + renderConfigGlyph('ph:moon') + ' in nav to edit the other mode.</p>' +
       basicRows +
       '<details class="cust-advanced"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Advanced (' + ADVANCED_KEYS.length + ' options)</summary>' + advancedRows + '</details>' +
+      '<details class="cust-terrain-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Terrain profile chart (' + TERRAIN_COLOR_KEYS.length + ' options)</summary>' + terrainRows + '</details>' +
       '<details class="cust-fonts" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Fonts</summary>' + fontRows + '</details>' +
     '</div>';
   }
@@ -1597,7 +1853,46 @@
       _renderChannelsShowEncryptedToggle() +
       _renderHide1ByteHopsToggle() +
       _renderTileProviderSelector() +
+      _renderTerrainSettings() +
     '</div>';
+  }
+
+  // ── #681 M6 Terrain profile defaults ──
+  // Antenna heights are the dominant error term in a path profile: the
+  // elevation model is accurate to centimetres, while nothing in the mesh
+  // says how high an antenna is. These are the defaults the Path profile
+  // tool starts from; the panel's own inputs, a remembered height and a
+  // shared link all still win over them, and an operator who set a real
+  // height in config.json wins too.
+  function _renderTerrainSettings() {
+    // Review PR#714 — no profile tool on this instance, no defaults to set.
+    // Same gate as the Map toggle and node detail (TerrainProfile.offered).
+    var tp = window.TerrainProfile;
+    if (!tp || typeof tp.offered !== 'function' || !tp.offered(window.MC_DHM_CFG)) return '';
+    var t = terrainSettings(_getEffective());
+    var rows = '';
+    for (var i = 0; i < TERRAIN_HEIGHT_FIELDS.length; i++) {
+      var f = TERRAIN_HEIGHT_FIELDS[i];
+      var id = 'cv2-terrain-' + f.key;
+      rows += '<div class="cust-terrain-row">' +
+        '<div><label for="' + id + '">' + f.label + ' (m)' + _overrideDot('terrain', f.key) + '</label>' +
+          '<div class="cust-hint">' + f.hint + '</div></div>' +
+        '<input type="number" id="' + id + '" class="cust-terrain-h" min="0" max="' + _maxAntennaHeight() + '" step="0.5" ' +
+          'inputmode="decimal" data-cv2-terrain-height="' + f.key + '" value="' + escAttr(String(t[f.key])) + '">' +
+      '</div>';
+    }
+    var modelOpt = function (value, label) {
+      return '<option value="' + value + '"' + (t.model === value ? ' selected' : '') + '>' + label + '</option>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Terrain Profile</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Default antenna heights above ground for the Map page\u2019s Path profile tool. Mesh adverts carry no height, so these are assumptions \u2014 the panel labels them as such. A height you type, one this browser remembers, one in a link you open, and one the operator set in server config all take precedence.</p>' +
+      rows +
+      '<div class="cust-field" style="margin-top:10px"><label for="cv2-terrain-model">Elevation model' + _overrideDot('terrain', 'model') + '</label>' +
+        '<select id="cv2-terrain-model" data-cv2-terrain-model style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">' +
+          modelOpt('both', 'Terrain and surface (trees, buildings)') +
+          modelOpt('dtm', 'Terrain only') +
+        '</select>' +
+        '<div class="cust-hint">Terrain always decides the verdict. Surface is drawn for information and costs a second elevation request.</div></div>';
   }
 
   // ── #1633 / #674 1-byte path hops: Show / Mark / Hide ──
@@ -2221,7 +2516,7 @@
     // Clean scalar sections
     for (var si = 0; si < SCALAR_SECTIONS.length; si++) {
       var sk = SCALAR_SECTIONS[si];
-      if (delta.hasOwnProperty(sk) && delta[sk] === server[sk]) {
+      if (_own(delta, sk) && delta[sk] === server[sk]) {
         delete delta[sk]; changed = true;
       }
     }
@@ -2319,6 +2614,32 @@
       });
     });
 
+    // #681 M6 — terrain antenna-height defaults. A value back at the
+    // built-in default is a cleared override, not a stored one, so the
+    // section only ever holds what the viewer actually changed.
+    container.querySelectorAll('[data-cv2-terrain-height]').forEach(function (inp) {
+      var key = inp.dataset.cv2TerrainHeight;
+      inp.addEventListener('change', function () {
+        var raw = _parseAntennaHeight(inp.value);
+        if (raw === null) {
+          // Put the effective value back rather than storing nonsense.
+          inp.value = String(terrainSettings(_getEffective())[key]);
+          return;
+        }
+        if (raw === TERRAIN_DEFAULTS[key]) clearOverride('terrain', key);
+        else setOverride('terrain', key, raw);
+      });
+    });
+
+    // #681 M6 — default elevation model (terrain only, or with the surface).
+    container.querySelectorAll('[data-cv2-terrain-model]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        if (TERRAIN_MODELS.indexOf(sel.value) === -1) return;
+        if (sel.value === TERRAIN_DEFAULTS.model) clearOverride('terrain', 'model');
+        else setOverride('terrain', 'model', sel.value);
+      });
+    });
+
     // #1633 / #674 1-byte path hops select — persists + fires
     // mc-hide-1byte-hops-changed through hop-filter.js; consumers re-render
     // or rely on the next navigation refresh (analytics tab, packets list).
@@ -2369,10 +2690,16 @@
       var key = parts[1];
       // Optimistic CSS for color pickers on input event
       if (inp.type === 'color') {
+        // The value to store: the pick, with the alpha of the colour it
+        // replaces when that one was translucent (review PR#714).
+        var picked = function () {
+          var a = inp.getAttribute('data-cv2-alpha');
+          return a ? _hexWithAlpha(inp.value, Number(a)) : inp.value;
+        };
         inp.addEventListener('input', function () {
           // Optimistic CSS update (Decision #12)
           var cssVar = THEME_CSS_MAP[key];
-          if (cssVar) document.documentElement.style.setProperty(cssVar, inp.value);
+          if (cssVar) document.documentElement.style.setProperty(cssVar, picked());
           // Mirror to logo brand vars so the wordmark recolors live too.
           if (key === 'accent') document.documentElement.style.setProperty('--logo-accent', inp.value);
           if (key === 'accentHover') document.documentElement.style.setProperty('--logo-accent-hi', inp.value);
@@ -2383,13 +2710,13 @@
           }
           // Update hex display
           var hex = inp.parentElement.querySelector('.cust-hex');
-          if (hex) hex.textContent = inp.value;
+          if (hex) hex.textContent = picked();
           // Update node dot
           var dot = inp.parentElement.querySelector('.cust-node-dot');
           if (dot) dot.style.background = inp.value;
         });
         inp.addEventListener('change', function () {
-          setOverride(section, key, inp.value);
+          setOverride(section, key, picked());
         });
       } else {
         // Text inputs — debounced write on input
@@ -2920,6 +3247,10 @@
     validateShape: validateShape,
     applyCSS: applyCSS,
     isValidColor: isValidColor,
+    // #681 M6 — exposed for tests; see test-issue-681-m6-customizer-terrain.js.
+    cssColorToHex: _cssColorToHex,
+    colorWithAlpha: _colorWithAlpha,
+    renderTerrainSettings: _renderTerrainSettings,
     isValidHomeUrl: isValidHomeUrl,
     isOverridden: _isOverridden,
     // #1496 — full reset (not just STORAGE_KEY). See _resetAll() above.
@@ -2929,6 +3260,12 @@
     // #1380 — exposed for unit tests; see test-issue-1380-*.
     applyCbSim: _applyCbSim,
     resetCbPreset: _resetCbPreset,
-    THEME_CSS_MAP: THEME_CSS_MAP
+    THEME_CSS_MAP: THEME_CSS_MAP,
+    // #681 M6 — exposed for tests; see test-issue-681-m6-customizer-terrain.js.
+    TERRAIN_DEFAULTS: TERRAIN_DEFAULTS,
+    TERRAIN_COLOR_KEYS: TERRAIN_COLOR_KEYS,
+    VALID_SECTIONS: VALID_SECTIONS,
+    isValidAntennaHeight: isValidAntennaHeight,
+    terrainSettings: terrainSettings
   };
 })();
