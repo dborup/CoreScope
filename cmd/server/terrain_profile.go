@@ -62,6 +62,7 @@ import (
 	"time"
 
 	"github.com/meshcore-analyzer/dhm"
+	"github.com/meshcore-analyzer/profilecard"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -132,15 +133,16 @@ type terrainSettings struct {
 	maxInFlight     int
 	// share is map.dhm.profile.share (#727), see share_profile.go.
 	share shareSettings
+	// card is map.dhm.profile.card (#727 M3), see profile_card.go.
+	card cardSettings
 }
 
 // shareSettings are map.dhm.profile.share, resolved and bounded.
 type shareSettings struct {
 	enabled bool
 	// upstreamPerMin is the server-wide budget of upstream profile
-	// fetches that sharing may cause. In #727 M1 the /p route makes no
-	// upstream call at all, which is within any value of it; the budget
-	// is enforced once a share request may fetch (#727 M3).
+	// fetches that sharing may cause: the share card spends it on an
+	// elevation cache miss (profile_card.go). /p itself never fetches.
 	upstreamPerMin int
 }
 
@@ -192,6 +194,11 @@ func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface
 		share: shareSettings{
 			enabled:        pc.Share.Enabled,
 			upstreamPerMin: integer("share.upstreamPerMin", pc.Share.UpstreamPerMin, 2, 0, shareUpstreamPerMinMax),
+		},
+		card: cardSettings{
+			dark:         cardTheme(pc.Card.Theme, logf),
+			names:        pc.Card.Names == nil || *pc.Card.Names,
+			cacheEntries: integer("card.cacheEntries", pc.Card.CacheEntries, cardCacheEntriesDefault, 1, cardCacheEntriesMax),
 		},
 	}
 }
@@ -252,11 +259,11 @@ type terrainProfiler struct {
 	cache      *dhm.Cache[terrainKey]
 	flight     dhm.Flight[[]byte]
 	limiter    *ipRateLimiter // nil: no per-client limit
-	admit      chan struct{}  // one token per profile fetch in flight (maxInFlight)
+	admit      *dhm.Admission // one slot per profile fetch in flight (maxInFlight)
 	refused    atomic.Int64   // admission refusals (503) since start
-	logMu      sync.Mutex     // guards the throttle below
-	logAt      time.Time      // last refusal report
-	logCount   int64          // refusals already reported
+	refusalLog logThrottle    // the admission-refusal log line
+	// card is the share card (#727 M3); nil unless sharing is enabled.
+	card       *profileCards
 	deadline   time.Duration
 	now        func() time.Time
 	logf       func(string, ...interface{})
@@ -275,6 +282,9 @@ type terrainProfilerDeps struct {
 	logFailure func(what string, err error)
 	observers  func() ([]Observer, error)
 	trusted    []*net.IPNet
+	// theme is the operator's theme sections for the share card's
+	// palette (cardThemeSections); nil means the shipped palette.
+	theme func() (light, dark map[string]string)
 }
 
 // terrainCacheMaxBytes is the cache's byte bound: one entry holds n DTM + n
@@ -305,19 +315,23 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 	}
 	set := resolveTerrainSettings(pc, d.logf)
 	maxBytes := terrainCacheMaxBytes(set.cacheEntries, set.plan.MaxSamples)
-	return &terrainProfiler{
+	p := &terrainProfiler{
 		src:        d.src,
 		set:        set,
 		radio:      resolveTerrainRadio(rc, d.logf),
 		cache:      dhm.NewCache[terrainKey](set.cacheEntries, maxBytes, set.cacheTTL),
 		limiter:    newIPRateLimiter("map.dhm.profile.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
-		admit:      make(chan struct{}, set.maxInFlight),
+		admit:      dhm.NewAdmission(set.maxInFlight),
 		deadline:   terrainDeadline,
 		now:        time.Now,
 		logf:       d.logf,
 		logFailure: d.logFailure,
 		observers:  d.observers,
 	}
+	if set.share.enabled {
+		p.card = newProfileCards(set, d.theme, d.logf)
+	}
+	return p
 }
 
 // newTerrainProfilerFromConfig offers the profile only when the DHM client
@@ -334,6 +348,12 @@ func newTerrainProfilerFromConfig(cfg *Config, proxy *dhmProxy, db *DB) *terrain
 	}
 	if db != nil {
 		d.observers = db.GetObservers
+	}
+	// The card's palette is read once, like the og: tags (og_meta.go):
+	// a theme.json change takes effect at the next start, and the
+	// palette fingerprint in the card key and in v makes it visible.
+	d.theme = func() (map[string]string, map[string]string) {
+		return cardThemeSections(cfg, LoadTheme("."))
 	}
 	return newTerrainProfiler(cfg.DHM.Profile, cfg.Radio, d)
 }
@@ -439,91 +459,21 @@ func parseTerrainRef(s string) (terrainRef, error) {
 
 // ── Response ───────────────────────────────────────────────────────────────
 
-// TerrainProfileResponse is the body of GET /api/terrain/profile.
-type TerrainProfileResponse struct {
-	A           TerrainEndpoint `json:"a"`
-	B           TerrainEndpoint `json:"b"`
-	DistanceM   float64         `json:"distanceM"`
-	StepM       float64         `json:"stepM"`
-	SampleCount int             `json:"sampleCount"` // computed; samples holds at most 1024 of them
-	Model       string          `json:"model"`       // "dtm" or "both"
-	Coverage    TerrainCoverage `json:"coverage"`
-	Samples     []TerrainSample `json:"samples"`
-	Physics     TerrainPhysics  `json:"physics"`
-	Verdict     TerrainVerdict  `json:"verdict"`
-	Attribution string          `json:"attribution"`
-}
-
-// TerrainEndpoint is one end of the path, snapped to 5 decimals.
-type TerrainEndpoint struct {
-	Lat           float64  `json:"lat"`
-	Lon           float64  `json:"lon"`
-	Kind          string   `json:"kind"` // "node" or "point"
-	Role          string   `json:"role,omitempty"`
-	GroundM       *float64 `json:"groundM"` // DTM; null outside coverage
-	AntennaM      float64  `json:"antennaM"`
-	AntennaSource string   `json:"antennaSource"` // request, operator-node, operator-role, role-default, point-default
-	Assumed       bool     `json:"assumed"`       // the height is a default, not a known value
-}
-
-type TerrainCoverage struct {
-	State     string   `json:"state"` // full, partial, none
-	Pct       float64  `json:"pct"`
-	FirstGapM *float64 `json:"firstGapM"` // distance of the first sample without data
-}
-
-// TerrainSample is one point along the path; null/absent where there is
-// no elevation data.
-type TerrainSample struct {
-	D   float64  `json:"d"`
-	DTM *float64 `json:"dtm"`
-	DSM *float64 `json:"dsm,omitempty"`
-}
-
-type TerrainPhysics struct {
-	FreqMHz    float64 `json:"freqMHz"`
-	FreqSource string  `json:"freqSource"` // request, config, observers, firmware
-	LambdaM    float64 `json:"lambdaM"`
-	K          float64 `json:"k"`
-	KSource    string  `json:"kSource"` // request, config, default
-	F1MaxM     float64 `json:"f1MaxM"`  // first Fresnel radius at mid-path
-}
-
-type TerrainVerdict struct {
-	State     string  `json:"state"` // clear, fresnel100, fresnel60, blocked, unknown
-	Model     string  `json:"model"` // always "dtm": the terrain model decides
-	Criterion float64 `json:"criterion"`
-	TerrainClearance
-	// Surface is the same assessment against the DSM (trees, buildings),
-	// for information; present with model=both.
-	Surface *TerrainSurfaceInfo `json:"surface,omitempty"`
-}
-
-// TerrainClearance is the worst point of an assessment; null without a
-// verdict. WorstF1Fraction is also null when the worst point is a surface
-// above an antenna: the zone has no radius at an endpoint (#745).
-type TerrainClearance struct {
-	WorstClearanceM *float64 `json:"worstClearanceM"`
-	WorstAtM        *float64 `json:"worstAtM"`
-	WorstF1Fraction *float64 `json:"worstF1Fraction"`
-}
-
-// TerrainSurfaceInfo is forced to "unknown" with null clearance numbers
-// whenever Coverage.State is not "full", even though it is assessed
-// against the DSM, not the deciding DTM: the two models can have
-// different coverage, and a partial profile must never report a
-// confident verdict on either (#689 review N1).
-//
-// Reason is "antennaBelowSurface" when the surface is above the antenna
-// at an endpoint (#745): the state is then blocked, and Endpoint is "A",
-// "B" or "both". The worst point stays the worst interior obstruction (by
-// F1 ratio, as everywhere) when there is one. Both are absent otherwise.
-type TerrainSurfaceInfo struct {
-	State string `json:"state"`
-	TerrainClearance
-	Reason   string `json:"reason,omitempty"`
-	Endpoint string `json:"endpoint,omitempty"`
-}
+// The body of GET /api/terrain/profile is internal/profilecard's
+// TerrainProfileResponse: the share-card renderer takes the response as it
+// is served (#727 M3), so the types live there and are aliased here. The
+// field-by-field documentation is in internal/profilecard/types.go;
+// profilecard_shape_test.go still pins the JSON shape.
+type (
+	TerrainProfileResponse = profilecard.TerrainProfileResponse
+	TerrainEndpoint        = profilecard.TerrainEndpoint
+	TerrainCoverage        = profilecard.TerrainCoverage
+	TerrainSample          = profilecard.TerrainSample
+	TerrainPhysics         = profilecard.TerrainPhysics
+	TerrainVerdict         = profilecard.TerrainVerdict
+	TerrainClearance       = profilecard.TerrainClearance
+	TerrainSurfaceInfo     = profilecard.TerrainSurfaceInfo
+)
 
 const terrainReasonAntennaBelowSurface = "antennaBelowSurface"
 
@@ -566,6 +516,11 @@ type terrainRequest struct {
 	ka, kb [2]int64   // the snapped endpoints of the cache key
 	a, b   dhm.LatLon // the same, as coordinates
 	plan   dhm.Plan
+}
+
+// elevationKey is the elevation cache key of a resolved request.
+func (req terrainRequest) elevationKey() terrainKey {
+	return terrainKey{A: req.ka, B: req.kb, Both: req.q.both, Samples: len(req.plan.E), StepCm: int64(math.Round(req.plan.StepM * 100))}
 }
 
 // terrainRequestError is a refusal: its status and a fixed message that
@@ -632,7 +587,7 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 			elev.dsm = nanSlice(n)
 		}
 	} else {
-		key := terrainKey{A: req.ka, B: req.kb, Both: tq.both, Samples: n, StepCm: int64(math.Round(plan.StepM * 100))}
+		key := req.elevationKey()
 		data, hit := p.cache.Get(key, p.now())
 		state = "hit"
 		if !hit {
@@ -641,23 +596,9 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 				writeRateLimited(w, retry)
 				return
 			}
-			data, _, err = p.flight.Do(r.Context(), key.String(), p.deadline, func(ctx context.Context) ([]byte, error) {
-				// Admission is per fetch, not per request: callers that
-				// join a running fetch add no work and are not counted.
-				select {
-				case p.admit <- struct{}{}:
-					defer func() { <-p.admit }()
-				default:
-					return nil, errTerrainBusy
-				}
-				e, err := p.fetch(ctx, &plan, tq.both)
-				if err != nil {
-					return nil, err
-				}
-				enc := e.encode()
-				p.cache.Put(key, enc, p.now())
-				return enc, nil
-			})
+			// Admission is per fetch, not per request: callers that join
+			// a running fetch add no work and take no slot.
+			data, _, err = p.flight.DoAdmitted(r.Context(), key.String(), p.deadline, p.admit, p.elevationCall(key, &plan, tq.both))
 			if err != nil {
 				p.writeFetchError(w, r, err)
 				return
@@ -672,6 +613,27 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, p.buildResponse(tq, req.ends, req.a, req.b, &plan, elev))
 }
 
+// elevationCall is the body of one shared elevation fetch: both models,
+// encoded and cached. Every route that fetches elevations runs it through
+// p.flight under p.admit, so a card and a panel asking for the same path
+// share one fetch and one maxInFlight budget.
+func (p *terrainProfiler) elevationCall(key terrainKey, plan *dhm.Plan, both bool) func(context.Context) ([]byte, error) {
+	return func(ctx context.Context) ([]byte, error) {
+		e, err := p.fetch(ctx, plan, both)
+		if err != nil {
+			return nil, err
+		}
+		enc := e.encode()
+		p.cache.Put(key, enc, p.now())
+		return enc, nil
+	}
+}
+
+// isTerrainBusy reports an admission refusal: no slot, no upstream work.
+func isTerrainBusy(err error) bool {
+	return errors.Is(err, errTerrainBusy) || errors.Is(err, dhm.ErrAdmissionFull)
+}
+
 // writeFetchError maps a failed fetch: a client that left gets nothing,
 // a timeout is 504, anything else upstream is 502. Neither carries
 // upstream text; the log line carries the category only.
@@ -679,7 +641,7 @@ func (p *terrainProfiler) writeFetchError(w http.ResponseWriter, r *http.Request
 	if r.Context().Err() != nil {
 		return
 	}
-	if errors.Is(err, errTerrainBusy) {
+	if isTerrainBusy(err) {
 		// A refusal did no upstream work: give the per-IP charge back, so
 		// a client that retries as told never reaches 429 through 503s.
 		p.limiter.refund(r)
@@ -702,17 +664,31 @@ func (p *terrainProfiler) writeFetchError(w http.ResponseWriter, r *http.Request
 // terrainRefusalLogEvery: the first at once, then the number since the last
 // report. Neither the token nor any URL is involved.
 func (p *terrainProfiler) noteRefusal() {
-	total := p.refused.Add(1)
-	now := p.now()
-	p.logMu.Lock()
-	if !p.logAt.IsZero() && now.Sub(p.logAt) < terrainRefusalLogEvery {
-		p.logMu.Unlock()
-		return
+	n, due := p.refusalLog.note(p.refused.Add(1), p.now(), terrainRefusalLogEvery)
+	if due {
+		p.logf("[dhm] terrain profile admission: refused %d request(s) since the last report because map.dhm.profile.maxInFlight (%d) fetches are running; raise it if this persists", n, p.admit.Cap())
 	}
-	n := total - p.logCount
-	p.logAt, p.logCount = now, total
-	p.logMu.Unlock()
-	p.logf("[dhm] terrain profile admission: refused %d request(s) since the last report because map.dhm.profile.maxInFlight (%d) fetches are running; raise it if this persists", n, cap(p.admit))
+}
+
+// logThrottle reports a running count at most once per interval: the
+// first event at once, then the number of events since the last report.
+type logThrottle struct {
+	mu       sync.Mutex
+	at       time.Time // last report
+	reported int64     // events already reported
+}
+
+// note records that total events have happened so far and returns how
+// many to report now, if a report is due.
+func (l *logThrottle) note(total int64, now time.Time, every time.Duration) (int64, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.at.IsZero() && now.Sub(l.at) < every {
+		return 0, false
+	}
+	n := total - l.reported
+	l.at, l.reported = now, total
+	return n, true
 }
 
 // resolveTerrainEnd resolves a public key to a positioned, visible node,
@@ -883,14 +859,8 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 	}
 
 	// Physics.
-	ph := TerrainPhysics{K: dhm.DefaultKFactor, KSource: "default"}
-	ph.FreqMHz, ph.FreqSource = p.frequency(tq.freq)
-	switch {
-	case tq.k != nil:
-		ph.K, ph.KSource = *tq.k, "request"
-	case p.radio.k != 0:
-		ph.K, ph.KSource = p.radio.k, "config"
-	}
+	var ph TerrainPhysics
+	ph.FreqMHz, ph.FreqSource, ph.K, ph.KSource = p.linkParams(tq)
 	lambda := dhm.Wavelength(ph.FreqMHz)
 	ph.LambdaM = math.Round(lambda*1e6) / 1e6
 	ph.F1MaxM = round2(dhm.FresnelRadius(lambda, plan.DistanceM/2, plan.DistanceM/2))
@@ -1019,6 +989,19 @@ func clearanceOf(a dhm.Assessment) TerrainClearance {
 		out.WorstF1Fraction = &f
 	}
 	return out
+}
+
+// linkParams resolves the request's frequency and k-factor, with where
+// each came from: the request, the operator's config, or a default.
+func (p *terrainProfiler) linkParams(tq terrainQuery) (freq float64, freqSource string, k float64, kSource string) {
+	freq, freqSource = p.frequency(tq.freq)
+	switch {
+	case tq.k != nil:
+		return freq, freqSource, *tq.k, "request"
+	case p.radio.k != 0:
+		return freq, freqSource, p.radio.k, "config"
+	}
+	return freq, freqSource, dhm.DefaultKFactor, "default"
 }
 
 // antenna is the antenna height above ground for an endpoint, most

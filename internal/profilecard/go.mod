@@ -9,11 +9,11 @@ require (
 	// glyph outlines (font/sfnt, font/gofont) and the fixed-point
 	// rasteriser (vector) are all the card needs from it.
 	golang.org/x/image v0.23.0
+	// Already in the graph through x/image (font/sfnt); used directly for
+	// unicode/norm (NFC names, #755 review).
+	golang.org/x/text v0.21.0
 )
 
-require (
-	golang.org/x/sync v0.10.0 // indirect
-	golang.org/x/text v0.21.0 // indirect
-)
+require golang.org/x/sync v0.10.0 // indirect
 
 replace github.com/meshcore-analyzer/dhm => ../dhm
