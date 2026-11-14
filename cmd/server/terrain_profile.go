@@ -58,7 +58,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/meshcore-analyzer/dhm"
@@ -149,27 +148,8 @@ const shareUpstreamPerMinMax = 60
 // resolveTerrainSettings applies the defaults and bounds. An out-of-range
 // value logs a warning and takes the default.
 func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface{})) terrainSettings {
-	num := func(key string, v *float64, def, lo, hi float64, loOpen bool) float64 {
-		if v == nil {
-			return def
-		}
-		ok := *v <= hi && (*v > lo || !loOpen && *v == lo) // NaN fails both
-		if !ok {
-			logf("[dhm] config map.dhm.profile.%s is out of range; using %v", key, def)
-			return def
-		}
-		return *v
-	}
-	integer := func(key string, v *int, def, lo, hi int) int {
-		if v == nil {
-			return def
-		}
-		if *v < lo || *v > hi {
-			logf("[dhm] config map.dhm.profile.%s is out of range; using %d", key, def)
-			return def
-		}
-		return *v
-	}
+	k := configKnobs{tag: "[dhm]", block: "map.dhm.profile", logf: logf}
+	num, integer := k.num, k.integer
 	return terrainSettings{
 		// The planner's rasters are at most dhm.MaxRasterSpanM (80 km).
 		maxPathM: 1000 * num("maxPathKm", pc.MaxPathKm, 80, 0, dhm.MaxRasterSpanM/1000, true),
@@ -251,11 +231,7 @@ type terrainProfiler struct {
 	cache      *dhm.Cache[terrainKey]
 	flight     dhm.Flight[[]byte]
 	limiter    *ipRateLimiter // nil: no per-client limit
-	admit      chan struct{}  // one token per profile fetch in flight (maxInFlight)
-	refused    atomic.Int64   // admission refusals (503) since start
-	logMu      sync.Mutex     // guards the throttle below
-	logAt      time.Time      // last refusal report
-	logCount   int64          // refusals already reported
+	admission                 // maxInFlight profile fetches; refusals are 503
 	deadline   time.Duration
 	now        func() time.Time
 	logf       func(string, ...interface{})
@@ -310,7 +286,7 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 		radio:      resolveTerrainRadio(rc, d.logf),
 		cache:      dhm.NewCache[terrainKey](set.cacheEntries, maxBytes, set.cacheTTL),
 		limiter:    newIPRateLimiter("map.dhm.profile.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
-		admit:      make(chan struct{}, set.maxInFlight),
+		admission:  newAdmission(set.maxInFlight),
 		deadline:   terrainDeadline,
 		now:        time.Now,
 		logf:       d.logf,
@@ -633,12 +609,10 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 			data, _, err = p.flight.Do(r.Context(), key.String(), p.deadline, func(ctx context.Context) ([]byte, error) {
 				// Admission is per fetch, not per request: callers that
 				// join a running fetch add no work and are not counted.
-				select {
-				case p.admit <- struct{}{}:
-					defer func() { <-p.admit }()
-				default:
+				if !p.tryAdmit() {
 					return nil, errTerrainBusy
 				}
+				defer p.release()
 				e, err := p.fetch(ctx, &plan, tq.both)
 				if err != nil {
 					return nil, err
@@ -691,16 +665,10 @@ func (p *terrainProfiler) writeFetchError(w http.ResponseWriter, r *http.Request
 // terrainRefusalLogEvery: the first at once, then the number since the last
 // report. Neither the token nor any URL is involved.
 func (p *terrainProfiler) noteRefusal() {
-	total := p.refused.Add(1)
-	now := p.now()
-	p.logMu.Lock()
-	if !p.logAt.IsZero() && now.Sub(p.logAt) < terrainRefusalLogEvery {
-		p.logMu.Unlock()
+	n := p.refusal(p.now(), terrainRefusalLogEvery)
+	if n == 0 {
 		return
 	}
-	n := total - p.logCount
-	p.logAt, p.logCount = now, total
-	p.logMu.Unlock()
 	p.logf("[dhm] terrain profile admission: refused %d request(s) since the last report because map.dhm.profile.maxInFlight (%d) fetches are running; raise it if this persists", n, cap(p.admit))
 }
 
