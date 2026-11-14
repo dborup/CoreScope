@@ -170,7 +170,7 @@ async function render(page, responses, width, height) {
       // Repeaters so the two 24h numbers never read as contradictory; a
       // client card (no Busiest Repeaters row) gets no such sentence.
       assert.match(await cards.nth(0).locator('.mnc-metric').first().getAttribute('title'),
-        /larger than its relayed count on Busiest Repeaters/i);
+        /usually larger than its relayed count on Busiest Repeaters, which counts only forwarded non-advert packets\./i);
       assert.doesNotMatch(await cards.nth(4).locator('.mnc-metric').first().getAttribute('title'),
         /Busiest Repeaters/i, 'a client card must not claim a Busiest Repeaters comparison');
       // The calendar-day counter and the bare hop average are gone from the

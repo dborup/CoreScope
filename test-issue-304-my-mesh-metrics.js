@@ -277,7 +277,7 @@ test('the label is unambiguous: "All traffic", not the old "Transmissions"', () 
 test('a repeater or room card gets the Busiest Repeaters cross-reference; a client does not', () => {
   const a = activity({ counts: { 3: 4 } });
   for (const role of ['repeater', 'room', 'REPEATER', 'Room']) {
-    assert.match(MMA.traffic24h(a, role).tip, /larger than its relayed count on Busiest Repeaters/i, role);
+    assert.match(MMA.traffic24h(a, role).tip, /is usually larger than its relayed count on Busiest Repeaters, which counts only forwarded non-advert packets\./i, role);
   }
   for (const role of ['client', 'room_server', '', undefined, null]) {
     assert.doesNotMatch(MMA.traffic24h(a, role).tip, /Busiest Repeaters/i, JSON.stringify(role));

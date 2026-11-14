@@ -76,7 +76,7 @@
   var TRAFFIC_TIP = 'Distinct transmissions associated with this node in the rolling 24-hour window: its own, ' +
     'those addressed to it, and those whose resolved path names it. It is not a count of what this node forwarded, ' +
     'and repeated observations of one transmission count once.';
-  var TRAFFIC_REPEATER_NOTE = 'For a repeater this is larger than its relayed count on Busiest Repeaters, which counts only forwarded non-advert packets.';
+  var TRAFFIC_REPEATER_NOTE = 'For a repeater this is usually larger than its relayed count on Busiest Repeaters, which counts only forwarded non-advert packets.';
   var TRAFFIC_PARTIAL_TIP = 'The in-memory history does not cover the whole window, so this is a lower bound (≥) over an incomplete window, not a total.';
   var TRAFFIC_UNAVAILABLE_TIP = 'The rolling window is unavailable for this node, so no 24-hour count is shown. An unknown window is not a quiet one.';
 

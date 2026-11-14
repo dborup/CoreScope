@@ -77,6 +77,8 @@ const esc = s => s ? String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').repl
 const windowStub = { ROLE_COLORS: { repeater: '#3b82f6', room: '#a855f7' } };
 // Busiest Repeaters formats estimated airtime with the real ObserverAirtime.
 new Function('window', fs.readFileSync(path.join(__dirname, 'public', 'observer-airtime.js'), 'utf8'))(windowStub);
+// index.html loads my-mesh-activity.js before analytics.js, so analytics.js reads the label from it with no fallback.
+new Function('window', fs.readFileSync(path.join(__dirname, 'public', 'my-mesh-activity.js'), 'utf8'))(windowStub);
 let _regionQS = '', _areaQS = '';
 const RegionFilter = { regionQueryString: () => _regionQS };
 const AreaFilter = { areaQueryString: () => _areaQS };
@@ -696,7 +698,7 @@ function makeElement(id) {
     // carry its own copy of the string — a hardcoded duplicate would still
     // pass the innerHTML assertion above but silently drift if Home's
     // label is ever renamed again.
-    assert(/window\.MyMeshActivity\s*\?\s*window\.MyMeshActivity\.TRAFFIC_LABEL/.test(src),
+    assert(/\$\{window\.MyMeshActivity\.TRAFFIC_LABEL\}/.test(src),
       'the Busiest Repeaters cross-reference line reads window.MyMeshActivity.TRAFFIC_LABEL rather than a hardcoded copy of the Home label text');
   }
 
