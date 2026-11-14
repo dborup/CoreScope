@@ -151,6 +151,22 @@ function profileFor(scenario, q) {
         surface: { state: 'blocked', worstClearanceM: -17.5, worstAtM: 138, worstF1Fraction: -2.6 } },
     });
   }
+  /* #745 (owner decision on #750): the DSM at an endpoint is above that
+   * antenna — a rooftop node with a ground-based height. The server keeps
+   * the surface blocked and says why; the endpoint-only worst point has a
+   * null F1 fraction. */
+  const below = { 'below-a': 'A', 'below-b': 'B', 'below-both': 'both' }[scenario];
+  if (below) {
+    const base = baseProfile(q);
+    const atA = below !== 'B', atB = below !== 'A';
+    return Object.assign(base, {
+      // groundM 40 + a 10 m role default: the antenna is at 50 m, the roof at 52 m.
+      samples: samples(120, D, (d) => ({ dtm: 40, dsm: (atA && d === 0) || (atB && d === D) ? 52 : 40 })),
+      verdict: { state: 'clear', model: 'dtm', criterion: 0.6, worstClearanceM: 10, worstAtM: 6000, worstF1Fraction: 0.31,
+        surface: { state: 'blocked', worstClearanceM: -2, worstAtM: below === 'B' ? D : 0, worstF1Fraction: null,
+          reason: 'antennaBelowSurface', endpoint: below } },
+    });
+  }
   return baseProfile(q);
 }
 
@@ -788,6 +804,42 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
       const back = await panelState(page);
       assert(back.chip === 'Terrain: Clear', 'main chip = ' + back.chip);
       assert(back.surfaceChip.shown, 'the surface chip did not come back');
+      assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  // ── 12b. #745: the antenna below the surface at an endpoint ─────────────
+  for (const [scenario, words] of [['below-a', 'A'], ['below-b', 'B'], ['below-both', 'A and B']]) {
+    const { ctx, page, rec } = await newCtx({ scenario });
+    await gotoMap(page, PAIR_LINK);
+    const label = 'Buildings/trees: antenna below the surface at ' + words + ' — check the antenna height';
+    await step('antenna below the surface at ' + words + ': the chip says so, in the warn tone', async () => {
+      await page.waitForTimeout(900);
+      const st = await panelState(page);
+      assert(st.open, 'panel did not open');
+      assert(st.chip === 'Terrain: Clear', 'main chip = ' + st.chip);
+      assert(st.surfaceChip && st.surfaceChip.shown, 'the surface chip is hidden');
+      assert(st.surfaceChip.text === label, 'surface chip = ' + st.surfaceChip.text);
+      const cls = await page.getAttribute('[data-testid="tp-surface-chip"]', 'class');
+      assert(/\btp-chip-warn\b/.test(cls) && !/\btp-chip-bad\b/.test(cls), 'class = ' + cls);
+      const tip = await page.getAttribute('[data-testid="tp-surface-chip"]', 'title');
+      assert(/antenna height above the ground/.test(tip), 'chip title = ' + tip);
+      // The blocking/attenuation line is about buildings in the link; none is.
+      assert(!st.surfaceNote.shown, 'the blocking/attenuation line appeared for an antenna height');
+    });
+
+    await step('antenna below the surface at ' + words + ': the chart title and accessible name carry it, no NaN', async () => {
+      const st = await panelState(page);
+      assert(st.svgTitle.indexOf(label) >= 0, 'chart title = ' + st.svgTitle);
+      assert(st.svgAria.indexOf(label) >= 0, 'chart aria-label = ' + st.svgAria);
+      assert(!/Buildings\/trees: Blocked/.test(st.svgTitle + st.svgAria), 'a plain "Blocked" reached the chart');
+      const text = await page.evaluate(() => {
+        const panel = document.querySelector('[data-testid="tp-panel"]');
+        return panel.textContent + ' ' + Array.from(panel.querySelectorAll('[title],[aria-label]'))
+          .map(el => (el.getAttribute('title') || '') + ' ' + (el.getAttribute('aria-label') || '')).join(' ');
+      });
+      assert(!/NaN|Infinity|undefined/.test(text), 'non-number text in the panel: ' + text.slice(0, 300));
       assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
     });
     await ctx.close();

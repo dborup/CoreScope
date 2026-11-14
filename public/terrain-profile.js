@@ -483,6 +483,14 @@
   // deliberately absent, so an unjudged surface is never ranked at all.
   var SURFACE_RANK = { blocked: 0, fresnel60: 1, fresnel100: 2, clear: 3 };
 
+  /* #745 (owner decision on #750): a surface above the antenna at an
+   * endpoint is rarely a building in the link. Far more often the node is
+   * on a roof and its antenna height, measured from the ground, is a role
+   * default or too low. The server names the case (verdict.surface.reason
+   * and .endpoint), so the chip says what to check instead of "Blocked". */
+  var REASON_ANTENNA_BELOW = 'antennaBelowSurface';
+  var BELOW_AT = { A: 'A', B: 'B', both: 'A and B' };
+
   /* The verdict states that assert terrain inside the criterion zone, and
    * so the only ones whose chart may carry intrusion bands. */
   var INTRUDING_VERDICTS = { fresnel60: true, blocked: true };
@@ -547,11 +555,16 @@
    * when there is no surface to speak of at all — "Terrain only", or a
    * response without the block — and otherwise a chip whose `show` says
    * whether it adds anything: it is shown only when the surface is strictly
-   * worse than the terrain, so two agreeing models stay one chip. */
+   * worse than the terrain, so two agreeing models stay one chip. An
+   * antenna below the surface is the exception (antennaBelowChip). */
   function surfaceChip(data) {
     if (!data || data.model !== 'both') return null;
     var state = surfaceState(data);
     if (state === null) return null;
+    if (state === 'blocked') {
+      var below = antennaBelowChip(data);
+      if (below) return below;
+    }
     var known = state === 'unknown' ? null : VERDICTS[state];
     var terrain = verdictChip(data);
     var show = !!known
@@ -565,7 +578,36 @@
       // terrain chip that is green.
       tone: 'warn',
       detail: known ? known.surface : SURFACE_UNKNOWN_DETAIL,
+      note: true,
       show: show
+    };
+  }
+
+  /* antennaBelowChip is the surface chip for an antenna below the surface
+   * at an endpoint, or null when the response names no such endpoint. It
+   * is shown whatever the terrain says: it is about the input, not a
+   * second verdict. The worst point is inside the path only when buildings
+   * or trees also rise through the line of sight (the server keeps the
+   * deepest interior obstruction as the worst point), and only then does
+   * the detail add that, and the blocking/attenuation line appears. */
+  function antennaBelowChip(data) {
+    var s = data.verdict.surface;
+    if (s.reason !== REASON_ANTENNA_BELOW || !Object.prototype.hasOwnProperty.call(BELOW_AT, s.endpoint)) return null;
+    var at = BELOW_AT[s.endpoint];
+    var worstAt = Number(s.worstAtM), distance = Number(data.distanceM);
+    var inside = s.worstAtM !== null && s.worstAtM !== undefined && isFinite(worstAt) && isFinite(distance)
+      && worstAt > 0 && worstAt < distance;
+    var detail = 'The buildings or trees at ' + at + ' are higher than the antenna'
+      + (s.endpoint === 'both' ? 's there' : ' there')
+      + '. If the node is on a roof or a mast, set its antenna height above the ground.';
+    if (inside) detail += ' ' + VERDICTS.blocked.surface;
+    return {
+      state: 'blocked',
+      label: SURFACE_PREFIX + 'antenna below the surface at ' + at + ' — check the antenna height',
+      tone: 'warn',
+      detail: detail,
+      note: inside,
+      show: true
     };
   }
 
@@ -755,7 +797,7 @@
     if (worst !== null && worst !== undefined && isFinite(Number(worst))) {
       txt += ' Worst clearance ' + fmtMetres(worst) + ' at ' + fmtMetres(data.verdict.worstAtM) + ' along the path.';
     }
-    if (surf && surf.show) txt += ' ' + surf.label + '. ' + surf.detail + ' ' + SURFACE_NOTE;
+    if (surf && surf.show) txt += ' ' + surf.label + '. ' + surf.detail + (surf.note ? ' ' + SURFACE_NOTE : '');
     return txt;
   }
 
@@ -1320,7 +1362,7 @@
         ui.surface.setAttribute('data-state', show ? surf.state : '');
         ui.surface.title = show ? surf.detail : '';
       }
-      if (ui.surfaceNote) ui.surfaceNote.hidden = !show;
+      if (ui.surfaceNote) ui.surfaceNote.hidden = !(show && surf.note);
     }
 
     function writeHash() {

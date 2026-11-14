@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -939,6 +940,199 @@ func TestTerrainProfile_EndpointNodata(t *testing.T) {
 	})
 }
 
+// #745: a surface (DSM) above the antenna at an endpoint makes the
+// informational surface verdict blocked, at that endpoint, with a null F1
+// fraction (the zone has no radius there), and says why: reason
+// antennaBelowSurface and the endpoint (owner decision on #750). The
+// deciding DTM verdict is the same as for the same path without a DSM.
+func TestTerrainProfile_SurfaceAboveEndpointAntenna(t *testing.T) {
+	x, _ := dhm.ToUTM32(56.1629, 10.2039)
+	const distance = 1000
+	for _, c := range []struct {
+		name         string
+		endpoint     int // the worst point: 0 = A, 1 = B
+		atA, atB     bool
+		wantEndpoint string
+	}{
+		{"A", 0, true, false, "A"},
+		{"B", 1, false, true, "B"},
+		// 45 m at B against 40 m at A makes B the deeper one.
+		{"both", 1, true, true, "both"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			split := modelSplit{
+				dtm: newFakeElevation(t, flatElev(0)),
+				dsm: newFakeElevation(t, func(e, n float64) float32 {
+					switch {
+					case c.atA && e < x:
+						return 40
+					case c.atB && e > x+distance-1:
+						return 45
+					}
+					return 0
+				}),
+			}
+			env := newTerrainEnv(t, split, dhm.ProfileConfig{}, nil)
+			q := pathQuery(aarhusPt, offsetPt(56.1629, 10.2039, distance, 0), "ha=10", "hb=10")
+			r := decodeProfile(t, env.get(q))
+			end, ep := r.Samples[0], r.A
+			if c.endpoint == 1 {
+				end, ep = r.Samples[len(r.Samples)-1], r.B
+			}
+			if r.Coverage.State != "full" || end.DSM == nil || ep.GroundM == nil || *end.DSM <= *ep.GroundM+ep.AntennaM {
+				t.Fatalf("fixture: want full coverage and DSM above the %s antenna: %+v endpoint %+v sample %+v", c.name, r.Coverage, ep, end)
+			}
+			for _, s := range r.Samples[1 : len(r.Samples)-1] {
+				if s.DSM == nil || *s.DSM > 1 {
+					t.Fatalf("fixture: the obstruction is not at the endpoints alone: %+v", s)
+				}
+			}
+			sv := r.Verdict.Surface
+			if sv == nil || sv.State != "blocked" || sv.WorstAtM == nil || sv.WorstClearanceM == nil || sv.WorstF1Fraction != nil {
+				t.Fatalf("surface verdict %+v, want blocked at an endpoint with a null F1 fraction", sv)
+			}
+			if sv.Reason != "antennaBelowSurface" || sv.Endpoint != c.wantEndpoint {
+				t.Fatalf("surface reason %q at %q, want antennaBelowSurface at %q", sv.Reason, sv.Endpoint, c.wantEndpoint)
+			}
+			near(t, "surface worstAtM", *sv.WorstAtM, float64(c.endpoint)*r.DistanceM, 0.01)
+			near(t, "surface worstClearanceM", *sv.WorstClearanceM, *ep.GroundM+ep.AntennaM-*end.DSM, 0.01)
+
+			// The DTM verdict is untouched: identical to the terrain-only profile.
+			dtmOnly := decodeProfile(t, env.get(q+"&model=dtm"))
+			r.Verdict.Surface = nil
+			if !reflect.DeepEqual(r.Verdict, dtmOnly.Verdict) || r.Verdict.State != "clear" {
+				t.Fatalf("deciding verdict changed: %+v, terrain-only %+v", r.Verdict, dtmOnly.Verdict)
+			}
+		})
+	}
+}
+
+// #745 review F1, with the reviewer's numbers: 1 km flat, DSM 200 m at
+// mid-path (about −190 m through the line of sight) and 10.01 m at A
+// (−1 cm against a 10 m antenna). The worst point is the mid-path
+// obstruction; the antenna below the surface at A is the reason. Without
+// the endpoint obstruction there is no reason at all.
+func TestTerrainProfile_InteriorObstructionOutranksEndpoint(t *testing.T) {
+	x, y := dhm.ToUTM32(56.1629, 10.2039)
+	la, lo := dhm.FromUTM32(x+1000, y)
+	a, b := dhm.LatLon{Lat: 56.1629, Lon: 10.2039}, dhm.LatLon{Lat: la, Lon: lo}
+	plan := dhm.PlanProfile(a, b, dhm.PlanOptions{MaxSamples: 3200, ChunkM: 2500})
+	n := len(plan.E)
+	if n%2 == 0 {
+		t.Fatalf("fixture: %d samples have no mid-path sample", n)
+	}
+	p := newTerrainProfiler(dhm.ProfileConfig{Enabled: true}, nil, terrainProfilerDeps{src: newFakeElevation(t, flatElev(0))})
+	q := terrainQuery{both: true, ha: floatp(10), hb: floatp(10)}
+	for _, atA := range []bool{true, false} {
+		e := terrainElevation{dtm: make([]float32, n), dsm: make([]float32, n)}
+		e.dsm[n/2] = 200
+		if atA {
+			e.dsm[0] = 10.01
+		}
+		r := p.buildResponse(q, [2]terrainEnd{{pt: a, kind: "point"}, {pt: b, kind: "point"}}, a, b, &plan, e)
+		sv := r.Verdict.Surface
+		if sv == nil || sv.State != "blocked" || sv.WorstAtM == nil || sv.WorstClearanceM == nil || sv.WorstF1Fraction == nil {
+			t.Fatalf("A below %t: surface verdict %+v, want blocked at an interior point with an F1 fraction", atA, sv)
+		}
+		near(t, "surface worstAtM", *sv.WorstAtM, r.DistanceM/2, 0.01)
+		near(t, "surface worstClearanceM", *sv.WorstClearanceM, 10-200-dhm.EarthBulge(r.DistanceM/2, r.DistanceM/2, dhm.DefaultKFactor), 0.01)
+		want := [2]string{}
+		if atA {
+			want = [2]string{"antennaBelowSurface", "A"}
+		}
+		if got := [2]string{sv.Reason, sv.Endpoint}; got != want {
+			t.Fatalf("A below %t: reason %q at %q, want %q at %q", atA, got[0], got[1], want[0], want[1])
+		}
+		if r.Verdict.State != "clear" {
+			t.Fatalf("the deciding DTM verdict is %q on flat ground", r.Verdict.State)
+		}
+	}
+}
+
+// #745 review F1, the chart: the worst DSM sample is a keep index, so a
+// one-sample peak survives decimation even with an antenna below the
+// surface at A. While the endpoint was the worst point, its keep index
+// was dropped (endpoints are always in) and most peak positions were
+// thinned out of the response.
+func TestTerrainProfile_DecimationKeepsInteriorPeakWithEndpointBelow(t *testing.T) {
+	a, b := dhm.LatLon{Lat: 56, Lon: 8.6}, dhm.LatLon{Lat: 56, Lon: 9.85}
+	plan := dhm.PlanProfile(a, b, dhm.PlanOptions{MaxSamples: 3200, ChunkM: 2500})
+	n := len(plan.E)
+	if n <= terrainMaxReturned {
+		t.Fatalf("fixture: %d samples need no decimation", n)
+	}
+	p := newTerrainProfiler(dhm.ProfileConfig{Enabled: true}, nil, terrainProfilerDeps{src: newFakeElevation(t, flatElev(0))})
+	ends := [2]terrainEnd{{pt: a, kind: "point"}, {pt: b, kind: "point"}}
+	lost := 0
+	for peak := 3; peak < n-3; peak += 7 {
+		e := terrainElevation{dtm: make([]float32, n), dsm: make([]float32, n)}
+		e.dsm[0], e.dsm[peak] = 50, 400 // the point default antenna is 2 m
+		r := p.buildResponse(terrainQuery{both: true}, ends, a, b, &plan, e)
+		if sv := r.Verdict.Surface; sv == nil || sv.Reason != "antennaBelowSurface" || sv.Endpoint != "A" {
+			t.Fatalf("peak %d: surface %+v, want the antenna below the surface at A", peak, sv)
+		}
+		found := false
+		for _, s := range r.Samples {
+			found = found || int(math.Round(s.D/r.StepM)) == peak
+		}
+		if !found {
+			lost++
+		}
+	}
+	if lost > 0 {
+		t.Fatalf("the interior DSM peak was thinned out at %d positions", lost)
+	}
+}
+
+// #745 review N4: the gap budget is what the worst points leave. With a
+// full DTM the terrain worst point holds a place, so 1022 one-sample DSM
+// gaps no longer fit beside it and terrainGapKeep must spread its missing
+// samples over all of them: one gap merges into its neighbours somewhere,
+// and the first and the last gap are both in the response. Given the old
+// fixed room of 1022, every gap seemed to fit, Decimate silently cut the
+// tail of the keep list, and the last gap was the one that went.
+func TestTerrainProfile_GapRoomCountsWorstPoints(t *testing.T) {
+	a, b := dhm.LatLon{Lat: 56, Lon: 8.6}, dhm.LatLon{Lat: 56, Lon: 9.85}
+	plan := dhm.PlanProfile(a, b, dhm.PlanOptions{MaxSamples: 3200, ChunkM: 2500})
+	n := len(plan.E)
+	const gaps = terrainMaxReturned - 2
+	e := terrainElevation{dtm: make([]float32, n), dsm: make([]float32, n)}
+	var gapAt []int
+	for i := n - 3; i > 0 && len(gapAt) < gaps; i -= 3 {
+		e.dsm[i] = float32(math.NaN())
+		gapAt = append(gapAt, i)
+	}
+	if len(gapAt) != gaps {
+		t.Fatalf("fixture: %d samples hold only %d gaps", n, len(gapAt))
+	}
+	p := newTerrainProfiler(dhm.ProfileConfig{Enabled: true}, nil, terrainProfilerDeps{src: newFakeElevation(t, flatElev(0))})
+	r := p.buildResponse(terrainQuery{both: true}, [2]terrainEnd{{pt: a, kind: "point"}, {pt: b, kind: "point"}}, a, b, &plan, e)
+	if r.Coverage.State != "full" || r.Verdict.WorstAtM == nil {
+		t.Fatalf("fixture: want a full DTM with an interior terrain worst point, got %+v %+v", r.Coverage, r.Verdict)
+	}
+	returned := map[int]bool{}
+	for _, s := range r.Samples {
+		returned[int(math.Round(s.D/r.StepM))] = true
+	}
+	if w := int(math.Round(*r.Verdict.WorstAtM / r.StepM)); !returned[w] || math.IsNaN(float64(e.dsm[w])) {
+		t.Fatalf("fixture: terrain worst point %d returned %t, on a gap %t", w, returned[w], math.IsNaN(float64(e.dsm[w])))
+	}
+	if len(r.Samples) > terrainMaxReturned {
+		t.Fatalf("%d samples returned", len(r.Samples))
+	}
+	assertGapsVisible(t, "dsm", r, e.dsm, func(s TerrainSample) *float64 { return s.DSM }, false)
+	var absent []int
+	for _, g := range gapAt {
+		if !returned[g] {
+			absent = append(absent, g)
+		}
+	}
+	first, last := gapAt[len(gapAt)-1], gapAt[0]
+	if len(absent) > 1 || !returned[first] || !returned[last] {
+		t.Fatalf("gaps absent from the response: %v; want at most one, and never the first (%d) or the last (%d)", absent, first, last)
+	}
+}
+
 // modelSplit serves DTM and DSM from different sources.
 type modelSplit struct{ dtm, dsm dhm.ElevationSource }
 
@@ -974,6 +1168,167 @@ func TestTerrainProfile_DecimationKeepsWorstSample(t *testing.T) {
 		t.Fatalf("worst sample at %v m dropped by decimation", *resp.Verdict.WorstAtM)
 	}
 	near(t, "worst near the spike", *resp.Verdict.WorstAtM, 51237, 60)
+}
+
+// #745: decimation must not hide a gap. A gap is hidden when two returned
+// samples that are neighbours in the response both have a value while a
+// sample between them is missing: the chart then draws a line across it.
+// assertGapsVisible checks that for one series, and also that each gap
+// whose edges fit (exact) starts and ends where the data does.
+func assertGapsVisible(t *testing.T, name string, r TerrainProfileResponse, series []float32, value func(TerrainSample) *float64, exact bool) {
+	t.Helper()
+	if len(r.Samples) > terrainMaxReturned {
+		t.Fatalf("%s: %d samples returned, more than %d", name, len(r.Samples), terrainMaxReturned)
+	}
+	returned := map[int]bool{}
+	prev, prevValid := -1, false
+	for j, s := range r.Samples {
+		i := int(math.Round(s.D / r.StepM))
+		if j > 0 && i <= prev {
+			t.Fatalf("%s: samples not strictly increasing at %d", name, j)
+		}
+		if math.IsNaN(float64(series[i])) != (value(s) == nil) {
+			t.Fatalf("%s: sample %d (index %d) misreports its value", name, j, i)
+		}
+		valid := value(s) != nil
+		if valid && prevValid {
+			for k := prev + 1; k < i; k++ {
+				if math.IsNaN(float64(series[k])) {
+					t.Fatalf("%s: missing sample %d hidden between returned samples %d and %d", name, k, prev, i)
+				}
+			}
+		}
+		returned[i] = true
+		prev, prevValid = i, valid
+	}
+	if !exact {
+		return
+	}
+	for i := 0; i < len(series); i++ {
+		if !math.IsNaN(float64(series[i])) {
+			continue
+		}
+		j := i
+		for j+1 < len(series) && math.IsNaN(float64(series[j+1])) {
+			j++
+		}
+		for _, k := range []int{i - 1, i, j, j + 1} {
+			if k >= 0 && k < len(series) && !returned[k] {
+				t.Fatalf("%s: edge %d of the gap %d–%d not returned", name, k, i, j)
+			}
+		}
+		i = j
+	}
+}
+
+func TestTerrainProfile_DecimationKeepsGaps(t *testing.T) {
+	a := dhm.LatLon{Lat: 56, Lon: 8.6}
+	nan := float32(math.NaN())
+	for _, c := range []struct {
+		name  string
+		lonB  float64
+		both  bool
+		exact bool
+		dtm   func(i, n int) bool // missing DTM sample
+		dsm   func(i, n int) bool // missing DSM sample; nil: model=dtm
+	}{
+		// The reviewer's case: evenly thinning about 2000 samples to 1024
+		// skips index 1.
+		{name: "one sample next to A", lonB: 9.404, exact: true, dtm: func(i, n int) bool { return i == 1 }},
+		{name: "a run and one next to B", lonB: 9.404, exact: true, dtm: func(i, n int) bool { return (i >= 700 && i <= 705) || i == n-2 }},
+		{name: "DSM only", lonB: 9.404, both: true, exact: true,
+			dtm: func(i, n int) bool { return false }, dsm: func(i, n int) bool { return i == 1501 || i == 3 }},
+		{name: "both models, different gaps", lonB: 9.404, both: true, exact: true,
+			dtm: func(i, n int) bool { return i >= 900 && i <= 903 }, dsm: func(i, n int) bool { return i >= 902 && i <= 907 }},
+		// More gaps than the edges fit: every gap still shows.
+		{name: "300 single gaps", lonB: 9.85, dtm: func(i, n int) bool { return i%7 == 3 && i < 2100 }},
+		// More gaps than samples returned: none may hide behind a line.
+		{name: "every other sample", lonB: 9.85, both: true,
+			dtm: func(i, n int) bool { return i%2 == 1 }, dsm: func(i, n int) bool { return i%2 == 1 }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := dhm.LatLon{Lat: 56, Lon: c.lonB}
+			plan := dhm.PlanProfile(a, b, dhm.PlanOptions{MaxSamples: 3200, ChunkM: 2500})
+			n := len(plan.E)
+			if n <= terrainMaxReturned {
+				t.Fatalf("fixture: %d samples need no decimation", n)
+			}
+			e := terrainElevation{dtm: make([]float32, n)}
+			if c.dsm != nil {
+				e.dsm = make([]float32, n)
+			}
+			for i := 0; i < n; i++ {
+				if c.dtm(i, n) {
+					e.dtm[i] = nan
+				}
+				if c.dsm != nil && c.dsm(i, n) {
+					e.dsm[i] = nan
+				}
+			}
+			p := newTerrainProfiler(dhm.ProfileConfig{Enabled: true}, nil, terrainProfilerDeps{src: newFakeElevation(t, flatElev(0))})
+			r := p.buildResponse(terrainQuery{both: c.both}, [2]terrainEnd{{pt: a, kind: "point"}, {pt: b, kind: "point"}}, a, b, &plan, e)
+			if len(r.Samples) == 0 || len(r.Samples) > terrainMaxReturned {
+				t.Fatalf("%d of %d samples returned", len(r.Samples), n)
+			}
+			assertGapsVisible(t, "dtm", r, e.dtm, func(s TerrainSample) *float64 { return s.DTM }, c.exact)
+			if e.dsm != nil {
+				assertGapsVisible(t, "dsm", r, e.dsm, func(s TerrainSample) *float64 { return s.DSM }, c.exact)
+			}
+		})
+	}
+}
+
+// terrainGapKeep with less room than gaps: bounded, and never a division
+// by zero or a negative allocation.
+func TestTerrainGapKeepTinyRoom(t *testing.T) {
+	nan := float32(math.NaN())
+	s := []float32{0, nan, 0, nan, 0, nan, 0}
+	if got := terrainGapKeep(0, s); len(got) != 0 {
+		t.Fatalf("room 0: %v", got)
+	}
+	if got := terrainGapKeep(1, s); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("room 1: %v", got)
+	}
+	if got := terrainGapKeep(2, s, nil); len(got) != 2 || got[0] != 1 || got[1] != 5 {
+		t.Fatalf("room 2: %v", got)
+	}
+	if got := terrainGapKeep(3, s, nil); !reflect.DeepEqual(got, []int{1, 3, 5, 1, 0, 2, 3, 2, 4, 5, 4, 6}) {
+		t.Fatalf("room 3, all gaps fit: %v", got)
+	}
+	// A run of missing samples is one gap: its interior takes no room.
+	run := []float32{0, nan, nan, nan, 0}
+	if got := terrainGapKeep(1, run); !reflect.DeepEqual(got, []int{1, 3, 0, 4}) {
+		t.Fatalf("one run, room 1: %v", got)
+	}
+}
+
+// BenchmarkTerrainBuildResponse is the per-request work after the
+// elevations are in (cache hits included) at the 3200-sample maximum, with
+// both models and gaps in each: coverage, physics, both assessments and
+// the gap-keeping decimation to 1024 samples (#745).
+func BenchmarkTerrainBuildResponse(b *testing.B) {
+	pa, pb := dhm.LatLon{Lat: 56, Lon: 8.6}, dhm.LatLon{Lat: 56, Lon: 9.85}
+	plan := dhm.PlanProfile(pa, pb, dhm.PlanOptions{MaxSamples: 3200, ChunkM: 2500})
+	n := len(plan.E)
+	e := terrainElevation{dtm: make([]float32, n), dsm: make([]float32, n)}
+	for i := 0; i < n; i++ {
+		e.dtm[i], e.dsm[i] = float32(i%37), float32(i%37+5)
+		if i%80 < 5 {
+			e.dtm[i] = float32(math.NaN())
+		}
+		if i%160 == 100 {
+			e.dsm[i] = float32(math.NaN())
+		}
+	}
+	p := newTerrainProfiler(dhm.ProfileConfig{Enabled: true}, nil, terrainProfilerDeps{src: newFakeElevation(nil, flatElev(0))})
+	ends := [2]terrainEnd{{pt: pa, kind: "point"}, {pt: pb, kind: "point"}}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if r := p.buildResponse(terrainQuery{both: true}, ends, pa, pb, &plan, e); len(r.Samples) == 0 || len(r.Samples) > terrainMaxReturned {
+			b.Fatalf("%d samples", len(r.Samples))
+		}
+	}
 }
 
 // ── Frequency ──────────────────────────────────────────────────────────────
