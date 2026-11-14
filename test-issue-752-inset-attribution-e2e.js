@@ -28,6 +28,14 @@
  * max-height (#735 review N2) differentially: with the credit's published
  * height forced to 0 the cap must grow by exactly that height.
  *
+ * #756 (follow-ups from the #754 review) adds two more checks:
+ *   - every credit's scrollHeight must not exceed its clientHeight — the
+ *     "clipped" assertion above tolerates a scrollable overflow, which is
+ *     exactly how the review's 2px-short cap slipped through;
+ *   - the Home My-Mesh health minimap (home.js), left out of #752's scope
+ *     because it hardcodes OSM instead of the registry's provider, now
+ *     gets the same compact credit through MC_ensureAttribution.
+ *
  * The CI server has no map.tiles config, so /api/config/client is
  * intercepted and given the map.tiles block an operator would set, as the
  * #728 suite does. Every third-party tile is stubbed; nothing reaches Esri
@@ -167,6 +175,8 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         fontSize: parseFloat(cs.fontSize),
         maxHeight: parseFloat(cs.maxHeight),
         overflowY: cs.overflowY,
+        scrollHeight: ctl.scrollHeight,
+        clientHeight: ctl.clientHeight,
         clipped: ctl.scrollHeight > ctl.clientHeight + 1 && cs.overflowY !== 'auto' && cs.overflowY !== 'scroll',
         covered,
         imageryTiles: tiles.filter((i) => /World_Imagery/.test(i.src)).length,
@@ -197,6 +207,12 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     assert(s.inViewport, label + ': the credit is outside the viewport: ' + JSON.stringify(s.rect));
     assert(s.covered.length === 0, label + ': credit covered at ' + s.covered.length + ' points, e.g. ' + s.covered.slice(0, 4).join(' '));
     assert(!s.clipped, label + ': the credit is clipped instead of scrollable (overflow-y: ' + s.overflowY + ')');
+    // #756 (review of #754, finding 1): border-box with vertical padding ate
+    // into the content height the cap budgeted, so a two-line credit (Esri
+    // World Imagery) scrolled by exactly the padding — allowed by `clipped`
+    // above, which only cares whether an existing clip is scrollable at all.
+    assert(s.scrollHeight <= s.clientHeight, label + ': the credit scrolls — scrollHeight ' +
+      s.scrollHeight + 'px > clientHeight ' + s.clientHeight + 'px (the cap does not count the vertical padding)');
     // Compact: inside the CSS cap, and a minority of a small inset.
     assert(Number.isFinite(s.maxHeight) && s.maxHeight > 0,
       label + ': the compact credit has no height cap (max-height: ' + s.maxHeight + ') — a long credit would grow without bound');
@@ -311,6 +327,48 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       await page.waitForTimeout(1500);
       const s = await creditState(page, '#subpathMap');
       assertCredit(s, { label: 'analytics subpath', credit: ESRI_CREDIT, esri: true, tileKind: 'imagery' });
+      assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+    } finally { await ctx.close(); }
+  });
+
+  // ── #756: the Home My-Mesh minimap (out of #752's scope, still uncredited
+  // until now) ───────────────────────────────────────────────────────────
+  // home.js hardcodes the OSM tile layer rather than going through
+  // nodes.js's provider-aware helper, so it always shows the OSM credit
+  // regardless of the configured provider — unlike every other inset above.
+  await step('Home My-Mesh minimap credits OSM (#756)', async () => {
+    const { ctx, page, rec } = await newCtx({ tiles: ESRI_TILES, storage: { 'mc-light-tile-provider': 'esri-imagery' } });
+    try {
+      const key = await (async () => {
+        try {
+          const found = await page.evaluate(async () => {
+            const r = await fetch('/api/nodes?limit=200');
+            const d = await r.json();
+            const list = Array.isArray(d) ? d : (d.nodes || []);
+            const n = list.find((x) => x.lat != null && x.lon != null && x.public_key);
+            return n ? n.public_key : null;
+          });
+          return found || NODE_KEY;
+        } catch (_) { return NODE_KEY; }
+      })();
+      await page.goto(BASE + '/#/home', { waitUntil: 'domcontentloaded' });
+      await page.evaluate((pk) => {
+        localStorage.setItem('meshcore-user-level', 'experienced');
+        localStorage.setItem('meshcore-my-nodes', JSON.stringify([{ pubkey: pk, name: 'Attr756', addedAt: new Date().toISOString() }]));
+      }, key);
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      // home.js closes an open health panel on 'theme-refresh' (a full
+      // renderHome), and every page load schedules exactly one of those
+      // ~300ms after the theme customizer's init dispatches
+      // 'theme-changed' (app.js). Clearing that one-shot window before
+      // opening the panel keeps the assertions below from racing it.
+      await page.waitForTimeout(1000);
+      await page.waitForSelector('.my-node-card', { timeout: 10000 });
+      await page.click('.my-node-card');
+      await page.waitForSelector('#healthMap .leaflet-tile-pane', { state: 'attached', timeout: 8000 });
+      await page.waitForTimeout(1200);
+      const s = await creditState(page, '#healthMap');
+      assertCredit(s, { label: 'Home My-Mesh minimap', credit: OSM_CREDIT, esri: false, tileKind: 'osm' });
       assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
     } finally { await ctx.close(); }
   });

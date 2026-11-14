@@ -325,8 +325,10 @@
   // (no explicit URL viewport) still fits that observer's coverage.
   function createMap(view, explicitView, gen) {
     map = L.map('rxMap', { zoomControl: true, attributionControl: false }).setView([view.lat, view.lon], view.zoom);
-    if (typeof window._applyTilesToNodeMap === 'function') window._applyTilesToNodeMap(map);
-    else L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+    // #756 — nodes.js (which defines this) always loads before this file
+    // (index.html), so the uncredited OSM fallback this used to have on a
+    // missing helper was dead code.
+    window._applyTilesToNodeMap(map);
     covLayer = L.layerGroup().addTo(map);
     // Debounce pan/zoom redraws so dragging the map doesn't fire a storm of
     // /api/rx-coverage requests (#6). Direct calls (setDays, fit) stay immediate.

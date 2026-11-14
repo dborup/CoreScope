@@ -20,7 +20,7 @@ function mk() {
   };
   const chain = { addTo() { return chain; }, bindPopup() { return chain; }, bindTooltip() { return chain; } };
   const sandbox = {
-    window: {}, console: console, escapeHtml: String,
+    window: { _applyTilesToNodeMap: () => {} }, console: console, escapeHtml: String,
     document: { getElementById: () => ({}), documentElement: {} },
     getComputedStyle: () => ({ getPropertyValue: () => '#123' }),
     L: {
