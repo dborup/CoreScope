@@ -16,6 +16,9 @@
  *   3. §5 — with a customizer point height (30 m) unlike the server's
  *      (2 m), a link of two free points and a Move A onto a free point each
  *      cost exactly one request, which carries the 30 m.
+ *   4. N2 — the accessibility tree reads the terrain and surface chips as two
+ *      sentences ("Terrain: Clear. Buildings/trees: Blocked"), while the
+ *      separator takes no visible room.
  *
  * Usage:
  *   BASE_URL=http://localhost:13581 node test-issue-746-profile-ui-e2e.js
@@ -50,7 +53,9 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
 /* The stub answers the shape of a real GET /api/terrain/profile, with the
  * endpoints at the requested points and the heights the request asked for.
- * A request with freq=868 gets a DSM gap over samples 18-20 (§4). */
+ * A request with freq=868 gets a DSM gap over samples 18-20 (§4); one with
+ * k=1.5 gets a building through the line of sight that the terrain clears,
+ * so the surface chip is shown (N2). */
 function profileFor(q) {
   const D = 1200;
   const end = (side) => {
@@ -77,7 +82,9 @@ function profileFor(q) {
     coverage: { state: 'full', pct: 100, firstGapM: null }, samples,
     physics: { freqMHz: 869.618, freqSource: 'firmware', lambdaM: 0.34474, k: 1.3333333333333333, kSource: 'default', f1MaxM: 10.2 },
     verdict: { state: 'clear', model: 'dtm', criterion: 0.6, worstClearanceM: 21.2, worstAtM: 600, worstF1Fraction: 2.1,
-      surface: { state: 'clear', worstClearanceM: 15.1, worstAtM: 600, worstF1Fraction: 1.5 } },
+      surface: q.get('k') === '1.5'
+        ? { state: 'blocked', worstClearanceM: -17.5, worstAtM: 600, worstF1Fraction: -2.6 }
+        : { state: 'clear', worstClearanceM: 15.1, worstAtM: 600, worstF1Fraction: 1.5 } },
     attribution: ATTRIBUTION,
   };
 }
@@ -241,6 +248,31 @@ function hashParams(hash) {
       assert(q.get('a') !== P1.split(',').slice(0, 2).join(','), 'A did not move: ' + q.toString());
       assert(/^-?\d+\.\d{5},-?\d+\.\d{5}$/.test(q.get('a')), 'A is not a free point: ' + q.get('a'));
       assert(q.get('ha') === '30', 'measured with ' + q.toString());
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  // ── 4. N2: the two chips are two sentences to a screen reader ──────────
+  {
+    const { ctx, page, rec } = await newCtx();
+    await step('N2: the accessibility tree separates the terrain and surface chips', async () => {
+      await page.goto(`${BASE}/#/map?profile=${P1}&k=1.5`, { waitUntil: 'domcontentloaded' });
+      await waitForRequestFor(page, rec, P1);
+      await page.waitForSelector('[data-testid="tp-surface-chip"]:not([hidden])', { timeout: 5000 });
+      const snap = await page.locator('.tp-head').ariaSnapshot();
+      // The snapshot puts a space between inline elements; what matters is
+      // the full stop between the two statements.
+      assert(/Terrain: Clear\s*\.\s*Buildings\/trees: Blocked/.test(snap), 'aria snapshot: ' + snap);
+      const sep = await page.evaluate(() => {
+        const chip = document.querySelector('[data-testid="tp-verdict"]');
+        const el = chip.nextElementSibling;
+        const r = el.getBoundingClientRect();
+        return { cls: el.className, text: el.textContent, w: r.width, h: r.height,
+          next: el.nextElementSibling && el.nextElementSibling.getAttribute('data-testid') };
+      });
+      assert(sep.cls === 'sr-only' && sep.text === '. ' && sep.next === 'tp-surface-chip', 'separator ' + JSON.stringify(sep));
+      assert(sep.w <= 1 && sep.h <= 1, 'the separator takes visible room: ' + JSON.stringify(sep));
       assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     });
     await ctx.close();

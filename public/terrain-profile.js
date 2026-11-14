@@ -1138,6 +1138,14 @@
        * than the terrain one. It rides beside the verdict rather than under
        * the chart because "Clear" beside an obvious building is read in the
        * title row and nowhere else. */
+      /* #746 N2: the chips are separate statements, but a screen reader
+       * reads adjacent inline text as one ("Terrain: ClearBuildings/trees:
+       * Blocked"). A visually hidden full stop between them, shown and
+       * hidden with the surface chip, makes it two sentences. aria-label
+       * on a plain span is not reliably announced, so it is text. */
+      ui.surfaceSep = el('span', 'sr-only', '. ');
+      ui.surfaceSep.hidden = true;
+      head.appendChild(ui.surfaceSep);
       ui.surface = el('span', 'tp-chip tp-chip-surface');
       ui.surface.setAttribute('data-testid', 'tp-surface-chip');
       ui.surface.hidden = true;
@@ -1395,6 +1403,7 @@
         ui.surface.setAttribute('data-state', show ? surf.state : '');
         ui.surface.title = show ? surf.detail : '';
       }
+      if (ui.surfaceSep) ui.surfaceSep.hidden = !show;
       if (ui.surfaceNote) ui.surfaceNote.hidden = !(show && surf.note);
     }
 

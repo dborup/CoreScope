@@ -1817,6 +1817,41 @@ atest('the surface chip and its note are hidden as soon as a new profile is aske
   assert.strictEqual(note.hidden, true, 'the old surface note stayed up');
 });
 
+// ── #746 N2 (#736 review): the two chips are read as two statements ────────
+
+console.log('\n=== #746 N2: a screen-reader break between the verdict chips ===');
+
+atest('a visually hidden separator sits between the terrain and surface chips', async () => {
+  const live = loadLive();
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  f.calls[0].settle.resolve(surfaceAnswer());
+  await sleep(0);
+  const chip = live.dom.find('tp-verdict'), surf = live.dom.find('tp-surface-chip');
+  const kids = chip.parentNode.children;
+  const between = kids.slice(kids.indexOf(chip) + 1, kids.indexOf(surf));
+  assert.strictEqual(between.length, 1, 'expected exactly one element between the chips');
+  const sep = between[0];
+  assert.strictEqual(sep.className, 'sr-only', 'the separator must be visually hidden');
+  assert.strictEqual(sep.textContent, '. ');
+  assert.strictEqual(sep.hidden, false, 'the separator is hidden while the surface chip is shown');
+  // Read in order, the header now says two sentences, not "ClearBuildings".
+  const spoken = kids.filter(k => !k.hidden).map(k => k.textContent).join('');
+  assert.ok(spoken.indexOf('Terrain: Clear. Buildings/trees: Blocked') >= 0, spoken);
+});
+
+atest('the separator goes with the surface chip', async () => {
+  const live = loadLive();
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  f.calls[0].settle.resolve(answer('clear'));
+  await sleep(0);
+  const chip = live.dom.find('tp-verdict');
+  const sep = chip.parentNode.children[chip.parentNode.children.indexOf(chip) + 1];
+  assert.strictEqual(live.dom.find('tp-surface-chip').hidden, true, 'setup: a surface chip is shown');
+  assert.strictEqual(sep.hidden, true, 'a separator with nothing after it');
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 (async () => {
