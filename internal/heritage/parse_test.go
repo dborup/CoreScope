@@ -113,6 +113,25 @@ func TestParseCleansText(t *testing.T) {
 	}
 }
 
+// TestParseNumericPropertyRuneCap (#762 review finding 3): a number is kept
+// in its JSON form, but under the same MaxTextRunes cap as a string, so
+// the cache entry and the response stay as small as documented.
+func TestParseNumericPropertyRuneCap(t *testing.T) {
+	long := strings.Repeat("7", 5000)
+	body := fc(featureJSON("Polygon", square, `"frednr":`+long+`,"systemnr":-`+long+`.5e3`), "")
+	page, err := Parse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	z := page.Zones[0]
+	if n := len([]rune(z.ProtectionNo)); n != MaxTextRunes {
+		t.Fatalf("frednr kept %d chars (cap %d)", n, MaxTextRunes)
+	}
+	if n := len([]rune(z.SystemNo)); n != MaxTextRunes || !strings.HasPrefix(z.SystemNo, "-777") {
+		t.Fatalf("systemnr kept %d chars (cap %d): %.10q", n, MaxTextRunes, z.SystemNo)
+	}
+}
+
 func TestParseTruncation(t *testing.T) {
 	var fs []string
 	for i := 0; i < MaxFeatures; i++ {

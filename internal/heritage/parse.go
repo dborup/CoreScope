@@ -185,8 +185,9 @@ func polygons(typ string, raw json.RawMessage) ([][][][2]float64, int, error) {
 	return out, n, nil
 }
 
-// text is a property as display text: a string, cleaned, or a number in
-// its JSON form; null or absent is "". Any other JSON type is an error.
+// text is a property as display text: a string or a number in its JSON
+// form, cleaned and capped either way; null or absent is "". Any other
+// JSON type is an error.
 func text(raw json.RawMessage) (string, error) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || string(raw) == "null" {
@@ -204,7 +205,8 @@ func text(raw json.RawMessage) (string, error) {
 		if err := json.Unmarshal(raw, &n); err != nil {
 			return "", err
 		}
-		return n.String(), nil
+		// Capped like a string: a number may be any length in JSON.
+		return cleanText(n.String()), nil
 	}
 	return "", errShape
 }
