@@ -9,7 +9,8 @@
  *   - MC_applyTileFilter() applies/clears the CSS filter on
  *     `.leaflet-tile-pane` based on current theme + selected provider.
  *   - MC_createLayerControl() builds a Leaflet control mapping providers,
- *     plus the optional DHM terrain hillshade overlay (#680).
+ *     plus the optional DHM terrain hillshade (#680) and protected ancient
+ *     monuments (#723) overlays.
  *
  * No new deps — URL-only providers.
  */
@@ -323,28 +324,31 @@
     };
   }
 
-  /* #680 — optional DHM terrain hillshade overlay (Denmark).
+  /* Optional map overlays: #680 DHM terrain hillshade, #723 protected
+   * ancient monuments (both Denmark only).
    *
-   * Offered only when /api/config/client carries an enabled `dhm` block
-   * (roles.js stores it as window.MC_DHM_CFG); the server sends it only
-   * while map.dhm is enabled with a token. Tiles come from the server's
-   * same-origin WMS proxy, which adds the token: the browser never sees it.
+   * Each is offered only when /api/config/client carries its enabled block
+   * (roles.js stores them as window.MC_DHM_CFG / window.MC_HERITAGE_CFG).
+   * The plumbing below is shared: an overlay is one entry in OVERLAYS,
+   * never a second copy of it.
    *
-   * The layer lives in its own pane between the base tiles (tilePane, 200)
-   * and the vector overlays/markers (overlayPane 400, markerPane 600). That
-   * also keeps it out of the dark-theme invert filter on the tile pane.
+   *   - A WMS 1.3.0 EPSG:3857 tile layer in its own pane between the base
+   *     tiles (tilePane, 200) and the vector overlays/markers (overlayPane
+   *     400, markerPane 600). That also keeps it out of the dark-theme
+   *     invert filter on the tile pane.
+   *   - On/off is remembered per viewer (localStorage) and mirrored in the
+   *     hash (?terrain=1, ?heritage=1). A =1 / =0 in the hash wins over the
+   *     stored choice and is saved, like Live's ?heard= (#660).
+   *   - A map without an attribution control (Live) gets one while any
+   *     overlay is on, because every overlay's credit is required.
    *
-   * On/off is remembered per viewer (localStorage) and mirrored in the hash
-   * as ?terrain=1. A ?terrain=1 / ?terrain=0 in the hash wins over the
-   * stored choice and is saved, like Live's ?heard= (#660).
+   * DHM tiles come from the server's same-origin proxy, which adds the
+   * token. The monument tiles come straight from the agency's WMS (no
+   * token, open CORS); the server sends its fixed https URL.
    */
-  var TERRAIN_ID          = 'dhm-terrain';
-  var TERRAIN_LABEL       = 'Terrain (DHM hillshade)';
-  var TERRAIN_STORAGE_KEY = 'mc-terrain-dhm';
-  var TERRAIN_HASH_PARAM  = 'terrain';
-  var TERRAIN_OPACITY     = 0.65;
-  var TERRAIN_PANE        = 'mcTerrainPane';
-  var TERRAIN_PANE_Z      = 250;
+  var TERRAIN_ID    = 'dhm-terrain';
+  var TERRAIN_LABEL = 'Terrain (DHM hillshade)';
+  var HERITAGE_ID   = 'heritage-monuments';
 
   function getTerrainConfig() {
     var c = window.MC_DHM_CFG;
@@ -352,7 +356,38 @@
     return c;
   }
 
-  function resolveTerrainOn(hashValue, stored) {
+  function _isZoom(z) { return typeof z === 'number' && Math.floor(z) === z && z >= 0 && z <= 22; }
+
+  function getHeritageConfig() {
+    var c = window.MC_HERITAGE_CFG;
+    if (!c || c.enabled !== true || typeof c.url !== 'string' || c.url.indexOf('https://') !== 0) return null;
+    if (typeof c.layers !== 'string' || !c.layers || !_isZoom(c.minZoom) || !_isZoom(c.maxZoom)) return null;
+    if (!Array.isArray(c.bounds) || c.bounds.length !== 2) return null;
+    return c;
+  }
+
+  // #723 — opacity (and whether an overlay starts on) is hard-coded here;
+  // exposing them in the customizer is tracked as #723 M4.
+  var OVERLAYS = [
+    {
+      id: TERRAIN_ID, storageKey: 'mc-terrain-dhm', hashParam: 'terrain', layerProp: '_mcTerrainLayer',
+      pane: 'mcTerrainPane', paneZ: 250, paneClass: 'mc-terrain-pane', className: 'mc-terrain-tiles', opacity: 0.65,
+      config: getTerrainConfig,
+      label: function () { return TERRAIN_LABEL; },
+      layers: function (cfg) { return cfg.layer; }
+    },
+    {
+      // Protection-zone polygons under the monument points. The WMS draws
+      // nothing further out than minZoom, so the label says where it starts.
+      id: HERITAGE_ID, storageKey: 'mc-heritage', hashParam: 'heritage', layerProp: '_mcHeritageLayer',
+      pane: 'mcHeritagePane', paneZ: 260, paneClass: 'mc-heritage-pane', className: 'mc-heritage-tiles', opacity: 0.85,
+      config: getHeritageConfig,
+      label: function (cfg) { return 'Protected ancient monuments (zoom ' + cfg.minZoom + '+)'; },
+      layers: function (cfg) { return cfg.layers; }
+    }
+  ];
+
+  function resolveOverlayOn(hashValue, stored) {
     if (hashValue === '1') return true;
     if (hashValue === '0') return false;
     return stored === '1';
@@ -364,24 +399,24 @@
     return { base: qi >= 0 ? hash.slice(0, qi) : hash, params: new URLSearchParams(qi >= 0 ? hash.slice(qi + 1) : '') };
   }
 
-  function _readTerrainPref() {
+  function _readOverlayPref(o) {
     var hv = null, stored = null;
-    try { hv = _hashParts().params.get(TERRAIN_HASH_PARAM); } catch (_) {}
-    try { stored = window.localStorage && window.localStorage.getItem(TERRAIN_STORAGE_KEY); } catch (_) {}
-    var on = resolveTerrainOn(hv, stored);
+    try { hv = _hashParts().params.get(o.hashParam); } catch (_) {}
+    try { stored = window.localStorage && window.localStorage.getItem(o.storageKey); } catch (_) {}
+    var on = resolveOverlayOn(hv, stored);
     if (hv === '1' || hv === '0') {
-      try { if (window.localStorage) window.localStorage.setItem(TERRAIN_STORAGE_KEY, on ? '1' : '0'); } catch (_) {}
+      try { if (window.localStorage) window.localStorage.setItem(o.storageKey, on ? '1' : '0'); } catch (_) {}
     }
     return on;
   }
 
   // replaceState, so the SPA router does not re-run on the hash rewrite.
-  function _saveTerrainPref(on) {
-    try { if (window.localStorage) window.localStorage.setItem(TERRAIN_STORAGE_KEY, on ? '1' : '0'); } catch (_) {}
+  function _saveOverlayPref(o, on) {
+    try { if (window.localStorage) window.localStorage.setItem(o.storageKey, on ? '1' : '0'); } catch (_) {}
     try {
       var h = _hashParts();
-      if (on) h.params.set(TERRAIN_HASH_PARAM, '1');
-      else h.params.delete(TERRAIN_HASH_PARAM);
+      if (on) h.params.set(o.hashParam, '1');
+      else h.params.delete(o.hashParam);
       var qs = h.params.toString();
       // An empty hash gets a bare '#', so the parameter never lands in the
       // query string (#682 review F4).
@@ -389,64 +424,102 @@
     } catch (_) {}
   }
 
-  function createTerrainLayer(map, cfg) {
-    if (!map.getPane(TERRAIN_PANE)) {
-      var pane = map.createPane(TERRAIN_PANE);
-      pane.style.zIndex = String(TERRAIN_PANE_Z);
+  function _createOverlayLayer(map, o, cfg) {
+    if (!map.getPane(o.pane)) {
+      var pane = map.createPane(o.pane);
+      pane.style.zIndex = String(o.paneZ);
       pane.style.pointerEvents = 'none';
-      pane.classList.add('mc-terrain-pane');
+      pane.classList.add(o.paneClass);
     }
-    // Only these options become WMS parameters (layers, styles, format,
-    // transparent, version + crs/width/height/bbox); the server accepts
-    // exactly that shape. `bounds` keeps Leaflet from requesting tiles
-    // outside DHM coverage at all.
+    // Leaflet turns every option it does not know into a WMS parameter, so
+    // only these may be passed: the request is then exactly service,
+    // request, layers, styles, format, transparent, version, width, height,
+    // crs and bbox (the DHM proxy accepts nothing else). `bounds` keeps
+    // Leaflet from requesting tiles outside the data at all.
     return L.tileLayer.wms(cfg.url, {
-      layers: cfg.layer,
+      layers: o.layers(cfg),
       styles: '',
       format: 'image/png',
       transparent: true,
       version: '1.3.0',
       crs: L.CRS.EPSG3857,
       tileSize: 256,
-      opacity: TERRAIN_OPACITY,
-      pane: TERRAIN_PANE,
+      opacity: o.opacity,
+      pane: o.pane,
       minZoom: cfg.minZoom,
       maxZoom: cfg.maxZoom,
       bounds: L.latLngBounds(cfg.bounds),
       attribution: cfg.attribution,
-      className: 'mc-terrain-tiles'
+      className: o.className
     });
   }
 
-  // Live runs without an attribution control; the DHM credit is still
-  // required while the overlay is on, so such a map gets one for exactly
-  // that time (it lists every active layer's credit, as Leaflet does).
-  function _syncTerrainAttribution(map, on) {
-    if (on && !map.attributionControl && !map._mcTerrainAttribution) {
-      map._mcTerrainAttribution = L.control.attribution({ position: 'bottomright', prefix: false }).addTo(map);
-    } else if (!on && map._mcTerrainAttribution) {
-      try { map._mcTerrainAttribution.remove(); } catch (_) {}
-      map._mcTerrainAttribution = null;
+  function _anyOverlayOn(map) {
+    for (var i = 0; i < OVERLAYS.length; i++) {
+      var l = map[OVERLAYS[i].layerProp];
+      if (l && map.hasLayer(l)) return true;
+    }
+    return false;
+  }
+
+  // Live runs without an attribution control, so it gets one while any
+  // overlay is on (listing every active layer's credit, as Leaflet does).
+  // It is rebuilt on every change: Leaflet's control picks up the credits
+  // already on the map when added but only drops later ones on removal,
+  // and its onAdd claims map.attributionControl without onRemove ever
+  // releasing it, so a second "on" would otherwise find a dead control.
+  function _syncOverlayAttribution(map) {
+    var own = map._mcOverlayAttribution;
+    if (own) {
+      try { own.remove(); } catch (_) {}
+      if (map.attributionControl === own) map.attributionControl = null;
+      map._mcOverlayAttribution = null;
+    }
+    if (_anyOverlayOn(map) && !map.attributionControl) {
+      map._mcOverlayAttribution = L.control.attribution({ position: 'bottomright', prefix: false }).addTo(map);
     }
   }
 
-  // Once per map: listen for the user's toggles and apply the initial
-  // choice. Runs before the layer control exists, so the initial add does
-  // not make L.Control.Layers re-render its labels (that would undo the
-  // label surgery in _buildControl) and is not mistaken for a toggle.
-  function _wireTerrain(map, layer) {
-    if (map._mcTerrainWired) return;
-    map._mcTerrainWired = true;
+  // Once per map and overlay: listen for the user's toggles and apply the
+  // initial choice. Runs before the layer control exists, so the initial
+  // add does not make L.Control.Layers re-render its labels (that would
+  // undo the label surgery in _buildControl) and is not mistaken for a
+  // toggle.
+  function _wireOverlay(map, o) {
+    map._mcOverlayWired = map._mcOverlayWired || {};
+    if (map._mcOverlayWired[o.id]) return;
+    map._mcOverlayWired[o.id] = true;
     map.on('overlayadd overlayremove', function (e) {
-      if (e.layer !== map._mcTerrainLayer) return;
-      var on = e.type === 'overlayadd';
-      _syncTerrainAttribution(map, on);
-      _saveTerrainPref(on);
+      if (!e.layer || e.layer !== map[o.layerProp]) return;
+      _syncOverlayAttribution(map);
+      _saveOverlayPref(o, e.type === 'overlayadd');
     });
-    if (_readTerrainPref()) {
-      map.addLayer(layer);
-      _syncTerrainAttribution(map, true);
+    if (_readOverlayPref(o)) {
+      map.addLayer(map[o.layerProp]);
+      _syncOverlayAttribution(map);
     }
+  }
+
+  // Puts every offered overlay into `overlays` (label → layer) and drops
+  // the layer of any the server no longer offers; layers survive control
+  // rebuilds. Returns the offered ids in insertion order, which is the
+  // order L.Control.Layers lists them in.
+  function _collectOverlays(map, overlays) {
+    var ids = [];
+    OVERLAYS.forEach(function (o) {
+      var cfg = o.config();
+      if (cfg) {
+        if (!map[o.layerProp]) map[o.layerProp] = _createOverlayLayer(map, o, cfg);
+        _wireOverlay(map, o);
+        overlays[o.label(cfg)] = map[o.layerProp];
+        ids.push(o.id);
+      } else if (map[o.layerProp]) {
+        try { map.removeLayer(map[o.layerProp]); } catch (_) {}
+        map[o.layerProp] = null;
+        _syncOverlayAttribution(map);
+      }
+    });
+    return ids;
   }
 
   // ── Public surface ──────────────────────────────────────────────────────
@@ -463,7 +536,8 @@
   window.MC_applyTileFilter             = applyTileFilter;
   window.MC_getTileSpec                 = getTileSpec;
   window.MC_getTerrainConfig            = getTerrainConfig;
-  window.MC_resolveTerrainOn            = resolveTerrainOn;
+  window.MC_getHeritageConfig           = getHeritageConfig;
+  window.MC_resolveOverlayOn            = resolveOverlayOn;
 
 
   /**
@@ -553,28 +627,20 @@
       lightIds.forEach(function (id) { baseMaps[id] = _makeLayer(id); });
       darkIds.forEach(function  (id) { baseMaps[id] = _makeLayer(id); });
 
-      // #680 — the terrain overlay survives control rebuilds; it is dropped
-      // only if the server stops offering it.
-      var terrainCfg = getTerrainConfig();
-      var overlays = null;
-      if (terrainCfg) {
-        if (!map._mcTerrainLayer) map._mcTerrainLayer = createTerrainLayer(map, terrainCfg);
-        _wireTerrain(map, map._mcTerrainLayer);
-        overlays = {};
-        overlays[TERRAIN_LABEL] = map._mcTerrainLayer;
-      } else if (map._mcTerrainLayer) {
-        try { map.removeLayer(map._mcTerrainLayer); } catch (_) {}
-        _syncTerrainAttribution(map, false);
-        map._mcTerrainLayer = null;
-      }
+      // #680/#723 — optional overlays; null keeps the overlay section out.
+      var overlays = {};
+      var overlayIds = _collectOverlays(map, overlays);
+      if (!overlayIds.length) overlays = null;
 
       // Use the dynamic controlPosition variable instead of a hardcoded string
       _control = L.control.layers(baseMaps, overlays, { position: controlPosition }).addTo(map);
 
-      if (terrainCfg) {
+      if (overlayIds.length) {
         try {
-          var overlayLabel = _control.getContainer().querySelector('.leaflet-control-layers-overlays label');
-          if (overlayLabel) overlayLabel.setAttribute('data-overlay-id', TERRAIN_ID);
+          var overlayLabels = _control.getContainer().querySelectorAll('.leaflet-control-layers-overlays label');
+          for (var oi = 0; oi < overlayLabels.length && oi < overlayIds.length; oi++) {
+            overlayLabels[oi].setAttribute('data-overlay-id', overlayIds[oi]);
+          }
         } catch (_) {}
       }
 

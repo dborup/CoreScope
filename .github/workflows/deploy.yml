@@ -232,6 +232,9 @@ jobs:
           (cd internal/pprofbind && go test ./...)
           # internal/dhm (#680): shared DHM upstream client, allow-list and cache.
           (cd internal/dhm && go test -race ./...)
+          # internal/mastedb (#724): Mastedatabasen WFS client and GML parser.
+          # Its own module, not yet imported by cmd/server, so nothing else runs it.
+          (cd internal/mastedb && go test -race ./...)
           # internal/regions is its own module: the server/ingestor steps
           # above compile it but never run its tests, and it now holds the
           # hashRegions/hashRegionsPath loader both processes share (#360).

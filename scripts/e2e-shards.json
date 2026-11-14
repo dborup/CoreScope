@@ -68,6 +68,14 @@
       "measurementNote": "New suite; #721 moving A or B of an open Map Path profile with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile that echoes ha/hb/model: draggable 48px A/B markers and Move A / Move B / Swap in the panel, no request during a mouse drag and exactly one after the drop with A, both heights and the model kept and the hash following, a drop on a node marker snapping to its pubkey, Escape mid-drag and during Move A restoring the old end with no request, the Move A button flow, Swap carrying the heights, a CDP touch drag and a Move B tap at 360x740, Move/Swap reachable at 48px at 360x740 and 740x360, and axe plus measured A/B tag contrast in light and dark. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681 DHM suites."
     },
     {
+      "file": "test-issue-723-heritage-overlay-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #723 M1 protected ancient monuments overlay on Map and Live with an intercepted heritage client-config block and every request to the agency's WMS answered by a synthetic PNG (the real service is never contacted): not offered without the block, off by default with zero requests, on/off/on (tiles, opacity, pane above the hillshade and below overlays/markers, credit including Live's second 'on', hash, storage), the exact pinned GetMap parameter set, zoom 11 silent and zoom 12 drawing, ?heritage=1 deep link across reload and pages, ?heritage=0 over a stored 'on', dark theme not inverting the overlay pane, independence from the DHM hillshade, and no requests or console errors outside Denmark. About 50s locally; no CI duration measured yet. Assigned to shard 1 next to the #680/#681 DHM suites."
+    },
+    {
       "file": "test-issue-674-1byte-hop-modes-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

@@ -288,6 +288,10 @@ type Config struct {
 	// never rides along when Map is shipped to the browser (#680).
 	DHM DHMConfig `json:"-"`
 
+	// Heritage is map.heritage (#723), lifted out of Map the same way so
+	// the browser receives only the fixed `heritage` client block.
+	Heritage HeritageConfig `json:"-"`
+
 	// Radio holds the link-physics defaults of the terrain profile (#681).
 	Radio *RadioConfig `json:"radio,omitempty"`
 
@@ -881,7 +885,7 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		cfg.NormalizeTimestampConfig()
 		cfg.migrateDeprecatedConfig()
 		cfg.warnGatedTileDefaults(log.Printf)
-		cfg.extractDHMConfig()
+		cfg.extractTypedMapBlocks()
 		cfg.applyListLimitsDefaults()
 		cfg.RegionGroups = normalizeRegionGroups(cfg.RegionGroups, log.Printf)
 		applyCORSEnv(cfg)
@@ -891,10 +895,11 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 	cfg.NormalizeTimestampConfig()
 	cfg.migrateDeprecatedConfig()
 	// No candidate was committed, so Map is whatever newDefaultConfig left
-	// it: nil. extractDHMConfig stays on this path as a no-op guard -- the
-	// contract is that no path out of LoadConfig may hand back a Config
-	// whose client-visible Map still holds map.dhm (#680, #694).
-	cfg.extractDHMConfig()
+	// it: nil. extractTypedMapBlocks stays on this path as a no-op guard --
+	// the contract is that no path out of LoadConfig may hand back a Config
+	// whose client-visible Map still holds map.dhm (#680, #694) or
+	// map.heritage (#723).
+	cfg.extractTypedMapBlocks()
 	cfg.applyListLimitsDefaults()
 	applyCORSEnv(cfg)
 	// No config.json anywhere: HASH_REGIONS_PATH alone can still name a
@@ -1891,4 +1896,40 @@ func (c *Config) RegionPlacementSettings() regionPlacementSettings {
 		}
 	}
 	return out
+}
+
+// liftMapBlock moves c.Map[key] into *dst and deletes it from c.Map, which
+// /api/config/client ships verbatim. The raw block is deleted even when it
+// is malformed; *dst is then left zero (feature off) with a warning.
+//
+// Key lookup in c.Map is case-sensitive. A case variant (`DHM`, `Dhm`, …)
+// is removed too, with a warning, but it does not fill *dst: only the
+// documented spelling does, so the result never depends on which of several
+// spellings map iteration meets first.
+func liftMapBlock[T any](c *Config, key, feature string, dst *T) {
+	m := c.Map
+	if m == nil {
+		return
+	}
+	for k := range m {
+		if k != key && strings.EqualFold(k, key) {
+			delete(m, k)
+			log.Printf("[%s] config map.%s ignored and removed from the client config; the key must be spelled map.%s", key, k, key)
+		}
+	}
+	raw, ok := m[key]
+	if !ok {
+		return
+	}
+	delete(m, key)
+	var zero T
+	*dst = zero
+	b, err := json.Marshal(raw)
+	if err == nil {
+		err = json.Unmarshal(b, dst)
+	}
+	if err != nil {
+		*dst = zero
+		log.Printf("[%s] config map.%s is malformed; %s disabled", key, key, feature)
+	}
 }
