@@ -230,7 +230,9 @@
     var hash = nodeEntryHash(node, cfg);
     if (!hash) return null;
     var a = el('a', 'btn-primary node-terrain-action');
-    a.setAttribute('href', hash);
+    // hash is '#/map?profile=' + 64 hex, so esc() changes nothing; it keeps
+    // the href sink provably clean for the XSS preflight.
+    a.setAttribute('href', esc(hash));
     a.setAttribute('data-testid', 'node-terrain-profile');
     a.setAttribute('title', 'Path profile from this node: terrain, line of sight and Fresnel zone. Pick the other end on the map.');
     // Static markup, no interpolation: the Phosphor sprite icon.
