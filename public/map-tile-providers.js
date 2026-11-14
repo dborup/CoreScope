@@ -455,6 +455,11 @@
     });
   }
 
+  // The class the compact (inset) credit is styled by; public/style.css
+  // owns its size, and MC_CREDIT_COMPACT_CLASS exposes the name so a test
+  // or a caller never spells it a second time.
+  var CREDIT_COMPACT_CLASS = 'mc-credit-compact';
+
   // Live runs without Leaflet's default attribution control, so it gets
   // one here, once, when its layer control is built, and keeps it: the
   // base map's credit must always show (Esri requires "Powered by Esri"),
@@ -465,13 +470,27 @@
   // gives later layers, so they get that hook here, or picking another base
   // map would leave the old credit behind. The Map page has its own control
   // and is left alone.
-  function _ensureAttribution(map) {
-    if (map.attributionControl) return;
+  //
+  // #752: the inset maps (node detail, node-reach, packet-path, area-nodes,
+  // rx-coverage and the Analytics subpath minimap) are built the same way
+  // and render the same provider, so they call this through
+  // MC_ensureAttribution with compact: true. That only adds the
+  // MC_CREDIT_COMPACT_CLASS to the control's container; the sizing lives in
+  // CSS, so a 200px inset is not swallowed by a long credit.
+  function _ensureAttribution(map, compact) {
+    if (map.attributionControl) return null;
     var control = L.control.attribution({ position: 'bottomright', prefix: false }).addTo(map);
+    if (compact) {
+      try {
+        var el = control.getContainer && control.getContainer();
+        if (el && el.classList) el.classList.add(CREDIT_COMPACT_CLASS);
+      } catch (_) {}
+    }
     map.eachLayer(function (layer) {
       if (!layer.getAttribution || !layer.getAttribution()) return;
       layer.once('remove', function () { control.removeAttribution(layer.getAttribution()); });
     });
+    return control;
   }
 
   // Changes a layer's credit in place: Live's Auto layer switches provider
@@ -541,6 +560,14 @@
   window.MC_getHeritageConfig           = getHeritageConfig;
   window.MC_resolveOverlayOn            = resolveOverlayOn;
   window.MC_setLayerAttribution         = setLayerAttribution;
+  window.MC_CREDIT_COMPACT_CLASS        = CREDIT_COMPACT_CLASS;
+  // #752 — every map without Leaflet's own attribution control needs one,
+  // not just Live: the inset maps call this (compact: true) right after
+  // they attach the viewer's provider.
+  window.MC_ensureAttribution           = function (map, opts) {
+    if (!map || typeof L === 'undefined') return null;
+    return _ensureAttribution(map, !!(opts && opts.compact));
+  };
 
 
   /**

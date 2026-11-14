@@ -145,6 +145,7 @@ run test-issue-721-move-endpoints.js
 run test-issue-727-share-link.js
 run test-issue-390-legacy-tile-followups.js
 run test-issue-728-esri-imagery.js
+run test-issue-752-inset-attribution.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js
 run test-issue-1446-cb-preset-cascade.js
