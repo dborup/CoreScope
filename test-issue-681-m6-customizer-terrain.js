@@ -103,7 +103,11 @@ function load(opts) {
   ctx.window.localStorage = localStorage;
   ctx.window.CustomEvent = ctx.CustomEvent;
   ctx.self = ctx.window;
+  if (opts.dhm !== undefined) ctx.window.MC_DHM_CFG = opts.dhm;
   vm.createContext(ctx);
+  // index.html order: the shared height rule first, then the customizer.
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'antenna-height.js'), 'utf8'), ctx,
+    { filename: 'antenna-height.js' });
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'customize-v2.js'), 'utf8'), ctx,
     { filename: 'customize-v2.js' });
   const api = ctx.window._customizerV2;
@@ -136,12 +140,12 @@ test('terrain is a known object section', () => {
 test('the built-in defaults are the server’s own role heights', () => {
   // cmd/server/terrain_profile.go terrainRoleAntennaM, and model "both".
   // An untouched section must therefore change nothing about a profile.
-  const { api } = load();
+  const { api, ctx } = load();
   assert.deepStrictEqual(Object.assign({}, api.TERRAIN_DEFAULTS), {
     heightRepeater: 10, heightRoom: 5, heightCompanion: 2,
     heightSensor: 2, heightPoint: 2, model: 'both',
   });
-  assert.strictEqual(api.TERRAIN_MAX_HEIGHT_M, 100);
+  assert.strictEqual(ctx.window.MCAntennaHeight.MAX_M, 100);
 });
 
 test('the six chart colours map onto the documented CSS variables', () => {
@@ -280,6 +284,122 @@ test('terrainSettings resolves the effective values over the built-ins', () => {
   assert.strictEqual(t.model, 'dtm');
   const none = api.terrainSettings({});
   assert.deepStrictEqual(Object.assign({}, none), Object.assign({}, api.TERRAIN_DEFAULTS));
+});
+
+// ── 2b. Review PR#714: one height rule, and no way round it ──────────────
+
+console.log('\n=== review PR#714: the height rule cannot be bypassed ===');
+
+/* Every one of these got past the old parseFloat check: "0x1F4" read as 0
+ * and was stored as Number("0x1F4") = 500, "5abc" was stored as NaN. */
+const NOT_A_HEIGHT = ['0x1F4', '0x10', '5abc', '1e2', ' 5', '5 ', '-1', '+5', '100.5', 'NaN', 'Infinity',
+  NaN, Infinity, -Infinity, -1, 100.5, true, '0b11', '.5', '5.'];
+
+test('hex, exponents, padding, signs and out-of-range heights are refused', () => {
+  const { api } = load();
+  NOT_A_HEIGHT.forEach((v) => {
+    assert.strictEqual(api.isValidAntennaHeight(v), false, 'accepted ' + JSON.stringify(String(v)));
+  });
+});
+
+test('a refused height is never stored, whatever Number() would make of it', () => {
+  NOT_A_HEIGHT.forEach((v) => {
+    const { api, localStorage } = load();
+    api.writeOverrides({ terrain: { heightRepeater: v, heightSensor: 3 } });
+    const got = JSON.parse(localStorage.getItem('cs-theme-overrides')).terrain;
+    assert.deepStrictEqual(got, { heightSensor: 3 }, JSON.stringify(String(v)) + ' was stored as ' + JSON.stringify(got));
+  });
+});
+
+test('an import with a hex or garbage height is refused', () => {
+  const { api } = load();
+  ['0x1F4', '0x10', '5abc', '1e2', ' 5'].forEach((v) => {
+    const res = api.validateShape({ terrain: { heightRepeater: v } });
+    assert.strictEqual(res.valid, false, 'the import gate let ' + JSON.stringify(v) + ' through');
+  });
+});
+
+test('the customizer shows the value the profile will use', () => {
+  // The reviewer's repro: {terrain:{heightRepeater:"0x1F4"}} in SITE_CONFIG
+  // must not show 10 here while the profile draws 100 m.
+  const { api } = load();
+  const t = api.terrainSettings({ terrain: { heightRepeater: '0x1F4', heightRoom: '5abc', heightSensor: '12.5' } });
+  assert.strictEqual(t.heightRepeater, 10);
+  assert.strictEqual(t.heightRoom, 5);
+  assert.strictEqual(t.heightSensor, 12.5);
+});
+
+test('the customizer and the profile share one height rule', () => {
+  const { api, ctx } = load();
+  const rule = ctx.window.MCAntennaHeight;
+  assert.ok(rule && typeof rule.parse === 'function', 'public/antenna-height.js must define MCAntennaHeight.parse');
+  NOT_A_HEIGHT.concat([0, 2, '12', '12.5', 100, '100']).forEach((v) => {
+    assert.strictEqual(api.isValidAntennaHeight(v), rule.parse(v) !== null, 'disagree on ' + JSON.stringify(String(v)));
+  });
+  const profile = fs.readFileSync(path.join(__dirname, 'public', 'terrain-profile.js'), 'utf8');
+  assert.ok(/MCAntennaHeight\.parse/.test(CODE), 'customize-v2.js does not use the shared rule');
+  assert.ok(/MCAntennaHeight\.parse/.test(profile), 'terrain-profile.js does not use the shared rule');
+  const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
+  const at = (f) => html.indexOf('src="' + f + '?');
+  assert.ok(at('antenna-height.js') > 0, 'index.html does not load antenna-height.js');
+  assert.ok(at('antenna-height.js') < at('customize-v2.js'), 'antenna-height.js loads after customize-v2.js');
+  assert.ok(at('antenna-height.js') < at('terrain-profile.js'), 'antenna-height.js loads after terrain-profile.js');
+});
+
+test('readOverrides drops sections the customizer does not own', () => {
+  // Overrides written before unknown sections were dropped on write still
+  // sit in localStorage; they must not reach SITE_CONFIG or an export.
+  const { api, localStorage } = load();
+  localStorage.setItem('cs-theme-overrides', JSON.stringify({
+    theme: { accent: '#123456' }, map: { dhm: { token: 'old' } }, radio: { kFactor: 1 },
+  }));
+  const got = api.readOverrides();
+  assert.deepStrictEqual(Object.keys(got), ['theme']);
+  const effective = api.computeEffective({}, got);
+  assert.strictEqual(effective.map, undefined, 'a stale map section reached the effective config');
+});
+
+test('a key named hasOwnProperty does not break the import gate', () => {
+  [{ terrain: { hasOwnProperty: 1 } }, { theme: { hasOwnProperty: 1 } }, { hasOwnProperty: 1 }].forEach((obj) => {
+    const { api } = load();
+    let res;
+    assert.doesNotThrow(() => { res = api.validateShape(obj); }, 'validateShape threw on ' + JSON.stringify(obj));
+    assert.ok(res && Array.isArray(res.errors), 'no result for ' + JSON.stringify(obj));
+    // ...and the write that follows an accepted import does not throw either.
+    assert.doesNotThrow(() => api.writeOverrides(JSON.parse(JSON.stringify(obj))), 'writeOverrides threw on ' + JSON.stringify(obj));
+  });
+});
+
+test('a picked colour keeps the alpha of the colour it replaces', () => {
+  // The native picker has no alpha channel, so the first pick for
+  // --terrain-clutter (default alpha 0.55) would make the canopy opaque.
+  const { api } = load();
+  assert.strictEqual(typeof api.colorWithAlpha, 'function');
+  assert.strictEqual(api.colorWithAlpha('#ff0000', 'rgba(84, 124, 92, 0.55)'), 'rgba(255, 0, 0, 0.55)');
+  assert.strictEqual(api.colorWithAlpha('#ff0000', 'rgb(84 124 92 / 45%)'), 'rgba(255, 0, 0, 0.45)');
+  assert.strictEqual(api.colorWithAlpha('#00ff00', '#11223380'), 'rgba(0, 255, 0, 0.502)');
+  // An opaque colour stays a plain hex, exactly as before.
+  ['#123456', 'rgb(1, 2, 3)', 'rgba(1, 2, 3, 1)', '', null, undefined, 'red'].forEach((cur) => {
+    assert.strictEqual(api.colorWithAlpha('#00ff00', cur), '#00ff00', 'changed for ' + JSON.stringify(cur));
+  });
+  // And the result is still a colour the customizer will store.
+  assert.ok(api.isValidColor(api.colorWithAlpha('#ff0000', 'rgba(84, 124, 92, 0.55)')));
+});
+
+test('the Terrain Profile section follows the server’s profile switch', () => {
+  const on = { enabled: true, profile: true };
+  const off = [null, undefined, { enabled: true, profile: false }, { enabled: false, profile: true }];
+  const { api, ctx } = load({ dhm: on });
+  ctx.window.TerrainProfile = { offered: (c) => !!(c && c.enabled === true && c.profile === true) };
+  assert.ok(/Terrain Profile/.test(api.renderTerrainSettings()), 'hidden while the profile is on');
+  off.forEach((cfg) => {
+    ctx.window.MC_DHM_CFG = cfg;
+    assert.strictEqual(api.renderTerrainSettings(), '', 'shown with dhm ' + JSON.stringify(cfg));
+  });
+  // No profile tool on the page at all: nothing to set defaults for.
+  ctx.window.MC_DHM_CFG = on;
+  delete ctx.window.TerrainProfile;
+  assert.strictEqual(api.renderTerrainSettings(), '');
 });
 
 // ── 3. Export / import ───────────────────────────────────────────────────

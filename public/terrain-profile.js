@@ -98,6 +98,15 @@
     return round(n, 1);
   }
 
+  /* themeHeightOf reads one customizer height by the customizer's own rule
+   * (public/antenna-height.js), so the profile uses exactly the value the
+   * customizer shows. Unlike clampHeight it refuses rather than clamps, and
+   * it refuses hex, exponents and padding: "0x1F4" is no default (review
+   * PR#714). Without the rule on the page there are no customizer heights. */
+  function themeHeightOf(v) {
+    return global.MCAntennaHeight ? global.MCAntennaHeight.parse(v) : null;
+  }
+
   /* themeDefaults resolves the customizer's terrain section. Pass the raw
    * section to resolve a specific one; omit it to read the live config.
    * Junk is not a default: an unusable value falls through to the server. */
@@ -109,10 +118,10 @@
     if (!src || typeof src !== 'object') return out;
     if (validModel(src.model)) out.model = src.model;
     Object.keys(THEME_HEIGHT_KEYS).forEach(function (role) {
-      var h = clampHeight(src[THEME_HEIGHT_KEYS[role]]);
+      var h = themeHeightOf(src[THEME_HEIGHT_KEYS[role]]);
       if (h !== null) out.heights[role] = h;
     });
-    var pt = clampHeight(src[THEME_POINT_KEY]);
+    var pt = themeHeightOf(src[THEME_POINT_KEY]);
     if (pt !== null) out.heights[POINT_STORAGE_KEY] = pt;
     return out;
   }
@@ -235,11 +244,14 @@
     var out = {};
     if (!state || !state.a || !state.b) return out;
     out[HASH_PARAM] = refToParam(state.a) + ',' + refToParam(state.b);
-    /* The model rides the link whenever it differs from the default this
-     * viewer would otherwise get, so a link is exact in both directions:
-     * with a customizer default of "dtm", choosing terrain + surface has to
-     * be written down or reopening the link would silently undo it. */
-    if (validModel(state.model) && state.model !== modelOf(null, defaults)) out.model = state.model;
+    /* The model rides the link whenever it is not the standard "both",
+     * whatever this viewer's own default is: the recipient may not share it,
+     * so a terrain-only link must say so (review PR#714). It also rides when
+     * it differs from this viewer's default, so with a customizer default of
+     * "dtm" a chosen terrain + surface survives reopening the link. */
+    if (validModel(state.model) && (state.model !== DEFAULT_MODEL || state.model !== modelOf(null, defaults))) {
+      out.model = state.model;
+    }
     if (state.ha !== null && state.ha !== undefined) out.ha = String(state.ha);
     if (state.hb !== null && state.hb !== undefined) out.hb = String(state.hb);
     if (state.k !== null && state.k !== undefined) out.k = String(state.k);

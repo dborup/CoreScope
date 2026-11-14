@@ -87,6 +87,7 @@ function load(opts) {
   };
   ctx.localStorage = win.localStorage;
   vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync('public/antenna-height.js', 'utf8'), ctx);
   vm.runInContext(fs.readFileSync('public/terrain-profile.js', 'utf8'), ctx);
   const TP = ctx.window.TerrainProfile;
   assert.ok(TP, 'terrain-profile.js must define window.TerrainProfile');
@@ -748,6 +749,7 @@ function loadLive() {
     setTimeout, clearTimeout, document: dom.doc,
   };
   vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync('public/antenna-height.js', 'utf8'), ctx);
   vm.runInContext(fs.readFileSync('public/terrain-profile.js', 'utf8'), ctx);
   // `win` comes back so a test can plant window.SITE_CONFIG — the customizer
   // defaults the module reads at call time (#681 M6).
@@ -938,9 +940,20 @@ test('a junk customizer value is not a default', () => {
   assert.strictEqual(d.model, 'both', 'dsm is not a model the customizer offers');
 });
 
-test('an out-of-range customizer height is clamped, not dropped', () => {
-  const d = TP.themeDefaults({ heightRepeater: 400, heightSensor: -3 });
-  eq(d.heights, { repeater: 100, sensor: 0 });
+test('an out-of-range customizer height is refused, not clamped', () => {
+  // Review PR#714: the customizer refuses these, so clamping here would draw
+  // a height the customizer never showed anybody (400 -> 100 m).
+  const d = TP.themeDefaults({ heightRepeater: 400, heightSensor: -3, heightRoom: 100.5, heightCompanion: 100 });
+  eq(d.heights, { companion: 100 });
+});
+
+test('a hex, exponent or padded customizer height is no default', () => {
+  // The reviewer's repro: "0x1F4" was stored as 500 and drawn as 100 m.
+  ['0x1F4', '0x10', '5abc', '1e2', ' 5', '-1', '100.5', 'NaN', 'Infinity', NaN, Infinity].forEach((v) => {
+    const d = TP.themeDefaults({ heightRepeater: v });
+    eq(d.heights, {}, JSON.stringify(String(v)) + ' became a default');
+  });
+  eq(TP.themeDefaults({ heightRepeater: '12.5', heightPoint: 3 }).heights, { repeater: 12.5, point: 3 });
 });
 
 test('themeHeight resolves a response endpoint by its role', () => {
@@ -998,15 +1011,29 @@ test('a junk model in the link falls back to the customizer default', () => {
   assert.strictEqual(TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=dsm', { model: 'dtm' }).model, 'dtm');
 });
 
-test('the link writes down the model only when it differs from the default', () => {
+test('the link leaves the model out only for both under a both default', () => {
   const both = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: 'both' };
   const dtm = Object.assign({}, both, { model: 'dtm' });
   assert.strictEqual(TP.serializeState(both, { model: 'both' }).model, undefined);
   assert.strictEqual(TP.serializeState(dtm, { model: 'both' }).model, 'dtm');
   // With a customizer default of dtm the asymmetry flips: now "both" is the
   // choice that has to be written down, or reopening the link would undo it.
-  assert.strictEqual(TP.serializeState(dtm, { model: 'dtm' }).model, undefined);
   assert.strictEqual(TP.serializeState(both, { model: 'dtm' }).model, 'both');
+  // Review PR#714: anything but "both" is always written down, whatever the
+  // sharer's own default is — the recipient may not share it.
+  assert.strictEqual(TP.serializeState(dtm, { model: 'dtm' }).model, 'dtm');
+});
+
+test('a terrain-only link means terrain-only to a recipient on the standard default', () => {
+  // The sharer's customizer default is dtm; the recipient has never opened
+  // the customizer. The link must not quietly turn into terrain + surface.
+  const state = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: 'dtm',
+    ha: null, hb: null, k: null, freq: null };
+  const url = TP.shareURL(state, { origin: 'https://x.test', pathname: '/' }, TP.themeDefaults({ model: 'dtm' }));
+  const qs = url.split('#/map?')[1];
+  assert.strictEqual(new URLSearchParams(qs).get('model'), 'dtm', 'the link left the model out: ' + url);
+  assert.strictEqual(TP.parseState(qs, TP.themeDefaults(null)).model, 'dtm');
+  assert.strictEqual(TP.parseState(qs).model, 'dtm');
 });
 
 test('a non-default model round-trips through the link under either default', () => {
@@ -1204,6 +1231,43 @@ atest('a changed default re-measures an open profile', async () => {
   f.calls[1].settle.resolve(defaultsAnswer());
   await sleep(0);
   eq(askedHeights(f.calls[2]), { ha: '30', hb: '30' });
+});
+
+atest('a second customizer change replaces the height the first one adopted', async () => {
+  // Review PR#714 R10: changing the default twice with the panel open must
+  // not keep the height adopted from the first change.
+  const live = loadLive();
+  live.win.SITE_CONFIG = { terrain: terrainCfg() };
+  const f = deferredFetch();
+  const tool = openPair(live.TP, live.dom, f);
+  f.calls[0].settle.resolve(defaultsAnswer());
+  await sleep(0);
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: 30 }) };
+  tool.defaultsChangedForTests();
+  f.calls[1].settle.resolve(defaultsAnswer());
+  await sleep(0);
+  eq(askedHeights(f.calls[2]), { ha: '30', hb: '30' }, 'the first change was not adopted');
+  const at30 = defaultsAnswer();
+  at30.a = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 30, antennaSource: 'request', assumed: false };
+  at30.b = Object.assign({}, at30.a);
+  f.calls[2].settle.resolve(at30);
+  await sleep(0);
+  assert.strictEqual(live.dom.find('tp-h-a').value, '30');
+
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: 45 }) };
+  tool.defaultsChangedForTests();
+  eq(askedHeights(f.calls[3]), { ha: null, hb: null }, 'the stale 30 m default was sent again');
+  f.calls[3].settle.resolve(defaultsAnswer());
+  await sleep(0);
+  assert.strictEqual(f.calls.length, 5, 'the second change was never adopted');
+  eq(askedHeights(f.calls[4]), { ha: '45', hb: '45' });
+  const at45 = defaultsAnswer();
+  at45.a = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 45, antennaSource: 'request', assumed: false };
+  at45.b = Object.assign({}, at45.a);
+  f.calls[4].settle.resolve(at45);
+  await sleep(0);
+  assert.strictEqual(live.dom.find('tp-h-a').value, '45');
+  assert.strictEqual(live.dom.find('tp-hsrc-a').textContent, 'default');
 });
 
 atest('a model the viewer chose survives a customizer change', async () => {

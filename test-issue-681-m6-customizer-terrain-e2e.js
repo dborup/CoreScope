@@ -22,7 +22,10 @@
  *   6. the export carries the terrain section and no token, and nothing
  *      under map.dhm is anywhere in the client;
  *   7. axe and measured text contrast are clean in light and dark with the
- *      default colours.
+ *      default colours;
+ *   8. review PR#714: a hex height planted in storage is no default, a
+ *      pick over the translucent clutter colour keeps its alpha, and the
+ *      section is gone when the server has the profile switched off.
  *
  * Usage:
  *   BASE_URL=http://localhost:13800 node test-issue-681-m6-customizer-terrain-e2e.js
@@ -139,7 +142,7 @@ function profileFor(q, opts) {
       const response = await route.fetch();
       const config = await response.json();
       delete config.dhm;
-      config.dhm = DHM_BLOCK;
+      config.dhm = o.dhm !== undefined ? o.dhm : DHM_BLOCK;
       await route.fulfill({ response, json: config });
     });
     await ctx.route(url => new URL(url).pathname === PROFILE_PATH, async (route) => {
@@ -350,6 +353,47 @@ function profileFor(q, opts) {
     await ctx.close();
   }
 
+  {
+    // Review PR#714: Number("0x1F4") is 500, and the profile used to clamp
+    // it to 100 m while the customizer showed 10. Planted straight into
+    // storage, past the write-side validation, as an old override would be.
+    const { ctx, page, rec } = await newCtx({ overrides: { terrain: { heightRepeater: '0x1F4' } } });
+    await gotoMap(page, PAIR_LINK);
+    await step('a hex height in storage is no default, in the profile or the customizer', async () => {
+      await page.waitForSelector('[data-testid="tp-chart"] svg.tp-svg', { timeout: 10000 });
+      await page.waitForTimeout(600);
+      assert(rec.profile.length === 1, 'the hex height cost a second request: ' + rec.profile.map(u => u.search).join(' '));
+      assert(rec.profile[0].searchParams.get('ha') === null, 'ha=' + rec.profile[0].searchParams.get('ha'));
+      const ha = await page.evaluate(() => document.querySelector('[data-testid="tp-h-a"]').value);
+      assert(ha === String(ROLE_DEFAULT_M), 'the profile drew ' + ha + ' m');
+      await openCustomizer(page, 'display');
+      const shown = await page.evaluate(() => document.querySelector('[data-cv2-terrain-height="heightRepeater"]').value);
+      assert(shown === ha, 'the customizer shows ' + shown + ' m, the profile draws ' + ha + ' m');
+    });
+    await ctx.close();
+  }
+
+  {
+    // Review PR#714: an instance with the profile switched off offers no
+    // defaults for it.
+    for (const dhm of [null, Object.assign({}, DHM_BLOCK, { profile: false })]) {
+      const { ctx, page, rec } = await newCtx({ dhm });
+      await gotoMap(page);
+      await step('the Terrain Profile section is hidden with dhm ' + (dhm ? 'profile:false' : 'absent'), async () => {
+        await openCustomizer(page, 'display');
+        const got = await page.evaluate(() => ({
+          fields: document.querySelectorAll('[data-cv2-terrain-height], [data-cv2-terrain-model]').length,
+          title: Array.from(document.querySelectorAll('.cust-panel[data-panel="display"] .cust-section-title'))
+            .some(el => /Terrain Profile/.test(el.textContent)),
+        }));
+        assert(got.fields === 0, got.fields + ' terrain fields still shown');
+        assert(!got.title, 'the Terrain Profile title is still shown');
+        assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
+      });
+      await ctx.close();
+    }
+  }
+
   // ── 3. A changed chart colour is what the chart draws with ────────────────
 
   {
@@ -396,6 +440,23 @@ function profileFor(q, opts) {
       });
       assert(got.var === '#00ff00', '--profile-blocked is ' + got.var);
       assert(got.fill === 'rgb(0, 255, 0)', 'the intrusion band draws with ' + got.fill);
+    });
+
+    await step('a pick over the translucent clutter colour keeps its alpha', async () => {
+      // Review PR#714: the native picker has no alpha channel, so the first
+      // pick used to make the canopy opaque.
+      const sel = '[data-cv2-field="theme.terrainClutter"]';
+      await page.fill(sel, '#ff0000');
+      await page.dispatchEvent(sel, 'input');
+      await page.dispatchEvent(sel, 'change');
+      await page.waitForTimeout(700);
+      const got = await page.evaluate(() => ({
+        cssVar: getComputedStyle(document.documentElement).getPropertyValue('--terrain-clutter').trim(),
+        stored: JSON.parse(localStorage.getItem('cs-theme-overrides')).theme.terrainClutter,
+      }));
+      assert(got.stored === 'rgba(255, 0, 0, 0.55)', 'stored ' + got.stored);
+      assert(/^rgba\(255, 0, 0, 0\.55\)$/.test(got.cssVar), '--terrain-clutter is ' + got.cssVar);
+      assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
     });
 
     await step('a reset puts every chart colour back', async () => {

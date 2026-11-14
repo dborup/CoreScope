@@ -450,13 +450,21 @@
     heightRepeater: 10, heightRoom: 5, heightCompanion: 2, heightSensor: 2,
     heightPoint: 2, model: 'both'
   };
-  var TERRAIN_MAX_HEIGHT_M = 100;
 
-  /** Antenna height above ground, in metres: a finite number in 0-100. */
-  function isValidAntennaHeight(val) {
-    var n = typeof val === 'string' ? parseFloat(val) : val;
-    return typeof n === 'number' && isFinite(n) && n >= 0 && n <= TERRAIN_MAX_HEIGHT_M;
+  /* Antenna height above ground, in metres, or null when `val` is not one.
+   * The rule lives in public/antenna-height.js, shared with the Path profile
+   * so the customizer stores exactly the value the profile will use (review
+   * PR#714: a looser parseFloat check here let "0x1F4" through as 500).
+   * Without the rule on the page no height is accepted at all. */
+  function _parseAntennaHeight(val) {
+    return window.MCAntennaHeight ? window.MCAntennaHeight.parse(val) : null;
   }
+
+  function _maxAntennaHeight() {
+    return window.MCAntennaHeight ? window.MCAntennaHeight.MAX_M : 0;
+  }
+
+  function isValidAntennaHeight(val) { return _parseAntennaHeight(val) !== null; }
 
   /** The effective terrain settings: this section over the built-ins. */
   function terrainSettings(effectiveConfig) {
@@ -464,13 +472,18 @@
     var out = {};
     for (var i = 0; i < TERRAIN_HEIGHT_FIELDS.length; i++) {
       var k = TERRAIN_HEIGHT_FIELDS[i].key;
-      out[k] = isValidAntennaHeight(src[k]) ? Number(src[k]) : TERRAIN_DEFAULTS[k];
+      var h = _parseAntennaHeight(src[k]);
+      out[k] = h !== null ? h : TERRAIN_DEFAULTS[k];
     }
     out.model = TERRAIN_MODELS.indexOf(src.model) >= 0 ? src.model : TERRAIN_DEFAULTS.model;
     return out;
   }
 
   // ── Validation helpers ──
+
+  /* An imported file is plain JSON, so a key may well be "hasOwnProperty";
+   * never call the method off the object itself (review PR#714). */
+  function _own(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
 
   var COLOR_RE = /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
   var CSS_FUNC_RE = /^(?:rgb|rgba|hsl|hsla)\s*\(.*\)$/i;
@@ -542,6 +555,12 @@
       var raw = localStorage.getItem(STORAGE_KEY);
       var parsed = (raw != null) ? JSON.parse(raw) : {};
       if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) parsed = {};
+      // Overrides saved before unknown sections were dropped on write can
+      // still hold one (a `map` section, say). They are filtered here too,
+      // so they never reach SITE_CONFIG or an export (#681 M6).
+      for (var pk in parsed) {
+        if (_own(parsed, pk) && VALID_SECTIONS.indexOf(pk) === -1) delete parsed[pk];
+      }
       // Include favorites and claimed nodes from their own localStorage keys
       try {
         var favs = JSON.parse(localStorage.getItem('meshcore-favorites') || '[]');
@@ -563,12 +582,12 @@
     var clean = {};
     var colorSections = ['theme', 'themeDark', 'nodeColors', 'typeColors'];
     for (var key in delta) {
-      if (!delta.hasOwnProperty(key)) continue;
+      if (!_own(delta, key)) continue;
       if (colorSections.indexOf(key) !== -1 && typeof delta[key] === 'object' && delta[key] !== null) {
         var section = {};
         var src = delta[key];
         for (var sk in src) {
-          if (!src.hasOwnProperty(sk)) continue;
+          if (!_own(src, sk)) continue;
           // font/mono are not colors
           if ((key === 'theme' || key === 'themeDark') && (sk === 'font' || sk === 'mono')) {
             if (typeof src[sk] === 'string') section[sk] = src[sk];
@@ -618,7 +637,7 @@
         var ts = {};
         var tsrc = delta[key];
         for (var tk in tsrc) {
-          if (!tsrc.hasOwnProperty(tk)) continue;
+          if (!_own(tsrc, tk)) continue;
           if (TS_ENUMS[tk]) {
             if (TS_ENUMS[tk].indexOf(tsrc[tk]) !== -1) {
               ts[tk] = tsrc[tk];
@@ -639,8 +658,9 @@
         for (var thi = 0; thi < TERRAIN_HEIGHT_FIELDS.length; thi++) {
           var hk = TERRAIN_HEIGHT_FIELDS[thi].key;
           if (tIn[hk] == null) continue;
-          if (isValidAntennaHeight(tIn[hk])) {
-            tOut[hk] = Number(tIn[hk]);
+          var th = _parseAntennaHeight(tIn[hk]);
+          if (th !== null) {
+            tOut[hk] = th;
           } else {
             console.warn('[customizer-v2] Invalid antenna height rejected:', 'terrain.' + hk, tIn[hk]);
           }
@@ -686,7 +706,7 @@
     // Build theme-only delta (without favorites/myNodes)
     var themeDelta = {};
     for (var k in delta) {
-      if (delta.hasOwnProperty(k) && k !== 'favorites' && k !== 'myNodes') {
+      if (_own(delta, k) && k !== 'favorites' && k !== 'myNodes') {
         themeDelta[k] = delta[k];
       }
     }
@@ -717,14 +737,14 @@
     }
     if (!userOverrides || typeof userOverrides !== 'object') return effective;
     for (var key in userOverrides) {
-      if (!userOverrides.hasOwnProperty(key)) continue;
+      if (!_own(userOverrides, key)) continue;
       var uv = userOverrides[key];
       if (uv != null && typeof uv === 'object' && !Array.isArray(uv)) {
         // Object section — shallow merge
         if (!effective[key] || typeof effective[key] !== 'object') effective[key] = {};
         var val = userOverrides[key];
         for (var sk in val) {
-          if (val.hasOwnProperty(sk)) {
+          if (_own(val, sk)) {
             if (Array.isArray(val[sk])) {
               effective[key][sk] = JSON.parse(JSON.stringify(val[sk])); // array: full replace
             } else {
@@ -1117,7 +1137,7 @@
 
     var colorSections = ['theme', 'themeDark', 'nodeColors', 'typeColors'];
     for (var key in obj) {
-      if (!obj.hasOwnProperty(key)) continue;
+      if (!_own(obj, key)) continue;
       if (VALID_SECTIONS.indexOf(key) === -1) {
         console.warn('[customizer-v2] Unknown top-level key in import:', key);
         continue; // warning, not error
@@ -1139,7 +1159,7 @@
       // Validate colors in color sections
       if (colorSections.indexOf(key) !== -1 && typeof obj[key] === 'object') {
         for (var ck in obj[key]) {
-          if (!obj[key].hasOwnProperty(ck)) continue;
+          if (!_own(obj[key], ck)) continue;
           if ((key === 'theme' || key === 'themeDark') && (ck === 'font' || ck === 'mono')) continue;
           if (typeof obj[key][ck] === 'string' && !isValidColor(obj[key][ck])) {
             errors.push('Invalid color: ' + key + '.' + ck + ' = "' + obj[key][ck] + '"');
@@ -1157,15 +1177,15 @@
       // #681 M6 — terrain: antenna heights in metres, and the model enum.
       if (key === 'terrain' && typeof obj[key] === 'object' && obj[key] !== null) {
         for (var trk in obj[key]) {
-          if (!obj[key].hasOwnProperty(trk)) continue;
+          if (!_own(obj[key], trk)) continue;
           if (trk === 'model') {
             if (TERRAIN_MODELS.indexOf(obj[key][trk]) === -1) {
               errors.push('Invalid terrain model: "' + obj[key][trk] + '" \u2014 must be dtm or both');
             }
-          } else if (!TERRAIN_DEFAULTS.hasOwnProperty(trk)) {
+          } else if (!_own(TERRAIN_DEFAULTS, trk)) {
             console.warn('[customizer-v2] Unknown terrain key in import:', trk);
           } else if (!isValidAntennaHeight(obj[key][trk])) {
-            errors.push('Invalid antenna height: terrain.' + trk + ' = "' + obj[key][trk] + '" \u2014 must be 0-' + TERRAIN_MAX_HEIGHT_M + ' m');
+            errors.push('Invalid antenna height: terrain.' + trk + ' = "' + obj[key][trk] + '" \u2014 must be 0-' + _maxAntennaHeight() + ' m');
           }
         }
       }
@@ -1232,7 +1252,7 @@
     var overrides = _getOverrides();
     var server = _getServer();
     if (section) {
-      if (!overrides[section] || !overrides[section].hasOwnProperty(key)) return false;
+      if (!overrides[section] || !_own(overrides[section], key)) return false;
       var serverSection = server[section] || {};
       var ov = overrides[section][key];
       var sv = serverSection[key];
@@ -1242,7 +1262,7 @@
       }
       return ov !== sv;
     }
-    if (!overrides.hasOwnProperty(key)) return false;
+    if (!_own(overrides, key)) return false;
     var ov2 = overrides[key];
     var sv2 = server[key];
     if (typeof ov2 === 'object' || typeof sv2 === 'object') {
@@ -1402,6 +1422,41 @@
     return hex;
   }
 
+  /* Review PR#714 — the alpha of a CSS colour, 0-1, or 1 when it has none
+   * or is not one we can read. */
+  function _cssColorAlpha(val) {
+    if (typeof val !== 'string') return 1;
+    var s = val.trim();
+    var a = null;
+    if (/^#[0-9a-fA-F]{8}$/.test(s)) a = parseInt(s.slice(7), 16) / 255;
+    else if (/^#[0-9a-fA-F]{4}$/.test(s)) a = parseInt(s[4] + s[4], 16) / 255;
+    else {
+      var m = s.match(/^rgba?\(([^)]*)\)$/i);
+      var parts = m ? m[1].split(/[\s,/]+/).filter(function (x) { return x !== ''; }) : [];
+      if (parts.length === 4) {
+        a = parseFloat(parts[3]);
+        if (parts[3].charAt(parts[3].length - 1) === '%') a = a / 100;
+      }
+    }
+    if (a === null || !isFinite(a) || a < 0 || a >= 1) return 1;
+    return Math.round(a * 1000) / 1000;
+  }
+
+  /* Review PR#714 — the native picker hands back an opaque #rrggbb, so a
+   * pick over a translucent colour (--terrain-clutter is rgba(..., 0.55))
+   * would make it opaque. Carry the alpha of the colour being replaced over
+   * to the pick; an opaque colour stays a plain hex, as before. */
+  function _colorWithAlpha(picked, current) {
+    return _hexWithAlpha(picked, _cssColorAlpha(current));
+  }
+
+  function _hexWithAlpha(picked, a) {
+    var hex = _cssColorToHex(picked);
+    if (!(a >= 0 && a < 1) || !hex) return picked;
+    return 'rgba(' + parseInt(hex.slice(1, 3), 16) + ', ' + parseInt(hex.slice(3, 5), 16) + ', ' +
+      parseInt(hex.slice(5, 7), 16) + ', ' + a + ')';
+  }
+
   /* #681 M6 — what a theme key resolves to on the page right now. The six
    * chart colours have no server default by design (they are chart ink, not
    * page chrome), and a row with no value renders a black swatch and an
@@ -1427,7 +1482,11 @@
     } else {
       // Ensure hex is 7 chars for color input
       var hexVal = val.length === 7 ? val : (val.length === 4 ? '#' + val[1] + val[1] + val[2] + val[2] + val[3] + val[3] : _cssColorToHex(val));
-      inputHtml = '<input type="color" data-cv2-field="' + section + '.' + key + '" value="' + escAttr(hexVal) + '">' +
+      // data-cv2-alpha carries a translucent colour's alpha over to the
+      // pick, which the native picker cannot express (review PR#714).
+      var alpha = _cssColorAlpha(val);
+      inputHtml = '<input type="color" data-cv2-field="' + section + '.' + key + '" value="' + escAttr(hexVal) + '"' +
+        (alpha < 1 ? ' data-cv2-alpha="' + alpha + '"' : '') + '>' +
         '<span class="cust-hex">' + esc(val) + '</span>';
     }
     return '<div class="cust-color-row">' +
@@ -1806,6 +1865,10 @@
   // shared link all still win over them, and an operator who set a real
   // height in config.json wins too.
   function _renderTerrainSettings() {
+    // Review PR#714 — no profile tool on this instance, no defaults to set.
+    // Same gate as the Map toggle and node detail (TerrainProfile.offered).
+    var tp = window.TerrainProfile;
+    if (!tp || typeof tp.offered !== 'function' || !tp.offered(window.MC_DHM_CFG)) return '';
     var t = terrainSettings(_getEffective());
     var rows = '';
     for (var i = 0; i < TERRAIN_HEIGHT_FIELDS.length; i++) {
@@ -1814,7 +1877,7 @@
       rows += '<div class="cust-terrain-row">' +
         '<div><label for="' + id + '">' + f.label + ' (m)' + _overrideDot('terrain', f.key) + '</label>' +
           '<div class="cust-hint">' + f.hint + '</div></div>' +
-        '<input type="number" id="' + id + '" class="cust-terrain-h" min="0" max="' + TERRAIN_MAX_HEIGHT_M + '" step="0.5" ' +
+        '<input type="number" id="' + id + '" class="cust-terrain-h" min="0" max="' + _maxAntennaHeight() + '" step="0.5" ' +
           'inputmode="decimal" data-cv2-terrain-height="' + f.key + '" value="' + escAttr(String(t[f.key])) + '">' +
       '</div>';
     }
@@ -2453,7 +2516,7 @@
     // Clean scalar sections
     for (var si = 0; si < SCALAR_SECTIONS.length; si++) {
       var sk = SCALAR_SECTIONS[si];
-      if (delta.hasOwnProperty(sk) && delta[sk] === server[sk]) {
+      if (_own(delta, sk) && delta[sk] === server[sk]) {
         delete delta[sk]; changed = true;
       }
     }
@@ -2557,8 +2620,8 @@
     container.querySelectorAll('[data-cv2-terrain-height]').forEach(function (inp) {
       var key = inp.dataset.cv2TerrainHeight;
       inp.addEventListener('change', function () {
-        var raw = parseFloat(inp.value);
-        if (!isValidAntennaHeight(raw)) {
+        var raw = _parseAntennaHeight(inp.value);
+        if (raw === null) {
           // Put the effective value back rather than storing nonsense.
           inp.value = String(terrainSettings(_getEffective())[key]);
           return;
@@ -2627,10 +2690,16 @@
       var key = parts[1];
       // Optimistic CSS for color pickers on input event
       if (inp.type === 'color') {
+        // The value to store: the pick, with the alpha of the colour it
+        // replaces when that one was translucent (review PR#714).
+        var picked = function () {
+          var a = inp.getAttribute('data-cv2-alpha');
+          return a ? _hexWithAlpha(inp.value, Number(a)) : inp.value;
+        };
         inp.addEventListener('input', function () {
           // Optimistic CSS update (Decision #12)
           var cssVar = THEME_CSS_MAP[key];
-          if (cssVar) document.documentElement.style.setProperty(cssVar, inp.value);
+          if (cssVar) document.documentElement.style.setProperty(cssVar, picked());
           // Mirror to logo brand vars so the wordmark recolors live too.
           if (key === 'accent') document.documentElement.style.setProperty('--logo-accent', inp.value);
           if (key === 'accentHover') document.documentElement.style.setProperty('--logo-accent-hi', inp.value);
@@ -2641,13 +2710,13 @@
           }
           // Update hex display
           var hex = inp.parentElement.querySelector('.cust-hex');
-          if (hex) hex.textContent = inp.value;
+          if (hex) hex.textContent = picked();
           // Update node dot
           var dot = inp.parentElement.querySelector('.cust-node-dot');
           if (dot) dot.style.background = inp.value;
         });
         inp.addEventListener('change', function () {
-          setOverride(section, key, inp.value);
+          setOverride(section, key, picked());
         });
       } else {
         // Text inputs — debounced write on input
@@ -3180,6 +3249,8 @@
     isValidColor: isValidColor,
     // #681 M6 — exposed for tests; see test-issue-681-m6-customizer-terrain.js.
     cssColorToHex: _cssColorToHex,
+    colorWithAlpha: _colorWithAlpha,
+    renderTerrainSettings: _renderTerrainSettings,
     isValidHomeUrl: isValidHomeUrl,
     isOverridden: _isOverridden,
     // #1496 — full reset (not just STORAGE_KEY). See _resetAll() above.
@@ -3193,7 +3264,6 @@
     // #681 M6 — exposed for tests; see test-issue-681-m6-customizer-terrain.js.
     TERRAIN_DEFAULTS: TERRAIN_DEFAULTS,
     TERRAIN_COLOR_KEYS: TERRAIN_COLOR_KEYS,
-    TERRAIN_MAX_HEIGHT_M: TERRAIN_MAX_HEIGHT_M,
     VALID_SECTIONS: VALID_SECTIONS,
     isValidAntennaHeight: isValidAntennaHeight,
     terrainSettings: terrainSettings
