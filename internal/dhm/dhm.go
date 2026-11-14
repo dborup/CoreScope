@@ -68,6 +68,7 @@ type ProfileConfig struct {
 	CacheTTLHours     *float64 `json:"cacheTTLHours"`
 	UpstreamTimeoutMs *int     `json:"upstreamTimeoutMs"`
 	RateLimitPerMin   *int     `json:"rateLimitPerMin"`
+	MaxInFlight       *int     `json:"maxInFlight"`
 }
 
 // Active reports whether DHM features may be offered: enabled with a token.

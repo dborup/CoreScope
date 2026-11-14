@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -446,6 +447,93 @@ func TestTerrainProfile_SingleflightCollapses20Requests(t *testing.T) {
 	}
 }
 
+// #696 finding 1: uncached profiles in flight are bounded server-wide,
+// whatever the number of client addresses. Each admitted profile runs
+// 2 models × 8 rasters here; without the bound 40 distinct concurrent
+// requests ran 40 such fetches at once (the review measured 681
+// goroutines), all waiting on the shared upstream budget. Beyond the
+// bound a request gets 503 with Retry-After at once, and cancellation
+// still frees both the goroutines and the slots.
+func TestTerrainProfile_GlobalInFlightBound(t *testing.T) {
+	var blocked atomic.Int64
+	var release atomic.Bool
+	src := newFakeElevation(t, flatElev(0))
+	src.hook = func(ctx context.Context, r dhm.RasterRequest) error {
+		if release.Load() {
+			return nil
+		}
+		blocked.Add(1)
+		defer blocked.Add(-1)
+		<-ctx.Done()
+		return dhm.FetchError{Reason: "canceled"}
+	}
+	env := newTerrainEnv(t, src, dhm.ProfileConfig{}, nil)
+	limit := env.p.set.maxInFlight
+	if limit != 4 {
+		t.Fatalf("default maxInFlight %d, want 4", limit)
+	}
+	// perProfile: a 20 km diagonal with chunkKm 2.5 and model=both.
+	const n, perProfile = 40, 16
+	// A distinct path per i, so no request joins another's fetch.
+	queryFor := func(i int) string {
+		return pathQuery(aarhusPt, offsetPt(56.1629, 10.2039, 20000/math.Sqrt2+float64(3*i), 20000/math.Sqrt2))
+	}
+	runtime.GC()
+	baseline := runtime.NumGoroutine()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var wg sync.WaitGroup
+	answered := make(chan *httptest.ResponseRecorder, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			answered <- env.get(queryFor(i), func(r *http.Request) {
+				*r = *r.WithContext(ctx)
+				r.RemoteAddr = fmt.Sprintf("198.51.100.%d:1000", i+1) // own per-IP budget each
+			})
+		}(i)
+	}
+	settled := func() bool { return blocked.Load() == int64(limit*perProfile) && len(answered) == n-limit }
+	for deadline := time.Now().Add(3 * time.Second); !settled() && time.Now().Before(deadline); {
+		time.Sleep(2 * time.Millisecond)
+	}
+	// Per admitted profile: its request, the flight, two model fetches
+	// and perProfile rasters. Unbounded this is n×(4+perProfile) = 800.
+	if got, max := runtime.NumGoroutine()-baseline, limit*(4+perProfile)+8; got > max {
+		t.Fatalf("%d goroutines for %d concurrent profiles, want at most %d", got, n, max)
+	}
+	if !settled() {
+		t.Fatalf("%d rasters blocked upstream, %d requests answered; want %d and %d",
+			blocked.Load(), len(answered), limit*perProfile, n-limit)
+	}
+	if calls := src.calls.Load(); calls != int64(limit*perProfile) {
+		t.Fatalf("%d upstream calls, want %d", calls, limit*perProfile)
+	}
+	for busy := 0; busy < n-limit; busy++ {
+		w := <-answered
+		wantError(t, w, http.StatusServiceUnavailable, "terrain profiles busy")
+		if w.Header().Get("Retry-After") != "5" {
+			t.Fatalf("Retry-After %q", w.Header().Get("Retry-After"))
+		}
+	}
+	if strings.Contains(env.logs.String(), "upstream") {
+		t.Fatalf("a busy answer was logged as an upstream failure: %q", env.logs.String())
+	}
+
+	// The clients leave: every goroutine and every slot is released.
+	cancel()
+	wg.Wait()
+	waitUntil(t, "goroutines back to baseline", func() bool { return runtime.NumGoroutine() <= baseline+2 })
+	if blocked.Load() != 0 || env.p.cache.Len() != 0 {
+		t.Fatalf("blocked %d, cached %d after cancel", blocked.Load(), env.p.cache.Len())
+	}
+	release.Store(true)
+	for i := 0; i < limit; i++ {
+		decodeProfile(t, env.get(queryFor(100+i), func(r *http.Request) { r.RemoteAddr = "203.0.113.9:1000" }))
+	}
+}
+
 // ── Upstream failures ──────────────────────────────────────────────────────
 
 // wcsUpstream is a fake dhm_wcs_DAF: h answers GetCoverage; tiles on
@@ -815,6 +903,41 @@ func TestTerrainProfile_SurfaceVerdictGatedByCoverage(t *testing.T) {
 	}
 }
 
+// #696 finding 2: a nodata endpoint in either model makes that model's
+// verdict unknown. The DSM gap is the one that used to pass: the endpoint
+// heights come from the DTM, so only the series itself shows it.
+func TestTerrainProfile_EndpointNodata(t *testing.T) {
+	e0, _ := dhm.ToUTM32(56.1629, 10.2039)
+	gapAtA := func(e, n float64) float32 { // nodata west of A only
+		if e < e0 {
+			return -9999
+		}
+		return 0
+	}
+	// 60 m masts over flat ground: the whole F1 zone is clear.
+	q := pathQuery(aarhusPt, offsetPt(56.1629, 10.2039, 5000, 0), "ha=60", "hb=60")
+	t.Run("dsm", func(t *testing.T) {
+		split := modelSplit{dtm: newFakeElevation(t, flatElev(0)), dsm: newFakeElevation(t, gapAtA)}
+		resp := decodeProfile(t, newTerrainEnv(t, split, dhm.ProfileConfig{}, nil).get(q))
+		if resp.Coverage.State != "full" || resp.Verdict.State != "clear" {
+			t.Fatalf("DTM side should be full and clear: %+v %+v", resp.Coverage, resp.Verdict)
+		}
+		if resp.Samples[0].DSM != nil || resp.Samples[1].DSM == nil {
+			t.Fatalf("fixture: want a DSM gap at A only, samples %+v %+v", resp.Samples[0], resp.Samples[1])
+		}
+		if s := resp.Verdict.Surface; s == nil || s.State != "unknown" || s.WorstClearanceM != nil {
+			t.Fatalf("surface verdict with a DSM endpoint gap: %+v", s)
+		}
+	})
+	t.Run("dtm", func(t *testing.T) {
+		split := modelSplit{dtm: newFakeElevation(t, gapAtA), dsm: newFakeElevation(t, flatElev(0))}
+		resp := decodeProfile(t, newTerrainEnv(t, split, dhm.ProfileConfig{}, nil).get(q))
+		if resp.A.GroundM != nil || resp.Verdict.State != "unknown" || resp.Verdict.Surface.State != "unknown" {
+			t.Fatalf("DTM endpoint gap: A %+v verdict %+v surface %+v", resp.A, resp.Verdict, resp.Verdict.Surface)
+		}
+	})
+}
+
 // modelSplit serves DTM and DSM from different sources.
 type modelSplit struct{ dtm, dsm dhm.ElevationSource }
 
@@ -1092,7 +1215,7 @@ func TestTerrainProfile_SettingsDefaultsAndClamps(t *testing.T) {
 	logs := &dhmLogSink{}
 	s := resolveTerrainSettings(dhm.ProfileConfig{}, logs.logf)
 	if s.maxPathM != 80000 || s.plan.MaxSamples != 3200 || s.plan.ChunkM != 2500 || s.cacheEntries != 256 ||
-		s.cacheTTL != 24*time.Hour || s.upstreamTimeout != 10*time.Second || s.rateLimitPerMin != 10 {
+		s.cacheTTL != 24*time.Hour || s.upstreamTimeout != 10*time.Second || s.rateLimitPerMin != 10 || s.maxInFlight != 4 {
 		t.Fatalf("defaults %+v", s)
 	}
 	s = resolveTerrainSettings(dhm.ProfileConfig{MaxPathKm: floatp(500), MaxSamples: intp(99999), ChunkKm: floatp(0),
@@ -1105,7 +1228,13 @@ func TestTerrainProfile_SettingsDefaultsAndClamps(t *testing.T) {
 	if s.rateLimitPerMin != 10 {
 		t.Fatalf("negative rateLimitPerMin → %d", s.rateLimitPerMin)
 	}
-	for _, k := range []string{"maxPathKm", "maxSamples", "cacheEntries", "cacheTTLHours", "upstreamTimeoutMs", "rateLimitPerMin"} {
+	// maxInFlight is 1-64: 0 would refuse every uncached profile.
+	for v, want := range map[int]int{0: 4, 65: 4, 1: 1, 64: 64} {
+		if got := resolveTerrainSettings(dhm.ProfileConfig{MaxInFlight: intp(v)}, logs.logf).maxInFlight; got != want {
+			t.Fatalf("maxInFlight %d → %d, want %d", v, got, want)
+		}
+	}
+	for _, k := range []string{"maxPathKm", "maxSamples", "cacheEntries", "cacheTTLHours", "upstreamTimeoutMs", "rateLimitPerMin", "maxInFlight"} {
 		if !strings.Contains(logs.String(), k) {
 			t.Fatalf("out-of-range %s not warned: %q", k, logs.String())
 		}
@@ -1115,7 +1244,7 @@ func TestTerrainProfile_SettingsDefaultsAndClamps(t *testing.T) {
 func TestTerrainProfile_ConfigLoadsAndStaysServerSide(t *testing.T) {
 	dir := t.TempDir()
 	cfgJSON := `{"map":{"dhm":{"enabled":true,"token":"` + dhmTestToken + `","tileRateLimitPerMin":300,
-		"profile":{"enabled":true,"maxPathKm":40,"chunkKm":5,"rateLimitPerMin":4}}},
+		"profile":{"enabled":true,"maxPathKm":40,"chunkKm":5,"rateLimitPerMin":4,"maxInFlight":2}}},
 		"radio":{"defaultFreqMHz":868.1,"kFactor":1,"antennaHeightsM":{"repeater":12}}}`
 	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfgJSON), 0o600); err != nil {
 		t.Fatal(err)
@@ -1132,7 +1261,7 @@ func TestTerrainProfile_ConfigLoadsAndStaysServerSide(t *testing.T) {
 		t.Fatalf("radio config %+v", cfg.Radio)
 	}
 	srv := NewServer(setupTestDB(t), cfg, NewHub())
-	if srv.terrain == nil || srv.dhm == nil || srv.terrain.set.maxPathM != 40000 {
+	if srv.terrain == nil || srv.dhm == nil || srv.terrain.set.maxPathM != 40000 || cap(srv.terrain.admit) != 2 {
 		t.Fatal("profile not wired from config")
 	}
 	if srv.dhm.limiter == nil || srv.terrain.limiter == nil {
@@ -1210,7 +1339,7 @@ func TestTerrainProfile_OpenAPI(t *testing.T) {
 	for _, e := range m.Errors {
 		codes[e.Status] = true
 	}
-	for _, c := range []string{"400", "404", "429", "502", "504"} {
+	for _, c := range []string{"400", "404", "429", "502", "503", "504"} {
 		if !codes[c] {
 			t.Fatalf("error %s undocumented", c)
 		}

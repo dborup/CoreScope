@@ -25,6 +25,10 @@ package main
 //     sea is covered, Danish or not: 0.0 is its true height, except within
 //     about 1.25 km of a foreign coast, where the coarse coastline could
 //     put foreign land (#693 review round 2).
+//   - At most map.dhm.profile.maxInFlight distinct profile fetches run at
+//     once, server-wide; beyond that a request is 503 with Retry-After
+//     before any raster work starts (#696). The per-IP budget alone does
+//     not bound the total across addresses.
 //   - Identical concurrent requests share one fetch (dhm.Flight), which
 //     stops when every requester has gone or after the 25 s profile
 //     deadline, releasing the client's concurrency slots (#683 review N3).
@@ -63,6 +67,9 @@ import (
 const (
 	// terrainDeadline bounds a whole profile fetch (plan §7).
 	terrainDeadline = 25 * time.Second
+	// terrainBusyRetry is the Retry-After of a 503 when maxInFlight
+	// profiles are already being fetched: a few cold profiles' time.
+	terrainBusyRetry = 5 * time.Second
 	// terrainMaxReturned is the most samples a response carries; the
 	// worst points are always among them (dhm.Decimate).
 	terrainMaxReturned = 1024
@@ -114,6 +121,7 @@ type terrainSettings struct {
 	cacheTTL        time.Duration
 	upstreamTimeout time.Duration
 	rateLimitPerMin int
+	maxInFlight     int
 }
 
 // resolveTerrainSettings applies the defaults and bounds. An out-of-range
@@ -152,6 +160,10 @@ func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface
 		// Capped at the shared client's own 10 s per-request timeout.
 		upstreamTimeout: time.Duration(integer("upstreamTimeoutMs", pc.UpstreamTimeoutMs, 10000, 500, 10000)) * time.Millisecond,
 		rateLimitPerMin: integer("rateLimitPerMin", pc.RateLimitPerMin, 10, 0, 6000),
+		// 4 matches the shared DHM client's upstream budget: one model=both
+		// profile has up to 32 rasters, so it can fill all 4 slots on its
+		// own, and more profiles in flight would only queue goroutines.
+		maxInFlight: integer("maxInFlight", pc.MaxInFlight, 4, 1, 64),
 	}
 }
 
@@ -211,6 +223,7 @@ type terrainProfiler struct {
 	cache      *dhm.Cache[terrainKey]
 	flight     dhm.Flight[[]byte]
 	limiter    *ipRateLimiter // nil: no per-client limit
+	admit      chan struct{}  // one token per profile fetch in flight (maxInFlight)
 	deadline   time.Duration
 	now        func() time.Time
 	logf       func(string, ...interface{})
@@ -265,6 +278,7 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 		radio:      resolveTerrainRadio(rc, d.logf),
 		cache:      dhm.NewCache[terrainKey](set.cacheEntries, maxBytes, set.cacheTTL),
 		limiter:    newIPRateLimiter("map.dhm.profile.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
+		admit:      make(chan struct{}, set.maxInFlight),
 		deadline:   terrainDeadline,
 		now:        time.Now,
 		logf:       d.logf,
@@ -317,6 +331,9 @@ type terrainQuery struct {
 }
 
 var errTerrainQuery = dhm.ErrBadRequest
+
+// errTerrainBusy: maxInFlight profile fetches are already running.
+var errTerrainBusy = errors.New("terrain profiles busy")
 
 func parseTerrainQuery(q url.Values) (terrainQuery, error) {
 	var tq terrainQuery
@@ -548,6 +565,14 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			data, _, err = p.flight.Do(r.Context(), key.String(), p.deadline, func(ctx context.Context) ([]byte, error) {
+				// Admission is per fetch, not per request: callers that
+				// join a running fetch add no work and are not counted.
+				select {
+				case p.admit <- struct{}{}:
+					defer func() { <-p.admit }()
+				default:
+					return nil, errTerrainBusy
+				}
 				e, err := p.fetch(ctx, &plan, tq.both)
 				if err != nil {
 					return nil, err
@@ -575,6 +600,11 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 // upstream text; the log line carries the category only.
 func (p *terrainProfiler) writeFetchError(w http.ResponseWriter, r *http.Request, err error) {
 	if r.Context().Err() != nil {
+		return
+	}
+	if errors.Is(err, errTerrainBusy) {
+		setRetryAfter(w, terrainBusyRetry)
+		writeError(w, http.StatusServiceUnavailable, errTerrainBusy.Error())
 		return
 	}
 	if p.logFailure != nil {

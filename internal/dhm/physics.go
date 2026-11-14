@@ -85,12 +85,16 @@ type Assessment struct {
 // Assess finds the interior sample with the smallest clearance ratio.
 // The line of sight is kept straight and the earth bulge is added to the
 // surface, the conventional path-profile rendering (plan §4.3). Any
-// missing value (NaN), at an interior sample or in an endpoint height,
-// makes the verdict unknown: a partial profile never reports "clear".
+// missing value (NaN), at any sample of surface, endpoints included, or
+// in an endpoint height, makes the verdict unknown: a partial profile
+// never reports "clear". The endpoint heights come from the DTM, so the
+// series' own endpoints are checked too: a DSM gap at an antenna is
+// otherwise invisible (#696).
 func (l Link) Assess(surface []float32) Assessment {
 	unknown := Assessment{State: VerdictUnknown, WorstIndex: -1}
 	n := len(surface)
-	if n < 3 || math.IsNaN(l.HeightA) || math.IsNaN(l.HeightB) {
+	if n < 3 || math.IsNaN(l.HeightA) || math.IsNaN(l.HeightB) ||
+		math.IsNaN(float64(surface[0])) || math.IsNaN(float64(surface[n-1])) {
 		return unknown
 	}
 	step := l.DistanceM / float64(n-1)
