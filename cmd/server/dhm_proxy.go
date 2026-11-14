@@ -34,7 +34,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"image"
 	"image/png"
 	"log"
@@ -42,7 +41,6 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/meshcore-analyzer/dhm"
@@ -124,42 +122,6 @@ func (c *Config) extractDHMConfig() {
 func (c *Config) extractTypedMapBlocks() {
 	c.extractDHMConfig()
 	c.extractHeritageConfig()
-}
-
-// liftMapBlock moves c.Map[key] into *dst and deletes it from c.Map, which
-// /api/config/client ships verbatim. The raw block is deleted even when it
-// is malformed; *dst is then left zero (feature off) with a warning.
-//
-// Key lookup in c.Map is case-sensitive. A case variant (`DHM`, `Dhm`, …)
-// is removed too, with a warning, but it does not fill *dst: only the
-// documented spelling does, so the result never depends on which of several
-// spellings map iteration meets first.
-func liftMapBlock[T any](c *Config, key, feature string, dst *T) {
-	m := c.Map
-	if m == nil {
-		return
-	}
-	for k := range m {
-		if k != key && strings.EqualFold(k, key) {
-			delete(m, k)
-			log.Printf("[%s] config map.%s ignored and removed from the client config; the key must be spelled map.%s", key, k, key)
-		}
-	}
-	raw, ok := m[key]
-	if !ok {
-		return
-	}
-	delete(m, key)
-	var zero T
-	*dst = zero
-	b, err := json.Marshal(raw)
-	if err == nil {
-		err = json.Unmarshal(b, dst)
-	}
-	if err != nil {
-		*dst = zero
-		log.Printf("[%s] config map.%s is malformed; %s disabled", key, key, feature)
-	}
 }
 
 // ── Proxy ──────────────────────────────────────────────────────────────────
