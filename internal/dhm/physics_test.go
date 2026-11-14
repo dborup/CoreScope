@@ -280,9 +280,9 @@ func TestAssessSurfaceAboveAntennaIsBlocked(t *testing.T) {
 
 // TestDecimateKeepIndicesWhileTheyFit (#745): keep indices are taken in
 // the order given while they fit, so a caller can pass every gap edge of
-// a fragmented profile without breaking the bound. Before, each keep was
-// added on top of the evenly spaced picks, so 2000 of them returned 2002
-// indices.
+// a fragmented profile without breaking the bound. Before, the evenly
+// spaced picks got max minus the keep count, so 2000 keep indices left
+// none: 2000 indices came back, without the first and the last.
 func TestDecimateKeepIndicesWhileTheyFit(t *testing.T) {
 	const n, max = 3200, 1024
 	var keep []int
