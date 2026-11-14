@@ -354,6 +354,125 @@ test('a missing response is unknown, not a crash', () => {
   assert.strictEqual(TP.verdictChip({}).state, 'unknown');
 });
 
+// ── 3b. Surface (buildings/trees) chip, #729 ───────────────────────────────
+
+console.log('\n=== #729: surface chip ===');
+
+/* The server already answers verdict.surface (cmd/server/terrain_profile.go,
+ * #689 M3): the DTM decides the verdict, the DSM is information only (owner
+ * decision 6 on #681). These cases pin the UI side of that split — the main
+ * chip says which model it speaks for, and a surface verdict that is WORSE
+ * than the terrain one gets a chip of its own instead of disappearing into
+ * the hatched band. */
+function surf(terrain, surface, over) {
+  return Object.assign({
+    model: 'both',
+    coverage: { state: 'full', pct: 100, firstGapM: null },
+    verdict: {
+      state: terrain, model: 'dtm', criterion: 0.6,
+      worstClearanceM: 6.9, worstAtM: 138, worstF1Fraction: 1.1,
+      surface: surface === null ? undefined
+        : { state: surface, worstClearanceM: -17.5, worstAtM: 138, worstF1Fraction: -2.1 },
+    },
+  }, over || {});
+}
+
+// Worst first. The chip appears exactly when the surface sits below the
+// terrain on this ladder, which is the "worse than" of the issue.
+const LADDER = ['blocked', 'fresnel60', 'fresnel100', 'clear'];
+
+test('the Dokk1 case: terrain clear, surface blocked → a warn chip of its own', () => {
+  const c = TP.surfaceChip(surf('clear', 'blocked'));
+  assert.ok(c, 'no surface chip at all');
+  assert.strictEqual(c.show, true, 'the surface chip was hidden');
+  assert.strictEqual(c.state, 'blocked');
+  assert.strictEqual(c.tone, 'warn', 'tone = ' + c.tone);
+  assert.strictEqual(c.label, 'Buildings/trees: Blocked');
+  assert.ok(/buildings|trees/i.test(c.detail), c.detail);
+});
+
+test('the main chip names its model when the surface is in play', () => {
+  assert.strictEqual(TP.verdictChip(surf('clear', 'blocked')).label, 'Terrain: Clear');
+  assert.strictEqual(TP.verdictChip(surf('blocked', 'blocked')).label, 'Terrain: Blocked');
+});
+
+test('with "Terrain only" the main chip keeps its bare label', () => {
+  const d = surf('clear', 'blocked', { model: 'dtm' });
+  assert.strictEqual(TP.verdictChip(d).label, 'Clear');
+});
+
+test('with "Terrain only" there is no surface chip, even with surface data', () => {
+  assert.strictEqual(TP.surfaceChip(surf('clear', 'blocked', { model: 'dtm' })), null);
+});
+
+test('a response with no verdict.surface has no surface chip', () => {
+  assert.strictEqual(TP.surfaceChip(surf('clear', null)), null);
+  assert.strictEqual(TP.surfaceChip(null), null);
+  assert.strictEqual(TP.surfaceChip({}), null);
+});
+
+test('every terrain/surface combination: shown only when the surface is worse', () => {
+  LADDER.forEach((t, ti) => {
+    LADDER.forEach((s, si) => {
+      const c = TP.surfaceChip(surf(t, s));
+      assert.ok(c, 'no chip object for ' + t + '/' + s);
+      assert.strictEqual(c.state, s, t + '/' + s + ' mapped to ' + c.state);
+      assert.strictEqual(c.label, 'Buildings/trees: ' + TP.verdictChip(surf(s, null, { model: 'dtm' })).label,
+        'label mismatch for ' + t + '/' + s + ': ' + c.label);
+      assert.strictEqual(c.show, si < ti,
+        t + '/' + s + ' show = ' + c.show + ', expected ' + (si < ti));
+    });
+  });
+});
+
+test('the two agreeing hides the chip, on every state', () => {
+  LADDER.forEach((s) => {
+    assert.strictEqual(TP.surfaceChip(surf(s, s)).show, false, s + '/' + s + ' was shown');
+  });
+});
+
+test('a surface better than the terrain is not a second verdict either', () => {
+  // DSM ≥ DTM by construction, so this should never arrive; if it does, the
+  // panel must not use it to soften a bad terrain verdict.
+  assert.strictEqual(TP.surfaceChip(surf('blocked', 'clear')).show, false);
+});
+
+test('partial coverage makes the surface unknown, never clear (#689 N1)', () => {
+  const d = surf('unknown', 'clear', { coverage: { state: 'partial', pct: 62.5, firstGapM: 7500 } });
+  const c = TP.surfaceChip(d);
+  assert.ok(c, 'no surface chip object on a partial profile');
+  assert.strictEqual(c.state, 'unknown', 'a partial profile reported ' + c.state);
+  assert.ok(!/clear/i.test(c.label), 'a partial profile offered "' + c.label + '"');
+  assert.strictEqual(c.show, false, 'an unjudged surface was shown as a verdict');
+});
+
+test('partial coverage downgrades a blocked surface too', () => {
+  const d = surf('unknown', 'blocked', { coverage: { state: 'partial', pct: 62.5, firstGapM: 7500 } });
+  const c = TP.surfaceChip(d);
+  assert.strictEqual(c.state, 'unknown', 'state = ' + c.state);
+  assert.strictEqual(c.show, false);
+});
+
+test('no coverage at all is never a surface verdict', () => {
+  LADDER.forEach((s) => {
+    const c = TP.surfaceChip(surf('unknown', s, { coverage: { state: 'none', pct: 0, firstGapM: 0 } }));
+    assert.strictEqual(c.state, 'unknown', s + ' survived a coverage of none');
+    assert.strictEqual(c.show, false, s + ' was shown with no coverage');
+  });
+});
+
+test('an unrecognised surface state degrades to unknown, never to a tone', () => {
+  const c = TP.surfaceChip(surf('clear', 'totally-new-state'));
+  assert.strictEqual(c.state, 'unknown');
+  assert.strictEqual(c.show, false, 'a state this build does not know was shown anyway');
+});
+
+test('the explanatory line separates blocking from attenuation', () => {
+  assert.ok(/buildings/i.test(TP.SURFACE_NOTE), TP.SURFACE_NOTE);
+  assert.ok(/trees/i.test(TP.SURFACE_NOTE), TP.SURFACE_NOTE);
+  assert.ok(/attenuat/i.test(TP.SURFACE_NOTE), TP.SURFACE_NOTE);
+});
+
 // ── 4. SVG geometry ────────────────────────────────────────────────────────
 
 console.log('\n=== #681 M4: chart geometry ===');
@@ -689,6 +808,62 @@ test('a hostile node name cannot break out of the endpoint labels', () => {
 test('escaping covers every HTML metacharacter', () => {
   const svg = TP.buildChart(flatPath(), { nameA: `<>&"'`, nameB: 'ok' });
   assert.ok(svg.indexOf('&lt;&gt;&amp;&quot;&#39;') >= 0, 'incomplete escaping');
+});
+
+/* #729 — a Dokk1-shaped profile: the DTM is well clear, the DSM is a 28 m
+ * building at 138 m of a 237 m path. Both verdicts have to reach a screen
+ * reader, not just the hatched band in the picture. */
+function dokk1Path() {
+  const d = flatPath();
+  d.model = 'both';
+  d.distanceM = 237;
+  d.samples = [{ d: 0, dtm: 0, dsm: 0 }, { d: 138, dtm: 0, dsm: 28 }, { d: 237, dtm: 0, dsm: 0 }];
+  d.verdict = {
+    state: 'clear', model: 'dtm', criterion: 0.6,
+    worstClearanceM: 6.9, worstAtM: 138, worstF1Fraction: 1.1,
+    surface: { state: 'blocked', worstClearanceM: -17.5, worstAtM: 138, worstF1Fraction: -2.6 },
+  };
+  return d;
+}
+
+test('#729: the chart title names both verdicts', () => {
+  const svg = TP.buildChart(dokk1Path(), { nameA: 'Alfa', nameB: 'Bravo' });
+  const m = svg.match(/<title>([\s\S]*?)<\/title>/);
+  assert.ok(m, 'missing <title>');
+  assert.ok(/Terrain: Clear/.test(m[1]), m[1]);
+  assert.ok(/Buildings\/trees: Blocked/.test(m[1]), m[1]);
+});
+
+test('#729: the chart\'s accessible name carries both verdicts too', () => {
+  // role="img" + aria-label: the label is the accessible NAME, so a verdict
+  // that lives only in <title> is never announced.
+  const svg = TP.buildChart(dokk1Path(), { nameA: 'Alfa', nameB: 'Bravo' });
+  const m = svg.match(/aria-label="([^"]*)"/);
+  assert.ok(m, 'missing aria-label');
+  assert.ok(/Terrain: Clear/.test(m[1]), m[1]);
+  assert.ok(/Buildings\/trees: Blocked/.test(m[1]), m[1]);
+});
+
+test('#729: an agreeing surface adds nothing to the chart title', () => {
+  const d = dokk1Path();
+  d.verdict.surface.state = 'clear';
+  const svg = TP.buildChart(d, { nameA: 'Alfa', nameB: 'Bravo' });
+  assert.strictEqual(svg.indexOf('Buildings/trees'), -1, 'a hidden chip still reached the title');
+});
+
+test('#729: a hostile node name is still escaped with the surface chip in play', () => {
+  const svg = TP.buildChart(dokk1Path(), { nameA: TAG_PAYLOAD, nameB: 'ok' });
+  assert.strictEqual(svg.indexOf('<img'), -1, 'raw tag reached the SVG');
+  assert.ok(svg.indexOf('&lt;img src=x onerror=alert(1)&gt;') >= 0, 'expected the payload escaped');
+  // The aria-label is a quoted attribute built by concatenation; a name that
+  // closes it would hand an attacker an event handler on the <svg>.
+  const m = svg.match(/aria-label="([^"]*)"/);
+  assert.ok(m && /Terrain: Clear/.test(m[1]), 'aria-label broken: ' + (m && m[1]));
+});
+
+test('#729: the chart still uses only CSS variables with the surface band', () => {
+  assert.strictEqual(/#[0-9a-fA-F]{3,8}\b/.test(TP.buildChart(dokk1Path(), {})), false,
+    'hard-coded colour in the chart SVG');
 });
 
 // ── 7. The request sequence guard (review F4) ──────────────────────────────

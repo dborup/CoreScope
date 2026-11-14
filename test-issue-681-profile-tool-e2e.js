@@ -93,7 +93,10 @@ function baseProfile(q, over) {
     coverage: { state: 'full', pct: 100, firstGapM: null },
     samples: samples(120, D, (d) => ({ dtm: 30 + 18 * Math.sin(d / 900), dsm: 42 + 18 * Math.sin(d / 900) })),
     physics: { freqMHz: 869.618, freqSource: 'firmware', lambdaM: 0.34474, k: 1.3333333333333333, kSource: 'default', f1MaxM: 32.14 },
-    verdict: { state: 'clear', model: 'dtm', criterion: 0.6, worstClearanceM: 41.2, worstAtM: 5000, worstF1Fraction: 1.4 },
+    verdict: { state: 'clear', model: 'dtm', criterion: 0.6, worstClearanceM: 41.2, worstAtM: 5000, worstF1Fraction: 1.4,
+      // The surface agrees with the terrain here, so #729's second chip
+      // stays hidden on the ordinary clear profile.
+      surface: { state: 'clear', worstClearanceM: 29.1, worstAtM: 5000, worstF1Fraction: 1.0 } },
     attribution: ATTRIBUTION,
   }, over || {});
 }
@@ -106,7 +109,8 @@ function profileFor(scenario, q) {
         const ridge = Math.abs(d - 6200) < 700 ? 130 * (1 - Math.abs(d - 6200) / 700) : 0;
         return { dtm: 18 + 6 * Math.sin(d / 900) + ridge, dsm: 27 + 6 * Math.sin(d / 900) + ridge };
       }),
-      verdict: { state: 'blocked', model: 'dtm', criterion: 0.6, worstClearanceM: -72.4, worstAtM: 6200, worstF1Fraction: -2.3 },
+      verdict: { state: 'blocked', model: 'dtm', criterion: 0.6, worstClearanceM: -72.4, worstAtM: 6200, worstF1Fraction: -2.3,
+        surface: { state: 'blocked', worstClearanceM: -81.3, worstAtM: 6200, worstF1Fraction: -2.6 } },
     });
   }
   if (scenario === 'partial') {
@@ -116,7 +120,10 @@ function profileFor(scenario, q) {
       samples: samples(120, D, (d) => (d >= 7500
         ? { dtm: null, dsm: null }
         : { dtm: 30 + 18 * Math.sin(d / 900), dsm: 42 + 18 * Math.sin(d / 900) })),
-      verdict: { state: 'unknown', model: 'dtm', criterion: 0.6, worstClearanceM: null, worstAtM: null, worstF1Fraction: null },
+      // #689 review N1: the server forces the surface to unknown on any
+      // coverage but full, whatever the DSM itself measured.
+      verdict: { state: 'unknown', model: 'dtm', criterion: 0.6, worstClearanceM: null, worstAtM: null, worstF1Fraction: null,
+        surface: { state: 'unknown', worstClearanceM: null, worstAtM: null, worstF1Fraction: null } },
     });
   }
   if (scenario === 'none') {
@@ -125,7 +132,23 @@ function profileFor(scenario, q) {
       b: Object.assign(baseProfile(q).b, { groundM: null }),
       coverage: { state: 'none', pct: 0, firstGapM: 0 },
       samples: [],
-      verdict: { state: 'unknown', model: 'dtm', criterion: 0.6, worstClearanceM: null, worstAtM: null, worstF1Fraction: null },
+      verdict: { state: 'unknown', model: 'dtm', criterion: 0.6, worstClearanceM: null, worstAtM: null, worstF1Fraction: null,
+        surface: { state: 'unknown', worstClearanceM: null, worstAtM: null, worstF1Fraction: null } },
+    });
+  }
+  /* #729 — the case from the issue: the link through Dokk1 in Aarhus. The
+   * terrain (DTM) clearance is +6.9 m, so the server says "clear"; the
+   * surface (DSM) carries a ~28 m building at 138 m of the 237 m path and
+   * says "blocked". The panel used to show only the first. */
+  if (scenario === 'dokk1') {
+    const L = 237, base = baseProfile(q);
+    return Object.assign(base, {
+      a: Object.assign(base.a, { groundM: 5 }),
+      b: Object.assign(base.b, { groundM: 5 }),
+      distanceM: L, stepM: 10, sampleCount: 24,
+      samples: samples(60, L, (d) => ({ dtm: 5, dsm: Math.abs(d - 138) < 14 ? 33 : 5 })),
+      verdict: { state: 'clear', model: 'dtm', criterion: 0.6, worstClearanceM: 6.9, worstAtM: 138, worstF1Fraction: 1.1,
+        surface: { state: 'blocked', worstClearanceM: -17.5, worstAtM: 138, worstF1Fraction: -2.6 } },
     });
   }
   return baseProfile(q);
@@ -192,8 +215,12 @@ const OBS_ONLY = {
           body: JSON.stringify({ error: 'node not found' }) });
         return;
       }
+      const body = profileFor(rec.scenario, u.searchParams);
+      // The server only assesses the DSM when it fetched one: with
+      // model=dtm there is no verdict.surface at all.
+      if (body.model === 'dtm' && body.verdict) delete body.verdict.surface;
       await route.fulfill({ status: 200, contentType: 'application/json',
-        body: JSON.stringify(profileFor(rec.scenario, u.searchParams)) });
+        body: JSON.stringify(body) });
     });
     // Hillshade tiles and every third-party image are stubbed; nothing in
     // this suite may reach a real network.
@@ -301,6 +328,18 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
         })[0] || null,
         svgTitle: svg ? (svg.querySelector('title') || {}).textContent || '' : null,
         svgRole: svg ? svg.getAttribute('role') : null,
+        svgAria: svg ? svg.getAttribute('aria-label') : null,
+        // #729: the surface (buildings/trees) chip and the line that
+        // explains it. Both are built up front and toggled with [hidden].
+        surfaceChip: (() => {
+          const b = q('[data-testid="tp-surface-chip"]');
+          return b ? { text: b.textContent, state: b.getAttribute('data-state'),
+            shown: !b.hidden && getComputedStyle(b).display !== 'none' } : null;
+        })(),
+        surfaceNote: (() => {
+          const n = q('[data-testid="tp-surface-note"]');
+          return n ? { text: n.textContent, shown: !n.hidden && getComputedStyle(n).display !== 'none' } : null;
+        })(),
         status: (q('[data-testid="tp-status"]') || {}).textContent || '',
         assumedChip: (() => {
           const b = q('[data-testid="tp-assumed-chip"]');
@@ -364,7 +403,11 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
       await page.waitForTimeout(900);
       const st = await panelState(page);
       assert(st.open, 'panel did not open');
-      assert(st.chip === 'Clear', 'chip = ' + st.chip);
+      // #729: with the surface model in play the chip names its model.
+      assert(st.chip === 'Terrain: Clear', 'chip = ' + st.chip);
+      assert(st.surfaceChip, 'the surface chip was never built');
+      assert(!st.surfaceChip.shown, 'a surface chip appeared where the two models agree');
+      assert(!st.surfaceNote.shown, 'the surface note appeared without its chip');
       assert(st.svgRole === 'img', 'chart is not role=img');
       assert(/Clear/i.test(st.svgTitle), 'verdict missing from the chart title: ' + st.svgTitle);
       assert(st.credit, 'no CC BY 4.0 credit in the panel');
@@ -667,6 +710,159 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
     await ctx.close();
   }
 
+  // ── 12. #729: the surface (buildings/trees) verdict chip ──────────────────
+  {
+    const { ctx, page, rec } = await newCtx({ scenario: 'dokk1' });
+    await gotoMap(page, PAIR_LINK);
+    await step('the Dokk1 case shows "Terrain: Clear" beside "Buildings/trees: Blocked"', async () => {
+      await page.waitForTimeout(900);
+      const st = await panelState(page);
+      assert(st.open, 'panel did not open');
+      assert(st.chip === 'Terrain: Clear', 'main chip = ' + st.chip);
+      assert(st.surfaceChip, 'no surface chip in the panel');
+      assert(st.surfaceChip.shown, 'the surface chip is hidden on a blocked surface');
+      assert(st.surfaceChip.text === 'Buildings/trees: Blocked', 'surface chip = ' + st.surfaceChip.text);
+      assert(st.surfaceChip.state === 'blocked', 'surface chip state = ' + st.surfaceChip.state);
+      assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
+    });
+
+    await step('the surface chip wears the warn tone, not a second verdict', async () => {
+      const cls = await page.getAttribute('[data-testid="tp-surface-chip"]', 'class');
+      assert(/\btp-chip-warn\b/.test(cls), 'class = ' + cls);
+      assert(!/\btp-chip-bad\b/.test(cls), 'the surface chip went red beside a green verdict: ' + cls);
+      /* The colour comes from the shared warn tone, not from a literal: a
+       * probe element wearing only `tp-chip tp-chip-warn` must compute to
+       * the same ink and border as the real chip. */
+      const same = await page.evaluate(() => {
+        const chip = document.querySelector('[data-testid="tp-surface-chip"]');
+        const probe = document.createElement('span');
+        probe.className = 'tp-chip tp-chip-warn';
+        chip.parentNode.appendChild(probe);
+        const a = getComputedStyle(chip), b = getComputedStyle(probe);
+        const out = { color: a.color, probeColor: b.color, border: a.borderTopColor, probeBorder: b.borderTopColor };
+        probe.remove();
+        return out;
+      });
+      assert(same.color === same.probeColor, 'chip ink ' + same.color + ' is not the warn tone ' + same.probeColor);
+      assert(same.border === same.probeBorder, 'chip border ' + same.border + ' is not the warn tone ' + same.probeBorder);
+    });
+
+    await step('the explanatory line separates blocking from attenuation', async () => {
+      const st = await panelState(page);
+      assert(st.surfaceNote && st.surfaceNote.shown, 'no explanatory line under the chart');
+      assert(/buildings/i.test(st.surfaceNote.text), 'note = ' + st.surfaceNote.text);
+      assert(/trees/i.test(st.surfaceNote.text), 'note = ' + st.surfaceNote.text);
+      assert(/attenuat/i.test(st.surfaceNote.text), 'note = ' + st.surfaceNote.text);
+      // Under the chart, not above it: the chip states it, the line explains it.
+      const order = await page.evaluate(() => {
+        const chart = document.querySelector('[data-testid="tp-chart"]');
+        const note = document.querySelector('[data-testid="tp-surface-note"]');
+        if (!chart || !note) return null;
+        return note.getBoundingClientRect().top >= chart.getBoundingClientRect().bottom - 1;
+      });
+      assert(order === true, 'the explanatory line is not under the chart');
+    });
+
+    await step('both verdicts reach a screen reader', async () => {
+      const st = await panelState(page);
+      assert(/Terrain: Clear/.test(st.svgTitle), 'chart title = ' + st.svgTitle);
+      assert(/Buildings\/trees: Blocked/.test(st.svgTitle), 'chart title = ' + st.svgTitle);
+      // role="img" + aria-label: the label is the accessible NAME, so it has
+      // to carry them too or nothing is announced.
+      assert(/Terrain: Clear/.test(st.svgAria), 'chart aria-label = ' + st.svgAria);
+      assert(/Buildings\/trees: Blocked/.test(st.svgAria), 'chart aria-label = ' + st.svgAria);
+    });
+
+    await step('"Terrain only" drops the surface chip and the bare label returns', async () => {
+      await page.click('[data-testid="tp-model-dtm"]');
+      await page.waitForTimeout(900);
+      const st = await panelState(page);
+      assert(st.model === 'dtm', 'model = ' + st.model);
+      assert(st.chip === 'Clear', 'main chip = ' + st.chip);
+      assert(!st.surfaceChip.shown, 'the surface chip survived "Terrain only"');
+      assert(!st.surfaceNote.shown, 'the explanatory line survived "Terrain only"');
+      assert(st.svgAria.indexOf('Buildings/trees') === -1, 'chart aria-label = ' + st.svgAria);
+
+      await page.click('[data-testid="tp-model-both"]');
+      await page.waitForTimeout(900);
+      const back = await panelState(page);
+      assert(back.chip === 'Terrain: Clear', 'main chip = ' + back.chip);
+      assert(back.surfaceChip.shown, 'the surface chip did not come back');
+      assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  // A partial profile has no surface verdict either (#689 N1).
+  {
+    const { ctx, page, rec } = await newCtx({ scenario: 'partial' });
+    await gotoMap(page, PAIR_LINK);
+    await step('partial coverage shows no surface chip, and never a clear one', async () => {
+      await page.waitForTimeout(900);
+      const st = await panelState(page);
+      assert(st.chip === 'No verdict', 'main chip = ' + st.chip);
+      assert(st.surfaceChip, 'the surface chip was never built');
+      assert(!st.surfaceChip.shown, 'an unmeasured path was given a surface verdict');
+      assert(!st.surfaceNote.shown, 'the explanatory line appeared without a chip');
+      const words = await page.evaluate(() => {
+        const head = document.querySelector('.tp-head');
+        return Array.from(head.querySelectorAll('.tp-chip'))
+          .filter(e => !e.hidden).map(e => e.textContent).join(' | ');
+      });
+      assert(!/clear/i.test(words), 'a partial profile shows "' + words + '"');
+      assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  // 740x360 landscape is the tightest supported box; it has to hold the
+  // extra chip and the extra line as well (#678, #729).
+  {
+    const { ctx, page, rec } = await newCtx({ scenario: 'dokk1', viewport: { width: 740, height: 360 }, touch: true });
+    await gotoMap(page, PAIR_LINK);
+    await step('740x360 landscape still fits with both chips and the note', async () => {
+      await page.waitForTimeout(900);
+      const st = await panelState(page);
+      assert(st.open, 'panel did not open');
+      assert(st.surfaceChip.shown, 'the surface chip is not shown at 740x360');
+      const box = await page.evaluate(() => {
+        const panel = document.querySelector('[data-testid="tp-panel"]');
+        const body = document.querySelector('[data-testid="tp-body"]');
+        const seen = (sel) => {
+          const e = document.querySelector(sel);
+          if (!e) return { missing: true };
+          e.scrollIntoView({ block: 'center' });
+          const r = e.getBoundingClientRect();
+          return { w: Math.round(r.width), h: Math.round(r.height),
+            inView: r.top >= 0 && r.bottom <= window.innerHeight + 1 && r.left >= 0 && r.right <= window.innerWidth + 1 };
+        };
+        return {
+          panelBottom: Math.round(panel.getBoundingClientRect().bottom),
+          panelRight: Math.round(panel.getBoundingClientRect().right),
+          viewportH: window.innerHeight, viewportW: window.innerWidth,
+          scrollable: ['auto', 'scroll'].indexOf(getComputedStyle(body).overflowY) >= 0,
+          chip: seen('[data-testid="tp-verdict"]'),
+          surface: seen('[data-testid="tp-surface-chip"]'),
+          note: seen('[data-testid="tp-surface-note"]'),
+          close: seen('[data-testid="tp-close"]'),
+        };
+      });
+      assert(box.scrollable, 'the panel body is not a scroll box');
+      assert(box.panelBottom <= box.viewportH + 1, 'the panel runs past the viewport: ' + JSON.stringify(box));
+      assert(box.panelRight <= box.viewportW + 1, 'the panel runs past the right edge: ' + JSON.stringify(box));
+      for (const k of ['chip', 'surface', 'note']) {
+        assert(!box[k].missing, 'missing ' + k);
+        assert(box[k].inView, k + ' cannot be brought on screen at 740x360: ' + JSON.stringify(box[k]));
+        assert(box[k].h > 0 && box[k].w > 0, k + ' has no box: ' + JSON.stringify(box[k]));
+      }
+      // The one touch target in the title row must survive the third chip.
+      assert(box.close.w >= 48 && box.close.h >= 48,
+        'close is ' + box.close.w + 'x' + box.close.h + ', below the 48px touch target');
+      assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
   // ── 11a. an observer-only marker (review F6) ──────────────────────────────
   {
     const { ctx, page, rec } = await newCtx({ observerOnly: true });
@@ -723,7 +919,7 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
         'the point is not where the observer sits: ' + q.get('a'));
       const st = await panelState(page);
       assert(st.open, 'the panel did not open');
-      assert(st.chip === 'Clear', 'chip = ' + st.chip + ' (a 404 would read "No profile")');
+      assert(st.chip === 'Terrain: Clear', 'chip = ' + st.chip + ' (a 404 would read "No profile")');
       assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
     });
     await ctx.close();
@@ -738,6 +934,8 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
     { sel: '[data-testid="tp-end-a"] .tp-end-tag', what: 'the A endpoint tag' },
     { sel: '[data-testid="tp-end-b"] .tp-end-tag', what: 'the B endpoint tag' },
     { sel: '[data-testid="tp-verdict"]', what: 'the verdict chip' },
+    { sel: '[data-testid="tp-surface-chip"]', what: 'the surface verdict chip' },
+    { sel: '[data-testid="tp-surface-note"]', what: 'the surface explanatory line' },
     { sel: '[data-testid="tp-assumed-chip"]', what: 'the assumed-heights caveat' },
     { sel: '.tp-title', what: 'the panel title' },
     { sel: '[data-testid="tp-detail"]', what: 'the verdict detail' },
@@ -752,7 +950,9 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
     { sel: '.tp-step', what: 'a stepper' },
   ];
   for (const theme of ['light', 'dark']) {
-    const { ctx, page } = await newCtx({ theme: theme });
+    // The Dokk1 profile, so #729's second chip and its line are on screen
+    // and get measured like every other label.
+    const { ctx, page } = await newCtx({ theme: theme, scenario: 'dokk1' });
     await gotoMap(page, PAIR_LINK);
     await step('every panel label clears WCAG AA 4.5:1 in ' + theme, async () => {
       await page.waitForTimeout(900);
@@ -952,12 +1152,30 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
     await ctx.close();
   }
 
+  // #729: axe over the panel carrying both chips and the explanatory line.
+  for (const theme of ['light', 'dark']) {
+    const { ctx, page } = await newCtx({ theme: theme, scenario: 'dokk1' });
+    await gotoMap(page, PAIR_LINK);
+    await step('axe is clean on the surface chip in ' + theme, async () => {
+      const { AxeBuilder } = require('@axe-core/playwright');
+      await page.waitForTimeout(900);
+      const st = await panelState(page);
+      assert(st.open, 'panel did not open');
+      assert(st.surfaceChip.shown, 'axe ran without the surface chip on screen');
+      const res = await new AxeBuilder({ page }).include(PANEL).withRules(AXE_RULES).analyze();
+      const v = res.violations.map(x => x.id + ' x' + x.nodes.length);
+      assert(res.violations.length === 0, 'axe violations: ' + v.join(', '));
+    });
+    await ctx.close();
+  }
+
   // ── Screenshots for the PR ────────────────────────────────────────────────
   if (SHOT_DIR) {
     const shots = [
       { file: 'clear', scenario: 'clear', viewport: { width: 1280, height: 860 } },
       { file: 'blocked', scenario: 'blocked', viewport: { width: 1280, height: 860 } },
       { file: 'partial', scenario: 'partial', viewport: { width: 1280, height: 860 } },
+      { file: 'dokk1', scenario: 'dokk1', viewport: { width: 1280, height: 860 } },
     ];
     for (const theme of ['light', 'dark']) {
       for (const s of shots) {
@@ -971,7 +1189,7 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
       }
     }
     for (const vp of [{ n: '360-portrait', w: 360, h: 740 }, { n: '740x360-landscape', w: 740, h: 360 }]) {
-      const { ctx, page } = await newCtx({ theme: 'dark', scenario: 'blocked', viewport: { width: vp.w, height: vp.h }, touch: true });
+      const { ctx, page } = await newCtx({ theme: 'dark', scenario: 'dokk1', viewport: { width: vp.w, height: vp.h }, touch: true });
       await gotoMap(page, PAIR_LINK);
       await page.waitForTimeout(1200);
       await page.screenshot({ path: path.join(SHOT_DIR, `681-m4-${vp.n}.png`) });
