@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"html"
 	"net/http"
@@ -548,6 +549,58 @@ func TestShareProfile_MakesNoUpstreamCall(t *testing.T) {
 	}
 	if env.p.cache.Len() != 0 {
 		t.Fatal("/p touched the elevation cache")
+	}
+	// Nor the per-client budget: /p must not spend a viewer's (or a
+	// crawler's) uncached-profile allowance (review round 3).
+	if env.p.limiter == nil {
+		t.Fatal("test setup has no per-IP limiter to observe")
+	}
+	env.p.limiter.mu.Lock()
+	charged := len(env.p.limiter.clients)
+	env.p.limiter.mu.Unlock()
+	if charged != 0 {
+		t.Fatalf("/p charged %d limiter identities", charged)
+	}
+}
+
+// #743 on the share route (review round 3): a node that is visible and
+// positioned in the node table, but whose key also belongs to an observer
+// whose name is hidden, is hidden everywhere (isIdentityHidden). /p must
+// treat it exactly like an unknown node — 404 with the plain site
+// document — on either end, and never put its node name in a tag.
+func TestShareProfile_HiddenObserverAliasIs404(t *testing.T) {
+	env := newShareEnv(t, true, nil)
+	// Same key, different case, as an observer with a hidden-prefix name.
+	if _, err := env.srv.db.conn.Exec(`INSERT INTO observers (id, name) VALUES (?, 'private-observer')`, strings.ToUpper(shareKeyA)); err != nil {
+		t.Fatal(err)
+	}
+	env.srv.cfg.SetHiddenNamePrefixes([]string{"private-"})
+	env.srv.store.InvalidateNodeCache()
+
+	hidden, err := env.srv.isIdentityHidden(context.Background(), shareKeyA)
+	if err != nil || !hidden {
+		t.Fatalf("precondition: canonical isIdentityHidden = %v, %v", hidden, err)
+	}
+	r := httptest.NewRecorder()
+	env.router.ServeHTTP(r, httptest.NewRequest("GET", "/api/nodes/"+shareKeyA+"/reach", nil))
+	if r.Code != 404 {
+		t.Fatalf("precondition: Reach answers %d for the hidden identity, want 404", r.Code)
+	}
+
+	unknown := env.share(shareQ(strings.Repeat("d", 64), shareKeyB))
+	for _, target := range []string{shareQ(shareKeyA, shareKeyB), shareQ(shareKeyB, shareKeyA)} {
+		w := env.share(target)
+		wantSiteDocument(t, env, w, 404, target)
+		if w.Body.String() != unknown.Body.String() {
+			t.Fatalf("%s: not the same document as an unknown node", target)
+		}
+		body := w.Body.String()
+		if strings.Contains(body, "Søby Bakker") || strings.Contains(body, "private-observer") || strings.Contains(strings.ToLower(body), shareKeyA) {
+			t.Fatalf("%s: the hidden identity's name or key reached the page", target)
+		}
+	}
+	if n := env.src.calls.Load(); n != 0 {
+		t.Fatalf("%d upstream calls", n)
 	}
 }
 
