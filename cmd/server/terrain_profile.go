@@ -521,6 +521,52 @@ type terrainEnd struct {
 	pubkey string
 }
 
+// terrainRequest is a validated, resolved profile request: everything a
+// handler needs before any elevation work. One path builds it
+// (resolveTerrainRequest), whichever route the query came in on.
+type terrainRequest struct {
+	q      terrainQuery
+	ends   [2]terrainEnd
+	ka, kb [2]int64   // the snapped endpoints of the cache key
+	a, b   dhm.LatLon // the same, as coordinates
+	plan   dhm.Plan
+}
+
+// terrainRequestError is a refusal: its status and a fixed message that
+// echoes nothing from the request.
+type terrainRequestError struct {
+	status int
+	msg    string
+}
+
+// resolveTerrainRequest is the shared prelude after parsing: resolve both
+// ends (hidden, unknown and unpositioned nodes are 404), snap them to the
+// cache key's 5 decimals, gate the distance and plan the samples. It makes
+// no upstream call and charges nothing.
+func (s *Server) resolveTerrainRequest(p *terrainProfiler, tq terrainQuery) (terrainRequest, *terrainRequestError) {
+	req := terrainRequest{q: tq}
+	for i, ref := range [2]terrainRef{tq.a, tq.b} {
+		e, ok := s.resolveTerrainEnd(ref)
+		if !ok {
+			return req, &terrainRequestError{http.StatusNotFound, "node not found"}
+		}
+		req.ends[i] = e
+	}
+	req.ka = [2]int64{terrainSnapCoord(req.ends[0].pt.Lat), terrainSnapCoord(req.ends[0].pt.Lon)}
+	req.kb = [2]int64{terrainSnapCoord(req.ends[1].pt.Lat), terrainSnapCoord(req.ends[1].pt.Lon)}
+	req.a = dhm.LatLon{Lat: float64(req.ka[0]) / terrainSnap, Lon: float64(req.ka[1]) / terrainSnap}
+	req.b = dhm.LatLon{Lat: float64(req.kb[0]) / terrainSnap, Lon: float64(req.kb[1]) / terrainSnap}
+	d := dhm.GroundDistance(req.a, req.b)
+	if !(d >= 1) {
+		return req, &terrainRequestError{http.StatusBadRequest, dhm.ErrBadRequest.Error()}
+	}
+	if d > p.set.maxPathM {
+		return req, &terrainRequestError{http.StatusBadRequest, "path too long"}
+	}
+	req.plan = dhm.PlanProfile(req.a, req.b, p.set.plan)
+	return req, nil
+}
+
 func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 	p := s.terrain
 	if p == nil {
@@ -532,29 +578,12 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, dhm.ErrBadRequest.Error())
 		return
 	}
-	var ends [2]terrainEnd
-	for i, ref := range [2]terrainRef{tq.a, tq.b} {
-		e, ok := s.resolveTerrainEnd(ref)
-		if !ok {
-			writeError(w, http.StatusNotFound, "node not found")
-			return
-		}
-		ends[i] = e
-	}
-	ka := [2]int64{terrainSnapCoord(ends[0].pt.Lat), terrainSnapCoord(ends[0].pt.Lon)}
-	kb := [2]int64{terrainSnapCoord(ends[1].pt.Lat), terrainSnapCoord(ends[1].pt.Lon)}
-	a := dhm.LatLon{Lat: float64(ka[0]) / terrainSnap, Lon: float64(ka[1]) / terrainSnap}
-	b := dhm.LatLon{Lat: float64(kb[0]) / terrainSnap, Lon: float64(kb[1]) / terrainSnap}
-	d := dhm.GroundDistance(a, b)
-	if !(d >= 1) {
-		writeError(w, http.StatusBadRequest, dhm.ErrBadRequest.Error())
+	req, rerr := s.resolveTerrainRequest(p, tq)
+	if rerr != nil {
+		writeError(w, rerr.status, rerr.msg)
 		return
 	}
-	if d > p.set.maxPathM {
-		writeError(w, http.StatusBadRequest, "path too long")
-		return
-	}
-	plan := dhm.PlanProfile(a, b, p.set.plan)
+	plan := req.plan
 	n := len(plan.E)
 
 	var elev terrainElevation
@@ -566,7 +595,7 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 			elev.dsm = nanSlice(n)
 		}
 	} else {
-		key := terrainKey{A: ka, B: kb, Both: tq.both, Samples: n, StepCm: int64(math.Round(plan.StepM * 100))}
+		key := terrainKey{A: req.ka, B: req.kb, Both: tq.both, Samples: n, StepCm: int64(math.Round(plan.StepM * 100))}
 		data, hit := p.cache.Get(key, p.now())
 		state = "hit"
 		if !hit {
@@ -603,7 +632,7 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("X-CoreScope-Cache", state)
-	writeJSON(w, p.buildResponse(tq, ends, a, b, &plan, elev))
+	writeJSON(w, p.buildResponse(tq, req.ends, req.a, req.b, &plan, elev))
 }
 
 // writeFetchError maps a failed fetch: a client that left gets nothing,
