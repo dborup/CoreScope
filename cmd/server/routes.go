@@ -103,6 +103,9 @@ type Server struct {
 	// terrain is the #681 terrain profile; nil unless the proxy is active
 	// and map.dhm.profile.enabled (the endpoint then answers 404).
 	terrain *terrainProfiler
+	// masts is the #724 antenna sites proxy; nil while map.masts is off
+	// (the endpoint then answers 404).
+	masts *mastsProxy
 
 	// Cached /api/analytics/wardriving response — per-window, recomputed at most once every 30s
 	wardrivingStatsMu       sync.Mutex
@@ -230,7 +233,8 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 		// Keys come from request parameters (window × region), so bound them.
 		scopeTransport: scopeAuditCache[scopeTransportScan]{max: scopeTransportCacheMax},
 
-		dhm: newDHMProxyFromConfig(cfg),
+		dhm:   newDHMProxyFromConfig(cfg),
+		masts: newMastsProxyFromConfig(cfg),
 	}
 	s.terrain = newTerrainProfilerFromConfig(cfg, s.dhm, db)
 	return s
@@ -335,6 +339,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/config/map", s.handleConfigMap).Methods("GET")
 	r.HandleFunc("/api/map/dhm/wms", s.handleDHMTile).Methods("GET")
 	r.HandleFunc("/api/terrain/profile", s.handleTerrainProfile).Methods("GET")
+	r.HandleFunc("/api/masts", s.handleMasts).Methods("GET")
 	r.HandleFunc("/api/config/geo-filter", s.handleConfigGeoFilter).Methods("GET")
 	r.HandleFunc("/api/config/areas", s.handleConfigAreas).Methods("GET")
 	r.HandleFunc("/api/config/areas/polygons", s.handleConfigAreasPolygons).Methods("GET")
@@ -643,6 +648,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		EstimatedPositions:  EstimatedPositionsClientConfig{Enabled: s.estimatedPositionsEnabled()},
 		DHM:                 s.dhmClientConfig(),
 		Heritage:            s.heritageClientConfig(),
+		Masts:               s.mastsClientConfig(),
 	})
 }
 
