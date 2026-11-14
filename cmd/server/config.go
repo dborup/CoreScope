@@ -1113,52 +1113,33 @@ func (c *Config) migrateDeprecatedConfig() {
 	}
 }
 
-// tileDefaultsView is the part of map.tiles that warnGatedTileDefaults
-// reads. map.tiles is passed to the browser as-is; the server only looks.
-type tileDefaultsView struct {
-	DarkDefault  string `json:"darkDefault"`
-	LightDefault string `json:"lightDefault"`
-	Providers    struct {
-		Esri struct {
-			// Raw, so "enabled": "true" (which the browser does not
-			// accept) is reported instead of failing the decode.
-			Enabled json.RawMessage `json:"enabled"`
-		} `json:"esri"`
-	} `json:"providers"`
-}
-
 // warnGatedTileDefaults logs when map.tiles.darkDefault or lightDefault
 // names an Esri style while map.tiles.providers.esri.enabled is not true.
 // Since #728 every esri-* style is opt-in, and the browser then skips that
 // default and shows the fallback base map; an operator who upgraded with
 // Esri Dark Gray as the dark default should find out from the server log,
 // not from a changed map. It runs after migrateDeprecatedConfig, so a
-// legacy top-level mapDarkTileProvider is checked too. Only the JSON
-// boolean true enables Esri, as in map-tile-providers.js. A tiles block
-// whose defaults are not strings cannot be decoded here and is left to
-// the browser, which ignores such values.
+// legacy top-level mapDarkTileProvider is checked too. map.tiles is passed
+// to the browser as-is; the server only looks, and reads the keys exactly
+// as map-tile-providers.js does: exact-case keys (encoding/json would match
+// them case-insensitively), only the JSON boolean true enables Esri, and a
+// default that is not a string is ignored without hiding the other one.
 func (c *Config) warnGatedTileDefaults(logf func(string, ...interface{})) {
-	if c == nil || c.Map == nil {
+	if c == nil {
 		return
 	}
-	raw, ok := c.Map["tiles"]
-	if !ok || raw == nil {
+	tiles, ok := c.Map["tiles"].(map[string]interface{})
+	if !ok {
 		return
 	}
-	b, err := json.Marshal(raw)
-	if err != nil {
+	providers, _ := tiles["providers"].(map[string]interface{})
+	esri, _ := providers["esri"].(map[string]interface{})
+	if enabled, _ := esri["enabled"].(bool); enabled {
 		return
 	}
-	var v tileDefaultsView
-	if err := json.Unmarshal(b, &v); err != nil {
-		return
-	}
-	if strings.TrimSpace(string(v.Providers.Esri.Enabled)) == "true" {
-		return
-	}
-	for _, d := range []struct{ key, id string }{{"darkDefault", v.DarkDefault}, {"lightDefault", v.LightDefault}} {
-		if strings.HasPrefix(d.id, "esri-") {
-			logf("[config] map.tiles.%s is %q, but Esri styles are opt-in since #728 and map.tiles.providers.esri.enabled is not true: browsers will skip it and show the fallback base map. Set map.tiles.providers.esri.enabled to true to keep it.", d.key, d.id)
+	for _, key := range []string{"darkDefault", "lightDefault"} {
+		if id, _ := tiles[key].(string); strings.HasPrefix(id, "esri-") {
+			logf("[config] map.tiles.%s is %q, but Esri styles are opt-in since #728 and map.tiles.providers.esri.enabled is not true: browsers will skip it and show the fallback base map. Set map.tiles.providers.esri.enabled to true to keep it.", key, id)
 		}
 	}
 }

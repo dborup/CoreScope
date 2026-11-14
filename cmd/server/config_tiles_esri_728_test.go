@@ -62,6 +62,36 @@ func TestWarnGatedTileDefaults728(t *testing.T) {
 		{"no tiles block",
 			`{"port":8080}`,
 			nil},
+		// The browser reads these keys exactly, so a case variant does not
+		// switch Esri on there and must not silence the warning here.
+		{"providers.Esri (wrong case) does not enable esri",
+			`{"map":{"tiles":{"darkDefault":"esri-darkgray-labels","providers":{"Esri":{"enabled":true}}}}}`,
+			[]string{`map.tiles.darkDefault is "esri-darkgray-labels"`}},
+		{"esri.Enabled (wrong case) does not enable esri",
+			`{"map":{"tiles":{"darkDefault":"esri-darkgray-labels","providers":{"esri":{"Enabled":true}}}}}`,
+			[]string{`map.tiles.darkDefault is "esri-darkgray-labels"`}},
+		{"ESRI.ENABLED (wrong case) does not enable esri",
+			`{"map":{"tiles":{"darkDefault":"esri-darkgray-labels","providers":{"ESRI":{"ENABLED":true}}}}}`,
+			[]string{`map.tiles.darkDefault is "esri-darkgray-labels"`}},
+		{"DarkDefault (wrong case) is ignored by the browser, so not reported",
+			`{"map":{"tiles":{"DarkDefault":"esri-darkgray-labels"}}}`,
+			nil},
+		// A malformed neighbour must not hide the warning.
+		{"providers is not an object",
+			`{"map":{"tiles":{"darkDefault":"esri-darkgray-labels","providers":"x"}}}`,
+			[]string{`map.tiles.darkDefault is "esri-darkgray-labels"`}},
+		{"providers.esri is not an object",
+			`{"map":{"tiles":{"darkDefault":"esri-darkgray-labels","providers":{"esri":true}}}}`,
+			[]string{`map.tiles.darkDefault is "esri-darkgray-labels"`}},
+		{"lightDefault is not a string",
+			`{"map":{"tiles":{"darkDefault":"esri-darkgray-labels","lightDefault":5}}}`,
+			[]string{`map.tiles.darkDefault is "esri-darkgray-labels"`}},
+		{"darkDefault is not a string",
+			`{"map":{"tiles":{"darkDefault":5,"lightDefault":"esri-imagery"}}}`,
+			[]string{`map.tiles.lightDefault is "esri-imagery"`}},
+		{"tiles is not an object",
+			`{"map":{"tiles":"esri-darkgray-labels"}}`,
+			nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
