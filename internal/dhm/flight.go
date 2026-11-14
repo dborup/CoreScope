@@ -18,6 +18,9 @@ import (
 type Flight[V any] struct {
 	mu    sync.Mutex
 	calls map[string]*flightCall[V]
+	// beforeDone, set only by tests before any call, runs in a call's
+	// worker just before its waiters are woken.
+	beforeDone func()
 }
 
 type flightCall[V any] struct {
@@ -31,6 +34,15 @@ type flightCall[V any] struct {
 // Do runs fn once per key at a time and returns its result to every
 // caller; shared is true for callers that joined a running call.
 func (g *Flight[V]) Do(ctx context.Context, key string, timeout time.Duration, fn func(context.Context) (V, error)) (v V, shared bool, err error) {
+	return g.DoAdmitted(ctx, key, timeout, nil, fn)
+}
+
+// DoAdmitted is Do with a bound on new calls (#744): a call that would
+// start a worker takes an adm slot first, and when none is free it
+// returns ErrAdmissionFull at once, with no worker. The slot is held until
+// the worker has returned, so adm bounds live workers, queued or running.
+// Joining a running call takes no slot. A nil adm admits everything.
+func (g *Flight[V]) DoAdmitted(ctx context.Context, key string, timeout time.Duration, adm *Admission, fn func(context.Context) (V, error)) (v V, shared bool, err error) {
 	g.mu.Lock()
 	if g.calls == nil {
 		g.calls = make(map[string]*flightCall[V])
@@ -39,6 +51,11 @@ func (g *Flight[V]) Do(ctx context.Context, key string, timeout time.Duration, f
 	if shared {
 		c.waiters++
 	} else {
+		if !adm.tryAcquire() {
+			g.mu.Unlock()
+			var zero V
+			return zero, false, ErrAdmissionFull
+		}
 		work, cancel := context.WithCancel(context.Background())
 		if timeout > 0 {
 			work, cancel = context.WithTimeout(context.Background(), timeout)
@@ -49,6 +66,13 @@ func (g *Flight[V]) Do(ctx context.Context, key string, timeout time.Duration, f
 			c.val, c.err = fn(work)
 			g.forget(key, c)
 			cancel()
+			// The slot goes back before any waiter wakes (#749 review
+			// F3), so a woken caller's next call, such as its terrain
+			// fallback, never meets its own finished call's slot.
+			adm.release()
+			if g.beforeDone != nil {
+				g.beforeDone()
+			}
 			close(c.done)
 		}()
 	}
