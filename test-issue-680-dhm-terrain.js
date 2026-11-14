@@ -208,16 +208,21 @@ test('control rebuild keeps the same layer and its on state', () => {
   assert.strictEqual(map.hasLayer(l), true);
 });
 
-test('map without an attribution control (Live) gets one only while terrain is on', () => {
+// #728 review round 3: one control for the map's lifetime (the base map's
+// credit must always show); the terrain credit is in it only while on.
+test('map without an attribution control (Live) gets one; the terrain credit only while on', () => {
   const ctx = makeSandbox({ dhm: ENABLED });
   const { map, ctl } = buildControl(ctx, false);
-  assert.strictEqual(map._attributionControls.length, 0, 'none while off');
+  const live = () => map._attributionControls.filter(c => !c._removed);
+  assert.strictEqual(live().length, 1, 'one while off');
+  assert.strictEqual(live()[0].opts.prefix, false);
+  assert.deepStrictEqual(live()[0].credits(), [], 'no terrain credit while off');
   map.addLayer(terrainLayer(ctl));
-  const live = map._attributionControls.filter(c => !c._removed);
-  assert.strictEqual(live.length, 1, 'one while on');
-  assert.strictEqual(live[0].opts.prefix, false);
+  assert.strictEqual(live().length, 1, 'one while on');
+  assert.deepStrictEqual(live()[0].credits(), [ENABLED.attribution]);
   map.removeLayer(terrainLayer(ctl));
-  assert.strictEqual(map._attributionControls.filter(c => !c._removed).length, 0, 'removed when off');
+  assert.strictEqual(live().length, 1, 'kept when off');
+  assert.deepStrictEqual(live()[0].credits(), [], 'terrain credit left when off');
 });
 
 test('restored-on terrain on a map without attribution control adds the credit', () => {

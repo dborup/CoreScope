@@ -306,7 +306,7 @@
    * around a sparse legend). Drive height by content and cap width so
    * the PACKET TYPES legend stops dominating the map.
    */
-  bottom: calc(var(--vcr-bar-height, 58px) + 10px);
+  bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
   right: 12px;
   height: max-content;
   max-width: 260px;
@@ -949,7 +949,7 @@ body.live-fullscreen #liveFullscreenToggle:hover,
   --legend-toggle-stack: calc(var(--legend-toggle-h, 46px) + 10px); /* gap above legend-toggle */
   position: absolute;
   bottom: max(1rem, min(
-    calc(max(1rem, calc(var(--vcr-bar-height, 0px) + 10px + var(--legend-toggle-stack))) + var(--legend-toggle-stack)),
+    calc(max(1rem, calc(var(--vcr-bar-height, 0px) + var(--live-credit-height, 0px) + 10px + var(--legend-toggle-stack))) + var(--legend-toggle-stack)),
     calc(100% - var(--legend-toggle-h, 46px) - 52px - 10px)
   ));
   right: 1rem; z-index: 500;
@@ -1313,15 +1313,18 @@ input.live-node-filter-input:focus {
  * (and other bottom-pinned overlays) always clear the bar regardless of
  * how tall it grows (mobile two-row layout, safe-area-inset, etc.).
  */
-.live-feed { bottom: calc(var(--vcr-bar-height, 58px) + 10px); }
-/* #680 — Live has no attribution control of its own; the one the DHM terrain
- * overlay adds while it is on must sit above the VCR bar, not under it. */
+.live-feed { bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px); }
+/* #680/#728 — the attribution control the tile registry gives Live (base map
+ * and overlay credits) must sit above the VCR bar, not under it. The
+ * bottom-pinned overlays above also clear its measured height
+ * (--live-credit-height, published with --vcr-bar-height), so they never
+ * cover the credit. */
 #liveMap .leaflet-bottom { bottom: var(--vcr-bar-height, 58px); }
 /* Cap the feed's height so its scrollable content never extends below the
  * VCR bar top edge, even when the feed is pinned to a bottom corner.
  */
 .live-feed {
-  max-height: min(340px, calc(100dvh - 64px - var(--vcr-bar-height, 58px) - 24px));
+  max-height: min(340px, calc(100dvh - 64px - var(--vcr-bar-height, 58px) - var(--live-credit-height, 0px) - 24px));
 }
 
 /* Backdrop for mobile tap-outside-to-close (#797) */
@@ -1435,7 +1438,7 @@ input.live-node-filter-input:focus {
  * navigation reserve cannot move this button underneath the VCR bar. */
 .legend-toggle-btn {
   position: absolute;
-  bottom: calc(var(--vcr-bar-height, 58px) + 10px);
+  bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
   right: 1rem;
   z-index: 500;
   background: color-mix(in srgb, var(--surface-1) 92%, transparent);
@@ -1493,8 +1496,8 @@ input.live-node-filter-input:focus {
 /* Corner positions — applied via data-position attribute on .live-overlay panels */
 .live-overlay[data-position="tl"] { top: 64px; left: 12px; bottom: auto; right: auto; }
 .live-overlay[data-position="tr"] { top: 64px; right: 12px; bottom: auto; left: auto; }
-.live-overlay[data-position="bl"] { bottom: calc(var(--vcr-bar-height, 58px) + 10px); left: 12px; top: auto; right: auto; }
-.live-overlay[data-position="br"] { bottom: calc(var(--vcr-bar-height, 58px) + 10px); right: 12px; top: auto; left: auto; }
+.live-overlay[data-position="bl"] { bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px); left: 12px; top: auto; right: auto; }
+.live-overlay[data-position="br"] { bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px); right: 12px; top: auto; left: auto; }
 
 /* Override hide animations for positioned panels — slide toward nearest edge */
 .live-overlay[data-position="tl"].hidden,

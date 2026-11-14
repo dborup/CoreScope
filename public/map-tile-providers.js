@@ -339,8 +339,9 @@
    *   - On/off is remembered per viewer (localStorage) and mirrored in the
    *     hash (?terrain=1, ?heritage=1). A =1 / =0 in the hash wins over the
    *     stored choice and is saved, like Live's ?heard= (#660).
-   *   - A map without an attribution control (Live) gets one while any
-   *     overlay is on, because every overlay's credit is required.
+   *   - A map without an attribution control (Live) gets one for its
+   *     lifetime (_ensureAttribution), because the base map's credit and
+   *     every overlay's credit are required.
    *
    * DHM tiles come from the server's same-origin proxy, which adds the
    * token. The monument tiles come straight from the agency's WMS (no
@@ -454,30 +455,36 @@
     });
   }
 
-  function _anyOverlayOn(map) {
-    for (var i = 0; i < OVERLAYS.length; i++) {
-      var l = map[OVERLAYS[i].layerProp];
-      if (l && map.hasLayer(l)) return true;
-    }
-    return false;
+  // Live runs without Leaflet's default attribution control, so it gets
+  // one here, once, when its layer control is built, and keeps it: the
+  // base map's credit must always show (Esri requires "Powered by Esri"),
+  // with each overlay's credit next to it while that overlay is on. From
+  // then on Leaflet's control follows layeradd and each layer's 'remove'
+  // itself, except for the layers already on the map when it is added (the
+  // Auto tile layer): it counts their credits without the removal hook it
+  // gives later layers, so they get that hook here, or picking another base
+  // map would leave the old credit behind. The Map page has its own control
+  // and is left alone.
+  function _ensureAttribution(map) {
+    if (map.attributionControl) return;
+    var control = L.control.attribution({ position: 'bottomright', prefix: false }).addTo(map);
+    map.eachLayer(function (layer) {
+      if (!layer.getAttribution || !layer.getAttribution()) return;
+      layer.once('remove', function () { control.removeAttribution(layer.getAttribution()); });
+    });
   }
 
-  // Live runs without an attribution control, so it gets one while any
-  // overlay is on (listing every active layer's credit, as Leaflet does).
-  // It is rebuilt on every change: Leaflet's control picks up the credits
-  // already on the map when added but only drops later ones on removal,
-  // and its onAdd claims map.attributionControl without onRemove ever
-  // releasing it, so a second "on" would otherwise find a dead control.
-  function _syncOverlayAttribution(map) {
-    var own = map._mcOverlayAttribution;
-    if (own) {
-      try { own.remove(); } catch (_) {}
-      if (map.attributionControl === own) map.attributionControl = null;
-      map._mcOverlayAttribution = null;
-    }
-    if (_anyOverlayOn(map) && !map.attributionControl) {
-      map._mcOverlayAttribution = L.control.attribution({ position: 'bottomright', prefix: false }).addTo(map);
-    }
+  // Changes a layer's credit in place: Live's Auto layer switches provider
+  // with setUrl, and the control counts credits by their text, so without
+  // this it would go on showing the old provider's credit instead of the
+  // new one's.
+  function setLayerAttribution(map, layer, text) {
+    var old = layer.options.attribution;
+    layer.options.attribution = text;
+    var control = map.attributionControl;
+    if (old === text || !control || !map.hasLayer(layer)) return;
+    control.removeAttribution(old);
+    control.addAttribution(text);
   }
 
   // Once per map and overlay: listen for the user's toggles and apply the
@@ -491,13 +498,9 @@
     map._mcOverlayWired[o.id] = true;
     map.on('overlayadd overlayremove', function (e) {
       if (!e.layer || e.layer !== map[o.layerProp]) return;
-      _syncOverlayAttribution(map);
       _saveOverlayPref(o, e.type === 'overlayadd');
     });
-    if (_readOverlayPref(o)) {
-      map.addLayer(map[o.layerProp]);
-      _syncOverlayAttribution(map);
-    }
+    if (_readOverlayPref(o)) map.addLayer(map[o.layerProp]);
   }
 
   // Puts every offered overlay into `overlays` (label → layer) and drops
@@ -516,7 +519,6 @@
       } else if (map[o.layerProp]) {
         try { map.removeLayer(map[o.layerProp]); } catch (_) {}
         map[o.layerProp] = null;
-        _syncOverlayAttribution(map);
       }
     });
     return ids;
@@ -538,6 +540,7 @@
   window.MC_getTerrainConfig            = getTerrainConfig;
   window.MC_getHeritageConfig           = getHeritageConfig;
   window.MC_resolveOverlayOn            = resolveOverlayOn;
+  window.MC_setLayerAttribution         = setLayerAttribution;
 
 
   /**
@@ -562,6 +565,8 @@
     var _isAuto    = true;  // true when "Auto" is the active selection
     var _overrideLightId = null;
     var _overrideDarkId  = null;
+
+    _ensureAttribution(map);
 
     // Restore the auto tile group and kick _syncDarkTiles
     function _activateAuto() {

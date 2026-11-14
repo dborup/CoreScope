@@ -27,6 +27,11 @@
  *      after a reload Map and Live load World_Imagery tiles by default.
  *   6. With the DHM hillshade on: both layers load, terrain above the
  *      imagery, both credits shown.
+ *   7. Live always shows the base map's credit (review round 3): with no
+ *      overlay on, through every on/off order of the DHM hillshade and the
+ *      protected monuments, after an explicit base pick, after a provider
+ *      or theme swap in Auto, and at 390x844 and 740x360, with exactly one
+ *      attribution control and the credit not covered.
  *
  * Usage:
  *   BASE_URL=http://localhost:13728 node test-issue-728-esri-imagery-e2e.js
@@ -51,6 +56,17 @@ const DHM_BLOCK = {
   minZoom: 7, maxZoom: 19, bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
   attribution: 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0',
 };
+// #723 — what the server sends while map.heritage is on; its tiles go to
+// the agency's WMS and are answered by the third-party stub below.
+const HERITAGE_BLOCK = {
+  enabled: true,
+  url: 'https://www.kulturarv.dk/ffgeoserver/public/wms',
+  layers: 'fundogfortidsminder_areal_beskyttelse,fundogfortidsminder_punkt_fredet',
+  minZoom: 12, maxZoom: 19,
+  bounds: [[54.4646, 8.0899], [57.7289, 15.5689]],
+  attribution: '© Slots- og Kulturstyrelsen',
+};
+const OSM_CREDIT = '© OpenStreetMap contributors';
 const ESRI_IDS = ['esri-darkgray-labels', 'esri-imagery', 'esri-imagery-dark'];
 const DK_VIEW = { lat: 56.15, lon: 10.2, zoom: 12 };
 
@@ -105,8 +121,8 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   });
   console.log(`\n=== #728 Esri World Imagery against ${BASE} ===\n`);
 
-  // tiles: the map.tiles block to serve; dhm: add the terrain block.
-  async function newCtx({ tiles, dhm = false, theme = 'light', storage = {}, viewport = { width: 1100, height: 720 } }) {
+  // tiles: the map.tiles block to serve; dhm / heritage: add that overlay's block.
+  async function newCtx({ tiles, dhm = false, heritage = false, theme = 'light', storage = {}, viewport = { width: 1100, height: 720 } }) {
     const ctx = await browser.newContext({ viewport });
     const rec = { esri: [], imagery: [], osm: [], terrain: [], warnings: [], errors: [] };
     await ctx.route(BASE + '/api/config/client', async (route) => {
@@ -114,8 +130,10 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       const config = await response.json();
       delete config.tiles;
       delete config.dhm;
+      delete config.heritage;
       config.map = Object.assign({}, config.map, { tiles: tiles || {} });
       if (dhm) config.dhm = DHM_BLOCK;
+      if (heritage) config.heritage = HERITAGE_BLOCK;
       await route.fulfill({ response, json: config });
     });
     await ctx.route(url => new URL(url).pathname === DHM_PATH, async (route) => {
@@ -124,7 +142,8 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     });
     await ctx.route(/^https?:\/\/(?!localhost|127\.0\.0\.1)/i, async (route) => {
       const url = route.request().url();
-      if (route.request().resourceType() !== 'image') { await route.continue(); return; }
+      // Nothing third-party leaves the browser: non-image requests are refused.
+      if (route.request().resourceType() !== 'image') { await route.abort(); return; }
       if (/arcgisonline\.com/.test(url)) rec.esri.push(url);
       if (/World_Imagery/.test(url)) rec.imagery.push(url);
       if (/tile\.openstreetmap\.org/.test(url)) rec.osm.push(url);
@@ -182,13 +201,39 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         imageryTiles: imgs.filter(i => /World_Imagery/.test(i.src) && i.complete && i.naturalWidth === 256).length,
         terrainTiles: tpane ? Array.from(tpane.querySelectorAll('img.leaflet-tile')).filter(i => i.complete && i.naturalWidth === 256).length : 0,
         attribution: attr ? attr.textContent : '',
+        attributionControls: document.querySelectorAll('.leaflet-control-attribution').length,
         esriLinks: attr ? Array.from(attr.querySelectorAll('a')).filter(a => a.getAttribute('href') === 'https://www.esri.com').map(a => a.textContent) : [],
         attributionVisible: (() => {
           if (!attr) return false;
           const r = attr.getBoundingClientRect();
           if (!r.width || !r.height) return false;
+          // Wholly inside the viewport, not clipped by a narrow phone.
+          if (r.left < 0 || r.top < 0 || r.right > innerWidth || r.bottom > innerHeight) return false;
           const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
           return !!hit && attr.contains(hit);
+        })(),
+        // Points of the credit's text painted over by something else. Hit
+        // testing follows paint order once nothing is pointer-events: none
+        // (Live's legend is), so it is forced on for the probe; three
+        // heights per text box, every 4px across.
+        creditCovered: (() => {
+          if (!attr) return ['no control'];
+          const st = document.createElement('style');
+          st.textContent = '* { pointer-events: auto !important; }';
+          document.head.appendChild(st);
+          const range = document.createRange();
+          range.selectNodeContents(attr);
+          const out = [];
+          for (const rc of range.getClientRects()) {
+            for (const y of [rc.top + 2, rc.top + rc.height / 2, rc.bottom - 2]) {
+              for (let x = rc.left + 1; x < rc.right - 1; x += 4) {
+                const hit = document.elementFromPoint(x, y);
+                if (!hit || !attr.contains(hit)) out.push((hit ? (hit.id || hit.className || hit.tagName) : 'off-screen') + '@' + Math.round(x) + ',' + Math.round(y));
+              }
+            }
+          }
+          st.remove();
+          return out;
         })(),
         zTile: z('.leaflet-tile-pane'), zTerrain: z('.mc-terrain-pane'),
       };
@@ -201,6 +246,26 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     await page.mouse.move(b.x + dx, b.y + dy, { steps: 8 });
     await page.mouse.up();
     await page.waitForTimeout(700);
+  }
+  async function toggleOverlay(page, id) {
+    await page.evaluate((oid) => {
+      const input = document.querySelector('.leaflet-control-layers-overlays label[data-overlay-id="' + oid + '"] input');
+      if (!input) throw new Error('no overlay ' + oid);
+      input.click();
+    }, id);
+    await page.waitForTimeout(400);
+  }
+  // The Live credit contract: the base map's credit plus exactly the
+  // overlays that are on, in one visible control.
+  async function assertLiveCredits(page, base, overlays, label) {
+    const s = await state(page);
+    assert(s.attributionControls === 1, label + ': attribution controls: ' + s.attributionControls);
+    assert(s.attribution.includes(base), label + ': base credit missing: ' + JSON.stringify(s.attribution));
+    assert(s.attributionVisible, label + ': credit not visible');
+    assert(s.creditCovered.length === 0, label + ': credit covered at ' + s.creditCovered.length + ' points, e.g. ' + s.creditCovered.slice(0, 4).join(' '));
+    assert(s.attribution.includes(DHM_BLOCK.attribution) === overlays.includes('dhm-terrain'), label + ': DHM credit: ' + s.attribution);
+    assert(s.attribution.includes(HERITAGE_BLOCK.attribution) === overlays.includes('heritage-monuments'), label + ': heritage credit: ' + s.attribution);
+    return s;
   }
   async function zoomIn(page) { await page.click('.leaflet-control-zoom-in'); await page.waitForTimeout(900); }
   async function shot(page, name) {
@@ -396,6 +461,129 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         assert(s.attributionVisible, 'credits are covered');
         assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
         if (p.name === 'Map') await shot(page, 'esri-imagery-terrain.jpg');
+      } finally { await ctx.close(); }
+    });
+  }
+
+  // 7 — Live always shows the base map's credit (review round 3). Live has
+  // no attribution control of its own, and the overlays' replacement used
+  // to exist only while an overlay was on.
+  await step('Live: Esri imagery, no overlay on → "Powered by Esri" and the Esri link are visible', async () => {
+    const { ctx, page, rec } = await newCtx({ tiles: { providers: { esri: { enabled: true } } }, storage: { 'mc-light-tile-provider': 'esri-imagery' } });
+    try {
+      await gotoMap(page, '#/live');
+      await page.waitForTimeout(800);
+      const s = await state(page);
+      assert(rec.imagery.length > 0 && s.imageryTiles > 0, 'imagery did not load on Live');
+      assert(s.attribution.includes(CREDIT), 'imagery shown on Live without its credit: ' + JSON.stringify(s.attribution));
+      assert(s.esriLinks.join() === 'Esri', 'want one "Esri" link to ' + ESRI_HOME + ', got ' + JSON.stringify(s.esriLinks));
+      assert(s.attributionControls === 1, 'attribution controls: ' + s.attributionControls);
+      assert(s.attributionVisible, 'credit not visible');
+      assert(s.creditCovered.length === 0, 'credit covered at: ' + s.creditCovered.slice(0, 4).join(' '));
+      assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+    } finally { await ctx.close(); }
+  });
+
+  await step('Live: the base credit stays through every overlay on/off order', async () => {
+    const { ctx, page, rec } = await newCtx({
+      dhm: true, heritage: true,
+      tiles: { providers: { esri: { enabled: true } } },
+      storage: { 'mc-light-tile-provider': 'esri-imagery' },
+    });
+    try {
+      await gotoMap(page, '#/live');
+      const on = new Set();
+      await assertLiveCredits(page, CREDIT, [], 'start');
+      const T = 'dhm-terrain', H = 'heritage-monuments';
+      for (const id of [T, H, T, H, H, T, H, T, T, T]) {
+        await toggleOverlay(page, id);
+        if (on.has(id)) on.delete(id); else on.add(id);
+        await assertLiveCredits(page, CREDIT, [...on], 'after toggling ' + id + ' (on: ' + ([...on].join('+') || 'none') + ')');
+      }
+      assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+    } finally { await ctx.close(); }
+  });
+
+  await step('Live: explicit base picks and Auto provider/theme swaps keep the right credit', async () => {
+    const { ctx, page, rec } = await newCtx({ dhm: true, tiles: { providers: { esri: { enabled: true } } } });
+    try {
+      await gotoMap(page, '#/live');
+      await assertLiveCredits(page, OSM_CREDIT, [], 'Auto, OSM');
+      await selectBase(page, 'esri-imagery');
+      let s = await assertLiveCredits(page, CREDIT, [], 'explicit imagery');
+      assert(!s.attribution.includes(OSM_CREDIT), 'OSM credit left after picking the imagery: ' + s.attribution);
+      await toggleOverlay(page, 'dhm-terrain');
+      await assertLiveCredits(page, CREDIT, ['dhm-terrain'], 'explicit imagery + terrain');
+      await toggleOverlay(page, 'dhm-terrain');
+      await selectBase(page, '__auto__');
+      s = await assertLiveCredits(page, OSM_CREDIT, [], 'back to Auto');
+      assert(!s.attribution.includes('Vantor'), 'imagery credit left after Auto: ' + s.attribution);
+
+      // The customizer's provider choice swaps the Auto layer in place (setUrl).
+      await page.evaluate(() => window.MC_setLightTileProvider('esri-imagery'));
+      await page.waitForTimeout(900);
+      s = await assertLiveCredits(page, CREDIT, [], 'Auto swapped to the imagery');
+      assert(!s.attribution.includes(OSM_CREDIT), 'OSM credit left after the swap: ' + s.attribution);
+      assert(s.imageryTiles > 0, 'imagery did not load after the swap');
+
+      // Theme flips swap it too: dark is OSM (inverted), light is the imagery again.
+      await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
+      await page.waitForTimeout(900);
+      s = await assertLiveCredits(page, OSM_CREDIT, [], 'dark theme');
+      assert(!s.attribution.includes('Vantor'), 'imagery credit left in the dark theme: ' + s.attribution);
+      await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'));
+      await page.waitForTimeout(900);
+      s = await assertLiveCredits(page, CREDIT, [], 'light theme again');
+      assert(s.esriLinks.join() === 'Esri', 'Esri link after the theme swap: ' + JSON.stringify(s.esriLinks));
+
+      await page.evaluate(() => window.MC_setLightTileProvider('osm-standard'));
+      await page.waitForTimeout(900);
+      s = await assertLiveCredits(page, OSM_CREDIT, [], 'Auto swapped back to OSM');
+      assert(!s.attribution.includes('Esri'), 'Esri credit left after swapping back: ' + s.attribution);
+      assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+    } finally { await ctx.close(); }
+  });
+
+  for (const vp of [{ width: 390, height: 844 }, { width: 740, height: 360 }, { width: 844, height: 390 }, { width: 768, height: 1024 }]) {
+    await step(`Live ${vp.width}x${vp.height}: the imagery credit is visible and covers no control`, async () => {
+      const { ctx, page, rec } = await newCtx({
+        viewport: vp, dhm: true,
+        tiles: { providers: { esri: { enabled: true } } },
+        storage: { 'mc-light-tile-provider': 'esri-imagery' },
+      });
+      try {
+        await gotoMap(page, '#/live');
+        await page.waitForTimeout(800);
+        await assertLiveCredits(page, CREDIT, [], 'no overlay');
+        const layout = await page.evaluate(() => {
+          const a = document.querySelector('.leaflet-control-attribution').getBoundingClientRect();
+          const vcr = document.querySelector('.vcr-bar');
+          const v = vcr ? vcr.getBoundingClientRect() : null;
+          // Every other map control and the Live chrome stays clickable.
+          const covered = [];
+          document.querySelectorAll('#liveMap .leaflet-control:not(.leaflet-control-attribution) a, #liveMap .leaflet-control-layers-toggle, .vcr-bar button').forEach(el => {
+            const r = el.getBoundingClientRect();
+            if (!r.width || !r.height) return;
+            const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+            if (hit && hit.closest('.leaflet-control-attribution')) covered.push(el.id || el.className || el.tagName);
+          });
+          const page = document.querySelector('.live-page');
+          const reserved = parseFloat(getComputedStyle(page).getPropertyValue('--live-credit-height')) || 0;
+          return { a: { top: a.top, bottom: a.bottom, height: a.height }, vcrTop: v && v.height ? v.top : null, covered, reserved };
+        });
+        assert(layout.vcrTop === null || layout.a.bottom <= layout.vcrTop + 1, 'credit under the VCR bar: ' + JSON.stringify(layout));
+        assert(layout.covered.length === 0, 'credit covers: ' + layout.covered.join(', '));
+        assert(Math.abs(layout.reserved - Math.ceil(layout.a.height)) <= 1, 'reserved ' + layout.reserved + 'px for a ' + layout.a.height + 'px credit');
+        await shot(page, `live-credit-${vp.width}x${vp.height}.jpg`);
+        // The credit grows a line with the terrain on; the overlays follow.
+        await toggleOverlay(page, 'dhm-terrain');
+        await page.waitForTimeout(300);
+        await assertLiveCredits(page, CREDIT, ['dhm-terrain'], 'terrain on');
+        await shot(page, `live-credit-${vp.width}x${vp.height}-terrain.jpg`);
+        await toggleOverlay(page, 'dhm-terrain');
+        await page.waitForTimeout(300);
+        await assertLiveCredits(page, CREDIT, [], 'terrain off again');
+        assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
       } finally { await ctx.close(); }
     });
   }

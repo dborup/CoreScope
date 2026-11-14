@@ -563,6 +563,9 @@ test('MC_createLayerControl handles Auto mode and explicit layers correctly', ()
   };
   
   const mockMap = {
+    // Like the Map page (default 'topleft' position): it has its own
+    // attribution control, so the registry adds none (#728).
+    attributionControl: {},
     hasLayer: (l) => addedLayers.includes(l),
     addLayer: (l) => { addedLayers.push(l); removedLayers = removedLayers.filter(x => x !== l); },
     removeLayer: (l) => { removedLayers.push(l); addedLayers = addedLayers.filter(x => x !== l); },

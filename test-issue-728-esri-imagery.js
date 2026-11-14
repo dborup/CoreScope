@@ -17,6 +17,11 @@
  *   E4  Per-viewer choice: MC_set*TileProvider persists an Esri style only
  *       while Esri is on; a stored Esri choice is ignored while it is off.
  *   E5  Dark theme with the imagery selected: the tile pane gets no filter.
+ *   E6  Live (no attribution control of its own) always shows the base
+ *       map's credit: with no overlay on, through every on/off order of
+ *       the two overlays, across a base swap and an in-place credit change
+ *       (MC_setLayerAttribution), with one control; the Map page, which has
+ *       its own control, never gets a second one (review round 3).
  *
  * Runs via: node test-issue-728-esri-imagery.js  (pure vm sandbox)
  */
@@ -25,6 +30,7 @@ const vm     = require('vm');
 const fs     = require('fs');
 const path   = require('path');
 const assert = require('assert');
+const { makeSandbox, buildControl, liveAttributions, liveCredits } = require('./tests/map-overlay-sandbox');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -272,6 +278,131 @@ test('E5 dark theme + esri-imagery-dark → the tile pane has no filter', () => 
   ctx.window.MC_setDarkTileProvider('esri-imagery-dark');
   ctx.window.MC_applyTileFilter();
   assert.strictEqual(ctx.tilePane.style.filter, '');
+});
+
+console.log('\n── #728 E6: Live always credits the base map ──');
+
+const DHM = {
+  enabled: true, url: '/api/map/dhm/wms', layer: 'dhm_terraen_skyggekort',
+  minZoom: 7, maxZoom: 19, bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
+  attribution: 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0',
+};
+const HERITAGE = {
+  enabled: true, url: 'https://www.kulturarv.dk/ffgeoserver/public/wms',
+  layers: 'fundogfortidsminder_areal_beskyttelse,fundogfortidsminder_punkt_fredet',
+  minZoom: 12, maxZoom: 19, bounds: [[54.4646, 8.0899], [57.7289, 15.5689]],
+  attribution: '© Slots- og Kulturstyrelsen',
+};
+const OVERLAY_OF = { T: 'Terrain (DHM hillshade)', H: 'Protected ancient monuments (zoom 12+)' };
+const CREDIT_OF = { T: DHM.attribution, H: HERITAGE.attribution };
+
+// Live: the Auto tile layer from the light spec is on the map before the
+// layer control is built (public/live.js).
+function liveWithImagery(opts) {
+  const ctx = makeSandbox(Object.assign({ hash: '#/live', mapCfg: tiles(ESRI_ON), storage: { 'mc-light-tile-provider': 'esri-imagery' } }, opts));
+  const spec = ctx.window.MC_getTileSpec('light');
+  const base = ctx.L.tileLayer(spec.url, { attribution: spec.attribution, maxZoom: 19 });
+  return Object.assign({ ctx, base }, buildControl(ctx, false, base));
+}
+
+test('E6 Live, no overlay offered: the imagery credit is shown in one control', () => {
+  const { map, base } = liveWithImagery();
+  assert.strictEqual(base.options.attribution, CREDIT);
+  assert.deepStrictEqual(liveCredits(map), [CREDIT]);
+  const live = liveAttributions(map);
+  assert.strictEqual(live.length, 1);
+  assert.strictEqual(map.attributionControl, live[0]);
+  assert.strictEqual(live[0].opts.prefix, false);
+  assert.strictEqual(live[0].opts.position, 'bottomright');
+});
+
+test('E6 Live, both overlays offered but off: only the imagery credit', () => {
+  const { map } = liveWithImagery({ dhm: DHM, heritage: HERITAGE });
+  assert.deepStrictEqual(liveCredits(map), [CREDIT]);
+  assert.strictEqual(liveAttributions(map).length, 1);
+});
+
+test('E6 Live, every on/off order of both overlays (all 64 six-toggle runs): base credit always, overlay credits exactly', () => {
+  for (let n = 0; n < 64; n++) {
+    const { map, ctl } = liveWithImagery({ dhm: DHM, heritage: HERITAGE });
+    const on = new Set();
+    const run = [];
+    for (let i = 0; i < 6; i++) {
+      const k = (n >> i) & 1 ? 'H' : 'T';
+      const layer = ctl.overlays[OVERLAY_OF[k]];
+      if (on.has(k)) { map.removeLayer(layer); on.delete(k); } else { map.addLayer(layer); on.add(k); }
+      run.push(k);
+      const want = [CREDIT].concat([...on].map(x => CREDIT_OF[x])).sort();
+      assert.deepStrictEqual(liveCredits(map), want, 'after ' + run.join(''));
+      assert.strictEqual(liveAttributions(map).length, 1, 'controls after ' + run.join(''));
+      assert.strictEqual(map.attributionControl, liveAttributions(map)[0], 'claimed control after ' + run.join(''));
+    }
+  }
+});
+
+test('E6 Live, restored-on overlay: base and overlay credit from the start', () => {
+  const { map } = liveWithImagery({ dhm: DHM, storage: { 'mc-light-tile-provider': 'esri-imagery', 'mc-terrain-dhm': '1' } });
+  assert.deepStrictEqual(liveCredits(map), [CREDIT, DHM.attribution].sort());
+  assert.strictEqual(liveAttributions(map).length, 1);
+});
+
+// The base layer is on the map before the control exists; Leaflet's control
+// counts such a layer's credit without the removal hook it gives later
+// layers, so picking another base map would leave the imagery credit behind.
+test('E6 Live, base swapped (explicit pick, back to Auto): the old credit goes, the new one comes', () => {
+  const { ctx, map, base } = liveWithImagery({ dhm: DHM });
+  const osm = ctx.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap contributors' });
+  map.removeLayer(base);
+  map.addLayer(osm);
+  assert.deepStrictEqual(liveCredits(map), ['© OpenStreetMap contributors']);
+  map.removeLayer(osm);
+  map.addLayer(base);
+  assert.deepStrictEqual(liveCredits(map), [CREDIT]);
+  assert.strictEqual(liveAttributions(map).length, 1);
+});
+
+test('E6 Live, config rebuild and an overlay the server drops: still one control and the base credit', () => {
+  const { ctx, map } = liveWithImagery({ heritage: HERITAGE, storage: { 'mc-light-tile-provider': 'esri-imagery', 'mc-heritage': '1' } });
+  ctx.window.MC_initTileRegistry(true);
+  assert.deepStrictEqual(liveCredits(map), [CREDIT, HERITAGE.attribution].sort());
+  ctx.window.MC_HERITAGE_CFG = null;
+  ctx.window.MC_initTileRegistry(true);
+  assert.deepStrictEqual(liveCredits(map), [CREDIT]);
+  assert.strictEqual(liveAttributions(map).length, 1);
+});
+
+// Live's Auto layer changes provider in place (setUrl), so its credit must
+// be swapped in the control too, or the control keeps the old provider's.
+test('E6 MC_setLayerAttribution swaps an on-map layer\'s credit in the control', () => {
+  const { ctx, map, base } = liveWithImagery({ dhm: DHM, storage: { 'mc-light-tile-provider': 'esri-imagery', 'mc-terrain-dhm': '1' } });
+  ctx.window.MC_setLayerAttribution(map, base, '© OpenStreetMap contributors');
+  assert.strictEqual(base.options.attribution, '© OpenStreetMap contributors');
+  assert.deepStrictEqual(liveCredits(map), ['© OpenStreetMap contributors', DHM.attribution].sort());
+  ctx.window.MC_setLayerAttribution(map, base, '© OpenStreetMap contributors');
+  assert.deepStrictEqual(liveCredits(map), ['© OpenStreetMap contributors', DHM.attribution].sort(), 'same text twice');
+  ctx.window.MC_setLayerAttribution(map, base, CREDIT);
+  assert.deepStrictEqual(liveCredits(map), [CREDIT, DHM.attribution].sort());
+  map.removeLayer(base);
+  assert.deepStrictEqual(liveCredits(map), [DHM.attribution], 'swapped layer removed');
+});
+
+test('E6 MC_setLayerAttribution on a layer that is off the map only changes its option', () => {
+  const { ctx, map, base } = liveWithImagery();
+  map.removeLayer(base);
+  ctx.window.MC_setLayerAttribution(map, base, '© OpenStreetMap contributors');
+  assert.deepStrictEqual(liveCredits(map), []);
+  map.addLayer(base);
+  assert.deepStrictEqual(liveCredits(map), ['© OpenStreetMap contributors']);
+});
+
+test('E6 Map page (own attribution control): no registry control, with or without overlays', () => {
+  const ctx = makeSandbox({ mapCfg: tiles(ESRI_ON), dhm: DHM, heritage: HERITAGE });
+  const base = ctx.L.tileLayer(URL_IMAGERY, { attribution: CREDIT });
+  const { map, ctl } = buildControl(ctx, true, base);
+  map.addLayer(ctl.overlays[OVERLAY_OF.T]);
+  map.removeLayer(ctl.overlays[OVERLAY_OF.T]);
+  assert.strictEqual(map._attributionControls.length, 0);
+  assert.strictEqual(map.attributionControl.builtIn, true);
 });
 
 console.log(`\n#728 esri imagery: ${passed} passed, ${failed} failed`);
