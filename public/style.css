@@ -6453,18 +6453,23 @@ body.embed #app.app-fixed {
 }
 .tp-copy-status { margin: 0; padding: 2px 8px; font-size: var(--fs-sm); color: var(--text-muted); }
 .tp-copy-status:empty { display: none; }
-/* The licence link keeps the credit line's size, but gets a 48 px hit box
+/* Each credit link keeps the credit line's size, but gets a 48 px hit box
    from padding cancelled by negative margins, so the line height is not
    disturbed. position + z-index lift that padding band above the chart and
    the detail line it overlaps; without them it is a 48 px box but only a
-   ~36-40 px target (#711). */
+   ~36-40 px target (#711). min-width alone gives a short mark its 48 px of
+   width, so the band grows vertically only: #733 puts a second link (the
+   dataset) on this line, and horizontal padding cancelled by a negative
+   margin would make each link's box overlap its neighbour's by 4 px — the
+   later one wins the hit test, and the earlier one is no longer 48 px of
+   its own target. */
 .tp-credit-link {
   position: relative;
   z-index: 1;
   display: inline-block;
   min-width: 48px;
-  padding: 18px 4px;
-  margin: -18px -4px;
+  padding: 18px 0;
+  margin: -18px 0;
   color: inherit;
   text-decoration: underline;
   text-align: center;
