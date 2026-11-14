@@ -60,6 +60,14 @@
       "measurementNote": "New suite; #721 moving A or B of an open Map Path profile with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile that echoes ha/hb/model: draggable 48px A/B markers and Move A / Move B / Swap in the panel, no request during a mouse drag and exactly one after the drop with A, both heights and the model kept and the hash following, a drop on a node marker snapping to its pubkey, Escape mid-drag and during Move A restoring the old end with no request, the Move A button flow, Swap carrying the heights, a CDP touch drag and a Move B tap at 360x740, Move/Swap reachable at 48px at 360x740 and 740x360, and axe plus measured A/B tag contrast in light and dark. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681 DHM suites."
     },
     {
+      "file": "test-issue-727-share-link-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #727 M1 shareable /p links for the Map Path profile with an intercepted dhm client-config block (profile: true, share on or off) and a stubbed /api/terrain/profile: /p?profile=... lands on #/map with the panel open and one request carrying only the allow-listed keys, one document request and app.js loaded once with every asset below 400, Back leaves /p behind, the copy button hands out a /p link with dhm.share (and that link reopens the profile) and the #/map link without it, the raw /p HTML for a crawler User-Agent has the handoff script and filled OG tags, /p/ is a 301 to /p, and the same landing at 360x740. About 15s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681/#721 DHM suites."
+    },
+    {
       "file": "test-issue-674-1byte-hop-modes-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

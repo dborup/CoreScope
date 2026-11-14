@@ -1,0 +1,268 @@
+{
+  "_comment": "#727: one table for both profile= parsers: cmd/server/share_profile.go (splitProfilePair, then parseTerrainRef) and public/terrain-profile.js (parseProfilePair). go test (TestShareProfile_ParamFixture) and node test-issue-727-share-link.js read this same file, so a change to one parser that is not matched in the other fails CI. Valid refs are lower-case.",
+  "cases": [
+    {
+      "name": "two keys (129 bytes, the longest valid pair)",
+      "input": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "valid": true,
+      "refs": [
+        {
+          "kind": "node",
+          "pubkey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        },
+        {
+          "kind": "node",
+          "pubkey": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        }
+      ]
+    },
+    {
+      "name": "key then point",
+      "input": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,55.12345,10.12345",
+      "valid": true,
+      "refs": [
+        {
+          "kind": "node",
+          "pubkey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        },
+        {
+          "kind": "point",
+          "lat": 55.12345,
+          "lon": 10.12345
+        }
+      ]
+    },
+    {
+      "name": "point then key",
+      "input": "55.12345,10.12345,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "valid": true,
+      "refs": [
+        {
+          "kind": "point",
+          "lat": 55.12345,
+          "lon": 10.12345
+        },
+        {
+          "kind": "node",
+          "pubkey": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        }
+      ]
+    },
+    {
+      "name": "point then point",
+      "input": "55.12345,10.12345,-55.2,-10.2",
+      "valid": true,
+      "refs": [
+        {
+          "kind": "point",
+          "lat": 55.12345,
+          "lon": 10.12345
+        },
+        {
+          "kind": "point",
+          "lat": -55.2,
+          "lon": -10.2
+        }
+      ]
+    },
+    {
+      "name": "upper-case hex is lower-cased",
+      "input": "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "valid": true,
+      "refs": [
+        {
+          "kind": "node",
+          "pubkey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        },
+        {
+          "kind": "node",
+          "pubkey": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+        }
+      ]
+    },
+    {
+      "name": "ten decimals",
+      "input": "55.1234567890,10.1234567890,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": true,
+      "refs": [
+        {
+          "kind": "point",
+          "lat": 55.123456789,
+          "lon": 10.123456789
+        },
+        {
+          "kind": "node",
+          "pubkey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      ]
+    },
+    {
+      "name": "range edges",
+      "input": "-90,-180,90,180",
+      "valid": true,
+      "refs": [
+        {
+          "kind": "point",
+          "lat": -90,
+          "lon": -180
+        },
+        {
+          "kind": "point",
+          "lat": 90,
+          "lon": 180
+        }
+      ]
+    },
+    {
+      "name": "integers",
+      "input": "55,10,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": true,
+      "refs": [
+        {
+          "kind": "point",
+          "lat": 55,
+          "lon": 10
+        },
+        {
+          "kind": "node",
+          "pubkey": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      ]
+    },
+    {
+      "name": "empty",
+      "input": "",
+      "valid": false
+    },
+    {
+      "name": "a lone comma",
+      "input": ",",
+      "valid": false
+    },
+    {
+      "name": "one key",
+      "input": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "four coordinates and one more",
+      "input": "55.1,10.1,55.2,10.2,55.3",
+      "valid": false
+    },
+    {
+      "name": "odd token count",
+      "input": "55.1,10.1,55.2",
+      "valid": false
+    },
+    {
+      "name": "three keys",
+      "input": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "point as the third ref",
+      "input": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210,55.1,10.1",
+      "valid": false
+    },
+    {
+      "name": "63-hex token",
+      "input": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "valid": false
+    },
+    {
+      "name": "65-hex token",
+      "input": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdefa,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "valid": false
+    },
+    {
+      "name": "non-hex 64 chars",
+      "input": "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "valid": false
+    },
+    {
+      "name": "leading plus",
+      "input": "+55.1,10.1,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "exponent",
+      "input": "5e1,10.1,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "NaN",
+      "input": "NaN,10.1,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "Infinity",
+      "input": "Infinity,10.1,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "hex float",
+      "input": "0x1p3,10.1,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "eleven decimals",
+      "input": "55.12345678901,10.1,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "four integer digits",
+      "input": "1000.1,10.1,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "latitude out of range",
+      "input": "90.00001,10.1,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "longitude out of range",
+      "input": "55.1,-180.1,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "a key as a longitude",
+      "input": "55.1,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "empty token",
+      "input": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "valid": false
+    },
+    {
+      "name": "trailing comma",
+      "input": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210,",
+      "valid": false
+    },
+    {
+      "name": "leading comma",
+      "input": ",0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "valid": false
+    },
+    {
+      "name": "leading space",
+      "input": " 55.1,10.1,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "trailing dot",
+      "input": "55.,10.1,0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "valid": false
+    },
+    {
+      "name": "over-long parameter (141 bytes)",
+      "input": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210,11111111111",
+      "valid": false
+    },
+    {
+      "name": "over-long parameter (201 bytes)",
+      "input": "1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1",
+      "valid": false
+    }
+  ]
+}

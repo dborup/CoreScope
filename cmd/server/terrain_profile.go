@@ -129,7 +129,22 @@ type terrainSettings struct {
 	upstreamTimeout time.Duration
 	rateLimitPerMin int
 	maxInFlight     int
+	// share is map.dhm.profile.share (#727), see share_profile.go.
+	share shareSettings
 }
+
+// shareSettings are map.dhm.profile.share, resolved and bounded.
+type shareSettings struct {
+	enabled bool
+	// upstreamPerMin is the server-wide budget of upstream profile
+	// fetches that sharing may cause. In #727 M1 the /p route makes no
+	// upstream call at all, which is within any value of it; the budget
+	// is enforced once a share request may fetch (#727 M3).
+	upstreamPerMin int
+}
+
+// shareUpstreamPerMinMax bounds share.upstreamPerMin: one fetch a second.
+const shareUpstreamPerMinMax = 60
 
 // resolveTerrainSettings applies the defaults and bounds. An out-of-range
 // value logs a warning and takes the default.
@@ -171,6 +186,12 @@ func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface
 		// profile has up to 32 rasters, so it can fill all 4 slots on its
 		// own, and more profiles in flight would only queue goroutines.
 		maxInFlight: integer("maxInFlight", pc.MaxInFlight, 4, 1, terrainMaxInFlightCap),
+		// Off unless the operator opts in (#727 owner decision 7); 0 is a
+		// legitimate budget: sharing never goes upstream.
+		share: shareSettings{
+			enabled:        pc.Share.Enabled,
+			upstreamPerMin: integer("share.upstreamPerMin", pc.Share.UpstreamPerMin, 2, 0, shareUpstreamPerMinMax),
+		},
 	}
 }
 
@@ -519,6 +540,10 @@ type terrainEnd struct {
 	kind   string
 	role   string
 	pubkey string
+	// name is the node's display name, for the share preview (#727). It
+	// is only ever set for a node that passed the visibility gate in
+	// resolveTerrainEnd; the JSON response never carries it.
+	name string
 }
 
 // terrainRequest is a validated, resolved profile request: everything a
@@ -697,7 +722,7 @@ func (s *Server) resolveTerrainEnd(ref terrainRef) (terrainEnd, bool) {
 		if !n.HasGPS || !isValidNodePosition(n.Lat, n.Lon) || identityHidden(s.cfg, ref.pubkey, n.Name) {
 			return terrainEnd{}, false
 		}
-		return terrainEnd{pt: dhm.LatLon{Lat: n.Lat, Lon: n.Lon}, kind: "node", role: n.Role, pubkey: ref.pubkey}, true
+		return terrainEnd{pt: dhm.LatLon{Lat: n.Lat, Lon: n.Lon}, kind: "node", role: n.Role, pubkey: ref.pubkey, name: n.Name}, true
 	}
 	return terrainEnd{}, false
 }

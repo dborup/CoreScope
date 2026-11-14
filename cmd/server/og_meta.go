@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // #646 — link-preview crawlers do not run JavaScript, so the Open Graph and
@@ -40,8 +42,19 @@ const (
 // absolute URL. Anything else yields a relative path rather than markup.
 var ogHostRe = regexp.MustCompile(`^[A-Za-z0-9.\-]+(:[0-9]{1,5})?$|^\[[0-9A-Fa-f:.]+\](:[0-9]{1,5})?$`)
 
+// ogPlaceholders are every __OG_*__ placeholder index.html may carry. Both
+// prepare (the site document) and renderProfile (the /p document, #727)
+// substitute every one of them; a test pins this list to the shipped file.
+var ogPlaceholders = []string{
+	"__OG_TITLE__", "__OG_SITE_NAME__", "__OG_DESCRIPTION__",
+	"__OG_IMAGE__", "__OG_IMAGE_DIMS__", "__OG_PAGE_META__",
+}
+
 type ogMeta struct {
 	replacer *strings.Replacer // static placeholders, applied once
+	// siteName is the escaped og:site_name, which a per-profile document
+	// (#727) keeps while its title changes.
+	siteName string
 	trusted  []*net.IPNet
 	// publicBase, when set, is used instead of the request origin.
 	publicBase string
@@ -114,10 +127,14 @@ func newOGMeta(pick func(string) any, publicDir string, trusted []*net.IPNet) *o
 	}
 
 	e := html.EscapeString
+	o.siteName = e(siteName)
 	o.replacer = strings.NewReplacer(
-		"__OG_TITLE__", e(siteName),
+		"__OG_TITLE__", o.siteName,
+		"__OG_SITE_NAME__", o.siteName,
 		"__OG_DESCRIPTION__", e(desc),
 		"__OG_IMAGE_DIMS__", o.dims,
+		// Page-specific tags (og:url, robots) exist on /p only (#727).
+		"__OG_PAGE_META__", "",
 	)
 	return o
 }
@@ -203,13 +220,109 @@ func (o *ogMeta) origin(r *http.Request) string {
 func (o *ogMeta) prepare(doc string) string {
 	doc = o.replacer.Replace(doc)
 	if o.imageNeedsOrigin {
-		imagePath := o.imagePath
-		if o.imageVer != "" {
-			imagePath += "?v=" + o.imageVer
-		}
-		return strings.ReplaceAll(doc, "__OG_IMAGE__", ogOriginPlaceholder+"/"+html.EscapeString(imagePath))
+		return strings.ReplaceAll(doc, "__OG_IMAGE__", ogOriginPlaceholder+"/"+o.localImageRef())
 	}
 	return strings.ReplaceAll(doc, "__OG_IMAGE__", html.EscapeString(o.imageAbs))
+}
+
+// localImageRef is the escaped path and #719 version of a local og:image.
+func (o *ogMeta) localImageRef() string {
+	imagePath := o.imagePath
+	if o.imageVer != "" {
+		imagePath += "?v=" + o.imageVer
+	}
+	return html.EscapeString(imagePath)
+}
+
+// imageFor is the escaped og:image value for one request: what prepare and
+// render produce between them.
+func (o *ogMeta) imageFor(r *http.Request) string {
+	if !o.imageNeedsOrigin {
+		return html.EscapeString(o.imageAbs)
+	}
+	return html.EscapeString(o.origin(r)) + "/" + o.localImageRef()
+}
+
+// ── Per-profile documents (#727) ───────────────────────────────────────────
+
+// ogPage is the page-specific part of a per-profile document, unescaped:
+// renderProfile is the only place it is escaped.
+type ogPage struct {
+	Title       string
+	Description string
+	// Path is the page's own path and query ("/p?…"). The caller builds it
+	// from parsed, validated values only, never from the raw request; with
+	// the request origin it becomes og:url.
+	Path string
+}
+
+// Rune limits of the per-profile tags (#727 plan §1.3).
+const (
+	ogTitleMaxRunes       = 90
+	ogDescriptionMaxRunes = 200
+)
+
+// renderProfile fills a per-profile document: doc is index.html with only
+// __BUST__ substituted, so every OG placeholder is still in place. One
+// strings.Replacer pass fills all of them; substituted values are never
+// scanned again, so a value that happens to contain a placeholder stays
+// text. The image stays the site card until #727 M3. og:url (re-added for
+// /p only, owner decision 5; #1890 keeps it off every other page) and
+// robots noindex (owner decision 8) ride __OG_PAGE_META__.
+func (o *ogMeta) renderProfile(doc string, r *http.Request, pg ogPage) []byte {
+	meta := `<meta name="robots" content="noindex">`
+	if origin := o.origin(r); origin != "" {
+		meta = `<meta property="og:url" content="` + html.EscapeString(origin+pg.Path) + `">` + "\n  " + meta
+	}
+	return []byte(strings.NewReplacer(
+		"__OG_TITLE__", ogText(pg.Title, ogTitleMaxRunes),
+		"__OG_SITE_NAME__", o.siteName,
+		"__OG_DESCRIPTION__", ogText(pg.Description, ogDescriptionMaxRunes),
+		"__OG_IMAGE__", o.imageFor(r),
+		"__OG_IMAGE_DIMS__", o.dims,
+		"__OG_PAGE_META__", meta,
+	).Replace(doc))
+}
+
+// ogText is the one chokepoint for request-derived text in a meta tag:
+// sanitise and truncate (ogClip), then html.EscapeString, in that order, so
+// truncation can never cut an entity in half. Every value lands in a
+// double-quoted attribute (or <title>) of a document whose markup is fixed
+// at build time, so attribute escaping is sufficient.
+func ogText(s string, maxRunes int) string {
+	return html.EscapeString(ogClip(s, maxRunes))
+}
+
+// ogClip drops what has no business in a preview — C0/C1 controls, the
+// U+2028/U+2029 separators, bidi overrides and isolates, and angle
+// brackets — collapses whitespace runs to one space, trims, and cuts the
+// result to maxRunes runes, ending in "…" when it was longer.
+func ogClip(s string, maxRunes int) string {
+	var b strings.Builder
+	pendingSpace := false
+	for _, r := range s {
+		switch {
+		case r == '<' || r == '>' || r == '\u2028' || r == '\u2029' ||
+			(r >= '\u202a' && r <= '\u202e') || (r >= '\u2066' && r <= '\u2069'):
+			continue
+		case unicode.IsSpace(r):
+			pendingSpace = true
+			continue
+		case unicode.IsControl(r):
+			continue
+		}
+		if pendingSpace && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		pendingSpace = false
+		b.WriteRune(r)
+	}
+	out := b.String()
+	if maxRunes <= 0 || utf8.RuneCountInString(out) <= maxRunes {
+		return out
+	}
+	rs := []rune(out)[:maxRunes-1]
+	return strings.TrimRight(string(rs), " ") + "…"
 }
 
 // render returns the final document for one request.

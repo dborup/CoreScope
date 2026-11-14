@@ -24,7 +24,9 @@ test('og:image and twitter:image are placeholders, not external hosts', () => {
 });
 test('title/description tags are placeholders', () => {
   assert.ok(html.includes('<title>__OG_TITLE__</title>'));
-  assert.ok(/og:site_name" content="__OG_TITLE__"/.test(html));
+  // #727: the site name has its own placeholder, so a /p share page can
+  // change its title and keep the site's name.
+  assert.ok(/og:site_name" content="__OG_SITE_NAME__"/.test(html));
   assert.ok(/og:description" content="__OG_DESCRIPTION__"/.test(html));
   assert.ok(/twitter:description" content="__OG_DESCRIPTION__"/.test(html));
   assert.ok(html.includes('__OG_IMAGE_DIMS__'));

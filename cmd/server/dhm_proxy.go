@@ -74,7 +74,12 @@ type DHMClientConfig struct {
 	// map.dhm.profile.enabled, so the Map page cannot infer it from
 	// Enabled and must be told. No limit or parameter is published with
 	// it: the endpoint validates its own request.
-	Profile     bool          `json:"profile"`
+	Profile bool `json:"profile"`
+	// Share reports whether the /p share route serves per-profile link
+	// previews (#727): the profile is served and map.dhm.profile.share.
+	// enabled is set. Without it the copy button hands out the plain
+	// #/map?profile= link, exactly as before.
+	Share       bool          `json:"share"`
 	Bounds      [2][2]float64 `json:"bounds"` // [[south, west], [north, east]]
 	Attribution string        `json:"attribution"`
 }
@@ -363,6 +368,7 @@ func (s *Server) dhmClientConfig() *DHMClientConfig {
 	}
 	c := dhmClientConfig()
 	c.Profile = s.terrain != nil
+	c.Share = s.terrain != nil && s.terrain.set.share.enabled
 	return c
 }
 
