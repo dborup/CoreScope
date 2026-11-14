@@ -2707,6 +2707,7 @@
   // Inert until armed: no request, no map listener and no marker handler
   // exists before the user presses the toggle.
   var profileTool = null;     // the terrain-profile.js controller
+  var profileMastHint = null; // #724 M4: masts-hint.js, null unless the masts layer is offered
   var profileArm = null;      // 'a' | 'b' while picking, else null
   var profileLine = null;     // the measured path
   var profileGhost = null;    // live preview from A to the pointer
@@ -2813,6 +2814,11 @@
         profileSyncButton();
       }
     });
+    // #724 M4: the interference hint reads the antenna-site cells around
+    // each end through the masts layer's own loader; no request of its own.
+    profileMastHint = window.MastsHint && window.MC_getMastsConfig
+      ? window.MastsHint.attach({ map: map, cfg: window.MC_getMastsConfig(), panel: function () { return profileTool && profileTool.el(); } })
+      : null;
     if (!profileKeyHandler) {
       // Escape drops a drag or disarms the picker, either way keeping the
       // old end (#721); a second Escape closes the panel.
@@ -2971,6 +2977,7 @@
     profileDrag = null;
     if (profileLine && map) { try { map.removeLayer(profileLine); } catch (_) {} }
     profileLine = null;
+    if (profileMastHint) profileMastHint.clear();
     ['a', 'b'].forEach(function (side) {
       if (profileEnds[side] && map) { try { map.removeLayer(profileEnds[side]); } catch (_) {} }
       profileEnds[side] = null;
@@ -2992,6 +2999,7 @@
     else profileLine = L.polyline([a, b], { className: 'tp-path-line', interactive: false, weight: 3 }).addTo(map);
     profileEndMarker('a', a);
     profileEndMarker('b', b);
+    if (profileMastHint) profileMastHint.update(a, b);
   }
 
   // ── #721: drag an end ──
@@ -3164,6 +3172,7 @@
     profileKeyHandler = null;
     if (profileTool) profileTool.destroy();
     profileTool = null;
+    profileMastHint = null;
     profileExtraNode = null;
     profileBtn = null;
     profileHintEl = null;

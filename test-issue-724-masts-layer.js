@@ -128,11 +128,16 @@ test('a view straddling 9° E lists the cell under the southern edge at the meri
 
 test('z13 viewport cell counts (printed) stay under the view cap', () => {
   z13Count = ML.cellsForView(AARHUS_Z13, MASTS).length;
-  const big = ML.cellsForView(viewBox(56.1629, 10.2039, 13, 2560, 1440), MASTS).length;
+  const big = ML.cellsForView(viewBox(56.1629, 10.2039, 13, 2560, 1440), MASTS, 100000).length;
   const z14 = ML.cellsForView(viewBox(56.1629, 10.2039, 14, 1920, 1080), MASTS).length;
-  console.log(`     z13 1920×1080 Aarhus: ${z13Count} cells; z13 2560×1440: ${big}; z14 1920×1080: ${z14}`);
+  const big14 = ML.cellsForView(viewBox(56.1629, 10.2039, 14, 3840, 2160), MASTS);
+  console.log(`     z13 1920×1080 Aarhus: ${z13Count} cells; z13 2560×1440: ${big}; z14 1920×1080: ${z14}; z14 3840×2160: ${big14 && big14.length}`);
   assert(z13Count >= 60 && z13Count <= 100, 'z13 count ' + z13Count);
-  assert(big <= ML.VIEW_CELL_CAP, '2560×1440 z13 over the cap: ' + big);
+  assert(z13Count <= ML.VIEW_CELL_CAP, '1920×1080 z13 over the cap: ' + z13Count);
+  // #758 F2: a wider z13 view is over the cap (one more zoom step, F1) ...
+  assert(big > ML.VIEW_CELL_CAP && ML.cellsForView(viewBox(56.1629, 10.2039, 13, 2560, 1440), MASTS) === null, '2560×1440 z13: ' + big);
+  // ... and one step in, even a 4K view fits.
+  assert(big14 && big14.length <= ML.VIEW_CELL_CAP, '3840×2160 z14 over the cap');
   assert(z14 < z13Count / 3);
 });
 
@@ -206,6 +211,9 @@ test('the client pacing fits the server defaults (maxInFlight, per-IP budget)', 
   assert(ML.CONCURRENCY * 4 <= maxInFlight, `${ML.CONCURRENCY} per viewer vs maxInFlight ${maxInFlight}`);
   assert(z13Count > maxInFlight, 'a cold z13 view would exceed maxInFlight without pacing');
   assert(z13Count <= perMin, `a cold z13 view (${z13Count}) fits the per-IP budget ${perMin}`);
+  // #758 F2: the largest view the layer draws at all must fit the budget,
+  // or its last cells get 429 and stay empty for up to a minute.
+  assert(ML.VIEW_CELL_CAP <= perMin, `view cap ${ML.VIEW_CELL_CAP} over the per-IP budget ${perMin}`);
 });
 
 test('cells that leave the view before they start are never requested', async () => {
@@ -354,7 +362,9 @@ test('popup shows the published fields and nothing the source does not publish',
 test('the interference hint (500 m / 100 m) only on interference sites; no legal claims', () => {
   const on = ML.popupHTML(SITE, MASTS);
   const off = ML.popupHTML(Object.assign({}, SITE, { interference: false, likelyMast: false }), MASTS);
-  assert(/Within about 500 m \(most within 100 m\)/.test(on) && /may desensitise/.test(on));
+  // #758 F4: the strong tier, not a claim about where most transmitters are.
+  assert(/Within about 500 m, especially within 100 m, /.test(on) && /may desensitise/.test(on), on);
+  assert(!/most within/.test(on));
   assert(!/desensitise|500 m/.test(off));
   assert(/likely a tall dedicated mast \(a heuristic, not from the source\)/.test(on));
   assert(!/heuristic/.test(off));
@@ -371,7 +381,10 @@ test('the interference hint (500 m / 100 m) only on interference sites; no legal
 test('status line: zoom gate, loading, unavailable, truncated, silent when off', () => {
   const s0 = { pending: 0, failed: 0, truncated: 0 };
   assert.strictEqual(ML.statusText(12, MASTS, true, s0, false), 'Zoom in to 13+ to see antenna positions');
-  assert.strictEqual(ML.statusText(13, MASTS, true, s0, true), 'Zoom in to 13+ to see antenna positions');
+  // #758 F1: at the gate zoom a view over the cap must not ask for a zoom
+  // the map already has.
+  assert.strictEqual(ML.statusText(13, MASTS, true, s0, true), 'This view is too wide for antenna positions; zoom in one more step');
+  assert.strictEqual(ML.statusText(15, MASTS, true, s0, true), 'This view is too wide for antenna positions; zoom in one more step');
   assert.strictEqual(ML.statusText(12, MASTS, false, s0, false), '');
   assert.strictEqual(ML.statusText(13, MASTS, true, Object.assign({}, s0, { pending: 2 }), false), 'Loading antenna sites…');
   assert.strictEqual(ML.statusText(13, MASTS, true, Object.assign({}, s0, { failed: 1 }), false), 'Antenna data unavailable for some areas');
@@ -506,6 +519,8 @@ test('cell diffing: markers built once, detached off-view, re-attached without a
   assert.strictEqual(ring.options.color, 'rgb(4, 5, 6)');
   assert(markers.some((m) => m.options.fillColor === 'rgb(1, 2, 3)'));
   assert(/LTE/.test(ring.popup()), 'popup is the site popup');
+  // #758 F3: the width every other map popup uses, so it fits a 375 px phone.
+  assert(markers.every((m) => m.popupOptions && m.popupOptions.maxWidth === 280), 'popup maxWidth is not 280');
   assert.strictEqual(map._mcMasts.stats().attached, first);
 
   view.b = { south: 56.40, west: 10.60, north: 56.41, east: 10.615 }; // pan away

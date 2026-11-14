@@ -38,7 +38,12 @@
 (function () {
   'use strict';
 
-  var VIEW_CELL_CAP = 160;  // cells one view may need; a 2560×1440 z13 view is ~140
+  // Cells one view may need. At most the server's default per-IP budget
+  // (mastsCellRateLimitDefault, 120 cells a minute), so a cold view the
+  // layer draws at all is served inside one minute instead of leaving its
+  // last cells on 429 (#758 review F2). A 1920×1080 z13 view is ~80; a
+  // wider one asks for one more zoom step (statusText).
+  var VIEW_CELL_CAP = 120;
   var KEEP_CELL_CAP = 320;  // cells kept in memory, visible ones included
   var CONCURRENCY = 4;      // cell requests in flight per map
   var BUSY_RETRIES = 3;     // 503s per cell before it counts as failed
@@ -46,7 +51,8 @@
   var MAX_WAIT_MS = 60000;  // longest Retry-After honoured
   var DEBOUNCE_MS = 250;
   // #724 owner decision 2: the distance a cellular transmitter in these
-  // bands may matter at, and the strong tier. Also used by the M4 hint.
+  // bands may matter at, and the strong tier. Also used by the M4 hint
+  // (public/masts-hint.js). The customizer exposes them in M5.
   var HINT_DISTANCE_M = 500;
   var HINT_STRONG_M = 100;
 
@@ -257,6 +263,8 @@
         onChange();
       },
       data: function (key) { var e = entries.get(key); return e && e.state === 'loaded' ? e.data : null; },
+      /** 'loaded' | 'loading' | 'waiting' | 'failed', or '' for an unknown cell. */
+      state: function (key) { var e = entries.get(key); return e ? e.state : ''; },
       stats: function () {
         var s = { kept: entries.size, inFlight: inFlight, wanted: wanted.length, loaded: 0, pending: 0, failed: 0, truncated: 0 };
         for (var i = 0; i < wanted.length; i++) {
@@ -311,7 +319,7 @@
     }
     if (site.interference) {
       h += '<p class="mc-masts-popup-hint">Has a 700/800/900 MHz entry. Within about ' + HINT_DISTANCE_M +
-        ' m (most within ' + HINT_STRONG_M + ' m) a cellular transmitter like this may desensitise an unfiltered ' +
+        ' m, especially within ' + HINT_STRONG_M + ' m, a cellular transmitter like this may desensitise an unfiltered ' +
         '868 MHz receiver; a band-pass filter or another site may help. Based on distance only: the source ' +
         'publishes no height or power.</p>';
     }
@@ -342,7 +350,10 @@
 
   function statusText(z, cfg, active, stats, tooWide) {
     if (!active) return '';
-    if (z < cfg.minZoom || tooWide) return 'Zoom in to ' + cfg.minZoom + '+ to see antenna positions';
+    if (z < cfg.minZoom) return 'Zoom in to ' + cfg.minZoom + '+ to see antenna positions';
+    // Over VIEW_CELL_CAP at or above the gate (a large display): the map
+    // already is at the gate zoom, so asking for it would be wrong (#758 F1).
+    if (tooWide) return 'This view is too wide for antenna positions; zoom in one more step';
     if (stats.pending) return 'Loading antenna sites…';
     if (stats.failed) return 'Antenna data unavailable for some areas';
     if (stats.truncated) return 'Some areas hit the source\'s 500-row limit; sites may be missing';
@@ -362,6 +373,13 @@
     var visible = new Set();
     var statusEl = null;
     var tooWide = false;
+    // The view's cells, centre first, and the cells pinned for the profile
+    // hint (#724 M4, public/masts-hint.js). Pinned cells are fetched and
+    // kept like any other through the same loader, whether or not an
+    // overlay is on, but only drawn when they are also in the view.
+    var viewKeys = [];
+    var pinned = [];
+    var pinListener = null, pinSig = '';
     var st = styles();
     var debounceT = null;
 
@@ -373,7 +391,8 @@
       var c = { sites: L.layerGroup(), interference: L.layerGroup() };
       (data.sites || []).forEach(function (site) {
         var ll = [site.lat, site.lon];
-        var popupOpts = { maxWidth: 340, className: 'mc-masts-popup' };
+        // 280, like every other map popup: it fits a 375 px phone (#758 F3).
+        var popupOpts = { maxWidth: 280, className: 'mc-masts-popup' };
         c.sites.addLayer(L.circleMarker(ll, Object.assign({ renderer: renderer }, st.sites)).bindPopup(popupFor(site), popupOpts));
         if (site.interference) {
           c.interference.addLayer(L.circleMarker(ll, Object.assign({ renderer: renderer }, st.interference)).bindPopup(popupFor(site), popupOpts));
@@ -402,7 +421,26 @@
 
     function active() { return map.hasLayer(groups.sites) || map.hasLayer(groups.interference); }
 
+    // The loader's wanted list: the pinned cells first (a handful, the
+    // viewer is waiting on them), then the view's, each once.
+    function wantedKeys() {
+      if (!pinned.length) return viewKeys;
+      var seen = new Set(pinned);
+      return pinned.concat(viewKeys.filter(function (k) { return !seen.has(k); }));
+    }
+
+    // Tells the pin listener when one of its cells settled, not on every
+    // state change of the view's cells.
+    function notifyPinned() {
+      if (!pinListener) return;
+      var sig = pinned.map(function (k) { return loader.state(k); }).join(',');
+      if (sig === pinSig) return;
+      pinSig = sig;
+      pinListener();
+    }
+
     function renderStatus() {
+      notifyPinned();
       if (!statusEl) return;
       var text = statusText(map.getZoom(), cfg, active(), loader.stats(), tooWide);
       statusEl.textContent = text;
@@ -433,9 +471,10 @@
         else tooWide = true;
       }
       visible = new Set(want);
+      viewKeys = want;
       attached.forEach(function (key) { if (!visible.has(key)) detach(key); });
       want.forEach(function (key) { if (loader.data(key)) attach(key); });
-      loader.view(want);
+      loader.view(wantedKeys());
       renderStatus();
     }
 
@@ -473,6 +512,17 @@
     map._mcMasts = {
       groups: groups,
       setStatusElement: function (el) { statusEl = el; renderStatus(); },
+      /* Keeps `keys` loaded (and fetches the missing ones, paced like the
+       * view's) until the next pin; onChange runs when one of them settles.
+       * pin([]) lets them go back to the LRU. */
+      pin: function (keys, onChange) {
+        pinned = (keys || []).slice();
+        pinListener = onChange || null;
+        pinSig = '';
+        loader.view(wantedKeys());
+      },
+      /** A pinned or viewed cell's data, or null while it is not loaded. */
+      data: function (key) { return loader.data(key); },
       // For tests and diagnostics only.
       stats: function () { var s = loader.stats(); s.attached = attached.size; s.built = cells.size; return s; }
     };
@@ -494,6 +544,8 @@
     statusText: statusText,
     /** The overlay layer of one category ('sites' | 'interference'). */
     layer: function (map, cfg, kind) { return controllerFor(map, cfg).groups[kind]; },
+    /** The map's one controller: pin() and data() for the profile hint. */
+    controller: controllerFor,
     /** Puts the status line under the overlay's label. */
     decorate: function (map, cfg, labelEl) {
       var doc = labelEl.ownerDocument || document;
