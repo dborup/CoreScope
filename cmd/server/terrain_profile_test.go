@@ -942,25 +942,32 @@ func TestTerrainProfile_EndpointNodata(t *testing.T) {
 
 // #745: a surface (DSM) above the antenna at an endpoint makes the
 // informational surface verdict blocked, at that endpoint, with a null F1
-// fraction (the zone has no radius there). The deciding DTM verdict is
-// the same as for the same path without a DSM.
+// fraction (the zone has no radius there), and says why: reason
+// antennaBelowSurface and the endpoint (owner decision on #750). The
+// deciding DTM verdict is the same as for the same path without a DSM.
 func TestTerrainProfile_SurfaceAboveEndpointAntenna(t *testing.T) {
 	x, _ := dhm.ToUTM32(56.1629, 10.2039)
 	const distance = 1000
 	for _, c := range []struct {
-		name     string
-		endpoint int // 0: A, 1: B
-		above    func(e float64) bool
+		name         string
+		endpoint     int // the worst point: 0 = A, 1 = B
+		atA, atB     bool
+		wantEndpoint string
 	}{
-		{"A", 0, func(e float64) bool { return e < x }},
-		{"B", 1, func(e float64) bool { return e > x+distance-1 }},
+		{"A", 0, true, false, "A"},
+		{"B", 1, false, true, "B"},
+		// 45 m at B against 40 m at A makes B the deeper one.
+		{"both", 1, true, true, "both"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			split := modelSplit{
 				dtm: newFakeElevation(t, flatElev(0)),
 				dsm: newFakeElevation(t, func(e, n float64) float32 {
-					if c.above(e) {
+					switch {
+					case c.atA && e < x:
 						return 40
+					case c.atB && e > x+distance-1:
+						return 45
 					}
 					return 0
 				}),
@@ -977,12 +984,15 @@ func TestTerrainProfile_SurfaceAboveEndpointAntenna(t *testing.T) {
 			}
 			for _, s := range r.Samples[1 : len(r.Samples)-1] {
 				if s.DSM == nil || *s.DSM > 1 {
-					t.Fatalf("fixture: the obstruction is not at %s alone: %+v", c.name, s)
+					t.Fatalf("fixture: the obstruction is not at the endpoints alone: %+v", s)
 				}
 			}
 			sv := r.Verdict.Surface
 			if sv == nil || sv.State != "blocked" || sv.WorstAtM == nil || sv.WorstClearanceM == nil || sv.WorstF1Fraction != nil {
-				t.Fatalf("surface verdict %+v, want blocked at %s with a null F1 fraction", sv, c.name)
+				t.Fatalf("surface verdict %+v, want blocked at an endpoint with a null F1 fraction", sv)
+			}
+			if sv.Reason != "antennaBelowSurface" || sv.Endpoint != c.wantEndpoint {
+				t.Fatalf("surface reason %q at %q, want antennaBelowSurface at %q", sv.Reason, sv.Endpoint, c.wantEndpoint)
 			}
 			near(t, "surface worstAtM", *sv.WorstAtM, float64(c.endpoint)*r.DistanceM, 0.01)
 			near(t, "surface worstClearanceM", *sv.WorstClearanceM, *ep.GroundM+ep.AntennaM-*end.DSM, 0.01)
@@ -994,6 +1004,83 @@ func TestTerrainProfile_SurfaceAboveEndpointAntenna(t *testing.T) {
 				t.Fatalf("deciding verdict changed: %+v, terrain-only %+v", r.Verdict, dtmOnly.Verdict)
 			}
 		})
+	}
+}
+
+// #745 review F1, with the reviewer's numbers: 1 km flat, DSM 200 m at
+// mid-path (about −190 m through the line of sight) and 10.01 m at A
+// (−1 cm against a 10 m antenna). The worst point is the mid-path
+// obstruction; the antenna below the surface at A is the reason. Without
+// the endpoint obstruction there is no reason at all.
+func TestTerrainProfile_InteriorObstructionOutranksEndpoint(t *testing.T) {
+	x, y := dhm.ToUTM32(56.1629, 10.2039)
+	la, lo := dhm.FromUTM32(x+1000, y)
+	a, b := dhm.LatLon{Lat: 56.1629, Lon: 10.2039}, dhm.LatLon{Lat: la, Lon: lo}
+	plan := dhm.PlanProfile(a, b, dhm.PlanOptions{MaxSamples: 3200, ChunkM: 2500})
+	n := len(plan.E)
+	if n%2 == 0 {
+		t.Fatalf("fixture: %d samples have no mid-path sample", n)
+	}
+	p := newTerrainProfiler(dhm.ProfileConfig{Enabled: true}, nil, terrainProfilerDeps{src: newFakeElevation(t, flatElev(0))})
+	q := terrainQuery{both: true, ha: floatp(10), hb: floatp(10)}
+	for _, atA := range []bool{true, false} {
+		e := terrainElevation{dtm: make([]float32, n), dsm: make([]float32, n)}
+		e.dsm[n/2] = 200
+		if atA {
+			e.dsm[0] = 10.01
+		}
+		r := p.buildResponse(q, [2]terrainEnd{{pt: a, kind: "point"}, {pt: b, kind: "point"}}, a, b, &plan, e)
+		sv := r.Verdict.Surface
+		if sv == nil || sv.State != "blocked" || sv.WorstAtM == nil || sv.WorstClearanceM == nil || sv.WorstF1Fraction == nil {
+			t.Fatalf("A below %t: surface verdict %+v, want blocked at an interior point with an F1 fraction", atA, sv)
+		}
+		near(t, "surface worstAtM", *sv.WorstAtM, r.DistanceM/2, 0.01)
+		near(t, "surface worstClearanceM", *sv.WorstClearanceM, 10-200-dhm.EarthBulge(r.DistanceM/2, r.DistanceM/2, dhm.DefaultKFactor), 0.01)
+		want := [2]string{}
+		if atA {
+			want = [2]string{"antennaBelowSurface", "A"}
+		}
+		if got := [2]string{sv.Reason, sv.Endpoint}; got != want {
+			t.Fatalf("A below %t: reason %q at %q, want %q at %q", atA, got[0], got[1], want[0], want[1])
+		}
+		if r.Verdict.State != "clear" {
+			t.Fatalf("the deciding DTM verdict is %q on flat ground", r.Verdict.State)
+		}
+	}
+}
+
+// #745 review F1, the chart: the worst DSM sample is a keep index, so a
+// one-sample peak survives decimation even with an antenna below the
+// surface at A. While the endpoint was the worst point, its keep index
+// was dropped (endpoints are always in) and most peak positions were
+// thinned out of the response.
+func TestTerrainProfile_DecimationKeepsInteriorPeakWithEndpointBelow(t *testing.T) {
+	a, b := dhm.LatLon{Lat: 56, Lon: 8.6}, dhm.LatLon{Lat: 56, Lon: 9.85}
+	plan := dhm.PlanProfile(a, b, dhm.PlanOptions{MaxSamples: 3200, ChunkM: 2500})
+	n := len(plan.E)
+	if n <= terrainMaxReturned {
+		t.Fatalf("fixture: %d samples need no decimation", n)
+	}
+	p := newTerrainProfiler(dhm.ProfileConfig{Enabled: true}, nil, terrainProfilerDeps{src: newFakeElevation(t, flatElev(0))})
+	ends := [2]terrainEnd{{pt: a, kind: "point"}, {pt: b, kind: "point"}}
+	lost := 0
+	for peak := 3; peak < n-3; peak += 7 {
+		e := terrainElevation{dtm: make([]float32, n), dsm: make([]float32, n)}
+		e.dsm[0], e.dsm[peak] = 50, 400 // the point default antenna is 2 m
+		r := p.buildResponse(terrainQuery{both: true}, ends, a, b, &plan, e)
+		if sv := r.Verdict.Surface; sv == nil || sv.Reason != "antennaBelowSurface" || sv.Endpoint != "A" {
+			t.Fatalf("peak %d: surface %+v, want the antenna below the surface at A", peak, sv)
+		}
+		found := false
+		for _, s := range r.Samples {
+			found = found || int(math.Round(s.D/r.StepM)) == peak
+		}
+		if !found {
+			lost++
+		}
+	}
+	if lost > 0 {
+		t.Fatalf("the interior DSM peak was thinned out at %d positions", lost)
 	}
 }
 

@@ -80,6 +80,9 @@ type Assessment struct {
 	WorstAtM        float64 // distance from A
 	WorstClearanceM float64 // line of sight minus (surface + bulge); negative = above the LoS
 	WorstRatio      float64 // WorstClearanceM / F1 radius there
+	// AntennaBelowA and AntennaBelowB say the surface is above the antenna
+	// at that end (#745).
+	AntennaBelowA, AntennaBelowB bool
 }
 
 // Assess finds the interior sample with the smallest clearance ratio.
@@ -92,10 +95,15 @@ type Assessment struct {
 // otherwise invisible (#696).
 //
 // A surface above the antenna at an endpoint obstructs the line of sight
-// at the antenna itself (#745): blocked, with the endpoint as the worst
-// point and a ratio of −Inf, since F1 has no radius there. Exactly at
-// the antenna is grazing, not blocked. Against the DTM this never fires:
-// the endpoint heights are the DTM plus an antenna of at least 0 m.
+// at the antenna itself (#745): the verdict is blocked and AntennaBelowA
+// or AntennaBelowB says where. Exactly at the antenna is grazing, not
+// blocked. The worst point stays the worst interior sample when that
+// obstructs the line of sight too, however much shallower the endpoint
+// is, so the real obstruction is the one named and kept in the chart
+// (#745 review F1). Otherwise the endpoint is the worst point, with a
+// ratio of −Inf since F1 has no radius there; the deeper one if both
+// ends are below the surface, A on a tie. Against the DTM this never
+// fires: the endpoint heights are the DTM plus an antenna of at least 0 m.
 func (l Link) Assess(surface []float32) Assessment {
 	unknown := Assessment{State: VerdictUnknown, WorstIndex: -1}
 	n := len(surface)
@@ -119,17 +127,21 @@ func (l Link) Assess(surface []float32) Assessment {
 			worst = Assessment{WorstIndex: i, WorstAtM: d1, WorstClearanceM: clearance, WorstRatio: ratio}
 		}
 	}
-	// Endpoints last, so missing data above still wins. The deeper of
-	// two obstructed endpoints is the worst point; A on a tie.
-	for _, end := range [2]struct {
-		i      int
-		height float64
-	}{{0, l.HeightA}, {n - 1, l.HeightB}} {
-		clearance := end.height - float64(surface[end.i])
-		if clearance < 0 && (!math.IsInf(worst.WorstRatio, -1) || clearance < worst.WorstClearanceM) {
-			worst = Assessment{WorstIndex: end.i, WorstAtM: float64(end.i) * step, WorstClearanceM: clearance, WorstRatio: math.Inf(-1)}
-		}
+	// Endpoints last, so missing data above still wins.
+	end := Assessment{WorstIndex: -1}
+	clearanceA := l.HeightA - float64(surface[0])
+	clearanceB := l.HeightB - float64(surface[n-1])
+	if clearanceA < 0 {
+		end = Assessment{WorstIndex: 0, WorstClearanceM: clearanceA}
 	}
+	if clearanceB < 0 && (end.WorstIndex < 0 || clearanceB < end.WorstClearanceM) {
+		end = Assessment{WorstIndex: n - 1, WorstAtM: l.DistanceM, WorstClearanceM: clearanceB}
+	}
+	if end.WorstIndex >= 0 && worst.WorstRatio >= 0 {
+		end.WorstRatio = math.Inf(-1)
+		worst = end
+	}
+	worst.AntennaBelowA, worst.AntennaBelowB = clearanceA < 0, clearanceB < 0
 	worst.State = ClassifyClearance(worst.WorstRatio)
 	return worst
 }

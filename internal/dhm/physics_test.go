@@ -307,3 +307,82 @@ func TestDecimateKeepIndicesWhileTheyFit(t *testing.T) {
 		}
 	}
 }
+
+// TestAssessInteriorObstructionOutranksEndpoint (#745 review F1): an
+// antenna below the surface at an endpoint is reported as such, but it no
+// longer replaces a deeper obstruction inside the path as the worst point.
+// The reviewer's case: 1 km flat, DSM 200 m at mid-path (about −190 m
+// through the line of sight) and 10.01 m at A (−1 cm).
+func TestAssessInteriorObstructionOutranksEndpoint(t *testing.T) {
+	const n = 101 // 10 m steps: index 50 is mid-path
+	l := Link{DistanceM: 1000, HeightA: 10, HeightB: 10, LambdaM: Wavelength(FirmwareFreqMHz), K: DefaultKFactor}
+	s := make([]float32, n)
+	s[50], s[0] = 200, 10.01
+	a := l.Assess(s)
+	if a.State != VerdictBlocked || a.WorstIndex != 50 || math.IsInf(a.WorstRatio, 0) {
+		t.Fatalf("%+v, want blocked with the mid-path obstruction (index 50) as the worst point", a)
+	}
+	near(t, "worst at", a.WorstAtM, 500, 1e-9)
+	near(t, "worst clearance", a.WorstClearanceM, 10-200-EarthBulge(500, 500, DefaultKFactor), 1e-6)
+	if !a.AntennaBelowA || a.AntennaBelowB {
+		t.Fatalf("antenna below the surface: A %t, B %t, want A only", a.AntennaBelowA, a.AntennaBelowB)
+	}
+
+	// Both ends below, still behind the interior obstruction.
+	s[n-1] = 30
+	if a := l.Assess(s); a.WorstIndex != 50 || !a.AntennaBelowA || !a.AntennaBelowB {
+		t.Fatalf("both ends below: %+v, want the worst point at 50 and both ends flagged", a)
+	}
+
+	// The interior obstruction wins even when the endpoint is deeper in
+	// metres: about −5 m at mid-path against −30 m at A.
+	s[50], s[0], s[n-1] = 15, 40, 0
+	if a := l.Assess(s); a.State != VerdictBlocked || a.WorstIndex != 50 || !a.AntennaBelowA {
+		t.Fatalf("shallow interior, deep endpoint: %+v, want the worst point at 50 and A flagged", a)
+	}
+
+	// No interior obstruction (the line of sight clears every interior
+	// sample): the endpoint is the worst point, as before.
+	s[50], s[n-1] = 0, 0
+	if a := l.Assess(s); a.State != VerdictBlocked || a.WorstIndex != 0 || !math.IsInf(a.WorstRatio, -1) || !a.AntennaBelowA || a.AntennaBelowB {
+		t.Fatalf("endpoint only: %+v, want blocked at A with ratio −Inf", a)
+	}
+}
+
+// TestAssessEndpointBoundary (#745 review N5) pins the endpoint check to
+// the antenna height itself: the closest float32 below it and exactly at
+// it are not blocked, the closest float32 above it and 1 mm above it are.
+func TestAssessEndpointBoundary(t *testing.T) {
+	l, surface := flatLink() // 10 m antennas over flat ground at 0 m
+	n := len(surface)
+	for _, c := range []struct {
+		name    string
+		v       float32
+		blocked bool
+	}{
+		{"1 mm below", 9.999, false},
+		{"just below", math.Nextafter32(10, 0), false},
+		{"exactly at", 10, false},
+		{"just above", math.Nextafter32(10, 20), true},
+		{"1 mm above", 10.001, true},
+	} {
+		for _, end := range []int{0, n - 1} {
+			s := append([]float32(nil), surface...)
+			s[end] = c.v
+			a := l.Assess(s)
+			below := a.AntennaBelowA
+			if end != 0 {
+				below = a.AntennaBelowB
+			}
+			if got := a.State == VerdictBlocked; got != c.blocked || below != c.blocked {
+				t.Errorf("%s the antenna at %d: %+v, want blocked %t", c.name, end, a, c.blocked)
+			}
+		}
+	}
+	// The DTM verdict never carries the flags: its endpoints are ground +
+	// an antenna of at least 0 m.
+	l.HeightA, l.HeightB = 0, 0
+	if a := l.Assess(surface); a.AntennaBelowA || a.AntennaBelowB {
+		t.Fatalf("0 m antennas on the ground itself: %+v", a)
+	}
+}

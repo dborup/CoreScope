@@ -492,10 +492,19 @@ type TerrainClearance struct {
 // against the DSM, not the deciding DTM: the two models can have
 // different coverage, and a partial profile must never report a
 // confident verdict on either (#689 review N1).
+//
+// Reason is "antennaBelowSurface" when the surface is above the antenna
+// at an endpoint (#745): the state is then blocked, and Endpoint is "A",
+// "B" or "both". The worst point stays the worst interior obstruction (by
+// F1 ratio, as everywhere) when there is one. Both are absent otherwise.
 type TerrainSurfaceInfo struct {
 	State string `json:"state"`
 	TerrainClearance
+	Reason   string `json:"reason,omitempty"`
+	Endpoint string `json:"endpoint,omitempty"`
 }
+
+const terrainReasonAntennaBelowSurface = "antennaBelowSurface"
 
 // ── Handler ────────────────────────────────────────────────────────────────
 
@@ -832,7 +841,7 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 		if resp.Coverage.State != "full" {
 			surface = dhm.Assessment{State: dhm.VerdictUnknown, WorstIndex: -1}
 		}
-		resp.Verdict.Surface = &TerrainSurfaceInfo{State: string(surface.State), TerrainClearance: clearanceOf(surface)}
+		resp.Verdict.Surface = surfaceInfo(surface)
 		keep = append(keep, surface.WorstIndex)
 	}
 
@@ -894,6 +903,24 @@ func terrainGapKeep(room int, series ...[]float32) []int {
 	out := make([]int, room)
 	for j := range out {
 		out[j] = missing[int(math.Round(float64(j)*float64(len(missing)-1)/float64(max(room-1, 1))))]
+	}
+	return out
+}
+
+// surfaceInfo is the informational DSM verdict, with the reason when an
+// antenna is below the surface (#745).
+func surfaceInfo(a dhm.Assessment) *TerrainSurfaceInfo {
+	out := &TerrainSurfaceInfo{State: string(a.State), TerrainClearance: clearanceOf(a)}
+	switch {
+	case a.AntennaBelowA && a.AntennaBelowB:
+		out.Endpoint = "both"
+	case a.AntennaBelowA:
+		out.Endpoint = "A"
+	case a.AntennaBelowB:
+		out.Endpoint = "B"
+	}
+	if out.Endpoint != "" {
+		out.Reason = terrainReasonAntennaBelowSurface
 	}
 	return out
 }
