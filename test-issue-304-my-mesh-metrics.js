@@ -268,6 +268,40 @@ test('a genuine quiet window with proven coverage is an exact zero', () => {
   assert.strictEqual(t.value, '0');
 });
 
+console.log('\n=== #716: "All traffic" vs Busiest Repeaters\' "Relayed" count ===');
+
+test('the label is unambiguous: "All traffic", not the old "Transmissions"', () => {
+  assert.strictEqual(MMA.TRAFFIC_LABEL, 'All traffic · 24 h');
+});
+
+test('a repeater or room card gets the Busiest Repeaters cross-reference; a client does not', () => {
+  const a = activity({ counts: { 3: 4 } });
+  for (const role of ['repeater', 'room', 'REPEATER', 'Room']) {
+    assert.match(MMA.traffic24h(a, role).tip, /is usually larger than its relayed count on Busiest Repeaters, which counts only forwarded non-advert packets\./i, role);
+  }
+  for (const role of ['client', 'room_server', '', undefined, null]) {
+    assert.doesNotMatch(MMA.traffic24h(a, role).tip, /Busiest Repeaters/i, JSON.stringify(role));
+  }
+  // The note is additive: everything #304 already pinned about the base
+  // tip and the window text stays in place for a repeater too.
+  const repTip = MMA.traffic24h(a, 'repeater').tip;
+  assert.match(repTip, /resolved path/i);
+  assert.match(repTip, new RegExp(windowTextOf(a)));
+});
+
+test('the cross-reference still appears when the window is unavailable or incomplete', () => {
+  assert.match(MMA.traffic24h(undefined, 'repeater').tip, /Busiest Repeaters/i, 'unavailable window');
+  const partial = activity({ complete: false, coverageStart: new Date(NOW - 8 * 3600000).toISOString(), counts: { 20: 5 } });
+  assert.match(MMA.traffic24h(partial, 'repeater').tip, /Busiest Repeaters/i, 'incomplete window');
+});
+
+test('home.js threads the node role into traffic24h so the note can apply', () => {
+  assert.strictEqual((homeJs.match(/MyMeshActivity\.traffic24h\(h\.activity24h, node\.role\)/g) || []).length, 2,
+    'both the My Mesh card list and the full-health panel must pass node.role');
+});
+
+function windowTextOf(a) { return MMA.windowText(a).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
 test('the comparison needs two complete, like-for-like windows', () => {
   const up = MMA.compare24h(activity({ counts: { 1: 60 }, previous: { count: 50 } }));
   assert.strictEqual(up.available, true);

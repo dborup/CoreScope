@@ -161,11 +161,18 @@ async function render(page, responses, width, height) {
       await page.mouse.move(0, 0); // keep :hover off the border-colour probe
       const labels = async i => (await cards.nth(i).locator('.mnc-metrics .mnc-lbl').allInnerTexts()).map(t => t.replace(/\s+/g, ' ').trim());
       const vals = async i => (await cards.nth(i).locator('.mnc-metrics .mnc-val').allInnerTexts()).map(t => t.trim());
-      assert.deepEqual(await labels(0), ['Transmissions · 24 h', 'Direct observers', 'Direct SNR · 30 receptions']);
+      assert.deepEqual(await labels(0), ['All traffic · 24 h', 'Direct observers', 'Direct SNR · 30 receptions']);
       assert.deepEqual(await vals(0), ['35 +25%', '51', '-3.3 dB']);
-      assert.deepEqual(await labels(1), ['Transmissions · 24 h', 'Direct observers', 'Direct SNR']);
+      assert.deepEqual(await labels(1), ['All traffic · 24 h', 'Direct observers', 'Direct SNR']);
       assert.deepEqual(await vals(1), ['≥ 35', '1', '-3.3 dB'], 'an incomplete window is a lower bound, and an unknown sample size prints no n=');
       assert.deepEqual(await vals(2), ['—', '0', '—'], 'no window and no direct attribution render em dashes, not zeroes');
+      // #716: a repeater's "All traffic" tooltip cross-references Busiest
+      // Repeaters so the two 24h numbers never read as contradictory; a
+      // client card (no Busiest Repeaters row) gets no such sentence.
+      assert.match(await cards.nth(0).locator('.mnc-metric').first().getAttribute('title'),
+        /usually larger than its relayed count on Busiest Repeaters, which counts only forwarded non-advert packets\./i);
+      assert.doesNotMatch(await cards.nth(4).locator('.mnc-metric').first().getAttribute('title'),
+        /Busiest Repeaters/i, 'a client card must not claim a Busiest Repeaters comparison');
       // The calendar-day counter and the bare hop average are gone from the
       // headline metrics, and no metric carries a quality verdict or colour.
       const metricText = (await page.locator('.mnc-metrics').allInnerTexts()).join(' ');

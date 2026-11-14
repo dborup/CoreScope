@@ -3254,6 +3254,14 @@
   // 10% limit); the flag holds because a lower bound at the limit means the
   // repeater is over it.
   const BUSIEST_AIRTIME_TITLE = 'Seen airtime: LoRa time-on-air of the relayed packets the observers saw. A lower bound: on staging data the real airtime was about 1.5 to 2 times higher for well-observed repeaters and up to 50 times for others. Flagged when even the seen part is at or above the 10% duty-cycle limit.';
+
+  // #716: the "Relayed" columns and the Home/My Mesh "All traffic" metric
+  // (MyMeshActivity.traffic24h) both describe a repeater's 24h/1h traffic but
+  // count different things, so each names what IT counts rather than
+  // assuming the reader will compare the two. BUSIEST_RELAYED_TITLE is this
+  // table's half of that; TRAFFIC_LABEL is read from MyMeshActivity (DRY)
+  // so a rename of the Home label can't silently go stale here.
+  const BUSIEST_RELAYED_TITLE = 'Relayed: distinct packets this repeater forwarded (it appears as a relay hop in the observed path). Adverts are not counted. Refreshed periodically, so it can lag a few minutes behind live traffic.';
   function _busiestAirtimeCell(pct) {
     const oa = window.ObserverAirtime;
     if (pct == null || !oa) return '<span class="text-muted">—</span>';
@@ -3271,13 +3279,14 @@
     // In the #206 scroll wrapper already, so a redraw keeps it. Long names
     // wrap anywhere, and busiest-repeaters-table lifts the wrapper's 480px
     // minimum: the four columns fit a phone.
-    // Two header rows: the group names sit over short column names, which
-    // keeps the six columns inside a phone screen.
+    // Two header rows: the group name ("Relayed"/"Seen airtime") sits over
+    // the per-window column name, which keeps the six columns inside a
+    // phone screen while each column still names what it counts (#716).
     let html = '<div class="analytics-table-scroll"><table class="analytics-table busiest-repeaters-table" data-testid="busiest-repeaters-table"><thead><tr>'
       + '<th scope="col" rowspan="2" style="text-align:right;width:3em">#</th><th scope="col" rowspan="2">Repeater</th>'
-      + '<th scope="colgroup" colspan="2" style="text-align:center">Relayed</th>'
+      + `<th scope="colgroup" colspan="2" style="text-align:center" title="${BUSIEST_RELAYED_TITLE}">Relayed</th>`
       + `<th scope="colgroup" colspan="2" style="text-align:center" title="${BUSIEST_AIRTIME_TITLE}">Seen airtime</th></tr><tr>`
-      + countTh('24h', '24h') + countTh('1h', '1h')
+      + countTh('24h', 'Relayed 24h') + countTh('1h', 'Relayed 1h')
       + '<th scope="col" style="text-align:right">24h</th>' + countTh('peak', 'Busiest hour') + '</tr></thead><tbody>';
     shown.forEach((r, i) => {
       const tags = (r.role === 'room' ? ' <span class="text-muted">room</span>' : '')
@@ -3351,6 +3360,7 @@
         <div class="analytics-section" id="busiestRepeaters">
           <h3><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-list-numbers"/></svg> Busiest Repeaters</h3>
           <p class="text-muted">Repeaters ranked by packets relayed: distinct non-advert packets in which the observers saw the repeater as a hop. It is a lower bound, since a packet no observer heard is not counted, and a hop sent as a short (1-byte) prefix can be credited to the wrong repeater. A repeater that is also an observer reports its real airtime under RF Health, so it is hidden here unless included.</p>
+          <p class="text-muted" style="font-size:12px;margin-top:4px">This is not the same number as a repeater's "${window.MyMeshActivity.TRAFFIC_LABEL}" on Home → My Mesh: that figure also counts its own adverts and traffic addressed to or merely naming it, so it is usually larger.</p>
           <p class="text-muted" style="font-size:12px;margin-top:4px"><strong>Seen airtime</strong>: LoRa time-on-air of the relayed packets the observers saw (other nodes' adverts included), as a share of the last 24 hours and of the busiest hour in them. It is a lower bound, shown as "≥": the repeater's own adverts, direct-routed traffic and packets no observer heard are missing. Compared with repeaters that report their own airtime, the real figure was about 1.5 to 2 times higher for well-observed repeaters and up to 50 times for others. So a low value does not mean a repeater is safely under the 10% duty-cycle limit (which applies per hour); a value flagged at the limit does mean it is over.</p>
           <div style="display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
             <label style="display:flex;gap:6px;align-items:center">Sort by

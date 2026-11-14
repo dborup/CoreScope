@@ -357,7 +357,7 @@
         // the observer links that proved a direct reception, not this node's
         // signal quality (#76).
         const snr = MyMeshActivity.snr(stats, obs);
-        const traffic = MyMeshActivity.traffic24h(h.activity24h);
+        const traffic = MyMeshActivity.traffic24h(h.activity24h, node.role);
         const trend = MyMeshActivity.compare24h(h.activity24h);
 
         const sparkHtml = buildSparkline(h.activity24h);
@@ -694,7 +694,7 @@
         (ev.source === 'relay' ? ' · ' + MyMeshActivity.ATTRIBUTED_SUFFIX : '');
 
       const snr = MyMeshActivity.snr(stats, heard.direct);
-      const traffic = MyMeshActivity.traffic24h(h.activity24h);
+      const traffic = MyMeshActivity.traffic24h(h.activity24h, node.role);
       const trend = MyMeshActivity.compare24h(h.activity24h);
       const hops = MyMeshActivity.hops(stats);
 
