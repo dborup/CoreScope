@@ -78,7 +78,8 @@ const (
 	// terrainRefusalLogEvery throttles the admission-refusal log line.
 	terrainRefusalLogEvery = time.Minute
 	// terrainMaxReturned is the most samples a response carries; the
-	// worst points are always among them (dhm.Decimate).
+	// worst points and the data gaps are always among them (dhm.Decimate,
+	// terrainGapKeep).
 	terrainMaxReturned = 1024
 	// terrainObserverWindow is how recently an observer must have been
 	// seen for its radio to count towards the modal frequency.
@@ -836,6 +837,7 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 	}
 
 	if resp.Coverage.State != "none" {
+		keep = append(keep, terrainGapKeep(terrainMaxReturned-2, e.dtm, e.dsm)...)
 		idx := dhm.Decimate(n, terrainMaxReturned, keep...)
 		resp.Samples = make([]TerrainSample, len(idx))
 		for j, i := range idx {
@@ -847,6 +849,53 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 		}
 	}
 	return resp
+}
+
+// terrainGapKeep lists the samples that keep every data gap of the series
+// visible through dhm.Decimate (#745), most important first, for room
+// places: the first missing sample of each gap, then its last missing
+// sample and the samples just outside it, so a chart gap starts and ends
+// where the data does. Decimate takes them while they fit, and then has
+// no room for evenly spaced samples that could join two valid ones across
+// a gap. With more gaps than room, the room goes to missing samples spread
+// evenly over all of them: neighbouring gaps merge, none disappears.
+// Nil series are skipped; the rest have the same length.
+func terrainGapKeep(room int, series ...[]float32) []int {
+	var starts, edges []int
+	for _, s := range series {
+		for i := 0; i < len(s); i++ {
+			if !math.IsNaN(float64(s[i])) {
+				continue
+			}
+			j := i
+			for j+1 < len(s) && math.IsNaN(float64(s[j+1])) {
+				j++
+			}
+			starts = append(starts, i)
+			edges = append(edges, j, i-1, j+1)
+			i = j
+		}
+	}
+	if len(starts) <= room {
+		return append(starts, edges...)
+	}
+	if room <= 0 {
+		return nil
+	}
+	var missing []int
+	for i := range series[0] {
+		for _, s := range series {
+			if s != nil && math.IsNaN(float64(s[i])) {
+				missing = append(missing, i)
+				break
+			}
+		}
+	}
+	out := make([]int, room)
+	for j := range out {
+		out[j] = missing[int(math.Round(float64(j)*float64(len(missing)-1)/float64(max(room-1, 1))))]
+	}
+	return out
 }
 
 func clearanceOf(a dhm.Assessment) TerrainClearance {

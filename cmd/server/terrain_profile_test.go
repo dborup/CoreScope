@@ -1034,6 +1034,162 @@ func TestTerrainProfile_DecimationKeepsWorstSample(t *testing.T) {
 	near(t, "worst near the spike", *resp.Verdict.WorstAtM, 51237, 60)
 }
 
+// #745: decimation must not hide a gap. A gap is hidden when two returned
+// samples that are neighbours in the response both have a value while a
+// sample between them is missing: the chart then draws a line across it.
+// assertGapsVisible checks that for one series, and also that each gap
+// whose edges fit (exact) starts and ends where the data does.
+func assertGapsVisible(t *testing.T, name string, r TerrainProfileResponse, series []float32, value func(TerrainSample) *float64, exact bool) {
+	t.Helper()
+	if len(r.Samples) > terrainMaxReturned {
+		t.Fatalf("%s: %d samples returned, more than %d", name, len(r.Samples), terrainMaxReturned)
+	}
+	returned := map[int]bool{}
+	prev, prevValid := -1, false
+	for j, s := range r.Samples {
+		i := int(math.Round(s.D / r.StepM))
+		if j > 0 && i <= prev {
+			t.Fatalf("%s: samples not strictly increasing at %d", name, j)
+		}
+		if math.IsNaN(float64(series[i])) != (value(s) == nil) {
+			t.Fatalf("%s: sample %d (index %d) misreports its value", name, j, i)
+		}
+		valid := value(s) != nil
+		if valid && prevValid {
+			for k := prev + 1; k < i; k++ {
+				if math.IsNaN(float64(series[k])) {
+					t.Fatalf("%s: missing sample %d hidden between returned samples %d and %d", name, k, prev, i)
+				}
+			}
+		}
+		returned[i] = true
+		prev, prevValid = i, valid
+	}
+	if !exact {
+		return
+	}
+	for i := 0; i < len(series); i++ {
+		if !math.IsNaN(float64(series[i])) {
+			continue
+		}
+		j := i
+		for j+1 < len(series) && math.IsNaN(float64(series[j+1])) {
+			j++
+		}
+		for _, k := range []int{i - 1, i, j, j + 1} {
+			if k >= 0 && k < len(series) && !returned[k] {
+				t.Fatalf("%s: edge %d of the gap %d–%d not returned", name, k, i, j)
+			}
+		}
+		i = j
+	}
+}
+
+func TestTerrainProfile_DecimationKeepsGaps(t *testing.T) {
+	a := dhm.LatLon{Lat: 56, Lon: 8.6}
+	nan := float32(math.NaN())
+	for _, c := range []struct {
+		name  string
+		lonB  float64
+		both  bool
+		exact bool
+		dtm   func(i, n int) bool // missing DTM sample
+		dsm   func(i, n int) bool // missing DSM sample; nil: model=dtm
+	}{
+		// The reviewer's case: evenly thinning about 2000 samples to 1024
+		// skips index 1.
+		{name: "one sample next to A", lonB: 9.404, exact: true, dtm: func(i, n int) bool { return i == 1 }},
+		{name: "a run and one next to B", lonB: 9.404, exact: true, dtm: func(i, n int) bool { return (i >= 700 && i <= 705) || i == n-2 }},
+		{name: "DSM only", lonB: 9.404, both: true, exact: true,
+			dtm: func(i, n int) bool { return false }, dsm: func(i, n int) bool { return i == 1501 || i == 3 }},
+		{name: "both models, different gaps", lonB: 9.404, both: true, exact: true,
+			dtm: func(i, n int) bool { return i >= 900 && i <= 903 }, dsm: func(i, n int) bool { return i >= 902 && i <= 907 }},
+		// More gaps than the edges fit: every gap still shows.
+		{name: "300 single gaps", lonB: 9.85, dtm: func(i, n int) bool { return i%7 == 3 && i < 2100 }},
+		// More gaps than samples returned: none may hide behind a line.
+		{name: "every other sample", lonB: 9.85, both: true,
+			dtm: func(i, n int) bool { return i%2 == 1 }, dsm: func(i, n int) bool { return i%2 == 1 }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := dhm.LatLon{Lat: 56, Lon: c.lonB}
+			plan := dhm.PlanProfile(a, b, dhm.PlanOptions{MaxSamples: 3200, ChunkM: 2500})
+			n := len(plan.E)
+			if n <= terrainMaxReturned {
+				t.Fatalf("fixture: %d samples need no decimation", n)
+			}
+			e := terrainElevation{dtm: make([]float32, n)}
+			if c.dsm != nil {
+				e.dsm = make([]float32, n)
+			}
+			for i := 0; i < n; i++ {
+				if c.dtm(i, n) {
+					e.dtm[i] = nan
+				}
+				if c.dsm != nil && c.dsm(i, n) {
+					e.dsm[i] = nan
+				}
+			}
+			p := newTerrainProfiler(dhm.ProfileConfig{Enabled: true}, nil, terrainProfilerDeps{src: newFakeElevation(t, flatElev(0))})
+			r := p.buildResponse(terrainQuery{both: c.both}, [2]terrainEnd{{pt: a, kind: "point"}, {pt: b, kind: "point"}}, a, b, &plan, e)
+			if len(r.Samples) == 0 || len(r.Samples) > terrainMaxReturned {
+				t.Fatalf("%d of %d samples returned", len(r.Samples), n)
+			}
+			assertGapsVisible(t, "dtm", r, e.dtm, func(s TerrainSample) *float64 { return s.DTM }, c.exact)
+			if e.dsm != nil {
+				assertGapsVisible(t, "dsm", r, e.dsm, func(s TerrainSample) *float64 { return s.DSM }, c.exact)
+			}
+		})
+	}
+}
+
+// terrainGapKeep with less room than gaps: bounded, and never a division
+// by zero or a negative allocation.
+func TestTerrainGapKeepTinyRoom(t *testing.T) {
+	nan := float32(math.NaN())
+	s := []float32{0, nan, 0, nan, 0, nan, 0}
+	if got := terrainGapKeep(0, s); len(got) != 0 {
+		t.Fatalf("room 0: %v", got)
+	}
+	if got := terrainGapKeep(1, s); len(got) != 1 || got[0] != 1 {
+		t.Fatalf("room 1: %v", got)
+	}
+	if got := terrainGapKeep(2, s, nil); len(got) != 2 || got[0] != 1 || got[1] != 5 {
+		t.Fatalf("room 2: %v", got)
+	}
+	if got := terrainGapKeep(3, s, nil); !reflect.DeepEqual(got, []int{1, 3, 5, 1, 0, 2, 3, 2, 4, 5, 4, 6}) {
+		t.Fatalf("room 3, all gaps fit: %v", got)
+	}
+}
+
+// BenchmarkTerrainBuildResponse is the per-request work after the
+// elevations are in (cache hits included) at the 3200-sample maximum, with
+// both models and gaps in each: coverage, physics, both assessments and
+// the gap-keeping decimation to 1024 samples (#745).
+func BenchmarkTerrainBuildResponse(b *testing.B) {
+	pa, pb := dhm.LatLon{Lat: 56, Lon: 8.6}, dhm.LatLon{Lat: 56, Lon: 9.85}
+	plan := dhm.PlanProfile(pa, pb, dhm.PlanOptions{MaxSamples: 3200, ChunkM: 2500})
+	n := len(plan.E)
+	e := terrainElevation{dtm: make([]float32, n), dsm: make([]float32, n)}
+	for i := 0; i < n; i++ {
+		e.dtm[i], e.dsm[i] = float32(i%37), float32(i%37+5)
+		if i%80 < 5 {
+			e.dtm[i] = float32(math.NaN())
+		}
+		if i%160 == 100 {
+			e.dsm[i] = float32(math.NaN())
+		}
+	}
+	p := newTerrainProfiler(dhm.ProfileConfig{Enabled: true}, nil, terrainProfilerDeps{src: newFakeElevation(nil, flatElev(0))})
+	ends := [2]terrainEnd{{pt: pa, kind: "point"}, {pt: pb, kind: "point"}}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if r := p.buildResponse(terrainQuery{both: true}, ends, pa, pb, &plan, e); len(r.Samples) == 0 || len(r.Samples) > terrainMaxReturned {
+			b.Fatalf("%d samples", len(r.Samples))
+		}
+	}
+}
+
 // ── Frequency ──────────────────────────────────────────────────────────────
 
 func TestModalObserverFreq(t *testing.T) {

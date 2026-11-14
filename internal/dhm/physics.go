@@ -135,9 +135,11 @@ func (l Link) Assess(surface []float32) Assessment {
 }
 
 // Decimate picks at most max indices of n evenly spaced samples, always
-// including the first, the last and every keep index (negative ones are
-// ignored), so thinning a profile for the chart never hides its worst
-// point. The result is strictly increasing.
+// including the first and the last. The keep indices come first, in the
+// order given, while they fit (out-of-range ones are ignored), so
+// thinning a profile for the chart never hides its worst point or a data
+// gap (#745); evenly spaced indices fill the room that is left. The
+// result is strictly increasing. max must be at least 2.
 func Decimate(n, max int, keep ...int) []int {
 	if n <= max {
 		out := make([]int, n)
@@ -146,24 +148,27 @@ func Decimate(n, max int, keep ...int) []int {
 		}
 		return out
 	}
-	var must []int
+	picked := make([]bool, n)
+	picked[0], picked[n-1] = true, true
+	count := 2
 	for _, k := range keep {
-		if k > 0 && k < n-1 {
-			must = append(must, k)
+		if count == max {
+			break
+		}
+		if k > 0 && k < n-1 && !picked[k] {
+			picked[k] = true
+			count++
 		}
 	}
-	// Leave room for the kept indices, then merge them in.
-	slots := max - len(must)
-	picked := make(map[int]bool, max)
-	for j := 0; j < slots; j++ {
+	// The evenly spaced picks include the two endpoints, already counted:
+	// at most max−count new ones.
+	slots := max - count + 2
+	for j := 1; j < slots-1; j++ {
 		picked[int(math.Round(float64(j)*float64(n-1)/float64(slots-1)))] = true
 	}
-	for _, k := range must {
-		picked[k] = true
-	}
-	out := make([]int, 0, len(picked))
-	for i := 0; i < n; i++ {
-		if picked[i] {
+	out := make([]int, 0, max)
+	for i, p := range picked {
+		if p {
 			out = append(out, i)
 		}
 	}

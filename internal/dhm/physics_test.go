@@ -277,3 +277,33 @@ func TestAssessSurfaceAboveAntennaIsBlocked(t *testing.T) {
 		t.Fatalf("endpoint obstruction with an interior gap: %+v, want unknown", a)
 	}
 }
+
+// TestDecimateKeepIndicesWhileTheyFit (#745): keep indices are taken in
+// the order given while they fit, so a caller can pass every gap edge of
+// a fragmented profile without breaking the bound. Before, each keep was
+// added on top of the evenly spaced picks, so 2000 of them returned 2002
+// indices.
+func TestDecimateKeepIndicesWhileTheyFit(t *testing.T) {
+	const n, max = 3200, 1024
+	var keep []int
+	for k := n - 2; k >= 1 && len(keep) < 2000; k -= 1 + len(keep)%2 {
+		keep = append(keep, k)
+	}
+	idx := Decimate(n, max, keep...)
+	if len(idx) != max || idx[0] != 0 || idx[len(idx)-1] != n-1 {
+		t.Fatalf("%d indices from %d to %d, want %d from 0 to %d", len(idx), idx[0], idx[len(idx)-1], max, n-1)
+	}
+	in := map[int]bool{}
+	for i, v := range idx {
+		if i > 0 && v <= idx[i-1] {
+			t.Fatalf("not strictly increasing at %d", i)
+		}
+		in[v] = true
+	}
+	// The first max−2 keep indices, in the caller's order, all made it.
+	for _, k := range keep[:max-2] {
+		if !in[k] {
+			t.Fatalf("keep index %d dropped although it fits", k)
+		}
+	}
+}
