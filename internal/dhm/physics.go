@@ -90,6 +90,12 @@ type Assessment struct {
 // never reports "clear". The endpoint heights come from the DTM, so the
 // series' own endpoints are checked too: a DSM gap at an antenna is
 // otherwise invisible (#696).
+//
+// A surface above the antenna at an endpoint obstructs the line of sight
+// at the antenna itself (#745): blocked, with the endpoint as the worst
+// point and a ratio of −Inf, since F1 has no radius there. Exactly at
+// the antenna is grazing, not blocked. Against the DTM this never fires:
+// the endpoint heights are the DTM plus an antenna of at least 0 m.
 func (l Link) Assess(surface []float32) Assessment {
 	unknown := Assessment{State: VerdictUnknown, WorstIndex: -1}
 	n := len(surface)
@@ -111,6 +117,17 @@ func (l Link) Assess(surface []float32) Assessment {
 		ratio := clearance / FresnelRadius(l.LambdaM, d1, d2)
 		if ratio < worst.WorstRatio {
 			worst = Assessment{WorstIndex: i, WorstAtM: d1, WorstClearanceM: clearance, WorstRatio: ratio}
+		}
+	}
+	// Endpoints last, so missing data above still wins. The deeper of
+	// two obstructed endpoints is the worst point; A on a tie.
+	for _, end := range [2]struct {
+		i      int
+		height float64
+	}{{0, l.HeightA}, {n - 1, l.HeightB}} {
+		clearance := end.height - float64(surface[end.i])
+		if clearance < 0 && (!math.IsInf(worst.WorstRatio, -1) || clearance < worst.WorstClearanceM) {
+			worst = Assessment{WorstIndex: end.i, WorstAtM: float64(end.i) * step, WorstClearanceM: clearance, WorstRatio: math.Inf(-1)}
 		}
 	}
 	worst.State = ClassifyClearance(worst.WorstRatio)

@@ -478,7 +478,8 @@ type TerrainVerdict struct {
 }
 
 // TerrainClearance is the worst point of an assessment; null without a
-// verdict.
+// verdict. WorstF1Fraction is also null when the worst point is a surface
+// above an antenna: the zone has no radius at an endpoint (#745).
 type TerrainClearance struct {
 	WorstClearanceM *float64 `json:"worstClearanceM"`
 	WorstAtM        *float64 `json:"worstAtM"`
@@ -852,8 +853,15 @@ func clearanceOf(a dhm.Assessment) TerrainClearance {
 	if a.State == dhm.VerdictUnknown {
 		return TerrainClearance{}
 	}
-	c, at, f := round2(a.WorstClearanceM), round2(a.WorstAtM), math.Round(a.WorstRatio*1000)/1000
-	return TerrainClearance{WorstClearanceM: &c, WorstAtM: &at, WorstF1Fraction: &f}
+	c, at := round2(a.WorstClearanceM), round2(a.WorstAtM)
+	out := TerrainClearance{WorstClearanceM: &c, WorstAtM: &at}
+	// An obstruction at an antenna has no fraction: F1 has no radius
+	// there, and the ratio is −Inf (#745), which JSON cannot carry.
+	if !math.IsInf(a.WorstRatio, 0) {
+		f := math.Round(a.WorstRatio*1000) / 1000
+		out.WorstF1Fraction = &f
+	}
+	return out
 }
 
 // antenna is the antenna height above ground for an endpoint, most

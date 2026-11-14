@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -937,6 +938,63 @@ func TestTerrainProfile_EndpointNodata(t *testing.T) {
 			t.Fatalf("DTM endpoint gap: A %+v verdict %+v surface %+v", resp.A, resp.Verdict, resp.Verdict.Surface)
 		}
 	})
+}
+
+// #745: a surface (DSM) above the antenna at an endpoint makes the
+// informational surface verdict blocked, at that endpoint, with a null F1
+// fraction (the zone has no radius there). The deciding DTM verdict is
+// the same as for the same path without a DSM.
+func TestTerrainProfile_SurfaceAboveEndpointAntenna(t *testing.T) {
+	x, _ := dhm.ToUTM32(56.1629, 10.2039)
+	const distance = 1000
+	for _, c := range []struct {
+		name     string
+		endpoint int // 0: A, 1: B
+		above    func(e float64) bool
+	}{
+		{"A", 0, func(e float64) bool { return e < x }},
+		{"B", 1, func(e float64) bool { return e > x+distance-1 }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			split := modelSplit{
+				dtm: newFakeElevation(t, flatElev(0)),
+				dsm: newFakeElevation(t, func(e, n float64) float32 {
+					if c.above(e) {
+						return 40
+					}
+					return 0
+				}),
+			}
+			env := newTerrainEnv(t, split, dhm.ProfileConfig{}, nil)
+			q := pathQuery(aarhusPt, offsetPt(56.1629, 10.2039, distance, 0), "ha=10", "hb=10")
+			r := decodeProfile(t, env.get(q))
+			end, ep := r.Samples[0], r.A
+			if c.endpoint == 1 {
+				end, ep = r.Samples[len(r.Samples)-1], r.B
+			}
+			if r.Coverage.State != "full" || end.DSM == nil || ep.GroundM == nil || *end.DSM <= *ep.GroundM+ep.AntennaM {
+				t.Fatalf("fixture: want full coverage and DSM above the %s antenna: %+v endpoint %+v sample %+v", c.name, r.Coverage, ep, end)
+			}
+			for _, s := range r.Samples[1 : len(r.Samples)-1] {
+				if s.DSM == nil || *s.DSM > 1 {
+					t.Fatalf("fixture: the obstruction is not at %s alone: %+v", c.name, s)
+				}
+			}
+			sv := r.Verdict.Surface
+			if sv == nil || sv.State != "blocked" || sv.WorstAtM == nil || sv.WorstClearanceM == nil || sv.WorstF1Fraction != nil {
+				t.Fatalf("surface verdict %+v, want blocked at %s with a null F1 fraction", sv, c.name)
+			}
+			near(t, "surface worstAtM", *sv.WorstAtM, float64(c.endpoint)*r.DistanceM, 0.01)
+			near(t, "surface worstClearanceM", *sv.WorstClearanceM, *ep.GroundM+ep.AntennaM-*end.DSM, 0.01)
+
+			// The DTM verdict is untouched: identical to the terrain-only profile.
+			dtmOnly := decodeProfile(t, env.get(q+"&model=dtm"))
+			r.Verdict.Surface = nil
+			if !reflect.DeepEqual(r.Verdict, dtmOnly.Verdict) || r.Verdict.State != "clear" {
+				t.Fatalf("deciding verdict changed: %+v, terrain-only %+v", r.Verdict, dtmOnly.Verdict)
+			}
+		})
+	}
 }
 
 // modelSplit serves DTM and DSM from different sources.

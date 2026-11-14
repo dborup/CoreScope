@@ -208,3 +208,50 @@ func TestAssessObstacleNextToEndpoint(t *testing.T) {
 		}
 	}
 }
+
+// TestAssessSurfaceAboveAntennaIsBlocked (#745): a finite surface above
+// the antenna at an endpoint obstructs the line of sight right at the
+// antenna. Only the interior samples used to be assessed, so a DSM
+// (rooftop, canopy) higher than the antenna came out "clear". F1 has no
+// radius at an endpoint: the depth is a clearance in metres, and the
+// ratio is −Inf rather than a division by zero.
+func TestAssessSurfaceAboveAntennaIsBlocked(t *testing.T) {
+	l, surface := flatLink() // 10 m antennas over flat ground at 0 m
+	n := len(surface)
+	for _, c := range []struct {
+		name          string
+		a, b          float32 // surface at the endpoints
+		wantIdx       int
+		wantClearance float64
+	}{
+		{"above A", 19.99, 0, 0, -9.99},
+		{"above B", 0, 12, n - 1, -2},
+		{"above both, A deeper", 15, 11, 0, -5},
+		{"above both, B deeper", 11, 15, n - 1, -5},
+	} {
+		s := append([]float32(nil), surface...)
+		s[0], s[n-1] = c.a, c.b
+		a := l.Assess(s)
+		if a.State != VerdictBlocked || a.WorstIndex != c.wantIdx || !math.IsInf(a.WorstRatio, -1) {
+			t.Errorf("%s: %+v, want blocked at %d with ratio −Inf", c.name, a, c.wantIdx)
+			continue
+		}
+		near(t, c.name+" worst at", a.WorstAtM, float64(c.wantIdx)*20, 1e-9)
+		near(t, c.name+" clearance", a.WorstClearanceM, c.wantClearance, 1e-4)
+	}
+
+	// Exactly at the antenna is grazing, not blocked: the interior decides.
+	// This is also the DTM's own case with a 0 m antenna, so the deciding
+	// verdict, whose endpoint heights are DTM + antenna ≥ 0, never changes.
+	s := append([]float32(nil), surface...)
+	s[0], s[n-1] = 10, 10
+	if a := l.Assess(s); a.State != VerdictFresnel60 || a.WorstIndex != 500 {
+		t.Fatalf("surface at antenna height: %+v, want the flat-link mid-path fresnel60", a)
+	}
+
+	// Missing data still wins over an endpoint obstruction.
+	s[0], s[300] = 50, float32(math.NaN())
+	if a := l.Assess(s); a.State != VerdictUnknown || a.WorstIndex != -1 {
+		t.Fatalf("endpoint obstruction with an interior gap: %+v, want unknown", a)
+	}
+}
