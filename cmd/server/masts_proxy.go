@@ -220,7 +220,9 @@ type mastsProxy struct {
 
 	failLog    logThrottle
 	refuseLog  logThrottle
-	refusedAll atomic.Int64 // 503s (refused or starved) since start
+	starveLog  logThrottle
+	refusedAll atomic.Int64 // admission refusals (503) since start
+	starvedAll atomic.Int64 // starved fetches (503) since start
 }
 
 // newMastsProxy returns nil unless map.masts is enabled: the layer is then
@@ -343,10 +345,7 @@ func (p *mastsProxy) writeFetchError(w http.ResponseWriter, r *http.Request, err
 		// Neither did upstream work: give the per-IP charge back, so a
 		// client that retries as told never reaches 429 through 503s.
 		p.limiter.refund(r)
-		total := p.refusedAll.Add(1)
-		if n, ok := p.refuseLog.note(p.now(), total, mastsLogEvery); ok {
-			p.logf("[masts] busy: answered %d request(s) with 503 since the last report because map.masts.maxInFlight (%d) fetches were admitted and %d talk upstream at once; raise maxInFlight if this persists", n, p.admit.Cap(), mastsUpstreamSlots)
-		}
+		p.logBusy(errors.Is(err, errMastsStarved))
 		setRetryAfter(w, mastsBusyRetry)
 		writeError(w, http.StatusServiceUnavailable, errMastsBusy.Error())
 		return
@@ -364,6 +363,24 @@ func (p *mastsProxy) writeFetchError(w http.ResponseWriter, r *http.Request, err
 		return
 	}
 	writeError(w, http.StatusBadGateway, "antenna data unavailable")
+}
+
+// logBusy reports 503s at most once per interval per cause. The two
+// causes have different knobs (#758 review F5): a refusal means
+// map.masts.maxInFlight fetches were admitted; a starved fetch was
+// admitted with room to spare but waited out its deadline behind the
+// mastsUpstreamSlots open WFS requests, which raising maxInFlight would
+// only lengthen.
+func (p *mastsProxy) logBusy(starved bool) {
+	if starved {
+		if n, ok := p.starveLog.note(p.now(), p.starvedAll.Add(1), mastsLogEvery); ok {
+			p.logf("[masts] busy: answered %d request(s) with 503 since the last report because admitted fetches waited %s for one of the %d upstream slots; upstream is slow, and raising maxInFlight would not help", n, p.deadline, mastsUpstreamSlots)
+		}
+		return
+	}
+	if n, ok := p.refuseLog.note(p.now(), p.refusedAll.Add(1), mastsLogEvery); ok {
+		p.logf("[masts] busy: answered %d request(s) with 503 since the last report because map.masts.maxInFlight (%d) fetches were admitted; raise maxInFlight if this persists", n, p.admit.Cap())
+	}
 }
 
 func (s *Server) mastsClientConfig() *MastsClientConfig {
