@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -1438,6 +1439,52 @@ func TestTerrainProfile_AdmissionRefusalsAreObservable(t *testing.T) {
 	}
 	if !strings.Contains(got[0], "maxInFlight") || strings.Contains(strings.ToLower(env.logs.String()), "token") {
 		t.Fatalf("log line must name maxInFlight and never the token: %q", env.logs.String())
+	}
+}
+
+// #710 gap 2: an upstream failure (502, 504) did the upstream work, so it
+// stays charged. Refunding it would let one client spend a full upstream
+// timeout per request for free. With a budget of 3, three failing fetches
+// exhaust it and the 4th is 429, not another upstream call.
+func TestTerrainProfile_UpstreamFailuresStayCharged(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		err  error
+		code int
+		msg  string
+	}{
+		{"502", errors.New("upstream broke"), http.StatusBadGateway, "terrain data unavailable"},
+		{"504", context.DeadlineExceeded, http.StatusGatewayTimeout, "terrain data timed out"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			src := newFakeElevation(t, flatElev(0))
+			src.hook = func(context.Context, dhm.RasterRequest) error { return c.err }
+			env := newTerrainEnv(t, src, dhm.ProfileConfig{RateLimitPerMin: intp(3)}, nil)
+			client := func(r *http.Request) { r.RemoteAddr = "198.51.100.8:1000" }
+			for i := 0; i < 3; i++ {
+				wantError(t, env.get(busyQuery(i), client), c.code, c.msg)
+			}
+			calls := src.calls.Load()
+			wantError(t, env.get(busyQuery(3), client), http.StatusTooManyRequests, "rate limit exceeded")
+			if src.calls.Load() != calls {
+				t.Fatal("a rate-limited request reached upstream")
+			}
+		})
+	}
+}
+
+// #710 gap 3: the refusal log line names the configured maxInFlight, not a
+// constant. 7 is neither the default (4) nor the clamp (16).
+func TestTerrainProfile_AdmissionLogNamesConfiguredMaxInFlight(t *testing.T) {
+	src := newFakeElevation(t, flatElev(0))
+	env := newTerrainEnv(t, src, dhm.ProfileConfig{RateLimitPerMin: intp(0), MaxInFlight: intp(7)}, nil)
+	if cap(env.p.admit) != 7 {
+		t.Fatalf("admit capacity %d, want 7", cap(env.p.admit))
+	}
+	fillAdmission(env)
+	wantError(t, env.get(busyQuery(0)), http.StatusServiceUnavailable, "terrain profiles busy")
+	if !strings.Contains(env.logs.String(), "maxInFlight (7) fetches") {
+		t.Fatalf("log line does not carry the configured value 7: %q", env.logs.String())
 	}
 }
 
