@@ -1682,6 +1682,53 @@ atest('a model picked with the buttons rides the hash, even when it is the stand
   assert.strictEqual(hashParamsOf(live.win.location).get('model'), 'both', 'a chosen "both" left the hash: ' + live.win.location.hash);
 });
 
+// ── #746 §3: a height edit invalidates the answer in flight at once ────────
+
+console.log('\n=== #746: no stale answer while a height edit waits for its debounce ===');
+
+/* loadTimed is loadLive with timers the test fires itself, so "the old
+ * answer lands inside the debounce window" is a fact, not a race. */
+function loadTimed() {
+  const live = loadLive();
+  const timers = new Map();
+  let next = 0;
+  live.win.setTimeout = (fn) => { timers.set(++next, fn); return next; };
+  live.win.clearTimeout = (id) => { timers.delete(id); };
+  live.fireTimers = () => { for (const [id, fn] of [...timers]) { timers.delete(id); fn(); } };
+  live.timers = timers;
+  return live;
+}
+
+atest('the old answer landing inside the debounce window is dropped', async () => {
+  const live = loadTimed();
+  const f = deferredFetch();
+  const tool = openPair(live.TP, live.dom, f);
+  live.dom.find('tp-h-a-plus').fire('click');
+  assert.strictEqual(tool.getState().ha, 1);
+  assert.strictEqual(f.calls.length, 1, 'setup: the edit must still be waiting for its debounce');
+  assert.strictEqual(live.timers.size, 1, 'setup: no debounce timer');
+  f.calls[0].settle.resolve(answer('blocked'));
+  await sleep(0);
+  assert.strictEqual(live.dom.find('tp-h-a').value, '1', 'the old answer overwrote the height being edited');
+  assert.strictEqual(chipOf(live.dom).state, 'pending', 'the old answer reached the chip: ' + JSON.stringify(chipOf(live.dom)));
+  live.fireTimers();
+  assert.strictEqual(f.calls.length, 2);
+  assert.ok(/[?&]ha=1(&|$)/.test(f.calls[1].url), 'the edit was not measured: ' + f.calls[1].url);
+  f.calls[1].settle.resolve(answer('clear'));
+  await sleep(0);
+  assert.strictEqual(chipOf(live.dom).state, 'clear', 'the new answer was not drawn');
+});
+
+atest('a failure of the old request inside the debounce window is dropped too', async () => {
+  const live = loadTimed();
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  live.dom.find('tp-h-b-minus').fire('click');
+  f.calls[0].settle.reject(new Error('upstream timed out'));
+  await sleep(0);
+  assert.strictEqual(chipOf(live.dom).state, 'pending', 'the old failure reached the chip');
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 (async () => {

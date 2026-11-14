@@ -1326,9 +1326,9 @@
 
     /* endpointsChanged is the shared tail of a move and a swap: the panel
      * names, the hash at once (replaceState), and one debounced request. An
-     * answer still in flight belongs to the old ends, so it is dropped. */
+     * answer still in flight belongs to the old ends, so scheduleRequest
+     * drops it. */
     function endpointsChanged() {
-      seq++;
       renderNames();
       setStatus('Measuring the terrain along the path…', 'tp-loading');
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
@@ -1388,7 +1388,13 @@
       });
     }
 
+    /* scheduleRequest debounces the request for an edit. Whatever is still
+     * in flight was asked for the state before the edit, so it is dropped
+     * now, not when the debounced request goes out: otherwise an old
+     * answer landing inside the window overwrites the height being edited,
+     * the chart and the verdict (#746). */
     function scheduleRequest() {
+      seq++;
       if (debounceTimer) global.clearTimeout(debounceTimer);
       debounceTimer = global.setTimeout(function () { debounceTimer = null; request(); }, HEIGHT_DEBOUNCE_MS);
       writeHash();
