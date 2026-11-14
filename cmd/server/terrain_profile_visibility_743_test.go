@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/meshcore-analyzer/dhm"
 )
@@ -130,3 +133,50 @@ func TestTerrainProfile743_OneLookupPerNodeEndpoint(t *testing.T) {
 	}
 }
 
+// Perf proof: the visibility lookup is one indexed bulk query per node
+// endpoint (at most two per request), and none for free points or when no
+// hidden-name prefix is configured. Measured at a realistic scale — 2,000
+// nodes, 500 observers — with a prefix configured, so the query really
+// runs; the lookup must stay a small fraction of a warm (cached) serve.
+// Run with -v for the numbers.
+func TestTerrainProfile743_VisibilityLookupCost(t *testing.T) {
+	env, _, pk := terrain743Env(t, "public-observer")
+	tx, err := env.srv.db.conn.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2000; i++ {
+		if _, err := tx.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
+			VALUES (?, ?, 'repeater', 56.0, 10.0, datetime('now'), datetime('now'), 1)`, fmt.Sprintf("%064x", i+1), fmt.Sprintf("n%d", i)); err != nil {
+			t.Fatal(err)
+		}
+		if i < 500 {
+			if _, err := tx.Exec(`INSERT INTO observers (id, name) VALUES (?, ?)`, fmt.Sprintf("%064X", i+1), fmt.Sprintf("o%d", i)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	env.srv.store.InvalidateNodeCache()
+	q := pathQuery(pk, offsetPt(56.1629, 10.2039, 4000, 0))
+	decodeProfile(t, env.get(q)) // fill the profile cache
+	const runs = 200
+	start := time.Now()
+	for i := 0; i < runs; i++ {
+		decodeProfile(t, env.get(q))
+	}
+	warm := time.Since(start) / runs
+	start = time.Now()
+	for i := 0; i < runs; i++ {
+		if hidden, err := env.srv.isIdentityHidden(context.Background(), pk); err != nil || hidden {
+			t.Fatalf("lookup: hidden=%v err=%v", hidden, err)
+		}
+	}
+	lookup := time.Since(start) / runs
+	if lookup >= warm {
+		t.Fatalf("visibility lookup %v not below a warm serve %v", lookup, warm)
+	}
+	t.Logf("2,000 nodes, 500 observers: warm node-endpoint serve %v, visibility lookup %v (mean of %d)", warm, lookup, runs)
+}
