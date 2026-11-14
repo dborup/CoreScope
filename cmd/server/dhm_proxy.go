@@ -64,11 +64,17 @@ type DHMConfig = dhm.Config
 // while the proxy is active; it carries what the overlay needs and nothing
 // secret.
 type DHMClientConfig struct {
-	Enabled     bool          `json:"enabled"`
-	URL         string        `json:"url"`
-	Layer       string        `json:"layer"`
-	MinZoom     int           `json:"minZoom"`
-	MaxZoom     int           `json:"maxZoom"`
+	Enabled bool   `json:"enabled"`
+	URL     string `json:"url"`
+	Layer   string `json:"layer"`
+	MinZoom int    `json:"minZoom"`
+	MaxZoom int    `json:"maxZoom"`
+	// Profile reports whether GET /api/terrain/profile is served (#681 M4).
+	// The overlay only needs map.dhm; the Path profile tool also needs
+	// map.dhm.profile.enabled, so the Map page cannot infer it from
+	// Enabled and must be told. No limit or parameter is published with
+	// it: the endpoint validates its own request.
+	Profile     bool          `json:"profile"`
 	Bounds      [2][2]float64 `json:"bounds"` // [[south, west], [north, east]]
 	Attribution string        `json:"attribution"`
 }
@@ -355,7 +361,9 @@ func (s *Server) dhmClientConfig() *DHMClientConfig {
 	if s.dhm == nil {
 		return nil
 	}
-	return dhmClientConfig()
+	c := dhmClientConfig()
+	c.Profile = s.terrain != nil
+	return c
 }
 
 func (s *Server) handleDHMTile(w http.ResponseWriter, r *http.Request) {
