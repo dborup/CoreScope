@@ -497,7 +497,7 @@ test('ATTRIBUTION_URL is the CC BY 4.0 licence over https', () => {
   assert.strictEqual(TP.ATTRIBUTION_URL, 'https://creativecommons.org/licenses/by/4.0/');
 });
 
-test('the panel credit links "CC BY 4.0" to the licence in a new tab', () => {
+test('the panel credit links "CC BY 4.0" and the dataset in a new tab', () => {
   const { TP: T, dom } = load();
   openTool(T, dom, deferredFetch()).open();
   const link = dom.find('tp-credit-link');
@@ -507,9 +507,21 @@ test('the panel credit links "CC BY 4.0" to the licence in a new tab', () => {
   assert.strictEqual(link.textContent, 'CC BY 4.0');
   assert.strictEqual(link.attrs.target, '_blank');
   assert.ok(/noopener/.test(link.attrs.rel || ''), 'rel = ' + link.attrs.rel);
-  // The text around the link plus the link reads exactly the shared credit.
+  // #733: the dataset is linked too, and the line says the profile is
+  // computed from DHM rather than shown as served.
+  const dataset = dom.find('tp-credit-dataset');
+  assert.ok(dataset, 'the credit has no dataset link');
+  assert.strictEqual(dataset.tagName, 'A');
+  assert.strictEqual(dataset.attrs.href, T.DATASET_URL);
+  assert.strictEqual(dataset.textContent, T.DATASET_MARK);
+  assert.strictEqual(dataset.attrs.target, '_blank');
+  assert.ok(/noopener/.test(dataset.attrs.rel || ''), 'rel = ' + dataset.attrs.rel);
+  // The text around the links plus the links reads exactly the shared
+  // credit, derived note last.
   const line = link.parentNode;
-  assert.strictEqual(line.children.map(c => c.textContent).join(''), T.ATTRIBUTION);
+  assert.strictEqual(dataset.parentNode, line, 'the two links are not on the same line');
+  assert.strictEqual(line.children.map(c => c.textContent).join(''), T.ATTRIBUTION_DERIVED);
+  assert.ok(T.ATTRIBUTION_DERIVED.endsWith(T.DERIVED_NOTE), T.ATTRIBUTION_DERIVED);
 });
 
 // ── 7. #711 polish ─────────────────────────────────────────────────────────

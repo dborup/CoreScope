@@ -837,7 +837,9 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 	n := len(e.dtm)
 	resp := TerrainProfileResponse{
 		DistanceM: round2(plan.DistanceM), StepM: round2(plan.StepM), SampleCount: n,
-		Model: "dtm", Attribution: dhm.Attribution, Samples: []TerrainSample{},
+		// The profile is computed from DHM, not shown as served, so the
+		// credit is the derived one (#733).
+		Model: "dtm", Attribution: dhm.AttributionDerived, Samples: []TerrainSample{},
 	}
 	if tq.both {
 		resp.Model = "both"

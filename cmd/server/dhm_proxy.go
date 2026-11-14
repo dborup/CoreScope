@@ -88,6 +88,16 @@ type DHMClientConfig struct {
 	Share       bool          `json:"share"`
 	Bounds      [2][2]float64 `json:"bounds"` // [[south, west], [north, east]]
 	Attribution string        `json:"attribution"`
+	// The credit's parts (#733). Dataforsyningen's terms require the
+	// credit to link both the dataset and the licence, and Leaflet's
+	// attribution control is the page's, not the server's, so the link
+	// targets have to reach the browser. Attribution stays the plain text
+	// it always was: the page turns these two marks inside it into
+	// anchors, which is why each mark travels with its URL.
+	DatasetName string `json:"datasetName"`
+	DatasetURL  string `json:"datasetUrl"`
+	LicenseName string `json:"licenseName"`
+	LicenseURL  string `json:"licenseUrl"`
 }
 
 func dhmClientConfig() *DHMClientConfig {
@@ -100,6 +110,10 @@ func dhmClientConfig() *DHMClientConfig {
 		MaxZoom:     dhm.MaxZoom,
 		Bounds:      [2][2]float64{{c.South, c.West}, {c.North, c.East}},
 		Attribution: dhm.Attribution,
+		DatasetName: dhm.DatasetName,
+		DatasetURL:  dhm.DatasetURL,
+		LicenseName: dhm.LicenseName,
+		LicenseURL:  dhm.LicenseURL,
 	}
 }
 

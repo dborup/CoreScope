@@ -54,6 +54,57 @@ function makeAttributionStub() {
   return (opts) => { c.opts = opts || null; return c; };
 }
 
+/* A minimal element model for the credit builder (#733), which assembles
+ * the hillshade credit with createElement/createTextNode and hands Leaflet
+ * the container's innerHTML. Supports appendChild, setAttribute,
+ * textContent and an innerHTML/outerHTML getter that serialises children
+ * the way a browser does, escaping text and attribute values — enough to
+ * pin the anchors' href/rel/target and that no credit string can become
+ * markup. The real DOM is covered by test-issue-733-dhm-credit-e2e.js.
+ */
+function escText(v) { return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function escAttr(v) { return escText(v).replace(/"/g, '&quot;'); }
+
+function makeTextNode(data) {
+  const n = { nodeType: 3, data: String(data) };
+  Object.defineProperty(n, 'textContent', { get: () => n.data });
+  Object.defineProperty(n, 'outerHTML', { get: () => escText(n.data) });
+  return n;
+}
+
+function makeElement(tag) {
+  const name = String(tag).toLowerCase();
+  const classes = [];
+  const el = {
+    nodeType: 1, tagName: name.toUpperCase(), attrs: {}, children: [], style: {}, classes,
+    classList: {
+      add: (c) => { if (!classes.includes(c)) classes.push(c); },
+      remove: (c) => { const i = classes.indexOf(c); if (i >= 0) classes.splice(i, 1); },
+      contains: (c) => classes.includes(c),
+    },
+    setAttribute(k, v) { el.attrs[k] = String(v); },
+    getAttribute(k) { return Object.prototype.hasOwnProperty.call(el.attrs, k) ? el.attrs[k] : null; },
+    appendChild(c) { el.children.push(c); return c; },
+    querySelectorAll: () => [],
+    querySelector: () => null,
+  };
+  Object.defineProperty(el, 'textContent', {
+    get() { return el.children.map(c => c.textContent).join(''); },
+    set(v) { el.children = v === '' || v == null ? [] : [makeTextNode(v)]; },
+  });
+  Object.defineProperty(el, 'innerHTML', {
+    get() { return el.children.map(c => c.outerHTML).join(''); },
+    set(v) { el.children = [makeTextNode(v)]; },
+  });
+  Object.defineProperty(el, 'outerHTML', {
+    get() {
+      const a = Object.keys(el.attrs).map(k => ' ' + k + '="' + escAttr(el.attrs[k]) + '"').join('');
+      return '<' + name + a + '>' + el.innerHTML + '</' + name + '>';
+    },
+  });
+  return el;
+}
+
 function makeLeaflet() {
   function evented(o) {
     const h = {};
@@ -192,7 +243,8 @@ function makeSandbox(opts) {
     document: {
       documentElement: { getAttribute: () => opts.theme || 'light' },
       querySelector: () => null,
-      createElement: () => ({}),
+      createElement: makeElement,
+      createTextNode: makeTextNode,
     },
     CustomEvent: function (type, init) { this.type = type; this.detail = (init && init.detail) || null; },
     L: makeLeaflet(),
@@ -235,4 +287,4 @@ function liveCredits(map) {
   return liveAttributions(map).flatMap(c => c.credits()).sort();
 }
 
-module.exports = { makeStorage, makeLeaflet, makeAttributionStub, makeMap, makeSandbox, buildControl, liveAttributions, liveCredits };
+module.exports = { makeStorage, makeLeaflet, makeAttributionStub, makeMap, makeSandbox, buildControl, liveAttributions, liveCredits, makeElement, makeTextNode };
