@@ -2,6 +2,7 @@ package dhm
 
 import (
 	"math"
+	"reflect"
 	"testing"
 )
 
@@ -384,5 +385,31 @@ func TestAssessEndpointBoundary(t *testing.T) {
 	l.HeightA, l.HeightB = 0, 0
 	if a := l.Assess(surface); a.AntennaBelowA || a.AntennaBelowB {
 		t.Fatalf("0 m antennas on the ground itself: %+v", a)
+	}
+}
+
+// TestDecimateMaxBelowTwo (#745 review N3): with no room for both ends the
+// bound still holds: max 1 is the first sample alone, as before #745, and
+// max 0 (or less) is nothing.
+func TestDecimateMaxBelowTwo(t *testing.T) {
+	for _, c := range []struct {
+		n, max int
+		keep   []int
+		want   []int
+	}{
+		{10, 1, nil, []int{0}},
+		{10, 1, []int{5, 6}, []int{0}},
+		{10, 0, []int{5}, []int{}},
+		{10, -3, nil, []int{}},
+		{1, 1, nil, []int{0}},
+		{0, 0, nil, []int{}},
+	} {
+		if got := Decimate(c.n, c.max, c.keep...); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("Decimate(%d, %d, %v) = %v, want %v", c.n, c.max, c.keep, got, c.want)
+		}
+	}
+	// max 2 is the two ends, whatever is kept.
+	if got := Decimate(10, 2, 5); !reflect.DeepEqual(got, []int{0, 9}) {
+		t.Fatalf("max 2: %v", got)
 	}
 }

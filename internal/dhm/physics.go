@@ -151,7 +151,8 @@ func (l Link) Assess(surface []float32) Assessment {
 // order given, while they fit (out-of-range ones are ignored), so
 // thinning a profile for the chart never hides its worst point or a data
 // gap (#745); evenly spaced indices fill the room that is left. The
-// result is strictly increasing. max must be at least 2.
+// result is strictly increasing. A max below 2 has no room for both ends:
+// max 1 is the first index alone, max 0 or less none.
 func Decimate(n, max int, keep ...int) []int {
 	if n <= max {
 		out := make([]int, n)
@@ -159,6 +160,12 @@ func Decimate(n, max int, keep ...int) []int {
 			out[i] = i
 		}
 		return out
+	}
+	switch {
+	case max == 1:
+		return []int{0}
+	case max < 1:
+		return []int{}
 	}
 	picked := make([]bool, n)
 	picked[0], picked[n-1] = true, true
