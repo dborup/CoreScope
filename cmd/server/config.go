@@ -292,6 +292,10 @@ type Config struct {
 	// the browser receives only the fixed `heritage` client block.
 	Heritage HeritageConfig `json:"-"`
 
+	// Masts is map.masts (#724), lifted out of Map the same way; the
+	// browser receives only the fixed `masts` client block.
+	Masts MastsConfig `json:"-"`
+
 	// Radio holds the link-physics defaults of the terrain profile (#681).
 	Radio *RadioConfig `json:"radio,omitempty"`
 
@@ -898,7 +902,7 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 	// it: nil. extractTypedMapBlocks stays on this path as a no-op guard --
 	// the contract is that no path out of LoadConfig may hand back a Config
 	// whose client-visible Map still holds map.dhm (#680, #694) or
-	// map.heritage (#723).
+	// map.heritage (#723) or map.masts (#724).
 	cfg.extractTypedMapBlocks()
 	cfg.applyListLimitsDefaults()
 	applyCORSEnv(cfg)

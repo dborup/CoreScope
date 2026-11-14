@@ -140,6 +140,17 @@
       var pane = map.getPane && map.getPane('tilePane');
       if (pane) pane.style.filter = (provider && provider.invertFilter) ? provider.invertFilter : '';
     } catch (_e) {}
+    // #752 — every inset built on this helper renders the viewer's active
+    // provider, so it must credit it: Esri requires "Powered by Esri" and
+    // OSM/CARTO require their credit too. The inset maps are created with
+    // attributionControl: false, so they get the registry's own control
+    // (the one Live gets, #735), in its compact form. Called after the
+    // layers are on the map, so the control counts this credit at once and
+    // drops it again when the layer goes (MC_setLayerAttribution keeps it
+    // right if a caller ever swaps the credit in place).
+    if (typeof window.MC_ensureAttribution === 'function') {
+      window.MC_ensureAttribution(map, { compact: true });
+    }
     return layer;
   }
   // Exposed so the node-reach link-map (node-reach-map.js) reuses the user's

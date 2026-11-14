@@ -45,13 +45,11 @@
 
     var map = L.map(containerId, { zoomControl: true, attributionControl: false })
       .setView([node.lat, node.lon], 11);
-    if (typeof window._applyTilesToNodeMap === 'function') {
-      window._applyTilesToNodeMap(map);
-    } else {
-      // Loud, not silent: the tile-preference helper is missing.
-      console.warn('NodeReachMap: _applyTilesToNodeMap unavailable — using OSM fallback');
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
-    }
+    // #756 — nodes.js (which defines this) always loads before this file
+    // (index.html), so the uncredited OSM fallback this used to have on a
+    // missing helper was dead code; _applyTilesToNodeMap is relied on
+    // unconditionally, as the other insets already do.
+    window._applyTilesToNodeMap(map);
 
     // Center node: a circleMarker like the neighbours (one glyph family) — just
     // larger + accent-filled — rather than the heavy default droplet icon.

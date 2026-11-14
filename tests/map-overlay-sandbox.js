@@ -16,6 +16,8 @@
  *     hook), then listens to layeradd, counting each later layer's credit
  *     and dropping it again on that layer's 'remove'. remove() only stops
  *     listening to layeradd and does not give map.attributionControl back.
+ *     getContainer() returns a stub element whose classList records the
+ *     classes added to it (#752 adds the compact class there).
  */
 'use strict';
 const vm = require('vm');
@@ -35,6 +37,74 @@ function makeStorage(init) {
   };
 }
 
+// A light stand-in for L.Control.Attribution, for the suites that drive a
+// single call site with a tile-layer spy rather than the whole registry
+// (#332, #390, #1470). It records what the control was given; the fuller
+// model inside makeLeaflet() counts credits the way Leaflet does.
+function makeAttributionStub() {
+  const credits = [];
+  const classes = [];
+  const c = {
+    credits, classes, opts: null,
+    addTo(map) { map.attributionControl = c; (map._attributionControls = map._attributionControls || []).push(c); return c; },
+    addAttribution(t) { if (t) credits.push(t); return c; },
+    removeAttribution(t) { const i = credits.indexOf(t); if (i >= 0) credits.splice(i, 1); return c; },
+    getContainer() { return { classList: { add: (cl) => { if (!classes.includes(cl)) classes.push(cl); }, contains: (cl) => classes.includes(cl) } }; },
+  };
+  return (opts) => { c.opts = opts || null; return c; };
+}
+
+/* A minimal element model for the credit builder (#733), which assembles
+ * the hillshade credit with createElement/createTextNode and hands Leaflet
+ * the container's innerHTML. Supports appendChild, setAttribute,
+ * textContent and an innerHTML/outerHTML getter that serialises children
+ * the way a browser does, escaping text and attribute values — enough to
+ * pin the anchors' href/rel/target and that no credit string can become
+ * markup. The real DOM is covered by test-issue-733-dhm-credit-e2e.js.
+ */
+function escText(v) { return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function escAttr(v) { return escText(v).replace(/"/g, '&quot;'); }
+
+function makeTextNode(data) {
+  const n = { nodeType: 3, data: String(data) };
+  Object.defineProperty(n, 'textContent', { get: () => n.data });
+  Object.defineProperty(n, 'outerHTML', { get: () => escText(n.data) });
+  return n;
+}
+
+function makeElement(tag) {
+  const name = String(tag).toLowerCase();
+  const classes = [];
+  const el = {
+    nodeType: 1, tagName: name.toUpperCase(), attrs: {}, children: [], style: {}, classes,
+    classList: {
+      add: (c) => { if (!classes.includes(c)) classes.push(c); },
+      remove: (c) => { const i = classes.indexOf(c); if (i >= 0) classes.splice(i, 1); },
+      contains: (c) => classes.includes(c),
+    },
+    setAttribute(k, v) { el.attrs[k] = String(v); },
+    getAttribute(k) { return Object.prototype.hasOwnProperty.call(el.attrs, k) ? el.attrs[k] : null; },
+    appendChild(c) { el.children.push(c); return c; },
+    querySelectorAll: () => [],
+    querySelector: () => null,
+  };
+  Object.defineProperty(el, 'textContent', {
+    get() { return el.children.map(c => c.textContent).join(''); },
+    set(v) { el.children = v === '' || v == null ? [] : [makeTextNode(v)]; },
+  });
+  Object.defineProperty(el, 'innerHTML', {
+    get() { return el.children.map(c => c.outerHTML).join(''); },
+    set(v) { el.children = [makeTextNode(v)]; },
+  });
+  Object.defineProperty(el, 'outerHTML', {
+    get() {
+      const a = Object.keys(el.attrs).map(k => ' ' + k + '="' + escAttr(el.attrs[k]) + '"').join('');
+      return '<' + name + a + '>' + el.innerHTML + '</' + name + '>';
+    },
+  });
+  return el;
+}
+
 function makeLeaflet() {
   function evented(o) {
     const h = {};
@@ -42,8 +112,9 @@ function makeLeaflet() {
     o.off = (t, fn) => { if (h[t]) h[t] = h[t].filter(f => f !== fn); return o; };
     o.once = (t, fn) => { const w = (e) => { o.off(t, w); fn(e); }; return o.on(t, w); };
     o.fire = (t, e) => { (h[t] || []).slice().forEach(fn => fn(Object.assign({ type: t }, e || {}))); return o; };
-    // Leaflet's Layer.getAttribution.
+    // Leaflet's Layer.getAttribution and Layer.addTo.
     o.getAttribution = () => (o.options || {}).attribution;
+    o.addTo = (map) => { map.addLayer(o); return o; };
     return o;
   }
   const L = {
@@ -74,8 +145,20 @@ function makeLeaflet() {
   L.tileLayer.wms = (url, opts) => evented({ _url: url, options: opts || {}, kind: 'wms' });
   L.control.attribution = (opts) => {
     const counts = {};
+    // Leaflet's Control.getContainer(): the registry adds the compact class
+    // to it for the inset maps (#752).
+    const classes = [];
+    const container = {
+      classList: {
+        add: (cl) => { if (!classes.includes(cl)) classes.push(cl); },
+        contains: (cl) => classes.includes(cl),
+      },
+      classes,
+    };
     const c = {
       opts,
+      getContainer() { return container; },
+      classes,
       addAttribution(t) { if (t) counts[t] = (counts[t] || 0) + 1; return c; },
       removeAttribution(t) { if (t && counts[t]) counts[t]--; return c; },
       // Leaflet 1.9.4 Control.Attribution._addAttribution.
@@ -160,7 +243,8 @@ function makeSandbox(opts) {
     document: {
       documentElement: { getAttribute: () => opts.theme || 'light' },
       querySelector: () => null,
-      createElement: () => ({}),
+      createElement: makeElement,
+      createTextNode: makeTextNode,
     },
     CustomEvent: function (type, init) { this.type = type; this.detail = (init && init.detail) || null; },
     L: makeLeaflet(),
@@ -203,4 +287,4 @@ function liveCredits(map) {
   return liveAttributions(map).flatMap(c => c.credits()).sort();
 }
 
-module.exports = { makeStorage, makeLeaflet, makeMap, makeSandbox, buildControl, liveAttributions, liveCredits };
+module.exports = { makeStorage, makeLeaflet, makeAttributionStub, makeMap, makeSandbox, buildControl, liveAttributions, liveCredits, makeElement, makeTextNode };

@@ -15,7 +15,10 @@
 //     response checks, and it never follows redirects.
 //   - ExactQuery: the allow-list validator for client query strings.
 //   - Cache: a bounded LRU (entries, bytes, TTL) for upstream responses.
-//   - Attribution: the one CC BY 4.0 credit line for DHM data.
+//   - Attribution: the one CC BY 4.0 credit line for DHM data, with
+//     AttributionDerived and the parts it is built from (Owner,
+//     DatasetName, DatasetURL, LicenseName, LicenseURL, DerivedNote) for
+//     the views that render the dataset and licence links (#733).
 //
 // The hillshade tile shape (#680) lives in wms.go, and the exaggerated
 // hillshade service (#687) in hillshade.go. The elevation raster
@@ -34,12 +37,46 @@ import "strings"
 // licensed under CC BY 4.0 since 16 May 2024. It is plain text because it is
 // rendered by Leaflet's attribution control. Every DHM-derived view must
 // show it.
-const Attribution = "Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, " + LicenseName
+const Attribution = "Indeholder data fra " + Owner + ", " + DatasetName + ", " + LicenseName
 
-// LicenseName and LicenseURL identify the licence of DHM data.
+// AttributionDerived is the credit for a view CoreScope computes from DHM
+// rather than shows as served: Attribution plus the statement that the data
+// was changed, which clause 4 of the terms requires (#733). The terrain
+// profile and the profile share card (#727) use it; the hillshade tiles are
+// the agency's own rendering and use Attribution.
+const AttributionDerived = Attribution + " — " + DerivedNote
+
+// The parts of the credit, each a separate constant because each view
+// renders them differently: the map credit and the profile footer link
+// DatasetName and LicenseName, and only a derived view adds DerivedNote.
+//
+// Dataforsyningen's terms for Klimadatastyrelsen data under CC BY 4.0
+// ("Vilkår for brug af data", v3.1, August 2024,
+// https://dataforsyningen.dk/Vilkaar) require the credit to name the data
+// owner, name the licence and link to it, link to the specific dataset (or
+// to the data overview), and state whether the data was changed (#733).
 const (
+	// Owner is the data owner the credit must name.
+	Owner = "Klimadatastyrelsen"
+	// DatasetName is the dataset the credit must name, and link through
+	// DatasetURL.
+	DatasetName = "Danmarks Højdemodel"
+	// DatasetURL is that dataset on Dataforsyningen: DHM/Terræn, the
+	// terrain model behind both the hillshade and the profile's DTM.
+	// DHM/Overflade (the profile's surface model, /data/928) is the same
+	// product family under the same licence and the same owner; the terms
+	// also accept a link to the data overview (/data) instead.
+	DatasetURL = "https://dataforsyningen.dk/data/930"
+
+	// LicenseName and LicenseURL identify the licence of DHM data. The
+	// name must be shown and must link to the licence itself.
 	LicenseName = "CC BY 4.0"
 	LicenseURL  = "https://creativecommons.org/licenses/by/4.0/"
+
+	// DerivedNote states that the data shown was changed. It is Danish
+	// like the rest of the line, which is Dataforsyningen's own recommended
+	// wording.
+	DerivedNote = "data bearbejdet"
 )
 
 // Config is config.json `map.dhm`.

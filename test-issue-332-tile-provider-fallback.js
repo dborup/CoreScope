@@ -42,6 +42,7 @@ const vm     = require('vm');
 const fs     = require('fs');
 const path   = require('path');
 const assert = require('assert');
+const { makeAttributionStub } = require('./tests/map-overlay-sandbox');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -174,6 +175,9 @@ function makeTileLayerSpy() {
     tileLayer(url, opts) {
       return { addTo(map) { calls.push({ url, opts, map }); return this; } };
     },
+    // #752 — the inset helper gives the map the registry's attribution
+    // control; Leaflet always has this factory, so the spy has it too.
+    control: { attribution: makeAttributionStub() },
   };
   return { L, calls };
 }
@@ -568,10 +572,14 @@ function makeMapMock() {
       fitBounds() { return this; },
       setView() { return this; },
       on() { return this; },
+      // #752 — the inset helper gives the map the registry's attribution
+      // control, which walks the layers already on the map.
+      eachLayer() { return this; },
     };
   }
   const L = {
     map() { return fakeMap(); },
+    control: { attribution: makeAttributionStub() },
     tileLayer(url, opts) {
       return { addTo(map) { calls.push({ url, opts, map }); return this; } };
     },
@@ -829,7 +837,7 @@ async function legacyLightTests() {
       const spy = makeTileLayerSpy();
       ctx.L = spy.L;
       const pane = { style: { filter: 'stale filter' } };
-      ctx.__map = { getPane: () => pane };
+      ctx.__map = { getPane: () => pane, eachLayer() {} };
       vm.runInContext(extractFn('public/nodes.js', '_applyTilesToNodeMap') + '\n_applyTilesToNodeMap(__map);', ctx);
       assert.strictEqual(spy.calls.length, 1, 'an unknown vendor must not borrow a registry reference overlay');
       assert.strictEqual(spy.calls[0].url, url);

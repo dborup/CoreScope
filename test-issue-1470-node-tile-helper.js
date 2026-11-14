@@ -21,6 +21,7 @@ const vm = require('vm');
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
+const { makeAttributionStub } = require('./tests/map-overlay-sandbox');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -44,6 +45,9 @@ function makeLeafletMock() {
   const fakeMap = {
     _tileLayers: [],
     getPane: (name) => name === 'tilePane' ? tilePane : null,
+    // #752 — the helper gives an inset map the registry's attribution
+    // control, so the mock models the two Leaflet members that needs.
+    eachLayer(fn) { fakeMap._tileLayers.forEach(fn); return fakeMap; },
   };
   const L = {
     tileLayer(url, opts) {
@@ -59,6 +63,7 @@ function makeLeafletMock() {
     },
     map() { return fakeMap; },
     marker() { return { addTo: () => ({ bindPopup: () => {} }) }; },
+    control: { attribution: makeAttributionStub() },
   };
   return { L, calls, fakeMap, tilePane };
 }
