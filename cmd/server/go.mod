@@ -76,3 +76,7 @@ replace github.com/meshcore-analyzer/pprofbind => ../../internal/pprofbind
 require github.com/meshcore-analyzer/dhm v0.0.0
 
 replace github.com/meshcore-analyzer/dhm => ../../internal/dhm
+
+require github.com/meshcore-analyzer/mastedb v0.0.0
+
+replace github.com/meshcore-analyzer/mastedb => ../../internal/mastedb

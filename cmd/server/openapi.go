@@ -78,6 +78,18 @@ func routeDescriptions() map[string]routeMeta {
 				{Status: "503", Description: "map.dhm.profile.maxInFlight uncached profiles (default 4) are already being fetched, server-wide; no upstream call. Requests for a profile already being fetched share that fetch, so when its fetch is refused they are refused with it. A refusal is not charged to the per-client budget. Retry-After gives the seconds to wait."},
 				{Status: "504", Description: "The elevation service timed out (per raster, or 25 s for the whole profile)."},
 			}},
+		"GET /api/masts": {Summary: "Antenna sites of one grid cell (Mastedatabasen, Denmark)", Description: "Existing antenna positions from Mastedatabasen (Digitaliseringsstyrelsen, CC0) inside one fixed 2 km x 2 km EPSG:25832 grid cell: cell E,N spans easting [E*2000, (E+1)*2000) and northing [N*2000, (N+1)*2000). Rows at identical coordinates are grouped into one site. Response: {cell: {e, n}, truncated, sites: [{lat, lon, street?, houseNumber?, postcode?, city?, stations[], entries: [{technology, bandMHz?, service?, commissioned?, interference}], interference, likelyMast}]}. interference is set when an entry is in the 700, 800 or 900 MHz band or is GSM-R; likelyMast is a heuristic (a broadcast technology), not a fact from the source. truncated is set when upstream returned its 500-row page limit, so the cell may be missing sites. Only published fields appear: no operator, height or structure type. The server fetches a cell from the Mastedatabasen WFS only when it is requested and not cached (7 days); it never prefetches or walks the grid. X-CoreScope-Cache says hit or miss; responses may be browser-cached for 24 hours. 404 unless map.masts.enabled. (#724)", Tag: "config",
+			QueryParams: []paramMeta{
+				{Name: "cell", Description: "E,N grid cell indexes as plain decimal integers, E 219-462 and N 3017-3209 (the Danish extent); the only accepted key", Type: "string", Required: true},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Missing, malformed or out-of-extent cell, or any other query key; no upstream call and no charge."},
+				{Status: "404", Description: "map.masts is not enabled."},
+				{Status: "429", Description: "Per-client budget of cells not in the cache exceeded (map.masts.cellRateLimitPerMin, default 120/min; cached cells are not counted). Retry-After gives the seconds to wait."},
+				{Status: "502", Description: "Mastedatabasen failed or returned something other than a well-formed feature collection; no upstream detail is returned and nothing is cached."},
+				{Status: "503", Description: "map.masts.maxInFlight uncached cells (default 16) are already being fetched, server-wide; no upstream call and no charge. Requests for a cell already being fetched share that fetch. Retry-After gives the seconds to wait."},
+				{Status: "504", Description: "Mastedatabasen timed out."},
+			}},
 
 		// Admin / system
 		"GET /api/health": {Summary: "Health check", Description: "Returns server health, uptime, and memory stats.", Tag: "admin"},
