@@ -1681,6 +1681,10 @@ type ClientConfigResponse struct {
 	// Heritage offers the #723 protected ancient monuments overlay. Omitted
 	// unless map.heritage.enabled is true.
 	Heritage *HeritageClientConfig `json:"heritage,omitempty"`
+
+	// Masts offers the #724 antenna sites layer (GET /api/masts). Omitted
+	// unless map.masts.enabled is true.
+	Masts *MastsClientConfig `json:"masts,omitempty"`
 }
 
 // PrivacyClientConfig is the privacy block of /api/config/client. It carries

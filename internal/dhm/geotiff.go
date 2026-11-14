@@ -306,10 +306,17 @@ func (r *tiffReader) noData() (float32, bool, error) {
 
 // georef reads ModelTiepoint + ModelPixelScale and the GeoKeys that change
 // their meaning. Absent georeferencing is the zero Georef; a rotated
-// (ModelTransformation) or non-UTM32 raster is an error.
+// (ModelTransformation) or non-UTM32 raster is an error. The GeoKeys are
+// checked even without tiepoint and scale (#745): such a raster takes the
+// request's grid (rasterGrid), which is wrong for one that declares
+// another CRS.
 func (r *tiffReader) georef() (Georef, error) {
 	if _, ok := r.fields[tagModelTransform]; ok {
 		return Georef{}, errBadTIFF
+	}
+	pointOrigin, err := r.geoKeys()
+	if err != nil {
+		return Georef{}, err
 	}
 	_, tiePresent := r.fields[tagModelTiepoint]
 	_, scalePresent := r.fields[tagModelPixelScale]
@@ -322,10 +329,6 @@ func (r *tiffReader) georef() (Georef, error) {
 	scale, hasScale := r.doubles(tagModelPixelScale, 3)
 	if !hasTie || !hasScale {
 		return Georef{}, errBadTIFF
-	}
-	pointOrigin, err := r.geoKeys()
-	if err != nil {
-		return Georef{}, err
 	}
 	g := Georef{PixelE: scale[0], PixelN: scale[1]}
 	// Tiepoint (I, J, K) → (X, Y, Z): raster position I, J sits at X, Y.

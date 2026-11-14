@@ -473,6 +473,87 @@ test('the explanatory line separates blocking from attenuation', () => {
   assert.ok(/attenuat/i.test(TP.SURFACE_NOTE), TP.SURFACE_NOTE);
 });
 
+// ── 3c. Antenna below the surface, #745 / owner decision on #750 ──────────
+
+console.log('\n=== #745: antenna below the surface at an endpoint ===');
+
+/* The server answers verdict.surface.reason = "antennaBelowSurface" with
+ * endpoint "A", "B" or "both" when the DSM at an endpoint is above that
+ * antenna. That is most often a rooftop node with a ground-based or
+ * default height, so the chip says what to check instead of "Blocked".
+ * An endpoint-only obstruction has worstF1Fraction null (F1 has no radius
+ * there) and its worst point at 0 or distanceM. */
+function below(endpoint, over) {
+  const d = surf('clear', 'blocked', { distanceM: 1000 });
+  d.verdict.surface = Object.assign({ state: 'blocked', worstClearanceM: -9.99,
+    worstAtM: endpoint === 'A' ? 0 : 1000, worstF1Fraction: null,
+    reason: 'antennaBelowSurface', endpoint: endpoint }, over || {});
+  return d;
+}
+
+[['A', 'A'], ['B', 'B'], ['both', 'A and B']].forEach(([endpoint, words]) => {
+  test('reason at ' + endpoint + ': the chip names the endpoint and the remedy, in the warn tone', () => {
+    const c = TP.surfaceChip(below(endpoint));
+    assert.ok(c, 'no surface chip');
+    assert.strictEqual(c.label, 'Buildings/trees: antenna below the surface at ' + words + ' — check the antenna height');
+    assert.strictEqual(c.tone, 'warn');
+    assert.strictEqual(c.state, 'blocked');
+    assert.strictEqual(c.show, true);
+    assert.ok(/antenna height above the ground/.test(c.detail), c.detail);
+    assert.ok(c.detail.indexOf(' at ' + words + ' ') >= 0, c.detail);
+    // Nothing on an endpoint-only obstruction says buildings are in the link.
+    assert.strictEqual(c.note, false, 'the blocking/attenuation line came with an endpoint-only reason');
+    assert.ok(!/rise through/.test(c.detail), c.detail);
+  });
+});
+
+test('reason: shown beside a blocked terrain verdict too (it is about the input)', () => {
+  const d = below('A');
+  d.verdict.state = 'blocked';
+  assert.strictEqual(TP.surfaceChip(d).show, true);
+});
+
+test('reason with an interior obstruction as the worst point: the detail says both', () => {
+  const c = TP.surfaceChip(below('B', { worstAtM: 500, worstClearanceM: -190.02, worstF1Fraction: -20.468 }));
+  assert.ok(/at B/.test(c.label), c.label);
+  assert.ok(/rise through the line of sight/.test(c.detail), c.detail);
+  assert.strictEqual(c.note, true, 'an interior obstruction lost its blocking/attenuation line');
+});
+
+test('reason: partial coverage still downgrades to unknown and hides the chip', () => {
+  const d = below('A');
+  d.coverage = { state: 'partial', pct: 62.5, firstGapM: 7500 };
+  const p = TP.surfaceChip(d);
+  assert.strictEqual(p.state, 'unknown');
+  assert.strictEqual(p.show, false);
+  assert.ok(!/antenna/.test(p.label), p.label);
+});
+
+test('reason: an unknown endpoint or reason, or a non-blocked state, falls back to the plain chip', () => {
+  assert.strictEqual(TP.surfaceChip(below('C')).label, 'Buildings/trees: Blocked');
+  assert.strictEqual(TP.surfaceChip(below('A', { reason: 'somethingNew' })).label, 'Buildings/trees: Blocked');
+  assert.strictEqual(TP.surfaceChip(below('constructor')).label, 'Buildings/trees: Blocked');
+  const c = TP.surfaceChip(below('A', { state: 'fresnel60' }));
+  assert.strictEqual(c.label, 'Buildings/trees: Marginal');
+});
+
+[['A', 'A'], ['B', 'B'], ['both', 'A and B']].forEach(([endpoint, words]) => {
+  test('reason at ' + endpoint + ': chart <title> and aria-label carry it, and a null F1 fraction never reads NaN', () => {
+    const d = Object.assign(flatPath(), { model: 'both' });
+    d.samples = [{ d: 0, dtm: 0, dsm: 19.99 }, { d: 500, dtm: 0, dsm: 0 }, { d: 1000, dtm: 0, dsm: endpoint === 'A' ? 0 : 19.99 }];
+    d.verdict.surface = below(endpoint).verdict.surface;
+    const svg = TP.buildChart(d, { nameA: 'Alfa', nameB: 'Bravo' });
+    const title = (svg.match(/<title>([\s\S]*?)<\/title>/) || [])[1] || '';
+    const aria = (svg.match(/aria-label="([^"]*)"/) || [])[1] || '';
+    const label = 'Buildings/trees: antenna below the surface at ' + words + ' — check the antenna height';
+    assert.ok(title.indexOf(label) >= 0, 'title = ' + title);
+    assert.ok(aria.indexOf(label) >= 0, 'aria-label = ' + aria);
+    assert.ok(!/Blocked/.test(title + aria), 'a plain "Blocked" reached the chart: ' + title);
+    assert.strictEqual(title.indexOf(TP.SURFACE_NOTE), -1, 'the blocking/attenuation line reached the title');
+    assert.ok(!/NaN|Infinity|undefined|null/.test(svg), 'non-number text in the chart');
+  });
+});
+
 // ── 4. SVG geometry ────────────────────────────────────────────────────────
 
 console.log('\n=== #681 M4: chart geometry ===');

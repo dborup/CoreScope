@@ -80,6 +80,9 @@ type Assessment struct {
 	WorstAtM        float64 // distance from A
 	WorstClearanceM float64 // line of sight minus (surface + bulge); negative = above the LoS
 	WorstRatio      float64 // WorstClearanceM / F1 radius there
+	// AntennaBelowA and AntennaBelowB say the surface is above the antenna
+	// at that end (#745).
+	AntennaBelowA, AntennaBelowB bool
 }
 
 // Assess finds the interior sample with the smallest clearance ratio.
@@ -90,6 +93,17 @@ type Assessment struct {
 // never reports "clear". The endpoint heights come from the DTM, so the
 // series' own endpoints are checked too: a DSM gap at an antenna is
 // otherwise invisible (#696).
+//
+// A surface above the antenna at an endpoint obstructs the line of sight
+// at the antenna itself (#745): the verdict is blocked and AntennaBelowA
+// or AntennaBelowB says where. Exactly at the antenna is grazing, not
+// blocked. The worst point stays the worst interior sample when that
+// obstructs the line of sight too, however much shallower the endpoint
+// is, so the real obstruction is the one named and kept in the chart
+// (#745 review F1). Otherwise the endpoint is the worst point, with a
+// ratio of −Inf since F1 has no radius there; the deeper one if both
+// ends are below the surface, A on a tie. Against the DTM this never
+// fires: the endpoint heights are the DTM plus an antenna of at least 0 m.
 func (l Link) Assess(surface []float32) Assessment {
 	unknown := Assessment{State: VerdictUnknown, WorstIndex: -1}
 	n := len(surface)
@@ -113,14 +127,32 @@ func (l Link) Assess(surface []float32) Assessment {
 			worst = Assessment{WorstIndex: i, WorstAtM: d1, WorstClearanceM: clearance, WorstRatio: ratio}
 		}
 	}
+	// Endpoints last, so missing data above still wins.
+	end := Assessment{WorstIndex: -1}
+	clearanceA := l.HeightA - float64(surface[0])
+	clearanceB := l.HeightB - float64(surface[n-1])
+	if clearanceA < 0 {
+		end = Assessment{WorstIndex: 0, WorstClearanceM: clearanceA}
+	}
+	if clearanceB < 0 && (end.WorstIndex < 0 || clearanceB < end.WorstClearanceM) {
+		end = Assessment{WorstIndex: n - 1, WorstAtM: l.DistanceM, WorstClearanceM: clearanceB}
+	}
+	if end.WorstIndex >= 0 && worst.WorstRatio >= 0 {
+		end.WorstRatio = math.Inf(-1)
+		worst = end
+	}
+	worst.AntennaBelowA, worst.AntennaBelowB = clearanceA < 0, clearanceB < 0
 	worst.State = ClassifyClearance(worst.WorstRatio)
 	return worst
 }
 
 // Decimate picks at most max indices of n evenly spaced samples, always
-// including the first, the last and every keep index (negative ones are
-// ignored), so thinning a profile for the chart never hides its worst
-// point. The result is strictly increasing.
+// including the first and the last. The keep indices come first, in the
+// order given, while they fit (out-of-range ones are ignored), so
+// thinning a profile for the chart never hides its worst point or a data
+// gap (#745); evenly spaced indices fill the room that is left. The
+// result is strictly increasing. A max below 2 has no room for both ends:
+// max 1 is the first index alone, max 0 or less none.
 func Decimate(n, max int, keep ...int) []int {
 	if n <= max {
 		out := make([]int, n)
@@ -129,24 +161,33 @@ func Decimate(n, max int, keep ...int) []int {
 		}
 		return out
 	}
-	var must []int
+	switch {
+	case max == 1:
+		return []int{0}
+	case max < 1:
+		return []int{}
+	}
+	picked := make([]bool, n)
+	picked[0], picked[n-1] = true, true
+	count := 2
 	for _, k := range keep {
-		if k > 0 && k < n-1 {
-			must = append(must, k)
+		if count == max {
+			break
+		}
+		if k > 0 && k < n-1 && !picked[k] {
+			picked[k] = true
+			count++
 		}
 	}
-	// Leave room for the kept indices, then merge them in.
-	slots := max - len(must)
-	picked := make(map[int]bool, max)
-	for j := 0; j < slots; j++ {
+	// The evenly spaced picks include the two endpoints, already counted:
+	// at most max−count new ones.
+	slots := max - count + 2
+	for j := 1; j < slots-1; j++ {
 		picked[int(math.Round(float64(j)*float64(n-1)/float64(slots-1)))] = true
 	}
-	for _, k := range must {
-		picked[k] = true
-	}
-	out := make([]int, 0, len(picked))
-	for i := 0; i < n; i++ {
-		if picked[i] {
+	out := make([]int, 0, max)
+	for i, p := range picked {
+		if p {
 			out = append(out, i)
 		}
 	}

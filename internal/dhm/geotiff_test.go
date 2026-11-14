@@ -245,6 +245,59 @@ func TestDecodeGeoTIFFRejectsUnusableGeoref(t *testing.T) {
 	}
 }
 
+// #745: GeoKeys are checked even without tiepoint and scale. Such a file
+// takes the request's grid (rasterGrid), which is only right when it does
+// not declare another CRS; one that explicitly says geographic, another
+// projection or another raster type was relabelled as the requested UTM
+// grid and sampled.
+func TestDecodeGeoTIFFChecksGeoKeysWithoutAffine(t *testing.T) {
+	vals := varied(4, 3)
+	bare := func() *tiffFixture {
+		f := newFixture(4, 3, vals)
+		f.geoKeys = utm32GeoKeys(rasterPixelIsArea)
+		return f
+	}
+	// Control: UTM 32 keys, or none at all, still take the request's grid.
+	for name, f := range map[string]*tiffFixture{"UTM 32 keys": bare(), "no keys": newFixture(4, 3, vals)} {
+		if g, err := decodeGeoTIFF(f.bytes()); err != nil || g.Georef != (Georef{}) {
+			t.Fatalf("%s without tiepoint and scale: georef %+v, %v", name, g.Georef, err)
+		}
+	}
+	for name, mutate := range map[string]func(f *tiffFixture){
+		"geographic model":   func(f *tiffFixture) { f.geoKeys[7] = 2 },
+		"EPSG:3857":          func(f *tiffFixture) { f.geoKeys[15] = 3857 },
+		"UTM 33":             func(f *tiffFixture) { f.geoKeys[15] = 25833 },
+		"raster type 3":      func(f *tiffFixture) { f.geoKeys[11] = 3 },
+		"CRS key not inline": func(f *tiffFixture) { f.geoKeys[13] = tagGeoKeyDirectory },
+		"keys past the tag":  func(f *tiffFixture) { f.geoKeys[3] = 9 },
+		"directory too short": func(f *tiffFixture) {
+			f.geoKeys = []uint16{1, 1, 0}
+		},
+		// The reviewer's file: ModelType geographic, GeographicType 4326.
+		"EPSG:4326 lat/lon": func(f *tiffFixture) {
+			f.geoKeys = []uint16{1, 1, 0, 2, geoKeyModelType, 0, 1, 2, 2048, 0, 1, 4326}
+		},
+	} {
+		f := bare()
+		mutate(f)
+		if g, err := decodeGeoTIFF(f.bytes()); err == nil {
+			t.Errorf("%s without tiepoint and scale: accepted with georef %+v", name, g.Georef)
+		}
+	}
+
+	// End to end: the request's UTM grid is never applied to it.
+	f := bare()
+	f.geoKeys[7] = 2
+	r := RasterRequest{Model: ModelTerrain, BBox: [4]float64{580000, 6200000, 580040, 6200030}, Width: 4, Height: 3}
+	if err := r.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if g, err := rasterGrid(f.bytes(), r); err == nil {
+		v, ok := g.Sample(580010, 6200010)
+		t.Fatalf("geographic raster sampled as the requested UTM grid: %v, %v", v, ok)
+	}
+}
+
 // malformedTIFFs are inputs that must be rejected. Each is built from a
 // valid fixture with one thing wrong.
 func malformedTIFFs() map[string][]byte {

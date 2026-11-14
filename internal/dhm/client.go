@@ -76,6 +76,9 @@ type Client struct {
 	sem     chan struct{}
 	flight  Flight[[]byte]
 	lastLog atomic.Int64 // unix nanos of the last failure log line
+	// lastRefusalLog throttles admission refusals on their own (#749
+	// review F4), so a refusal flood never hides an upstream failure.
+	lastRefusalLog atomic.Int64
 }
 
 // disableCompressionTransport clones the default transport with
@@ -121,17 +124,19 @@ func (e FetchError) Error() string { return e.Reason }
 // Identical concurrent requests share one upstream call. A service with a
 // request shape (the WCS) only accepts exactly that shape.
 //
-// Get has no context: a tile request runs to Timeout whatever the browser
-// does, as it did in #680.
+// Get has no context and no admission bound; the tile proxy uses
+// FetchHillshadeAdmitted (#744).
 func (c *Client) Get(service string, q url.Values, contentType string) ([]byte, error) {
-	return c.get(context.Background(), service, q, []string{contentType})
+	return c.get(context.Background(), nil, service, q, []string{contentType})
 }
 
 // get is Get accepting any of contentTypes, stopping when ctx is done: a
 // cancelled ctx is FetchError "canceled", a passed deadline "timeout".
 // The shared upstream call stops once every caller waiting on it has gone
-// (#683 review N3), which frees its concurrency slot.
-func (c *Client) get(ctx context.Context, service string, q url.Values, contentTypes []string) ([]byte, error) {
+// (#683 review N3), which frees its concurrency slot. A new upstream call
+// first takes an adm slot (nil: unbounded); when none is free, get returns
+// ErrAdmissionFull without starting one (#744).
+func (c *Client) get(ctx context.Context, adm *Admission, service string, q url.Values, contentTypes []string) ([]byte, error) {
 	shape, ok := allowedServices[service]
 	if !ok {
 		return nil, ErrBadRequest
@@ -154,7 +159,7 @@ func (c *Client) get(ctx context.Context, service string, q url.Values, contentT
 		}
 	}
 	target := c.opts.BaseURL + service + "?" + q.Encode()
-	data, _, err := c.flight.Do(ctx, strings.Join(contentTypes, ",")+" "+target, 0, func(work context.Context) ([]byte, error) {
+	data, _, err := c.flight.DoAdmitted(ctx, strings.Join(contentTypes, ",")+" "+target, 0, adm, func(work context.Context) ([]byte, error) {
 		return c.fetch(work, target, contentTypes, maxBody)
 	})
 	if err != nil {
@@ -260,12 +265,24 @@ func (c *Client) LogFailure(what string, err error) {
 	c.logThrottled("[dhm] upstream %s failed (%s)", what, FailureReason(err))
 }
 
+// LogRefusal logs that what was refused by a full Admission (#744): no
+// upstream request was made. It is throttled per LogEvery like
+// LogFailure, but on its own clock (#749 review F4).
+func (c *Client) LogRefusal(what string) {
+	c.logEvery(&c.lastRefusalLog, "[dhm] %s refused: admission full, no upstream request", what)
+}
+
 // logThrottled logs at most once per LogEvery, across all callers.
 func (c *Client) logThrottled(format string, args ...interface{}) {
+	c.logEvery(&c.lastLog, format, args...)
+}
+
+// logEvery logs at most once per LogEvery per clock last.
+func (c *Client) logEvery(last *atomic.Int64, format string, args ...interface{}) {
 	if c.opts.LogEvery > 0 {
 		now := c.opts.Now().UnixNano()
-		last := c.lastLog.Load()
-		if now-last < int64(c.opts.LogEvery) || !c.lastLog.CompareAndSwap(last, now) {
+		prev := last.Load()
+		if now-prev < int64(c.opts.LogEvery) || !last.CompareAndSwap(prev, now) {
 			return
 		}
 	}
