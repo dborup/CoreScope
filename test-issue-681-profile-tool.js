@@ -1267,14 +1267,16 @@ test('a junk model in the link falls back to the customizer default', () => {
   assert.strictEqual(TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=dsm', { model: 'dtm' }).model, 'dtm');
 });
 
-test('the link leaves the model out only for both under a both default', () => {
+test('the link leaves the model out only for a "both" nobody stated', () => {
   const both = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: 'both' };
   const dtm = Object.assign({}, both, { model: 'dtm' });
+  const stated = Object.assign({}, both, { modelExplicit: true });
   assert.strictEqual(TP.serializeState(both, { model: 'both' }).model, undefined);
   assert.strictEqual(TP.serializeState(dtm, { model: 'both' }).model, 'dtm');
-  // With a customizer default of dtm the asymmetry flips: now "both" is the
-  // choice that has to be written down, or reopening the link would undo it.
-  assert.strictEqual(TP.serializeState(both, { model: 'dtm' }).model, 'both');
+  // #746: a stated "both" is written down under either default, or a
+  // recipient on a dtm default would reopen the link as terrain-only.
+  assert.strictEqual(TP.serializeState(stated, { model: 'both' }).model, 'both');
+  assert.strictEqual(TP.serializeState(stated, { model: 'dtm' }).model, 'both');
   // Review PR#714: anything but "both" is always written down, whatever the
   // sharer's own default is — the recipient may not share it.
   assert.strictEqual(TP.serializeState(dtm, { model: 'dtm' }).model, 'dtm');
@@ -1285,7 +1287,7 @@ test('a terrain-only link means terrain-only to a recipient on the standard defa
   // the customizer. The link must not quietly turn into terrain + surface.
   const state = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: 'dtm',
     ha: null, hb: null, k: null, freq: null };
-  const url = TP.shareURL(state, { origin: 'https://x.test', pathname: '/' }, TP.themeDefaults({ model: 'dtm' }));
+  const url = TP.shareURL(state, { origin: 'https://x.test', pathname: '/' });
   const qs = url.split('#/map?')[1];
   assert.strictEqual(new URLSearchParams(qs).get('model'), 'dtm', 'the link left the model out: ' + url);
   assert.strictEqual(TP.parseState(qs, TP.themeDefaults(null)).model, 'dtm');
@@ -1294,8 +1296,9 @@ test('a terrain-only link means terrain-only to a recipient on the standard defa
 
 test('a non-default model round-trips through the link under either default', () => {
   [['dtm', 'both'], ['both', 'dtm']].forEach(([def, chosen]) => {
+    // Chosen: the viewer picked it, so it is stated (#746).
     const state = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: chosen,
-      ha: null, hb: null, k: null, freq: null };
+      modelExplicit: true, ha: null, hb: null, k: null, freq: null };
     const qs = new URLSearchParams(TP.serializeState(state, { model: def })).toString();
     assert.strictEqual(TP.parseState(qs, { model: def }).model, chosen, def + ' default, ' + chosen + ' chosen');
   });
@@ -1446,7 +1449,7 @@ atest('a customizer height never reaches the shared link', async () => {
   const st = tool.getState();
   assert.strictEqual(st.ha, null, 'an ambient default became part of the state');
   assert.strictEqual(st.hb, null);
-  const url = live.TP.shareURL(st, { origin: 'https://x.test', pathname: '/' }, live.TP.themeDefaults(terrainCfg({ heightRepeater: 25 })));
+  const url = live.TP.shareURL(st, { origin: 'https://x.test', pathname: '/' });
   assert.strictEqual(url.indexOf('ha='), -1, 'a customizer default was written into the link');
 });
 
@@ -1619,6 +1622,64 @@ atest('destroy still closes the panel, drops answers in flight and tells the hos
   f.calls[0].settle.resolve(answer('blocked'));
   await sleep(0);
   assert.notStrictEqual(chipOf(live.dom).state, 'blocked', 'a destroyed panel still took an answer');
+});
+
+// ── #746 §2: the link keeps the model it was given ─────────────────────────
+
+console.log('\n=== #746: an explicit model survives another viewer\'s default ===');
+
+test('a copied link keeps an explicit model=both for a recipient on a dtm default', () => {
+  const state = TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=both', { model: 'both' });
+  const link = TP.shareURL(state, { origin: 'https://x.test', pathname: '/' });
+  const qs = link.split('#/map?')[1];
+  assert.strictEqual(new URLSearchParams(qs).get('model'), 'both', 'the link dropped the model: ' + link);
+  assert.strictEqual(TP.parseState(qs, { model: 'dtm' }).model, 'both');
+});
+
+test('the same holds for the /p share link', () => {
+  const state = TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=both', { model: 'both' });
+  const link = TP.shareURL(state, { origin: 'https://x.test', pathname: '/' }, true);
+  assert.strictEqual(new URLSearchParams(link.split('?')[1]).get('model'), 'both', link);
+});
+
+test('a link without a model gets none, whatever the sharer\'s own default', () => {
+  // Presence, not a comparison with the current default: the link never
+  // said "both", so it does not start saying so under a dtm default.
+  const state = TP.parseState('profile=' + PK_A + ',' + PK_B, { model: 'both' });
+  assert.strictEqual(TP.serializeState(state, { model: 'both' }).model, undefined);
+  assert.strictEqual(TP.serializeState(state, { model: 'dtm' }).model, undefined);
+});
+
+atest('an imported model=both stays pinned when the customizer moves to dtm', async () => {
+  const live = loadLive();
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'both' }) };
+  const f = deferredFetch();
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: f, syncHash: false });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=both', live.TP.themeDefaults()));
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'dtm' }) };
+  tool.defaultsChangedForTests();
+  assert.strictEqual(tool.getState().model, 'both', 'the customizer overrode a model the link stated');
+  assert.ok(/model=both/.test(f.calls[f.calls.length - 1].url), 'measured ' + f.calls[f.calls.length - 1].url);
+});
+
+atest('an imported link without a model still follows the customizer', async () => {
+  const live = loadLive();
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'both' }) };
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch(), syncHash: false });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B, live.TP.themeDefaults()));
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'dtm' }) };
+  tool.defaultsChangedForTests();
+  assert.strictEqual(tool.getState().model, 'dtm');
+});
+
+atest('a model picked with the buttons rides the hash, even when it is the standard one', async () => {
+  const live = loadRouted('#/map');
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'dtm' }) };
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B, live.TP.themeDefaults()));
+  assert.strictEqual(hashParamsOf(live.win.location).get('model'), 'dtm', 'setup: terrain-only always rides');
+  live.dom.find('tp-model-both').fire('click');
+  assert.strictEqual(hashParamsOf(live.win.location).get('model'), 'both', 'a chosen "both" left the hash: ' + live.win.location.hash);
 });
 
 // ── Summary ────────────────────────────────────────────────────────────────

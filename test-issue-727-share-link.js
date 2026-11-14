@@ -143,7 +143,7 @@ const LOC = { origin: 'http://h', pathname: '/', search: '?lang=da' };
 
 test('route on: a /p link next to index.html, the same keys as the hash link', () => {
   const st = TP.parseState('profile=' + PK_A + ',56.16290,10.20390&model=dtm&ha=12&k=1.5');
-  assert.strictEqual(TP.shareURL(st, LOC, undefined, true),
+  assert.strictEqual(TP.shareURL(st, LOC, true),
     'http://h/p?profile=' + PK_A + '%2C56.16290%2C10.20390&model=dtm&ha=12&k=1.5');
 });
 
@@ -151,33 +151,33 @@ test('route off (or not exactly true): the #/map link, unchanged from before #72
   const st = TP.parseState('profile=' + PK_A + ',' + PK_B);
   const hash = 'http://h/?lang=da#/map?profile=' + PK_A + '%2C' + PK_B;
   assert.strictEqual(TP.shareURL(st, LOC), hash);
-  assert.strictEqual(TP.shareURL(st, LOC, undefined, false), hash);
-  assert.strictEqual(TP.shareURL(st, LOC, undefined, 'true'), hash);
+  assert.strictEqual(TP.shareURL(st, LOC, false), hash);
+  assert.strictEqual(TP.shareURL(st, LOC, 'true'), hash);
 });
 
 test('route on under a sub-path: /p sits next to the page, not at the host root', () => {
   const st = TP.parseState('profile=' + PK_A + ',' + PK_B);
-  assert.strictEqual(TP.shareURL(st, { origin: 'http://h', pathname: '/app/', search: '' }, undefined, true),
+  assert.strictEqual(TP.shareURL(st, { origin: 'http://h', pathname: '/app/', search: '' }, true),
     'http://h/app/p?profile=' + PK_A + '%2C' + PK_B);
-  assert.strictEqual(TP.shareURL(st, { origin: 'http://h', pathname: '/app/index.html' }, undefined, true),
+  assert.strictEqual(TP.shareURL(st, { origin: 'http://h', pathname: '/app/index.html' }, true),
     'http://h/app/p?profile=' + PK_A + '%2C' + PK_B);
 });
 
 test('a /p link parses back to the same state', () => {
   const st = TP.parseState('profile=56.10000,10.10000,' + PK_B + '&model=dtm&ha=9&hb=4.5&freq=868.1');
-  const url = TP.shareURL(st, LOC, undefined, true);
+  const url = TP.shareURL(st, LOC, true);
   eq(TP.parseState(url.split('?')[1]), JSON.parse(JSON.stringify(st)));
 });
 
 test('a customizer height never rides a /p link', () => {
   const st = TP.parseState('profile=' + PK_A + ',' + PK_B);
-  const defaults = TP.themeDefaults({ heightRepeater: '25', heightPoint: '3', model: 'both' });
-  const url = TP.shareURL(st, LOC, defaults, true);
+  // shareURL takes no defaults at all: only the state's own decisions ride.
+  const url = TP.shareURL(st, LOC, true);
   assert.ok(!/[?&](ha|hb)=/.test(url), url);
 });
 
 test('null until both ends are picked, route or not', () => {
-  assert.strictEqual(TP.shareURL({ a: { kind: 'node', pubkey: PK_A }, b: null }, LOC, undefined, true), null);
+  assert.strictEqual(TP.shareURL({ a: { kind: 'node', pubkey: PK_A }, b: null }, LOC, true), null);
 });
 
 // ── 4. The copy button ─────────────────────────────────────────────────────

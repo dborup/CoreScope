@@ -190,7 +190,10 @@
 
   /* parseState returns null when the pair itself is unusable — that is the
    * one thing the link cannot do without. A junk model/k/freq falls back to
-   * the default instead, so one bad control never costs the whole link. */
+   * the default instead, so one bad control never costs the whole link.
+   * modelExplicit records whether the link stated the model at all: a
+   * stated model is a decision that a copied link and a later customizer
+   * change both keep, whatever the default is (#746). */
   function parseState(input, defaults) {
     var p = toParams(input);
     if (!p) return null;
@@ -200,6 +203,7 @@
       a: refs[0],
       b: refs[1],
       model: modelOf(p.get('model'), defaults),
+      modelExplicit: validModel(p.get('model')),
       ha: clampHeight(p.get('ha')),
       hb: clampHeight(p.get('hb')),
       k: boundedNumber(p.get('k'), 0.5, 10, 4),
@@ -276,18 +280,20 @@
     return best ? markerRef(best.key, best.lat, best.lon, isNode) : pointRef(drop.lat, drop.lon);
   }
 
-  /* serializeState writes only what differs from the defaults, so a plain
-   * two-node link stays short and the round trip is exact. */
-  function serializeState(state, defaults) {
+  /* serializeState writes only what was decided, so a plain two-node link
+   * stays short and the round trip is exact. */
+  function serializeState(state) {
     var out = {};
     if (!state || !state.a || !state.b) return out;
     out[HASH_PARAM] = refToParam(state.a) + ',' + refToParam(state.b);
     /* The model rides the link whenever it is not the standard "both",
      * whatever this viewer's own default is: the recipient may not share it,
-     * so a terrain-only link must say so (review PR#714). It also rides when
-     * it differs from this viewer's default, so with a customizer default of
-     * "dtm" a chosen terrain + surface survives reopening the link. */
-    if (validModel(state.model) && (state.model !== DEFAULT_MODEL || state.model !== modelOf(null, defaults))) {
+     * so a terrain-only link must say so (review PR#714). It also rides
+     * whenever it was stated — by the link this state came from or by the
+     * viewer's own pick — so a recipient on another default sees the same
+     * profile (#746). Presence, not a comparison with this viewer's
+     * default, which the recipient does not share either. */
+    if (validModel(state.model) && (state.model !== DEFAULT_MODEL || state.modelExplicit === true)) {
       out.model = state.model;
     }
     if (state.ha !== null && state.ha !== undefined) out.ha = String(state.ha);
@@ -307,7 +313,7 @@
      * default of "dtm" has to be stated or the request would quietly come
      * back with a surface model nobody asked for. */
     p.set('model', state.model === 'dtm' ? 'dtm' : 'both');
-    var ser = serializeState(state, { model: state.model });
+    var ser = serializeState(state);
     ['ha', 'hb', 'k', 'freq'].forEach(function (key) { if (ser[key] !== undefined) p.set(key, ser[key]); });
     return ENDPOINT + '?' + p.toString();
   }
@@ -316,8 +322,8 @@
    * once both ends are set, and while B is still being picked the half link
    * profile=<A> that parseStart reads back, so a reload keeps A. A point as
    * A has no half link: parseStart only takes a node key. */
-  function hashParams(state, defaults) {
-    if (state && state.a && state.b) return serializeState(state, defaults);
+  function hashParams(state) {
+    if (state && state.a && state.b) return serializeState(state);
     var out = {};
     if (state && state.a && !state.b && state.a.kind === 'node') out[HASH_PARAM] = refToParam(state.a);
     return out;
@@ -356,9 +362,9 @@
    * chat; otherwise the plain #/map link, exactly as before #727. Both carry
    * the same serializeState decisions, so a customizer default never rides
    * either one. */
-  function shareURL(state, loc, defaults, route) {
+  function shareURL(state, loc, route) {
     if (!state || !state.a || !state.b || !loc) return null;
-    var ser = serializeState(state, defaults);
+    var ser = serializeState(state);
     if (route !== true) return profileURL(loc, '#/map', ser, true);
     var p = new URLSearchParams();
     Object.keys(ser).forEach(function (key) { p.set(key, ser[key]); });
@@ -1024,7 +1030,7 @@
      * arm a picker for one end. Swap needs nothing from the host. */
     var canPick = typeof opts.onMoveStart === 'function';
 
-    var state = { a: null, b: null, model: themeDefaults().model, ha: null, hb: null, k: null, freq: null };
+    var state = { a: null, b: null, model: themeDefaults().model, modelExplicit: false, ha: null, hb: null, k: null, freq: null };
     var open = false, seq = 0, debounceTimer = null, panel = null, nodes = { a: null, b: null };
     // The end whose Move button is armed ('a' | 'b'), else null (#721).
     var moving = null;
@@ -1037,9 +1043,6 @@
      * travel in a shared link, and after a reload the badge has to read
      * "default" again rather than "link" (#681 M6). */
     var themeH = { a: null, b: null };
-    // True once the viewer, or a link, has stated the model outright — a
-    // later customizer change then leaves it alone.
-    var modelPinned = false;
     var ui = {};
 
     /* effectiveState is what we ask the server for: `state` with the
@@ -1080,7 +1083,7 @@
      * what was adopted from the old values and measure again. */
     function onDefaultsChanged() {
       var defs = themeDefaults();
-      if (!modelPinned && state.model !== defs.model) {
+      if (!state.modelExplicit && state.model !== defs.model) {
         state.model = defs.model;
         syncModelButtons();
       }
@@ -1198,7 +1201,9 @@
         b.addEventListener('click', function () {
           if (state.model === m[0]) return;
           state.model = m[0];
-          modelPinned = true;
+          // The viewer's own pick: a later customizer change leaves it
+          // alone, and it rides the link.
+          state.modelExplicit = true;
           syncModelButtons();
           request();
         });
@@ -1369,13 +1374,13 @@
       if (!syncHash) return;
       try {
         var loc = global.location;
-        var next = profileURL(loc, loc.hash, open ? hashParams(state, themeDefaults()) : {}, false);
+        var next = profileURL(loc, loc.hash, open ? hashParams(state) : {}, false);
         global.history.replaceState(global.history.state, '', next);
       } catch (_) { /* a hash we cannot write is not worth breaking the tool for */ }
     }
 
     function onCopy() {
-      var url = shareURL(state, global.location, themeDefaults(), opts.shareRoute === true);
+      var url = shareURL(state, global.location, opts.shareRoute === true);
       if (!url) return;
       copyLink(url, opts.copyText || global.copyToClipboard).then(function (ok) {
         if (!ui.copyStatus) return;
@@ -1515,7 +1520,8 @@
       el: function () { return panel; },
       isOpen: function () { return open; },
       getState: function () {
-        return { a: state.a, b: state.b, model: state.model, ha: state.ha, hb: state.hb, k: state.k, freq: state.freq };
+        return { a: state.a, b: state.b, model: state.model, modelExplicit: state.modelExplicit,
+          ha: state.ha, hb: state.hb, k: state.k, freq: state.freq };
       },
       /* setEndpoint fills one end and, when both are set, measures. A node
        * or point with a remembered height adopts it immediately. */
@@ -1541,10 +1547,10 @@
         state.b = next.b || null;
         state.model = validModel(next.model) ? next.model : themeDefaults().model;
         /* A link that spells the model out is a decision, and a later
-         * customizer change must not quietly override it. parseState has
-         * already resolved an absent one to the default, so the difference
-         * from the default is what the link actually said. */
-        modelPinned = state.model !== themeDefaults().model;
+         * customizer change must not quietly override it. parseState says
+         * whether it did; comparing with the default cannot, since a stated
+         * model can equal it (#746). */
+        state.modelExplicit = next.modelExplicit === true;
         state.ha = next.ha === undefined ? null : next.ha;
         state.hb = next.hb === undefined ? null : next.hb;
         state.k = next.k === undefined ? null : next.k;
