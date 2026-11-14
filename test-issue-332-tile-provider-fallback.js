@@ -186,6 +186,7 @@ function cfgDefaults(dark, light) {
         carto: { enabled: true, domain: '' },
         opentopomap: { enabled: true },
         usgs: { enabled: true },
+        esri: { enabled: true }, // #728 — Esri styles are opt-in
       },
     },
   };

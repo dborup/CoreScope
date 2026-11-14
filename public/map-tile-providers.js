@@ -1,10 +1,11 @@
 /* map-tile-providers.js — Registry of map tile providers & runtime switcher (#1165/#1420).
  *
  * Scope:
- *   - Multiple providers: Carto (default), OSM, Stamen, Esri.
+ *   - Multiple providers: OSM (default), Carto, Stamen, OpenTopoMap, USGS,
+ *     Esri. OpenTopoMap, USGS and Esri are opt-in (map.tiles.providers.*.enabled).
  *   - MC_setDarkTileProvider(id) / MC_setLightTileProvider(id) persist per-browser
  *     to localStorage and dispatch `mc-tile-provider-changed`.
- *   - Resolves localStorage → server default → 'carto-dark' / 'carto-light'.
+ *   - Resolves localStorage → server default → 'osm-dark' / 'osm-standard' (#332).
  *   - MC_applyTileFilter() applies/clears the CSS filter on
  *     `.leaflet-tile-pane` based on current theme + selected provider.
  *   - MC_createLayerControl() builds a Leaflet control mapping providers,
@@ -72,6 +73,13 @@
     return OSM;
   };
 
+  /* #728 — Esri World Imagery. The service is {z}/{y}/{x} (row before
+   * column) like the Dark Gray canvas. Rural Denmark is already upsampled
+   * at z19, so it is capped there like the other Esri style. The credit is
+   * the service's own copyrightText (Maxar is now Vantor). */
+  var ESRI_IMAGERY_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+  var ESRI_IMAGERY_ATTRIBUTION = 'Tiles © Esri — Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community';
+
   var BASE_STYLES = {
     'carto-dark': { provider: 'carto', label: 'Carto Dark', url: function() { return _getCartoBase() + '/dark_all/{z}/{x}/{y}{r}.png'; }, invertFilter: null, type: 'dark', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
     'carto-light': { provider: 'carto', label: 'Carto Positron', url: function() { return _getCartoBase() + '/light_all/{z}/{x}/{y}{r}.png'; }, invertFilter: null, type: 'light', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
@@ -85,13 +93,36 @@
     'stamen-toner-dark': { provider: 'stamen', label: 'Stamen Toner Lite', url: _getStamenUrl, invertFilter: INVERT_CSS, type: 'dark', attribution: '© Stadia Maps © Stamen Design © OpenStreetMap', maxZoom: 20 },
     'usgs-topo': { provider: 'usgs', label: 'USGS Topographic', url: function() { return 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}'; }, invertFilter: null, type: 'light', attribution: 'U.S. Geological Survey, National Geospatial Program', maxZoom: 16 },
     'usgs-imagery': { provider: 'usgs', label: 'USGS Imagery', url: function() { return 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}'; }, invertFilter: null, type: 'light', attribution: 'U.S. Geological Survey, National Geospatial Program', maxZoom: 16 },
-    'esri-darkgray-labels': { provider: 'esri', label: 'Esri Dark Gray Canvas', url: function() { return 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'; }, invertFilter: null, type: 'dark', attribution: 'Tiles © Esri', maxZoom: 19 }
+    'esri-darkgray-labels': { provider: 'esri', label: 'Esri Dark Gray Canvas', url: function() { return 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'; }, invertFilter: null, type: 'dark', attribution: 'Tiles © Esri', maxZoom: 19 },
+    // #728 — aerial photo: never inverted, so the same tiles serve both themes.
+    'esri-imagery': { provider: 'esri', label: 'Esri World Imagery', url: function() { return ESRI_IMAGERY_URL; }, invertFilter: null, type: 'light', attribution: ESRI_IMAGERY_ATTRIBUTION, maxZoom: 19 },
+    'esri-imagery-dark': { provider: 'esri', label: 'Esri World Imagery', url: function() { return ESRI_IMAGERY_URL; }, invertFilter: null, type: 'dark', attribution: ESRI_IMAGERY_ATTRIBUTION, maxZoom: 19 }
   };
 
   var REGISTRY = {};
 
   function _hasId(id) {
     return typeof id === 'string' && Object.prototype.hasOwnProperty.call(REGISTRY, id);
+  }
+
+  /* #728 — a configured default whose provider is not enabled is skipped
+   * (the resolvers fall through to the legacy URL or the built-in
+   * fallback), so the map still works. Say so once per page, naming the
+   * switch, so an operator who upgraded past the Esri opt-in can find it. */
+  var _warnedDefaults = {};
+  function _warnUnavailableDefault(key, id) {
+    if (typeof id !== 'string' || !id || _hasId(id)) return;
+    if (_warnedDefaults[key + '=' + id]) return;
+    _warnedDefaults[key + '=' + id] = true;
+    var style = Object.prototype.hasOwnProperty.call(BASE_STYLES, id) ? BASE_STYLES[id] : null;
+    var why = style
+      ? 'its provider is not enabled (set map.tiles.providers.' + style.provider + '.enabled: true)'
+      : 'it is not a known tile style';
+    try {
+      if (typeof console !== 'undefined' && console.warn) {
+        console.warn('[map tiles] map.tiles.' + key + ' "' + id + '" is ignored: ' + why + '. Using the fallback base map instead.');
+      }
+    } catch (_) {}
   }
 
   window.MC_initTileRegistry = function(fromAsync) {
@@ -102,7 +133,10 @@
     var HAS_OPENTOPOMAP = _cfg && _cfg.providers && _cfg.providers.opentopomap && _cfg.providers.opentopomap.enabled;
     var HAS_USGS = _cfg && _cfg.providers && _cfg.providers.usgs && _cfg.providers.usgs.enabled;
     var HAS_STAMEN = _cfg && _cfg.providers && _cfg.providers.stamen && _cfg.providers.stamen.enabled && !!_cfg.providers.stamen.token;
-    var HAS_ESRI = true; // Kept for backwards compatibility
+    // #728 — opt-in like OpenTopoMap and USGS. The public Esri endpoint is
+    // licensed under the Esri Master License Agreement, so an operator has
+    // to switch it on deliberately; only the JSON boolean true counts.
+    var HAS_ESRI = !!(_cfg && _cfg.providers && _cfg.providers.esri && _cfg.providers.esri.enabled === true);
 
     // #332 — resolve the OSM credit against the configured vendor before
     // the registry is handed out. Keeping `attribution` a plain string here
@@ -137,6 +171,8 @@
 
     if (_cfg && _cfg.darkDefault && _hasId(_cfg.darkDefault)) _serverDefault = _cfg.darkDefault;
     if (_cfg && _cfg.lightDefault && _hasId(_cfg.lightDefault)) _serverDefaultLight = _cfg.lightDefault;
+    _warnUnavailableDefault('darkDefault', _cfg && _cfg.darkDefault);
+    _warnUnavailableDefault('lightDefault', _cfg && _cfg.lightDefault);
 
     // When called after async config loads, notify maps to re-sync tiles
     if (fromAsync) {

@@ -81,7 +81,7 @@ function loadProviders(ctx, mapCfg) {
 const ALL_CARTO_IDS  = ['carto-dark', 'carto-light', 'carto-voyager', 'carto-voyager-dark', 'positron-dark'];
 const ALL_OSM_IDS    = ['osm-standard', 'osm-dark'];
 const ALL_STAMEN_IDS = ['stamen-toner-lite', 'stamen-toner-dark'];
-const ALL_ESRI_IDS   = ['esri-darkgray-labels'];
+const ALL_ESRI_IDS   = ['esri-darkgray-labels', 'esri-imagery', 'esri-imagery-dark']; // #728: opt-in
 // #332 — the built-in non-CARTO defaults; registered regardless of gating.
 const FALLBACK_IDS   = ['osm-dark', 'osm-standard'];
 const ALL_IDS        = [...ALL_CARTO_IDS, ...ALL_OSM_IDS, ...ALL_STAMEN_IDS, ...ALL_ESRI_IDS];
@@ -106,7 +106,7 @@ test('Default registry (no MC_MAP_CFG) has Carto plus the #332 fallback defaults
 
 test('Every registry entry has a url function or string with {z}', () => {
   const ctx = makeSandbox();
-  loadProviders(ctx, { tiles: { providers: { carto: { enabled: true }, osm: { enabled: true }, stamen: { enabled: true, token: 'x' } } } });
+  loadProviders(ctx, { tiles: { providers: { carto: { enabled: true }, osm: { enabled: true }, stamen: { enabled: true, token: 'x' }, esri: { enabled: true } } } });
   ctx.window.MC_initTileRegistry(false);
   const reg = ctx.window.MC_TILE_PROVIDERS;
   assert.ok(Object.keys(reg).length >= 10, 'registry must contain all 10 providers when all enabled');
@@ -121,7 +121,7 @@ test('Every registry entry has a url function or string with {z}', () => {
 
 test('Every registry entry has a type of light or dark', () => {
   const ctx = makeSandbox();
-  loadProviders(ctx, { tiles: { providers: { carto: { enabled: true }, osm: { enabled: true }, stamen: { enabled: true, token: 'x' } } } });
+  loadProviders(ctx, { tiles: { providers: { carto: { enabled: true }, osm: { enabled: true }, stamen: { enabled: true, token: 'x' }, esri: { enabled: true } } } });
   ctx.window.MC_initTileRegistry(false);
   const reg = ctx.window.MC_TILE_PROVIDERS;
   assert.ok(Object.keys(reg).length >= 10, 'registry must contain all 10 providers when all enabled');

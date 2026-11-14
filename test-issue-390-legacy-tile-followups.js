@@ -205,7 +205,8 @@ async function darkLegacyTests() {
 
   await asyncTest('P1 configured darkDefault wins over the legacy URL; browser choice wins over both', async () => {
     const ctx = await configuredStack({
-      map: { tiles: { darkUrl: DARK_URL, darkDefault: 'esri-darkgray-labels' } },
+      // #728 — Esri styles are opt-in.
+      map: { tiles: { darkUrl: DARK_URL, darkDefault: 'esri-darkgray-labels', providers: { esri: { enabled: true } } } },
     }, 'dark');
     assert.strictEqual(ctx.MC_getTileSpec('dark').id, 'esri-darkgray-labels');
     assert.ok(ctx.getTileUrl().includes('arcgisonline.com'));
