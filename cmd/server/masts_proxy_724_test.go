@@ -584,7 +584,9 @@ func TestMastsAdmissionRefusesAndRefunds(t *testing.T) {
 			mastsGet(p, cellQuery(mastedb.Cell{E: 263 + i, N: 3127}), clientB)
 		}(i)
 	}
-	waitMasts(t, func() bool { return p.admit.InUse() == 2 })
+	// Admission is taken before the worker starts, so also wait until both
+	// fetches have reached the fake.
+	waitMasts(t, func() bool { return p.admit.InUse() == 2 && f.inFlight.Load() == 2 })
 	for i := 0; i < 5; i++ {
 		w := mastsGet(p, cellQuery(mastedb.Cell{E: 300, N: 3127}), clientA)
 		if w.Code != http.StatusServiceUnavailable {

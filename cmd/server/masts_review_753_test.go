@@ -3,6 +3,7 @@ package main
 // #724 M3 — the #753 review nits on GET /api/masts (N1–N3, N8).
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -61,12 +62,15 @@ func TestMastsStarvedFetchIsBusyAndRefunded(t *testing.T) {
 	opts.rateLimitPerMin = 2
 	p := mustMastsProxy(t, opts)
 
+	// Each held fetch comes from its own client: two concurrent requests
+	// from one client on a budget of exactly 2 can race inside the limiter
+	// (it reads the clock before its lock), which is not what this tests.
 	var wg sync.WaitGroup
 	for i := 0; i < mastsUpstreamSlots; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			mastsGet(p, cellQuery(mastedb.Cell{E: 263 + i, N: 3127}), clientB)
+			mastsGet(p, cellQuery(mastedb.Cell{E: 263 + i, N: 3127}), fmt.Sprintf("198.51.100.%d:40000", 20+i))
 		}(i)
 	}
 	waitMasts(t, func() bool { return f.inFlight.Load() == mastsUpstreamSlots })
