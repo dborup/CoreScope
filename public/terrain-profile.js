@@ -641,6 +641,18 @@
     return null;
   }
 
+  /* runsWhere lists the contiguous runs of indices 0..n-1 for which has(i)
+   * holds, as { from, to }, inclusive. */
+  function runsWhere(n, has) {
+    var out = [], run = null;
+    for (var i = 0; i < n; i++) {
+      if (!has(i)) { run = null; continue; }
+      if (run) run.to = i;
+      else { run = { from: i, to: i }; out.push(run); }
+    }
+    return out;
+  }
+
   /* chartGeometry turns one /api/terrain/profile response into plot
    * coordinates. Elevations are drawn with the earth bulge added, which is
    * how the server assesses them, so what the eye reads off the chart and
@@ -699,20 +711,16 @@
     function yOf(z) { return r2(plot.y + plot.h * (zMax - z) / span); }
 
     // Contiguous runs of samples with elevation, and the gaps between them.
-    var segments = [], gaps = [], run = null, gap = null;
-    for (i = 0; i < n; i++) {
-      if (terrain[i] === null) {
-        if (run) { segments.push(run); run = null; }
-        if (!gap) gap = { fromM: d[i], toM: d[i], x1: r2(xs[i]), x2: r2(xs[i]) };
-        else { gap.toM = d[i]; gap.x2 = r2(xs[i]); }
-      } else {
-        if (gap) { gaps.push(gap); gap = null; }
-        if (!run) run = { from: i, to: i };
-        else run.to = i;
-      }
-    }
-    if (run) segments.push(run);
-    if (gap) gaps.push(gap);
+    var segments = runsWhere(n, function (j) { return terrain[j] !== null; });
+    var gaps = runsWhere(n, function (j) { return terrain[j] === null; }).map(function (r) {
+      return { fromM: d[r.from], toM: d[r.to], x1: r2(xs[r.from]), x2: r2(xs[r.to]) };
+    });
+    /* The surface has gaps of its own (#746): its line follows the surface
+     * samples alone, and the clutter band, which needs both edges, the
+     * samples with both. Neither may join two valid points across a
+     * missing one. */
+    var surfaceSegments = both ? runsWhere(n, function (j) { return surface[j] !== null; }) : [];
+    var clutterSegments = both ? runsWhere(n, function (j) { return surface[j] !== null && terrain[j] !== null; }) : [];
 
     /* Intrusion runs: where the clearance below the line of sight is under
      * the server's criterion fraction of the Fresnel radius.
@@ -758,6 +766,8 @@
       f60BotY: los.map(function (l, j) { return yOf(l - criterion * f1[j]); }),
       baseY: r2(plot.y + plot.h),
       segments: segments,
+      surfaceSegments: surfaceSegments,
+      clutterSegments: clutterSegments,
       gaps: gaps,
       intrusions: intrusions,
       criterion: criterion
@@ -853,20 +863,19 @@
         + '" fill="var(--terrain-fill)" stroke="var(--terrain-fill)" stroke-width="1"/>');
     });
 
-    // 2. DSM: the clutter band between terrain and surface, plus its line.
-    if (g.surfaceY) {
-      g.segments.forEach(function (seg) {
-        var up = [], down = [];
-        for (var i = seg.from; i <= seg.to; i++) {
-          if (g.surfaceY[i] === null) continue;
-          up.push(g.x[i] + ',' + g.surfaceY[i]);
-          down.unshift(g.x[i] + ',' + g.terrainY[i]);
-        }
-        if (up.length < 2) return;
-        out.push('<polygon points="' + up.join(' ') + ' ' + down.join(' ') + '" fill="var(--terrain-clutter)" stroke="none"/>');
-        out.push('<polyline points="' + up.join(' ') + '" fill="none" stroke="var(--terrain-clutter)" stroke-width="1.2"/>');
-      });
-    }
+    // 2. DSM: the clutter band between terrain and surface, plus its line,
+    //    each split on its own gaps.
+    g.clutterSegments.forEach(function (seg) {
+      if (seg.to === seg.from) return;
+      var down = [];
+      for (var i = seg.to; i >= seg.from; i--) down.push(g.x[i] + ',' + g.terrainY[i]);
+      out.push('<polygon points="' + polyline(g.x, g.surfaceY, seg.from, seg.to) + ' ' + down.join(' ')
+        + '" fill="var(--terrain-clutter)" stroke="none"/>');
+    });
+    g.surfaceSegments.forEach(function (seg) {
+      if (seg.to === seg.from) return;
+      out.push('<polyline points="' + polyline(g.x, g.surfaceY, seg.from, seg.to) + '" fill="none" stroke="var(--terrain-clutter)" stroke-width="1.2"/>');
+    });
 
     // 3/4. Fresnel bands: 60 % inside the full first zone.
     out.push('<polyline points="' + polyline(g.x, g.f60TopY, 0, g.x.length - 1) + '" fill="none" stroke="var(--fresnel-60)" stroke-width="1" stroke-dasharray="4 3"/>');

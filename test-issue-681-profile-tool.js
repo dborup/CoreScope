@@ -1729,6 +1729,62 @@ atest('a failure of the old request inside the debounce window is dropped too', 
   assert.strictEqual(chipOf(live.dom).state, 'pending', 'the old failure reached the chip');
 });
 
+// ── #746 §4: the DSM is segmented on its own gaps ──────────────────────────
+
+console.log('\n=== #746: the surface line never bridges a surface gap ===');
+
+function surfacePath(dtm, dsm) {
+  const d = flatPath();
+  d.model = 'both';
+  d.distanceM = 1000;
+  d.samples = dsm.map((v, i) => ({ d: i * 250, dtm: dtm[i], dsm: v }));
+  d.verdict = { state: 'clear', model: 'dtm', criterion: 0.6, worstClearanceM: 9, worstAtM: 500, worstF1Fraction: 1,
+    surface: { state: 'unknown', worstClearanceM: null, worstAtM: null, worstF1Fraction: null } };
+  return d;
+}
+const surfaceLines = (svg) => [...svg.matchAll(/<polyline points="([^"]+)" fill="none" stroke="var\(--terrain-clutter\)"/g)].map(m => m[1]);
+const clutterBands = (svg) => [...svg.matchAll(/<polygon points="([^"]+)" fill="var\(--terrain-clutter\)"/g)].map(m => m[1]);
+
+test('a DSM gap over complete terrain splits the surface line and band in two', () => {
+  const d = surfacePath([0, 0, 0, 0, 0], [4, 6, null, 1, 5]);
+  const g = TP.chartGeometry(d);
+  eq(g.surfaceSegments, [{ from: 0, to: 1 }, { from: 3, to: 4 }]);
+  eq(g.clutterSegments, [{ from: 0, to: 1 }, { from: 3, to: 4 }]);
+  const svg = TP.buildChart(d, { nameA: 'Alfa', nameB: 'Bravo' });
+  const lines = surfaceLines(svg);
+  assert.strictEqual(lines.length, 2, 'one surface line per covered stretch: ' + JSON.stringify(lines));
+  assert.strictEqual(lines[0].split(' ').length, 2);
+  assert.strictEqual(lines[1].split(' ').length, 2);
+  assert.strictEqual(clutterBands(svg).length, 2, 'the band bridged the gap too');
+  // No point of either line sits at the missing sample's x.
+  const xGap = String(g.x[2]);
+  lines.concat(clutterBands(svg)).forEach(pts => {
+    assert.ok(pts.split(' ').every(p => p.split(',')[0] !== xGap), 'drawn across the gap: ' + pts);
+  });
+});
+
+test('a lone DSM sample between gaps draws no line of one point', () => {
+  const svg = TP.buildChart(surfacePath([0, 0, 0, 0, 0], [4, null, 6, null, 5]), {});
+  eq(surfaceLines(svg), []);
+});
+
+test('a DTM gap still breaks the band, but surface data on both sides of it keeps its own line', () => {
+  const d = surfacePath([0, 0, null, 0, 0], [5, 5, 5, 5, 5]);
+  d.coverage = { state: 'partial', pct: 80, firstGapM: 500 };
+  const g = TP.chartGeometry(d);
+  eq(g.clutterSegments, [{ from: 0, to: 1 }, { from: 3, to: 4 }]);
+  eq(g.surfaceSegments, [{ from: 0, to: 4 }]);
+  const svg = TP.buildChart(d, {});
+  assert.strictEqual(clutterBands(svg).length, 2);
+  assert.strictEqual(surfaceLines(svg).length, 1);
+});
+
+test('terrain only: no surface segments at all', () => {
+  const g = TP.chartGeometry(flatPath());
+  eq(g.surfaceSegments, []);
+  eq(g.clutterSegments, []);
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 (async () => {

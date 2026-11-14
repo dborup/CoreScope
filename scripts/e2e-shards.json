@@ -81,7 +81,7 @@
       "env": { "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; #746 Map Path profile UI fixes with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile that echoes the request: switching between two profile links and going back keeps the destination profile while Close still clears it. Assigned to shard 1 next to the other #680/#681/#721/#727 DHM suites."
+      "measurementNote": "New suite; #746 Map Path profile UI fixes with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile that echoes the request: switching between two profile links and going back keeps the destination profile while Close still clears it; a surface-model gap splits the surface line and clutter band. Assigned to shard 1 next to the other #680/#681/#721/#727 DHM suites."
     },
     {
       "file": "test-issue-723-heritage-overlay-e2e.js",

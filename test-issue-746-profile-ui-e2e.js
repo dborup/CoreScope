@@ -11,6 +11,8 @@
  *   1. §1 — switching from one profile link to another on the Map page, and
  *      going back in history, opens the destination profile: the old
  *      page's teardown no longer rewrites the new hash.
+ *   2. §4 — a gap in the surface model (DSM) over complete terrain is drawn
+ *      as two surface lines and two clutter bands, not one bridging it.
  *
  * Usage:
  *   BASE_URL=http://localhost:13581 node test-issue-746-profile-ui-e2e.js
@@ -44,7 +46,8 @@ async function step(name, fn) {
 function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
 /* The stub answers the shape of a real GET /api/terrain/profile, with the
- * endpoints at the requested points and the heights the request asked for. */
+ * endpoints at the requested points and the heights the request asked for.
+ * A request with freq=868 gets a DSM gap over samples 18-20 (§4). */
 function profileFor(q) {
   const D = 1200;
   const end = (side) => {
@@ -62,7 +65,8 @@ function profileFor(q) {
   const samples = [];
   for (let i = 0; i < 40; i++) {
     const d = Math.round(D * i / 39);
-    samples.push({ d, dtm: 30 + 8 * Math.sin(d / 200), dsm: 36 + 8 * Math.sin(d / 200) });
+    const dsmGap = q.get('freq') === '868' && i >= 18 && i <= 20;
+    samples.push({ d, dtm: 30 + 8 * Math.sin(d / 200), dsm: dsmGap ? null : 36 + 8 * Math.sin(d / 200) });
   }
   return {
     a: end('a'), b: end('b'),
@@ -178,6 +182,25 @@ function hashParams(hash) {
       await page.click('[data-testid="tp-close"]');
       const hp = hashParams(await page.evaluate(() => location.hash));
       assert(hp.get('profile') === null && hp.get('ha') === null, 'Close left ' + hp.toString());
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  // ── 2. §4: the surface line never bridges a surface gap ───────────────
+  {
+    const { ctx, page, rec } = await newCtx();
+    await step('§4: a DSM gap splits the surface line and the clutter band', async () => {
+      await page.goto(`${BASE}/#/map?profile=${P1}&freq=868`, { waitUntil: 'domcontentloaded' });
+      await waitForRequestFor(page, rec, P1);
+      const got = await page.evaluate(() => {
+        const svg = document.querySelector('[data-testid="tp-chart"] svg');
+        return {
+          lines: svg.querySelectorAll('polyline[stroke="var(--terrain-clutter)"]').length,
+          bands: svg.querySelectorAll('polygon[fill="var(--terrain-clutter)"]').length,
+        };
+      });
+      assert(got.lines === 2 && got.bands === 2, 'surface drawn as ' + JSON.stringify(got));
       assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     });
     await ctx.close();
