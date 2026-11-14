@@ -258,13 +258,13 @@
   /* nodeEntryAction is the node-detail button, built as DOM so no node
    * field ever passes through an HTML string. */
   function nodeEntryAction(node, cfg) {
-    var hash = nodeEntryHash(node, cfg);
-    if (!hash) return null;
+    var entryHref = nodeEntryHash(node, cfg);
+    if (!entryHref) return null;
     var a = el('a', 'btn-primary node-terrain-action');
     // Not HTML-escaped: an attribute set through the DOM is not HTML,
-    // and escaping would turn a second parameter's & into &amp;. The hash
-    // is safe as built: '#/map?profile=' plus a PUBKEY_RE-checked key.
-    a.setAttribute('href', hash);
+    // and escaping would turn a second parameter's & into &amp;. It is
+    // safe as built: '#/map?profile=' plus a PUBKEY_RE-checked key.
+    a.setAttribute('href', entryHref);
     a.setAttribute('data-testid', 'node-terrain-profile');
     a.setAttribute('title', 'Path profile from this node: terrain, line of sight and Fresnel zone. Pick the other end on the map.');
     // Static markup, no interpolation: the Phosphor sprite icon.
