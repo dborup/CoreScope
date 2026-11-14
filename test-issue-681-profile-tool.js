@@ -1785,6 +1785,38 @@ test('terrain only: no surface segments at all', () => {
   eq(g.clutterSegments, []);
 });
 
+// ── #746 N1 (#736 review): no surface chip while a new profile is pending ──
+
+console.log('\n=== #746 N1: the surface chip goes with the answer it described ===');
+
+/* The Dokk1 answer: terrain clear, buildings blocked, so the surface chip
+ * and its explanatory line are both shown. */
+function surfaceAnswer() {
+  const a = answer('clear');
+  a.model = 'both';
+  a.samples = [{ d: 0, dtm: 0, dsm: 0 }, { d: 500, dtm: 0, dsm: 28 }, { d: 1000, dtm: 0, dsm: 0 }];
+  a.verdict.surface = { state: 'blocked', worstClearanceM: -17.5, worstAtM: 500, worstF1Fraction: -2.6 };
+  return a;
+}
+
+atest('the surface chip and its note are hidden as soon as a new profile is asked for', async () => {
+  const live = loadLive();
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  f.calls[0].settle.resolve(surfaceAnswer());
+  await sleep(0);
+  const chip = live.dom.find('tp-surface-chip'), note = live.dom.find('tp-surface-note');
+  assert.strictEqual(chip.hidden, false, 'setup: the surface chip is not shown');
+  assert.strictEqual(note.hidden, false, 'setup: the surface note is not shown');
+  // A model switch asks at once (no debounce), through request() alone.
+  live.dom.find('tp-model-dtm').fire('click');
+  assert.strictEqual(f.calls.length, 2, 'setup: the switch did not ask');
+  assert.strictEqual(chipOf(live.dom).state, 'pending');
+  assert.strictEqual(chip.hidden, true, 'the old surface chip stayed up beside a pending verdict');
+  assert.strictEqual(chip.textContent, '', 'the hidden chip still carries the old words');
+  assert.strictEqual(note.hidden, true, 'the old surface note stayed up');
+});
+
 // ── Summary ────────────────────────────────────────────────────────────────
 
 (async () => {
