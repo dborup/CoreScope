@@ -16,7 +16,9 @@
  *      customizer default rides either;
  *   4. the copy button hands out whichever link the host's shareRoute says;
  *   5. the index.html handoff: /p moves to #/map with an allow-list, no
- *      reload, no history entry, before any asset loads.
+ *      reload, no history entry, before any asset loads; tracking keys
+ *      (the fixture's `queries` table) never reach the hash, and a path
+ *      starting with // is left alone.
  *
  * Usage: node test-issue-727-share-link.js
  */
@@ -283,6 +285,35 @@ test('every other page is left alone', () => {
     assert.strictEqual(c.replaceState.length + c.replace.length, 0, p);
   }
 });
+
+test('a path starting with // is left alone (it would read as another host)', () => {
+  for (const p of ['//p', '//evil.example/p', '///p']) {
+    const c = handoff(p, '?profile=' + PK_A + '%2C' + PK_B);
+    assert.strictEqual(c.replaceState.length + c.replace.length, 0, p);
+    const f = handoff(p, '?profile=' + PK_A + '%2C' + PK_B, { throws: true });
+    assert.strictEqual(f.replace.length, 0, p + ' (fallback)');
+  }
+});
+
+/* The shared fixture's whole-query table (cmd/server/testdata/
+ * profile-param-cases.json `queries`): the server ignores the fixed tracking
+ * keys and refuses other unknown keys; either way the handoff carries only
+ * the profile's own keys. */
+const queryFixture = JSON.parse(fs.readFileSync('cmd/server/testdata/profile-param-cases.json', 'utf8')).queries;
+
+test('the query fixture is there and covers the tracking keys', () => {
+  assert.ok(queryFixture.length >= 15, queryFixture.length + ' query cases');
+  const keys = queryFixture.map(c => c.query).join('&');
+  for (const k of ['fbclid', 'gclid', 'dclid', 'msclkid', 'igshid', 'mc_eid', 'utm_source']) assert.ok(keys.includes(k + '='), k);
+});
+
+for (const c of queryFixture) {
+  test('handoff drops what is not the profile\'s: ' + c.name, () => {
+    const got = handoff('/p', '?' + c.query).replaceState.map(x => x.u);
+    eq(got, ['/#/map' + (c.handoff ? '?' + c.handoff : '')]);
+    assert.ok(!/fbclid|gclid|dclid|msclkid|igshid|mc_eid|utm_|evil|_ga/i.test(got[0]), got[0]);
+  });
+}
 
 test('without a usable history API it falls back to location.replace', () => {
   const c = handoff('/p', '?profile=' + PK_A + '%2C' + PK_B, { throws: true });

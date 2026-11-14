@@ -40,11 +40,15 @@
        loads, keeping only the profile's own keys (an allow-list, so no
        other parameter reaches the hash), with replaceState: no reload, no
        history entry for /p, and the app boots once. The relative asset
-       URLs below resolve the same at /p as at /. -->
+       URLs below resolve the same at /p as at /. Tracking keys (fbclid,
+       utm_*, ...) are not on the allow-list, so they never reach the hash.
+       A path starting with // is left alone: built into the target it
+       would read as another host (defence in depth; the server already
+       cleans such paths with a 301). -->
   <script data-share-handoff>
     (function () {
       var path = location.pathname;
-      if (!/\/p$/.test(path)) return;
+      if (path.indexOf('//') === 0 || !/\/p$/.test(path)) return;
       var keep = ['profile', 'model', 'ha', 'hb', 'k', 'freq'];
       var src = new URLSearchParams(location.search), out = new URLSearchParams();
       keep.forEach(function (k) { if (src.has(k)) out.set(k, src.get(k)); });

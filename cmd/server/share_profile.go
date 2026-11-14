@@ -16,6 +16,9 @@ package main
 //     then resolves, snaps and gates exactly as /api/terrain/profile does.
 //     Hidden, unknown and unpositioned nodes are 404, so a node that cannot
 //     be profiled cannot be named in a preview either.
+//   - A fixed list of click-tracking keys (fbclid, gclid, utm_*, ...) is
+//     ignored: accepted, never validated, never echoed. Any other unknown
+//     key is refused.
 //   - A refused request gets the plain site document with the error status:
 //     nothing from the request is echoed, and a browser still lands on the
 //     map, where the panel explains the problem.
@@ -55,6 +58,19 @@ const shareNameMaxRunes = 48
 // shareParams are the only keys /p accepts: the hash link's keys, and v,
 // a preview cache-bust (#720 pattern) that is accepted and ignored.
 var shareParams = map[string]bool{"profile": true, "model": true, "ha": true, "hb": true, "k": true, "freq": true, "v": true}
+
+// shareTrackingParams are click-tracking keys that chat apps, ad networks
+// and newsletters append to a link someone shared (Facebook adds fbclid to
+// every outbound click). /p ignores them rather than refusing the page:
+// they are never validated, never echoed into a tag or og:url, and the
+// index.html handoff never carries them into #/map (#727 owner decision on
+// PR #742). The list is fixed and closed, plus any key starting with utm_;
+// every other unknown key is still a 400.
+var shareTrackingParams = map[string]bool{"fbclid": true, "gclid": true, "dclid": true, "msclkid": true, "igshid": true, "mc_eid": true}
+
+func isShareTrackingParam(k string) bool {
+	return shareTrackingParams[k] || strings.HasPrefix(k, "utm_")
+}
 
 // registerShareRoutes adds /p and the /p/ redirect. newHTTPRouter calls it
 // before the SPA catch-all, which would otherwise answer both.
@@ -102,6 +118,9 @@ func (s *Server) handleShareProfile(doc *indexDoc) http.HandlerFunc {
 func parseSharedProfile(q url.Values) (terrainQuery, error) {
 	api := url.Values{}
 	for k, vs := range q {
+		if isShareTrackingParam(k) {
+			continue
+		}
 		limit := 64
 		if k == "profile" {
 			limit = shareProfileMaxLen

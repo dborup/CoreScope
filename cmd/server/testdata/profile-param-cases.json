@@ -1,5 +1,5 @@
 {
-  "_comment": "#727: one table for both profile= parsers: cmd/server/share_profile.go (splitProfilePair, then parseTerrainRef) and public/terrain-profile.js (parseProfilePair). go test (TestShareProfile_ParamFixture) and node test-issue-727-share-link.js read this same file, so a change to one parser that is not matched in the other fails CI. Valid refs are lower-case.",
+  "_comment": "#727: one table for both profile= parsers: cmd/server/share_profile.go (splitProfilePair, then parseTerrainRef) and public/terrain-profile.js (parseProfilePair). go test (TestShareProfile_ParamFixture, TestShareProfile_QueryFixture) and node test-issue-727-share-link.js read this same file, so a change to one side that is not matched in the other fails CI. Valid refs are lower-case. `queries` are whole /p queries: `valid` is the server verdict, `handoff` what the index.html handoff writes after #/map?.",
   "cases": [
     {
       "name": "two keys (129 bytes, the longest valid pair)",
@@ -263,6 +263,134 @@
       "name": "over-long parameter (201 bytes)",
       "input": "1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1",
       "valid": false
+    }
+  ],
+  "queries": [
+    {
+      "name": "plain pair",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "all keys plus v",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&model=dtm&ha=9&hb=4&k=1.5&freq=868.1&v=abc",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&model=dtm&ha=9&hb=4&k=1.5&freq=868.1"
+    },
+    {
+      "name": "fbclid",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&fbclid=IwAR0abc-_123",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "gclid",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&gclid=Cj0KCQ",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "dclid",
+      "query": "dclid=x&profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "msclkid",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&msclkid=abc",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "igshid",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&igshid=abc",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "mc_eid",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&mc_eid=abc",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "utm_source, utm_medium, utm_campaign",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&utm_source=discord&utm_medium=social&utm_campaign=x",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "any utm_ key, even the bare prefix",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&utm_=1&utm_whatever=2",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "a tracking key twice",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&fbclid=a&fbclid=b",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "a tracking value over 64 bytes",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&utm_content=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "markup in a tracking value",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&utm_source=%22%3E%3Cscript%3Ealert(1)%3C%2Fscript%3E",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "tracking keys and heights",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&ha=12&fbclid=z&hb=3",
+      "valid": true,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&ha=12&hb=3"
+    },
+    {
+      "name": "tracking keys cannot rescue a bad pair",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef&fbclid=x",
+      "valid": false,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    {
+      "name": "an unknown key",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&evil=1",
+      "valid": false,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "a near-miss of a tracking key",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&fbclid2=x",
+      "valid": false,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "tracking keys are case-sensitive",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&FBCLID=x",
+      "valid": false,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "utm without the underscore",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&utm=x",
+      "valid": false,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "utm_ not at the start",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&xutm_source=x",
+      "valid": false,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+    },
+    {
+      "name": "a cookie-style key",
+      "query": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210&_ga=1",
+      "valid": false,
+      "handoff": "profile=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef%2Cfedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
     }
   ]
 }

@@ -181,6 +181,76 @@ func TestShareProfile_ParamFixture(t *testing.T) {
 	}
 }
 
+type shareQueryCase struct {
+	Name    string `json:"name"`
+	Query   string `json:"query"`
+	Valid   bool   `json:"valid"`
+	Handoff string `json:"handoff"`
+}
+
+// Whole /p queries from the shared fixture: the server ignores the fixed
+// tracking keys and refuses every other unknown key. The same table checks
+// the index.html handoff in test-issue-727-share-link.js.
+func TestShareProfile_QueryFixture(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "profile-param-cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var f struct {
+		Queries []shareQueryCase `json:"queries"`
+	}
+	if err := json.Unmarshal(data, &f); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.Queries) < 15 {
+		t.Fatalf("only %d query cases", len(f.Queries))
+	}
+	for _, c := range f.Queries {
+		q, err := url.ParseQuery(c.Query)
+		if err != nil {
+			t.Fatalf("%s: fixture query does not parse: %v", c.Name, err)
+		}
+		if _, err := parseSharedProfile(q); (err == nil) != c.Valid {
+			t.Errorf("%s: valid=%v, want %v", c.Name, err == nil, c.Valid)
+		}
+	}
+}
+
+// A tracking key is ignored end to end: the page is the same per-profile
+// document as without it, so it reaches no tag and not og:url.
+func TestShareProfile_TrackingKeysNeverEchoed(t *testing.T) {
+	env := newShareEnv(t, true, nil)
+	clean := env.share(shareQ(shareKeyA, shareKeyB, "ha=12"))
+	if clean.Code != 200 {
+		t.Fatalf("status %d", clean.Code)
+	}
+	for _, extra := range []string{
+		"fbclid=IwAR0trackme", "gclid=trackme", "dclid=trackme", "msclkid=trackme", "igshid=trackme", "mc_eid=trackme",
+		"utm_source=trackme&utm_medium=trackme&utm_campaign=trackme",
+		"utm_content=" + url.QueryEscape(`"><script>trackme</script>`),
+		"fbclid=trackme&fbclid=trackme2",
+	} {
+		w := env.share(shareQ(shareKeyA, shareKeyB, "ha=12", extra))
+		if w.Code != 200 {
+			t.Fatalf("%s: status %d", extra, w.Code)
+		}
+		body := w.Body.String()
+		if body != clean.Body.String() {
+			t.Errorf("%s: the page differs from the page without it", extra)
+		}
+		// (index.html's own comment names the keys, so look for the value.)
+		if strings.Contains(body, "trackme") {
+			t.Errorf("%s: echoed into the page", extra)
+		}
+	}
+	// Anything not on the closed list is still refused.
+	for _, extra := range []string{"fbclid2=x", "FBCLID=x", "utm=x", "xutm_source=x", "_ga=1"} {
+		if w := env.share(shareQ(shareKeyA, shareKeyB, extra)); w.Code != 400 {
+			t.Errorf("%s: status %d, want 400", extra, w.Code)
+		}
+	}
+}
+
 // Everything after the pair goes through parseTerrainQuery unchanged.
 func TestShareProfile_ParsesTheOtherKeysLikeTheAPI(t *testing.T) {
 	q := url.Values{"profile": {shareKeyA + "," + shareKeyB}, "model": {"dtm"}, "ha": {"12.5"}, "hb": {"0"}, "k": {"1.3333"}, "freq": {"869.618"}, "v": {"abc123"}}
@@ -218,6 +288,11 @@ func TestShareProfile_TagsForTwoNodes(t *testing.T) {
 	if w.Code != 200 || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") {
 		t.Fatalf("status %d, type %q", w.Code, w.Header().Get("Content-Type"))
 	}
+	// The page embeds the per-startup __BUST__ asset versions and is
+	// per-request: no shared cache may keep it (review PR#742 R2).
+	if cc := w.Header().Get("Cache-Control"); !strings.Contains(cc, "no-store") {
+		t.Fatalf("Cache-Control %q on /p", cc)
+	}
 	body := w.Body.String()
 	if got := titleOf(t, body); got != "Path profile: 11.1 km" {
 		t.Fatalf("title %q", got)
@@ -238,6 +313,11 @@ func TestShareProfile_TagsForTwoNodes(t *testing.T) {
 	}
 	if got := mustMeta(t, body, "og:url"); got != "http://example.test/p?profile="+shareKeyA+","+shareKeyB+"&model=both" {
 		t.Fatalf("og:url %q", got)
+	}
+	// The raw attribute carries the escaped separator (review PR#742 R1):
+	// og:url goes through html.EscapeString like every other value.
+	if raw, _ := metaContent(body, "og:url"); !strings.Contains(raw, "&amp;model=both") || strings.Contains(raw, "&model") {
+		t.Fatalf("og:url attribute is not escaped: %q", raw)
 	}
 	if got := mustMeta(t, body, "robots"); got != "noindex" {
 		t.Fatalf("robots %q", got)

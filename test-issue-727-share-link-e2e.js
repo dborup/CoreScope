@@ -16,6 +16,8 @@
  *   2. one document request, app.js loaded once, every same-origin asset
  *      answered below 400;
  *   3. Back goes where the user came from — /p leaves no history entry;
+ *      an injected parameter never reaches the hash or the request, and a
+ *      link carrying fbclid / utm_* is a 200 that lands without them;
  *   4. with dhm.share the copy button hands out a /p link, and that link
  *      opens the same profile; without it, the #/map link as before;
  *   5. the raw /p HTML, fetched with a crawler User-Agent, carries the
@@ -212,6 +214,21 @@ const PANEL = '[data-testid="tp-panel"]';
       assert(hash === WANT_HASH, 'hash ' + hash);
       assert(rec.profile.length === 1 && !rec.profile[0].searchParams.has('evil'), 'request ' + rec.profile.map(String).join(' '));
       assert(!(await page.evaluate(() => document.querySelector('script:not([src])') && document.documentElement.outerHTML.includes('alert(1)'))), 'payload in the DOM');
+    });
+    await ctx.close();
+  }
+
+  // ── 1c. Tracking keys (owner decision on PR #742) ─────────────────────
+  {
+    const { ctx, page, rec } = await newCtx();
+    const doc = await page.goto(BASE + SHARE + '&fbclid=IwAR0abc_123&utm_source=discord&utm_medium=social', { waitUntil: 'domcontentloaded' });
+    await waitForProfile(page, rec);
+    await step('a link with fbclid/utm_* is a 200 that lands without them', async () => {
+      assert(doc.status() === 200, 'status ' + doc.status());
+      const hash = await page.evaluate(() => location.hash);
+      assert(hash === WANT_HASH, 'hash ' + hash);
+      assert(rec.profile.length === 1 && !/fbclid|utm_/.test(rec.profile[0].search), 'request ' + rec.profile.map(String).join(' '));
+      assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
     });
     await ctx.close();
   }
