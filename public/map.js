@@ -2714,6 +2714,10 @@
   var profileHintEl = null;
   var profileKeyHandler = null;
   var profileAnchor = null;   // [lat, lon] of A while picking B
+  // #711: the one node a half link named that the Map page's own list does
+  // not hold (an area filter or the last-heard window left it out). One
+  // entry, replaced by the next half link, so it cannot grow.
+  var profileExtraNode = null;
 
   // One gate, shared with the node-detail entry point (TerrainProfile.offered).
   function profileOffered() {
@@ -2740,7 +2744,22 @@
         return { name: n.name || n.id || null, lat: n.lat, lon: n.lon, role: 'observer' };
       }
     }
+    if (profileExtraNode && profileExtraNode.pubkey === want) return profileExtraNode.node;
     return null;
+  }
+
+  /* profileLoadExtraNode looks up a half link's A in the full node store
+   * when the Map page's filtered list does not hold it, so A is named and
+   * the map can pan to it. One request per half link, never per marker; a
+   * failure leaves A as its key prefix, which the measurement does not need. */
+  async function profileLoadExtraNode(pubkey) {
+    if (profileResolveNode(pubkey)) return;
+    try {
+      var data = await api('/nodes/' + encodeURIComponent(pubkey), { ttl: CLIENT_TTL.nodeDetail });
+      var n = data && data.node;
+      if (!n || String(n.public_key || '').toLowerCase() !== pubkey) return;
+      profileExtraNode = { pubkey: pubkey, node: { name: n.name || n.adv_name || null, lat: n.lat, lon: n.lon, role: n.role || null } };
+    } catch (_) { /* named by its key prefix instead */ }
   }
 
   /* An observer-only marker carries obs.id in _nodeKey, which is 64 hex
@@ -2964,6 +2983,8 @@
       // the picker is armed for B, exactly as if A had just been clicked.
       var start = window.TerrainProfile.parseStart(qs);
       if (!start || !ensureProfileTool()) return;
+      await profileLoadExtraNode(start.pubkey);
+      if (!alive() || !ensureProfileTool()) return;
       profileArmFor('a');
       profilePick(start);
       if (profileAnchor && map) map.panTo(profileAnchor);
@@ -2982,6 +3003,7 @@
     profileKeyHandler = null;
     if (profileTool) profileTool.destroy();
     profileTool = null;
+    profileExtraNode = null;
     profileBtn = null;
     profileHintEl = null;
   }

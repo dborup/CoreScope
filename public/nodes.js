@@ -2095,6 +2095,7 @@
           <a href="#/nodes/${encodeURIComponent(n.public_key)}/analytics" class="btn-primary" style="display:inline-block;margin-left:4px;text-decoration:none;font-size:11px;padding:2px 8px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-chart-bar"/></svg> Analytics</a>
           <a href="#/nodes/${encodeURIComponent(n.public_key)}/reach" class="btn-primary" style="display:inline-block;margin-left:4px;text-decoration:none;font-size:11px;padding:2px 8px"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-broadcast"/></svg> Reach</a>
         </div>
+        <div class="node-detail-actions"></div>
         ${renderStatusExplanation(n)}
 
         ${(hasLoc || hasEstLoc) ? `<div class="node-map-qr-wrap">
@@ -2205,7 +2206,7 @@
       } catch {}
     }
 
-    mountTerrainProfileAction(panel.querySelector('.node-detail-role'), n);
+    mountTerrainProfileAction(panel.querySelector('.node-detail-actions'), n);
 
     // Wire "Details" button via the unified navigateToNode helper
     var detailBtn = panel.querySelector('.node-detail-btn');
