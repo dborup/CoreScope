@@ -2715,10 +2715,10 @@
   var profileKeyHandler = null;
   var profileAnchor = null;   // [lat, lon] of A while picking B
 
+  // One gate, shared with the node-detail entry point (TerrainProfile.offered).
   function profileOffered() {
-    var c = window.MC_DHM_CFG;
-    return !!(c && c.enabled === true && c.profile === true &&
-      window.TerrainProfile && typeof window.TerrainProfile.create === 'function');
+    var tp = window.TerrainProfile;
+    return !!(tp && typeof tp.create === 'function' && tp.offered(window.MC_DHM_CFG));
   }
 
   // resolveNode is the only thing terrain-profile.js asks the map for: a
@@ -2957,8 +2957,18 @@
     try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}
     if (!alive() || !profileOffered()) return;
     buildProfileToggle();
-    var st = window.TerrainProfile.parseState((location.hash || '').split('?')[1] || '');
-    if (!st) return;
+    var qs = (location.hash || '').split('?')[1] || '';
+    var st = window.TerrainProfile.parseState(qs);
+    if (!st) {
+      // #681 M5: node detail sends profile=<one key> — A is that node, and
+      // the picker is armed for B, exactly as if A had just been clicked.
+      var start = window.TerrainProfile.parseStart(qs);
+      if (!start || !ensureProfileTool()) return;
+      profileArmFor('a');
+      profilePick(start);
+      if (profileAnchor && map) map.panTo(profileAnchor);
+      return;
+    }
     var tool = ensureProfileTool();
     if (!tool) return;
     tool.setState(st);

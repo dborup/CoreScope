@@ -6340,6 +6340,69 @@ body.embed #app.app-fixed {
 .tp-chip-assumed { border-color: var(--warning); color: var(--warning); font-style: italic; }
 .tp-chip[hidden] { display: none; }
 
+/* #681 M5 — copy link sits left of close; the pair shares the auto margin. */
+.tp-copy { margin-left: auto; }
+.tp-copy + .tp-close { margin-left: 0; }
+.tp-copy:disabled { opacity: 0.45; cursor: default; }
+/* On a phone the title row cannot hold two chips and two 48 px buttons, and
+   the close button used to wrap onto a line of its own. Keep the buttons
+   beside the title and let the chips take the second line instead. */
+@media (max-width: 520px) {
+  .tp-head::after { content: ''; order: 1; flex-basis: 100%; height: 0; }
+  .tp-head .tp-chip { order: 2; }
+}
+.tp-copy-status { margin: 0; padding: 2px 8px; font-size: var(--fs-sm); color: var(--text-muted); }
+.tp-copy-status:empty { display: none; }
+/* The licence link keeps the credit line's size, but gets a 48 px hit box
+   from padding cancelled by negative margins, so the line height is not
+   disturbed. */
+.tp-credit-link {
+  display: inline-block;
+  min-width: 48px;
+  padding: 18px 4px;
+  margin: -18px -4px;
+  color: inherit;
+  text-decoration: underline;
+  text-align: center;
+}
+.tp-credit-link:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: -14px; }
+
+/* Where the antenna height comes from: default / operator / yours / link. */
+.tp-src-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.tp-hbadge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  line-height: 18px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--surface-2, var(--input-bg));
+}
+.tp-hbadge[hidden] { display: none; }
+.tp-hbadge-default { border-style: dashed; border-color: var(--warning); color: var(--text); }
+.tp-hbadge-operator { border-color: var(--accent, var(--link-color)); color: var(--text); }
+.tp-hbadge-yours { border-color: var(--success); color: var(--text); }
+.tp-hbadge-link { border-color: var(--border); color: var(--text); }
+
+/* #681 M5 — "Terrain profile to…" on node detail: a 48 px target in both
+   the side pane and the full page action row. */
+.node-terrain-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 48px;
+  min-width: 48px;
+  padding: 4px 12px;
+  margin-left: 4px;
+  font-size: 12px;
+  text-decoration: none;
+  vertical-align: middle;
+}
+.node-full-actions .node-terrain-action { margin-left: 0; }
+.node-terrain-icon { display: inline-flex; }
+
 .tp-controls {
   display: flex;
   flex-wrap: wrap;

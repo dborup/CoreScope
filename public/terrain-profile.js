@@ -24,6 +24,8 @@
 
   // The single CC BY 4.0 credit line, same text as internal/dhm (#680).
   var ATTRIBUTION = 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0';
+  var LICENCE_MARK = 'CC BY 4.0';
+  var ATTRIBUTION_URL = 'https://creativecommons.org/licenses/by/4.0/';
   var ASSUMED_LABEL = 'assumed heights';
   var ENDPOINT = '/api/terrain/profile';
   var HASH_PARAM = 'profile';
@@ -125,6 +127,19 @@
     };
   }
 
+  /* parseStart reads the half link node detail opens the tool with:
+   * profile=<one public key> means "A is this node, pick B". It is a
+   * separate reader on purpose, so a lone key can never pass parseState
+   * and be measured as half a path. */
+  function parseStart(input) {
+    var p = toParams(input);
+    if (!p) return null;
+    var raw = p.get(HASH_PARAM);
+    if (typeof raw !== 'string') return null;
+    var pk = raw.toLowerCase();
+    return PUBKEY_RE.test(pk) ? { kind: 'node', pubkey: pk } : null;
+  }
+
   function fmtCoord(v) { return Number(v).toFixed(5); }
 
   function refToParam(ref) {
@@ -167,6 +182,64 @@
     if (ser.model) p.set('model', ser.model);
     ['ha', 'hb', 'k', 'freq'].forEach(function (key) { if (ser[key] !== undefined) p.set(key, ser[key]); });
     return ENDPOINT + '?' + p.toString();
+  }
+
+  /* shareURL is the link the panel's copy button hands out: built from the
+   * state, not read off the address bar, so it is the same whether or not
+   * the host lets the panel write the hash. */
+  function shareURL(state, loc) {
+    if (!state || !state.a || !state.b || !loc) return null;
+    return String(loc.origin || '') + String(loc.pathname || '/') + '#/map?' + new URLSearchParams(serializeState(state)).toString();
+  }
+
+  // ── Node-detail entry point ──────────────────────────────────────────────
+
+  /* offered is the one gate for the whole tool: the server only sends a dhm
+   * block with profile: true when map.dhm.profile.enabled is set and a
+   * token is configured. The Map page and node detail both ask it. */
+  function offered(cfg) {
+    return !!(cfg && cfg.enabled === true && cfg.profile === true);
+  }
+
+  /* hasFix is the node-detail "real fix" rule (public/nodes.js): both
+   * coordinates present and in range, and not the 0,0 no-lock sentinel. An
+   * estimated position does not count — the server measures from the
+   * node's own lat/lon. */
+  function hasFix(node) {
+    if (!node || node.lat === null || node.lat === undefined || node.lat === ''
+      || node.lon === null || node.lon === undefined || node.lon === '') return false;
+    var lat = Number(node.lat), lon = Number(node.lon);
+    if (!isFinite(lat) || !isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) return false;
+    return !(lat === 0 && lon === 0);
+  }
+
+  /* nodeEntryHash is the deep link node detail offers: the Map tool with A
+   * filled in and the picker waiting for B. null means "offer nothing". */
+  function nodeEntryHash(node, cfg) {
+    if (!offered(cfg) || !hasFix(node)) return null;
+    var pk = String(node.public_key || '').toLowerCase();
+    if (!PUBKEY_RE.test(pk)) return null;
+    var p = new URLSearchParams();
+    p.set(HASH_PARAM, refToParam({ kind: 'node', pubkey: pk }));
+    return '#/map?' + p.toString();
+  }
+
+  /* nodeEntryAction is the node-detail button, built as DOM so no node
+   * field ever passes through an HTML string. */
+  function nodeEntryAction(node, cfg) {
+    var hash = nodeEntryHash(node, cfg);
+    if (!hash) return null;
+    var a = el('a', 'btn-primary node-terrain-action');
+    a.setAttribute('href', hash);
+    a.setAttribute('data-testid', 'node-terrain-profile');
+    a.setAttribute('title', 'Path profile from this node: terrain, line of sight and Fresnel zone. Pick the other end on the map.');
+    // Static markup, no interpolation: the Phosphor sprite icon.
+    var icon = el('span', 'node-terrain-icon');
+    icon.setAttribute('aria-hidden', 'true');
+    icon.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-ruler"/></svg>';
+    a.appendChild(icon);
+    a.appendChild(el('span', null, 'Terrain profile to…'));
+    return a;
   }
 
   // ── Per-viewer height memory ─────────────────────────────────────────────
@@ -552,6 +625,42 @@
     'point-default': 'default for a map point'
   };
 
+  /* Where an antenna height comes from, as a one-word badge. The server
+   * knows defaults and operator values; a "request" height is one the
+   * browser sent, and only the browser knows whether the viewer typed or
+   * remembered it ("yours") or it arrived on somebody else's link. */
+  var HEIGHT_BADGES = {
+    default: { label: 'default', title: 'A built-in default for this kind of endpoint, not a measured height.' },
+    operator: { label: 'operator', title: 'Set by the operator of this instance (radio.antennaHeightsM).' },
+    yours: { label: 'yours', title: 'Your own height for this endpoint, remembered in this browser.' },
+    link: { label: 'link', title: 'Taken from the link you opened.' }
+  };
+  var SOURCE_BADGE = {
+    'role-default': 'default',
+    'point-default': 'default',
+    'operator-node': 'operator',
+    'operator-role': 'operator'
+  };
+
+  function heightBadge(source, origin) {
+    var key = null;
+    if (source === 'request') key = origin === 'yours' ? 'yours' : 'link';
+    else if (Object.prototype.hasOwnProperty.call(SOURCE_BADGE, source)) key = SOURCE_BADGE[source];
+    if (!key) return null;
+    return { key: key, label: HEIGHT_BADGES[key].label, title: HEIGHT_BADGES[key].title };
+  }
+
+  /* copyLink resolves true or false and never throws: a clipboard that
+   * refuses, throws or does not exist is a message, not an error. */
+  function copyLink(text, copier) {
+    return new Promise(function (resolve) {
+      if (typeof copier !== 'function') { resolve(false); return; }
+      try {
+        copier(String(text), function () { resolve(true); }, function () { resolve(false); });
+      } catch (_) { resolve(false); }
+    });
+  }
+
   var FREQ_SOURCES = {
     request: 'from this link',
     config: 'operator configuration',
@@ -578,6 +687,9 @@
 
     var state = { a: null, b: null, model: 'both', ha: null, hb: null, k: null, freq: null };
     var open = false, seq = 0, debounceTimer = null, panel = null, nodes = { a: null, b: null };
+    // Where each height in `state` came from on this side of the wire:
+    // 'yours' (typed, or remembered in localStorage), 'link', or null.
+    var origin = { a: null, b: null };
     var ui = {};
 
     function buildPanel() {
@@ -602,6 +714,16 @@
       ui.assumed.title = 'At least one antenna height is a default, not a measured value. Set both heights to confirm them.';
       ui.assumed.hidden = true;
       head.appendChild(ui.assumed);
+      ui.copy = el('button', 'tp-close tp-copy');
+      ui.copy.type = 'button';
+      ui.copy.disabled = true;
+      ui.copy.title = 'Copy a link to this profile';
+      ui.copy.setAttribute('aria-label', 'Copy link to this profile');
+      ui.copy.setAttribute('data-testid', 'tp-copy-link');
+      // Static markup, no interpolation: the Phosphor sprite icon.
+      ui.copy.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-link"/></svg>';
+      ui.copy.addEventListener('click', onCopy);
+      head.appendChild(ui.copy);
       var close = el('button', 'tp-close');
       close.type = 'button';
       close.setAttribute('aria-label', 'Close path profile');
@@ -612,6 +734,10 @@
       close.addEventListener('click', function () { api.close(); });
       head.appendChild(close);
       panel.appendChild(head);
+      ui.copyStatus = el('p', 'tp-copy-status');
+      ui.copyStatus.setAttribute('role', 'status');
+      ui.copyStatus.setAttribute('data-testid', 'tp-copy-status');
+      panel.appendChild(ui.copyStatus);
 
       var body = el('div', 'tp-body');
       body.setAttribute('data-testid', 'tp-body');
@@ -619,7 +745,16 @@
       ui.chart.setAttribute('data-testid', 'tp-chart');
       body.appendChild(ui.chart);
 
-      ui.credit = el('p', 'tp-credit-line', ATTRIBUTION);
+      // The shared credit text, with its licence marker as a link to the
+      // licence itself: the CC BY 4.0 obligation, spelled out once.
+      ui.credit = el('p', 'tp-credit-line');
+      ui.credit.appendChild(el('span', null, ATTRIBUTION.slice(0, ATTRIBUTION.length - LICENCE_MARK.length)));
+      var licence = el('a', 'tp-credit-link', LICENCE_MARK);
+      licence.setAttribute('href', ATTRIBUTION_URL);
+      licence.setAttribute('target', '_blank');
+      licence.setAttribute('rel', 'noopener noreferrer license');
+      licence.setAttribute('data-testid', 'tp-credit-link');
+      ui.credit.appendChild(licence);
       body.appendChild(ui.credit);
 
       ui.detail = el('p', 'tp-detail');
@@ -702,15 +837,22 @@
       stepper.appendChild(plus);
       wrap.appendChild(stepper);
 
+      var srcRow = el('div', 'tp-src-row');
+      var badge = el('span', 'tp-hbadge');
+      badge.setAttribute('data-testid', 'tp-hsrc-' + side);
+      badge.hidden = true;
+      srcRow.appendChild(badge);
       var source = el('span', 'tp-assumed');
       source.setAttribute('data-testid', 'tp-assumed-' + side);
-      wrap.appendChild(source);
+      srcRow.appendChild(source);
+      wrap.appendChild(srcRow);
 
       function commit(v) {
         var h = clampHeight(v);
         if (h === null) return;
         input.value = String(h);
         state[side === 'a' ? 'ha' : 'hb'] = h;
+        origin[side] = 'yours';
         rememberHeight(state[side], h);
         scheduleRequest();
       }
@@ -718,7 +860,7 @@
       plus.addEventListener('click', function () { commit((clampHeight(input.value) || 0) + 1); });
       input.addEventListener('input', function () { commit(input.value); });
       input.addEventListener('change', function () { commit(input.value); });
-      return { wrap: wrap, name: name, input: input, source: source };
+      return { wrap: wrap, name: name, input: input, source: source, badge: badge };
     }
 
     function syncModelButtons() {
@@ -757,6 +899,15 @@
       } catch (_) { /* a hash we cannot write is not worth breaking the tool for */ }
     }
 
+    function onCopy() {
+      var url = shareURL(state, global.location);
+      if (!url) return;
+      copyLink(url, opts.copyText || global.copyToClipboard).then(function (ok) {
+        if (!ui.copyStatus) return;
+        ui.copyStatus.textContent = ok ? 'Link copied' : 'Could not copy the link. It is in the address bar.';
+      });
+    }
+
     function scheduleRequest() {
       if (debounceTimer) global.clearTimeout(debounceTimer);
       debounceTimer = global.setTimeout(function () { debounceTimer = null; request(); }, HEIGHT_DEBOUNCE_MS);
@@ -772,6 +923,8 @@
         c.name.textContent = endpointLabel(ref, nodes[side] && nodes[side].name);
         c.input.disabled = !ref;
       });
+      ui.copy.disabled = !(state.a && state.b);
+      ui.copyStatus.textContent = '';
     }
 
     function setStatus(text, cls) {
@@ -814,8 +967,16 @@
         var side = pair[0], c = pair[1];
         var end = data[side] || {};
         var h = clampHeight(end.antennaM);
+        // Shown, not adopted: copying the server's default into `state`
+        // would send it back as a "request" height on the next measure and
+        // quietly turn an assumed height into a confirmed one.
         if (h !== null && doc.activeElement !== c.input) c.input.value = String(h);
-        if (h !== null) state[side === 'a' ? 'ha' : 'hb'] = h;
+        var badge = heightBadge(end.antennaSource, origin[side]);
+        c.badge.hidden = !badge;
+        c.badge.textContent = badge ? badge.label : '';
+        c.badge.title = badge ? badge.title : '';
+        c.badge.className = 'tp-hbadge' + (badge ? ' tp-hbadge-' + badge.key : '');
+        c.badge.setAttribute('data-source', badge ? badge.key : '');
         var src = SOURCE_LABELS[end.antennaSource] || '';
         c.source.textContent = end.assumed ? ('Assumed — ' + src) : src;
         c.source.classList.toggle('is-assumed', !!end.assumed);
@@ -858,6 +1019,7 @@
         state[side] = ref || null;
         var h = recallHeight(ref);
         state[side === 'a' ? 'ha' : 'hb'] = h;
+        origin[side] = h === null ? null : 'yours';
         if (panel) {
           var c = side === 'a' ? ui.endA : ui.endB;
           c.input.value = h === null ? '' : String(h);
@@ -875,8 +1037,10 @@
         state.hb = next.hb === undefined ? null : next.hb;
         state.k = next.k === undefined ? null : next.k;
         state.freq = next.freq === undefined ? null : next.freq;
-        if (state.ha === null) state.ha = recallHeight(state.a);
-        if (state.hb === null) state.hb = recallHeight(state.b);
+        origin.a = state.ha === null ? null : 'link';
+        origin.b = state.hb === null ? null : 'link';
+        if (state.ha === null) { state.ha = recallHeight(state.a); if (state.ha !== null) origin.a = 'yours'; }
+        if (state.hb === null) { state.hb = recallHeight(state.b); if (state.hb !== null) origin.b = 'yours'; }
         api.open();
         syncModelButtons();
         if (panel) {
@@ -917,11 +1081,19 @@
 
   global.TerrainProfile = {
     ATTRIBUTION: ATTRIBUTION,
+    ATTRIBUTION_URL: ATTRIBUTION_URL,
     ASSUMED_LABEL: ASSUMED_LABEL,
     ENDPOINT: ENDPOINT,
     HASH_PARAM: HASH_PARAM,
     MAX_HEIGHT_M: MAX_HEIGHT_M,
     parseState: parseState,
+    parseStart: parseStart,
+    shareURL: shareURL,
+    offered: offered,
+    nodeEntryHash: nodeEntryHash,
+    nodeEntryAction: nodeEntryAction,
+    heightBadge: heightBadge,
+    copyLink: copyLink,
     serializeState: serializeState,
     requestURL: requestURL,
     clampHeight: clampHeight,
