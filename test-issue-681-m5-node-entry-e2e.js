@@ -19,7 +19,12 @@
  *   4. the same round trip at 360 px portrait on a touch device;
  *   5. no action for a node without a fix;
  *   6. no action, no panel and no request with the profile disabled, even
- *      when the half link is opened directly.
+ *      when the half link is opened directly;
+ *   7. #711: the licence link is hit-testable over its whole 48 px box
+ *      (elementFromPoint, not just the bounding box), copy and close sit
+ *      side by side, the half link stays in the address bar and survives a
+ *      reload, A outside the Map page's node list is still named and
+ *      panned to, and the side pane gives the action a row of its own.
  *
  * Usage:
  *   BASE_URL=http://localhost:13700 node test-issue-681-m5-node-entry-e2e.js
@@ -176,6 +181,27 @@ function profileAnswer(q) {
     });
   }
 
+  /* Every point of the element's box must hit the element itself: a 48 px
+   * box whose padding band is covered by a neighbour is not a 48 px target. */
+  async function hitArea(page, sel) {
+    return page.$eval(sel, (e) => {
+      e.scrollIntoView({ block: 'center' });
+      const r = e.getBoundingClientRect();
+      const miss = [];
+      let probes = 0;
+      for (let y = r.top + 1; y <= r.bottom - 1; y += 2) {
+        for (let x = r.left + 1; x <= r.right - 1; x += 4) {
+          probes++;
+          const h = document.elementFromPoint(x, y);
+          if (!h || !(h === e || e.contains(h))) {
+            miss.push([Math.round(x - r.left), Math.round(y - r.top), h ? (h.getAttribute('class') || h.tagName) : null]);
+          }
+        }
+      }
+      return { w: r.width, h: r.height, probes, missCount: miss.length, miss: miss.slice(0, 4) };
+    });
+  }
+
   async function box(page, sel) {
     return page.$eval(sel, (e) => { const r = e.getBoundingClientRect(); return { w: r.width, h: r.height, x: r.x, y: r.y }; });
   }
@@ -234,6 +260,10 @@ function profileAnswer(q) {
       assert(/other end/.test(s.hint), 'hint = ' + s.hint);
       assert(rec.profile.length === 0, 'measured before B was picked');
     });
+    await step(`${label}: the half link stays in the address bar while B is picked`, async () => {
+      const hash = await page.evaluate(() => location.hash);
+      assert(hash === '#/map?profile=' + PK, 'hash = ' + hash);
+    });
 
     await pickPoint(page, o.touch);
     await page.waitForSelector('[data-testid="tp-chart"] svg.tp-svg', { timeout: 10000 });
@@ -260,6 +290,10 @@ function profileAnswer(q) {
       const c = await box(page, '[data-testid="tp-close"]');
       const t = await box(page, '.tp-title');
       assert(Math.abs(c.y - b.y) < 2, `copy y=${b.y}, close y=${c.y}`);
+      // #711 N6: they share one auto margin, so they sit side by side at the
+      // row's end instead of splitting the free space between them.
+      const between = c.x - (b.x + b.w);
+      assert(between >= 0 && between <= 8.5, `copy→close gap ${between}px`);
       assert(c.y <= t.y + t.h && t.y <= c.y + c.h, `close (y=${c.y}) is not on the title row (y=${t.y})`);
       if (o.touch) await page.tap('[data-testid="tp-copy-link"]'); else await page.click('[data-testid="tp-copy-link"]');
       await page.waitForFunction(() => (document.querySelector('[data-testid="tp-copy-status"]') || {}).textContent === 'Link copied', null, { timeout: 3000 });
@@ -278,6 +312,10 @@ function profileAnswer(q) {
       assert(l.line === ATTRIBUTION, 'credit = ' + l.line);
       const b = await box(page, '[data-testid="tp-credit-link"]');
       assert(b.h >= 48 && b.w >= 48, `licence link target ${b.w}x${b.h}`);
+      // #711 N1: and all of that box is the link's, not a neighbour's.
+      const hit = await hitArea(page, '[data-testid="tp-credit-link"]');
+      assert(hit.probes > 50 && hit.missCount === 0,
+        `licence link ${hit.w}x${hit.h}: ${hit.missCount}/${hit.probes} probes hit something else, e.g. ${JSON.stringify(hit.miss)}`);
     });
     await step(`${label}: no page errors`, async () => {
       assert(rec.errors.length === 0, rec.errors.join(' | '));
@@ -287,7 +325,7 @@ function profileAnswer(q) {
   }
 
   // ── 1–3. Desktop round trip ───────────────────────────────────────────────
-  await roundTrip('desktop', { shot: 'desktop' });
+  await roundTrip('desktop', { viewport: { width: 1280, height: 900 }, shot: 'desktop' });
 
   // ── 4. 360 px portrait, touch ─────────────────────────────────────────────
   await roundTrip('360px touch', { viewport: { width: 360, height: 740 }, touch: true, shot: '360' });
@@ -299,13 +337,20 @@ function profileAnswer(q) {
     const row = `tr[data-key="${nodes.fixed.pk}"]`;
     await page.waitForSelector(row, { timeout: 30000 });
     await page.click(row + ' td:nth-child(2)');
-    await step('side pane: the action sits in the detail header with the right link', async () => {
-      const sel = '#nodesRight .node-detail-role ' + ACTION;
+    await step('side pane: the action has a row of its own under the detail header', async () => {
+      const sel = '#nodesRight .node-detail-actions ' + ACTION;
       await page.waitForSelector(sel, { timeout: 10000 });
       const href = await page.$eval(sel, e => e.getAttribute('href'));
       assert(href === '#/map?profile=' + PK, 'href = ' + href);
       const b = await box(page, sel);
       assert(b.h >= 48 && b.w >= 48, `target ${b.w}x${b.h}`);
+      // #711 N7: the 48 px action no longer wraps under the 20 px
+      // Details/Analytics/Reach buttons and doubles the header row.
+      const role = await box(page, '#nodesRight .node-detail-role');
+      assert(await page.$('#nodesRight .node-detail-role ' + ACTION) === null, 'the action is still inside the button row');
+      assert(role.h < 48, `button row grew to ${role.h}px`);
+      assert(b.y >= role.y + role.h, `action (y=${b.y}) overlaps the button row (ends ${role.y + role.h})`);
+      assert(Math.abs(b.x - role.x) < 1, `action x=${b.x}, row x=${role.x}`);
     });
     await ctx.close();
   }
@@ -320,6 +365,62 @@ function profileAnswer(q) {
       const s = await armedState(page);
       assert(s.open && s.nameA === nodes.fixed.name && s.picking && s.pressed === 'true', JSON.stringify(s));
       assert(rec.profile.length === 0, 'measured half a path');
+    });
+    await ctx.close();
+  }
+
+  // ── 2c. #711 N2: a reload keeps A ────────────────────────────────────────
+  {
+    const { ctx, page, rec } = await newCtx({});
+    await gotoNode(page, PK);
+    await page.click('.node-full-card ' + ACTION);
+    await page.waitForSelector(PANEL + '.is-open', { timeout: 30000 });
+    await page.waitForTimeout(500);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
+    await page.waitForSelector(PANEL + '.is-open', { timeout: 15000 }).catch(() => {});
+    await page.waitForTimeout(800);
+    await step('a reload while B is being picked keeps A and the armed picker', async () => {
+      const s = await armedState(page);
+      assert(s.open && s.nameA === nodes.fixed.name && s.picking && s.pressed === 'true', JSON.stringify(s));
+      const hash = await page.evaluate(() => location.hash);
+      assert(hash === '#/map?profile=' + PK, 'hash = ' + hash);
+      assert(rec.profile.length === 0, 'measured half a path');
+    });
+    await ctx.close();
+  }
+
+  // ── 2d. #711 N4: A outside the Map page's own node list ──────────────────
+  {
+    const { ctx, page, rec } = await newCtx({});
+    // The Map page's list request (it carries lastHeard) comes back without
+    // A, as it does when a persisted area filter or the last-heard window
+    // excludes the node. Node detail's own /api/nodes/<key> is untouched.
+    await ctx.route(url => { const u = new URL(url); return u.pathname === '/api/nodes' && u.searchParams.has('lastHeard'); }, async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      const strip = (list) => (list || []).filter(n => String(n.public_key || '').toLowerCase() !== PK);
+      if (Array.isArray(body)) await route.fulfill({ response, json: strip(body) });
+      else await route.fulfill({ response, json: Object.assign({}, body, { nodes: strip(body.nodes) }) });
+    });
+    await gotoNode(page, PK);
+    await page.evaluate(() => {
+      window.__panned = [];
+      const orig = L.Map.prototype.panTo;
+      L.Map.prototype.panTo = function (ll) { const p = L.latLng(ll); window.__panned.push([p.lat, p.lng]); return orig.apply(this, arguments); };
+    });
+    await page.click('.node-full-card ' + ACTION);
+    await page.waitForSelector(PANEL + '.is-open', { timeout: 30000 });
+    await page.waitForTimeout(1200);
+    await step('A outside the Map list is named and the map pans to it', async () => {
+      const s = await armedState(page);
+      assert(s.open && s.picking, JSON.stringify(s));
+      assert(s.nameA === nodes.fixed.name, `A = "${s.nameA}", want "${nodes.fixed.name}"`);
+      const panned = await page.evaluate(() => window.__panned.slice());
+      assert(panned.some(p => Math.abs(p[0] - nodes.fixed.lat) < 1e-6 && Math.abs(p[1] - nodes.fixed.lon) < 1e-6),
+        'panTo calls ' + JSON.stringify(panned) + ', want ' + [nodes.fixed.lat, nodes.fixed.lon]);
+      assert(rec.profile.length === 0, 'measured half a path');
+      assert(rec.errors.length === 0, rec.errors.join(' | '));
     });
     await ctx.close();
   }
