@@ -428,11 +428,16 @@ function profileFor(q, opts) {
         document.querySelector('[data-testid="tp-model-' + m + '"]').classList.contains('active')));
       assert(active.join(',') === 'dtm', 'the active model button is ' + active.join(','));
     });
+    await ctx.close();
+  }
 
+  {
+    const { ctx, page, rec } = await newCtx({ overrides: { terrain: { model: 'dtm' } } });
+    await gotoMap(page, PAIR_LINK + '&model=both');
     await step('a link that spells the model out still wins', async () => {
-      await page.goto(`${BASE}/#/map?lat=${VIEW.lat}&lon=${VIEW.lon}&zoom=${VIEW.zoom}&${PAIR_LINK}&model=both`,
-        { waitUntil: 'domcontentloaded' });
       await page.waitForSelector('[data-testid="tp-chart"] svg.tp-svg', { timeout: 15000 });
+      assert(rec.profile[0].searchParams.get('model') === 'both',
+        'the request asked for ' + rec.profile[0].searchParams.get('model'));
       const active = await page.evaluate(() => ['both', 'dtm'].filter(m =>
         document.querySelector('[data-testid="tp-model-' + m + '"]').classList.contains('active')));
       assert(active.join(',') === 'both', 'the link was ignored, model is ' + active.join(','));

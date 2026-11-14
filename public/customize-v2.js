@@ -533,6 +533,9 @@
   var _initDone = false;
   var _saveStatus = 'saved'; // 'saved' | 'saving' | 'error'
   var _writeTimer = null;
+  // #681 M6 — the terrain settings the last pipeline run produced, so the
+  // next one can tell whether they actually moved. null = never run.
+  var _lastTerrain = null;
 
   function readOverrides() {
     try {
@@ -918,6 +921,20 @@
       _setBrandHomeUrl(br.homeUrl);
     }
 
+    /* #681 M6 — tell an open Path profile panel that its defaults moved,
+     * and only then: a colour pick is pure CSS and must not cost a
+     * re-measure. This sits at the end of the pipeline rather than in the
+     * field handlers because setOverride is debounced — a listener fired
+     * from there would still read the previous settings off SITE_CONFIG.
+     * The first run only records the baseline. */
+    var terrainNow = JSON.stringify(terrainSettings(effectiveConfig));
+    if (_lastTerrain !== null && _lastTerrain !== terrainNow) {
+      try {
+        window.dispatchEvent(new CustomEvent('terrain-defaults-changed'));
+      } catch (_e) { /* no CustomEvent: the next profile reads them anyway */ }
+    }
+    _lastTerrain = terrainNow;
+
     // Dispatch theme-changed event (bare, no payload — matches existing behavior)
     window.dispatchEvent(new CustomEvent('theme-changed'));
   }
@@ -1293,7 +1310,9 @@
       '#cv2-terrain-model{min-height:48px;touch-action:manipulation}',
       // Colour swatches are a compact 40x32 on a pointer device. On touch
       // they are the tap target, so they take the 48px floor there.
-      '@media(pointer:coarse){.cust-color-row input[type="color"]{width:48px;height:48px}}',
+      // flex:none so a narrow row cannot squeeze the swatch below the
+      // floor: the hex text beside it competes for the same width.
+      '@media(pointer:coarse){.cust-color-row input[type="color"]{width:48px;height:48px;min-width:48px;flex:none}}',
       '.cv2-override-dot{color:var(--link-color);cursor:pointer;font-size:10px;margin-left:4px;vertical-align:middle;title:"Reset to server default"}',
       '.cv2-override-dot:hover{color:var(--status-red)}',
       '.cust-node-dot{display:inline-block;width:16px;height:16px;border-radius:50%;vertical-align:middle}',
@@ -1329,15 +1348,6 @@
     document.head.appendChild(_styleEl);
   }
 
-  /* #681 M6 — tell an open Path profile panel that its defaults moved.
-   * Fired only for an actual terrain change, so the panel never re-measures
-   * because somebody dragged a colour picker. */
-  function _notifyTerrainDefaults() {
-    try {
-      window.dispatchEvent(new CustomEvent('terrain-defaults-changed'));
-    } catch (_e) { /* no CustomEvent: the next profile picks it up anyway */ }
-  }
-
   function _tabBadge(section) {
     var n = _countOverrides(section);
     return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : '';
@@ -1367,6 +1377,45 @@
     }).join('') + '</div>';
   }
 
+  /* #681 M6 — a colour an <input type="color"> will take: 6-digit hex only.
+   * An rgb()/rgba() value (--terrain-clutter's default is one) has to be
+   * converted, and its alpha is dropped because the native picker has no
+   * alpha channel; the text beside the swatch keeps the real value. */
+  function _cssColorToHex(val) {
+    if (typeof val !== 'string') return '';
+    var s = val.trim();
+    if (/^#[0-9a-fA-F]{6}$/.test(s)) return s;
+    if (/^#[0-9a-fA-F]{8}$/.test(s)) return s.slice(0, 7);
+    if (/^#[0-9a-fA-F]{3,4}$/.test(s)) return '#' + s[1] + s[1] + s[2] + s[2] + s[3] + s[3];
+    var m = s.match(/^rgba?\(([^)]*)\)$/i);
+    if (!m) return '';
+    var parts = m[1].split(/[\s,/]+/).filter(function (x) { return x !== ''; });
+    if (parts.length < 3) return '';
+    var hex = '#';
+    for (var i = 0; i < 3; i++) {
+      var n = parseFloat(parts[i]);
+      if (!isFinite(n)) return '';
+      if (parts[i].charAt(parts[i].length - 1) === '%') n = n * 255 / 100;
+      n = Math.max(0, Math.min(255, Math.round(n)));
+      hex += (n < 16 ? '0' : '') + n.toString(16);
+    }
+    return hex;
+  }
+
+  /* #681 M6 — what a theme key resolves to on the page right now. The six
+   * chart colours have no server default by design (they are chart ink, not
+   * page chrome), and a row with no value renders a black swatch and an
+   * empty hex — showing a colour the chart is not using. style.css holds
+   * the real defaults for light and dark, so read them back rather than
+   * repeating them here: no colour is hard-coded in this file. */
+  function _cssVarValue(key) {
+    var name = THEME_CSS_MAP[key];
+    if (!name || typeof getComputedStyle !== 'function') return '';
+    try {
+      return (getComputedStyle(document.documentElement).getPropertyValue(name) || '').trim();
+    } catch (_e) { return ''; }
+  }
+
   function _renderColorRow(key, section, effectiveVal, serverDefault) {
     var isFont = key === 'font' || key === 'mono';
     var val = effectiveVal || '';
@@ -1377,9 +1426,9 @@
       inputHtml = '<input type="text" data-cv2-field="' + section + '.' + key + '" value="' + escAttr(val) + '" style="width:160px;font-size:11px;font-family:var(--mono);padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--text)">';
     } else {
       // Ensure hex is 7 chars for color input
-      var hexVal = val.length === 7 ? val : (val.length === 4 ? '#' + val[1] + val[1] + val[2] + val[2] + val[3] + val[3] : val);
-      inputHtml = '<input type="color" data-cv2-field="' + section + '.' + key + '" value="' + hexVal + '">' +
-        '<span class="cust-hex">' + val + '</span>';
+      var hexVal = val.length === 7 ? val : (val.length === 4 ? '#' + val[1] + val[1] + val[2] + val[2] + val[3] + val[3] : _cssColorToHex(val));
+      inputHtml = '<input type="color" data-cv2-field="' + section + '.' + key + '" value="' + escAttr(hexVal) + '">' +
+        '<span class="cust-hex">' + esc(val) + '</span>';
     }
     return '<div class="cust-color-row">' +
       '<div><label>' + (THEME_LABELS[key] || key) + dot + '</label>' +
@@ -1474,7 +1523,10 @@
     // list stays a list of page colours.
     var terrainRows = '';
     for (var t = 0; t < TERRAIN_COLOR_KEYS.length; t++) {
-      terrainRows += _renderColorRow(TERRAIN_COLOR_KEYS[t], section, current[TERRAIN_COLOR_KEYS[t]], serverCurrent[TERRAIN_COLOR_KEYS[t]]);
+      var tk = TERRAIN_COLOR_KEYS[t];
+      // No server default for these, so fall back to what the page is
+      // actually drawing with (style.css), not to an empty black swatch.
+      terrainRows += _renderColorRow(tk, section, current[tk] || _cssVarValue(tk), serverCurrent[tk]);
     }
 
     return '<div class="cust-panel' + (_activeTab === 'theme' ? ' active' : '') + '" data-panel="theme">' +
@@ -2513,7 +2565,6 @@
         }
         if (raw === TERRAIN_DEFAULTS[key]) clearOverride('terrain', key);
         else setOverride('terrain', key, raw);
-        _notifyTerrainDefaults();
       });
     });
 
@@ -2523,7 +2574,6 @@
         if (TERRAIN_MODELS.indexOf(sel.value) === -1) return;
         if (sel.value === TERRAIN_DEFAULTS.model) clearOverride('terrain', 'model');
         else setOverride('terrain', 'model', sel.value);
-        _notifyTerrainDefaults();
       });
     });
 
@@ -3128,6 +3178,8 @@
     validateShape: validateShape,
     applyCSS: applyCSS,
     isValidColor: isValidColor,
+    // #681 M6 — exposed for tests; see test-issue-681-m6-customizer-terrain.js.
+    cssColorToHex: _cssColorToHex,
     isValidHomeUrl: isValidHomeUrl,
     isOverridden: _isOverridden,
     // #1496 — full reset (not just STORAGE_KEY). See _resetAll() above.

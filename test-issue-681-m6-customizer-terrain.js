@@ -177,6 +177,28 @@ test('a dark override does not leak into light mode', () => {
     'the dark line colour was applied in light mode');
 });
 
+test('the swatch falls back to the colour the page actually draws with', () => {
+  // The six chart colours have no server default on purpose, so without a
+  // fallback every row would render a black swatch and an empty hex — a
+  // colour the chart is not using. style.css is the source, read back
+  // through getComputedStyle; nothing is hard-coded here or there.
+  const { api, ctx } = load();
+  const seen = [];
+  ctx.getComputedStyle = () => ({ getPropertyValue: (n) => { seen.push(n); return ' rgba(84, 124, 92, 0.55) '; } });
+  ctx.window.getComputedStyle = ctx.getComputedStyle;
+  assert.strictEqual(typeof api.cssColorToHex, 'function');
+  // The conversion the <input type="color"> needs; it has no alpha channel,
+  // so the alpha is dropped for the swatch only.
+  assert.strictEqual(api.cssColorToHex('rgba(84, 124, 92, 0.55)'), '#547c5c');
+  assert.strictEqual(api.cssColorToHex('rgb(154, 138, 115)'), '#9a8a73');
+  assert.strictEqual(api.cssColorToHex('#9a8a73'), '#9a8a73');
+  assert.strictEqual(api.cssColorToHex('#abc'), '#aabbcc');
+  assert.strictEqual(api.cssColorToHex('#9a8a73ff'), '#9a8a73');
+  ['', 'not a colour', 'rgb(1,2)', 'url(x)', null, undefined, 42].forEach((v) => {
+    assert.strictEqual(api.cssColorToHex(v), '', 'accepted ' + JSON.stringify(v));
+  });
+});
+
 // ── 2. Validation ─────────────────────────────────────────────────────────
 
 console.log('\n=== validation ===');
@@ -351,7 +373,47 @@ test('no customizer control is wired to a server-side DHM value', () => {
   assert.ok(!/['"]token['"]/.test(CODE), 'customizer code names a token key');
 });
 
-// ── 5. Presets ───────────────────────────────────────────────────────────
+// ── 5. The live-update signal ────────────────────────────────────────────
+
+console.log('\n=== the terrain-defaults-changed signal ===');
+
+function events(ctx) {
+  const seen = [];
+  ctx.window.dispatchEvent = (ev) => { seen.push(ev && ev.type); return true; };
+  return seen;
+}
+
+test('a changed antenna default announces itself once the pipeline has run', () => {
+  const { api, ctx } = load({ server: {} });
+  const seen = events(ctx);
+  api.writeOverrides({ terrain: { heightRepeater: 45 } });
+  api.init({});
+  assert.ok(seen.indexOf('terrain-defaults-changed') >= 0,
+    'no signal for a changed antenna default: ' + seen.join(', '));
+});
+
+test('a chart colour costs no re-measure', () => {
+  // A colour is pure CSS. Announcing it would make every drag of a colour
+  // picker re-request a profile.
+  const { api, ctx } = load({ server: {} });
+  api.init({});
+  const seen = events(ctx);
+  api.applyCSS(api.computeEffective({}, { theme: { terrainFill: '#123456' } }), { theme: { terrainFill: '#123456' } });
+  assert.strictEqual(seen.indexOf('terrain-defaults-changed'), -1,
+    'a colour change announced a terrain default change');
+  assert.ok(seen.indexOf('theme-changed') >= 0, 'the usual theme-changed event went missing');
+});
+
+test('an unchanged section is silent', () => {
+  const { api, ctx } = load({ server: {} });
+  api.writeOverrides({ terrain: { heightRepeater: 45 } });
+  api.init({});
+  const seen = events(ctx);
+  api.applyCSS(api.computeEffective({}, api.readOverrides()), api.readOverrides());
+  assert.strictEqual(seen.indexOf('terrain-defaults-changed'), -1, 'a no-op run announced a change');
+});
+
+// ── 6. Presets ───────────────────────────────────────────────────────────
 
 console.log('\n=== presets ===');
 
