@@ -118,6 +118,7 @@
     "_comment": "#1488/#1506 — outline around each map marker (live + map pages). Defaults restored to v3.7.2 visual (solid white, 2px). 'color' accepts any CSS color (hex, rgb, rgba); use rgba() or drop 'opacity' below ~0.5 to soften the outline when hundreds of nodes feel overwhelming. 'width' is the SVG stroke width (0 hides the outline entirely). Operators can override per-browser via the in-app Theme Customizer (Colors tab → Marker Stroke)."
   },
   "map": {
+    "_comment": "Key matching: the block names directly under map (tiles, dhm, heritage, ...) must be spelled exactly as documented. The server reads them exactly (a case variant such as \"DHM\" or \"Heritage\" is ignored, with a warning for the typed blocks), and the browser reads the map.tiles keys exactly. Field names inside the typed blocks (map.dhm, map.heritage, map.dhm.profile.share) are decoded by Go JSON and also match a different case, but use the documented spelling anyway.",
     "dhm": {
       "_comment": "#680 — optional 'Terrain (DHM hillshade)' overlay on the Map and Live pages (Denmark only). Needs a personal Dataforsyningen token (free, from dataforsyningen.dk). The token stays on the server: browsers fetch tiles from /api/map/dhm/wms, which adds it, and it is never sent to clients, written to responses or logged. Off unless enabled is true and token is non-empty; otherwise the overlay is not offered and the endpoint returns 404.",
       "_comment_layer": "#687 — which DHM hillshade the server fetches: 'exaggerated' (default; the clearer quickDHM_skyggekort_terraen_overdrevet from wms/dhm_temp) or 'terrain' (dhm_terraen_skyggekort from dhm_DAF). With 'exaggerated', any tile that fails upstream is served from the terrain layer instead. Any other value logs a warning and uses 'terrain'. Browsers are unaffected either way.",
@@ -152,7 +153,7 @@
       "enabled": false
     },
     "tiles": {
-      "_comment_defaults": "#332 — the built-in defaults are 'osm-dark' / 'osm-standard' (keyless OpenStreetMap, tiles to zoom 18). Set darkDefault/lightDefault to any enabled style id to override; they take priority over the built-in fallback. Carto is NOT the default any more: since August 2026 keyless Carto raster tiles come back HTTP 200 with 'API KEY REQUIRED' stamped into the PNG, and CoreScope has no Carto basemap-key plumbing.",
+      "_comment_defaults": "#332 — the built-in defaults are 'osm-dark' / 'osm-standard' (keyless OpenStreetMap, tiles to zoom 18). Set darkDefault/lightDefault to any enabled style id to override; they take priority over the built-in fallback. A default whose provider is not enabled (opentopomap, usgs and esri are opt-in) is skipped, as if it were not set. Carto is NOT the default any more: since August 2026 keyless Carto raster tiles come back HTTP 200 with 'API KEY REQUIRED' stamped into the PNG, and CoreScope has no Carto basemap-key plumbing.",
       "_comment_legacy": "Legacy raw tile-URL overrides — \"tiles.dark\" / \"tiles.light\" at the top level, or \"darkUrl\" / \"lightUrl\" here — are still honoured: they apply when no provider was chosen in the browser and no darkDefault/lightDefault is set, i.e. precedence is browser choice > darkDefault/lightDefault > raw URL > built-in fallback. A raw URL carries no vendor metadata, so such a map shows the generic \"\u00a9 OpenStreetMap contributors\" credit (no vendor-specific or licence attribution), is never CSS-inverted in dark mode, and is capped at zoom 18 like the built-in OpenStreetMap default. Prefer darkDefault/lightDefault with a registered style id when you need the correct credit, licence link or a different zoom ceiling.",
       "darkDefault": "osm-dark",
       "lightDefault": "osm-standard",
@@ -179,6 +180,10 @@
         },
         "_comment_usgs": "USGS topographical tile providers (USGS Topo, USGS Imagery). Enabling these makes USERS' BROWSERS fetch tiles from basemap.nationalmap.gov, exposing their IP and approximate viewing area to that third party. Limited to zoom level 16, and The National Map only serves the United States and its territories — elsewhere these layers render blank with no on-screen explanation.",
         "usgs": {
+          "enabled": false
+        },
+        "_comment_esri": "Esri tile providers (Esri Dark Gray Canvas, Esri World Imagery). Off unless enabled is true. Since #728 this also gates Esri Dark Gray Canvas, which used to be offered unconditionally: a config whose darkDefault or lightDefault names an esri-* style must set enabled to true, otherwise browsers skip that default (and log a console warning), and the server logs a warning at startup. The map then uses the next fallback (a legacy darkUrl/lightUrl, else osm-dark / osm-standard). Enabling these makes USERS' BROWSERS fetch tiles from server.arcgisonline.com, exposing their IP and approximate viewing area to Esri. The tiles are licensed under the Esri Master License Agreement, and Esri says this public endpoint is for licensed ArcGIS use; check that your use is covered before enabling. The credit must stay on the map. World Imagery is an aerial photo, never inverted in dark mode; style ids esri-imagery (light) and esri-imagery-dark (dark), tiles to zoom 19.",
+        "esri": {
           "enabled": false
         }
       }

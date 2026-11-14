@@ -420,9 +420,15 @@
     var bar = document.getElementById('vcrBar');
     var page = document.querySelector('.live-page');
     if (!bar || !page) return;
+    // #728: the attribution control the tile registry gives Live (the base
+    // map's credit, plus each overlay's while it is on) sits right on top of
+    // the VCR bar. Its height is published too, as --live-credit-height, so
+    // the same overlays clear it and never cover the credit.
+    var credit = document.querySelector('#liveMap .leaflet-control-attribution');
     function publish() {
       var h = Math.ceil(bar.getBoundingClientRect().height) || 58;
       page.style.setProperty('--vcr-bar-height', h + 'px');
+      page.style.setProperty('--live-credit-height', (credit ? Math.ceil(credit.getBoundingClientRect().height) : 0) + 'px');
       // #1568 round-2: also publish on :root so JS reading
       // getComputedStyle(document.documentElement).getPropertyValue(
       // '--vcr-bar-height') sees the measured value (E2E assertions,
@@ -433,7 +439,7 @@
     publish();
     var ro = null;
     if (typeof ResizeObserver === 'function') {
-      try { ro = new ResizeObserver(publish); ro.observe(bar); } catch (_) { ro = null; }
+      try { ro = new ResizeObserver(publish); ro.observe(bar); if (credit) ro.observe(credit); } catch (_) { ro = null; }
     }
     window.addEventListener('resize', publish);
     if (window.visualViewport) {
@@ -1832,7 +1838,9 @@
     function _liveSyncDarkTiles(dark) {
       const r = _liveResolveTile(dark);
       tileLayer.setUrl(r.url);
-      if (tileLayer.options) tileLayer.options.attribution = r.attribution;
+      // The registry swaps the credit in Live's attribution control too.
+      if (typeof window.MC_setLayerAttribution === 'function') window.MC_setLayerAttribution(map, tileLayer, r.attribution);
+      else if (tileLayer.options) tileLayer.options.attribution = r.attribution;
       if (dark && r.refUrl) {
         if (!_liveDarkRefLayer) {
           _liveDarkRefLayer = L.tileLayer(r.refUrl, { maxZoom: 19, attribution: r.attribution }).addTo(liveAutoLayerGroup);

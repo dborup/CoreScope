@@ -6377,6 +6377,20 @@ body.embed #app.app-fixed {
    has set both antenna heights. */
 .tp-chip-assumed { border-color: var(--warning); color: var(--warning); font-style: italic; }
 .tp-chip[hidden] { display: none; }
+/* #729 — the surface (buildings/trees) verdict. It takes the warn tone from
+   .tp-chip-warn, which is the same --warning pair the assumed caveat already
+   holds to 4.5:1 in both themes; only the wrapping differs, because
+   "Buildings/trees: Blocked" is the longest chip in the row. */
+.tp-chip-surface { white-space: normal; }
+/* The line that explains what a surface verdict means for a radio link.
+   Shown only with the chip it explains, so it is hidden by default. */
+.tp-surface-note {
+  margin: 2px 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+.tp-surface-note[hidden] { display: none; }
 
 /* #681 M5 — copy link sits left of close; the pair shares the auto margin. */
 .tp-copy { margin-left: auto; }

@@ -884,6 +884,7 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		cfg = candidate
 		cfg.NormalizeTimestampConfig()
 		cfg.migrateDeprecatedConfig()
+		cfg.warnGatedTileDefaults(log.Printf)
 		cfg.extractTypedMapBlocks()
 		cfg.applyListLimitsDefaults()
 		cfg.RegionGroups = normalizeRegionGroups(cfg.RegionGroups, log.Printf)
@@ -1114,6 +1115,37 @@ func (c *Config) migrateDeprecatedConfig() {
 	}
 	if migrated {
 		fmt.Fprintf(os.Stderr, "[deprecated] Top-level 'mapDarkTileProvider' and 'tiles' keys in config.json are deprecated and will be ignored in v3.5.0 (see #1165). Please move them into 'map': { 'tiles': { ... } }.\n")
+	}
+}
+
+// warnGatedTileDefaults logs when map.tiles.darkDefault or lightDefault
+// names an Esri style while map.tiles.providers.esri.enabled is not true.
+// Since #728 every esri-* style is opt-in, and the browser then skips that
+// default and shows the fallback base map; an operator who upgraded with
+// Esri Dark Gray as the dark default should find out from the server log,
+// not from a changed map. It runs after migrateDeprecatedConfig, so a
+// legacy top-level mapDarkTileProvider is checked too. map.tiles is passed
+// to the browser as-is; the server only looks, and reads the keys exactly
+// as map-tile-providers.js does: exact-case keys (encoding/json would match
+// them case-insensitively), only the JSON boolean true enables Esri, and a
+// default that is not a string is ignored without hiding the other one.
+func (c *Config) warnGatedTileDefaults(logf func(string, ...interface{})) {
+	if c == nil {
+		return
+	}
+	tiles, ok := c.Map["tiles"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	providers, _ := tiles["providers"].(map[string]interface{})
+	esri, _ := providers["esri"].(map[string]interface{})
+	if enabled, _ := esri["enabled"].(bool); enabled {
+		return
+	}
+	for _, key := range []string{"darkDefault", "lightDefault"} {
+		if id, _ := tiles[key].(string); strings.HasPrefix(id, "esri-") {
+			logf("[config] map.tiles.%s is %q, but Esri styles are opt-in since #728 and map.tiles.providers.esri.enabled is not true: browsers will skip it and show the fallback base map. Set map.tiles.providers.esri.enabled to true to keep it.", key, id)
+		}
 	}
 }
 

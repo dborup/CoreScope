@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/xml"
 	"errors"
+	"io"
 	"math"
 	"strconv"
 	"strings"
@@ -85,7 +86,8 @@ var utf8BOM = []byte{0xEF, 0xBB, 0xBF}
 // points come back for both neighbours) are dropped.
 func Parse(body []byte, cell Cell) (Page, error) {
 	var c gmlCollection
-	if err := xml.Unmarshal(bytes.TrimPrefix(body, utf8BOM), &c); err != nil {
+	dec := xml.NewDecoder(bytes.NewReader(bytes.TrimPrefix(body, utf8BOM)))
+	if err := dec.Decode(&c); err != nil || !onlyTrailingMisc(dec) {
 		return Page{}, ErrBadResponse
 	}
 	returned, err := strconv.Atoi(c.NumberReturned)
@@ -111,6 +113,31 @@ func Parse(body []byte, cell Cell) (Page, error) {
 		}
 	}
 	return page, nil
+}
+
+// onlyTrailingMisc consumes dec to EOF and reports whether nothing but
+// whitespace, comments and processing instructions follows the root.
+// Decode stops at the root's end tag, so without this a second root, text
+// or an unfinished tag after it would be accepted (#748).
+func onlyTrailingMisc(dec *xml.Decoder) bool {
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return true
+		}
+		if err != nil {
+			return false
+		}
+		switch t := tok.(type) {
+		case xml.Comment, xml.ProcInst:
+		case xml.CharData:
+			if len(bytes.TrimSpace(t)) != 0 {
+				return false
+			}
+		default: // StartElement, EndElement, Directive
+			return false
+		}
+	}
 }
 
 // row converts f, reporting false if a required field is unusable.
