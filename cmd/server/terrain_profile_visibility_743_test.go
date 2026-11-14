@@ -91,17 +91,22 @@ func TestTerrainProfile743_LookupFailureFailsClosed(t *testing.T) {
 }
 
 // Every node endpoint costs exactly one name lookup, whether the identity
-// is visible, hidden, unknown or unpositioned, so the work done does not
-// tell a hidden identity apart from one that does not exist (as #410).
-// Free points cost none.
+// is visible, alias-hidden, blacklisted, unknown or unpositioned, so the
+// work done does not tell a hidden identity apart from one that does not
+// exist (as #410). The blacklisted key is configured and requested in mixed
+// case: a blacklist hit must not short-circuit the lookup. Free points cost
+// none.
 func TestTerrainProfile743_OneLookupPerNodeEndpoint(t *testing.T) {
 	env, _, pk := terrain743Env(t, "public-observer")
 	hidden, unplaced := strings.Repeat("b", 64), strings.Repeat("c", 64)
+	blacklisted := strings.Repeat("eE", 32)
 	if _, err := env.srv.db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
 		VALUES (?, 'x', 'repeater', 56.2, 10.2, datetime('now'), datetime('now'), 1),
-		       (?, 'y', 'repeater', NULL, NULL, datetime('now'), datetime('now'), 1)`, hidden, unplaced); err != nil {
+		       (?, 'y', 'repeater', NULL, NULL, datetime('now'), datetime('now'), 1),
+		       (?, 'z', 'repeater', 56.3, 10.3, datetime('now'), datetime('now'), 1)`, hidden, unplaced, strings.ToLower(blacklisted)); err != nil {
 		t.Fatal(err)
 	}
+	env.srv.cfg.SetNodeBlacklist([]string{strings.ToUpper(blacklisted[:32]) + blacklisted[32:]})
 	if _, err := env.srv.db.conn.Exec(`INSERT INTO observers (id, name) VALUES (?, 'private-o')`, hidden); err != nil {
 		t.Fatal(err)
 	}
@@ -117,12 +122,12 @@ func TestTerrainProfile743_OneLookupPerNodeEndpoint(t *testing.T) {
 	for _, c := range []struct {
 		pk   string
 		code int
-	}{{pk, 200}, {hidden, 404}, {unplaced, 404}, {strings.Repeat("d", 64), 404}} {
+	}{{pk, 200}, {hidden, 404}, {blacklisted, 404}, {unplaced, 404}, {strings.Repeat("d", 64), 404}} {
 		looked = nil
 		if w := env.get(pathQuery(c.pk, b)); w.Code != c.code {
 			t.Fatalf("%s…: status %d, want %d: %s", c.pk[:4], w.Code, c.code, w.Body.String())
 		}
-		if len(looked) != 1 || len(looked[0]) != 1 || looked[0][0] != c.pk {
+		if len(looked) != 1 || len(looked[0]) != 1 || looked[0][0] != strings.ToLower(c.pk) {
 			t.Fatalf("%s…: name lookups %v, want exactly one for the endpoint", c.pk[:4], looked)
 		}
 	}
@@ -137,8 +142,10 @@ func TestTerrainProfile743_OneLookupPerNodeEndpoint(t *testing.T) {
 // endpoint (at most two per request), and none for free points or when no
 // hidden-name prefix is configured. Measured at a realistic scale — 2,000
 // nodes, 500 observers — with a prefix configured, so the query really
-// runs; the lookup must stay a small fraction of a warm (cached) serve.
-// Run with -v for the numbers.
+// runs. Run with -v for the numbers. The timing check is informational
+// only: a warm serve contains the lookup, so lookup < warm holds by
+// construction and does not catch a cost regression. The guard against
+// extra work is the lookup count in OneLookupPerNodeEndpoint.
 func TestTerrainProfile743_VisibilityLookupCost(t *testing.T) {
 	env, _, pk := terrain743Env(t, "public-observer")
 	tx, err := env.srv.db.conn.Begin()

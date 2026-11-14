@@ -652,16 +652,19 @@ func (p *terrainProfiler) noteRefusal() {
 // resolveTerrainEnd resolves a public key to a positioned, visible node,
 // or passes a point through. Hidden, unknown and unpositioned nodes all
 // look the same: not found. Visibility is the identity policy Reach uses
-// (isIdentityHidden: blacklists plus the live node, inactive-node and
-// observer-alias names, #743), decided before any coordinate is read. The
-// lookup runs for every node endpoint, known or not, so the work done does
-// not tell a hidden identity apart from a missing one; a failed lookup
-// fails closed.
+// (identityHidden over hiddenIdentityNames: blacklists plus the live node,
+// inactive-node and observer-alias names, #743), decided before any
+// coordinate is read. The lookup runs for every node endpoint, known or
+// not, so the work done does not tell a hidden identity apart from a
+// missing one; a failed lookup fails closed. Unlike isIdentityHidden it
+// does not skip the lookup for a blacklisted key, which would make
+// blacklisted endpoints measurably cheaper than unknown ones.
 func (s *Server) resolveTerrainEnd(ctx context.Context, ref terrainRef) (terrainEnd, bool) {
 	if ref.pubkey == "" {
 		return terrainEnd{pt: ref.pt, kind: "point"}, true
 	}
-	if hidden, err := s.isIdentityHidden(ctx, ref.pubkey); err != nil || hidden {
+	names, err := s.hiddenIdentityNames(ctx, []string{ref.pubkey})
+	if err != nil || identityHidden(s.cfg, ref.pubkey, names[strings.ToLower(ref.pubkey)]...) {
 		if err != nil && s.terrain != nil {
 			s.terrain.logf("[dhm] terrain profile: node visibility lookup failed; endpoint refused")
 		}
