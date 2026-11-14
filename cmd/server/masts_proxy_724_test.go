@@ -482,7 +482,7 @@ func TestMastsPerIPLimit(t *testing.T) {
 		t.Fatalf("Retry-After %q", w.Header().Get("Retry-After"))
 	}
 	if n := f.hits.Load(); n != 2 {
-		t.Fatalf("upstream hits %d, want 2 (the refused miss went upstream)", n)
+		t.Fatalf("upstream hits %d, want 2 (the refused miss must not go upstream)", n)
 	}
 	// A cached cell is not charged.
 	if w := mastsGet(p, cellQuery(mastedb.Cell{E: 263, N: 3127}), clientA); w.Code != 200 {
@@ -584,7 +584,9 @@ func TestMastsAdmissionRefusesAndRefunds(t *testing.T) {
 			mastsGet(p, cellQuery(mastedb.Cell{E: 263 + i, N: 3127}), clientB)
 		}(i)
 	}
-	waitMasts(t, func() bool { return len(p.admit) == 2 })
+	// Admission is taken before the worker starts, so also wait until both
+	// fetches have reached the fake.
+	waitMasts(t, func() bool { return p.admit.InUse() == 2 && f.inFlight.Load() == 2 })
 	for i := 0; i < 5; i++ {
 		w := mastsGet(p, cellQuery(mastedb.Cell{E: 300, N: 3127}), clientA)
 		if w.Code != http.StatusServiceUnavailable {
@@ -595,7 +597,7 @@ func TestMastsAdmissionRefusesAndRefunds(t *testing.T) {
 		}
 	}
 	if n := f.hits.Load(); n != 2 {
-		t.Fatalf("upstream hits %d, want 2 (a refused fetch went upstream)", n)
+		t.Fatalf("upstream hits %d, want 2 (a refused fetch must not go upstream)", n)
 	}
 	if !strings.Contains(logs.String(), "map.masts.maxInFlight") {
 		t.Fatalf("no refusal log line: %q", logs.String())
@@ -702,7 +704,7 @@ func TestMastsFailsClosedOnBadUpstream(t *testing.T) {
 				}
 			}
 			if n := f.hits.Load(); n != 2 {
-				t.Fatalf("upstream hits %d, want 2 (a failure was cached)", n)
+				t.Fatalf("upstream hits %d, want 2 (a failure must not be cached)", n)
 			}
 			if p.cache.Len() != 0 {
 				t.Fatal("a failure was cached")
@@ -834,7 +836,7 @@ func TestMastsClientConfig(t *testing.T) {
 		got = append(got, k)
 	}
 	sort.Strings(got)
-	if want := []string{"attribution", "cellSizeM", "enabled", "minZoom", "sourceUrl", "url"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"attribution", "cellExtent", "cellSizeM", "enabled", "minZoom", "sourceUrl", "url"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("masts block keys %v, want %v", got, want)
 	}
 	var c MastsClientConfig
@@ -842,7 +844,7 @@ func TestMastsClientConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := MastsClientConfig{Enabled: true, URL: "/api/masts", MinZoom: 13, CellSizeM: 2000,
-		Attribution: mastedb.Attribution, SourceURL: mastedb.SourceURL}
+		Attribution: mastedb.Attribution, SourceURL: mastedb.SourceURL, CellExtent: [4]int{219, 3017, 462, 3209}}
 	if c != want {
 		t.Fatalf("masts block %+v, want %+v", c, want)
 	}
@@ -877,7 +879,7 @@ func TestMastsConfigLoadedAndStripped(t *testing.T) {
 		t.Fatal("map.tiles lost while extracting masts")
 	}
 	p := newMastsProxyFromConfig(cfg)
-	if p == nil || cap(p.admit) != 4 {
+	if p == nil || p.admit.Cap() != 4 {
 		t.Fatalf("proxy from config: %+v", p)
 	}
 }
@@ -1006,7 +1008,7 @@ func BenchmarkMastsMissFullCell(b *testing.B) {
 	opts := defaultMastsProxyOptions()
 	opts.client.BaseURL = up.URL
 	opts.cacheTTL = time.Nanosecond // every request is a miss
-	opts.rateLimitPerMin = 0 // one client making many misses
+	opts.rateLimitPerMin = 0        // one client making many misses
 	p := newMastsProxy(MastsConfig{Enabled: true}, opts)
 	u := &url.URL{Path: "/api/masts", RawQuery: cellQuery(testMastsCell)}
 	b.ReportAllocs()

@@ -59,6 +59,8 @@
     terrainFill: '--terrain-fill', terrainClutter: '--terrain-clutter',
     losLine: '--los-line', fresnel100: '--fresnel-100',
     fresnel60: '--fresnel-60', profileBlocked: '--profile-blocked',
+    // #724 M3 — the antenna sites map layer (canvas markers + popup).
+    mastSite: '--mast-site', mastInterference: '--mast-interference',
     font: '--font', mono: '--mono'
   };
 
@@ -66,9 +68,11 @@
   // so they must stay out of preset detection: an operator who recolours
   // the profile chart has not stopped using the preset they picked.
   var TERRAIN_COLOR_KEYS = ['terrainFill', 'terrainClutter', 'losLine', 'fresnel100', 'fresnel60', 'profileBlocked'];
+  // #724 M3 — likewise outside preset detection: no preset defines them.
+  var MASTS_COLOR_KEYS = ['mastSite', 'mastInterference'];
 
   var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) {
-    return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1;
+    return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1 && MASTS_COLOR_KEYS.indexOf(k) === -1;
   });
 
   // ── Brand logo swap helper (PR #1137) ──
@@ -331,6 +335,7 @@
     terrainFill: 'Terrain (DTM)', terrainClutter: 'Trees & Buildings (DSM)',
     losLine: 'Line of Sight', fresnel100: 'Fresnel Zone', fresnel60: 'Fresnel 60 %',
     profileBlocked: 'Obstruction',
+    mastSite: 'Antenna Site', mastInterference: 'Interference Ring',
     font: 'Body Font', mono: 'Mono Font'
   };
 
@@ -355,6 +360,8 @@
     fresnel100: 'Path profile: the outline of the first Fresnel zone',
     fresnel60: 'Path profile: the 60 % criterion a link has to clear',
     profileBlocked: 'Path profile: where terrain rises into the zone',
+    mastSite: 'Map: every Mastedatabasen antenna site (mast, tower or rooftop)',
+    mastInterference: 'Map: the ring around sites with a 700/800/900 MHz transmitter',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
   };
 
@@ -1587,6 +1594,11 @@
       // actually drawing with (style.css), not to an empty black swatch.
       terrainRows += _renderColorRow(tk, section, current[tk] || _cssVarValue(tk), serverCurrent[tk]);
     }
+    var mastsRows = '';
+    for (var mi = 0; mi < MASTS_COLOR_KEYS.length; mi++) {
+      var mk = MASTS_COLOR_KEYS[mi];
+      mastsRows += _renderColorRow(mk, section, current[mk] || _cssVarValue(mk), serverCurrent[mk]);
+    }
 
     return '<div class="cust-panel' + (_activeTab === 'theme' ? ' active' : '') + '" data-panel="theme">' +
       _renderPresets() +
@@ -1595,6 +1607,7 @@
       basicRows +
       '<details class="cust-advanced"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Advanced (' + ADVANCED_KEYS.length + ' options)</summary>' + advancedRows + '</details>' +
       '<details class="cust-terrain-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Terrain profile chart (' + TERRAIN_COLOR_KEYS.length + ' options)</summary>' + terrainRows + '</details>' +
+      '<details class="cust-masts-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Antenna sites map layer (' + MASTS_COLOR_KEYS.length + ' options)</summary>' + mastsRows + '</details>' +
       '<details class="cust-fonts" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Fonts</summary>' + fontRows + '</details>' +
     '</div>';
   }
@@ -3264,6 +3277,7 @@
     // #681 M6 — exposed for tests; see test-issue-681-m6-customizer-terrain.js.
     TERRAIN_DEFAULTS: TERRAIN_DEFAULTS,
     TERRAIN_COLOR_KEYS: TERRAIN_COLOR_KEYS,
+    MASTS_COLOR_KEYS: MASTS_COLOR_KEYS,
     VALID_SECTIONS: VALID_SECTIONS,
     isValidAntennaHeight: isValidAntennaHeight,
     terrainSettings: terrainSettings

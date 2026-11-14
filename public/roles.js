@@ -826,6 +826,8 @@
     window.MC_DHM_CFG = cfg.dhm || null;
     // #723 — protected ancient monuments overlay; absent unless map.heritage is on.
     window.MC_HERITAGE_CFG = cfg.heritage || null;
+    // #724 — antenna sites overlay; absent unless map.masts is on.
+    window.MC_MASTS_CFG = cfg.masts || null;
     if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);
     if (cfg.snrThresholds) Object.assign(SNR_THRESHOLDS, cfg.snrThresholds);
     if (cfg.distThresholds) Object.assign(DIST_THRESHOLDS, cfg.distThresholds);

@@ -1,7 +1,7 @@
 /* tests/map-overlay-sandbox.js — vm sandbox for the optional map overlays
  * in public/map-tile-providers.js (#680 DHM terrain, #723 protected ancient
- * monuments), shared by test-issue-680-dhm-terrain.js and
- * test-issue-723-heritage-overlay.js.
+ * monuments, #724 antenna sites), shared by test-issue-680-dhm-terrain.js,
+ * test-issue-723-heritage-overlay.js and test-issue-724-masts-layer.js.
  *
  * Runs the real file in a vm context with a recording Leaflet stub:
  *   - layers, panes and the layer control's overlays are recorded;
@@ -25,6 +25,13 @@ const fs = require('fs');
 const path = require('path');
 
 const SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'map-tile-providers.js'), 'utf8');
+const MASTS_SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'masts-layer.js'), 'utf8');
+// The shared escapeHtml from public/app.js, run as is (not a copy).
+const APP_SRC = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+const ESCAPE_SRC = (function () {
+  const i = APP_SRC.indexOf('function escapeHtml(s) {');
+  return APP_SRC.slice(i, APP_SRC.indexOf('\n}\n', i) + 3);
+})();
 const OVERLAY_LABELS = '.leaflet-control-layers-overlays label';
 
 function makeStorage(init) {
@@ -143,6 +150,23 @@ function makeLeaflet() {
     },
   };
   L.tileLayer.wms = (url, opts) => evented({ _url: url, options: opts || {}, kind: 'wms' });
+  // #724 — what public/masts-layer.js builds: layer groups of canvas
+  // circle markers. A group on a map puts its members on that map.
+  L.canvas = (opts) => ({ kind: 'canvas', options: opts || {} });
+  L.circleMarker = (ll, opts) => {
+    const m = evented({ kind: 'circleMarker', latlng: ll, options: Object.assign({}, opts || {}) });
+    m.setStyle = (st) => { Object.assign(m.options, st); return m; };
+    m.bindPopup = (content, popupOpts) => { m.popup = content; m.popupOptions = popupOpts; return m; };
+    return m;
+  };
+  L.layerGroup = (layers, opts) => {
+    const members = new Set(layers || []);
+    const g = evented({ kind: 'layerGroup', options: opts || {}, members });
+    g.addLayer = (l) => { members.add(l); if (g._map) g._map.addLayer(l); return g; };
+    g.removeLayer = (l) => { members.delete(l); if (g._map) g._map.removeLayer(l); return g; };
+    g.eachLayer = (fn) => { Array.from(members).forEach(fn); return g; };
+    return g;
+  };
   L.control.attribution = (opts) => {
     const counts = {};
     // Leaflet's Control.getContainer(): the registry adds the compact class
@@ -205,6 +229,7 @@ function makeMap() {
     addLayer(l) {
       if (layers.has(l)) return map;
       layers.add(l);
+      if (l.kind === 'layerGroup') { l._map = map; l.members.forEach(m => map.addLayer(m)); }
       if (map._controls.some(c => !c._removed && Object.values(c.overlays || {}).includes(l))) map.fire('overlayadd', { layer: l });
       map.fire('layeradd', { layer: l });
       return map;
@@ -212,6 +237,7 @@ function makeMap() {
     removeLayer(l) {
       if (!layers.has(l)) return map;
       layers.delete(l);
+      if (l.kind === 'layerGroup') { l.members.forEach(m => map.removeLayer(m)); l._map = null; }
       map.fire('layerremove', { layer: l });
       if (map._controls.some(c => !c._removed && Object.values(c.overlays || {}).includes(l))) map.fire('overlayremove', { layer: l });
       if (l.fire) l.fire('remove');
@@ -226,6 +252,7 @@ function makeMap() {
 }
 
 // opts: hash, search, storage, theme, dhm (MC_DHM_CFG), heritage (MC_HERITAGE_CFG),
+// masts (MC_MASTS_CFG; also loads public/masts-layer.js unless noMastsLayer),
 // mapCfg (MC_MAP_CFG, read when the registry loads).
 function makeSandbox(opts) {
   opts = opts || {};
@@ -258,8 +285,20 @@ function makeSandbox(opts) {
   if (opts.dhm !== undefined) ctx.window.MC_DHM_CFG = opts.dhm;
   if (opts.heritage !== undefined) ctx.window.MC_HERITAGE_CFG = opts.heritage;
   if (opts.mapCfg !== undefined) ctx.window.MC_MAP_CFG = opts.mapCfg;
+  if (opts.masts !== undefined) ctx.window.MC_MASTS_CFG = opts.masts;
   ctx.globalThis = ctx;
   vm.createContext(ctx);
+  if (opts.masts !== undefined && !opts.noMastsLayer) {
+    ctx.Map = Map; ctx.Set = Set; ctx.Promise = Promise;
+    ctx.window.removeEventListener = () => {};
+    ctx.setTimeout = (fn, ms) => ({ fn, ms });
+    ctx.clearTimeout = () => {};
+    ctx.getComputedStyle = () => ({ getPropertyValue: (n) => (opts.cssVars || {})[n] || '' });
+    ctx.MutationObserver = function () { this.observe = () => {}; this.disconnect = () => {}; };
+    vm.runInContext(ESCAPE_SRC, ctx);
+    vm.runInContext(MASTS_SRC, ctx);
+    ctx.window.MastsLayer = ctx.MastsLayer = ctx.window.MastsLayer || ctx.MastsLayer;
+  }
   vm.runInContext(SRC, ctx);
   ctx.replaced = replaced;
   return ctx;
