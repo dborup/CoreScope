@@ -7,8 +7,15 @@
  *   - layers, panes and the layer control's overlays are recorded;
  *   - addLayer/removeLayer fire overlayadd/overlayremove for layers the
  *     control lists, the way L.Control.Layers does;
- *   - L.control.attribution().addTo(map) claims map.attributionControl and
- *     remove() does not give it back, exactly like Leaflet 1.9.4.
+ *   - after overlayadd the map fires layeradd; on removal overlayremove
+ *     fires before the layer's own 'remove' listeners (L.Control.Layers
+ *     subscribes to the layer before any attribution hook does);
+ *   - L.control.attribution() keeps credits the way Leaflet 1.9.4's
+ *     Control.Attribution does: addTo() claims map.attributionControl and
+ *     counts the credits of the layers already on the map (with no removal
+ *     hook), then listens to layeradd, counting each later layer's credit
+ *     and dropping it again on that layer's 'remove'. remove() only stops
+ *     listening to layeradd and does not give map.attributionControl back.
  */
 'use strict';
 const vm = require('vm');
@@ -32,8 +39,11 @@ function makeLeaflet() {
   function evented(o) {
     const h = {};
     o.on = (types, fn) => { types.split(' ').forEach(t => (h[t] = h[t] || []).push(fn)); return o; };
-    o.off = () => o;
+    o.off = (t, fn) => { if (h[t]) h[t] = h[t].filter(f => f !== fn); return o; };
+    o.once = (t, fn) => { const w = (e) => { o.off(t, w); fn(e); }; return o.on(t, w); };
     o.fire = (t, e) => { (h[t] || []).slice().forEach(fn => fn(Object.assign({ type: t }, e || {}))); return o; };
+    // Leaflet's Layer.getAttribution.
+    o.getAttribution = () => (o.options || {}).attribution;
     return o;
   }
   const L = {
@@ -63,12 +73,31 @@ function makeLeaflet() {
   };
   L.tileLayer.wms = (url, opts) => evented({ _url: url, options: opts || {}, kind: 'wms' });
   L.control.attribution = (opts) => {
+    const counts = {};
     const c = {
       opts,
-      // Leaflet 1.9.4 Control.Attribution.onAdd: map.attributionControl = this.
-      addTo(map) { c._map = map; map.attributionControl = c; map._attributionControls.push(c); return c; },
-      // ...and onRemove leaves map.attributionControl pointing at it.
-      remove() { c._removed = true; },
+      addAttribution(t) { if (t) counts[t] = (counts[t] || 0) + 1; return c; },
+      removeAttribution(t) { if (t && counts[t]) counts[t]--; return c; },
+      // Leaflet 1.9.4 Control.Attribution._addAttribution.
+      _addAttribution(e) {
+        if (!e.layer.getAttribution) return;
+        c.addAttribution(e.layer.getAttribution());
+        e.layer.once('remove', () => c.removeAttribution(e.layer.getAttribution()));
+      },
+      // Leaflet 1.9.4 Control.Attribution.onAdd: map.attributionControl = this,
+      // count the credits already on the map, then follow layeradd.
+      addTo(map) {
+        c._map = map; map.attributionControl = c; map._attributionControls.push(c);
+        map.layers.forEach(l => { if (l.getAttribution) c.addAttribution(l.getAttribution()); });
+        map.on('layeradd', c._addAttribution);
+        return c;
+      },
+      // ...and onRemove only stops following layeradd; map.attributionControl
+      // keeps pointing at it.
+      remove() { c._removed = true; c._map.off('layeradd', c._addAttribution); return c; },
+      // The credits the control shows (Leaflet's _update lists every one
+      // whose count is above zero).
+      credits() { return Object.keys(counts).filter(t => counts[t] > 0); },
     };
     return c;
   };
@@ -93,18 +122,21 @@ function makeMap() {
       if (layers.has(l)) return map;
       layers.add(l);
       if (map._controls.some(c => !c._removed && Object.values(c.overlays || {}).includes(l))) map.fire('overlayadd', { layer: l });
+      map.fire('layeradd', { layer: l });
       return map;
     },
     removeLayer(l) {
       if (!layers.has(l)) return map;
       layers.delete(l);
+      map.fire('layerremove', { layer: l });
       if (map._controls.some(c => !c._removed && Object.values(c.overlays || {}).includes(l))) map.fire('overlayremove', { layer: l });
+      if (l.fire) l.fire('remove');
       return map;
     },
   };
   const h = {};
   map.on = (types, fn) => { types.split(' ').forEach(t => (h[t] = h[t] || []).push(fn)); return map; };
-  map.off = () => map;
+  map.off = (t, fn) => { if (h[t]) h[t] = h[t].filter(f => f !== fn); return map; };
   map.fire = (t, e) => { (h[t] || []).slice().forEach(fn => fn(Object.assign({ type: t }, e || {}))); return map; };
   return map;
 }
@@ -161,4 +193,9 @@ function liveAttributions(map) {
   return map._attributionControls.filter(c => !c._removed);
 }
 
-module.exports = { makeStorage, makeLeaflet, makeMap, makeSandbox, buildControl, liveAttributions };
+// The credits shown on a map without its own attribution control (Live).
+function liveCredits(map) {
+  return liveAttributions(map).flatMap(c => c.credits()).sort();
+}
+
+module.exports = { makeStorage, makeLeaflet, makeMap, makeSandbox, buildControl, liveAttributions, liveCredits };

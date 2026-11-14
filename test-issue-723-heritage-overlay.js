@@ -27,7 +27,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { makeMap, makeSandbox, buildControl, liveAttributions } = require('./tests/map-overlay-sandbox');
+const { makeMap, makeSandbox, buildControl, liveAttributions, liveCredits } = require('./tests/map-overlay-sandbox');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -292,6 +292,26 @@ test('Live: one credit control while any overlay is on, none when all are off', 
   assert.strictEqual(liveAttributions(map).length, 1, 'monuments still on');
   map.removeLayer(heritageLayer(ctl));
   assert.strictEqual(liveAttributions(map).length, 0, 'all off');
+});
+
+// Leaflet's control counts the credits already on the map when it is added
+// but never drops those again, so a control kept across toggles would go on
+// showing the agency credit after its layer is gone.
+test('Live: the credit text follows the overlays that are on (no stale credit)', () => {
+  const ctx = makeSandbox({ dhm: DHM, heritage: HERITAGE });
+  const { map, ctl } = buildControl(ctx, false);
+  map.addLayer(heritageLayer(ctl));
+  assert.deepStrictEqual(liveCredits(map), [HERITAGE.attribution], 'monuments on');
+  map.addLayer(terrainLayer(ctl));
+  assert.deepStrictEqual(liveCredits(map), [HERITAGE.attribution, DHM.attribution].sort(), 'both on');
+  map.removeLayer(heritageLayer(ctl));
+  assert.deepStrictEqual(liveCredits(map), [DHM.attribution], 'monuments off, terrain on');
+  map.removeLayer(terrainLayer(ctl));
+  assert.deepStrictEqual(liveCredits(map), [], 'all off');
+  map.addLayer(terrainLayer(ctl));
+  map.addLayer(heritageLayer(ctl));
+  map.removeLayer(terrainLayer(ctl));
+  assert.deepStrictEqual(liveCredits(map), [HERITAGE.attribution], 'terrain off, monuments on');
 });
 
 // Leaflet's attribution control claims map.attributionControl on add and
