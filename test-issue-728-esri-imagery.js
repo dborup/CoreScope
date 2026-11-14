@@ -4,7 +4,9 @@
  * style (owner decision (b) on #728): map.tiles.providers.esri.enabled.
  *
  *   E1  esri-imagery / esri-imagery-dark: exact URL ({z}/{y}/{x}), exact
- *       credit, maxZoom 19, no invert filter, one per theme.
+ *       credit, maxZoom 19, no invert filter, one per theme. Every Esri
+ *       style's credit leads with "Powered by Esri", "Esri" linking to
+ *       https://www.esri.com (Esri's attribution requirement).
  *   E2  Gate: no config, enabled:false, a missing flag, the string "true",
  *       and the shipped config.example.json offer NO esri style (the Dark
  *       Gray canvas included); enabled:true offers all three; enabling Esri
@@ -31,7 +33,8 @@ function test(name, fn) {
 }
 
 const URL_IMAGERY = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
-const CREDIT = 'Tiles © Esri — Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community';
+const POWERED_BY = 'Powered by <a href="https://www.esri.com">Esri</a> | ';
+const CREDIT = POWERED_BY + 'Tiles © Esri — Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community';
 const ESRI_IDS = ['esri-darkgray-labels', 'esri-imagery', 'esri-imagery-dark'];
 const SRC = fs.readFileSync(path.resolve(__dirname, process.env.PROVIDERS_FILE || 'public/map-tile-providers.js'), 'utf8');
 
@@ -106,6 +109,14 @@ test('E1 tile URL is the World_Imagery MapServer in {z}/{y}/{x} order, over TLS,
 test('E1 credit is the service copyrightText with the Esri tile credit, exactly', () => {
   const reg = load({ mapCfg: tiles(ESRI_ON) }).window.MC_TILE_PROVIDERS;
   for (const id of ['esri-imagery', 'esri-imagery-dark']) assert.strictEqual(reg[id].attribution, CREDIT, id);
+});
+
+test('E1 every Esri style leads its credit with "Powered by Esri", linking Esri to esri.com', () => {
+  const reg = load({ mapCfg: tiles(ESRI_ON) }).window.MC_TILE_PROVIDERS;
+  const esri = Object.keys(reg).filter(id => reg[id].provider === 'esri').sort();
+  assert.deepStrictEqual(esri, ESRI_IDS.slice().sort(), 'Esri styles in the registry');
+  for (const id of esri) assert.ok(reg[id].attribution.startsWith(POWERED_BY), id + ': ' + reg[id].attribution);
+  assert.strictEqual(reg['esri-darkgray-labels'].attribution, POWERED_BY + 'Tiles © Esri');
 });
 
 test('E1 maxZoom 19 and no invert filter on either theme entry (it is a photo)', () => {

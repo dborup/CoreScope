@@ -17,10 +17,12 @@
  *   3. Esri on: World Imagery, its dark twin and Dark Gray are offered;
  *      zero World_Imagery requests until it is selected (incl. pan/zoom);
  *      selecting it loads {z}/{y}/{x} tiles at z<=19, shows the exact
- *      credit, and the tile pane carries no filter; back to Auto, no more
+ *      credit led by "Powered by Esri" with one Esri link to esri.com,
+ *      and the tile pane carries no filter; back to Auto, no more
  *      World_Imagery requests.
  *   4. Dark theme: the imagery is never inverted (osm-dark is, as a check
- *      that the probe sees filters at all).
+ *      that the probe sees filters at all); Dark Gray shows "Powered by
+ *      Esri" too.
  *   5. Per viewer: the customizer's light provider persists the choice;
  *      after a reload Map and Live load World_Imagery tiles by default.
  *   6. With the DHM hillshade on: both layers load, terrain above the
@@ -37,7 +39,11 @@ const path = require('path');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13800';
 const SHOT_DIR = process.env.SCREENSHOT_DIR || '';
-const CREDIT = 'Tiles © Esri — Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community';
+// The attribution control's textContent; "Esri" in "Powered by Esri" is a
+// link to https://www.esri.com (checked through esriLinks).
+const POWERED_BY = 'Powered by Esri | ';
+const CREDIT = POWERED_BY + 'Tiles © Esri — Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community';
+const ESRI_HOME = 'https://www.esri.com';
 const IMAGERY_RE = /^https:\/\/server\.arcgisonline\.com\/ArcGIS\/rest\/services\/World_Imagery\/MapServer\/tile\/(\d+)\/(\d+)\/(\d+)$/;
 const DHM_PATH = '/api/map/dhm/wms';
 const DHM_BLOCK = {
@@ -176,6 +182,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         imageryTiles: imgs.filter(i => /World_Imagery/.test(i.src) && i.complete && i.naturalWidth === 256).length,
         terrainTiles: tpane ? Array.from(tpane.querySelectorAll('img.leaflet-tile')).filter(i => i.complete && i.naturalWidth === 256).length : 0,
         attribution: attr ? attr.textContent : '',
+        esriLinks: attr ? Array.from(attr.querySelectorAll('a')).filter(a => a.getAttribute('href') === 'https://www.esri.com').map(a => a.textContent) : [],
         attributionVisible: (() => {
           if (!attr) return false;
           const r = attr.getBoundingClientRect();
@@ -283,6 +290,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       const s = await state(page);
       assert(s.imageryTiles > 0, 'no imagery tile rendered');
       assert(s.attribution.includes(CREDIT), 'credit missing or altered: ' + s.attribution);
+      assert(s.esriLinks.join() === 'Esri', 'want one "Esri" link to ' + ESRI_HOME + ', got ' + JSON.stringify(s.esriLinks));
       assert(s.attributionVisible, 'credit is covered');
       assert(s.filter === 'none', 'tile pane filter on imagery: ' + s.filter);
       await shot(page, 'esri-imagery-light.jpg');
@@ -314,7 +322,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   });
 
   // 4 — dark theme: never inverted
-  await step('Map (dark): esri-imagery-dark carries no filter; osm-dark does', async () => {
+  await step('Map (dark): esri-imagery-dark carries no filter; osm-dark does; Dark Gray credits Esri', async () => {
     const { ctx, page, rec } = await newCtx({ theme: 'dark', tiles: { providers: { esri: { enabled: true } } } });
     try {
       await gotoMap(page, '#/map');
@@ -326,7 +334,12 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       assert(s.filter === 'none', 'imagery is filtered in dark mode: ' + s.filter);
       assert(rec.imagery.length > 0 && s.imageryTiles > 0, 'imagery did not load in dark mode');
       assert(s.attribution.includes(CREDIT), 'credit missing in dark mode');
+      assert(s.esriLinks.join() === 'Esri', 'Esri link in dark mode: ' + JSON.stringify(s.esriLinks));
       await shot(page, 'esri-imagery-dark.jpg');
+      await selectBase(page, 'esri-darkgray-labels');
+      const g = await state(page);
+      assert(g.attribution.includes(POWERED_BY + 'Tiles © Esri') && !g.attribution.includes('Vantor'), 'Dark Gray credit: ' + g.attribution);
+      assert(g.esriLinks.join() === 'Esri', 'Dark Gray Esri link: ' + JSON.stringify(g.esriLinks));
     } finally { await ctx.close(); }
   });
 
@@ -378,6 +391,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         assert(rec.terrain.length > 0 && s.terrainTiles > 0, 'terrain did not load over the imagery');
         assert(s.zTerrain > s.zTile, `terrain pane (${s.zTerrain}) not above the base tiles (${s.zTile})`);
         assert(s.attribution.includes(CREDIT), 'Esri credit missing with terrain on: ' + s.attribution);
+        assert(s.esriLinks.join() === 'Esri', 'Esri link with terrain on: ' + JSON.stringify(s.esriLinks));
         assert(s.attribution.includes('Danmarks Højdemodel'), 'DHM credit missing: ' + s.attribution);
         assert(s.attributionVisible, 'credits are covered');
         assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));

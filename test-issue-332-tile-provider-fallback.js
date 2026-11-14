@@ -50,6 +50,8 @@ function test(name, fn) {
 }
 
 const CARTO_HOST = 'cartocdn.com';
+// #728 — Esri's attribution requirement: "Powered by Esri", Esri linked.
+const ESRI_DARKGRAY_CREDIT = 'Powered by <a href="https://www.esri.com">Esri</a> | Tiles © Esri';
 
 function makeStorage() {
   const store = {};
@@ -252,7 +254,7 @@ test('M2 MC_getTileSpec("dark") returns the active dark provider url + attributi
   assert.strictEqual(spec.id, 'esri-darkgray-labels');
   assert.strictEqual(typeof spec.url, 'string', 'url must be a string template, got ' + typeof spec.url);
   assert.ok(/World_Dark_Gray_Base/.test(spec.url), 'expected the Esri dark canvas URL, got ' + spec.url);
-  assert.strictEqual(spec.attribution, 'Tiles © Esri');
+  assert.strictEqual(spec.attribution, ESRI_DARKGRAY_CREDIT);
 });
 
 test('M2 MC_getTileSpec("light") returns the active LIGHT provider, not the dark one', () => {
@@ -390,7 +392,7 @@ test('M3 getActiveTileProvider() still resolves the dark provider in dark mode',
   const ctx = loadStack({ theme: 'dark', mapCfg: cfgDefaults('esri-darkgray-labels', 'carto-light') });
   const p = ctx.window.getActiveTileProvider();
   assert.ok(p && p.type === 'dark', 'expected the dark provider, got ' + JSON.stringify(p));
-  assert.strictEqual(p.attribution, 'Tiles © Esri');
+  assert.strictEqual(p.attribution, ESRI_DARKGRAY_CREDIT);
 });
 
 // ═══ M4 — customizer preview maps ══════════════════════════════════════
@@ -646,7 +648,7 @@ test('M7 subpath minimap: follows a configured dark provider (Esri, natively dar
   const r = runSubpathDetail({ theme: 'dark', mapCfg: cfgDefaults('esri-darkgray-labels', 'opentopomap') });
   assert.ok(/server\.arcgisonline\.com/.test(r.call.url), 'expected the configured Esri url, got ' + r.call.url);
   assert.strictEqual(r.pane.style.filter, '', 'esri-darkgray-labels is natively dark — no invert filter');
-  assert.strictEqual(r.call.opts.attribution, 'Tiles © Esri');
+  assert.strictEqual(r.call.opts.attribution, ESRI_DARKGRAY_CREDIT);
 });
 
 test('M7 subpath minimap: follows a configured light provider', () => {
