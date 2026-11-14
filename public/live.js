@@ -1873,6 +1873,9 @@
     if (typeof window.MC_createLayerControl === 'function') {
       window.MC_createLayerControl(map, liveAutoLayerGroup, 'topright');
     }
+    // #723 M2: click-for-info on the monuments overlay. Live has no map
+    // click mode of its own; markers and clickable paths win by target.
+    if (window.HeritageInfo) window.HeritageInfo.attach(map);
 
     // Add custom Leaflet Control for Fullscreen
     const LiveFullscreenControl = L.Control.extend({

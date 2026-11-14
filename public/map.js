@@ -423,6 +423,11 @@
     if (typeof window.MC_createLayerControl === 'function') {
       window.MC_createLayerControl(map, autoLayerGroup, 'topleft');
     }
+    // #723 M2: click-for-info on the monuments overlay. The profile
+    // tool's picking and A/B dragging win over it.
+    if (window.HeritageInfo) {
+      window.HeritageInfo.attach(map, { isBusy: function () { return !!profileArm || !!profileDrag; } });
+    }
 
     mapThemeObs = new MutationObserver(function () {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
