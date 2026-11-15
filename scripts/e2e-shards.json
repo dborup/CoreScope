@@ -42,6 +42,14 @@
       "measurementNote": "New suite; #733 DHM credit compliance with an intercepted map.dhm client-config block (credit link fields + profile: true), a stubbed /api/map/dhm/wms tile and a stubbed /api/terrain/profile: on Map and Live the hillshade credit names Klimadatastyrelsen, links the Danmarks Hojdemodel dataset and the CC BY 4.0 licence with target=_blank and rel=noopener, renders exactly the server's plain credit text, is visible and uncovered, and goes away with the overlay; a pre-#733 block without the link fields still shows the plain credit with no links; the profile chart footer carries the same two links plus the 'data bearbejdet' derived note, exactly once; and at 360x740 that footer stays inside the panel and the viewport, legible and uncovered, with both links at least 44px and hit by themselves. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds, next to the #728 credit suite."
     },
     {
+      "file": "test-issue-737-skraafoto-viewer-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #737 M2 Skraafoto (oblique aerial photo) viewer with an intercepted skraafoto client-config block (and dhm with profile: true), stubbed /api/skraafoto/search and /api/skraafoto/preview/{collection}/{item} in the M1 shapes, canvas-drawn JPEG previews and every other host refused: the gate (no block, a node without a fix, the node list), the node page dialog (loading, newest year facing north, five directions, the year selector without 2017, date, privacy note, credit links, Full resolution), lazy previews, a year change, Escape and Close focus return, the hash deep link and a cold deep link, search 429/503/502 and preview 503, an empty answer, the side pane, the Path profile A/B/clicked chart point (#781 mapping) and an unmoved head and chart, and real taps from a cold start at 375x560 and 640x360 above the bottom nav. About 15s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds, next to the #733 credit suite."
+    },
+    {
       "file": "test-issue-738-foreign-fill-ui-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },

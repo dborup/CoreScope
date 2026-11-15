@@ -444,6 +444,38 @@
     return a;
   }
 
+  // ── Oblique photo points (#737 M2) ───────────────────────────────────────
+
+  /* endPoint is end 'a' or 'b' of a measured profile as the server
+   * snapped it, or null. */
+  function endPoint(data, side) {
+    var e = (side === 'a' || side === 'b') && data ? data[side] : null;
+    var r = e ? pointRef(e.lat, e.lon) : null;
+    return r ? { lat: r.lat, lon: r.lon } : null;
+  }
+
+  /* pointAt is chart sample i as a map point: the #781 cursor's own
+   * mapping (its fraction of the path, interpolated as the map draws the
+   * line), so the photo is of the point the cursor showed. */
+  function pointAt(data, g, i) {
+    var C = global.TerrainProfileCursor;
+    var a = endPoint(data, 'a'), b = endPoint(data, 'b');
+    if (!C || !g || !g.x || !a || !b || !(i >= 0 && i < g.x.length) || i % 1) return null;
+    var ll = C.latLonAt([a.lat, a.lon], [b.lat, b.lon], C.fraction(g, i));
+    var r = pointRef(ll[0], ll[1]);
+    return r ? { lat: r.lat, lon: r.lon, distanceM: round(Number(g.d[i]), 2) } : null;
+  }
+
+  /* chartIndexAt is the sample under a click at clientX on the plot drawn
+   * in rect: the #781 nearest-sample search. -1 when there is none. */
+  function chartIndexAt(g, rect, clientX) {
+    var C = global.TerrainProfileCursor;
+    if (!C || !g || !g.x || !rect || !(rect.width > 0)) return -1;
+    return C.nearestIndex(g.x, (clientX - rect.left) / rect.width * g.view.w);
+  }
+
+  function fmtDistance(m) { return m >= 1000 ? (m / 1000).toFixed(2) + ' km' : Math.round(m) + ' m'; }
+
   // ── Fitting a linked path into view (#746) ───────────────────────────────
 
   var FIT_MARGIN_PX = 32;
@@ -1478,6 +1510,12 @@
     var ui = {};
     // #781: the hover cursor on the chart now drawn, else null.
     var cursor = null;
+    /* #737 M2: the oblique photo row, only while the server offers the
+     * photos. `drawn` is the profile on the chart with its geometry, and
+     * `picked` the chart point clicked on it; both go with the chart. */
+    var SF = global.Skraafoto;
+    var sfOffered = !!(SF && SF.offered(opts.skraafoto));
+    var drawn = null, picked = null;
 
     /* effectiveState is what we ask the server for: `state` with the
      * customizer's defaults filled into the heights it left empty. */
@@ -1619,6 +1657,7 @@
       ui.chart = el('div', 'tp-chart');
       ui.chart.setAttribute('data-testid', 'tp-chart');
       body.appendChild(ui.chart);
+      if (sfOffered) body.appendChild(skraafotoRow());
 
       // The server's derived credit, with the dataset and the licence marks
       // as links to the dataset page and the licence itself: the CC BY 4.0
@@ -1787,6 +1826,72 @@
       input.addEventListener('input', function () { commit(input.value); });
       input.addEventListener('change', function () { commit(input.value); });
       return { wrap: wrap, name: name, input: input, source: source, badge: badge, move: move };
+    }
+
+    /* #737 M2: "Oblique photo" at A, at B, and at the point last clicked
+     * on the chart (or picked with Enter at the keyboard cursor). Under
+     * the chart, not in the head: the title row must not wrap (#784
+     * review), and the chart itself does not move. Hidden until a chart
+     * is drawn, so a panel still waiting for B stays as compact as before
+     * (#790). Asks nothing until a button is pressed. */
+    function skraafotoRow() {
+      ui.sfRow = el('div', 'tp-sf-row');
+      ui.sfRow.setAttribute('role', 'group');
+      ui.sfRow.setAttribute('aria-label', 'Oblique photo');
+      ui.sfRow.setAttribute('data-testid', 'tp-sf-row');
+      ui.sfRow.hidden = true;
+      var lab = el('span', 'tp-sf-label', 'Oblique photo');
+      ui.sfRow.appendChild(lab);
+      function end(side, label) {
+        return function () {
+          var p = endPoint(drawn && drawn.data, side);
+          var ref = state[side];
+          return p && { lat: p.lat, lon: p.lon, label: label + ': ' + endpointLabel(ref, nodes[side] && nodes[side].name) };
+        };
+      }
+      [['a', 'A'], ['b', 'B']].forEach(function (s) {
+        var b = SF.actionButton({ cls: 'tp-seg-btn tp-sf-btn', testid: 'tp-sf-' + s[0], text: s[1], icon: false, cfg: opts.skraafoto,
+          title: 'Oblique aerial photo at ' + s[1], getPoint: end(s[0], s[1]) });
+        b.setAttribute('aria-label', 'Oblique photo at ' + s[1]);
+        ui.sfRow.appendChild(b);
+      });
+      ui.sfPoint = SF.actionButton({ cls: 'tp-seg-btn tp-sf-btn', testid: 'tp-sf-point', text: 'Chart point', icon: false, cfg: opts.skraafoto,
+        getPoint: function () {
+          return picked && { lat: picked.lat, lon: picked.lon, label: 'Profile point, ' + fmtDistance(picked.distanceM) + ' from A' };
+        } });
+      ui.sfRow.appendChild(ui.sfPoint);
+      setPicked(null);
+      ui.chart.addEventListener('click', function (e) {
+        var plot = drawn && e.target && e.target.closest ? e.target.closest('.tp-plot') : null;
+        var svg = plot && plot.querySelector('svg');
+        if (svg) setPicked(pointAt(drawn.data, drawn.g, chartIndexAt(drawn.g, svg.getBoundingClientRect(), e.clientX)));
+      });
+      ui.chart.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' || !drawn || !cursor || cursor.index() === null) return;
+        setPicked(pointAt(drawn.data, drawn.g, cursor.index()));
+      });
+      return ui.sfRow;
+    }
+
+    function setPicked(p) {
+      picked = p || null;
+      if (!ui.sfPoint) return;
+      ui.sfPoint.disabled = !picked;
+      ui.sfPoint.querySelector('.sf-action-text').textContent = picked ? 'Chart point · ' + fmtDistance(picked.distanceM) : 'Chart point';
+      ui.sfPoint.title = picked
+        ? 'Oblique aerial photo at the chart point ' + fmtDistance(picked.distanceM) + ' from A'
+        : 'Click or tap the chart to pick a point; Enter picks the keyboard cursor\'s point.';
+      ui.sfPoint.setAttribute('aria-label', picked ? 'Oblique photo at the chart point, ' + fmtDistance(picked.distanceM) + ' from A'
+        : 'Oblique photo at a chart point: click or tap the chart first');
+    }
+
+    /* setDrawn records the profile now on the chart (null: none), which
+     * drops a point picked on the one before. */
+    function setDrawn(data) {
+      drawn = data ? { data: data, g: chartGeometry(data) } : null;
+      if (!ui.sfRow) return;
+      setPicked(null);
+      ui.sfRow.hidden = !drawn;
     }
 
     function swapControl() {
@@ -1989,13 +2094,13 @@
       cursor = null;
     }
 
-    function attachCursor(data) {
+    function attachCursor(data, g) {
       detachCursor();
       var C = global.TerrainProfileCursor;
       if (!C || !opts.onCursor || !ui.chart || !ui.chart.querySelector) return;
       cursor = C.attach({
         plot: ui.chart.querySelector('.tp-plot'),
-        geometry: chartGeometry(data),
+        geometry: g || chartGeometry(data),
         data: data,
         onMove: opts.onCursor
       });
@@ -2004,6 +2109,7 @@
     function setStatus(text, cls) {
       if (!ui.chart) return;
       detachCursor();
+      setDrawn(null);
       ui.chart.textContent = '';
       var p = el('p', 'tp-status ' + (cls || ''), text);
       p.setAttribute('data-testid', 'tp-status');
@@ -2033,7 +2139,8 @@
         // name went through esc() at interpolation time.
         detachCursor();
         ui.chart.innerHTML = buildChart(data, names);
-        attachCursor(data);
+        setDrawn(data);
+        attachCursor(data, drawn.g);
       }
       ui.detail.textContent = chip.detail;
       var phys = data.physics || {};
@@ -2113,6 +2220,7 @@
       open = false;
       seq++;
       detachCursor();
+      setDrawn(null);
       if (debounceTimer) { global.clearTimeout(debounceTimer); debounceTimer = null; }
       state.a = null;
       state.b = null;
@@ -2293,6 +2401,11 @@
     offered: offered,
     nodeEntryHash: nodeEntryHash,
     nodeEntryAction: nodeEntryAction,
+    // #737 M2: the node-detail fix rule and the photo points.
+    hasFix: hasFix,
+    endPoint: endPoint,
+    pointAt: pointAt,
+    chartIndexAt: chartIndexAt,
     // #772 F4: the fit margin, read back by tests instead of copied in.
     FIT_MARGIN_PX: FIT_MARGIN_PX,
     heightBadge: heightBadge,

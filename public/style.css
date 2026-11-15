@@ -6701,6 +6701,141 @@ body.embed #app.app-fixed {
 .node-detail-actions .node-terrain-action { margin-left: 0; }
 .node-terrain-icon { display: inline-flex; }
 
+/* #737 M2 — "Oblique photo": the node-detail button sits beside "Terrain
+   profile to…" with the same 48 px target; in the Path profile a row of
+   its own under the chart (A, B, the clicked chart point). */
+.sf-icon { display: inline-flex; }
+.tp-sf-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 0; }
+.tp-sf-row[hidden] { display: none; }
+.tp-sf-label { font-size: var(--fs-sm); color: var(--text-muted); margin-right: 2px; }
+.tp-sf-btn { min-width: 48px; }
+/* Both open a dialog over themselves: the browser's tap highlight would
+   be painted over the photo until the next touch. */
+.tp-sf-btn, .sf-node-action { -webkit-tap-highlight-color: transparent; }
+
+/* The viewer: a modal on the modal tokens, one step above a SlideOver
+   panel (#180) so a deep link opened on a tablet stacks over it too, and
+   so its scrim covers the bottom nav (1200) and the profile panel. On a phone the dialog stops at
+   the bottom nav's reserve, so the nav never covers any of it; the dialog
+   scrolls inside itself with the head (and Close) pinned. */
+.sf-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-modal) + 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 12px calc(12px + var(--bottom-nav-reserve, 0px));
+  background: var(--shadow);
+}
+@media (max-height: 480px), (max-width: 480px) {
+  .sf-overlay { padding: 4px 4px calc(4px + var(--bottom-nav-reserve, 0px)); }
+}
+.sf-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(100%, 760px);
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 10px);
+  box-shadow: 0 16px 48px var(--shadow);
+}
+.sf-dialog:focus { outline: none; }
+.sf-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 0 0 14px;
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--border);
+}
+.sf-titles { flex: 1 1 auto; min-width: 0; }
+.sf-title { margin: 0; font-size: var(--fs-md); font-weight: var(--fw-semibold, 600); }
+.sf-where { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-close {
+  flex: 0 0 auto;
+  min-width: 48px;
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+}
+.sf-close:hover { color: var(--text); background: var(--row-hover); }
+.sf-controls { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 14px; }
+.sf-dirs { display: inline-flex; gap: 4px; }
+.sf-dir {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold, 600);
+  cursor: pointer;
+}
+.sf-dir.active { background: var(--selected-bg); border-color: var(--accent); }
+.sf-dir:disabled { opacity: 0.45; cursor: default; }
+.sf-year-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--text-muted); }
+.sf-year {
+  min-width: 88px;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+.sf-close:focus-visible, .sf-dir:focus-visible, .sf-year:focus-visible, .sf-full:focus-visible, .sf-credit a:focus-visible {
+  outline: 2px solid var(--accent, var(--link-color));
+  outline-offset: 2px;
+}
+.sf-stage {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  margin: 0 14px;
+  border-radius: 6px;
+  background: var(--section-bg);
+  overflow: hidden;
+}
+.sf-img { display: block; width: 100%; height: auto; max-height: min(62vh, 680px); object-fit: contain; }
+/* A short (landscape) screen: the whole photo fits under the head and the
+   controls, so it is seen without scrolling; the rest scrolls below it. */
+@media (max-height: 480px) {
+  .sf-img { max-height: calc(100vh - var(--bottom-nav-reserve, 0px) - 128px); }
+  .sf-controls { padding: 4px 14px; }
+}
+.sf-img[hidden], .sf-status[hidden], .sf-full[hidden] { display: none; }
+.sf-status { margin: 0; padding: 24px 16px; text-align: center; font-size: var(--fs-sm); color: var(--text-muted); }
+.sf-dialog[data-state="error"] .sf-status { color: var(--danger); }
+.sf-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 12px; margin: 4px 14px 0; font-size: var(--fs-sm); }
+.sf-full { display: inline-flex; align-items: center; min-height: 44px; color: var(--link-color, var(--accent)); font-weight: var(--fw-semibold, 600); }
+.sf-note, .sf-credit { margin: 2px 14px 0; font-size: 12px; line-height: 1.35; color: var(--text-muted); }
+.sf-credit { margin-bottom: 12px; }
+.sf-credit a { color: inherit; text-decoration: underline; }
+/* A touch target of their own on a phone, like the profile's credit links (#711). */
+@media (pointer: coarse) { .sf-credit a { display: inline-block; min-width: 44px; padding: 12px 0; text-align: center; } }
+
 .tp-controls {
   display: flex;
   flex-wrap: wrap;
