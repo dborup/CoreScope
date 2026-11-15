@@ -194,6 +194,10 @@
   --fresnel-100: #6d28d9;                        /* first Fresnel zone */
   --fresnel-60: #a78bfa;                         /* the 60 % criterion */
   --profile-blocked: #b91c1c;                    /* terrain in the way */
+  /* #781 — the profile's hover cursor: the chart's dashed line and the
+     map's dot. Dark values live in BOTH dark blocks below. */
+  --tp-cursor: #334155;
+  --tp-cursor-dot: #dc2626;
   /* #724 M3 — Mastedatabasen antenna sites on the map (canvas markers read
      these). Dark values live in BOTH dark blocks below. */
   --mast-site: #0e7490;                          /* every antenna site */
@@ -442,6 +446,9 @@
     --fresnel-100: #c4b5fd;
     --fresnel-60: #8b5cf6;
     --profile-blocked: #f87171;
+    /* #781 — the profile's hover cursor. */
+    --tp-cursor: #e2e8f0;
+    --tp-cursor-dot: #f87171;
     /* #724 M3 — antenna sites on dark tiles. */
     --mast-site: #22d3ee;
     --mast-interference: #fb923c;
@@ -515,6 +522,9 @@
   --fresnel-100: #c4b5fd;
   --fresnel-60: #8b5cf6;
   --profile-blocked: #f87171;
+  /* #781 — the profile's hover cursor (mirror of the @media block). */
+  --tp-cursor: #e2e8f0;
+  --tp-cursor-dot: #f87171;
   /* #724 M3 — antenna sites on dark tiles (mirror of the @media block). */
   --mast-site: #22d3ee;
   --mast-interference: #fb923c;
@@ -6314,6 +6324,9 @@ body.embed #app.app-fixed {
 
 .tp-path-line { stroke: var(--los-line); stroke-opacity: 0.95; }
 .tp-path-ghost { stroke: var(--los-line); stroke-opacity: 0.55; }
+/* #781: the chart cursor's point on the path. A ring in the panel's own
+   surface colour keeps the dot readable on any tile. */
+.tp-cursor-dot { fill: var(--tp-cursor-dot); stroke: var(--card-bg); }
 
 /* #721: the draggable A/B ends. The icon box is the 48px touch target and
    stays transparent; the visible disc inside it is the same white-on-
@@ -6415,6 +6428,26 @@ body.embed #app.app-fixed {
    spans are positioned in percentages of the same box — exact, because
    the mapping is linear per axis — and render at a real font size. */
 .tp-plot { position: relative; width: 100%; }
+/* #781: the hover cursor. A horizontal drag along the chart moves it, a
+   vertical one still scrolls the panel. */
+.tp-plot[tabindex] { touch-action: pan-y; cursor: crosshair; border-radius: 4px; }
+.tp-plot[tabindex]:focus-visible { outline: 2px solid var(--los-line); outline-offset: 2px; }
+.tp-plot > .tp-cursor-readout {
+  position: absolute;
+  top: 4px;
+  z-index: 1;
+  padding: 3px 6px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-variant-numeric: tabular-nums;
+}
+.tp-plot > .tp-cursor-readout > div:first-child { font-weight: var(--fw-semibold, 600); }
 .tp-plot > span {
   position: absolute;
   font-size: 11px;
@@ -6462,6 +6495,24 @@ body.embed #app.app-fixed {
    line is on screen with the chart rather than at the foot of a scroll box
    the viewer may never reach. */
 .tp-credit-line { margin: 4px 0 0; font-size: 11px; line-height: 1.3; color: var(--text-muted); }
+/* #738 M2 — the Copernicus credit of a mixed profile, under the DHM one;
+   the full Art. 6(b) line folds out of "Full credit". */
+.tp-credit-fill[hidden], .tp-mixed-note[hidden] { display: none; }
+.tp-credit-full { margin: 0; font-size: 11px; line-height: 1.3; color: var(--text-muted); }
+.tp-credit-more { cursor: pointer; color: var(--link-color, var(--accent)); width: max-content; }
+.tp-credit-more:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+/* A touch target of its own on a phone, like the credit links (#711). */
+@media (pointer: coarse) { .tp-credit-more { padding: 15px 0; } }
+/* The note a mixed verdict carries: a caveat on the verdict, in the warn
+   tone the other caveats use. */
+.tp-mixed-note {
+  margin: 2px 0 0;
+  padding-left: 6px;
+  border-left: 3px solid var(--warning);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-muted);
+}
 
 .tp-chip {
   display: inline-flex;

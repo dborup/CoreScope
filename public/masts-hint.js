@@ -4,7 +4,9 @@
  * an antenna site with a 700, 800 or 900 MHz entry, the profile panel gets
  * one more chip beside the verdict, and a line under the detail text that
  * says what it means. Within HINT_STRONG_M (100 m) it says the transmitter
- * may be on the same building or mast. The wording is a hint and nothing
+ * may be on the same building or mast. Both are MastsLayer.settings (#724
+ * M5): the operator's values, or this viewer's from the customizer, which
+ * fires `masts-defaults-changed` when they move. The wording is a hint and nothing
  * more: the source publishes no height or power, so the check is distance
  * only, and it never says that interference will happen (owner decision 2).
  *
@@ -31,14 +33,17 @@
   // cellsNear pads the hint distance: nearestFor rounds a spherical
   // distance, so a site up to 500.49 m away counts as 500 m, and the same
   // offset in UTM is up to ~0.5% longer across Denmark (scale factor and
-  // ellipsoid; 503 m at 15° E). 10 m keeps both ends at four cells at most
-  // (#768 review 4).
+  // ellipsoid; 503.15 m along grid east at the east edge of the extent).
+  // 10 m covers that up to the longest allowed distance (990 m: ~996 m)
+  // and keeps both ends at four cells at most (#768 review 4).
   var CELL_PAD_M = 10;
   var BANDS_MHZ = [700, 800, 900];
 
   function constants() {
-    var ML = window.MastsLayer || {};
-    return { far: ML.HINT_DISTANCE_M || 500, strong: ML.HINT_STRONG_M || 100 };
+    var ML = window.MastsLayer;
+    if (!ML || typeof ML.settings !== 'function') return { far: 500, strong: 100 };
+    var s = ML.settings(window.MC_getMastsConfig ? window.MC_getMastsConfig() : null);
+    return { far: s.hintDistanceM, strong: s.hintStrongM };
   }
 
   /** Great-circle distance in metres (haversine). */
@@ -62,8 +67,7 @@
   }
 
   /** 'strong' | 'near' | null for a distance in whole metres. */
-  function tierOf(d) {
-    var c = constants();
+  function tierOf(d, c) {
     if (d <= c.strong) return 'strong';
     if (d <= c.far) return 'near';
     return null;
@@ -74,7 +78,7 @@
    * (lat, lon): { distanceM (whole metres), bands, tier }, or null.
    */
   function nearestFor(lat, lon, sites) {
-    var best = null;
+    var best = null, c = constants();
     for (var i = 0; i < (sites || []).length; i++) {
       var s = sites[i];
       if (!s || typeof s.lat !== 'number' || typeof s.lon !== 'number' || !isFinite(s.lat) || !isFinite(s.lon)) continue;
@@ -82,16 +86,17 @@
       if (!bands.length) continue;
       var d = Math.round(distanceM(lat, lon, s.lat, s.lon));
       if (best && d >= best.distanceM) continue;
-      if (!tierOf(d)) continue;
-      best = { distanceM: d, bands: bands, tier: tierOf(d) };
+      var tier = tierOf(d, c);
+      if (!tier) continue;
+      best = { distanceM: d, bands: bands, tier: tier };
     }
     return best;
   }
 
   /**
    * The grid cells within the hint distance (plus CELL_PAD_M) of
-   * (lat, lon), its own cell first, inside cfg.cellExtent. 510 m against
-   * 2 km cells: at most four.
+   * (lat, lon), its own cell first, inside cfg.cellExtent. At most 1000 m
+   * (990 + 10) against 2 km cells: at most four.
    */
   function cellsNear(lat, lon, cfg) {
     var p = window.MastsLayer.toUTM32(lat, lon);
@@ -182,6 +187,7 @@
     if (!opts || !opts.map || !opts.cfg || !ML || typeof ML.controller !== 'function') return null;
     var map = opts.map, cfg = opts.cfg;
     var ends = null, key = '', cells = { a: [], b: [] };
+    var listening = false;
 
     function sitesOf(keys) {
       var ctl = ML.controller(map, cfg), out = [];
@@ -201,6 +207,19 @@
       }));
     }
 
+    function pinEnds() {
+      cells = { a: cellsNear(ends.a[0], ends.a[1], cfg), b: cellsNear(ends.b[0], ends.b[1], cfg) };
+      ML.controller(map, cfg).pin(cells.a.concat(cells.b), recompute);
+    }
+
+    // #724 M5: a new distance may need other cells, and both tiers move.
+    // Only while a path is shown, and never on a map that is gone.
+    function onSettings() {
+      if (!ends || !map._mcMasts) return;
+      pinEnds();
+      recompute();
+    }
+
     return {
       update: function (a, b) {
         if (!a || !b) { this.clear(); return; }
@@ -208,11 +227,12 @@
         if (k === key) { recompute(); return; }
         key = k;
         ends = { a: a, b: b };
-        cells = { a: cellsNear(a[0], a[1], cfg), b: cellsNear(b[0], b[1], cfg) };
-        ML.controller(map, cfg).pin(cells.a.concat(cells.b), recompute);
+        pinEnds();
+        if (!listening) { window.addEventListener('masts-defaults-changed', onSettings); listening = true; }
         recompute();
       },
       clear: function () {
+        if (listening) { window.removeEventListener('masts-defaults-changed', onSettings); listening = false; }
         // map.js tears the profile down after map.remove(): the map's
         // controller is gone then, and asking for it would build a new one
         // on the dead map that nothing removes (#768 review 1).
