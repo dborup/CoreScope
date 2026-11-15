@@ -1286,6 +1286,9 @@
     var open = false, seq = 0, debounceTimer = null, panel = null, nodes = { a: null, b: null };
     // The end whose Move button is armed ('a' | 'b'), else null (#721).
     var moving = null;
+    /* #790: the phase syncCompact last drew (compactPhase), and whether the
+     * viewer folded the finished profile down to its head (the ▾/▴ toggle). */
+    var lastPhase = null, folded = false;
     // Where each height in `state` came from on this side of the wire:
     // 'yours' (typed, or remembered in localStorage), 'link', 'theme' (the
     // customizer's default for this kind of endpoint), or null.
@@ -1417,18 +1420,29 @@
       ui.cancel.type = 'button';
       ui.cancel.hidden = true;
       ui.cancel.setAttribute('data-testid', 'tp-cancel');
+      // Focus goes back to the Move button in syncCompact, for this click
+      // and for Escape alike (#790 F1).
       ui.cancel.addEventListener('click', function () {
-        if (moving) {
-          var side = moving;
-          api.cancelMove();
-          // The bar is gone; focus goes back to the Move button it came from.
-          var mv = (side === 'a' ? ui.endA : ui.endB).move;
-          if (mv && mv.focus) mv.focus();
-        } else {
-          api.close();
-        }
+        if (moving) api.cancelMove(); else api.close();
       });
       head.appendChild(ui.cancel);
+      /* #790 F4: fold a finished profile down to its head — the title, the
+       * verdict chips and the verdict as a status line — so a small phone
+       * gets its map back; unfold brings the panel back as it was. A real
+       * button, not a drag gesture. Hidden in the compact bar. */
+      ui.fold = el('button', 'tp-fold');
+      ui.fold.type = 'button';
+      ui.fold.setAttribute('aria-label', 'Path profile details');
+      ui.fold.setAttribute('aria-expanded', 'true');
+      ui.fold.setAttribute('data-testid', 'tp-fold');
+      ui.foldGlyph = el('span', '', '\u25BE');
+      ui.foldGlyph.setAttribute('aria-hidden', 'true');
+      ui.fold.appendChild(ui.foldGlyph);
+      ui.fold.addEventListener('click', function () {
+        folded = !folded;
+        syncCompact();
+      });
+      head.appendChild(ui.fold);
       ui.copy = el('button', 'tp-close tp-copy');
       ui.copy.type = 'button';
       ui.copy.disabled = true;
@@ -1664,16 +1678,34 @@
       if (!panel) return;
       var phase = compactPhase(state, moving);
       var compact = phase !== null;
+      var shut = compact || folded;
+      var active = doc.activeElement;
       // Focus inside the body would be stranded once it is hidden.
-      var stranded = compact && ui.body.contains && doc.activeElement && ui.body.contains(doc.activeElement);
+      var stranded = shut && active && ui.body.contains && ui.body.contains(active);
+      /* F1: a Move that ends (Cancel, Escape, a pick) hides Cancel; if it
+       * held focus, focus goes back to the Move button the move began at
+       * instead of falling to <body>. */
+      var back = null;
+      if (!compact && active && active === ui.cancel && (lastPhase === 'move-a' || lastPhase === 'move-b')) {
+        back = (lastPhase === 'move-a' ? ui.endA : ui.endB).move;
+      }
+      lastPhase = phase;
       panel.classList.toggle('tp-compact', compact);
+      panel.classList.toggle('tp-folded', !compact && folded);
       panel.setAttribute('data-phase', phase || 'ready');
-      ui.body.hidden = compact;
+      ui.body.hidden = shut;
       ui.copy.hidden = compact;
       ui.cancel.hidden = !compact;
-      ui.pickStatus.hidden = !compact;
-      ui.pickStatus.textContent = compact ? PHASE_STATUS[phase] : '';
-      if (stranded && ui.cancel.focus) ui.cancel.focus();
+      ui.fold.hidden = compact;
+      ui.fold.setAttribute('aria-expanded', folded ? 'false' : 'true');
+      ui.fold.title = folded ? 'Expand the path profile' : 'Collapse the path profile';
+      ui.foldGlyph.textContent = folded ? '\u25B4' : '\u25BE';
+      ui.pickStatus.hidden = !shut;
+      // Folded, the status line carries the verdict the body would show.
+      ui.pickStatus.textContent = compact ? PHASE_STATUS[phase] : (folded ? (ui.chip.title || '') : '');
+      if (compact && stranded && ui.cancel.focus) ui.cancel.focus();
+      else if (stranded && ui.fold.focus) ui.fold.focus();
+      else if (back && back.focus) back.focus();
     }
 
     /* endpointsChanged is the shared tail of a move and a swap: the panel
@@ -1709,6 +1741,8 @@
       ui.chip.hidden = !chip.label;
       ui.chip.setAttribute('data-state', chip.state);
       ui.chip.title = chip.detail;
+      // A folded panel shows the verdict as its status line (#790 F4).
+      if (folded) syncCompact();
     }
 
     /* setSurfaceChip shows the second chip and its explanatory line, or
@@ -1965,6 +1999,9 @@
       state.model = themeDefaults().model;
       state.modelExplicit = false;
       moving = null;
+      // The next profile opens unfolded (#790 F4).
+      folded = false;
+      lastPhase = null;
       themeH.a = null;
       themeH.b = null;
       setHeritage(null);

@@ -20,8 +20,16 @@
  *   4. Move A is compact while pending, a tap moves A, it expands again;
  *      Cancel during Move B keeps B, with no request;
  *   5. Cancel with only A resets the profile and stays on the Map page;
+ *   6. (F4) the ▾/▴ toggle folds the finished profile to its head (title,
+ *      verdict chips, the verdict as status), the map above it can be
+ *      dragged, and unfolding brings the panel back — no request, same
+ *      hash;
+ * at 375x560 and 360x640 too (the reviewer's small phones);
  * plus, once: the #781 hover cursor still puts its dot on the map after
- * the panel has been compact and expanded again; axe is clean on the bar;
+ * the panel has been compact and expanded again, and after fold/unfold;
+ * axe is clean on the bar and on the folded head; at 1280x800 (desktop,
+ * keyboard) the panel is compact while picking (F3), and focus goes
+ * Move → Cancel → back to Move after Escape and after Cancel (F1/F2);
  * no console errors.
  *
  * Usage:
@@ -174,6 +182,7 @@ const PHONE_VIEW = { lat: 37.5, lon: -122.85, zoom: 10 };
       const map = document.getElementById('leaflet-map').getBoundingClientRect();
       const chips = Array.from(panel ? panel.querySelectorAll('.tp-chip') : []).filter(shown);
       const status = q('[data-testid="tp-pick-status"]');
+      const fold = q('[data-testid="tp-fold"]');
       const cancel = q('[data-testid="tp-cancel"]');
       const close = q('[data-testid="tp-close"]');
       return {
@@ -186,6 +195,7 @@ const PHONE_VIEW = { lat: 37.5, lon: -122.85, zoom: 10 };
         cancel: shown(cancel) ? box(cancel) : null,
         close: shown(close) ? box(close) : null,
         copy: shown(q('[data-testid="tp-copy-link"]')),
+        fold: shown(fold) ? Object.assign(box(fold), { tag: fold.tagName, expanded: fold.getAttribute('aria-expanded'), glyph: fold.textContent }) : null,
         body: shown(q('[data-testid="tp-body"]')),
         chart: shown(q('[data-testid="tp-chart"] svg.tp-svg')),
         chips: chips.map(c => c.textContent),
@@ -220,7 +230,32 @@ const PHONE_VIEW = { lat: 37.5, lon: -122.85, zoom: 10 };
     await page.waitForTimeout(700);
   }
 
+  /* The map pane's offset: it changes when the map is dragged. */
+  async function paneOffset(page) {
+    return page.evaluate(() => {
+      const r = document.querySelector('.leaflet-map-pane').getBoundingClientRect();
+      return { x: Math.round(r.x), y: Math.round(r.y) };
+    });
+  }
+
+  /* A one-finger drag on the map, by raw touch events (Playwright has
+   * only tap). */
+  async function touchDrag(page, from, dx, dy) {
+    const cdp = await page.context().newCDPSession(page);
+    const pt = (x, y) => [{ x: Math.round(x), y: Math.round(y), id: 1 }];
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: pt(from.x, from.y) });
+    for (let i = 1; i <= 8; i++) {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: pt(from.x + dx * i / 8, from.y + dy * i / 8) });
+      await page.waitForTimeout(16);
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await cdp.detach();
+    await page.waitForTimeout(500);
+  }
+
   const VIEWPORTS = [
+    { name: '375x560', viewport: { width: 375, height: 560 } },
+    { name: '360x640', viewport: { width: 360, height: 640 } },
     { name: '375x667', viewport: { width: 375, height: 667 } },
     { name: '390x844', viewport: { width: 390, height: 844 } },
     { name: '360x740', viewport: { width: 360, height: 740 } },
@@ -299,6 +334,49 @@ const PHONE_VIEW = { lat: 37.5, lon: -122.85, zoom: 10 };
       assert(v.armed === 'false', 'the picker is still armed after Cancel');
     });
 
+    await step(vp.name + ': ▾ folds the profile to its head, the map above it drags, ▴ unfolds it (F4)', async () => {
+      const before = rec.profile.length;
+      let v = await panelView(page);
+      const hashBefore = v.hash;
+      const full = v.panel.h;
+      assert(v.fold, 'no fold toggle on the finished profile');
+      assert(v.fold.tag === 'BUTTON', 'the toggle is a ' + v.fold.tag + ', not a button');
+      assert(v.fold.w >= 48 && v.fold.h >= 48, 'the toggle is under 48px: ' + JSON.stringify(v.fold));
+      assert(v.fold.expanded === 'true' && v.fold.glyph === '▾', 'expanded toggle: ' + JSON.stringify(v.fold));
+      await page.tap('[data-testid="tp-fold"]');
+      await page.waitForTimeout(250);
+      v = await panelView(page);
+      assert(v.fold && v.fold.expanded === 'false' && v.fold.glyph === '▴', 'folded toggle: ' + JSON.stringify(v.fold));
+      assert(!v.body, 'the body is still shown when folded');
+      assert(v.chips.length >= 1 && v.emptyChips === 0 && /Clear$/.test(v.chips[0]), 'folded chips: ' + JSON.stringify(v.chips));
+      assert(v.status === 'The whole first Fresnel zone is clear of terrain.', 'folded status: ' + JSON.stringify(v.status));
+      assert(v.statusBox.bottom <= v.panel.bottom + 0.5, 'the status is cut off');
+      assert(v.close, 'Close left the folded head');
+      const covered = v.panel.h / v.map.h;
+      assert(covered <= 0.34, 'folded, the panel covers ' + Math.round(covered * 100) + '% of the map (' +
+        Math.round(v.panel.h) + ' px, ' + Math.round(full) + ' px unfolded)');
+      if (SHOT_DIR) await page.screenshot({ path: path.join(SHOT_DIR, '790-folded-' + vp.name.split(' ')[0] + '.png') });
+      // The map the folded panel gave back can be dragged.
+      const spot = await freeSpot(page);
+      assert(spot, 'no free map to drag while folded');
+      const pane0 = await paneOffset(page);
+      await touchDrag(page, spot, 0, 60);
+      const pane1 = await paneOffset(page);
+      assert(Math.abs(pane1.y - pane0.y) >= 30, 'the map did not move: ' + JSON.stringify([pane0, pane1]));
+      v = await panelView(page);
+      assert(v.fold && v.fold.expanded === 'false', 'dragging the map unfolded the panel');
+      await page.tap('[data-testid="tp-fold"]');
+      await page.waitForTimeout(250);
+      v = await panelView(page);
+      assert(v.fold && v.fold.expanded === 'true' && v.fold.glyph === '▾', 'unfolded toggle: ' + JSON.stringify(v.fold));
+      assert(v.body && v.chart && v.phase === 'ready', 'unfold did not bring the chart back');
+      assert(v.status === null, 'the folded status stayed');
+      assert(Math.abs(v.panel.h - full) <= 1, 'unfolded height ' + v.panel.h + ', was ' + full);
+      assert(rec.profile.length === before, 'fold/unfold issued a request');
+      const prof = (h) => new URLSearchParams(h.split('?')[1]).get('profile');
+      assert(prof(v.hash) === prof(hashBefore), 'the profile changed: ' + v.hash);
+    });
+
     await step(vp.name + ': Cancel with only A resets the profile and stays on the Map', async () => {
       await page.tap('[data-testid="tp-close"]');
       await page.waitForTimeout(300);
@@ -369,6 +447,86 @@ const PHONE_VIEW = { lat: 37.5, lon: -122.85, zoom: 10 };
       await page.waitForTimeout(150);
       const dots = await page.locator(DOT).count();
       assert(dots === 1, 'dots on the map while hovering: ' + dots);
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
+    });
+    await step('the #781 hover cursor still works after ▾ fold and ▴ unfold (F4)', async () => {
+      await page.mouse.move(5, 5);
+      await page.waitForTimeout(150);
+      assert(await page.locator(DOT).count() === 0, 'the dot stayed after mouse-leave');
+      await page.click('[data-testid="tp-fold"]');
+      await page.waitForTimeout(200);
+      assert(!(await panelView(page)).body, 'not folded');
+      await page.click('[data-testid="tp-fold"]');
+      await page.waitForTimeout(200);
+      await page.locator('[data-testid="tp-chart"] .tp-plot svg').scrollIntoViewIfNeeded();
+      const svg = await page.locator('[data-testid="tp-chart"] .tp-plot svg').boundingBox();
+      assert(svg && svg.width > 0, 'no chart to hover after unfold');
+      await page.mouse.move(svg.x + svg.width * 0.6, svg.y + svg.height / 2);
+      await page.waitForTimeout(150);
+      const dots = await page.locator(DOT).count();
+      assert(dots === 1, 'dots on the map while hovering after unfold: ' + dots);
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  /* F3: desktop collapses too — the compact bar has no viewport condition,
+   * by decision, because it keeps the map free on every screen. And F1/F2:
+   * a keyboard Move puts focus on Cancel, and Escape or Cancel bring it
+   * back to the Move button, never to <body>. */
+  {
+    const { ctx, page, rec } = await newCtx({ viewport: { width: 1280, height: 800 }, touch: false });
+    await gotoMap(page);
+    const active = () => page.evaluate(() => {
+      const a = document.activeElement;
+      return a ? (a.getAttribute('data-testid') || a.tagName) : null;
+    });
+    await step('1280x800: the panel is the compact bar while B is picked, and during a Move (F3)', async () => {
+      await page.click(TOGGLE);
+      await page.waitForTimeout(200);
+      const a = await freeSpot(page);
+      await page.mouse.click(a.x, a.y);
+      await page.waitForTimeout(500);
+      let v = await panelView(page);
+      assert(v.phase === 'pick-b' && !v.body && v.cancel && v.status === 'Pick the second point on the map.',
+        'not compact after A on desktop: ' + JSON.stringify({ phase: v.phase, body: v.body, status: v.status }));
+      assert(v.panel.h <= 120, 'the desktop bar is ' + Math.round(v.panel.h) + ' px tall');
+      const b = await freeSpot(page, { avoid: a });
+      await page.mouse.click(b.x, b.y);
+      await page.waitForSelector('[data-testid="tp-chart"] svg.tp-svg', { timeout: 5000 });
+      await page.click('[data-testid="tp-move-a"]');
+      await page.waitForTimeout(200);
+      v = await panelView(page);
+      assert(v.phase === 'move-a' && !v.body && v.panel.h <= 120, 'not compact during Move A on desktop: ' + JSON.stringify({ phase: v.phase, h: v.panel.h }));
+      await page.click(CANCEL);
+      await page.waitForTimeout(200);
+      assert((await panelView(page)).phase === 'ready', 'not ready after Cancel');
+    });
+    for (const [side, how] of [['a', 'Escape'], ['a', 'Cancel'], ['b', 'Escape'], ['b', 'Cancel']]) {
+      await step('1280x800 keyboard: Move ' + side.toUpperCase() + ' → focus on Cancel → ' + how + ' → focus back on Move ' + side.toUpperCase() + ' (F1/F2)', async () => {
+        const before = rec.profile.length;
+        await page.focus('[data-testid="tp-move-' + side + '"]');
+        await page.keyboard.press('Enter');
+        await page.waitForTimeout(200);
+        assert((await panelView(page)).phase === 'move-' + side, 'Enter did not start Move ' + side.toUpperCase());
+        assert(await active() === 'tp-cancel', 'focus during the move: ' + await active());
+        // On Cancel, a keyboard press (Enter) — the button has focus.
+        await page.keyboard.press(how === 'Escape' ? 'Escape' : 'Enter');
+        await page.waitForTimeout(250);
+        const v = await panelView(page);
+        assert(v.open && v.phase === 'ready', how + ' did not end the move: ' + JSON.stringify({ open: v.open, phase: v.phase }));
+        assert(await active() === 'tp-move-' + side, 'focus after ' + how + ': ' + await active());
+        assert(rec.profile.length === before, how + ' issued a request');
+      });
+    }
+    await step('1280x800: the folded head passes axe', async () => {
+      await page.click('[data-testid="tp-fold"]');
+      await page.waitForTimeout(200);
+      const { AxeBuilder } = require('@axe-core/playwright');
+      const res = await new AxeBuilder({ page }).include(PANEL)
+        .withRules(['color-contrast', 'button-name', 'aria-allowed-attr', 'aria-valid-attr-value', 'nested-interactive', 'target-size'])
+        .analyze();
+      assert(res.violations.length === 0, 'axe: ' + res.violations.map(x => x.id + ' x' + x.nodes.length).join(', '));
       assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     });
     await ctx.close();

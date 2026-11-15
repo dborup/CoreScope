@@ -48,6 +48,8 @@ function makeStorage() {
 
 function fakeDom() {
   const made = [];
+  // #790 F1/F2: focus is tracked so the tests can follow activeElement.
+  const holder = { doc: null };
   function mkEl(tag) {
     const on = {};
     const classes = new Set();
@@ -68,13 +70,16 @@ function fakeDom() {
       addEventListener: (t, fn) => { (on[t] || (on[t] = [])).push(fn); },
       removeEventListener: (t, fn) => { on[t] = (on[t] || []).filter(f => f !== fn); },
       fire: (t) => { (on[t] || []).slice().forEach(fn => fn({ target: e, preventDefault() {} })); },
+      focus: () => { holder.doc.activeElement = e; },
+      contains: (x) => x === e || e.children.some(c => c.contains && c.contains(x)),
     };
     made.push(e);
     return e;
   }
   const body = mkEl('body');
+  holder.doc = { createElement: mkEl, body: body, activeElement: body, addEventListener() {}, querySelector: () => null, querySelectorAll: () => [] };
   return {
-    doc: { createElement: mkEl, body: body, addEventListener() {}, querySelector: () => null, querySelectorAll: () => [] },
+    doc: holder.doc,
     body: body,
     find: (id) => made.filter(e => e.attrs['data-testid'] === id).pop() || null,
   };
@@ -294,6 +299,126 @@ atest('the verdict chip is hidden until it has a label', async () => {
   await sleep(0);
   assert.strictEqual(chip.hidden, false, 'the verdict chip stayed hidden with a verdict');
   assert.ok(chip.textContent.length > 0);
+});
+
+console.log('\n=== #790 F1/F2: focus through a keyboard Move ===');
+
+async function readyWithFocus(side) {
+  const env = load();
+  const opened = openTool(env);
+  opened.tool.setEndpoint('a', NODE_A);
+  opened.tool.setEndpoint('b', NODE_B);
+  await sleep(0);
+  const move = env.dom.find('tp-move-' + side);
+  // A keyboard user: focus on Move, then Enter (a click on the button).
+  move.focus();
+  move.fire('click');
+  return Object.assign({ env, move }, opened);
+}
+
+for (const side of ['a', 'b']) {
+  atest('Move ' + side.toUpperCase() + ' from the keyboard: focus goes to Cancel, Escape brings it back to Move', async () => {
+    const { env, tool, move } = await readyWithFocus(side);
+    assert.strictEqual(bar(env).phase, 'move-' + side);
+    assert.strictEqual(env.dom.doc.activeElement, env.dom.find('tp-cancel'), 'focus was left in the hidden body, not on Cancel');
+    tool.cancelMove(); // what map.js does on Escape
+    assert.strictEqual(env.dom.doc.activeElement, move, 'focus after Escape: ' + (env.dom.doc.activeElement.attrs['data-testid'] || env.dom.doc.activeElement.tagName));
+  });
+  atest('Move ' + side.toUpperCase() + ' from the keyboard: Cancel brings focus back to Move', async () => {
+    const { env, tool, move } = await readyWithFocus(side);
+    env.dom.find('tp-cancel').fire('click');
+    assert.strictEqual(tool.movingSide(), null);
+    assert.strictEqual(env.dom.doc.activeElement, move, 'focus after Cancel: ' + (env.dom.doc.activeElement.attrs['data-testid'] || env.dom.doc.activeElement.tagName));
+  });
+}
+
+atest('focus outside the panel is left alone when a move ends', async () => {
+  const env = load();
+  const { tool } = openTool(env);
+  tool.setEndpoint('a', NODE_A);
+  tool.setEndpoint('b', NODE_B);
+  await sleep(0);
+  tool.beginMove('a'); // a mouse/touch start: focus stays on <body>
+  assert.strictEqual(env.dom.doc.activeElement, env.dom.body);
+  tool.cancelMove();
+  assert.strictEqual(env.dom.doc.activeElement, env.dom.body, 'focus was moved without the viewer being in the panel');
+});
+
+console.log('\n=== #790 F4: the fold toggle ===');
+
+function foldView(env) {
+  const fold = env.dom.find('tp-fold');
+  const status = env.dom.find('tp-pick-status');
+  return {
+    shown: !!(fold && !fold.hidden),
+    expanded: fold && fold.getAttribute('aria-expanded'),
+    glyph: fold && fold.children[0] && fold.children[0].textContent,
+    folded: env.dom.find('tp-panel').classList.contains('tp-folded'),
+    bodyHidden: env.dom.find('tp-body').hidden,
+    chipHidden: env.dom.find('tp-verdict').hidden,
+    chip: env.dom.find('tp-verdict').textContent,
+    status: status && !status.hidden ? status.textContent : null,
+    copyHidden: env.dom.find('tp-copy-link').hidden,
+    phase: env.dom.find('tp-panel').getAttribute('data-phase'),
+  };
+}
+
+test('the toggle is not in the compact bar', () => {
+  const env = load();
+  const { tool } = openTool(env);
+  tool.setEndpoint('a', NODE_A);
+  assert.strictEqual(foldView(env).shown, false, 'the fold toggle is shown while picking');
+});
+
+atest('fold: the head keeps title, verdict chip and the verdict as status; unfold restores the panel', async () => {
+  const env = load();
+  const { tool, fetchJSON } = openTool(env);
+  tool.setEndpoint('a', NODE_A);
+  tool.setEndpoint('b', NODE_B);
+  await sleep(0);
+  let v = foldView(env);
+  assert.strictEqual(v.shown, true, 'no fold toggle on a finished profile');
+  assert.strictEqual(v.expanded, 'true');
+  assert.strictEqual(v.glyph, '\u25BE');
+  const fold = env.dom.find('tp-fold');
+  assert.strictEqual(fold.tagName, 'BUTTON', 'the toggle is not a button');
+  assert.ok(fold.getAttribute('aria-label'), 'the toggle has no accessible name');
+  const calls = fetchJSON.calls.length;
+  fold.fire('click');
+  v = foldView(env);
+  assert.strictEqual(v.expanded, 'false', 'aria-expanded did not follow');
+  assert.strictEqual(v.glyph, '\u25B4');
+  assert.strictEqual(v.folded, true);
+  assert.strictEqual(v.bodyHidden, true, 'the body is still shown when folded');
+  assert.strictEqual(v.chipHidden, false, 'the verdict chip went with the body');
+  assert.ok(v.chip.length > 0);
+  assert.strictEqual(v.status, 'The whole first Fresnel zone is clear of terrain.', 'folded status: ' + v.status);
+  assert.strictEqual(v.copyHidden, false, 'the copy button left the folded head');
+  assert.strictEqual(v.phase, 'ready');
+  fold.fire('click');
+  v = foldView(env);
+  assert.strictEqual(v.expanded, 'true');
+  assert.strictEqual(v.folded, false);
+  assert.strictEqual(v.bodyHidden, false, 'unfold did not bring the body back');
+  assert.strictEqual(v.status, null, 'the folded status stayed');
+  assert.strictEqual(fetchJSON.calls.length, calls, 'folding issued a request');
+});
+
+atest('a profile closed folded opens unfolded next time', async () => {
+  const env = load();
+  const { tool } = openTool(env);
+  tool.setEndpoint('a', NODE_A);
+  tool.setEndpoint('b', NODE_B);
+  await sleep(0);
+  env.dom.find('tp-fold').fire('click');
+  tool.close();
+  tool.setEndpoint('a', NODE_A);
+  tool.setEndpoint('b', NODE_B);
+  await sleep(0);
+  const v = foldView(env);
+  assert.strictEqual(v.folded, false, 'still folded');
+  assert.strictEqual(v.expanded, 'true');
+  assert.strictEqual(v.bodyHidden, false);
 });
 
 (async () => {
