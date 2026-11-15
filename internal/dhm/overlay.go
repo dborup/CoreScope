@@ -86,9 +86,13 @@ var (
 		MinZoom: MinZoom, MaxZoom: MaxZoom, DatasetURL: SurfaceDatasetURL}
 	overlayContours = Overlay{ID: "contours", Service: WMSService, Layer: ContourLayer, Style: ContourStyle,
 		MinZoom: ContourMinZoom, MaxZoom: MaxZoom, DatasetURL: ContourDatasetURL}
+	// overlayElevation is rendered here from the WCS DTM (#792,
+	// elevation.go), not fetched as a WMS layer: Layer is the coverage.
+	overlayElevation = Overlay{ID: "elevation", Service: WCSService, Layer: TerrainCoverage,
+		MinZoom: ElevationMinZoom, MaxZoom: ElevationMaxZoom, DatasetURL: DatasetURL}
 
 	// overlayTable is the browser allow-list, in display order.
-	overlayTable = []Overlay{overlayTerrain, overlaySurface, overlayContours}
+	overlayTable = []Overlay{overlayTerrain, overlaySurface, overlayContours, overlayElevation}
 	overlayByID  = func() map[string]Overlay {
 		m := make(map[string]Overlay, len(overlayTable))
 		for _, o := range overlayTable {
@@ -125,6 +129,10 @@ func parseOverlayID(layers string) (Overlay, bool) {
 	}
 	return LookupOverlay(layers)
 }
+
+// Rendered reports whether the server renders o's tiles itself from a WCS
+// raster (#792) instead of fetching them from a WMS.
+func (o Overlay) Rendered() bool { return o.Service == WCSService }
 
 // Resolve returns o as the server fetches it: the terrain id is the
 // configured hillshade chain (map.dhm.layer, #687), every other id itself.
@@ -181,8 +189,12 @@ func overlayQueryCheck(service string) func(url.Values) error {
 // slot first, or fails at once with ErrAdmissionFull, and the caller stops
 // waiting when ctx is done. Only a complete 256×256 PNG is returned
 // (#695). o is not trusted: the service's check refuses any overlay that
-// is not in the table.
+// is not in the table. A rendered overlay (#792) takes one admitted WCS
+// call and is rendered here.
 func (c *Client) FetchOverlayAdmitted(ctx context.Context, adm *Admission, o Overlay, k TileKey) ([]byte, error) {
+	if o.Rendered() {
+		return c.fetchElevationTile(ctx, adm, o, k)
+	}
 	data, err := c.get(ctx, adm, o.Service, k.OverlayQuery(o), []string{"image/png"})
 	if err != nil {
 		return nil, err

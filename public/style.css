@@ -208,6 +208,19 @@
      these). Dark values live in BOTH dark blocks below. */
   --mast-site: #0e7490;                          /* every antenna site */
   --mast-interference: #c2410c;                  /* 700/800/900 MHz ring */
+  /* #792 — the colour-by-elevation ramp, one variable per stop in metres.
+     They are the colours the server renders the tiles with
+     (internal/dhm.ElevationRamp; cmd/server's
+     TestDHM792_LegendCSSMatchesTheRamp pins them), so they are the same in
+     every theme: the tiles are. The legend draws its bar from them. */
+  --dhm-elevation-0: #4a8c5c;
+  --dhm-elevation-25: #7fb069;
+  --dhm-elevation-50: #c2cf7e;
+  --dhm-elevation-75: #ecd98b;
+  --dhm-elevation-100: #d9a96a;
+  --dhm-elevation-125: #b07c4f;
+  --dhm-elevation-150: #a8907e;
+  --dhm-elevation-175: #f2eee9;
   /* Node-quality link strength colours (bottleneck tiers). Dark-theme
      overrides live in the [data-theme="dark"] block below (brighter hues). */
   --link-strong: #1a7f37;
@@ -2932,6 +2945,32 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 .mc-terrain-pane {
   mix-blend-mode: var(--terrain-overlay-blend);
   filter: var(--terrain-overlay-filter);
+}
+
+/* #792 — the colour-by-elevation legend under its toggle in the layer
+   control: the ramp as a bar (its gradient is set from the
+   --dhm-elevation-<m> variables) and the metres under it. */
+.mc-elev-legend {
+  margin: 2px 0 6px 20px;
+  width: 180px;
+  max-width: calc(100% - 20px);
+}
+.mc-elev-legend-bar {
+  height: 10px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+}
+.mc-elev-legend-scale {
+  position: relative;
+  height: 14px;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--text-muted);
+}
+.mc-elev-legend-scale span {
+  position: absolute;
+  top: 0;
+  white-space: nowrap;
 }
 
 /* #724 M3 — antenna sites: the status line under the overlay toggles and

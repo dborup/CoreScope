@@ -247,6 +247,9 @@ jobs:
           # budget fails at 50 ms, twice the 25 ms target it logs against,
           # and the geometry ratio is a median of rounds (#759 review).
           (cd internal/profilecard && go test -count=1 -run 'TestRenderWithinBudget|TestRenderTimeIndependentOfSampleCount|TestGeometryLinearInSamples' -v ./... | grep -E '^(=== RUN|--- |ok|FAIL|PASS)|per card|draw:|geometry:')
+          # #792: the colour-by-elevation tile's CPU budget (decode, colour,
+          # encode; 50 ms limit, 25 ms target) skips itself under -race too.
+          (cd internal/dhm && go test -count=1 -run 'TestElevation792_CPUWithinBudget' -v . | grep -E '^(=== RUN|--- |ok|FAIL|PASS)|per tile')
           # internal/heritage (#723 M2): protection-zone WFS client, parser and
           # nearest-zone maths, tested against a fake WFS.
           (cd internal/heritage && go test -race ./...)

@@ -192,7 +192,7 @@ func resultLine(t *testing.T, out, name string) string {
 
 var tokenProbes = []string{
 	"dhm-wms-terrain-exaggerated", "dhm-wms-terrain", "dhm-wms-surface", "dhm-wms-contours",
-	"dhm-wcs-dtm", "dhm-wcs-dsm", "dhm-ortho-wmts", "skraafoto-stac-search",
+	"dhm-wcs-dtm", "dhm-wcs-dsm", "dhm-wcs-elevation", "dhm-ortho-wmts", "skraafoto-stac-search",
 }
 
 var tokenlessProbes = []string{
@@ -523,6 +523,10 @@ func TestProbeURLsAreTheClientBuilders(t *testing.T) {
 	if !k.IntersectsCoverage() {
 		t.Fatalf("tile %v outside DHM coverage", k)
 	}
+	elev, ok := dhm.ElevationRaster(siteTileAt(dhm.ElevationMaxZoom))
+	if !ok || elev.Validate() != nil {
+		t.Fatalf("no valid elevation raster for the site: %+v", elev)
+	}
 	exag, _ := dhm.LookupOverlay("terrain")
 	exag = exag.Resolve(dhm.HillshadeExaggerated)
 	hc, _ := heritage.CellOf(e, n)
@@ -543,6 +547,7 @@ func TestProbeURLsAreTheClientBuilders(t *testing.T) {
 	want := map[string]string{
 		"dhm-wms-terrain-exaggerated": dhm.RequestURL(dhm.DefaultBaseURL, exag.Service, k.OverlayQuery(exag)),
 		"dhm-ortho-wmts":              dhm.RequestURL(dhm.DefaultBaseURL, dhm.OrthoWMTSService, k.OrthoQuery()),
+		"dhm-wcs-elevation":           dhm.RequestURL(dhm.DefaultBaseURL, dhm.WCSService, elev.CoverageQuery()),
 		"heritage-wfs":                hcli.CellURL(hc),
 		"mastedb-wfs":                 mastedb.NewClient(mastedb.DefaultClientOptions()).CellURL(mc),
 		"buildings-inspire-ogcapi":    buildings.NewClient(buildings.DefaultClientOptions()).SegmentURL(siteSegment()),
