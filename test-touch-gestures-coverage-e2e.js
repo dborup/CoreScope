@@ -38,6 +38,9 @@
 'use strict';
 
 const { chromium } = require('playwright');
+// The fixture is freshened once per shard: pin the packets window so the
+// rows do not depend on when this suite runs in it (#777).
+const { pinPacketsTimeWindow, withoutPinnedWindow } = require('./tests/e2e-packets-window');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 
@@ -168,6 +171,7 @@ async function main() {
     hasTouch: true,
     isMobile: true,
   });
+  await pinPacketsTimeWindow(ctx);
   const page = await ctx.newPage();
   page.setDefaultTimeout(15000);
   page.on('pageerror', (e) => console.error('[pageerror]', e.message));
@@ -220,7 +224,7 @@ async function main() {
         overlay: !!document.querySelector('.row-action-overlay.row-action-overlay-open'),
       }));
       const expected = `#/packets/${encodeURIComponent(r.hash)}`;
-      if (state.hash === expected && !state.overlay) {
+      if (withoutPinnedWindow(state.hash) === expected && !state.overlay) {
         pass(`(cov1) trace button navigated to ${state.hash} and dismissed overlay`);
       } else {
         fail(`(cov1) trace button: hash=${state.hash} expected=${expected}, overlay=${state.overlay}`);
@@ -250,7 +254,7 @@ async function main() {
         overlay: !!document.querySelector('.row-action-overlay.row-action-overlay-open'),
       }));
       const expected = `#/packets?hash=${encodeURIComponent(r2.hash)}`;
-      if (state.hash === expected && !state.overlay) {
+      if (withoutPinnedWindow(state.hash) === expected && !state.overlay) {
         pass(`(cov2) filter button navigated to ${state.hash} and dismissed overlay`);
       } else {
         fail(`(cov2) filter: hash=${state.hash} expected=${expected}, overlay=${state.overlay}`);
@@ -328,7 +332,7 @@ async function main() {
     await synthSwipe(page, cx - 80, cy, cx + 80, cy);
     await page.waitForTimeout(250);
     const hash = await page.evaluate(() => location.hash);
-    if (hash === '#/packets') pass('(cov5) LTR bottom-nav swipe on #/live navigated back to #/packets');
+    if (withoutPinnedWindow(hash) === '#/packets') pass('(cov5) LTR bottom-nav swipe on #/live navigated back to #/packets');
     else fail(`(cov5) expected #/packets, got ${hash}`);
   }
 
@@ -362,6 +366,7 @@ async function main() {
   // ────────────────────────────────────────────────────────────────
   {
     const ctxD = await browser.newContext({ viewport: { width: 1200, height: 900 }, hasTouch: true });
+    await pinPacketsTimeWindow(ctxD);
     const pD = await ctxD.newPage();
     pD.setDefaultTimeout(15000);
     pD.on('pageerror', (e) => console.error('[pageerror-desktop]', e.message));
@@ -396,6 +401,7 @@ async function main() {
     const ctxP = await browser.newContext({
       viewport: { width: 375, height: 812 }, hasTouch: true, isMobile: true,
     });
+    await pinPacketsTimeWindow(ctxP);
     const pP = await ctxP.newPage();
     pP.setDefaultTimeout(15000);
     pP.on('pageerror', (e) => console.error('[pageerror-phone2]', e.message));
