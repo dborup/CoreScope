@@ -18,6 +18,14 @@
       "measurementNote": "New suite; #728 M1 Esri World Imagery base map and the Esri opt-in gate on Map and Live with an intercepted map.tiles client-config block, every third-party tile stubbed and a stubbed /api/map/dhm/wms: no Esri entry, customizer option or arcgisonline request while Esri is off; an Esri darkDefault/lightDefault or stored choice while off falls back to OSM with a console warning; with Esri on the imagery is offered, not requested until selected, loads {z}/{y}/{x} tiles to z19 with the exact credit and no filter in either theme; the customizer choice persists across a reload on Map and Live; and the DHM hillshade loads above it with both credits. Review round 3 adds Live's base-map credit: shown with no overlay, through every on/off order of the hillshade and the protected monuments (stubbed agency WMS), after explicit base picks and in-place Auto provider/theme swaps, in one control that no Live panel covers at 390x844, 740x360, 844x390 and 768x1024. About 70s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
     },
     {
+      "file": "test-issue-741-skaermkort-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #741 M1b Dataforsyningen Skaermkort base maps through WMS in EPSG:3857 on Map and Live, with an intercepted map.tiles client-config block and a dummy token, every api.dataforsyningen.dk request answered by a 512 px stub in the browser and every other third-party tile stubbed: off by default and for enabled-without-token and enabled-as-string (no layer-control or customizer entry, no request), a gated-off default falls back to OSM with a warning naming both switches; on, four styles offered and nothing requested until picked; every GetMap carries exactly the allow-listed parameters, 512x512, EPSG:3857, the dummy token once and a bbox of 512 px at the map zoom; the CC BY 4.0 credit with dataset and licence links; grey under the invert filter in dark; the DHM hillshade above it; Auto swaps WMS and OSM on a theme switch both ways; the customizer choice applies in place and after a reload; a 375x560 phone flow picks a style in the layer control and keeps it through a theme switch, a control rebuild and SPA navigation, with a reload back to Auto; nothing requested outside the bounds; at most 20 GetMap requests per 1920x1080 view. About 75s locally; no CI duration measured yet. Assigned to shard 2, next to the #728 base-map suites."
+    },
+    {
       "file": "test-issue-728-ortho-base-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
