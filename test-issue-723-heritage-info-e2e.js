@@ -19,7 +19,9 @@
  *   6. 360x740 touch: a tap opens the popup, its close button is 44x44 px
  *      and closes it;
  *   6b. closing the popup while its lookup is still pending: the late
- *      answer does not reopen it (#762 review finding 5);
+ *      answer does not reopen it (#762 review finding 5), and again for a
+ *      second lookup in the same, reused popup (#723 M3: the abort
+ *      listener fires on every close, not only the first);
  *   7. light and dark: the popup's colours are the theme's variables;
  *   8. no console errors.
  *
@@ -269,10 +271,16 @@ function profileFor(q) {
       await clickMap(page, 150, 60);
       await page.waitForTimeout(800);
       assert(rec.profile.length >= 1, 'no profile request');
-      assert(rec.info.length === 0, 'lookups while picking: ' + rec.info.length);
+      // Since #723 M3 the profile itself asks about its ends, at the
+      // server's 5-decimal coordinates (profileFor: both at 55.75, 9.42,
+      // so one lookup); a click asks at 6 decimals. Only clicks count here.
+      const isProfileEnd = (u) => u.searchParams.get('lat') === '55.75000' && u.searchParams.get('lon') === '9.42000';
+      const clicks = () => rec.info.filter(u => !isProfileEnd(u));
+      assert(rec.info.length - clicks().length === 1, 'profile end lookups: ' + (rec.info.length - clicks().length));
+      assert(clicks().length === 0, 'lookups while picking: ' + clicks().length);
       assert(!(await page.$('.mc-heritage-popup')), 'heritage popup while picking');
       await clickMap(page, 0, -150);
-      assert(rec.info.length === 1, 'no lookup once the picker is done: ' + rec.info.length);
+      assert(clicks().length === 1, 'no lookup once the picker is done: ' + clicks().length);
       assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     } finally { await ctx.close(); }
   });
@@ -297,20 +305,24 @@ function profileFor(q) {
   }
 
   for (const p of PAGES) {
-    await step(`${p.name}: closing the popup while the lookup is pending — the late answer does not reopen it`, async () => {
+    await step(`${p.name}: closing the popup while the lookup is pending — the late answer does not reopen it, on every close`, async () => {
       const { ctx, page, rec } = await newCtx({ hold: true });
       try {
         await gotoMap(page, p.hash + '?heritage=1');
-        await clickMap(page, 40, 30);
-        assert(rec.info.length === 1, 'lookups: ' + rec.info.length);
-        await page.waitForFunction(() => /Looking up/.test((document.querySelector('.mc-heritage-popup') || {}).textContent || ''), null, { timeout: 5000 });
-        await page.click('.mc-heritage-popup .leaflet-popup-close-button');
-        await page.waitForTimeout(300);
-        assert(!(await page.$('.mc-heritage-popup')), 'popup still open after its close button');
-        rec.held.splice(0).forEach(r => r());
-        await page.waitForTimeout(800);
-        assert(!(await page.$('.mc-heritage-popup')), 'the late answer reopened the closed popup');
-        assert(rec.infoFailed === 1, 'the pending lookup was not aborted: ' + rec.infoFailed);
+        // Twice in the same popup: Leaflet reuses it, so the second close
+        // must abort its lookup just like the first.
+        for (let round = 1; round <= 2; round++) {
+          await clickMap(page, 40, 30);
+          assert(rec.info.length === round, 'round ' + round + ' lookups: ' + rec.info.length);
+          await page.waitForFunction(() => /Looking up/.test((document.querySelector('.mc-heritage-popup') || {}).textContent || ''), null, { timeout: 5000 });
+          await page.click('.mc-heritage-popup .leaflet-popup-close-button');
+          await page.waitForTimeout(300);
+          assert(!(await page.$('.mc-heritage-popup')), 'round ' + round + ': popup still open after its close button');
+          rec.held.splice(0).forEach(r => r());
+          await page.waitForTimeout(800);
+          assert(!(await page.$('.mc-heritage-popup')), 'round ' + round + ': the late answer reopened the closed popup');
+          assert(rec.infoFailed === round, 'round ' + round + ': the pending lookup was not aborted: ' + rec.infoFailed);
+        }
         assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
       } finally { await ctx.close(); }
     });

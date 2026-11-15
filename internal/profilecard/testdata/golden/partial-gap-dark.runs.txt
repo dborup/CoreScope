@@ -13,4 +13,4 @@ axis-x        16px regular x=  96 y=524 w=   9 0
 axis-x        16px regular x= 607 y=524 w=  58 10.9 km
 axis-x        16px regular x=1118 y=524 w=  58 21.8 km
 summary       20px regular x=  24 y=574 w= 978 No verdict, path leaves Denmark. The profile covers 71 % of the path. · heights 20 m / 15 m · terrain + surface
-attribution   18px regular x=  24 y=604 w= 606 Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0
+attribution   18px regular x=  24 y=604 w= 760 Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0 — data bearbejdet

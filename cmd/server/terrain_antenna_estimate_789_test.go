@@ -386,15 +386,11 @@ func TestAntennaEstimate789_AdmissionFull(t *testing.T) {
 	if !ok {
 		t.Fatal("node not resolved")
 	}
-	for i := 0; i < cap(env.p.admit); i++ {
-		env.p.admit <- struct{}{}
-	}
+	release := fillSlots(env.p.admit)
 	if s := env.p.surfaceFor(context.Background(), end); s != nil {
 		t.Fatalf("surface %v with admission full, want none", *s)
 	}
-	for i := 0; i < cap(env.p.admit); i++ {
-		<-env.p.admit
-	}
+	release()
 	if env.surface.calls.Load() != 0 || env.p.estimate.cache.Len() != 0 || env.p.estimate.failed.Len() != 0 {
 		t.Fatal("a refused measurement did upstream work or was remembered")
 	}
@@ -458,7 +454,7 @@ func TestAntennaEstimate789_WiredFromConfig(t *testing.T) {
 // #789 perf proof: a cache hit is a map lookup, no allocation per call
 // beyond the returned value.
 func BenchmarkAntennaEstimate789_Hit(b *testing.B) {
-	p := &terrainProfiler{estimate: newTerrainEstimator(&surfaceFake{surfaceM: 20}), admit: make(chan struct{}, 4), now: time.Now, deadline: time.Second}
+	p := &terrainProfiler{estimate: newTerrainEstimator(&surfaceFake{surfaceM: 20}), admit: dhm.NewAdmission(4), now: time.Now, deadline: time.Second}
 	e := terrainEnd{kind: "node", role: "repeater", pubkey: pk789("a"), pt: dhm.LatLon{Lat: est789Lat, Lon: est789Lon}}
 	if s := p.surfaceFor(context.Background(), e); s == nil {
 		b.Fatal("no surface")

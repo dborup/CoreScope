@@ -252,8 +252,8 @@ func TestPlanDanishPathsStayFull(t *testing.T) {
 }
 
 // #704 — why Okseøerne stay covered, as a number rather than a verdict.
-// The generator subtracts Danish land, Danish minor islands and
-// DANISH_ISLANDS after the buffer, but the islets are clear of the
+// The generator subtracts Danish territory from Topografisk Landpolygon
+// after the buffer (#739 M1), which has both islets, but they are clear of the
 // buffered German coast to begin with: Natural Earth puts German land
 // 2261 m from Store Okseø, and the real coast at Holnis (Glücksburg) is
 // 2105 m away, against a 1250 m buffer and a 150 m simplification
@@ -340,11 +340,13 @@ func TestPeberholmFixKeepsTheForeignSide(t *testing.T) {
 }
 
 // #763 — the generator's hand-made islands agree with the embedded
-// polygon: every EXTRA_ISLANDS centre (foreign) lies on it, and every
-// DANISH_ISLANDS centre is covered. CI cannot run the generator (it needs
-// the Natural Earth files), so this is what ties a change to those lists
-// to a regenerated foreign_land.txt. With TestPeberholmIsCovered, it also
-// keeps Peberholm out of EXTRA_ISLANDS.
+// polygon: every EXTRA_ISLANDS centre (foreign) lies on it. CI cannot run
+// the generator (it needs the Natural Earth files and the Topografisk
+// Landpolygon GeoPackage), so this is what ties a change to that list to
+// a regenerated foreign_land.txt. With TestPeberholmIsCovered, it also
+// keeps Peberholm out of EXTRA_ISLANDS. #739 M1 dropped DANISH_ISLANDS:
+// Topografisk Landpolygon has Okseøerne (TestForeignLandHeader739 keeps
+// the list gone).
 func TestGeneratorHandMadeIslandsMatchThePolygon(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join("..", "..", "scripts", "gen-dhm-foreign-land.py"))
 	if err != nil {
@@ -355,7 +357,6 @@ func TestGeneratorHandMadeIslandsMatchThePolygon(t *testing.T) {
 		foreign bool
 	}{
 		{"EXTRA_ISLANDS", true},
-		{"DANISH_ISLANDS", false},
 	} {
 		islands := handMadeIslands(t, string(src), c.list)
 		if len(islands) == 0 {
@@ -502,8 +503,10 @@ func TestBoundaryCellRangeEps(t *testing.T) {
 // output is byte-identical, because no Danish islet lies inside the
 // 1250 m buffer today, so the hash is deliberately unchanged. #763
 // dropped Peberholm (Danish) from EXTRA_ISLANDS: the eighth ring, its
-// buffered outline, is gone and nothing else changed.
-const foreignLandSHA256 = "7b4858264c596980b9103c96aad918c9c715df65046f012b18e8304a1fc91c9f"
+// buffered outline, is gone and nothing else changed. #739 M1 regenerated
+// it with Topografisk Landpolygon as the Danish side and the DK-DE land
+// border zone: 13 rings, 1158 vertices, 18 133 bytes.
+const foreignLandSHA256 = "9082afa8d063c4a7ff00fecfdb0545ffb563adf1dde2bdacc369ce5d7c4d3251"
 
 func TestForeignLandIsPinned(t *testing.T) {
 	sum := sha256.Sum256([]byte(foreignLandText))

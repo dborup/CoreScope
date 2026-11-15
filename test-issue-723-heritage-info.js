@@ -14,8 +14,9 @@
  *   - the overlay going off closes the popup and aborts its request; another
  *     layer going off leaves both alone;
  *   - closing the popup aborts its pending request, so a late answer never
- *     reopens it; a failure of an older request never replaces a newer
- *     answer;
+ *     reopens it, on every close of the reused popup and not only the
+ *     first (#762 review); a failure of an older request never replaces a
+ *     newer answer;
  *   - the popup CSS uses CSS variables only and a 44px close button on
  *     touch screens;
  *   - Map and Live attach it, and index.html loads it before them.
@@ -92,8 +93,10 @@ function makeL(map) {
         openOn(m) { p._open = true; m.popups.push(p); return p; },
         isOpen() { return p._open; },
         on(t, fn) { (p._h[t] = p._h[t] || []).push(fn); return p; },
-        off() { return p; },
-        fire(t) { (p._h[t] || []).forEach(fn => fn({ type: t })); },
+        // Like Leaflet's once(): the handler is gone after its first call.
+        once(t, fn) { const w = (e) => { p.off(t, w); fn(e); }; return p.on(t, w); },
+        off(t, fn) { if (t && p._h[t]) p._h[t] = p._h[t].filter(f => f !== fn); return p; },
+        fire(t) { (p._h[t] || []).slice().forEach(fn => fn({ type: t })); },
         getElement() { return null; },
       };
       return p;
@@ -293,6 +296,26 @@ test('closing the popup aborts its request; a late answer does not reopen it', a
   assert.strictEqual(s.map.popups[0]._open, false, 'late answer reopened the popup');
   assert.strictEqual(s.map.popups.length, 1, 'popup opened again');
   assert(!/Rundhøj/.test(s.map.popups[0]._content.textContent), 'late answer rendered');
+});
+
+// #762 review follow-up 1: the abort listener fires on every close, not
+// only the first. The popup is built once and reused, so a listener that
+// ran once (Leaflet's once()) would leave the second close unguarded.
+test('every close aborts its request: close, click, close, then a late answer stays closed', async () => {
+  const s = setup();
+  s.click();
+  s.map.closePopup(s.map.popups[0]);
+  assert(s.fetch.calls[0].init.signal.aborted, 'first close did not abort');
+  s.click();
+  assert.strictEqual(s.fetch.calls.length, 2, 'second click made no request');
+  assert.strictEqual(s.map.popups[0]._open, true, 'second click did not reopen the popup');
+  s.map.closePopup(s.map.popups[0]);
+  assert(s.fetch.calls[1].init.signal.aborted, 'second close did not abort');
+  answer(s.fetch.calls[1], 200, INSIDE);
+  await tick(); await tick();
+  assert.strictEqual(s.map.popups[0]._open, false, 'the second answer reopened the popup');
+  assert.strictEqual(s.map.popups.length, 2, 'popup opened a third time');
+  assert(!/Rundhøj/.test(s.map.popups[0]._content.textContent), 'the second answer was rendered');
 });
 
 test('a failure of an older request does not replace a newer answer', async () => {

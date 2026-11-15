@@ -39,14 +39,18 @@ type TerrainClassification struct {
 
 // TerrainEndpoint is one end of the path, snapped to 5 decimals.
 type TerrainEndpoint struct {
-	Lat           float64  `json:"lat"`
-	Lon           float64  `json:"lon"`
-	Kind          string   `json:"kind"` // "node" or "point"
-	Role          string   `json:"role,omitempty"`
-	GroundM       *float64 `json:"groundM"` // DTM; null outside coverage
-	AntennaM      float64  `json:"antennaM"`
-	AntennaSource string   `json:"antennaSource"`
-	Assumed       bool     `json:"assumed"` // the height is a default, not a known value
+	Lat      float64  `json:"lat"`
+	Lon      float64  `json:"lon"`
+	Kind     string   `json:"kind"` // "node" or "point"
+	Role     string   `json:"role,omitempty"`
+	GroundM  *float64 `json:"groundM"` // DTM; null outside coverage
+	AntennaM float64  `json:"antennaM"`
+	// AntennaSource is where AntennaM came from, in precedence order:
+	// request, operator-node, dsm-estimate (#789: the role default raised
+	// to the surface model around the node plus a roof offset, still
+	// Assumed), operator-role, role-default, point-default.
+	AntennaSource string `json:"antennaSource"`
+	Assumed       bool   `json:"assumed"` // the height is a default, not a known value
 }
 
 // TerrainCoverage is how much of the path the deciding model covers.

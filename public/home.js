@@ -753,8 +753,12 @@
         const mapEl = document.getElementById('healthMap');
         if (mapEl) {
           miniMap = L.map(mapEl, { zoomControl: false, attributionControl: false }).setView([node.lat, node.lon], 12);
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '© OpenStreetMap contributors'
+          // #741 M1a — this minimap still hardcodes OSM (#756 left that
+          // out of scope), but it builds the layer through the registry's
+          // one factory like every other map.
+          window.MC_createBaseLayer({
+            url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            attribution: '© OpenStreetMap contributors',
           }).addTo(miniMap);
           // #756 — this minimap was the one map #752/#754 left out of scope
           // (it hardcodes OSM, not the registry's provider), but it still

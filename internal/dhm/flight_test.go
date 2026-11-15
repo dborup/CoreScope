@@ -128,3 +128,69 @@ func TestFlightDistinctKeysRunSeparately(t *testing.T) {
 		}
 	}
 }
+
+// #759 review finding 3: a held call outlives its only caller. The caller
+// returns at its own deadline; the call runs on, holding its admission
+// slot, stays joinable, and ends at its timeout if nothing else ends it.
+func TestFlightHeldCallOutlivesItsCaller(t *testing.T) {
+	var g Flight[int]
+	adm := NewAdmission(1)
+	release := make(chan struct{})
+	var cancelled atomic.Bool
+	fn := func(ctx context.Context) (int, error) {
+		select {
+		case <-release:
+			return 7, nil
+		case <-ctx.Done():
+			cancelled.Store(true)
+			return 0, ctx.Err()
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, _, err := g.DoAdmittedHeld(ctx, "k", time.Minute, adm, fn); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("caller err %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if cancelled.Load() || adm.InUse() != 1 {
+		t.Fatalf("held call cancelled=%v, slots in use %d", cancelled.Load(), adm.InUse())
+	}
+	// A later caller joins the held call rather than starting another.
+	got := make(chan int, 1)
+	go func() {
+		v, shared, err := g.DoAdmitted(context.Background(), "k", time.Minute, adm, fn)
+		if err != nil || !shared {
+			t.Errorf("join: shared=%v err=%v", shared, err)
+		}
+		got <- v
+	}()
+	waitFor(t, "the join", func() bool { return g.waiters("k") == 1 })
+	close(release)
+	if v := <-got; v != 7 {
+		t.Fatalf("joined value %d", v)
+	}
+	waitFor(t, "the slot back", func() bool { return adm.InUse() == 0 })
+
+	// Bounded: with nobody waiting, the timeout still ends a held call.
+	cancelled.Store(false)
+	never := func(ctx context.Context) (int, error) { <-ctx.Done(); cancelled.Store(true); return 0, ctx.Err() }
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel2()
+	g.DoAdmittedHeld(ctx2, "k2", 50*time.Millisecond, adm, never)
+	waitFor(t, "the timeout", func() bool { return cancelled.Load() && adm.InUse() == 0 })
+}
+
+// A held call needs a timeout: without one, DoAdmittedHeld is DoAdmitted
+// and the last caller's leaving cancels the call.
+func TestFlightHeldNeedsATimeout(t *testing.T) {
+	var g Flight[int]
+	var cancelled atomic.Bool
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	g.DoAdmittedHeld(ctx, "k", 0, nil, func(ctx context.Context) (int, error) {
+		<-ctx.Done()
+		cancelled.Store(true)
+		return 0, ctx.Err()
+	})
+	waitFor(t, "the cancel", cancelled.Load)
+}

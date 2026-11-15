@@ -164,7 +164,7 @@ func (c *Client) header(ctx context.Context, t Tile) (header, error) {
 	if !ok {
 		var err error
 		enc, _, err = c.flight.DoAdmitted(ctx, "h "+path, 0, c.adm, func(work context.Context) ([]byte, error) {
-			return c.fetchHeader(work, path)
+			return c.fetchHeader(work, t)
 		})
 		if err != nil {
 			return header{}, dhm.ContextFailure(err)
@@ -179,34 +179,42 @@ func (c *Client) header(ctx context.Context, t Tile) (header, error) {
 	return header{tiff: tiff, size: size, calls: int(enc[8])}, nil
 }
 
-// fetchHeader runs the cold read of a header and returns it encoded for
-// the cache, after checking that it parses.
-func (c *Client) fetchHeader(work context.Context, path string) ([]byte, error) {
+// fetchHeader runs the cold read of t's header and returns it encoded
+// for the cache, after checking that it parses and that it places the
+// raster on t (#795): a valid COG of another tile is never cached, so
+// never sampled.
+func (c *Client) fetchHeader(work context.Context, t Tile) ([]byte, error) {
+	path := t.Path()
 	buf, size, err := c.rangeGet(work, path, 0, headerBytes-1, 0, headerBytes)
 	if err != nil {
 		return nil, err
 	}
 	calls := 1
-	_, err = dhm.ParseTiledGeoTIFF(buf, size)
+	tiff, err := dhm.ParseTiledGeoTIFF(buf, size)
 	if errors.Is(err, dhm.ErrShortHeader) && len(buf) == headerBytes {
 		more, _, err2 := c.rangeGet(work, path, headerBytes, min(maxHeaderBytes, size)-1, size, maxHeaderBytes-headerBytes)
 		if err2 != nil {
 			return nil, err2
 		}
 		buf, calls = append(buf, more...), 2
-		_, err = dhm.ParseTiledGeoTIFF(buf, size)
+		tiff, err = dhm.ParseTiledGeoTIFF(buf, size)
 	}
 	switch {
 	case errors.Is(err, dhm.ErrShortHeader):
 		return nil, dhm.FetchError{Reason: "header too large"}
 	case err != nil:
 		return nil, dhm.FetchError{Reason: "invalid header"}
+	case !tiff.Fits(float64(t.Lon), float64(t.Lat), float64(t.Lon+1), float64(t.Lat+1)):
+		return nil, errGeoref
 	}
 	enc := make([]byte, headerMeta, headerMeta+len(buf))
 	binary.LittleEndian.PutUint64(enc, uint64(size))
 	enc[8] = byte(calls)
 	return append(enc, buf...), nil
 }
+
+// errGeoref: the tile's raster is not on its 1° square.
+var errGeoref = dhm.FetchError{Reason: "wrong georeference"}
 
 // block reads the stored bytes of block i of level of t.
 func (c *Client) block(ctx context.Context, t Tile, h header, level, i int) ([]byte, error) {

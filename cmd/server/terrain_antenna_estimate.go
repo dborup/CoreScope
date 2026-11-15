@@ -141,15 +141,10 @@ func (p *terrainProfiler) surfaceFor(ctx context.Context, e terrainEnd) *float64
 		return nil
 	}
 	at := dhm.LatLon{Lat: float64(key.lat) / terrainSnap, Lon: float64(key.lon) / terrainSnap}
-	b, _, err := p.estimate.flight.Do(ctx, key.String(), p.deadline, func(fctx context.Context) ([]byte, error) {
-		select {
-		case p.admit <- struct{}{}:
-			defer func() { <-p.admit }()
-		default:
-			// No upstream work done: nothing is remembered, and the
-			// next profile tries again.
-			return nil, errTerrainBusy
-		}
+	// Admitted like a profile fetch: a refusal (dhm.ErrAdmissionFull) did
+	// no upstream work, so nothing is remembered and the next profile
+	// tries again.
+	b, _, err := p.estimate.flight.DoAdmitted(ctx, key.String(), p.deadline, p.admit, func(fctx context.Context) ([]byte, error) {
 		if p.set.upstreamTimeout > 0 {
 			var cancel context.CancelFunc
 			fctx, cancel = context.WithTimeout(fctx, p.set.upstreamTimeout)

@@ -170,7 +170,10 @@ func levelCost(level int, pts []fillPoint, tiles []Tile, hs []header) (int, []bl
 	index := map[[2]int]int{} // (tile, block) → group; at most one per block on the path
 	var groups []blockGroup
 	for j, p := range pts {
-		blk, _, _ := hs[p.tile].tiff.Levels[level].Locate(p.lon, p.lat)
+		blk, _, _, ok := hs[p.tile].tiff.Levels[level].Locate(p.lon, p.lat)
+		if !ok {
+			continue // off this raster: no value, never its edge (#795)
+		}
 		key := [2]int{p.tile, blk}
 		g, ok := index[key]
 		if !ok {
@@ -218,7 +221,7 @@ func (c *Client) sample(ctx context.Context, level int, groups []blockGroup, pts
 		lvl := &h.tiff.Levels[level]
 		for _, j := range g.pts {
 			p := pts[j]
-			_, lon, lat := lvl.Locate(p.lon, p.lat)
+			_, lon, lat, _ := lvl.Locate(p.lon, p.lat) // on the raster: levelCost grouped it
 			if v, ok := grid.Sample(lon, lat); ok {
 				values[p.i] = float32(v)
 			}
