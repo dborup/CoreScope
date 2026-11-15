@@ -68,6 +68,17 @@ func GLO30Tile(lat, lon int, value func(lon, lat float64) float32) COGOptions {
 	}
 }
 
+// Terrain is synthetic terrain for the #738 benchmarks: smooth hills
+// plus centimetre noise, so DEFLATE + predictor 3 stores a 1024² block in
+// about 2.8 MB, the largest real GLO-30 block measured (N55E012: 38 KB
+// to 2.78 MB, about 0.97 MB on average). Bytes measured on it are an upper
+// bound.
+func Terrain(lon, lat float64) float32 {
+	h := 40 + 30*math.Sin(lon*40)*math.Cos(lat*55) + 8*math.Sin(lon*310+lat*170)
+	noise := math.Mod(math.Abs(math.Sin(lon*91733+lat*48611))*1e4, 1) // pseudo-random, deterministic
+	return float32(h + 0.37*noise)
+}
+
 // COGBlocks is the number of blocks of each level of o.
 func COGBlocks(o COGOptions) []int {
 	t := tileEdge(o)

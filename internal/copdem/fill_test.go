@@ -25,57 +25,36 @@ func testHeight(lon, lat float64) float32 {
 	return float32(100 + 50*(lon-12) + 30*(lat-55))
 }
 
-// layout is a scaled GLO-30 tile: w × h pixels over the 1° square in
-// blocks of block pixels, with the ½ overview.
-type layout struct{ w, h, block int }
-
 var (
 	// tenth: a tenth of GLO-30's resolution in 64-pixel blocks (4 × 6;
 	// overview 2 × 3): fast, and a path still crosses several blocks.
-	tenth = layout{240, 360, 64}
+	tenth = copdemtest.Layout{W: 240, H: 360, Block: 64}
 	// dense: a fifth, in 16-pixel blocks (2.1 × 2.5 km at 55° N; 30 × 45
 	// blocks, overview 15 × 23), so a 40 km path is over budget at full
 	// resolution and within it at the overview.
-	dense = layout{480, 720, 16}
+	dense = copdemtest.Layout{W: 480, H: 720, Block: 16}
 )
 
-func scaledTile(t Tile, l layout, value func(lon, lat float64) float32) []byte {
-	return dhmtest.COG(dhmtest.COGOptions{
-		Width: l.w, Height: l.h, Tile: l.block,
-		Lon0: float64(t.Lon), Lat0: float64(t.Lat + 1), PixelLon: 1 / float64(l.w), PixelLat: 1 / float64(l.h),
-		Value: value, Overview: true,
-	})
-}
-
-// fillBucket serves every listed tile of the region at layout l, each
-// built when first asked for.
-func fillBucket(t *testing.T, l layout, value func(lon, lat float64) float32) *copdemtest.Bucket {
+// fillBucket serves every tile at layout l, each built when first asked
+// for.
+func fillBucket(t *testing.T, l copdemtest.Layout, value func(lon, lat float64) float32) *copdemtest.Bucket {
 	b := newBucket(t)
-	b.Generate = func(path string) []byte {
-		for lat := regionSouth; lat <= regionNorth; lat++ {
-			for lon := regionWest; lon <= regionEast; lon++ {
-				if tl := (Tile{lat, lon}); tl.Listed() && tl.Path() == path {
-					return scaledTile(tl, l, value)
-				}
-			}
-		}
-		return nil
-	}
+	b.Generate = copdemtest.Synthetic(l, value)
 	return b
 }
 
 // tol is the most a filled sample may differ from testHeight at layout
 // l and level: the edge hold of up to one pixel at a tile or block edge
 // (dhm.TiledLevel.Locate), at testHeight's slope, plus rounding.
-func (l layout) tol(level int) float64 {
+func tol(l copdemtest.Layout, level int) float64 {
 	px := float64(int(1) << level)
-	return 1.05*px*(50/float64(l.w)+30/float64(l.h)) + 1e-3
+	return 1.05*px*(50/float64(l.W)+30/float64(l.H)) + 1e-3
 }
 
 // putTiles serves the given tiles at layout l.
-func putTiles(b *copdemtest.Bucket, l layout, value func(lon, lat float64) float32, tiles ...Tile) {
+func putTiles(b *copdemtest.Bucket, l copdemtest.Layout, value func(lon, lat float64) float32, tiles ...Tile) {
 	for _, tl := range tiles {
-		b.Put(tl.Path(), scaledTile(tl, l, value))
+		b.Put(tl.Path(), copdemtest.TileCOG(tl.Lat, tl.Lon, l, value))
 	}
 }
 
@@ -149,7 +128,7 @@ func TestFillCopenhagenMalmo(t *testing.T) {
 	if r.Filled == 0 || r.Filled == len(p.E) || r.Level != 0 {
 		t.Fatalf("filled %d of %d at level %d", r.Filled, len(p.E), r.Level)
 	}
-	checkFill(t, &p, r, testHeight, tenth.tol(0))
+	checkFill(t, &p, r, testHeight, tol(tenth, 0))
 	// The two tiles' headers and the blocks the uncovered samples are
 	// in: no more.
 	if got := b.Requests.Load(); got != int64(r.Calls) || r.Calls < 3 || r.Calls > dhm.MaxCallsPerModel {
@@ -194,7 +173,7 @@ func TestFillOutOfExtent(t *testing.T) {
 	if e, n := p.E[len(p.E)-1], p.N[len(p.E)-1]; n >= dhm.RasterExtent[1] || p.Inside(len(p.E)-1) {
 		t.Fatalf("Kiel at %v,%v should be south of the extent", e, n)
 	}
-	checkFill(t, &p, r, testHeight, tenth.tol(0))
+	checkFill(t, &p, r, testHeight, tol(tenth, 0))
 	paths := map[string]bool{}
 	for _, req := range b.Log() {
 		paths[req.Path] = true
@@ -218,7 +197,7 @@ func TestFillSeaTileIsZeroWithoutRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkFill(t, &p, r, testHeight, tenth.tol(0))
+	checkFill(t, &p, r, testHeight, tol(tenth, 0))
 	if v := r.Values[len(p.E)-1]; v != 0 {
 		t.Fatalf("end on the sea tile: %v, want 0", v)
 	}
@@ -356,7 +335,7 @@ func TestFillFallsBackToOverview(t *testing.T) {
 	if r.Level != 1 || r.Calls > dhm.MaxCallsPerModel || b.Requests.Load() > dhm.MaxCallsPerModel {
 		t.Fatalf("level %d, calls %d, %d requests", r.Level, r.Calls, b.Requests.Load())
 	}
-	checkFill(t, &p, r, testHeight, dense.tol(1))
+	checkFill(t, &p, r, testHeight, tol(dense, 1))
 	if cost := fullResolutionCost(t, c, &p); cost <= dhm.MaxCallsPerModel {
 		t.Fatalf("full resolution would cost %d: the case does not exercise the fallback", cost)
 	}
@@ -509,7 +488,7 @@ func TestFillTileVisitedTwiceCountsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	checkFill(t, &p, r, testHeight, tenth.tol(0))
+	checkFill(t, &p, r, testHeight, tol(tenth, 0))
 	if got := b.Requests.Load(); got != int64(r.Calls) {
 		t.Fatalf("%d requests, Calls %d: a tile counted twice", got, r.Calls)
 	}

@@ -2,7 +2,6 @@ package copdem
 
 import (
 	"context"
-	"math"
 	"testing"
 
 	"github.com/meshcore-analyzer/copdem/copdemtest"
@@ -12,21 +11,13 @@ import (
 
 // #738 perf proof (AGENTS.md rule 0): the fill of a typical 80 km
 // cross-border path at the real GLO-30 layout (2400 × 3600 pixels per
-// tile, 1024² blocks, DEFLATE + predictor 3), served by the fake bucket on
-// loopback. It reports the blocks, requests and bytes one profile costs,
-// and the time cold (empty caches: headers, blocks, decode) and with the
-// blocks cached (decode and sampling only). The network is loopback, so
-// the cold time is the CPU and the in-process HTTP, not S3's latency.
-
-// benchTerrain compresses about as badly as real GLO-30: smooth hills
-// plus centimetre noise, ≈ 2.8 MB per 4 MiB block, the largest real block
-// measured in N55E012 (#738 research §3.2: 38 KB to 2.78 MB, ≈ 0.97 MB
-// on average). So the bytes below are an upper bound.
-func benchTerrain(lon, lat float64) float32 {
-	h := 40 + 30*math.Sin(lon*40)*math.Cos(lat*55) + 8*math.Sin(lon*310+lat*170)
-	noise := math.Mod(math.Abs(math.Sin(lon*91733+lat*48611))*1e4, 1)
-	return float32(h + 0.37*noise)
-}
+// tile, 1024² blocks, DEFLATE + predictor 3), on dhmtest.Terrain, whose
+// blocks are about as large as the largest real ones, served by the fake
+// bucket on loopback. It reports the blocks, requests and bytes one
+// profile costs, and the time cold (empty caches: headers, blocks,
+// decode) and with the blocks cached (decode and sampling only). The
+// network is loopback, so the cold time is the CPU and the in-process
+// HTTP, not S3's latency.
 
 // benchPath is Copenhagen City Hall to 80 km east-north-east, across
 // Øresund into Skåne: the DHM part is Copenhagen and the sea, the fill
@@ -36,14 +27,7 @@ func benchPath() dhm.Plan { return plan(copenhagen, toward(copenhagen, 80000, 70
 func glo30Bucket(b *testing.B) *copdemtest.Bucket {
 	bk := copdemtest.New()
 	b.Cleanup(bk.Close)
-	bk.Generate = func(path string) []byte {
-		for _, tl := range []Tile{{55, 12}, {55, 13}, {56, 12}, {56, 13}} {
-			if tl.Path() == path {
-				return dhmtest.COG(dhmtest.GLO30Tile(tl.Lat, tl.Lon, benchTerrain))
-			}
-		}
-		return nil
-	}
+	bk.Generate = copdemtest.Synthetic(copdemtest.GLO30, dhmtest.Terrain)
 	return bk
 }
 

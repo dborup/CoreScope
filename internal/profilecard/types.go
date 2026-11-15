@@ -22,6 +22,9 @@ type TerrainProfileResponse struct {
 	Physics     TerrainPhysics  `json:"physics"`
 	Verdict     TerrainVerdict  `json:"verdict"`
 	Attribution string          `json:"attribution"`
+	// AttributionFill is the Copernicus DEM credit, present exactly when
+	// Coverage.Mixed (#738).
+	AttributionFill string `json:"attributionFill,omitempty"`
 }
 
 // TerrainEndpoint is one end of the path, snapped to 5 decimals.
@@ -41,6 +44,19 @@ type TerrainCoverage struct {
 	State     string   `json:"state"` // full, partial, none
 	Pct       float64  `json:"pct"`
 	FirstGapM *float64 `json:"firstGapM"`
+	// Mixed: samples DHM does not cover were filled from Copernicus DEM
+	// GLO-30, along the stretches in Fill (#738).
+	Mixed bool               `json:"mixed"`
+	Fill  []TerrainFillRange `json:"fill,omitempty"`
+}
+
+// TerrainFillRange is a stretch of the path whose DTM came from the
+// foreign fill (#738).
+type TerrainFillRange struct {
+	FromM       float64 `json:"fromM"`
+	ToM         float64 `json:"toM"`
+	Source      string  `json:"source"`
+	ResolutionM int     `json:"resolutionM"` // nominal: 30, or 60 on the ½ overview
 }
 
 // TerrainSample is one point along the path; nil where there is no data.

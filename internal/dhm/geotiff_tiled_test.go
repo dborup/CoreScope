@@ -433,7 +433,7 @@ func TestDecodeBlockReusesBuffer(t *testing.T) {
 	}
 	// With a buffer, a decode allocates only the inflater and row
 	// scratch, never a tile: a 1024² tile is 4 MiB.
-	o := dhmtest.GLO30Tile(55, 12, glo30Terrain)
+	o := dhmtest.GLO30Tile(55, 12, dhmtest.Terrain)
 	o.Width, o.Height, o.Overview = 1024, 1024, false
 	big := dhmtest.COG(o)
 	bt, err := ParseTiledGeoTIFF(big, int64(len(big)))
@@ -521,20 +521,11 @@ func FuzzParseTiledGeoTIFF(f *testing.F) {
 	})
 }
 
-// glo30Terrain is synthetic terrain for the benchmarks: smooth hills plus
-// centimetre noise, so DEFLATE + predictor 3 compresses it about as badly
-// as real GLO-30 (≈ 0.3–2.8 MB per 4 MiB block, #738 research §3.2).
-func glo30Terrain(lon, lat float64) float32 {
-	h := 40 + 30*math.Sin(lon*40)*math.Cos(lat*55) + 8*math.Sin(lon*310+lat*170)
-	noise := math.Mod(math.Abs(math.Sin(lon*91733+lat*48611))*1e4, 1) // pseudo-random, deterministic
-	return float32(h + 0.37*noise)
-}
-
 // BenchmarkDecodeBlockGLO30 is the CPU of one full-resolution GLO-30
 // block (#738 perf proof): inflate 4 MiB, undo predictor 3, with a reused
 // buffer as the fill uses it.
 func BenchmarkDecodeBlockGLO30(b *testing.B) {
-	o := dhmtest.GLO30Tile(55, 12, glo30Terrain)
+	o := dhmtest.GLO30Tile(55, 12, dhmtest.Terrain)
 	o.Width, o.Height, o.Overview = 1024, 1024, false // one block of the real layout
 	data := dhmtest.COG(o)
 	tt, err := ParseTiledGeoTIFF(data, int64(len(data)))

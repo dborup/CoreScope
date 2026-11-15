@@ -110,6 +110,19 @@ type ProfileConfig struct {
 	MaxInFlight       *int     `json:"maxInFlight"`
 	// Share is the /p share route with per-profile link previews (#727).
 	Share ShareConfig `json:"share"`
+	// ForeignFill fills the samples DHM does not cover from Copernicus
+	// DEM GLO-30 (#738).
+	ForeignFill ForeignFillConfig `json:"foreignFill"`
+}
+
+// ForeignFillConfig is config.json `map.dhm.profile.foreignFill` (#738).
+// Off unless Enabled: it sends requests to a third party (the AWS Open
+// Data bucket of Copernicus DEM). A nil field takes the server default;
+// cmd/server resolves and bounds every value.
+type ForeignFillConfig struct {
+	Enabled      bool `json:"enabled"`
+	BlockCacheMB *int `json:"blockCacheMB"`
+	TimeoutMs    *int `json:"timeoutMs"`
 }
 
 // ShareConfig is config.json `map.dhm.profile.share` (#727). Off unless
