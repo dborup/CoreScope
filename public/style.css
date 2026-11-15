@@ -6467,6 +6467,8 @@ body.embed #app.app-fixed {
 .tp-credit-full { margin: 0; font-size: 11px; line-height: 1.3; color: var(--text-muted); }
 .tp-credit-more { cursor: pointer; color: var(--link-color, var(--accent)); width: max-content; }
 .tp-credit-more:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+/* A touch target of its own on a phone, like the credit links (#711). */
+@media (pointer: coarse) { .tp-credit-more { padding: 15px 0; } }
 /* The note a mixed verdict carries: a caveat on the verdict, in the warn
    tone the other caveats use. */
 .tp-mixed-note {
