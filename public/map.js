@@ -2717,6 +2717,7 @@
   var profileArm = null;      // 'a' | 'b' while picking, else null
   var profileLine = null;     // the measured path
   var profileGhost = null;    // live preview from A to the pointer
+  var profileCursorDot = null; // #781: the chart cursor's point on profileLine
   var profileBtn = null;
   var profileHintEl = null;
   var profileKeyHandler = null;
@@ -2819,6 +2820,7 @@
       onMoveStart: function (side) { profileArmFor(side, true); },
       onMoveCancel: profileDisarm,
       onEndpointsChange: profileDrawLine,
+      onCursor: profileCursorAt,
       onClose: function () {
         profileDisarm();
         profileClearLine();
@@ -2983,8 +2985,29 @@
     profileGhost = null;
   }
 
+  /* #781: the point under the chart cursor, as a dot on the drawn path. One
+   * circle marker, made on first use and moved after that; hidden by
+   * taking it off the map. The fraction is interpolated between the line's
+   * own ends in the projection Leaflet draws it in, so the dot sits on it. */
+  function profileCursorAt(p) {
+    if (!p || !profileLine || !map || !window.TerrainProfileCursor) { profileHideCursorDot(); return; }
+    var ll = profileLine.getLatLngs();
+    var at = window.TerrainProfileCursor.latLonAt([ll[0].lat, ll[0].lng], [ll[1].lat, ll[1].lng], p.t);
+    // No colour options: fill and stroke come from --tp-cursor-dot in
+    // style.css, like the path line's own.
+    if (!profileCursorDot) profileCursorDot = L.circleMarker(at, { className: 'tp-cursor-dot', radius: 6, weight: 2, fillOpacity: 1, interactive: false });
+    else profileCursorDot.setLatLng(at);
+    if (!map.hasLayer(profileCursorDot)) profileCursorDot.addTo(map);
+  }
+
+  function profileHideCursorDot() {
+    if (profileCursorDot && map && map.hasLayer(profileCursorDot)) map.removeLayer(profileCursorDot);
+  }
+
   function profileClearLine() {
     profileClearGhost();
+    profileHideCursorDot();
+    profileCursorDot = null;
     profileDrag = null;
     if (profileLine && map) { try { map.removeLayer(profileLine); } catch (_) {} }
     profileLine = null;

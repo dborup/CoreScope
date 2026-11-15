@@ -34,6 +34,14 @@
       "measurementNote": "New suite; #733 DHM credit compliance with an intercepted map.dhm client-config block (credit link fields + profile: true), a stubbed /api/map/dhm/wms tile and a stubbed /api/terrain/profile: on Map and Live the hillshade credit names Klimadatastyrelsen, links the Danmarks Hojdemodel dataset and the CC BY 4.0 licence with target=_blank and rel=noopener, renders exactly the server's plain credit text, is visible and uncovered, and goes away with the overlay; a pre-#733 block without the link fields still shows the plain credit with no links; the profile chart footer carries the same two links plus the 'data bearbejdet' derived note, exactly once; and at 360x740 that footer stays inside the panel and the viewport, legible and uncovered, with both links at least 44px and hit by themselves. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds, next to the #728 credit suite."
     },
     {
+      "file": "test-issue-738-foreign-fill-ui-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #738 M2 mixed-resolution note and Copernicus credit in the Map Path profile panel, with an intercepted dhm client-config block (profile: true plus the fill credit parts) and a stubbed /api/terrain/profile: Sonderborg to Flensburg shows the mixed note (30 m, and 60 m with the 1/2 overview) and the short Copernicus credit with the dataset and licence linked, target=_blank and rel=noopener, the full Art. 6(b) line folded until Full credit is opened, in light and dark; Aarhus to Silkeborg shows neither, and switching to it takes both away; at 360x740 both links and Full credit are at least 44px and hit by themselves; no request reaches AWS, Copernicus or Dataforsyningen. About 25s locally; no CI duration measured yet. Assigned to shard 2, next to the #733 credit suite."
+    },
+    {
       "file": "test-issue-752-inset-attribution-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
@@ -108,6 +116,14 @@
       "measurementNote": "New suite; #746 Map Path profile UI fixes with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile that echoes the request: switching between two profile links and going back keeps the destination profile while Close still clears it; a surface-model gap splits the surface line and clutter band; with a customizer point height unlike the server's, a two-point link and a Move A onto a free point each cost one request carrying it; the accessibility tree reads the terrain and surface chips as two sentences; from a stored view elsewhere a deep link (desktop) and a /p handoff (360x740) fit both ends above the panel, with no second fit after a pan or a Move and the stored view kept without a profile. About 40s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681/#721/#727 DHM suites."
     },
     {
+      "file": "test-issue-781-profile-cursor-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #781 Map Path profile hover cursor with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile: hovering the chart shows the dashed line at the sample under the pointer, the readout (distance, terrain, surface, clearance) and one dot on the drawn path at that fraction from A to B within 1.5 px; moving keeps the same dot; leaving hides all three; arrow keys step one sample and Shift ten with a polite readout; a touch drag at 360x740 moves the dot and it stays after the lift; 500 synthetic moves in one task cost one update and no chart rebuild, and spread over frames at most one per frame; Close and three Map visits leave no cursor listener, line or dot. About 40s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681/#721/#727/#746 DHM suites."
+    },
+    {
       "file": "test-issue-723-heritage-overlay-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },
@@ -130,6 +146,14 @@
       "output": "e2e",
       "meanSeconds": 0,
       "measurementNote": "New suite; #724 M4 interference hint in the Map Path profile with intercepted dhm and masts client-config blocks, a stubbed /api/terrain/profile and a stubbed /api/masts with fixed synthetic sites (neither the proxy's upstream, Mastedatabasen nor DHM is ever contacted): an end 320 m from an 800 MHz site shows the chip in the title row and its note, hostile stub text inert, and with both overlays off only the end cells are asked for, each once; dark-theme chip colour; 40 m from a 900 MHz site is the strong tier; an 1800 MHz site, an 800 MHz site 520 m away and a band-less GSM-R site give no hint; without the masts block no chip and no request; at 375 px the chip stays inside the panel; leaving the Map page with a path open three times leaves no theme-refresh listener or data-theme observer behind (#768 review 1). About 25s locally; no CI duration measured yet. Assigned to shard 1 next to the #724 M3 suite."
+    },
+    {
+      "file": "test-issue-724-m5-masts-customizer-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #724 M5 antenna sites settings in the customizer with intercepted dhm and masts client-config blocks (operator minZoom 14), a stubbed /api/terrain/profile and a stubbed /api/masts with fixed synthetic sites (neither the proxy's upstream, Mastedatabasen nor DHM is ever contacted): the Display tab's Antenna Sites section with the four settings at the operator values and server bounds, 48px inputs; changing the hint distance and strong tier updates an open profile's chip and note without a reload and fetches the newly needed cell; out-of-bounds values are put back and never stored; a value back at the operator's is a cleared override; the section survives a reload and reaches the export; a raised zoom gate asks for no cell and says so, and lowering it loads the view at once; the sites-by-default switch starts the next map without them while masts=1 in a link still wins; no section without the masts block. About 10s locally; no CI duration measured yet. Assigned to shard 1 next to the other #724 suites."
     },
     {
       "file": "test-issue-723-heritage-info-e2e.js",
