@@ -21,7 +21,8 @@
  *      text anywhere; the note gone while re-measuring and on Close;
  *   3. the cost: height edits and model switches re-measure without a
  *      single new lookup, a moved end asks for that end only, a stale
- *      answer is never shown, and the remembered answers are bounded;
+ *      answer is never shown, and the remembered answers are bounded and
+ *      least recently used out;
  *   4. the host: map.js passes the heritage block, style.css uses theme
  *      variables only for the new rules.
  *
@@ -234,6 +235,26 @@ test('builder: both ends — one line each, A first; the end inside leads the ch
   const m = TP.heritageNote({ a: NEAR, b: near2 }, CFG);
   assert.strictEqual(m.lead, 'b');
   assert.strictEqual(m.label, 'Monument zone ~17 m');
+});
+
+test('builder: outside a zone by less than 0.5 m — "at the edge", never "about 0 m"', () => {
+  const { TP } = load();
+  // The server rounds distanceM to whole metres, so 0 outside a zone is an
+  // end on its edge.
+  for (const d of [0, 0.4]) {
+    const edge = JSON.parse(JSON.stringify(NEAR)); edge.nearest.distanceM = d;
+    const n = TP.heritageNote({ a: null, b: edge }, CFG);
+    assert(/B: Vandfyldt grav, at the edge of its protection zone\./.test(n.text), d + ' m: ' + n.text);
+    assert(!/\b0 m\b/.test(n.text + n.label), 'reads "0 m": ' + n.text + ' / ' + n.label);
+    assert.strictEqual(n.label, 'At monument zone edge');
+  }
+  // From half a metre on it is a distance again.
+  const half = JSON.parse(JSON.stringify(NEAR)); half.nearest.distanceM = 0.5;
+  assert(/about 1 m from its protection zone/.test(TP.heritageNote({ a: half }, CFG).text), 'half a metre');
+  // Inside still wins over the edge, and the edge leads a farther end.
+  const edge = JSON.parse(JSON.stringify(NEAR)); edge.nearest.distanceM = 0;
+  assert.strictEqual(TP.heritageNote({ a: edge, b: INSIDE }, CFG).label, 'In monument zone');
+  assert.strictEqual(TP.heritageNote({ a: NEAR, b: edge }, CFG).lead, 'b');
 });
 
 test('builder: nothing within the radius — no note, and nothing that reads as an all-clear', () => {
@@ -482,6 +503,27 @@ test('cost: the remembered answers are bounded — an old end is asked again', a
   tool.moveEndpoint('a', { kind: 'point', lat: 56.43, lon: 9.4 });
   await sleep(SETTLE_MS);
   assert.deepStrictEqual(fetchJSON.heritage().slice(before), ['/api/terrain/heritage?lat=56.43000&lon=9.40000']);
+});
+
+test('cost: the remembered answers are least recently used out — an end in use is never asked again', async () => {
+  const env = load();
+  const { tool, fetchJSON } = openTool(env, { heritage: () => NONE });
+  setPoints(tool, A1, B1);
+  await sleep(20);
+  // A stays put while B moves to eight new places: each profile uses A's
+  // remembered answer again. Kept first-in-first-out, A's answer would be
+  // the oldest when the ninth answer arrives and A would be asked again.
+  for (let i = 1; i <= 8; i++) {
+    tool.moveEndpoint('b', { kind: 'point', lat: 56.6 + i / 100, lon: 9.6 });
+    await sleep(SETTLE_MS);
+  }
+  const h = fetchJSON.heritage();
+  assert.strictEqual(h.length, 10, 'lookups: ' + h.join(' ; '));
+  assert.strictEqual(h.filter(u => u === '/api/terrain/heritage?lat=56.43000&lon=9.40000').length, 1, 'A asked again: ' + h.join(' ; '));
+  // B1 has not been used since the first profile, so it is the one dropped.
+  tool.moveEndpoint('b', { kind: 'point', lat: 56.44, lon: 9.43 });
+  await sleep(SETTLE_MS);
+  assert.deepStrictEqual(fetchJSON.heritage().slice(10), ['/api/terrain/heritage?lat=56.44000&lon=9.43000']);
 });
 
 // ── 4. Host and CSS ────────────────────────────────────────────────────────
