@@ -474,6 +474,18 @@ test('F6 the layer control offers every style with its own credit and ceiling', 
   }
 });
 
+// A style with no credit and no ceiling of its own: the layer control has
+// always substituted '' and 19 for those, and the factory must not start
+// handing Leaflet `undefined` instead.
+test('F6 the layer control still substitutes \'\' and 19 for a style that carries neither', () => {
+  const ctx = makeSandbox({ mapCfg: ALL_ON });
+  ctx.window.MC_TILE_PROVIDERS['stub-bare'] = {
+    provider: 'stub', label: 'Stub', type: 'light', url: 'https://stub.example/{z}/{x}/{y}.png',
+  };
+  const { ctl } = buildControl(ctx, true);
+  sameOptions(ctl.base['stub-bare'].options, { attribution: '', maxZoom: 19 });
+});
+
 test('F6 an explicit pick in the layer control still locks the pane filter', () => {
   const ctx = makeSandbox({ theme: 'dark', mapCfg: ALL_ON });
   const { map, ctl } = buildControl(ctx, true);
