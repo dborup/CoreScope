@@ -727,8 +727,11 @@
     };
   }
 
+  /* An end outside a zone by less than half a metre (distanceM rounds to
+   * 0; the server sends whole metres) is on its edge, not "about 0 m". */
   function heritageLine(side, f) {
     var where = f.inside ? 'inside its protection zone'
+      : f.distanceM === 0 ? 'at the edge of its protection zone'
       : f.distanceM !== null ? 'about ' + f.distanceM + ' m from its protection zone' : 'near its protection zone';
     return side + ': ' + f.type + ', ' + where + '.';
   }
@@ -759,7 +762,8 @@
     });
     if (credit) html.push('<span class="tp-heritage-credit">' + esc(credit) + '</span>');
     return {
-      label: f.inside ? 'In monument zone' : 'Monument zone' + (f.distanceM !== null ? ' ~' + f.distanceM + ' m' : ''),
+      label: f.inside ? 'In monument zone' : f.distanceM === 0 ? 'At monument zone edge'
+        : 'Monument zone' + (f.distanceM !== null ? ' ~' + f.distanceM + ' m' : ''),
       text: [HERITAGE_WARNING + '.'].concat(lines, credit ? [credit] : []).join(' '),
       html: html.join(' '),
       lead: lead
