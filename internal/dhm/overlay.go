@@ -23,8 +23,11 @@ const (
 	// ContourStyle is the contour layer's one accepted style (#734 M2).
 	// The layer lists hvid, gul and roed (white, yellow, red) besides the
 	// unnamed default; only red is a named colour that stands out from
-	// both the light and the dark base maps, and the DHM panes are outside
-	// the dark-theme invert filter, so the colour is shown as served. One
+	// both the light and the dark base maps, and the contour pane
+	// (mc-contour-pane) is outside the dark-theme invert filter, so the
+	// colour is shown as served. The hillshade pane (mcTerrainPane) is not:
+	// it gets --terrain-overlay-filter in dark, so contours must not move
+	// into it (#798 review F3). One
 	// style for both themes keeps one contour cache and no refetch on a
 	// theme switch. Any other style is refused: upstream an unknown style
 	// is a ServiceException with status 200 (owner check T3).

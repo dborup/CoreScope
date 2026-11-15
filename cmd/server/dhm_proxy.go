@@ -337,17 +337,20 @@ type dhmProxyOptions struct {
 const dhmTileMaxInFlight = 96
 
 // dhmTileRateLimitDefault is the shipped per-client budget of tiles that
-// miss the server cache, per minute, shared by every overlay. Measured on
-// a 1920×1080 Map with the HTTP cache off (so upper bounds). One overlay
+// miss the server cache, per minute, shared by every overlay. Sized from
+// the tile ceilings of the scripted sessions in tests/dhm-tile-budget.js
+// (a 1920×1080 Map, HTTP cache off, so upper bounds; every step bounded by
+// the tiles its view change can touch, at a person's pace of 2.5 s per
+// view, times 1.3 for flick glides the scripts leave out). One overlay
 // from z8 (test-issue-681-dhm-tile-budget-e2e.js): a normal session —
-// load, three zoom steps in, four pans, two out — requested 308 tiles; an
-// aggressive one through 8→16→8 with sixteen pans 812 in 18 s. Two
-// overlays, a hillshade and the contour lines, from z15 (#734 M2,
-// test-issue-734-dhm-overlay-budget-e2e.js): a normal session — two zoom
-// steps in, four pans, two out — 542 tiles in 22 s, about 1460 a minute;
-// an aggressive one 15→19→15 with sixteen pans 1244 in 16 s. 2400 leaves
-// 1.6× over the sustained normal two-overlay rate and covers the
-// aggressive burst, so a person using the map never meets it, while a
+// load, three zoom steps in, four pans, two out — has a ceiling of 384
+// tiles in 25 s, 1198/min with the headroom: the earlier 1200 fitted one
+// overlay. Two overlays, a hillshade and the contour lines, from z15
+// (#734 M2, test-issue-734-dhm-overlay-budget-e2e.js): a normal session —
+// two zoom steps in, four pans, two out — has a ceiling of 660 tiles in
+// 22.5 s, 2288/min with the headroom, and an aggressive one 15→19→15 with
+// sixteen pans a ceiling of 1692 as one burst. 2400 is the next round
+// step over 2288, so a person using the map never meets it, while a
 // script walking the ~97 M tiles of DHM coverage is held to 40 per second
 // per address.
 const dhmTileRateLimitDefault = 2400

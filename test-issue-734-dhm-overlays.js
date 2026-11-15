@@ -88,6 +88,15 @@ test('an unknown id or a malformed entry is never offered', () => {
   assert.strictEqual(ctl.overlays, null);
 });
 
+test('an overlay above z19 is not offered, even within Leaflet\'s zoom range (#798 review F2)', () => {
+  // 20 passes _isZoom (0..22); only the z19 clamp refuses it, so this row
+  // pins that clamp: the proxy serves nothing above z19.
+  const { ctl } = setup({ dhm: withOverlays([
+    Object.assign({}, DHM.overlays[0], { maxZoom: 20 }),
+  ]) });
+  assert.strictEqual(ctl.overlays, null);
+});
+
 test('a block without overlays (pre-#734 server) is terrain only, sending the #680 layer', () => {
   const old = Object.assign({}, DHM); delete old.overlays;
   const { ctl } = setup({ dhm: old });

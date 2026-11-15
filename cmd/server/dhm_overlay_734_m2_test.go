@@ -44,16 +44,19 @@ func TestDHM734M2_TerrainRefusalKeepsTheHillshadeLabel(t *testing.T) {
 	}
 }
 
-// #734 M2 budget, measured with test-issue-734-dhm-overlay-budget-e2e.js
-// (1920x1080, HTTP cache off, terrain + contours from z15 in Aarhus): a
-// cold first view is 90 tiles (45 per overlay), a normal session 542
-// tiles in 22.3 s (1459/min), an aggressive z15→z19→z15 one 1244 in
-// 16.2 s. One overlay from z8 (#681) was 308 and 812.
+// #734 M2 budget, from test-issue-734-dhm-overlay-budget-e2e.js and the
+// ceilings in tests/dhm-tile-budget.js (1920x1080, HTTP cache off,
+// terrain + contours from z15 in Aarhus): a cold first view is 90 tiles
+// (45 per overlay, measured); the normal session's ceiling is 660 tiles in
+// 22.5 s at 2.5 s per view, 2288/min with the 1.3 headroom; the aggressive
+// z15→z19→z15 session's ceiling is 1692 as one burst. These are geometry
+// at a fixed pace, not wall-clock rates, so they hold on every runner
+// (#798 review F1).
 func TestDHM734M2_BudgetDefaultsFitTwoOverlays(t *testing.T) {
 	const (
-		coldView2    = 90   // tiles, both overlays
-		normalPerMin = 1459 // normal session, extrapolated to a minute
-		aggressive   = 1244 // raw burst
+		coldView2        = 90   // tiles, both overlays
+		normalNeedPerMin = 2288 // normal session ceiling at the user pace, x1.3
+		aggressive       = 1692 // aggressive session ceiling, one burst
 		// T9 on staging: the slowest cold DHM tile, z15-z19 (#734).
 		maxTileLatency = 350 * time.Millisecond
 	)
@@ -72,9 +75,9 @@ func TestDHM734M2_BudgetDefaultsFitTwoOverlays(t *testing.T) {
 	if opts.Concurrency != 4 {
 		t.Errorf("upstream concurrency %d: #734 M2 keeps the fair-use 4", opts.Concurrency)
 	}
-	if float64(dhmTileRateLimitDefault) < 1.3*normalPerMin || dhmTileRateLimitDefault < aggressive {
-		t.Errorf("per-client budget %d/min: under 1.3x the normal two-overlay session (%d/min) or the aggressive burst (%d)",
-			dhmTileRateLimitDefault, normalPerMin, aggressive)
+	if dhmTileRateLimitDefault < normalNeedPerMin || dhmTileRateLimitDefault < aggressive {
+		t.Errorf("per-client budget %d/min: under the normal two-overlay need (%d/min) or the aggressive burst (%d)",
+			dhmTileRateLimitDefault, normalNeedPerMin, aggressive)
 	}
 	// No more than needed: the budget still holds a tile-walking script.
 	if dhmTileRateLimitDefault > 2400 || dhmTileMaxInFlight > 96 {
