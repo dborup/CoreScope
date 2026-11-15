@@ -190,8 +190,11 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       return {
         shown: vis(chip), noteShown: vis(note),
         text: chip ? chip.textContent : null, tier: chip ? chip.getAttribute('data-tier') : null,
-        inHead: !!(chip && chip.parentElement && chip.parentElement.classList.contains('tp-head')),
-        beforeCopy: !!(chip && chip.nextElementSibling && chip.nextElementSibling.classList.contains('tp-copy')),
+        // #796 F5: the chips have their own row inside the title row.
+        inHead: !!(chip && chip.parentElement && chip.parentElement.classList.contains('tp-chips') && chip.closest('.tp-head')),
+        lastChip: !!(chip && !chip.nextElementSibling),
+        closeOnRow: (() => { const t = document.querySelector('.tp-title'), x = document.querySelector('[data-testid="tp-close"]');
+          return !!(t && x) && Math.abs(t.getBoundingClientRect().top - x.getBoundingClientRect().top) <= 1; })(),
         note: note ? note.textContent : null,
         imgs: document.querySelectorAll('.tp-panel img').length,
         xss: window.__xss === 1,
@@ -220,7 +223,8 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       await waitHint(page, 'Cell transmitter ~320 m');
       const s = await hintState(page);
       assert(s.shown && s.tier === 'near', 'chip ' + JSON.stringify(s));
-      assert(s.inHead && s.beforeCopy, 'chip not in the title row before the copy button');
+      assert(s.inHead && s.lastChip, 'chip not last in the title row\'s chip row');
+      assert(s.closeOnRow, 'the chip pushed Close off the title row');
       assert(s.noteShown && /^A: an 800 MHz cellular transmitter about 320 m away\./.test(s.note), 'note ' + s.note);
       assert(/especially within 100 m/.test(s.note) && !/most within/.test(s.note), 'wording ' + s.note);
       assert(!s.xss && s.imgs === 0, 'hostile stub text became markup');

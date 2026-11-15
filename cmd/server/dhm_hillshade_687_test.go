@@ -122,9 +122,16 @@ func newLayerProxy(t *testing.T, u *dhmUpstreams, layer string, logs *dhmLogSink
 // shape with the given layer, and never a token.
 func assertUpstreamShape(t *testing.T, where string, got url.Values, layer string) {
 	t.Helper()
+	assertUpstreamStyledShape(t, where, got, layer, "")
+}
+
+// assertUpstreamStyledShape is assertUpstreamShape for a layer drawn in a
+// named style (#734 M2: the contours).
+func assertUpstreamStyledShape(t *testing.T, where string, got url.Values, layer, style string) {
+	t.Helper()
 	want := map[string]string{
 		"service": "WMS", "version": "1.3.0", "request": "GetMap",
-		"layers": layer, "styles": "", "format": "image/png",
+		"layers": layer, "styles": style, "format": "image/png",
 		"transparent": "TRUE", "crs": "EPSG:3857", "width": "256", "height": "256",
 	}
 	for k, v := range want {

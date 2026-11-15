@@ -29,6 +29,11 @@
  *      the monument chip): the title row keeps its height, Copy and Close
  *      stay on it, the chart stays where it was and fully on screen, and
  *      the #781 hover cursor still follows a touch on the chart;
+ *   6c. 568x320, 640x360, 640x340, 640x320 and 667x320 landscape (touch) with the
+ *      widest chips ("Terrain: Marginal", "Buildings/trees: Blocked",
+ *      "assumed heights"): Copy and Close share the title's top and take
+ *      a tap, no chip runs in under them, so the title row never breaks,
+ *      and the chart ends above the bottom navigation. Geometry only, so it holds for any font (#796 F5);
  *   7. light and dark: the chip and the note border use --warning;
  *   8. no console errors, no request to the agency or any outside host.
  *
@@ -79,7 +84,9 @@ const answerFor = {
 const NONE = { radiusM: 100, count: 0, truncated: false, attribution: CREDIT, nearest: null };
 
 /* surface: the terrain is clear and only the surface is marginal, so the
- * title row also holds the "Buildings/trees" chip (#729). */
+ * title row also holds the "Buildings/trees" chip (#729). surface 'wide':
+ * the widest pair, "Terrain: Marginal" beside "Buildings/trees: Blocked"
+ * (#796 F5). */
 function profileFor(q, surface) {
   const D = 1800;
   const end = (side, h) => {
@@ -98,8 +105,8 @@ function profileFor(q, surface) {
     distanceM: D, stepM: 1.8, sampleCount: 1001, model: 'both',
     coverage: { state: 'full', pct: 100, firstGapM: null }, samples,
     physics: { freqMHz: 869.618, freqSource: 'firmware', lambdaM: 0.34474, k: 1.3333333333333333, kSource: 'default', f1MaxM: 12.5 },
-    verdict: { state: surface ? 'clear' : 'fresnel60', model: 'dtm', criterion: 0.6, worstClearanceM: 3.2, worstAtM: 600, worstF1Fraction: 0.4,
-      surface: { state: 'fresnel60', worstClearanceM: 2.1, worstAtM: 600, worstF1Fraction: 0.3 } },
+    verdict: { state: surface && surface !== 'wide' ? 'clear' : 'fresnel60', model: 'dtm', criterion: 0.6, worstClearanceM: 3.2, worstAtM: 600, worstF1Fraction: 0.4,
+      surface: { state: surface === 'wide' ? 'blocked' : 'fresnel60', worstClearanceM: surface === 'wide' ? -1.4 : 2.1, worstAtM: 600, worstF1Fraction: 0.3 } },
     attribution: DHM_BLOCK.attribution,
   };
 }
@@ -477,6 +484,62 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
           dots: document.querySelectorAll('.leaflet-overlay-pane .tp-cursor-dot').length };
       });
       assert(cur.line && cur.dots === 1, 'hover cursor after a touch: ' + JSON.stringify(cur));
+      checkClean(rec);
+    });
+    await ctx.close();
+  }
+
+  // ── 6c. Short landscape, the widest chips ─────────────────────────────
+  /* #796 F5: with "Terrain: Marginal", "Buildings/trees: Blocked" and
+   * "assumed heights" the title row broke at 640 px and Close went onto a
+   * line of its own, which put the chart under the bottom navigation at
+   * 640x340 and 640x320. The checks are geometric (same top, chart bottom
+   * above the nav top), so a wider or narrower font cannot hide a break. */
+  /* 568x320 is where the chips cannot share one line in any font, so the
+   * chip row has to wrap there. */
+  for (const vp of [{ width: 568, height: 320 }, { width: 640, height: 360 }, { width: 640, height: 340 }, { width: 640, height: 320 }, { width: 667, height: 320 }]) {
+    const { ctx, page, rec } = await newCtx({ viewport: vp, touch: true, surface: 'wide', heritage: false });
+    await step(`${vp.width}x${vp.height} landscape, the widest chips: Copy and Close stay on the title row, the chart ends above the bottom nav`, async () => {
+      await openProfile(page, FAR1, FAR2);
+      await page.waitForSelector('[data-testid="tp-assumed-chip"]:not([hidden])', { timeout: 5000 });
+      await page.waitForTimeout(200);
+      const g = await page.evaluate(() => {
+        const q = (s) => document.querySelector(s);
+        const top = (e) => Math.round(e.getBoundingClientRect().top);
+        const title = q('.tp-title'), chart = q('[data-testid="tp-chart"]'), nav = q('.bottom-nav');
+        const c = chart.getBoundingClientRect();
+        const hits = (y) => { const t = document.elementFromPoint(c.left + c.width / 2, y); return !!(t && t.closest('[data-testid="tp-chart"]')); };
+        return {
+          verdict: q('[data-testid="tp-verdict"]').textContent, surface: q('[data-testid="tp-surface-chip"]').textContent,
+          assumed: !q('[data-testid="tp-assumed-chip"]').hidden,
+          titleTop: top(title), copyTop: top(q('[data-testid="tp-copy-link"]')), closeTop: top(q('[data-testid="tp-close"]')),
+          // Copy and Close are on screen and take a tap at their centre.
+          buttonsTappable: ['[data-testid="tp-copy-link"]', '[data-testid="tp-close"]'].every((sel) => {
+            const e = q(sel), b = e.getBoundingClientRect();
+            const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
+            return b.left >= 0 && b.right <= window.innerWidth && !!(hit && e.contains(hit));
+          }),
+          // Every chip ends before Copy begins and after the title ends: none
+          // runs in under the buttons or the title.
+          chipsClear: (() => {
+            const copyL = q('[data-testid="tp-copy-link"]').getBoundingClientRect().left, titleR = title.getBoundingClientRect().right;
+            return Array.from(document.querySelectorAll('.tp-head .tp-chip')).filter(e => e.getClientRects().length)
+              .every(e => { const b = e.getBoundingClientRect(); return b.right <= copyL + 0.5 && b.left >= titleR - 0.5; });
+          })(),
+          chartBottom: Math.round(c.bottom), navTop: nav && nav.getClientRects().length ? Math.round(nav.getBoundingClientRect().top) : null,
+          visible: c.height > 0 && hits(c.top + 2) && hits(c.bottom - 2),
+          vw: window.innerWidth, sw: document.documentElement.scrollWidth,
+        };
+      });
+      assert(/Marginal/.test(g.verdict) && /Blocked/.test(g.surface) && g.assumed, 'not the widest chips: ' + JSON.stringify(g));
+      assert(g.navTop !== null, 'no bottom navigation at ' + vp.width + 'x' + vp.height);
+      assert(Math.abs(g.copyTop - g.titleTop) <= 1 && Math.abs(g.closeTop - g.titleTop) <= 1,
+        'the title row broke (title/copy/close top ' + g.titleTop + '/' + g.copyTop + '/' + g.closeTop + ')');
+      assert(g.buttonsTappable, 'Copy or Close is off screen or covered: ' + JSON.stringify(g));
+      assert(g.chipsClear, 'a chip runs in under the title or Copy: ' + JSON.stringify(g));
+      assert(g.chartBottom <= g.navTop && g.visible, 'the chart ends under the bottom nav: ' + JSON.stringify(g));
+      assert(g.sw <= g.vw, 'horizontal overflow: ' + JSON.stringify(g));
+      await shot(page, `m3-landscape-wide-${vp.width}x${vp.height}.jpg`);
       checkClean(rec);
     });
     await ctx.close();

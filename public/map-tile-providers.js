@@ -453,7 +453,7 @@
       var w = s.wms;
       o.styles = '';
       o.format = 'image/png';
-      o.transparent = false;
+      o.transparent = 'FALSE';
       o.version = '1.3.0';
       o.crs = L.CRS.EPSG3857;
       o.tileSize = 256;
@@ -462,6 +462,12 @@
         if (w[k] === undefined) continue;
         o[k] = (k === 'bounds') ? L.latLngBounds(w[k]) : w[k];
       }
+      // WMS 1.3.0 (OGC 06-042 §7.3.3.9) spells TRANSPARENT as TRUE or
+      // FALSE, and Dataforsyningen enforces it: Leaflet's boolean is sent
+      // as "false", which the Skærmkort service answers with a
+      // ServiceException ("TRANSPARENT must be either TRUE or FALSE")
+      // instead of a tile. Always send the uppercase string.
+      if (typeof o.transparent === 'boolean') o.transparent = o.transparent ? 'TRUE' : 'FALSE';
       var url = typeof w.url === 'function' ? w.url() : w.url;
       var layer = L.tileLayer.wms(url, _withOpts(o, opts));
       layer._mcWmsKey = _wmsKey(w, url);
@@ -535,6 +541,25 @@
   var TERRAIN_LABEL = 'Terrain (DHM hillshade)';
   var HERITAGE_ID   = 'heritage-monuments';
 
+  /* #734 M2 — the DHM overlays by id, as /api/config/client lists them in
+   * dhm.overlays (cmd/server/dhm_proxy.go). The page sends the id as the
+   * tile request's `layers`, and the proxy maps it to the upstream layer
+   * and style, so no upstream name or style is ever spelled here.
+   *   - terrain and surface are one either-or hillshade ("group"): one
+   *     stored key and one hash parameter, ?terrain=1 (or =terrain) for
+   *     terrain, as since #680, and ?terrain=surface for surface. The
+   *     control shows them as two checkboxes of which at most one is
+   *     checked (_uncheckGroupSiblings); both unchecked is Off.
+   *   - contours is a toggle of its own, ?contours=1, above the hillshade
+   *     and from the server's minZoom, so no tile is asked for below it.
+   * Each credit links its own dataset (#734 Q5). A block without
+   * `overlays` comes from a server before #734: terrain only, as #680. */
+  var DHM_OVERLAY_LABELS = {
+    terrain: function () { return 'Hillshade: terrain (DHM)'; },
+    surface: function () { return 'Hillshade: surface, buildings and trees (DHM)'; },
+    contours: function (cfg) { return 'Contour lines (DHM, zoom ' + cfg.minZoom + '+)'; }
+  };
+
   // A path on this server: not protocol-relative ("//host"), and not
   // "/\host", which browsers read the same way.
   // A same-origin absolute path: "/" and then neither "/" nor "\\" (protocol-
@@ -551,6 +576,29 @@
   }
 
   function _isZoom(z) { return typeof z === 'number' && Math.floor(z) === z && z >= 0 && z <= 22; }
+
+  // The tile layer config of one DHM overlay id: the block's URL, bounds
+  // and credit with the overlay's own zoom range and dataset link, and
+  // `layers` = the id. null while the server does not offer it.
+  function getDHMOverlayConfig(id) {
+    var c = getTerrainConfig();
+    if (!c) return null;
+    if (!Array.isArray(c.overlays)) {
+      return id === 'terrain' ? Object.assign({}, c, { layers: c.layer, label: TERRAIN_LABEL }) : null;
+    }
+    for (var i = 0; i < c.overlays.length; i++) {
+      var e = c.overlays[i];
+      if (!e || e.id !== id || !DHM_OVERLAY_LABELS[id]) continue;
+      if (!_isZoom(e.minZoom) || !_isZoom(e.maxZoom) || e.maxZoom > 19 || e.minZoom > e.maxZoom) return null;
+      var cfg = Object.assign({}, c, {
+        layers: id, minZoom: e.minZoom, maxZoom: e.maxZoom,
+        datasetName: e.datasetName, datasetUrl: e.datasetUrl
+      });
+      cfg.label = DHM_OVERLAY_LABELS[id](cfg);
+      return cfg;
+    }
+    return null;
+  }
 
   function getHeritageConfig() {
     var c = window.MC_HERITAGE_CFG;
@@ -580,11 +628,33 @@
   var OVERLAYS = [
     {
       id: TERRAIN_ID, storageKey: 'mc-terrain-dhm', hashParam: 'terrain', layerProp: '_mcTerrainLayer',
+      group: 'dhm-hillshade', onValues: ['1', 'terrain'],
       pane: 'mcTerrainPane', paneZ: 250, paneClass: 'mc-terrain-pane', className: 'mc-terrain-tiles', opacity: 0.65,
       retryPlaceholders: true, // #728 N3: a DHM proxy tile
-      config: getTerrainConfig,
-      label: function () { return TERRAIN_LABEL; },
-      layers: function (cfg) { return cfg.layer; }
+      config: function () { return getDHMOverlayConfig('terrain'); },
+      label: function (cfg) { return cfg.label; },
+      layers: function (cfg) { return cfg.layers; }
+    },
+    {
+      // #734 M2: the surface hillshade, the terrain one's either-or twin
+      // (same key, parameter, pane and opacity).
+      id: 'dhm-surface', storageKey: 'mc-terrain-dhm', hashParam: 'terrain', layerProp: '_mcSurfaceLayer',
+      group: 'dhm-hillshade', onValues: ['surface'],
+      pane: 'mcTerrainPane', paneZ: 250, paneClass: 'mc-terrain-pane', className: 'mc-surface-tiles', opacity: 0.65,
+      retryPlaceholders: true,
+      config: function () { return getDHMOverlayConfig('surface'); },
+      label: function (cfg) { return cfg.label; },
+      layers: function (cfg) { return cfg.layers; }
+    },
+    {
+      // #734 M2: contour lines, drawn as served (opacity 1) between the
+      // hillshade (250) and the monuments (260).
+      id: 'dhm-contours', storageKey: 'mc-contours-dhm', hashParam: 'contours', layerProp: '_mcContourLayer',
+      pane: 'mcContourPane', paneZ: 255, paneClass: 'mc-contour-pane', className: 'mc-contour-tiles', opacity: 1,
+      retryPlaceholders: true,
+      config: function () { return getDHMOverlayConfig('contours'); },
+      label: function (cfg) { return cfg.label; },
+      layers: function (cfg) { return cfg.layers; }
     },
     {
       // Protection-zone polygons under the monument points. The WMS draws
@@ -616,11 +686,41 @@
     }
   ];
 
-  function resolveOverlayOn(hashValue, stored, defaultOn) {
-    if (hashValue === '1') return true;
-    if (hashValue === '0') return false;
-    if (stored === '1' || stored === '0') return stored === '1';
+  /* Whether an overlay is on: a hash value the parameter knows wins, then a
+   * known stored value, then the default. `onValues` are the values that
+   * mean this overlay and `knownValues` every value of its parameter
+   * (#734: the hillshade pair shares one); both default to #680's '1' and
+   * '1'/'0'. */
+  function resolveOverlayOn(hashValue, stored, defaultOn, onValues, knownValues) {
+    var onv = onValues || ['1'], known = knownValues || ['1', '0'];
+    if (known.indexOf(hashValue) >= 0) return onv.indexOf(hashValue) >= 0;
+    if (known.indexOf(stored) >= 0) return onv.indexOf(stored) >= 0;
     return !!defaultOn;
+  }
+
+  function _onValues(o) { return o.onValues || ['1']; }
+
+  // o and the overlays sharing its hash parameter (o may be outside
+  // OVERLAYS, like the ortho pick).
+  function _paramOverlays(o) {
+    return [o].concat(OVERLAYS.filter(function (m) { return m !== o && m.hashParam === o.hashParam; }));
+  }
+
+  // Every value of o's hash parameter: '0' and each overlay's on values.
+  function _knownValues(o) {
+    var known = ['0'];
+    _paramOverlays(o).forEach(function (m) { known = known.concat(_onValues(m)); });
+    return known;
+  }
+
+  // The value stored for hash value v of o's parameter: the first on value
+  // of the overlay v means ('terrain' is stored as #680's '1'), else '0'.
+  function _canonicalValue(o, v) {
+    var ms = _paramOverlays(o);
+    for (var i = 0; i < ms.length; i++) {
+      if (_onValues(ms[i]).indexOf(v) >= 0) return _onValues(ms[i])[0];
+    }
+    return '0';
   }
 
   function _hashParts() {
@@ -629,13 +729,19 @@
     return { base: qi >= 0 ? hash.slice(0, qi) : hash, params: new URLSearchParams(qi >= 0 ? hash.slice(qi + 1) : '') };
   }
 
-  function _readOverlayPref(o) {
+  function _rawOverlayPref(o) {
     var hv = null, stored = null;
     try { hv = _hashParts().params.get(o.hashParam); } catch (_) {}
     try { stored = window.localStorage && window.localStorage.getItem(o.storageKey); } catch (_) {}
-    var on = resolveOverlayOn(hv, stored, typeof o.defaultOn === 'function' ? o.defaultOn() : o.defaultOn);
-    if (hv === '1' || hv === '0') {
-      try { if (window.localStorage) window.localStorage.setItem(o.storageKey, on ? '1' : '0'); } catch (_) {}
+    return { hv: hv, stored: stored };
+  }
+
+  function _readOverlayPref(o) {
+    var p = _rawOverlayPref(o), known = _knownValues(o);
+    var on = resolveOverlayOn(p.hv, p.stored, typeof o.defaultOn === 'function' ? o.defaultOn() : o.defaultOn,
+      _onValues(o), known);
+    if (known.indexOf(p.hv) >= 0) {
+      try { if (window.localStorage) window.localStorage.setItem(o.storageKey, _canonicalValue(o, p.hv)); } catch (_) {}
     }
     return on;
   }
@@ -652,10 +758,16 @@
 
   // replaceState, so the SPA router does not re-run on the hash rewrite.
   function _saveOverlayPref(o, on) {
-    try { if (window.localStorage) window.localStorage.setItem(o.storageKey, on ? '1' : '0'); } catch (_) {}
+    if (!on && o.group) {
+      // A hillshade turned off while the other one is the choice (the
+      // control switching terrain → surface) leaves that choice alone.
+      var p = _rawOverlayPref(o);
+      if (!resolveOverlayOn(p.hv, p.stored, true, _onValues(o), _knownValues(o))) return;
+    }
+    try { if (window.localStorage) window.localStorage.setItem(o.storageKey, on ? _onValues(o)[0] : '0'); } catch (_) {}
     try {
       var h = _hashParts();
-      if (on) h.params.set(o.hashParam, '1');
+      if (on) h.params.set(o.hashParam, _onValues(o)[0]);
       else if (o.defaultOn) h.params.set(o.hashParam, '0');
       else h.params.delete(o.hashParam);
       var qs = h.params.toString();
@@ -900,6 +1012,46 @@
     if (_readOverlayPref(o)) map.addLayer(map[o.layerProp]);
   }
 
+  // The overlay whose layer a control input toggles (L.Control.Layers sets
+  // input.layerId = L.stamp(layer)), or null.
+  function _overlayOfInput(map, input) {
+    if (!input) return null;
+    for (var i = 0; i < OVERLAYS.length; i++) {
+      var l = map[OVERLAYS[i].layerProp];
+      if (l && input.layerId === L.stamp(l)) return OVERLAYS[i];
+    }
+    return null;
+  }
+
+  /* #734 M2 — at most one overlay of a group (the hillshade pair) on. When
+   * `input` has just been checked, unchecks the other checked inputs of its
+   * group; returns how many. It runs in the capture phase of the click,
+   * before L.Control.Layers' own handler reads every input, so Leaflet then
+   * removes the old layer and adds the new one in one pass, without a
+   * re-render of the control. Unchecking checks nothing: both off is Off. */
+  function _uncheckGroupSiblings(map, inputs, input) {
+    if (!input || input.type !== 'checkbox' || !input.checked) return 0;
+    var o = _overlayOfInput(map, input);
+    if (!o || !o.group) return 0;
+    var n = 0;
+    for (var i = 0; i < inputs.length; i++) {
+      var other = inputs[i];
+      if (other === input || !other.checked) continue;
+      var m = _overlayOfInput(map, other);
+      if (m && m !== o && m.group === o.group) { other.checked = false; n++; }
+    }
+    return n;
+  }
+
+  function _wireGroupInputs(map, control) {
+    var el = control.getContainer && control.getContainer();
+    if (!el || !el.addEventListener) return;
+    el.addEventListener('click', function (e) {
+      var inputs = el.querySelectorAll('.leaflet-control-layers-overlays input');
+      _uncheckGroupSiblings(map, inputs, e.target);
+    }, true);
+  }
+
   // Puts every offered overlay into `overlays` (label → layer) and drops
   // the layer of any the server no longer offers; layers survive control
   // rebuilds. Returns the offered ids in insertion order, which is the
@@ -1088,6 +1240,7 @@
   window.MC_getOrthoConfig              = getOrthoConfig;
   window.MC_ORTHO_BASE_ID               = ORTHO_ID;
   window.MC_resolveOverlayOn            = resolveOverlayOn;
+  window.MC_uncheckGroupSiblings        = _uncheckGroupSiblings;
   window.MC_forgetOverlayPref           = forgetOverlayPref;
   window.MC_setLayerAttribution         = setLayerAttribution;
   window.MC_CREDIT_COMPACT_CLASS        = CREDIT_COMPACT_CLASS;
@@ -1242,6 +1395,7 @@
             try { _decorateOverlay(map, overlayIds[oi], overlayLabels[oi]); } catch (_) {}
           }
         } catch (_) {}
+        try { _wireGroupInputs(map, _control); } catch (_) {}
       }
 
       // DOM surgery: map IDs to human-readable labels, inject separator, set data attributes.

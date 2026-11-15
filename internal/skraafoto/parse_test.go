@@ -73,7 +73,7 @@ func TestParseSearch(t *testing.T) {
 	}
 	// An asset href that is not an allowed CDN path keeps the photo, without
 	// a preview: the official viewer link still works.
-	for _, href := range []string{"https://evil.example/x.tif", "", "https://cdn.dataforsyningen.dk/skraafoto_server/a/b.tif?token=x"} {
+	for _, href := range []string{"https://evil.example/x.tif", "", "https://skraafoto-cdn.dataforsyningen.dk/skraafoto_server/a/b.tif?token=x"} {
 		u.Href = func(string) string { return href }
 		body := `{"type":"FeatureCollection","features":[` + u.Feature("skraafotos2025", "west") + `]}`
 		it, err := ParseSearch([]byte(body), 2025, West)
@@ -102,7 +102,7 @@ func TestParseItem(t *testing.T) {
 func FuzzParseSearch(f *testing.F) {
 	u := &skraafototest.Upstream{}
 	f.Add([]byte(`{"type":"FeatureCollection","features":[` + u.Feature("skraafotos2025", "north") + `]}`))
-	f.Add([]byte(`{"features":[{"id":"2025_x","collection":"skraafotos2025","properties":{"direction":"north","datetime":"2025-01-01T00:00:00Z"},"assets":{"data":{"href":"https://cdn.dataforsyningen.dk/skraafoto_server/a/2025_x.tif"}}}]}`))
+	f.Add([]byte(`{"features":[{"id":"2025_x","collection":"skraafotos2025","properties":{"direction":"north","datetime":"2025-01-01T00:00:00Z"},"assets":{"data":{"href":"https://skraafoto-cdn.dataforsyningen.dk/skraafoto_server/a/2025_x.tif"}}}]}`))
 	f.Add([]byte(`{"features":[]}`))
 	f.Fuzz(func(t *testing.T, body []byte) {
 		it, err := ParseSearch(body, 2025, North)

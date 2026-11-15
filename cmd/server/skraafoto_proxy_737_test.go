@@ -243,7 +243,7 @@ func TestSkraafoto737_SearchFiveDirections(t *testing.T) {
 		DatasetName: "Skråfotos", DatasetURL: skraafoto.DatasetURL, LicenseName: "CC BY 4.0", LicenseURL: "https://creativecommons.org/licenses/by/4.0/"}) {
 		t.Fatalf("credit %+v", resp.Credit)
 	}
-	if strings.Contains(w.Body.String(), "cdn.dataforsyningen.dk") || strings.Contains(w.Body.String(), "api.dataforsyningen.dk") {
+	if strings.Contains(w.Body.String(), "skraafoto-cdn.dataforsyningen.dk") || strings.Contains(w.Body.String(), "api.dataforsyningen.dk") {
 		t.Fatal("an upstream URL in the response")
 	}
 	// The collections list and one request per direction.
