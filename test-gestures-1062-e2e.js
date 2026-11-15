@@ -22,6 +22,9 @@
 'use strict';
 
 const { chromium } = require('playwright');
+// The fixture is freshened once per shard: pin the packets window so the
+// rows do not depend on when this suite runs in it (#777).
+const { pinPacketsTimeWindow } = require('./tests/e2e-packets-window');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 
@@ -88,6 +91,7 @@ async function main() {
   const pass = (m) => { passes++; console.log('  PASS: ' + m); };
 
   const ctx = await browser.newContext({ viewport: { width: 360, height: 800 }, hasTouch: true });
+  await pinPacketsTimeWindow(ctx);
   const page = await ctx.newPage();
   page.setDefaultTimeout(15000);
   page.on('pageerror', (e) => console.error('[pageerror]', e.message));
@@ -304,6 +308,7 @@ async function main() {
     hasTouch: true,
     reducedMotion: 'reduce',
   });
+  await pinPacketsTimeWindow(ctx2);
   const page2 = await ctx2.newPage();
   page2.setDefaultTimeout(15000);
   await page2.goto(`${BASE}/#/packets`, { waitUntil: 'domcontentloaded' });

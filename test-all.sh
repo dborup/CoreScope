@@ -150,6 +150,7 @@ run test-issue-390-legacy-tile-followups.js
 run test-issue-728-esri-imagery.js
 run test-issue-728-ortho-base.js
 run test-issue-728-dhm-tile-retry.js
+run test-packets-window-pinned.js
 run test-issue-733-dhm-credit.js
 run test-issue-752-inset-attribution.js
 run test-issue-764-no-osm-fallback.js
