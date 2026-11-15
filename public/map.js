@@ -2734,8 +2734,9 @@
   // A linked path is fitted no closer than this: a 20 m path at zoom 19
   // would show nothing around it (#746).
   var PROFILE_FIT_MAX_ZOOM = 16;
-  // True only while profileFitPath moves the map, so the moveend handler
-  // leaves the viewer's stored view alone (#765).
+  // True only while a profile link moves the map (the fit of a full link,
+  // the pan to A of a half link), so the moveend handler leaves the
+  // viewer's stored view alone (#765, #794). See profileLinkMove.
   var profileFitting = false;
   // #711: the one node a half link named that the Map page's own list does
   // not hold (an area filter or the last-heard window left it out). One
@@ -3178,7 +3179,7 @@
       if (!alive() || !ensureProfileTool()) return;
       profileArmFor('a');
       profilePick(start);
-      if (profileAnchor && map) map.panTo(profileAnchor);
+      if (profileAnchor && map) profileLinkMove(function () { map.panTo(profileAnchor); });
       return;
     }
     var tool = ensureProfileTool();
@@ -3196,9 +3197,7 @@
    * the stored view stays.
    *
    * The fit itself is never saved as the viewer's view (#765): a later
-   * plain #/map or a reload opens their own view again. Without animation
-   * Leaflet fires moveend inside fitBounds, so the flag covers exactly
-   * this one move. */
+   * plain #/map or a reload opens their own view again. */
   function profileFitPath() {
     var st = profileTool && profileTool.getState();
     var a = st && profileRefLatLng(st.a), b = st && profileRefLatLng(st.b);
@@ -3206,12 +3205,23 @@
     if (!map || !a || !b || !panel) return;
     var cap = parseFloat(getComputedStyle(panel).getPropertyValue('--tp-panel-max-h'));
     var pad = window.TerrainProfile.fitPadding(map.getSize().y, panel.offsetHeight, cap);
-    profileFitting = true;
-    try {
+    profileLinkMove(function () {
       map.fitBounds(L.latLngBounds([a, b]), Object.assign(pad, { maxZoom: PROFILE_FIT_MAX_ZOOM, animate: false }));
-    } finally {
-      profileFitting = false;
-    }
+    });
+  }
+
+  /* profileLinkMove makes one map move on behalf of a profile link and keeps
+   * it out of the viewer's stored view (#765, #794). Leaflet ends every
+   * move with exactly one moveend: inside the call when it does not
+   * animate (or the jump is too far to animate), or when the animation
+   * ends — a drag or map.remove() stops it early, and that still fires
+   * moveend. So the guard is released by that moveend, not when the call
+   * returns: an animated pan to A would otherwise be saved after all.
+   * The save handler was registered first, so it still sees the guard. */
+  function profileLinkMove(move) {
+    profileFitting = true;
+    map.once('moveend', function () { profileFitting = false; });
+    move();
   }
 
   function destroyProfileTool() {
