@@ -174,7 +174,7 @@ function expectedOptions(ctx, id, layers) {
     layers,
     styles: '',
     format: 'image/png',
-    transparent: false,
+    transparent: 'FALSE', // #820: WMS 1.3.0 spells it TRUE/FALSE, and Dataforsyningen enforces it
     version: '1.3.0',
     crs: ctx.L.CRS.EPSG3857,
     tileSize: 512,
@@ -313,11 +313,19 @@ test('C the Skærmkort styles keep their own credit', () => {
   assert.ok(reg[ID].attribution.indexOf('GeoDanmark') < 0, 'the Natur credit names GeoDanmark');
 });
 
-test('C the credit is there while the gate is off too (the registry builds it at load)', () => {
-  const ctx = makeSandbox({ mapCfg: { tiles: {} } });
-  ctx.window.MC_MAP_CFG = ON();
+/* Every registry build walks every style's credit, whether or not the gate
+ * admits the style. A gated-off style is not in MC_TILE_PROVIDERS, so the
+ * test keeps a reference to the style object (the registry holds the
+ * objects themselves), clears its credit, and rebuilds with the gate off. */
+test('C the credit is built while the gate is off too (every registry build)', () => {
+  const ctx = makeSandbox({ mapCfg: ON() });
+  const style = ctx.window.MC_TILE_PROVIDERS[ID];
+  delete style.attribution;
+  ctx.window.MC_MAP_CFG = { tiles: {} };
   ctx.window.MC_initTileRegistry(true);
-  assert.strictEqual(ctx.window.MC_TILE_PROVIDERS[ID].attribution.replace(/<[^>]+>/g, ''), CREDIT);
+  assert.ok(!(ID in ctx.window.MC_TILE_PROVIDERS), 'the gate is off');
+  assert.strictEqual(style.attribution, ctx.window.MC_buildCredit(CREDIT, LINKS));
+  assert.strictEqual(style.attribution.replace(/<[^>]+>/g, ''), CREDIT);
 });
 
 // ── D: defaults ───────────────────────────────────────────────────────────

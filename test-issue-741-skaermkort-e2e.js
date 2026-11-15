@@ -48,9 +48,10 @@
  *      and Live as a light style only, in the customizer's light list and
  *      not its dark list, and nothing requested until it is picked.
  *  13. Picked: 512 px EPSG:3857 GetMaps of Natur_Friluft_basis with the
- *      allow-listed parameters and the same dummy token, the exact credit
- *      with its dataset and licence links, no filter in light or in dark
- *      (light only). Back to Auto stops the requests.
+ *      allow-listed parameters (TRANSPARENT=FALSE, uppercase as WMS 1.3.0
+ *      and Dataforsyningen require, #820) and the same dummy token, the
+ *      exact credit with its dataset and licence links, no filter in light
+ *      or in dark (light only). Back to Auto stops the requests.
  *  14. No extra tile churn: with every GetMap answered after 1.0 s (the
  *      owner's cold timing), the same pick/pan/zoom script costs Natur
  *      exactly the requests it costs Skærmkort, with no URL fetched twice.
@@ -740,7 +741,7 @@ function checkGetMap(url, layer, base = WMS_BASE) {
   // 13 — picked: request shape, tiles, credit, no filter in either theme
   for (const p of [{ name: 'Map', hash: '#/map' }, { name: 'Live', hash: '#/live' }]) {
     for (const theme of ['light', 'dark']) {
-      await step(`M2 ${p.name} (${theme}): picking Natur loads 512 px EPSG:3857 GetMaps of Natur_Friluft_basis with the exact credit and no filter`, async () => {
+      await step(`M2 ${p.name} (${theme}): picking Natur loads 512 px EPSG:3857 TRANSPARENT=FALSE GetMaps of Natur_Friluft_basis with the exact credit and no filter`, async () => {
         const { ctx, page, rec } = await newCtx({ tiles: naturOn(), theme });
         try {
           await gotoMap(page, p.hash);
