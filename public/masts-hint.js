@@ -28,6 +28,12 @@
   'use strict';
 
   var EARTH_RADIUS_M = 6371000;   // as public/terrain-profile.js
+  // cellsNear pads the hint distance: nearestFor rounds a spherical
+  // distance, so a site up to 500.49 m away counts as 500 m, and the same
+  // offset in UTM is up to ~0.5% longer across Denmark (scale factor and
+  // ellipsoid; 503 m at 15° E). 10 m keeps both ends at four cells at most
+  // (#768 review 4).
+  var CELL_PAD_M = 10;
   var BANDS_MHZ = [700, 800, 900];
 
   function constants() {
@@ -83,12 +89,13 @@
   }
 
   /**
-   * The grid cells within the hint distance of (lat, lon), its own cell
-   * first, inside cfg.cellExtent. 500 m against 2 km cells: at most four.
+   * The grid cells within the hint distance (plus CELL_PAD_M) of
+   * (lat, lon), its own cell first, inside cfg.cellExtent. 510 m against
+   * 2 km cells: at most four.
    */
   function cellsNear(lat, lon, cfg) {
     var p = window.MastsLayer.toUTM32(lat, lon);
-    var s = cfg.cellSizeM, x = cfg.cellExtent, r = constants().far;
+    var s = cfg.cellSizeM, x = cfg.cellExtent, r = constants().far + CELL_PAD_M;
     var own = Math.floor(p.e / s) + ',' + Math.floor(p.n / s);
     var out = [];
     for (var e = Math.floor((p.e - r) / s); e <= Math.floor((p.e + r) / s); e++) {
@@ -206,7 +213,10 @@
         recompute();
       },
       clear: function () {
-        if (key) ML.controller(map, cfg).pin([], null);
+        // map.js tears the profile down after map.remove(): the map's
+        // controller is gone then, and asking for it would build a new one
+        // on the dead map that nothing removes (#768 review 1).
+        if (key && map._mcMasts) map._mcMasts.pin([], null);
         key = '';
         ends = null;
         render(opts.panel(), null);

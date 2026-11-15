@@ -212,8 +212,12 @@ test('the client pacing fits the server defaults (maxInFlight, per-IP budget)', 
   assert(z13Count > maxInFlight, 'a cold z13 view would exceed maxInFlight without pacing');
   assert(z13Count <= perMin, `a cold z13 view (${z13Count}) fits the per-IP budget ${perMin}`);
   // #758 F2: the largest view the layer draws at all must fit the budget,
-  // or its last cells get 429 and stay empty for up to a minute.
-  assert(ML.VIEW_CELL_CAP <= perMin, `view cap ${ML.VIEW_CELL_CAP} over the per-IP budget ${perMin}`);
+  // or its last cells get 429 and stay empty for up to a minute. The cells
+  // pinned for the profile hint (#724 M4: four per end) share that budget
+  // (#768 review 2).
+  assert.strictEqual(ML.PIN_CELL_CAP, 8);
+  assert(ML.VIEW_CELL_CAP + ML.PIN_CELL_CAP <= perMin,
+    `view cap ${ML.VIEW_CELL_CAP} + ${ML.PIN_CELL_CAP} pinned cells over the per-IP budget ${perMin}`);
 });
 
 test('cells that leave the view before they start are never requested', async () => {

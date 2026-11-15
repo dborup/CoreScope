@@ -38,12 +38,15 @@
 (function () {
   'use strict';
 
-  // Cells one view may need. At most the server's default per-IP budget
-  // (mastsCellRateLimitDefault, 120 cells a minute), so a cold view the
-  // layer draws at all is served inside one minute instead of leaving its
-  // last cells on 429 (#758 review F2). A 1920×1080 z13 view is ~80; a
-  // wider one asks for one more zoom step (statusText).
-  var VIEW_CELL_CAP = 120;
+  // Cells one view may need, plus the cells pinned for the profile hint
+  // (#724 M4: at most four per end), at most the server's default per-IP
+  // budget (mastsCellRateLimitDefault, 120 cells a minute). So a cold view
+  // the layer draws at all is served inside one minute, profile open or
+  // not, instead of leaving its last cells on 429 (#758 review F2, #768
+  // review 2). A 1920×1080 z13 view is ~80; a wider one asks for one more
+  // zoom step (statusText).
+  var PIN_CELL_CAP = 8;
+  var VIEW_CELL_CAP = 120 - PIN_CELL_CAP;
   var KEEP_CELL_CAP = 320;  // cells kept in memory, visible ones included
   var CONCURRENCY = 4;      // cell requests in flight per map
   var BUSY_RETRIES = 3;     // 503s per cell before it counts as failed
@@ -265,10 +268,12 @@
       data: function (key) { var e = entries.get(key); return e && e.state === 'loaded' ? e.data : null; },
       /** 'loaded' | 'loading' | 'waiting' | 'failed', or '' for an unknown cell. */
       state: function (key) { var e = entries.get(key); return e ? e.state : ''; },
-      stats: function () {
+      /** Counts over `keys` (default: every wanted cell). */
+      stats: function (keys) {
+        keys = keys || wanted;
         var s = { kept: entries.size, inFlight: inFlight, wanted: wanted.length, loaded: 0, pending: 0, failed: 0, truncated: 0 };
-        for (var i = 0; i < wanted.length; i++) {
-          var e = entries.get(wanted[i]);
+        for (var i = 0; i < keys.length; i++) {
+          var e = entries.get(keys[i]);
           if (!e || e.state === 'loading' || e.state === 'waiting') s.pending++;
           else if (e.state === 'failed') s.failed++;
           else { s.loaded++; if (e.data && e.data.truncated) s.truncated++; }
@@ -442,7 +447,9 @@
     function renderStatus() {
       notifyPinned();
       if (!statusEl) return;
-      var text = statusText(map.getZoom(), cfg, active(), loader.stats(), tooWide);
+      // The view's cells only: a pinned cell off the view is not drawn, so
+      // its state says nothing about the map (#768 review 5).
+      var text = statusText(map.getZoom(), cfg, active(), loader.stats(viewKeys), tooWide);
       statusEl.textContent = text;
       statusEl.hidden = !text;
     }
@@ -533,6 +540,7 @@
     SITE_LABEL: SITE_LABEL,
     INTERFERENCE_LABEL: INTERFERENCE_LABEL,
     VIEW_CELL_CAP: VIEW_CELL_CAP,
+    PIN_CELL_CAP: PIN_CELL_CAP,
     KEEP_CELL_CAP: KEEP_CELL_CAP,
     CONCURRENCY: CONCURRENCY,
     HINT_DISTANCE_M: HINT_DISTANCE_M,

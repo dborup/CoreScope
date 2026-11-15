@@ -18,7 +18,10 @@
  *      band-less GSM-R site: no chip, no note;
  *   4. without the masts block: no chip and no /api/masts request;
  *   5. at 375 px the chip stays inside the panel (no horizontal overflow);
- *   6. no console errors.
+ *   6. leaving the Map page with a path open, several times, leaves no
+ *      theme-refresh listener and no data-theme observer behind (#768
+ *      review 1: clear() after map.remove() built a new masts controller);
+ *   7. no console errors.
  *
  * Usage:
  *   BASE_URL=http://localhost:13581 node test-issue-724-masts-hint-e2e.js
@@ -308,6 +311,58 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       assert(g.sw <= g.vw, 'horizontal overflow: ' + JSON.stringify(g));
       assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
       await shot(page, 'm4-hint-phone-light.jpg');
+    });
+    await ctx.close();
+  }
+
+  // ── 6. No leak when the Map page is left with a path open ─────────────
+  {
+    const { ctx, page, rec } = await newCtx({ storage: { 'mc-masts': '0', 'mc-masts-int': '0' } });
+    // Net (added − removed) theme-refresh listeners and data-theme
+    // observers on <html>, counted from the first script on.
+    await page.addInitScript(() => {
+      const net = window.__themeNet = { listeners: 0, observers: 0 };
+      const add = window.addEventListener, remove = window.removeEventListener;
+      const fns = new Set();
+      window.addEventListener = function (t, fn, o) {
+        if (t === 'theme-refresh' && !fns.has(fn)) { fns.add(fn); net.listeners++; }
+        return add.call(this, t, fn, o);
+      };
+      window.removeEventListener = function (t, fn, o) {
+        if (t === 'theme-refresh' && fns.delete(fn)) net.listeners--;
+        return remove.call(this, t, fn, o);
+      };
+      const MO = window.MutationObserver;
+      window.MutationObserver = class extends MO {
+        observe(target, opts) {
+          if (!this.__theme && target === document.documentElement && opts && (opts.attributeFilter || []).includes('data-theme')) {
+            this.__theme = true; net.observers++;
+          }
+          return super.observe(target, opts);
+        }
+        disconnect() {
+          if (this.__theme) { this.__theme = false; net.observers--; }
+          return super.disconnect();
+        }
+      };
+    });
+    await step('leaving the Map page with a path open leaks no theme listener or observer', async () => {
+      await page.goto(`${BASE}/#/nodes`, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(800);
+      const base = await page.evaluate(() => Object.assign({}, window.__themeNet));
+      const seen = [];
+      for (let i = 0; i < 3; i++) {
+        await page.evaluate((h) => { location.hash = h; }, `#/map?profile=${fmt(A1)},${fmt(B1)}`);
+        await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
+        await waitHint(page, 'Cell transmitter ~320 m');
+        await page.evaluate(() => { location.hash = '#/nodes'; });
+        await page.waitForFunction(() => !document.querySelector('#leaflet-map'), null, { timeout: 10000 });
+        await page.waitForTimeout(300);
+        const n = await page.evaluate(() => Object.assign({}, window.__themeNet));
+        seen.push((n.listeners - base.listeners) + '/' + (n.observers - base.observers));
+      }
+      assert(seen.every((x) => x === '0/0'), 'net theme-refresh listeners / data-theme observers after each visit: ' + seen.join(', '));
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     });
     await ctx.close();
   }

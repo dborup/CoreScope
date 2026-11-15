@@ -19,7 +19,11 @@
  *      gate, never a cell twice, never a request for an unchanged end;
  *   7. the panel: a chip beside the other chips, text only, hidden with no
  *      hint; hostile site fields never reach it;
- *   8. CSS variables only, map.js and index.html wiring.
+ *   8. CSS variables only, map.js and index.html wiring;
+ *   9. #768 review: clear() after the map's unload builds no controller;
+ *      a site 500.4 m away across a cell edge has its cell listed; pinned
+ *      cells are fetched before the rest of the view; the status line
+ *      counts the view's cells only.
  *
  * Runs via: node test-issue-724-masts-hint.js
  */
@@ -132,6 +136,8 @@ test('a site with a broken position is ignored, not a crash', () => {
 
 test('cellsNear covers the 500 m circle, at most four cells, inside the extent', () => {
   const ML = ctx0.window.MastsLayer;
+  // Two ends of at most four cells each: what the layer budgets for.
+  assert(2 * 4 <= ML.PIN_CELL_CAP, 'PIN_CELL_CAP ' + ML.PIN_CELL_CAP);
   for (let i = 0; i < 400; i++) {
     const lat = 54.8 + (i * 0.0071) % 2.6, lon = 8.3 + (i * 0.0193) % 4.2;
     const keys = H.cellsNear(lat, lon, MASTS);
@@ -146,6 +152,47 @@ test('cellsNear covers the 500 m circle, at most four cells, inside the extent',
   const p = ML.toUTM32(A[0], A[1]);
   assert.strictEqual(H.cellsNear(A[0], A[1], MASTS)[0], Math.floor(p.e / 2000) + ',' + Math.floor(p.n / 2000));
   assert.strictEqual(H.cellsNear(52.52, 13.40, MASTS).length, 0, 'Berlin is outside the extent');
+});
+
+test('cellsNear lists the neighbour cell of a site at 500.4 m across a cell edge (#768 review 4)', () => {
+  // nearestFor rounds a spherical distance, so a site up to 500.49 m away
+  // counts as 500; in UTM that can be ~0.5% more (scale factor, ellipsoid).
+  // Each end is placed so the site lies just across the next cell edge.
+  const ML = ctx0.window.MastsLayer;
+  const D = Math.PI / 180, M = 500.4, s = MASTS.cellSizeM, x = MASTS.cellExtent;
+  const dest = (ll, brg) => {
+    const d = M / R, p = ll[0] * D, l = ll[1] * D;
+    const p2 = Math.asin(Math.sin(p) * Math.cos(d) + Math.cos(p) * Math.sin(d) * Math.cos(brg));
+    return [p2 / D, (l + Math.atan2(Math.sin(brg) * Math.sin(d) * Math.cos(p), Math.cos(d) - Math.sin(p) * Math.sin(p2))) / D];
+  };
+  const cellOf = (ll) => { const p = ML.toUTM32(ll[0], ll[1]); return [Math.floor(p.e / s), Math.floor(p.n / s)]; };
+  let checked = 0;
+  for (let i = 0; i < 12; i++) {
+    for (let j = 0; j < 12; j++) {
+      for (const [axis, brg, sign] of [['e', Math.PI / 2, 1], ['e', 3 * Math.PI / 2, -1], ['n', 0, 1], ['n', Math.PI, -1]]) {
+        const end = [54.8 + i * 0.24, 8.3 + j * 0.56];
+        const coord = (ll) => ML.toUTM32(ll[0], ll[1])[axis];
+        const k = axis === 'e' ? 1 : 0;
+        const edge = sign > 0 ? Math.ceil((coord(end) + 500) / s) * s : Math.floor((coord(end) - 500) / s) * s;
+        // Newton on the end's lon (east-west) or lat (north-south).
+        for (let it = 0; it < 6; it++) {
+          const delta = Math.abs(coord(dest(end, brg)) - coord(end));
+          const target = edge - sign * (500 + (delta - 500) / 2);
+          const h = 1e-5, nudged = end.slice(); nudged[k] += h;
+          end[k] += (target - coord(end)) / ((coord(nudged) - coord(end)) / h);
+        }
+        const c = cellOf(dest(end, brg));
+        if (c[0] < x[0] || c[0] > x[2] || c[1] < x[1] || c[1] > x[3]) continue;
+        const near = H.nearestFor(end[0], end[1], [site(dest(end, brg), LTE800)]);
+        assert(near && near.distanceM === 500, 'not a 500 m hint: ' + JSON.stringify(near));
+        const keys = H.cellsNear(end[0], end[1], MASTS);
+        assert(keys.includes(c[0] + ',' + c[1]), 'cell ' + c + ' of a site 500.4 m ' + axis + (sign > 0 ? '+' : '-') + ' of ' + end + ' not listed: ' + keys);
+        assert(keys.length <= 4, keys.length + ' cells');
+        checked++;
+      }
+    }
+  }
+  assert(checked > 300, 'only ' + checked + ' cases inside the extent');
 });
 
 // ── 4. Wording ──────────────────────────────────────────────────────────────
@@ -289,6 +336,89 @@ test('far from any relevant site: no chip; clear() hides it and unpins', async (
   h.sitesFor[keysA[0]] = [site(north(A[0], A[1], 80), LTE800)];
   hint.clear();
   assert.strictEqual(h.map._mcMasts.stats().wanted, 0, 'clear() left cells pinned');
+});
+
+test('leaving the map with a path open: clear() after unload makes no new controller (#768 review 1)', async () => {
+  const view = { z: 9, b: { south: 55.5, west: 9.5, north: 56.8, east: 11.0 } };
+  const h = liveHarness(view);
+  const fp = fakePanel();
+  const hint = H.attach({ map: h.map, cfg: MASTS, panel: () => fp.panel });
+  hint.update(A, B);
+  await h.flush();
+  // map.js destroy(): map.remove() fires 'unload' before destroyProfileTool()
+  // clears the line.
+  let observers = 0, themeListeners = 0;
+  h.ctx.MutationObserver = function () { observers++; this.observe = () => {}; this.disconnect = () => {}; };
+  const add = h.ctx.window.addEventListener;
+  h.ctx.window.addEventListener = (t, fn) => { if (t === 'theme-refresh') themeListeners++; return add(t, fn); };
+  h.map.fire('unload');
+  assert.strictEqual(h.map._mcMasts, null);
+  hint.clear();
+  assert.strictEqual(h.map._mcMasts, null, 'clear() built a controller on the removed map');
+  assert.strictEqual(observers + themeListeners, 0, 'a theme observer or listener was added after unload');
+  const chip = fp.find(fp.head, 'tp-chip-mast');
+  assert(chip && chip.hidden, 'chip still shown after clear()');
+});
+
+// An overlay on, a view of many cells, every fetch held open.
+function heldHarness(view) {
+  const ctx = sandbox();
+  const timers = [];
+  ctx.setTimeout = (fn) => { timers.push(fn); return fn; };
+  const calls = [];
+  ctx.fetch = (url) => new Promise((resolve) => calls.push({ key: decodeURIComponent(url.split('cell=')[1]), resolve }));
+  const ok = (c) => c.resolve({ ok: true, status: 200, headers: { get: () => null }, json: () => Promise.resolve({ truncated: false, sites: [] }) });
+  const fail = (c) => c.resolve({ ok: false, status: 502, headers: { get: () => null } });
+  const { map } = buildControl(ctx);
+  map.getZoom = () => view.z;
+  map.getBounds = () => ({ getSouth: () => view.b.south, getWest: () => view.b.west, getNorth: () => view.b.north, getEast: () => view.b.east });
+  // One round of due timers at a time: a failed cell re-arms its retry
+  // timer, so draining until empty would spin.
+  const run = async () => { for (let i = 0; i < 6; i++) { timers.splice(0).forEach((fn) => fn()); await tick(); } };
+  return { ctx, map, calls, ok, fail, run };
+}
+
+test('pinned cells are fetched before the rest of the view (#768 review 3)', async () => {
+  const h = heldHarness({ z: 13, b: { south: 56.10, west: 10.05, north: 56.22, east: 10.35 } });
+  h.map.fire('moveend');
+  await h.run();
+  const ML = h.ctx.window.MastsLayer;
+  assert.strictEqual(h.calls.length, ML.CONCURRENCY, 'view not in flight');
+  const viewKeys = new Set(h.calls.map((c) => c.key));
+  const far = ['300,3100', '301,3100'];   // well outside the view
+  ML.controller(h.map, MASTS).pin(far, null);
+  assert.strictEqual(h.calls.length, ML.CONCURRENCY, 'over the concurrency limit');
+  h.ok(h.calls[0]);
+  await tick();
+  h.ok(h.calls[1]);
+  await tick();
+  assert.deepStrictEqual(h.calls.slice(ML.CONCURRENCY).map((c) => c.key), far, 'the next free slots went to the view: ' + h.calls.map((c) => c.key));
+  assert(!far.some((k) => viewKeys.has(k)));
+});
+
+test('the status line counts the view only, not a pinned cell outside it (#768 review 5)', async () => {
+  const h = heldHarness({ z: 15, b: { south: 56.1625, west: 10.2030, north: 56.1633, east: 10.2048 } });
+  const label = { setAttribute() {}, parentNode: { insertBefore: (el) => { label.after = el; } } };
+  h.ctx.document.createElement = () => { const el = { attrs: {}, setAttribute(k, v) { el.attrs[k] = v; }, textContent: '', hidden: false }; return el; };
+  const ML = h.ctx.window.MastsLayer;
+  ML.decorate(h.map, MASTS, label);
+  const st = label.after;
+  h.map.fire('moveend');
+  await h.run();
+  assert.strictEqual(h.calls.length, 1, 'view of one cell: ' + h.calls.map((c) => c.key));
+  // Pinned for a profile end far away: one pending, one failed.
+  ML.controller(h.map, MASTS).pin(['300,3100', '301,3100'], null);
+  h.fail(h.calls[1]);
+  await h.run();
+  assert.strictEqual(st.textContent, 'Loading antenna sites…', 'the view cell is still pending');
+  h.ok(h.calls[0]);
+  await h.run();
+  assert.strictEqual(st.textContent, '', 'status counts pinned cells outside the view: ' + st.textContent);
+  assert.strictEqual(st.hidden, true);
+  // The other pinned cell failing too changes nothing.
+  h.fail(h.calls[2]);
+  await h.run();
+  assert.strictEqual(st.textContent, '', 'a pinned failure outside the view: ' + st.textContent);
 });
 
 test('a pinned cell the view also needs is fetched once and drawn when the layer is on', async () => {
