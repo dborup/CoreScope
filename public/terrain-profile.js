@@ -1603,7 +1603,9 @@
     }
 
     /* shut closes the panel and drops every answer still in flight. Only
-     * an explicit Close takes the profile out of the hash. */
+     * an explicit Close takes the profile out of the hash. A stated model
+     * belonged to the profile that is closing: the next path is the
+     * viewer's own and follows the customizer again (#765). */
     function shut(rewriteHash) {
       if (!open) return;
       open = false;
@@ -1611,6 +1613,7 @@
       if (debounceTimer) { global.clearTimeout(debounceTimer); debounceTimer = null; }
       state.a = null;
       state.b = null;
+      state.modelExplicit = false;
       moving = null;
       themeH.a = null;
       themeH.b = null;
