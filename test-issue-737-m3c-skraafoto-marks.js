@@ -39,7 +39,10 @@ let passed = 0, failed = 0;
 const asyncTests = [];
 function test(name, fn) { asyncTests.push([name, fn]); }
 function eq(actual, expected, msg) {
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(actual === undefined ? null : actual)), expected, msg);
+  // Node 26 rejects an explicit undefined message, so it is passed only when given.
+  const args = [JSON.parse(JSON.stringify(actual === undefined ? null : actual)), expected];
+  if (msg !== undefined) args.push(msg);
+  assert.deepStrictEqual(...args);
 }
 function near(a, b, msg, tol) {
   assert.ok(Math.abs(a - b) <= (tol || 1e-9), (msg || '') + ': ' + a + ' vs ' + b);
@@ -162,7 +165,7 @@ test('marks: zoomed, the crop marker and the line moved into crop pixels', () =>
   const path = [{ x: 172.5, y: 312.8 }, { x: 428.5, y: 487.55 }];
   const crop = { box: { x0: 172.5, y0: 312.8, x1: 428.5, y1: 487.55 }, width: 1024, height: 699, marker: { x: 512, y: 349.6 } };
   const m = SF.marks(photo('south', { path, approx: true }), crop);
-  eq(m, { width: 1024, height: 699, point: { x: 512, y: 349.6 }, path: [{ x: 0, y: 0 }, { x: 1024, y: 699 }], approx: true });
+  eq(m, { width: 1024, height: 699, point: { x: 512, y: 349.6 }, path: [{ x: 0, y: 0 }, { x: 1024, y: 699 }], approx: true, zoomed: true });
   eq(SF.marks(photo('south'), Object.assign({}, crop, { marker: null })).point, null, 'no marker header, no crosshair');
   eq(SF.marks(photo('south', { path }), Object.assign({}, crop, { box: null })).path, null, 'no box header, no line');
   eq(SF.marks(photo('south'), Object.assign({}, crop, { marker: { x: 1100, y: 3 } })).point, null, 'a marker outside the crop');
@@ -267,6 +270,8 @@ test('markText: the point, how sure, and the line', () => {
     'The point is outside this photo. Line of sight from A to B drawn on the photo.');
   eq(SF.markText({ width: 900, height: 600, point: { x: 800, y: 50 }, path: [{ x: 0, y: 0 }, { x: 9, y: 9 }], approx: false }),
     'Point marked at the top-right. Line of sight from A to B drawn on the photo.');
+  eq(SF.markText({ width: 900, height: 600, point: null, path: null, approx: false, zoomed: true }),
+    'Not marked in this view.', 'zoomed without a usable marker: not "outside this photo"');
   eq(SF.markText(null), '');
 });
 
@@ -368,8 +373,20 @@ test('viewer: the marks are an SVG layer in preview space, with the crosshair an
     const svg = t.marks();
     eq(svg.tagName, 'SVG');
     eq(svg.namespaceURI, 'http://www.w3.org/2000/svg');
-    eq(svg.hidden, false);
+    // hidden is an HTML attribute only (#833 F2): the attribute is what counts.
+    eq(svg.getAttribute('hidden'), null, 'shown: no hidden attribute');
     eq(svg.getAttribute('viewBox'), '0 0 1024 765');
+    // #833 F1: the marks are clipped to the photo's own rect, not the box.
+    const clipG = t.mark('sf-marks-clip');
+    assert.ok(clipG, 'a clipped group holds the marks');
+    const m = /^url\(#([^)]+)\)$/.exec(clipG.getAttribute('clip-path') || '');
+    assert.ok(m, String(clipG.getAttribute('clip-path')));
+    const cp = find(svg, (e) => e.tagName === 'CLIPPATH' && e.attrs.id === m[1]);
+    eq(cp.length, 1, 'the clipPath it names is in the layer');
+    const rect = cp[0].children.filter((e) => e.tagName === 'RECT');
+    eq(rect.map((e) => [e.attrs.x, e.attrs.y, e.attrs.width, e.attrs.height]), [['0', '0', '1024', '765']]);
+    eq(find(clipG, (e) => e.attrs['data-testid'] === 'sf-los').length, 1, 'the line inside the clip');
+    eq(find(clipG, (e) => e.attrs['data-testid'] === 'sf-cross').length, 1, 'the crosshair inside the clip');
     eq(svg.getAttribute('preserveAspectRatio'), 'xMidYMid meet', 'the image is object-fit: contain');
     eq(svg.getAttribute('role'), 'img');
     eq(svg.getAttribute('aria-label'), 'Point marked at the centre-left. Line of sight from A to B drawn on the photo.');
@@ -386,6 +403,16 @@ test('viewer: an approximate point is drawn dashed', () => withViewer({}, async 
   eq(byClass(t.marks(), 'sf-cross-approx').length, 1, 'dashed when approx');
   eq(t.marks().getAttribute('aria-label'), 'Point marked at the centre-left, position approximate.');
 }, { approx: true }));
+
+test('viewer: the marks are hidden by attribute until the photo loads', () => withViewer({}, async (t) => {
+  eq(t.marks().getAttribute('hidden'), '', 'loading: hidden');
+  eq(t.marks().getAttribute('aria-label'), null);
+  t.load(1024, 765);
+  eq(t.marks().getAttribute('hidden'), null, 'loaded: shown');
+  await t.click('sf-dir-west');
+  eq(t.marks().getAttribute('hidden'), '', 'the next photo loading: hidden again');
+  eq(t.marks().getAttribute('aria-label'), null, 'and without the old label');
+}));
 
 test('viewer: out of frame, no crosshair and no zoom', () => withViewer({}, async (t) => {
   t.load(1024, 765);
@@ -413,6 +440,8 @@ test('viewer: zoom is a real button with aria-pressed; the crop is fetched only 
     eq(z.textContent, 'Zoom out');
     t.load(1024, 699);
     eq(t.marks().getAttribute('viewBox'), '0 0 1024 699', 'crop space');
+    const zr = find(t.marks(), (e) => e.tagName === 'RECT')[0];
+    eq([zr.attrs.width, zr.attrs.height], ['1024', '699'], 'zoomed, clipped to the crop');
     const cross = t.mark('sf-cross');
     eq([cross.getAttribute('data-x'), cross.getAttribute('data-y')], ['512', '349.5'], 'the marker header');
     // The line (10,700)-(1000,80) in preview pixels, moved into the crop.
@@ -436,9 +465,15 @@ test('viewer: another direction turns zoom off; only that photo\'s preview is fe
 
 test('viewer: a failed crop says so and Zoom out goes back to the photo', () => withViewer({}, async (t) => {
   t.load(1024, 765);
+  eq(t.marks().getAttribute('hidden'), null, 'marks shown on the photo');
   t.svc.fail = 503;
   await t.click('sf-zoom');
   eq(t.dom.byTid('sf-dialog').getAttribute('data-state'), 'error');
+  // #833 F2: no stale layer and no stale text equivalent in the error state.
+  eq(t.marks().getAttribute('hidden'), '', 'the layer is hidden by its attribute');
+  eq(t.marks().getAttribute('role'), null, 'no role left');
+  eq(t.marks().getAttribute('aria-label'), null, 'no old photo\'s label left');
+  eq(t.marks().children.length, 0, 'emptied');
   eq(t.zoom().getAttribute('aria-pressed'), 'true');
   await t.click('sf-zoom');
   eq(t.dom.byTid('sf-dialog').getAttribute('data-state'), 'loading', 'the kept preview is put back');

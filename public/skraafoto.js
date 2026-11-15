@@ -318,8 +318,8 @@
   /* marks is what to draw on photo p: { width, height } is the space (the
    * preview's frame, or zoomed the crop's size), point the crosshair
    * (null: none), path the line of sight (null: none). crop, when zoomed:
-   * { box, width, height, marker }, from the M3b headers. null when the
-   * photo has no camera model (no frame). */
+   * { box, width, height, marker }, from the M3b headers; zoomed is then
+   * true. null when the photo has no camera model (no frame). */
   function marks(p, crop) {
     var frame = size(p && p.frame);
     if (!frame) return null;
@@ -331,7 +331,7 @@
       var mk = xy(crop.marker);
       if (mk && (mk.x < 0 || mk.y < 0 || mk.x > cs.width || mk.y > cs.height)) mk = null;
       var moved = line && crop.box ? line.map(function (q) { return toCrop(q, crop); }) : null;
-      return { width: cs.width, height: cs.height, point: mk, path: moved, approx: approx };
+      return { width: cs.width, height: cs.height, point: mk, path: moved, approx: approx, zoomed: true };
     }
     return { width: frame.width, height: frame.height, point: p.inFrame === true ? xy(p.point) : null, path: line, approx: approx };
   }
@@ -389,7 +389,7 @@
     if (!m) return '';
     var t = m.point
       ? 'Point marked at the ' + placeWords(m.point, m.width, m.height) + (m.approx ? ', position approximate.' : '.')
-      : 'The point is outside this photo.';
+      : m.zoomed ? 'Not marked in this view.' : 'The point is outside this photo.';
     return m.path ? t + ' Line of sight from A to B drawn on the photo.' : t;
   }
 
@@ -414,6 +414,7 @@
   }
 
   var current = null; // the open viewer, if any
+  var clipSeq = 0; // numbers each viewer's clipPath id
 
   /* open shows the viewer at a point. o: { lat, lon, label, opener, cfg,
    * year, dir, line, fetch }. cfg defaults to the server's block; line is
@@ -531,7 +532,9 @@
     ui.marks.setAttribute('data-testid', 'sf-marks');
     ui.marks.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     ui.marks.setAttribute('focusable', 'false');
-    ui.marks.hidden = true;
+    // hidden is an HTML attribute only: on SVG the property does nothing,
+    // so the attribute itself is set (and .sf-marks[hidden] hides it).
+    ui.marks.setAttribute('hidden', '');
     frame.appendChild(ui.marks);
     stage.appendChild(frame);
     ui.status = el('p', 'sf-status');
@@ -628,6 +631,7 @@
       return e;
     }
 
+    var clipId = 'sf-marks-clip-' + (++clipSeq); // unique per viewer
     var drawn = null; // { p, crop }: the marks on screen, redrawn on resize
 
     /* drawMarks puts photo p's marks over the image: the crosshair and the
@@ -637,12 +641,25 @@
       drawn = { p: p, crop: crop };
       var c = crop ? { box: crop.box, marker: crop.marker, width: ui.img.naturalWidth, height: ui.img.naturalHeight } : null;
       var m = marks(p, c);
-      var g = ui.marks;
-      g.textContent = '';
-      if (!m) { g.hidden = true; g.removeAttribute('role'); g.removeAttribute('aria-label'); return; }
-      g.setAttribute('viewBox', '0 0 ' + m.width + ' ' + m.height);
-      g.setAttribute('role', 'img');
-      g.setAttribute('aria-label', markText(m));
+      if (!m) { hideMarks(); return; }
+      var root = ui.marks;
+      root.textContent = '';
+      root.setAttribute('viewBox', '0 0 ' + m.width + ' ' + m.height);
+      root.setAttribute('role', 'img');
+      root.setAttribute('aria-label', markText(m));
+      // Clipped to the photo itself: the outer svg clips only to its box,
+      // which takes in the letterbox bars, and zoomed the line's points
+      // lie far outside the crop.
+      var clip = svg('clipPath', null, svg('defs', null, root));
+      clip.setAttribute('id', clipId);
+      var r = svg('rect', null, clip);
+      r.setAttribute('x', '0');
+      r.setAttribute('y', '0');
+      r.setAttribute('width', String(m.width));
+      r.setAttribute('height', String(m.height));
+      var g = svg('g', 'sf-marks-clip', root);
+      g.setAttribute('clip-path', 'url(#' + clipId + ')');
+      g.setAttribute('data-testid', 'sf-marks-clip');
       var dm = displayMap(m, { width: ui.img.clientWidth, height: ui.img.clientHeight });
       var unit = dm && dm.scale > 0 ? 1 / dm.scale : m.width / 400;
       if (m.path) {
@@ -670,12 +687,17 @@
           });
         });
       }
-      g.hidden = false;
+      root.removeAttribute('hidden');
     }
 
+    /* hideMarks takes the layer away while a photo loads or fails: hidden,
+     * emptied, and without the last photo's text equivalent. */
     function hideMarks() {
       drawn = null;
-      ui.marks.hidden = true;
+      ui.marks.textContent = '';
+      ui.marks.removeAttribute('role');
+      ui.marks.removeAttribute('aria-label');
+      ui.marks.setAttribute('hidden', '');
     }
 
     // The crosshair is sized in screen pixels: redrawn when the image is

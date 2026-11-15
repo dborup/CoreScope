@@ -37,7 +37,9 @@ function fakeDom() {
   const doc = {
     createElement: element, activeElement: null,
     // #737 M3c: the marks are SVG; the namespace is recorded.
-    createElementNS: (ns, tag) => { const e = element(tag); e.namespaceURI = ns; return e; },
+    // hidden is an HTMLElement property only: on SVG it is a plain
+    // property that hides nothing, so the fake has none (#833 F2).
+    createElementNS: (ns, tag) => { const e = element(tag); e.namespaceURI = ns; delete e.hidden; return e; },
     addEventListener() {}, removeEventListener() {},
     querySelector: () => null,
   };

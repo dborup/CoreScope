@@ -595,6 +595,18 @@ function searchAnswer(q, o) {
       await waitReady(page);
       assert(rec.preview.length === 2, rec.preview.join(' '));
     });
+    // #833 F2: hidden is an HTML attribute only; the SVG layer must be
+    // hidden by the attribute, and lose the last photo's text, on error.
+    await step('preview 503 after a shown photo: the marks layer is hidden and says nothing stale', async () => {
+      const shown = await page.$eval(MARKS, (e) => ({ attr: e.hasAttribute('hidden'), display: getComputedStyle(e).display, label: e.getAttribute('aria-label') }));
+      assert(!shown.attr && shown.display !== 'none' && shown.label, 'south marks not shown ' + JSON.stringify(shown));
+      await page.click(DIR('north'));
+      await page.waitForFunction((sel) => document.querySelector(sel).getAttribute('data-state') === 'error', DIALOG, { timeout: 5000 });
+      const m = await page.$eval(MARKS, (e) => ({ attr: e.hasAttribute('hidden'), display: getComputedStyle(e).display,
+        label: e.getAttribute('aria-label'), role: e.getAttribute('role'), kids: e.childElementCount }));
+      assert(m.attr && m.display === 'none', 'layer not hidden ' + JSON.stringify(m));
+      assert(m.label === null && m.role === null && m.kids === 0, 'stale layer ' + JSON.stringify(m));
+    });
     await ctx.close();
   }
   {
@@ -753,12 +765,41 @@ function searchAnswer(q, o) {
       const pts = Array.from(l.points).map((p) => ({ x: ctm.a * p.x + ctm.c * p.y + ctm.e, y: ctm.b * p.x + ctm.d * p.y + ctm.f }));
       const m = window.Skraafoto.displayMap({ width: img.naturalWidth, height: img.naturalHeight }, { width: box.width, height: box.height });
       const want = s.path.map((p) => { const q = window.Skraafoto.toDisplay(p, m); return { x: box.x + q.x, y: box.y + q.y }; });
-      return { pts, want, visible: getComputedStyle(l).visibility !== 'hidden' && !document.querySelector(s.MARKS).hidden };
+      const layer = document.querySelector(s.MARKS);
+      return { pts, want, visible: getComputedStyle(l).visibility !== 'hidden' && !layer.hasAttribute('hidden') && getComputedStyle(layer).display !== 'none' };
     }, { IMG, LOS, MARKS, path });
     assert(r && r.visible, 'no line of sight drawn');
     assert(r.pts.length === path.length, 'points ' + r.pts.length);
     r.pts.forEach((p, i) => assert(Math.abs(p.x - r.want[i].x) <= 1.5 && Math.abs(p.y - r.want[i].y) <= 1.5,
       'line point ' + i + ' at ' + JSON.stringify(p) + ', want ' + JSON.stringify(r.want[i])));
+  }
+  /* noSpill (#833 F1) proves nothing of the marks is painted outside the
+   * photo: the letterbox bars (the image box minus its contain content
+   * rect) look the same with the marks shown and with them hidden.
+   * needBars: the viewport must letterbox, or the check says nothing. */
+  async function noSpill(page, needBars, label) {
+    const g = await page.evaluate((s) => {
+      const img = document.querySelector(s.IMG), b = img.getBoundingClientRect();
+      const m = window.Skraafoto.displayMap({ width: img.naturalWidth, height: img.naturalHeight }, { width: b.width, height: b.height });
+      const c = { x: b.x + m.x, y: b.y + m.y, w: img.naturalWidth * m.scale, h: img.naturalHeight * m.scale };
+      return { b: { x: b.x, y: b.y, w: b.width, h: b.height }, c };
+    }, { IMG });
+    const bars = [];
+    const left = g.c.x - g.b.x, right = g.b.x + g.b.w - (g.c.x + g.c.w);
+    const top = g.c.y - g.b.y, bottom = g.b.y + g.b.h - (g.c.y + g.c.h);
+    if (left >= 4) bars.push({ x: g.b.x, y: g.b.y, width: left - 1, height: g.b.h });
+    if (right >= 4) bars.push({ x: g.c.x + g.c.w + 1, y: g.b.y, width: right - 1, height: g.b.h });
+    if (top >= 4) bars.push({ x: g.b.x, y: g.b.y, width: g.b.w, height: top - 1 });
+    if (bottom >= 4) bars.push({ x: g.b.x, y: g.c.y + g.c.h + 1, width: g.b.w, height: bottom - 1 });
+    if (needBars) assert(bars.length > 0, (label || '') + ' no letterbox to check ' + JSON.stringify(g));
+    for (const clip of bars) {
+      const on = await page.screenshot({ clip });
+      await page.$eval(MARKS, (e) => { e.style.visibility = 'hidden'; });
+      const off = await page.screenshot({ clip });
+      await page.$eval(MARKS, (e) => { e.style.visibility = ''; });
+      assert(on.equals(off), (label || '') + ' the marks are painted on the letterbox bar ' + JSON.stringify(clip));
+    }
+    return bars.length;
   }
   const cropPath = (path) => path.map((p) => ({ x: (p.x - 70.5) * 4, y: (p.y - 170.2) * 4 }));
   const markLabel = (page) => page.getAttribute(MARKS, 'aria-label');
@@ -886,6 +927,15 @@ function searchAnswer(q, o) {
       await waitReady(page);
       await losOnPath(page, cropPath(LINE));
       await crossOnPoint(page, { x: 240, y: 160 });
+    });
+    await step('M3c profile: zoomed in a short window, the line stays on the photo, off the letterbox', async () => {
+      const vp = page.viewportSize();
+      await page.setViewportSize({ width: 1280, height: 600 });
+      await page.waitForTimeout(200);
+      await noSpill(page, true, '1280x600');
+      await losOnPath(page, cropPath(LINE));
+      await page.setViewportSize(vp);
+      await page.waitForTimeout(200);
     });
     await shot(page, '737-m3c-profile-zoom');
     await step('M3c profile: another direction is chosen by hand and kept for the next year', async () => {
@@ -1145,6 +1195,9 @@ function searchAnswer(q, o) {
       await waitReady(page);
       await losOnPath(page, cropPath(LINE));
       await crossOnPoint(page, { x: 240, y: 160 }, 'zoomed');
+      // #833 F1: 640x360 letterboxes the photo; the zoomed line runs far
+      // outside the crop and must be clipped to the photo.
+      await noSpill(page, viewport.width > viewport.height, label + ' zoomed');
       await page.locator(CLOSE).scrollIntoViewIfNeeded();
     });
     await shot(page, '737-profile-' + viewport.width);

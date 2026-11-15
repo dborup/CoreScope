@@ -44,7 +44,10 @@ function test(name, fn) {
   catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
 }
 function eq(actual, expected, msg) {
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(actual === undefined ? null : actual)), expected, msg);
+  // Node 26 rejects an explicit undefined message, so it is passed only when given.
+  const args = [JSON.parse(JSON.stringify(actual === undefined ? null : actual)), expected];
+  if (msg !== undefined) args.push(msg);
+  assert.deepStrictEqual(...args);
 }
 
 const { TP, win } = loadTerrainProfile(['terrain-profile-cursor.js', 'skraafoto.js', 'heritage-info.js']);
