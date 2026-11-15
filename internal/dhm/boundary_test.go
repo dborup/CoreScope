@@ -340,11 +340,13 @@ func TestPeberholmFixKeepsTheForeignSide(t *testing.T) {
 }
 
 // #763 — the generator's hand-made islands agree with the embedded
-// polygon: every EXTRA_ISLANDS centre (foreign) lies on it, and every
-// DANISH_ISLANDS centre is covered. CI cannot run the generator (it needs
-// the Natural Earth files), so this is what ties a change to those lists
-// to a regenerated foreign_land.txt. With TestPeberholmIsCovered, it also
-// keeps Peberholm out of EXTRA_ISLANDS.
+// polygon: every EXTRA_ISLANDS centre (foreign) lies on it. CI cannot run
+// the generator (it needs the Natural Earth files and the Topografisk
+// Landpolygon GeoPackage), so this is what ties a change to that list to
+// a regenerated foreign_land.txt. With TestPeberholmIsCovered, it also
+// keeps Peberholm out of EXTRA_ISLANDS. #739 M1 dropped DANISH_ISLANDS:
+// Topografisk Landpolygon has Okseøerne (TestForeignLandHeader739 keeps
+// the list gone).
 func TestGeneratorHandMadeIslandsMatchThePolygon(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join("..", "..", "scripts", "gen-dhm-foreign-land.py"))
 	if err != nil {
@@ -355,7 +357,6 @@ func TestGeneratorHandMadeIslandsMatchThePolygon(t *testing.T) {
 		foreign bool
 	}{
 		{"EXTRA_ISLANDS", true},
-		{"DANISH_ISLANDS", false},
 	} {
 		islands := handMadeIslands(t, string(src), c.list)
 		if len(islands) == 0 {
