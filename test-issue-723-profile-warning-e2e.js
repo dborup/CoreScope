@@ -10,8 +10,8 @@
  * no request leaves the machine.
  *
  * Asserts:
- *   1. A inside a zone, B 42 m from one, and both at once: the warn chip in
- *      the title row and the note under the detail line with the neutral
+ *   1. A inside a zone, B 42 m from one, and both at once: the warn chip
+ *      and the note under the detail line, never in the title row, with the neutral
  *      wording, each end's type and distance and the register's credit;
  *      one lat/lon-only lookup per end after the profile; the verdict chip
  *      exactly as it reads without the heritage block;
@@ -23,7 +23,12 @@
  *   5. hostile dataset text is shown as text and never runs;
  *   6. 740x360, 568x320 and 844x390 landscape (touch): the note does not
  *      move the chart, which stays on screen, and the 48 px close button
- *      survives the extra chip;
+ *      survives;
+ *   6b. 640x360, 667x375, 667x340, 667x330 and 667x320 landscape (touch)
+ *      with every chip showing (the surface chip, "assumed heights" and
+ *      the monument chip): the title row keeps its height, Copy and Close
+ *      stay on it, the chart stays where it was and fully on screen, and
+ *      the #781 hover cursor still follows a touch on the chart;
  *   7. light and dark: the chip and the note border use --warning;
  *   8. no console errors, no request to the agency or any outside host.
  *
@@ -73,7 +78,9 @@ const answerFor = {
 };
 const NONE = { radiusM: 100, count: 0, truncated: false, attribution: CREDIT, nearest: null };
 
-function profileFor(q) {
+/* surface: the terrain is clear and only the surface is marginal, so the
+ * title row also holds the "Buildings/trees" chip (#729). */
+function profileFor(q, surface) {
   const D = 1800;
   const end = (side, h) => {
     const ll = (q.get(side) || '').split(',').map(Number);
@@ -91,7 +98,7 @@ function profileFor(q) {
     distanceM: D, stepM: 1.8, sampleCount: 1001, model: 'both',
     coverage: { state: 'full', pct: 100, firstGapM: null }, samples,
     physics: { freqMHz: 869.618, freqSource: 'firmware', lambdaM: 0.34474, k: 1.3333333333333333, kSource: 'default', f1MaxM: 12.5 },
-    verdict: { state: 'fresnel60', model: 'dtm', criterion: 0.6, worstClearanceM: 3.2, worstAtM: 600, worstF1Fraction: 0.4,
+    verdict: { state: surface ? 'clear' : 'fresnel60', model: 'dtm', criterion: 0.6, worstClearanceM: 3.2, worstAtM: 600, worstF1Fraction: 0.4,
       surface: { state: 'fresnel60', worstClearanceM: 2.1, worstAtM: 600, worstF1Fraction: 0.3 } },
     attribution: DHM_BLOCK.attribution,
   };
@@ -112,7 +119,8 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   });
   console.log(`\n=== #723 M3 profile monument warning against ${BASE} ===\n`);
 
-  /* o: viewport, touch, theme, heritage (false: no block), answer(key)
+  /* o: viewport, touch, theme, heritage (false: no block), surface (see
+   * profileFor), answer(key)
    * (a body, a number = that HTTP status, or 'hold' to answer when the test
    * calls rec.release()), evil (hostile type text). */
   async function newCtx(o) {
@@ -131,7 +139,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     await ctx.route(url => new URL(url).pathname === PROFILE_PATH, async (route) => {
       const u = new URL(route.request().url());
       rec.profile.push(u);
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profileFor(u.searchParams)) });
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profileFor(u.searchParams, o.surface)) });
     });
     await ctx.route(url => new URL(url).pathname === HERITAGE_PATH, async (route) => {
       const u = new URL(route.request().url());
@@ -205,10 +213,12 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         chipHidden: chip ? chip.hidden : null, noteHidden: note ? note.hidden : null,
         label: chip ? chip.textContent : null, title: chip ? chip.title : null,
         noteText: note ? note.textContent : null, noteHTML: note ? note.innerHTML : null,
-        inHead: !!(chip && chip.parentElement && chip.parentElement.classList.contains('tp-head')),
+        inHead: !!(chip && chip.closest('.tp-head')),
+        // The chip and then its note, both under the detail line.
         afterDetail: (() => {
           const d = document.querySelector('[data-testid="tp-detail"]');
-          return !!(d && note && (d.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING));
+          const after = (x, y) => !!(x && y && (x.compareDocumentPosition(y) & Node.DOCUMENT_POSITION_FOLLOWING));
+          return after(d, chip) && after(chip, note);
         })(),
         chipClass: chip ? chip.className : '',
         verdict: v ? { text: v.textContent, state: v.getAttribute('data-state'), cls: v.className, title: v.title } : null,
@@ -269,12 +279,12 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       lines: ['A: Rundhøj, inside its protection zone.', 'B: Vandfyldt grav, about 42 m from its protection zone.'], not: null },
   ]) {
     const { ctx, page, rec } = await newCtx();
-    await step(`${c.name}: the warn chip beside the verdict, the note with type and distance; the verdict unchanged`, async () => {
+    await step(`${c.name}: the warn chip and the note with type and distance under the detail; the verdict unchanged`, async () => {
       await openProfile(page, c.a, c.b);
       await waitChip(page, c.label);
       const s = await state(page);
       assert(s.chip && s.note, 'chip ' + s.chip + ' note ' + s.note);
-      assert(s.inHead && s.afterDetail, 'placement: inHead ' + s.inHead + ' afterDetail ' + s.afterDetail);
+      assert(!s.inHead && s.afterDetail, 'placement: inHead ' + s.inHead + ' afterDetail ' + s.afterDetail);
       assert(/tp-chip-warn/.test(s.chipClass), 'chip class ' + s.chipClass);
       assert(s.noteText.indexOf(WARNING) === 0, 'note does not lead with the warning: ' + s.noteText);
       c.lines.forEach(l => assert(s.noteText.indexOf(l) > 0 && s.title.indexOf(l) > 0, 'missing "' + l + '" in ' + s.noteText));
@@ -393,6 +403,80 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         const r = e.getBoundingClientRect(); return r.height > 0 && r.top >= 0 && r.bottom <= window.innerHeight + 1;
       }, NOTE);
       assert(noteInView, 'the note cannot be brought on screen');
+      checkClean(rec);
+    });
+    await ctx.close();
+  }
+
+  // ── 6b. Short landscape, every chip showing ───────────────────────────
+  /* The review of #784 found that with the surface chip and "assumed
+   * heights" also showing, a monument chip in the title row wrapped Close
+   * (and at 667 wide Copy too) onto a second row, which pushed the chart
+   * under the bottom navigation at 667x320-340. Here the title row, the
+   * buttons on it and the chart must stay exactly where they were. */
+  for (const vp of [{ width: 640, height: 360 }, { width: 667, height: 375 }, { width: 667, height: 340 },
+    { width: 667, height: 330 }, { width: 667, height: 320 }]) {
+    const { ctx, page, rec } = await newCtx({ viewport: vp, touch: true, surface: true, answer: (k) => (answerFor[k] ? 'hold' : NONE) });
+    await step(`${vp.width}x${vp.height} landscape, every chip showing: the title row keeps its height and buttons, the chart stays on screen, the hover cursor still works`, async () => {
+      await openProfile(page, IN, NEAR);
+      await waitLookups(rec, 2);
+      const geo = () => page.evaluate(([chartSel, bodySel, panelSel, chipSel]) => {
+        const r = (el) => { const b = el.getBoundingClientRect(); return { top: Math.round(b.top), bottom: Math.round(b.bottom), h: Math.round(b.height) }; };
+        const panel = document.querySelector(panelSel);
+        const head = panel.querySelector('.tp-head'), title = head.querySelector('.tp-title');
+        const chart = document.querySelector(chartSel), c = chart.getBoundingClientRect();
+        const body = document.querySelector(bodySel);
+        const shown = (sel) => { const e = document.querySelector(sel); return !!(e && !e.hidden && e.getClientRects().length); };
+        // On the title row: the button overlaps the title vertically.
+        const onTitleRow = (sel) => { const b = document.querySelector(sel).getBoundingClientRect(), t = title.getBoundingClientRect();
+          return b.top < t.bottom && b.bottom > t.top; };
+        const hits = (y) => { const t = document.elementFromPoint(c.left + c.width / 2, y); return !!(t && t.closest(chartSel)); };
+        return {
+          head: r(head), chart: r(chart), body: r(body), scrollTop: body.scrollTop,
+          visible: c.height > 0 && hits(c.top + 2) && hits(c.bottom - 2),
+          chips: { verdict: shown('[data-testid="tp-verdict"]'), surface: shown('[data-testid="tp-surface-chip"]'),
+            assumed: shown('[data-testid="tp-assumed-chip"]'), heritage: shown(chipSel) },
+          copyOnRow: onTitleRow('[data-testid="tp-copy-link"]'), closeOnRow: onTitleRow('[data-testid="tp-close"]'),
+          vh: window.innerHeight, vw: window.innerWidth, sw: document.documentElement.scrollWidth,
+        };
+      }, ['[data-testid="tp-chart"]', '[data-testid="tp-body"]', PANEL, CHIP]);
+      const before = await geo();
+      assert(before.chips.verdict && before.chips.surface && before.chips.assumed && !before.chips.heritage,
+        'chips before the answers: ' + JSON.stringify(before.chips));
+      assert(before.visible && before.copyOnRow && before.closeOnRow, 'not a clean start: ' + JSON.stringify(before));
+      rec.release();
+      await waitChip(page, 'In monument zone');
+      await page.waitForTimeout(200);
+      const after = await geo();
+      const s = await state(page);
+      assert(s.note, 'no note');
+      assert(after.chips.verdict && after.chips.surface && after.chips.assumed && after.chips.heritage,
+        'not every chip shows: ' + JSON.stringify(after.chips));
+      assert(Math.abs(after.head.h - before.head.h) <= 1, 'the title row grew ' + before.head.h + ' → ' + after.head.h + ' px');
+      assert(after.copyOnRow && after.closeOnRow, 'Copy/Close left the title row: ' + JSON.stringify(after));
+      assert(Math.abs(after.chart.top - before.chart.top) <= 1 && Math.abs(after.chart.bottom - before.chart.bottom) <= 1,
+        'the chart moved: ' + JSON.stringify({ before: before.chart, after: after.chart }));
+      assert(after.scrollTop === 0, 'the panel body scrolled: ' + after.scrollTop);
+      assert(after.visible && after.chart.top >= after.body.top - 1 && after.chart.bottom <= after.body.bottom + 1 && after.chart.bottom <= after.vh + 1,
+        'the chart is not fully on screen: ' + JSON.stringify(after));
+      assert(after.sw <= after.vw, 'horizontal overflow: ' + JSON.stringify(after));
+      await shot(page, `m3-landscape-chips-${vp.width}x${vp.height}.jpg`);
+      // #781: a touch on the chart still draws the cursor line and puts one
+      // dot on the map's profile line.
+      const box = await page.locator('[data-testid="tp-chart"] .tp-plot svg').boundingBox();
+      const cdp = await ctx.newCDPSession(page);
+      const at = { x: box.x + box.width * 0.4, y: box.y + box.height / 2 };
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] });
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: at.x + box.width * 0.2, y: at.y }] });
+      await page.waitForTimeout(80);
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+      await page.waitForTimeout(150);
+      const cur = await page.evaluate(() => {
+        const line = document.querySelector('[data-testid="tp-cursor-line"]');
+        return { line: !!line && line.getAttribute('visibility') === 'visible',
+          dots: document.querySelectorAll('.leaflet-overlay-pane .tp-cursor-dot').length };
+      });
+      assert(cur.line && cur.dots === 1, 'hover cursor after a touch: ' + JSON.stringify(cur));
       checkClean(rec);
     });
     await ctx.close();

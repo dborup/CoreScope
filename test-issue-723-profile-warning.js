@@ -15,7 +15,8 @@
  *      text escaped through the file's single esc();
  *   2. the panel: after a profile resolves, one lookup per end from the
  *      server's own endpoint coordinates, only with the heritage block; the
- *      chip beside the verdict and the note under it; the verdict chip
+ *      chip and the note under the detail line, never in the title row
+ *      (#784 review: it wrapped Copy/Close there); the verdict chip
  *      exactly as without the note; silence on failure, with no all-clear
  *      text anywhere; the note gone while re-measuring and on Close;
  *   3. the cost: height edits and model switches re-measure without a
@@ -315,19 +316,19 @@ test('panel: after the profile, one lookup per end from the server\'s endpoint c
   assert(u.note.innerHTML.indexOf(WARNING) > 0 && /A: Rundhøj/.test(u.note.innerHTML) && /B: Vandfyldt grav/.test(u.note.innerHTML), 'note ' + u.note.innerHTML);
 });
 
-test('panel: the chip sits in the title row right after the verdict chips, the note under the detail', () => {
+test('panel: the chip and then the note sit under the detail, not in the title row', () => {
   const env = load();
   const { tool } = openTool(env);
   tool.open();
   const head = env.dom.find('tp-verdict').parentNode;
   const ids = head.children.map(c => c.attrs['data-testid'] || c.className);
-  const iv = ids.indexOf('tp-verdict'), ih = ids.indexOf('tp-heritage-chip'), ic = ids.indexOf('tp-copy-link');
-  assert(iv >= 0 && ih > iv && ic > ih, 'title row order: ' + ids.join(' | '));
-  assert.strictEqual(head.children[ih - 1].className, 'sr-only', 'no spoken stop before the chip');
+  assert(ids.indexOf('tp-heritage-chip') < 0, 'the chip is in the title row: ' + ids.join(' | '));
+  assert(ids.indexOf('tp-copy-link') >= 0 && ids.indexOf('tp-close') > ids.indexOf('tp-copy-link'), 'title row: ' + ids.join(' | '));
   const body = env.dom.find('tp-body');
   const bids = body.children.map(c => c.attrs['data-testid'] || c.className);
   assert(bids.indexOf('tp-chart') === 0, 'the chart is no longer first in the body: ' + bids.join(' | '));
-  assert(bids.indexOf('tp-heritage-note') > bids.indexOf('tp-detail'), 'note not under the detail: ' + bids.join(' | '));
+  const id = bids.indexOf('tp-detail'), ih = bids.indexOf('tp-heritage-chip'), inote = bids.indexOf('tp-heritage-note');
+  assert(id >= 0 && ih > id && inote === ih + 1, 'body order: ' + bids.join(' | '));
 });
 
 test('panel: the verdict chip and detail are exactly as without the heritage block', async () => {
