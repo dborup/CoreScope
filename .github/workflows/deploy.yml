@@ -249,6 +249,10 @@ jobs:
           # own module: cmd/server imports it (#730 M2), but the server step
           # does not run its tests.
           (cd internal/buildings && go test -race ./...)
+          # internal/skraafoto (#737): Skråfoto STAC client, CDN preview reader
+          # and their fakes. Its own module: cmd/server imports it, but the
+          # server step does not run its tests.
+          (cd internal/skraafoto && go test -race ./...)
           # internal/regions is its own module: the server/ingestor steps
           # above compile it but never run its tests, and it now holds the
           # hashRegions/hashRegionsPath loader both processes share (#360).

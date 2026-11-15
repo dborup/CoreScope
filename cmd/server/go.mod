@@ -92,3 +92,7 @@ replace github.com/meshcore-analyzer/heritage => ../../internal/heritage
 require github.com/meshcore-analyzer/buildings v0.0.0
 
 replace github.com/meshcore-analyzer/buildings => ../../internal/buildings
+
+require github.com/meshcore-analyzer/skraafoto v0.0.0
+
+replace github.com/meshcore-analyzer/skraafoto => ../../internal/skraafoto

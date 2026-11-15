@@ -106,6 +106,29 @@ func routeDescriptions() map[string]routeMeta {
 				{Status: "503", Description: "map.heritage.maxInFlight upstream lookups (default 4) are already running, server-wide; no upstream call, not charged to the per-client budget. Retry-After: 5."},
 				{Status: "504", Description: "The register's service timed out (map.heritage.upstreamTimeoutMs)."},
 			}},
+		"GET /api/skraafoto/search": {Summary: "Oblique aerial photos of a map point (Skråfoto, Denmark)", Description: "The Skråfoto oblique aerial photos (Klimadatastyrelsen) of one point: at most one photo per direction, in the order north, east, south, west, nadir; a direction without a photo is absent. Response: {collection, year, years[], photos: [{id, collection, direction, datetime, viewerUrl, previewUrl?}], credit: {attribution, owner, datasetName, datasetUrl, licenseName, licenseUrl}}. years are the years offered, newest first (2017 is not); without year the newest is searched. viewerUrl opens the photo at full resolution in the official viewer; previewUrl is GET /api/skraafoto/preview. No upstream URL and no token is ever returned. The server asks the Dataforsyningen STAC API with the operator's map.dhm token, one fixed query per direction, for the point snapped to a 10 m EPSG:25832 grid; answers are cached 24 h and X-CoreScope-Cache says hit, miss or none (outside Denmark: answered empty with no upstream call). Credit: Klimadatastyrelsen, Skråfotos, CC BY 4.0. 404 unless map.skraafoto.enabled and map.dhm has a token. (#737 M1)", Tag: "config",
+			QueryParams: []paramMeta{
+				{Name: "lat", Description: "latitude in decimal degrees, plain decimal", Type: "number", Required: true},
+				{Name: "lon", Description: "longitude in decimal degrees, plain decimal", Type: "number", Required: true},
+				{Name: "year", Description: "the collection's year, one of years; 2019 or later", Type: "integer"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "Missing, repeated, malformed or unknown parameter, or a year the API does not have (no upstream call once the year list is cached)."},
+				{Status: "404", Description: "map.skraafoto is not enabled, or map.dhm has no token."},
+				{Status: "429", Description: "Per-client budget of searches not in the cache exceeded (map.skraafoto.searchRateLimitPerMin, default 30/min). Retry-After gives the seconds to wait."},
+				{Status: "502", Description: "The STAC API failed or answered something unexpected; no upstream detail is returned and nothing is cached."},
+				{Status: "503", Description: "The server-wide budget of uncached searches and previews per UTC day is spent (map.skraafoto.dailyCap, default 2000; Retry-After: until 00:00 UTC), or map.skraafoto.maxInFlight upstream calls (default 8) are already running (Retry-After: 5). No upstream call, not charged to the per-client budget."},
+				{Status: "504", Description: "The STAC API timed out."},
+			}},
+		"GET /api/skraafoto/preview/{collection}/{item}": {Summary: "Reduced preview of one Skråfoto photo (JPEG)", Description: "One photo of GET /api/skraafoto/search as an image/jpeg of at most 1024 px on the long edge. The server reads only the tiles of one overview of the photo's Cloud-Optimized GeoTIFF on the Skråfoto CDN, by HTTP range requests, and re-encodes them; the CDN is never sent the token. collection is skraafotos<year> (2019 or later) and item a photo id of that year; any query string is refused. A photo no search has cached is looked up in the STAC API first. Previews are cached 7 days (map.skraafoto.cacheMB, default 64), served with Cache-Control: public, max-age=604800, and X-CoreScope-Cache says hit or miss. Credit: Klimadatastyrelsen, Skråfotos, CC BY 4.0. 404 unless map.skraafoto.enabled and map.dhm has a token. (#737 M1)", Tag: "config",
+			Errors: []routeError{
+				{Status: "400", Description: "Malformed collection or photo id, or a query string (no upstream call)."},
+				{Status: "404", Description: "map.skraafoto is not enabled, or the photo does not exist."},
+				{Status: "429", Description: "Per-client budget of previews not in the cache exceeded (map.skraafoto.previewRateLimitPerMin, default 120/min). Retry-After gives the seconds to wait."},
+				{Status: "502", Description: "The STAC API or the CDN failed, or the photo is not a COG the preview can read within its bounds; nothing is cached."},
+				{Status: "503", Description: "The daily budget (map.skraafoto.dailyCap) is spent or map.skraafoto.maxInFlight upstream calls are running, as for the search."},
+				{Status: "504", Description: "The STAC API or the CDN timed out."},
+			}},
 
 		// Admin / system
 		"GET /api/health": {Summary: "Health check", Description: "Returns server health, uptime, and memory stats.", Tag: "admin"},
