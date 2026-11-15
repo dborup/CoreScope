@@ -50,6 +50,20 @@ Customize the onboarding experience:
 - **Timezone** — local or UTC
 - **Format preset** — ISO or other presets
 
+### Terrain Profile (Display tab)
+
+Shown only where the server offers the Map's Path profile tool:
+
+- **Antenna heights** per node role and for a map point, and the default
+  **elevation model**. These are defaults: a height in a link, a height you
+  type and one the operator set in server config all take precedence.
+- **Share previews**, when the server offers them. **Copy link shares a
+  preview** picks whether Copy link hands out a link that shows a preview
+  card in chats, or the plain map link. The card's theme and whether it
+  shows node names are set by the operator. The card is drawn on the server
+  with the operator's saved palette, not the colours you set here. See
+  [Share previews](../share-previews.md).
+
 ## Live preview
 
 Changes apply instantly as you edit. You see the result in real time without saving.

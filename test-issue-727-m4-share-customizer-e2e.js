@@ -353,7 +353,7 @@ const PROFILE_LINK = `#/map?profile=${A0},${B0}&model=dtm&ha=12&hb=4`;
     });
     if (SHOT_DIR) {
       await page.tap('label[for="cv2-terrain-share"]');
-      await page.locator(SWITCH).scrollIntoViewIfNeeded();
+      await page.evaluate(() => { const b = document.querySelector('.cust-body'); if (b) b.scrollTop = b.scrollHeight; });
       await page.waitForTimeout(300);
       await page.screenshot({ path: path.join(SHOT_DIR, '727-m4-share-customizer-375x560.jpg'), type: 'jpeg', quality: 70 });
     }
