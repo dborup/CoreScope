@@ -20,6 +20,10 @@
 //     Page of footprints. A truncated answer is marked, a broken footprint
 //     is skipped and counted, and an answer in another CRS or over the
 //     vertex budget is refused whole (parse.go).
+//   - Client: the OGC API client. Every request has one fixed shape;
+//     only the segment's line and radius vary. It uses the shared keyless
+//     GET of internal/dhm: no redirects, a timeout, a bounded body, and
+//     failures reduced to a dhm.FetchError category (client.go).
 //
 // The polygon reading and the point-in-polygon maths are internal/dhm's
 // (polygon.go), shared with internal/heritage.
