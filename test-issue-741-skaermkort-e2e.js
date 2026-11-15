@@ -126,7 +126,7 @@ function checkGetMap(url, layer) {
   const keys = Array.from(u.searchParams.keys());
   assert(keys.slice().sort().join() === PARAMS.slice().sort().join(), 'parameters ' + keys.join(',') + ' in ' + url);
   assert(u.searchParams.getAll('token').length === 1 && u.searchParams.get('token') === TOKEN, 'token: ' + url);
-  const want = { service: 'WMS', request: 'GetMap', styles: '', format: 'image/png', transparent: 'false', version: '1.3.0', width: '512', height: '512', crs: 'EPSG:3857' };
+  const want = { service: 'WMS', request: 'GetMap', styles: '', format: 'image/png', transparent: 'FALSE', version: '1.3.0', width: '512', height: '512', crs: 'EPSG:3857' };
   for (const k of Object.keys(want)) assert(u.searchParams.get(k) === want[k], k + '=' + u.searchParams.get(k) + ' in ' + url);
   if (layer) assert(u.searchParams.get('layers') === layer, 'layers=' + u.searchParams.get('layers') + ', want ' + layer);
   const b = u.searchParams.get('bbox').split(',').map(Number);
