@@ -87,5 +87,36 @@ test('F4 without a stored pick Auto stays on the map (the check above is not vac
   assert.ok(!map.hasLayer(map._controls[map._controls.length - 1].base[ORTHO_ID]));
 });
 
+console.log('\n── #728 F5: Matrix tint on the ortho pane ──');
+
+const CSS = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+
+function matrixRule(sel) {
+  const re = /(^|\})\s*([^{}]*?)\{([^{}]*)\}/g;
+  let m;
+  while ((m = re.exec(CSS))) {
+    const sels = m[2].split(',').map(s => s.trim());
+    if (sels.indexOf(sel) >= 0) return { sels, body: m[3] };
+  }
+  return null;
+}
+const filterOf = (r) => { const m = /filter\s*:\s*([^;]+);/.exec(r.body); return m && m[1].trim(); };
+
+test('F5 .matrix-theme .mc-ortho-pane has the same filter as the Matrix tile pane', () => {
+  const tile = matrixRule('.matrix-theme .leaflet-tile-pane');
+  const ortho = matrixRule('.matrix-theme .mc-ortho-pane');
+  assert.ok(tile && filterOf(tile), 'no Matrix tile-pane filter');
+  assert.ok(ortho, 'no .matrix-theme .mc-ortho-pane rule');
+  assert.strictEqual(filterOf(ortho), filterOf(tile));
+  assert.ok(/hue-rotate/.test(filterOf(ortho)), 'not a green tint: ' + filterOf(ortho));
+});
+
+test('F5 the class the rule matches is the one the ortho pane gets', () => {
+  const ctx = makeSandbox({ dhm: dhmBlock(20) });
+  const map = makeMap();
+  ctx.window.MC_createLayerControl(map, { _auto: true }, 'topleft');
+  assert.ok(map.getPane('mcOrthoPane').classes.includes('mc-ortho-pane'));
+});
+
 console.log(`\n#728 follow-ups: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
