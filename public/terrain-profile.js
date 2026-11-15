@@ -780,6 +780,10 @@
       terrainZ: terrain.map(function (v) { return v === null ? null : r2(v); }),
       terrainY: terrain.map(function (v) { return v === null ? null : yOf(v); }),
       surfaceY: surface ? surface.map(function (v) { return v === null ? null : yOf(v); }) : null,
+      // #781: metres for the hover readout's clearance, bulge included
+      // like terrainZ.
+      surfaceZ: surface ? surface.map(function (v) { return v === null ? null : r2(v); }) : null,
+      losZ: los.map(r2),
       losY: los.map(yOf),
       f1: f1.map(r2),
       f1TopY: los.map(function (l, j) { return yOf(l + f1[j]); }),
@@ -1100,6 +1104,8 @@
      * "default" again rather than "link" (#681 M6). */
     var themeH = { a: null, b: null };
     var ui = {};
+    // #781: the hover cursor on the chart now drawn, else null.
+    var cursor = null;
 
     /* effectiveState is what we ask the server for: `state` with the
      * customizer's defaults filled into the heights it left empty. */
@@ -1493,8 +1499,30 @@
       syncMoveButtons();
     }
 
+    /* #781: the hover cursor lives in public/terrain-profile-cursor.js and
+     * only ever adds to the chart drawn here; the host (the Map page) gets
+     * the point along the path through opts.onCursor. Detached before the
+     * chart is replaced or the panel shuts, so no listener outlives it. */
+    function detachCursor() {
+      if (cursor) cursor.detach();
+      cursor = null;
+    }
+
+    function attachCursor(data) {
+      detachCursor();
+      var C = global.TerrainProfileCursor;
+      if (!C || !opts.onCursor || !ui.chart || !ui.chart.querySelector) return;
+      cursor = C.attach({
+        plot: ui.chart.querySelector('.tp-plot'),
+        geometry: chartGeometry(data),
+        data: data,
+        onMove: opts.onCursor
+      });
+    }
+
     function setStatus(text, cls) {
       if (!ui.chart) return;
+      detachCursor();
       ui.chart.textContent = '';
       var p = el('p', 'tp-status ' + (cls || ''), text);
       p.setAttribute('data-testid', 'tp-status');
@@ -1520,7 +1548,9 @@
       } else {
         // Sink: one SVG string from buildChart, where every node-controlled
         // name went through esc() at interpolation time.
+        detachCursor();
         ui.chart.innerHTML = buildChart(data, names);
+        attachCursor(data);
       }
       ui.detail.textContent = chip.detail;
       var phys = data.physics || {};
@@ -1593,6 +1623,7 @@
       if (!open) return;
       open = false;
       seq++;
+      detachCursor();
       if (debounceTimer) { global.clearTimeout(debounceTimer); debounceTimer = null; }
       state.a = null;
       state.b = null;
