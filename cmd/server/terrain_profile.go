@@ -150,27 +150,8 @@ const shareUpstreamPerMinMax = 60
 // resolveTerrainSettings applies the defaults and bounds. An out-of-range
 // value logs a warning and takes the default.
 func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface{})) terrainSettings {
-	num := func(key string, v *float64, def, lo, hi float64, loOpen bool) float64 {
-		if v == nil {
-			return def
-		}
-		ok := *v <= hi && (*v > lo || !loOpen && *v == lo) // NaN fails both
-		if !ok {
-			logf("[dhm] config map.dhm.profile.%s is out of range; using %v", key, def)
-			return def
-		}
-		return *v
-	}
-	integer := func(key string, v *int, def, lo, hi int) int {
-		if v == nil {
-			return def
-		}
-		if *v < lo || *v > hi {
-			logf("[dhm] config map.dhm.profile.%s is out of range; using %d", key, def)
-			return def
-		}
-		return *v
-	}
+	k := configKnobs{tag: "[dhm]", block: "map.dhm.profile", logf: logf}
+	num, integer := k.num, k.integer
 	return terrainSettings{
 		// The planner's rasters are at most dhm.MaxRasterSpanM (80 km).
 		maxPathM: 1000 * num("maxPathKm", pc.MaxPathKm, 80, 0, dhm.MaxRasterSpanM/1000, true),

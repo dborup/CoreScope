@@ -423,6 +423,11 @@
     if (typeof window.MC_createLayerControl === 'function') {
       window.MC_createLayerControl(map, autoLayerGroup, 'topleft');
     }
+    // #723 M2: click-for-info on the monuments overlay. The profile
+    // tool's picking and A/B dragging win over it.
+    if (window.HeritageInfo) {
+      window.HeritageInfo.attach(map, { isBusy: function () { return !!profileArm || !!profileDrag; } });
+    }
 
     mapThemeObs = new MutationObserver(function () {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
@@ -459,10 +464,11 @@
       });
     }
 
-    // Save position on move
+    // Save position on move. A profile link's fit is the link's view, not
+    // the viewer's, so it is not saved (#765).
     map.on('moveend', () => {
       const c = map.getCenter();
-      localStorage.setItem('map-view', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
+      if (!profileFitting) localStorage.setItem('map-view', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
       userHasMoved = true;
     });
 
@@ -2724,6 +2730,9 @@
   // A linked path is fitted no closer than this: a 20 m path at zoom 19
   // would show nothing around it (#746).
   var PROFILE_FIT_MAX_ZOOM = 16;
+  // True only while profileFitPath moves the map, so the moveend handler
+  // leaves the viewer's stored view alone (#765).
+  var profileFitting = false;
   // #711: the one node a half link named that the Map page's own list does
   // not hold (an area filter or the last-heard window left it out). One
   // entry, replaced by the next half link, so it cannot grow.
@@ -2805,6 +2814,8 @@
       // #746: the server's rule for a free point's height, so a drop onto
       // one is measured with the customizer's point default in one request.
       pointAntenna: window.MC_DHM_CFG.pointAntenna || null,
+      // #765: the chart footer's credit and its links, from the server.
+      dhm: window.MC_DHM_CFG,
       onMoveStart: function (side) { profileArmFor(side, true); },
       onMoveCancel: profileDisarm,
       onEndpointsChange: profileDrawLine,
@@ -3154,7 +3165,12 @@
    * link sees where the path is, not their own last view. Once, when the
    * link is opened: a move or a pan afterwards is the viewer's own view.
    * A node end the Map page's list does not hold has no position here, and
-   * the stored view stays. */
+   * the stored view stays.
+   *
+   * The fit itself is never saved as the viewer's view (#765): a later
+   * plain #/map or a reload opens their own view again. Without animation
+   * Leaflet fires moveend inside fitBounds, so the flag covers exactly
+   * this one move. */
   function profileFitPath() {
     var st = profileTool && profileTool.getState();
     var a = st && profileRefLatLng(st.a), b = st && profileRefLatLng(st.b);
@@ -3162,7 +3178,12 @@
     if (!map || !a || !b || !panel) return;
     var cap = parseFloat(getComputedStyle(panel).getPropertyValue('--tp-panel-max-h'));
     var pad = window.TerrainProfile.fitPadding(map.getSize().y, panel.offsetHeight, cap);
-    map.fitBounds(L.latLngBounds([a, b]), Object.assign(pad, { maxZoom: PROFILE_FIT_MAX_ZOOM, animate: false }));
+    profileFitting = true;
+    try {
+      map.fitBounds(L.latLngBounds([a, b]), Object.assign(pad, { maxZoom: PROFILE_FIT_MAX_ZOOM, animate: false }));
+    } finally {
+      profileFitting = false;
+    }
   }
 
   function destroyProfileTool() {

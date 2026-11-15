@@ -3,7 +3,6 @@ package mastedb
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -69,12 +68,9 @@ type Client struct {
 func NewClient(opts ClientOptions) *Client {
 	return &Client{
 		opts: opts,
-		http: &http.Client{
-			Timeout: opts.Timeout,
-			// Never follow a redirect: the request shape is only checked
-			// for the documented endpoint.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		// Never follows a redirect: the request shape is only checked for
+		// the documented endpoint.
+		http: dhm.NewNoRedirectClient(opts.Timeout),
 	}
 }
 
@@ -105,43 +101,9 @@ func (c *Client) FetchCell(ctx context.Context, cell Cell) (Page, error) {
 	return page, nil
 }
 
-// fetch runs one upstream GET and returns the body of a 200 response with
-// an accepted media type, at most MaxBodyBytes long.
+// fetch runs one upstream GET through the shared keyless fetch: the body
+// of a 200 response with an accepted media type, at most MaxBodyBytes long.
 func (c *Client) fetch(ctx context.Context, target string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
-	if err != nil {
-		return nil, dhm.FetchError{Reason: "request"}
-	}
-	req.Header.Set("Accept", "application/gml+xml, application/xml;q=0.9, text/xml;q=0.8")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, transportFailure(ctx, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, int64(c.opts.MaxBodyBytes)))
-		return nil, dhm.FetchError{Reason: "status " + strconv.Itoa(resp.StatusCode)}
-	}
-	if !dhm.HasContentType(resp.Header.Get("Content-Type"), acceptedContentTypes) {
-		return nil, dhm.FetchError{Reason: "unexpected content type"}
-	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(c.opts.MaxBodyBytes)+1))
-	if err != nil {
-		return nil, transportFailure(ctx, err)
-	}
-	if len(data) > c.opts.MaxBodyBytes {
-		return nil, dhm.FetchError{Reason: "oversize response"}
-	}
-	return data, nil
-}
-
-// transportFailure maps a request or body read error to a category.
-func transportFailure(ctx context.Context, err error) error {
-	switch {
-	case errors.Is(ctx.Err(), context.Canceled):
-		return dhm.FetchError{Reason: "canceled"}
-	case errors.Is(err, context.DeadlineExceeded) || dhm.IsTimeout(err):
-		return dhm.FetchError{Reason: "timeout"}
-	}
-	return dhm.FetchError{Reason: "transport"}
+	return dhm.GetBody(ctx, c.http, target, "application/gml+xml, application/xml;q=0.9, text/xml;q=0.8",
+		acceptedContentTypes, c.opts.MaxBodyBytes)
 }

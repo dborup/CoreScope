@@ -202,7 +202,7 @@ func TestDHMTileAdmission744_CancellationRemovesQueuedWork(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := p.cache.Get(dhmCacheKey{Layer: p.layer, Tile: k}, p.now()); ok {
+		if _, ok := p.cache.Get(dhmCacheKey{Product: hillshadeProduct(p.layer), Tile: k}, p.now()); ok {
 			t.Fatalf("tile %d completed and was cached after its client left", i)
 		}
 	}
