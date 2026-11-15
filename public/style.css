@@ -6713,8 +6713,8 @@ body.embed #app.app-fixed {
 .tp-sf-btn, .sf-node-action { -webkit-tap-highlight-color: transparent; }
 
 /* The viewer: a modal on the modal tokens, one step above a SlideOver
-   panel (#180) so the side pane on a tablet can open it, and so above the
-   bottom nav (1200) and the profile panel. On a phone the dialog stops at
+   panel (#180) so a deep link opened on a tablet stacks over it too, and
+   so its scrim covers the bottom nav (1200) and the profile panel. On a phone the dialog stops at
    the bottom nav's reserve, so the nav never covers any of it; the dialog
    scrolls inside itself with the head (and Close) pinned. */
 .sf-overlay {
