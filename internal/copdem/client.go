@@ -49,7 +49,10 @@ type Options struct {
 	// four slots are never used.
 	Concurrency int
 	// MaxPending bounds distinct upstream calls, queued or running
-	// (dhm.Admission); beyond it a call fails at once.
+	// (dhm.Admission); beyond it a call fails at once. It is a backstop:
+	// the profile's own admission (maxInFlight) bounds the fills, so the
+	// server sets it to maxInFlight × dhm.MaxCallsPerModel and every
+	// admitted profile can run its whole fill.
 	MaxPending int
 	// BlockCacheBytes bounds the compressed blocks kept in memory.
 	BlockCacheBytes int
@@ -67,7 +70,7 @@ func DefaultOptions() Options {
 	return Options{
 		Timeout:         10 * time.Second,
 		Concurrency:     2,
-		MaxPending:      dhm.MaxCallsPerModel,
+		MaxPending:      4 * dhm.MaxCallsPerModel, // the profile's default maxInFlight
 		BlockCacheBytes: 32 << 20,
 		CacheTTL:        24 * time.Hour,
 		Now:             time.Now,

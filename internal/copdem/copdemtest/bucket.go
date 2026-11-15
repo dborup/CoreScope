@@ -35,6 +35,9 @@ type Bucket struct {
 	// Hook, when set, answers a request instead of the bucket when it
 	// returns true: errors, redirects, a server that ignores Range.
 	Hook func(w http.ResponseWriter, r *http.Request) bool
+	// Generate, when set, makes the object at a path that was not Put
+	// (nil: 404), once; tests serve a whole region without building it.
+	Generate func(path string) []byte
 	// Requests counts requests that reached the bucket.
 	Requests atomic.Int64
 	// Bytes counts body bytes the bucket served.
@@ -92,6 +95,23 @@ type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// object is the file at path, generated on first use.
+func (b *Bucket) object(path string) ([]byte, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if data, ok := b.files[path]; ok {
+		return data, true
+	}
+	if b.Generate == nil {
+		return nil, false
+	}
+	data := b.Generate(path)
+	if data != nil {
+		b.files[path] = data
+	}
+	return data, data != nil
+}
+
 var rangeRe = regexp.MustCompile(`^bytes=([0-9]+)-([0-9]+)$`)
 
 func (b *Bucket) serve(w http.ResponseWriter, r *http.Request) {
@@ -99,9 +119,7 @@ func (b *Bucket) serve(w http.ResponseWriter, r *http.Request) {
 	if b.Hook != nil && b.Hook(w, r) {
 		return
 	}
-	b.mu.Lock()
-	data, ok := b.files[r.URL.Path]
-	b.mu.Unlock()
+	data, ok := b.object(r.URL.Path)
 	if !ok {
 		http.Error(w, "NoSuchKey", http.StatusNotFound)
 		return

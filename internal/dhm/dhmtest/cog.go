@@ -108,10 +108,11 @@ func COG(o COGOptions) []byte {
 		levels = append(levels, &cogLevel{w: w1, h: h1,
 			lon0: o.Lon0 - o.PixelLon/2 + dLon/2, lat0: o.Lat0 + o.PixelLat/2 - dLat/2, dLon: dLon, dLat: dLat})
 	}
+	enc := &blockEncoder{}
 	for li, l := range levels {
 		for by := 0; by < blocks(l.h, t); by++ {
 			for bx := 0; bx < blocks(l.w, t); bx++ {
-				b := encodeBlock(o, l, bx, by, t)
+				b := enc.encode(o, l, bx, by, t)
 				if o.Block != nil {
 					b = o.Block(li, len(l.blocks), b)
 				}
@@ -239,9 +240,15 @@ func levelEntries(o COGOptions, l *cogLevel, li, t int) []COGEntry {
 	return es
 }
 
-// encodeBlock is block (bx, by) of level l: t × t values, padded past the
+// blockEncoder reuses one compressor across the blocks of a file.
+type blockEncoder struct {
+	buf bytes.Buffer
+	zw  *zlib.Writer
+}
+
+// encode is block (bx, by) of level l: t × t values, padded past the
 // raster edge with zeros, as GDAL pads, then predicted and compressed.
-func encodeBlock(o COGOptions, l *cogLevel, bx, by, t int) []byte {
+func (enc *blockEncoder) encode(o COGOptions, l *cogLevel, bx, by, t int) []byte {
 	raw := make([]byte, 4*t*t)
 	row := make([]byte, 4*t)
 	for y := 0; y < t; y++ {
@@ -261,11 +268,15 @@ func encodeBlock(o COGOptions, l *cogLevel, bx, by, t int) []byte {
 	if o.Uncompressed {
 		return raw
 	}
-	var b bytes.Buffer
-	zw := zlib.NewWriter(&b)
-	zw.Write(raw)
-	zw.Close()
-	return b.Bytes()
+	enc.buf.Reset()
+	if enc.zw == nil {
+		enc.zw = zlib.NewWriter(&enc.buf)
+	} else {
+		enc.zw.Reset(&enc.buf)
+	}
+	enc.zw.Write(raw)
+	enc.zw.Close()
+	return append([]byte(nil), enc.buf.Bytes()...)
 }
 
 // floatPredict applies libtiff's floating-point predictor (fpDiff) to one

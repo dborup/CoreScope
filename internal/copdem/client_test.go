@@ -581,7 +581,7 @@ func TestNewClientDefaults(t *testing.T) {
 		t.Fatalf("base URL %q", baseURL)
 	}
 	o := DefaultOptions()
-	if o.Concurrency != 2 || o.MaxPending != dhm.MaxCallsPerModel || o.BlockCacheBytes != 32<<20 || o.Timeout != 10*time.Second {
+	if o.Concurrency != 2 || o.MaxPending != 4*dhm.MaxCallsPerModel || o.BlockCacheBytes != 32<<20 || o.Timeout != 10*time.Second {
 		t.Fatalf("defaults %+v", o)
 	}
 }
