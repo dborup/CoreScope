@@ -96,51 +96,16 @@ func TestTitleShrinkSteps(t *testing.T) {
 	a, b := "Søby Bakker Nordre", "Ørsted Mast Vestre"
 	full := a + " → " + b
 	for _, c := range []struct{ fitsAt, want int }{{40, 40}, {38, 36}, {36, 36}, {34, 32}, {30, 28}, {28, 28}} {
-		maxW := r.fs.measure(full, c.fitsAt, true)
+		maxW := r.fs.Measure(full, c.fitsAt, true)
 		size, got := r.fitTitle(a, b, maxW)
 		if size != c.want || got != full {
 			t.Errorf("room for %dpx: got %dpx %q, want %dpx and the whole title", c.fitsAt, size, got, c.want)
 		}
 	}
 	// Below 28 px the size stays and the names are shortened instead.
-	size, got := r.fitTitle(a, b, r.fs.measure(full, 24, true))
+	size, got := r.fitTitle(a, b, r.fs.Measure(full, 24, true))
 	if size != minTitleSize || !strings.Contains(got, "…") {
 		t.Errorf("no room at 28px: %dpx %q", size, got)
-	}
-}
-
-// #755 review Low: a name in NFD (as macOS file names and some keyboards
-// produce it) keeps its diacritics: it is composed before the glyph check,
-// which would otherwise drop the combining marks.
-func TestCardNameNFC(t *testing.T) {
-	fonts := mustFonts(t)
-	for in, want := range map[string]string{
-		"Åbenrå":        "Åbenrå",
-		"Kobenhavn Vést": "Kobenhavn Vést",
-		"Mälmö Hub":     "Mälmö Hub",
-		"Åbenrå":          "Åbenrå", // already NFC: unchanged
-	} {
-		if got := fonts.cardName(in); got != want {
-			t.Errorf("cardName(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-// #755 review M8: the fallback threshold is "more than one rune in five
-// unmappable", exactly.
-func TestCardNameFallbackThreshold(t *testing.T) {
-	fonts := mustFonts(t)
-	for in, want := range map[string]string{
-		"abc🛰":       "",         // 1 of 4: fallback
-		"abcd🛰":      "abcd",     // 1 of 5: kept, the stray glyph dropped
-		"abcdefgh🛰🛰": "abcdefgh", // 2 of 10: kept
-		"abcdefg🛰🛰":  "",         // 2 of 9: fallback
-		"ab cd 🛰":    "ab cd",    // spaces do not count: 1 of 5
-		"a b c 🛰":    "",         // 1 of 4
-	} {
-		if got := fonts.cardName(in); got != want {
-			t.Errorf("cardName(%q) = %q, want %q", in, got, want)
-		}
 	}
 }
 

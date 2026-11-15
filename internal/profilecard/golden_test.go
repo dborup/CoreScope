@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/meshcore-analyzer/cardkit"
 )
 
 // go test -run TestGolden -update rewrites testdata/golden/. Each case is
@@ -139,7 +141,7 @@ func runText(runs []textRun, role string) string {
 
 func encodePNG(t testing.TB, img image.Image) []byte {
 	t.Helper()
-	b, err := encode(img)
+	b, err := cardkit.EncodePNG(img)
 	if err != nil {
 		t.Fatal(err)
 	}

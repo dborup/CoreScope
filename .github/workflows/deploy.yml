@@ -238,6 +238,10 @@ jobs:
           # internal/copdem (#738): Copernicus GLO-30 foreign fill for the
           # terrain profile (tile list, range client, block sampler).
           (cd internal/copdem && go test -race ./...)
+          # internal/cardkit (#811 M1): the drawing primitives every share card
+          # uses (fonts, canvas, colours, PNG). Its own module, so nothing
+          # else runs its tests.
+          (cd internal/cardkit && go test -race ./...)
           # internal/profilecard (#727 M2): share-card renderer. cmd/server
           # imports it since #727 M3, but its own tests run only here.
           (cd internal/profilecard && go test -race ./...)

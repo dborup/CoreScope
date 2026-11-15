@@ -9,15 +9,14 @@
 package profilecard
 
 import (
-	"bytes"
 	"image"
 	"image/color"
 	"image/draw"
-	"image/png"
 	"math"
 	"strconv"
 	"strings"
 
+	"github.com/meshcore-analyzer/cardkit"
 	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dhm"
 )
@@ -106,35 +105,24 @@ func Render(resp TerrainProfileResponse, names [2]string, pal Palette, opt Optio
 	if err != nil {
 		return nil, err
 	}
-	return encode(img)
-}
-
-// encode writes img as a PNG at BestSpeed: about a third of the default
-// level's encode time for a few KiB more (plan §2.5).
-func encode(img image.Image) ([]byte, error) {
-	var b bytes.Buffer
-	enc := png.Encoder{CompressionLevel: png.BestSpeed}
-	if err := enc.Encode(&b, img); err != nil {
-		return nil, err
-	}
-	return b.Bytes(), nil
+	return cardkit.EncodePNG(img)
 }
 
 type renderer struct {
-	cv   canvas
-	fs   *fontSet
+	cv   cardkit.Canvas
+	fs   *cardkit.Fonts
 	pal  Palette
 	runs []textRun
 }
 
 func render(resp TerrainProfileResponse, names [2]string, pal Palette, opt Options) (*image.RGBA, []textRun, error) {
-	fs, err := loadFonts()
+	fs, err := cardkit.LoadFonts()
 	if err != nil {
 		return nil, nil, err
 	}
 	img := image.NewRGBA(image.Rect(0, 0, Width, Height))
-	draw.Draw(img, img.Rect, image.NewUniform(opaque(pal.Background)), image.Point{}, draw.Src)
-	r := &renderer{cv: canvas{img}, fs: fs, pal: pal}
+	draw.Draw(img, img.Rect, image.NewUniform(cardkit.Opaque(pal.Background)), image.Point{}, draw.Src)
+	r := &renderer{cv: cardkit.Canvas{Img: img}, fs: fs, pal: pal}
 
 	if opt.Pending {
 		resp = pendingResponse(resp)
@@ -156,7 +144,7 @@ func render(resp TerrainProfileResponse, names [2]string, pal Palette, opt Optio
 // public/terrain-profile.js chartTitle, with the card's own endpoint labels
 // and chips, so it says what the picture shows.
 func AltText(resp TerrainProfileResponse, names [2]string, opt Options) string {
-	fs, err := loadFonts()
+	fs, err := cardkit.LoadFonts()
 	if err != nil {
 		return ""
 	}
@@ -164,8 +152,8 @@ func AltText(resp TerrainProfileResponse, names [2]string, opt Options) string {
 		resp = pendingResponse(resp)
 	}
 	main := verdictChip(resp)
-	a := fs.endpointLabel(resp.A, names[0], 0, opt.HideNames)
-	b := fs.endpointLabel(resp.B, names[1], 1, opt.HideNames)
+	a := endpointLabel(fs, resp.A, names[0], 0, opt.HideNames)
+	b := endpointLabel(fs, resp.B, names[1], 1, opt.HideNames)
 	txt := "Terrain profile from " + a + " to " + b + ", " + fmtMetres(resp.DistanceM) + ". " + main.label + ". " + main.detail
 	wc, okC := value(resp.Verdict.WorstClearanceM)
 	at, okA := value(resp.Verdict.WorstAtM)
@@ -194,7 +182,7 @@ func (r *renderer) text(role, s string, x, y, size int, bold bool, c color.NRGBA
 	if s == "" {
 		return 0
 	}
-	w := r.fs.draw(&r.cv, s, x, y, size, bold, c)
+	w := r.fs.Draw(&r.cv, s, x, y, size, bold, c)
 	r.runs = append(r.runs, textRun{Role: role, Text: s, Size: size, Bold: bold, X: x, Y: y, W: w})
 	return w
 }
@@ -342,31 +330,31 @@ func (r *renderer) toneColor(tone string) color.NRGBA {
 func (r *renderer) header(resp TerrainProfileResponse, names [2]string, opt Options, main, surf chip, showSurf bool) {
 	right := Width - safeMargin
 	// Verdict badge, top right.
-	bw := r.fs.measure(main.label, badgeSize, true) + 36
+	bw := r.fs.Measure(main.label, badgeSize, true) + 36
 	badge := image.Rect(right-bw, 28, right, 72)
-	pillColor := opaque(r.toneColor(main.tone))
-	r.cv.pill(badge, pillColor)
-	r.text("badge", main.label, badge.Min.X+18, 58, badgeSize, true, opaque(readableOn(pillColor, r.pal.Text, r.pal.Background)))
+	pillColor := cardkit.Opaque(r.toneColor(main.tone))
+	r.cv.Pill(badge, pillColor)
+	r.text("badge", main.label, badge.Min.X+18, 58, badgeSize, true, cardkit.Opaque(cardkit.ReadableOn(pillColor, r.pal.Text, r.pal.Background)))
 	// The title row has only the badge to its right; the surface chip sits
 	// on the subtitle's row and bounds the subtitle alone (#755 review).
 	titleW := badge.Min.X - safeMargin - textX
 	textRight := badge.Min.X
 	if showSurf {
-		cw := r.fs.measure(surf.label, chipSize, false) + 24
+		cw := r.fs.Measure(surf.label, chipSize, false) + 24
 		c := image.Rect(right-cw, 80, right, 108)
-		cc := opaque(r.toneColor(surf.tone))
-		r.cv.pill(c, cc)
-		r.text("surface-badge", surf.label, c.Min.X+12, 100, chipSize, false, opaque(readableOn(cc, r.pal.Text, r.pal.Background)))
+		cc := cardkit.Opaque(r.toneColor(surf.tone))
+		r.cv.Pill(c, cc)
+		r.text("surface-badge", surf.label, c.Min.X+12, 100, chipSize, false, cardkit.Opaque(cardkit.ReadableOn(cc, r.pal.Text, r.pal.Background)))
 		textRight = min(textRight, c.Min.X)
 	}
 	maxW := textRight - safeMargin - textX
 
 	// Accent bar and title: "A → B", shrinking before it is shortened.
-	r.cv.fillRect(image.Rect(safeMargin, 30, safeMargin+6, 92), opaque(r.pal.LosLine))
-	a := r.fs.endpointLabel(resp.A, names[0], 0, opt.HideNames)
-	b := r.fs.endpointLabel(resp.B, names[1], 1, opt.HideNames)
+	r.cv.FillRect(image.Rect(safeMargin, 30, safeMargin+6, 92), cardkit.Opaque(r.pal.LosLine))
+	a := endpointLabel(r.fs, resp.A, names[0], 0, opt.HideNames)
+	b := endpointLabel(r.fs, resp.B, names[1], 1, opt.HideNames)
 	size, title := r.fitTitle(a, b, titleW)
-	r.text("title", title, textX, 70, size, true, opaque(r.pal.Text))
+	r.text("title", title, textX, 70, size, true, cardkit.Opaque(r.pal.Text))
 
 	parts := []string{"Path profile"}
 	if finite(resp.DistanceM) && resp.DistanceM > 0 {
@@ -382,9 +370,9 @@ func (r *renderer) header(resp TerrainProfileResponse, names [2]string, opt Opti
 		}
 		parts = append(parts, "k = "+ks)
 	}
-	sub := r.fs.fit(strings.Join(parts, " · "), subtitleSize, false, maxW)
-	r.text("subtitle", sub, textX, 104, subtitleSize, false, opaque(r.pal.TextMuted))
-	r.cv.hline(safeMargin, right, headerRule, 1, 0, opaque(r.pal.Border))
+	sub := r.fs.Fit(strings.Join(parts, " · "), subtitleSize, false, maxW)
+	r.text("subtitle", sub, textX, 104, subtitleSize, false, cardkit.Opaque(r.pal.TextMuted))
+	r.cv.HLine(safeMargin, right, headerRule, 1, 0, cardkit.Opaque(r.pal.Border))
 }
 
 // fitTitle shrinks the title from titleSize to minTitleSize, then shortens
@@ -392,20 +380,20 @@ func (r *renderer) header(resp TerrainProfileResponse, names [2]string, opt Opti
 func (r *renderer) fitTitle(a, b string, maxW int) (int, string) {
 	const arrow = " → "
 	for size := titleSize; size >= minTitleSize; size -= 4 {
-		if t := a + arrow + b; r.fs.measure(t, size, true) <= maxW {
+		if t := a + arrow + b; r.fs.Measure(t, size, true) <= maxW {
 			return size, t
 		}
 	}
 	size := minTitleSize
-	room := maxW - r.fs.measure(arrow, size, true)
-	wa, wb := r.fs.measure(a, size, true), r.fs.measure(b, size, true)
+	room := maxW - r.fs.Measure(arrow, size, true)
+	wa, wb := r.fs.Measure(a, size, true), r.fs.Measure(b, size, true)
 	switch {
 	case wa <= room/2:
-		b = r.fs.fit(b, size, true, room-wa)
+		b = r.fs.Fit(b, size, true, room-wa)
 	case wb <= room/2:
-		a = r.fs.fit(a, size, true, room-wb)
+		a = r.fs.Fit(a, size, true, room-wb)
 	default:
-		a, b = r.fs.fit(a, size, true, room/2), r.fs.fit(b, size, true, room/2)
+		a, b = r.fs.Fit(a, size, true, room/2), r.fs.Fit(b, size, true, room/2)
 	}
 	return size, a + arrow + b
 }
@@ -586,14 +574,14 @@ func nanSlice(n int) []float64 {
 
 // y maps an elevation to a fixed-point row.
 func (g geom) y(z float64) int32 {
-	return fx(plotY + float64(plotH*(g.zMax-z))/g.span)
+	return cardkit.Fx(plotY + float64(plotH*(g.zMax-z))/g.span)
 }
 
 // line draws a function graph given per edge (len plotW+1) or per column
 // (len plotW, drawn column centre to column centre), half px either side,
 // dashed on/off columns (off = 0: solid).
 func (r *renderer) line(g geom, vals []float64, half float64, on, off int, c color.NRGBA) {
-	h := fx(half)
+	h := cardkit.Fx(half)
 	n := len(vals) - 1
 	for i := 0; i < n && i < plotW; i++ {
 		if off > 0 && i%(on+off) >= on {
@@ -609,21 +597,21 @@ func (r *renderer) line(g geom, vals []float64, half float64, on, off int, c col
 			b = a
 		}
 		ya, yb := g.y(a), g.y(b)
-		r.cv.vspan(plotX+i, min(ya, yb)-h, max(ya, yb)+h, plotY, plotY+plotH, c)
+		r.cv.VSpan(plotX+i, min(ya, yb)-h, max(ya, yb)+h, plotY, plotY+plotH, c)
 	}
 }
 
 func (r *renderer) plot(resp TerrainProfileResponse, g geom) {
-	base := int32(plotY+plotH) * fracOne
-	border, muted := opaque(r.pal.Border), opaque(r.pal.TextMuted)
+	base := int32(plotY+plotH) * cardkit.FracOne
+	border, muted := cardkit.Opaque(r.pal.Border), cardkit.Opaque(r.pal.TextMuted)
 
 	// Grid and elevation ticks.
 	for t := 0; t <= 4; t++ {
 		yy := plotY + plotH*t/4
-		r.cv.hline(plotX, plotX+plotW, yy, 2, 3, border)
+		r.cv.HLine(plotX, plotX+plotW, yy, 2, 3, border)
 		z := g.zMax - float64(float64((g.zMax-g.zMin)*float64(t))/4)
 		lab := fmtNum(math.Floor(z+0.5)) + " m"
-		if w := r.fs.measure(lab, axisSize, false); w <= plotX-8-safeMargin {
+		if w := r.fs.Measure(lab, axisSize, false); w <= plotX-8-safeMargin {
 			r.text("axis-y", lab, plotX-8-w, yy+6, axisSize, false, muted)
 		}
 	}
@@ -631,13 +619,13 @@ func (r *renderer) plot(resp TerrainProfileResponse, g geom) {
 	// 1. DTM fill; 2. the DSM clutter band and its line.
 	for c := 0; c < plotW; c++ {
 		if !math.IsNaN(g.terr[c]) {
-			r.cv.vspan(plotX+c, g.y(g.terr[c]), base, plotY, plotY+plotH, r.pal.TerrainFill)
+			r.cv.VSpan(plotX+c, g.y(g.terr[c]), base, plotY, plotY+plotH, r.pal.TerrainFill)
 		}
 	}
 	if g.hasSurface {
 		for c := 0; c < plotW; c++ {
 			if !math.IsNaN(g.surf[c]) && !math.IsNaN(g.terr[c]) {
-				r.cv.vspan(plotX+c, g.y(g.surf[c]), g.y(g.terr[c]), plotY, plotY+plotH, r.pal.TerrainClutter)
+				r.cv.VSpan(plotX+c, g.y(g.surf[c]), g.y(g.terr[c]), plotY, plotY+plotH, r.pal.TerrainClutter)
 			}
 		}
 		r.line(g, g.surf, 0.6, 1, 0, r.pal.TerrainClutter)
@@ -671,14 +659,14 @@ func (r *renderer) plot(resp TerrainProfileResponse, g geom) {
 			mid := float64((g.los[c] + g.los[c+1]) / 2)
 			f := float64((g.f1[c] + g.f1[c+1]) / 2)
 			if !math.IsNaN(g.terr[c]) && f > 0 && mid-g.terr[c] < float64(g.criterion*f) {
-				r.cv.fillRect(image.Rect(plotX+c, plotY+plotH-8, plotX+c+1, plotY+plotH), opaque(r.pal.ProfileBlocked))
+				r.cv.FillRect(image.Rect(plotX+c, plotY+plotH-8, plotX+c+1, plotY+plotH), cardkit.Opaque(r.pal.ProfileBlocked))
 				hit = true
 			}
 		}
 	}
 	if at, ok := value(resp.Verdict.WorstAtM); ok && hit {
 		x := plotX + int(math.Min(1, math.Max(0, at/g.D))*float64(plotW-1))
-		r.cv.vline(x, 1, plotY, plotY+plotH, 4, 4, opaque(r.pal.ProfileBlocked))
+		r.cv.VLine(x, 1, plotY, plotY+plotH, 4, 4, cardkit.Opaque(r.pal.ProfileBlocked))
 	}
 
 	// 7. Out-of-coverage stretches: left blank, outlined, labelled once.
@@ -692,12 +680,12 @@ func (r *renderer) plot(resp TerrainProfileResponse, g geom) {
 			c++
 		}
 		x0, x1 := plotX+start, plotX+c-1
-		r.cv.hline(x0, x1+1, plotY, 3, 4, border)
-		r.cv.hline(x0, x1+1, plotY+plotH-1, 3, 4, border)
-		r.cv.vline(x0, 1, plotY, plotY+plotH, 3, 4, border)
-		r.cv.vline(x1, 1, plotY, plotY+plotH, 3, 4, border)
+		r.cv.HLine(x0, x1+1, plotY, 3, 4, border)
+		r.cv.HLine(x0, x1+1, plotY+plotH-1, 3, 4, border)
+		r.cv.VLine(x0, 1, plotY, plotY+plotH, 3, 4, border)
+		r.cv.VLine(x1, 1, plotY, plotY+plotH, 3, 4, border)
 		const lab = "no data"
-		if w := r.fs.measure(lab, axisSize, false); x1-x0 > w+16 {
+		if w := r.fs.Measure(lab, axisSize, false); x1-x0 > w+16 {
 			r.text("gap", lab, (x0+x1-w)/2, plotY+plotH-14, axisSize, false, muted)
 		}
 	}
@@ -712,17 +700,17 @@ func (r *renderer) plot(resp TerrainProfileResponse, g geom) {
 		top := g.y(g.los[p.e])
 		foot := g.y(p.ground)
 		for dx := -1; dx <= 1; dx++ {
-			r.cv.vspan(p.x+dx, top, foot, plotY, plotY+plotH, opaque(r.pal.LosLine))
+			r.cv.VSpan(p.x+dx, top, foot, plotY, plotY+plotH, cardkit.Opaque(r.pal.LosLine))
 		}
-		yTop := int(min(max(top>>fracBits, plotY), plotY+plotH))
-		r.cv.disc(p.x, yTop, 5, opaque(r.pal.LosLine))
-		w := r.fs.measure(p.tag, pinSize, true)
+		yTop := int(min(max(top>>cardkit.FracBits, plotY), plotY+plotH))
+		r.cv.Disc(p.x, yTop, 5, cardkit.Opaque(r.pal.LosLine))
+		w := r.fs.Measure(p.tag, pinSize, true)
 		lx := p.x + 10
 		if p.tag == "B" {
 			lx = p.x - 10 - w
 		}
 		ly := min(max(yTop-8, plotY+pinSize), plotY+plotH-4)
-		r.text("pin", p.tag, lx, ly, pinSize, true, opaque(r.pal.Text))
+		r.text("pin", p.tag, lx, ly, pinSize, true, cardkit.Opaque(r.pal.Text))
 	}
 
 	// Distance axis.
@@ -731,26 +719,26 @@ func (r *renderer) plot(resp TerrainProfileResponse, g geom) {
 	if g.D >= 10000 { // same unit as the end label
 		mid = fmtNum(jsRound(g.D/2000, 1)) + " km"
 	}
-	r.text("axis-x", mid, plotX+plotW/2-r.fs.measure(mid, axisSize, false)/2, axisBaseline, axisSize, false, muted)
-	end := r.fs.fit(fmtMetres(g.D), axisSize, false, plotW/2-40)
-	r.text("axis-x", end, plotX+plotW-r.fs.measure(end, axisSize, false), axisBaseline, axisSize, false, muted)
+	r.text("axis-x", mid, plotX+plotW/2-r.fs.Measure(mid, axisSize, false)/2, axisBaseline, axisSize, false, muted)
+	end := r.fs.Fit(fmtMetres(g.D), axisSize, false, plotW/2-40)
+	r.text("axis-x", end, plotX+plotW-r.fs.Measure(end, axisSize, false), axisBaseline, axisSize, false, muted)
 }
 
 // emptyPlot is the plot box when there is nothing to draw: the reason,
 // in the panel's words, inside a dashed outline.
 func (r *renderer) emptyPlot(main chip) {
-	border := opaque(r.pal.Border)
-	r.cv.hline(plotX, plotX+plotW, plotY, 3, 4, border)
-	r.cv.hline(plotX, plotX+plotW, plotY+plotH-1, 3, 4, border)
-	r.cv.vline(plotX, 1, plotY, plotY+plotH, 3, 4, border)
-	r.cv.vline(plotX+plotW-1, 1, plotY, plotY+plotH, 3, 4, border)
+	border := cardkit.Opaque(r.pal.Border)
+	r.cv.HLine(plotX, plotX+plotW, plotY, 3, 4, border)
+	r.cv.HLine(plotX, plotX+plotW, plotY+plotH-1, 3, 4, border)
+	r.cv.VLine(plotX, 1, plotY, plotY+plotH, 3, 4, border)
+	r.cv.VLine(plotX+plotW-1, 1, plotY, plotY+plotH, 3, 4, border)
 	msg := main.detail
 	if main.state != "unknown" {
 		msg = "No elevation data for this path, so there is no clearance verdict."
 	}
-	msg = r.fs.fit(msg, messageSize, false, plotW-48)
-	w := r.fs.measure(msg, messageSize, false)
-	r.text("message", msg, plotX+(plotW-w)/2, plotY+plotH/2+8, messageSize, false, opaque(r.pal.TextMuted))
+	msg = r.fs.Fit(msg, messageSize, false, plotW-48)
+	w := r.fs.Measure(msg, messageSize, false)
+	r.text("message", msg, plotX+(plotW-w)/2, plotY+plotH/2+8, messageSize, false, cardkit.Opaque(r.pal.TextMuted))
 }
 
 // ── Footer ───────────────────────────────────────────────────────────────
@@ -759,7 +747,7 @@ func (r *renderer) emptyPlot(main chip) {
 // verdict goes in the summary only when the plot did not already say it.
 func (r *renderer) footer(resp TerrainProfileResponse, main chip, opt Options, plotted bool) {
 	right := Width - safeMargin
-	r.cv.hline(safeMargin, right, footerRule, 1, 0, opaque(r.pal.Border))
+	r.cv.HLine(safeMargin, right, footerRule, 1, 0, cardkit.Opaque(r.pal.Border))
 
 	var parts []string
 	wc, okC := value(resp.Verdict.WorstClearanceM)
@@ -787,20 +775,20 @@ func (r *renderer) footer(resp TerrainProfileResponse, main chip, opt Options, p
 	if resp.Coverage.Mixed {
 		summaryY, creditY = mixedSummaryBaseline, mixedCreditBaseline
 	}
-	summary := r.fs.fit(strings.Join(parts, " · "), summarySize, false, right-safeMargin)
-	r.text("summary", summary, safeMargin, summaryY, summarySize, false, opaque(r.pal.Text))
+	summary := r.fs.Fit(strings.Join(parts, " · "), summarySize, false, right-safeMargin)
+	r.text("summary", summary, safeMargin, summaryY, summarySize, false, cardkit.Opaque(r.pal.Text))
 
 	// The credits are never shortened and never left out (CC BY 4.0 for
 	// DHM, the Copernicus DEM licence for the fill).
-	muted := opaque(r.pal.TextMuted)
+	muted := cardkit.Opaque(r.pal.TextMuted)
 	w := r.text("attribution", Credit, safeMargin, creditY, attributionSize, false, muted)
 	if resp.Coverage.Mixed {
 		r.text("attributionFill", FillCredit, safeMargin, creditBaseline, attributionSize, false, muted)
 	}
-	if site := sanitize(opt.Site); site != "" {
-		site = r.fs.fit(site, attributionSize, false, right-(safeMargin+w+32))
+	if site := cardkit.Sanitize(opt.Site); site != "" {
+		site = r.fs.Fit(site, attributionSize, false, right-(safeMargin+w+32))
 		if site != "" {
-			r.text("site", site, right-r.fs.measure(site, attributionSize, false), creditY, attributionSize, false, muted)
+			r.text("site", site, right-r.fs.Measure(site, attributionSize, false), creditY, attributionSize, false, muted)
 		}
 	}
 }
