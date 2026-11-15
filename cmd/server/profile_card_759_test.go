@@ -9,9 +9,11 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dhm"
 	"github.com/meshcore-analyzer/profilecard"
@@ -34,16 +36,21 @@ func TestProfileCard_CreditIsTheProfileAttribution(t *testing.T) {
 // Finding 3: a card stops waiting for a slow upstream after its wait, but
 // the fetch its share token bought runs on to the profile deadline and is
 // cached, so the next card is complete and costs no further upstream
-// calls. This is the reviewer's probe: a 50 ms wait against a 300 ms
-// upstream.
+// calls. The upstream answers only when the test releases it, never on a
+// timer: a degraded card under -race takes longer than any margin a timer
+// could leave (#759 delta review finding 1).
 func TestProfileCard_SlowFetchOutlivesTheCardWait(t *testing.T) {
 	env := newCardEnv(t, dhm.ProfileConfig{Share: dhm.ShareConfig{UpstreamPerMin: intp(5)}})
 	clock := time.Unix(1_700_000_000, 0)
 	env.p.now = func() time.Time { return clock }
 	env.p.card.wait = 50 * time.Millisecond
+	release := make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(release) }) }
+	defer open()
 	env.src.hook = func(ctx context.Context, _ dhm.RasterRequest) error {
 		select {
-		case <-time.After(300 * time.Millisecond):
+		case <-release:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
@@ -53,6 +60,14 @@ func TestProfileCard_SlowFetchOutlivesTheCardWait(t *testing.T) {
 	// A second card while the fetch runs joins it, gives its token back
 	// and is degraded too: still one fetch.
 	wantCard(t, env.card(cardQuery(3000)), "degraded")
+	// Both cards stopped waiting; the fetch is held, in its slot.
+	if n := env.p.admit.InUse(); n != 1 {
+		t.Fatalf("%d slots in use after both cards, want the one held fetch", n)
+	}
+	if got := env.p.card.budget.available(clock); got < 3.99 || got > 4.01 {
+		t.Fatalf("%.2f share tokens left, want 4: one fetch bought one profile", got)
+	}
+	open()
 	// The fetch holds its maxInFlight slot until it is done, and no longer.
 	waitUntil(t, "the held fetch to finish", func() bool { return env.p.admit.InUse() == 0 })
 	calls := env.src.calls.Load()
@@ -64,22 +79,60 @@ func TestProfileCard_SlowFetchOutlivesTheCardWait(t *testing.T) {
 		t.Fatalf("the complete card cost %d more upstream calls", n-calls)
 	}
 	if got := env.p.card.budget.available(clock); got < 3.99 || got > 4.01 {
-		t.Fatalf("%.2f share tokens left, want 4: one fetch bought one profile", got)
+		t.Fatalf("%.2f share tokens left after the complete card, want 4", got)
 	}
 }
 
-// Finding 3, the bound: a held fetch is still cancelled at the profile
-// deadline, so an upstream that never answers cannot keep a slot.
+// Finding 3, the bound: a held fetch runs under the profile deadline, not
+// the card's wait and not unbounded, so an upstream that never answers
+// cannot keep a slot. The test reads the deadline off the fetch's own
+// context instead of waiting for it to pass, so a slow -race render
+// cannot outlast it (#759 delta review finding 1). That the deadline then
+// cancels a held call is internal/dhm's TestFlightHeldCallOutlivesItsCaller.
 func TestProfileCard_HeldFetchEndsAtTheDeadline(t *testing.T) {
 	env := newCardEnv(t, dhm.ProfileConfig{})
 	env.p.card.wait = 20 * time.Millisecond
-	env.p.deadline = 200 * time.Millisecond
-	env.src.hook = func(ctx context.Context, _ dhm.RasterRequest) error { <-ctx.Done(); return ctx.Err() }
+	// Below the per-raster timeout (10 s), so the context the upstream
+	// sees carries the flight's deadline; far above any -race render.
+	env.p.deadline = 5 * time.Second
+	release := make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(release) }) }
+	defer open()
+	type seen struct {
+		at, deadline time.Time
+		ok           bool
+	}
+	fetch := make(chan seen, 8)
+	env.src.hook = func(ctx context.Context, _ dhm.RasterRequest) error {
+		dl, ok := ctx.Deadline()
+		fetch <- seen{time.Now(), dl, ok}
+		select {
+		case <-release:
+			return errors.New("upstream never answered")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	before := time.Now()
 	wantCard(t, env.card(cardQuery(3000)), "degraded")
 	if env.p.admit.InUse() != 1 {
 		t.Fatalf("%d slots in use right after the card: the fetch was not held", env.p.admit.InUse())
 	}
-	waitUntil(t, "the deadline to end the held fetch", func() bool { return env.p.admit.InUse() == 0 })
+	var f seen
+	select {
+	case f = <-fetch:
+	default:
+		t.Fatal("the held fetch never reached upstream")
+	}
+	if !f.ok {
+		t.Fatal("the held fetch has no deadline")
+	}
+	if lo, hi := before.Add(env.p.deadline), f.at.Add(env.p.deadline); f.deadline.Before(lo) || f.deadline.After(hi) {
+		t.Fatalf("held fetch deadline %v after the card started, want the profile deadline %v", f.deadline.Sub(before), env.p.deadline)
+	}
+	open()
+	waitUntil(t, "the held fetch to give its slot back", func() bool { return env.p.admit.InUse() == 0 })
 }
 
 // RM7: a pending (degraded) render and a complete one of the same card
@@ -239,20 +292,49 @@ func TestTerrainProfile_OpenAPI503MatchesAdmission(t *testing.T) {
 // Merge with #738: a profile whose foreign fill failed is cached for its
 // DHM part, and the JSON route tries the fill again on a hit. Its card is
 // degraded (max-age 60, not cached), never an immutable complete card of a
-// profile that can still change, and /p adds no verdict word for it.
+// profile that can still change, and /p treats it as not ready: no verdict
+// word and the pending card's v (#759 delta review finding 3). Once the
+// fill succeeds the profile is ready and mixed, and the card the renderer
+// is handed carries Coverage.Mixed, which draws the Copernicus credit
+// (finding 2; internal/profilecard TestMixedCardDrawsBothCredits).
 func TestProfileCard_FailedFillIsNotAComplete(t *testing.T) {
-	failing := func(context.Context, *dhm.Plan) (copdem.Result, error) {
+	var fillWorks atomic.Bool
+	fill := func(ctx context.Context, p *dhm.Plan) (copdem.Result, error) {
+		if fillWorks.Load() {
+			return everywhere(5)(ctx, p)
+		}
 		return copdem.Result{}, errors.New("bucket down")
 	}
-	f := &scriptedFill{fn: failing}
+	f := &scriptedFill{fn: fill}
 	pc := dhm.ProfileConfig{ForeignFill: dhm.ForeignFillConfig{Enabled: true}, Share: dhm.ShareConfig{Enabled: true}}
 	env := newTerrainEnvWith(t, newFakeElevation(t, flatElev(fillDHMHeight)), pc, nil, func(d *terrainProfilerDeps) { d.fill = f })
+	var mixed atomic.Bool
+	env.p.card.render = func(resp profilecard.TerrainProfileResponse, names [2]string, pal profilecard.Palette, opt profilecard.Options) ([]byte, error) {
+		mixed.Store(!opt.Pending && resp.Coverage.Mixed)
+		return profilecard.Render(resp, names, pal, opt)
+	}
 	q := pathQuery(cphPt, malmoPt)
-	card := func() *httptest.ResponseRecorder {
+	// /p as newShareEnvWith serves it, on this env's fill.
+	doc := newIndexDoc(sharePublicDir, newOGMeta(brandPick(nil), sharePublicDir, nil))
+	router := mux.NewRouter()
+	env.srv.RegisterRoutes(router)
+	env.srv.registerShareRoutes(router, doc)
+	serve := func(path string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
-		env.router.ServeHTTP(w, httptest.NewRequest("GET", cardRoute+"?"+q, nil))
+		router.ServeHTTP(w, httptest.NewRequest("GET", "http://example.test"+path, nil))
 		return w
 	}
+	card := func() *httptest.ResponseRecorder { return serve(cardRoute + "?" + q) }
+	share := func() (title, image string) {
+		w := serve(shareQ(cphPt, malmoPt))
+		if w.Code != http.StatusOK {
+			t.Fatalf("/p: %d", w.Code)
+		}
+		body := w.Body.String()
+		return mustMeta(t, body, "og:title"), mustMeta(t, body, "og:image")
+	}
+	// Nothing cached yet: /p is not ready.
+	coldTitle, coldImage := share()
 	wantCard(t, card(), "degraded")
 	wantCard(t, card(), "degraded")
 	if env.p.card.cache.Len() != 0 {
@@ -260,5 +342,26 @@ func TestProfileCard_FailedFillIsNotAComplete(t *testing.T) {
 	}
 	if f.count() == 0 {
 		t.Fatal("precondition: the fill was never tried")
+	}
+	// The DHM part is cached now, the fill still missing: /p must say
+	// exactly what it said with nothing cached.
+	if title, image := share(); title != coldTitle || image != coldImage {
+		t.Fatalf("/p of a failed fill: title %q image %q, want the not-ready %q %q", title, image, coldTitle, coldImage)
+	}
+	if strings.Contains(coldTitle, " · ") {
+		t.Fatalf("not-ready /p title carries a verdict word: %q", coldTitle)
+	}
+	// The JSON route retries the fill on a hit; now it works.
+	fillWorks.Store(true)
+	resp := decodeProfile(t, env.get(q))
+	if !resp.Coverage.Mixed {
+		t.Fatal("precondition: the retried fill did not make the profile mixed")
+	}
+	if _, image := share(); image == coldImage {
+		t.Fatal("/p kept the not-ready card URL for a ready profile: the pin above proves nothing")
+	}
+	wantCard(t, card(), "miss")
+	if !mixed.Load() {
+		t.Fatal("the complete card of a mixed profile was not drawn as mixed")
 	}
 }

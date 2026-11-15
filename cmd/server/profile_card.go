@@ -58,7 +58,7 @@ const (
 	// cardRendererVersion is part of every card key and v: bump it when
 	// the renderer draws differently, so no stale card is served or kept
 	// by a crawler.
-	cardRendererVersion = "727m3.2"
+	cardRendererVersion = "727m3.3"
 	// cardBytesPerEntry is the byte bound per cached card. Real cards are
 	// 80–94 KB (#755 review); 128 KiB leaves room for an unusual one, and
 	// the default 64 entries keep the plan's ~8 MiB (#727 plan §3.2).

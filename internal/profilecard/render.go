@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dhm"
 )
 
@@ -46,6 +47,12 @@ const (
 	footerRule      = 540
 	summaryBaseline = 574
 	creditBaseline  = 604
+
+	// A mixed card (#738) has two credit lines: the footer moves up so
+	// the Copernicus line takes creditBaseline and the DHM line sits
+	// above it, at the same 18 px size.
+	mixedSummaryBaseline = 564
+	mixedCreditBaseline  = 584
 )
 
 // Options are the operator's display choices. The zero value is the
@@ -78,6 +85,16 @@ type textRun struct {
 // because a card is computed from DHM data rather than shown as served,
 // and it is the credit of the profile it pictures.
 const Credit = dhm.AttributionDerived
+
+// FillCredit is the Copernicus DEM credit a mixed card (resp.Coverage.Mixed,
+// #738) draws under Credit: the profile UI's short line (#779's
+// copdem.Credit), built from the copdem parts master has, without its
+// trailing "(Copernicus DEM licence)" mark. That mark is a link in the UI;
+// a picture cannot link, and with it the line does not fit the card at the
+// credit size. The long Art. 6(b) notice (copdem.AttributionDerived) stays
+// one step away, on the page the card links to.
+const FillCredit = "Outside Denmark: produced using " + copdem.DatasetName +
+	", provided under COPERNICUS by the European Union and ESA"
 
 // Render draws the card for resp and returns it as a PNG. names are the
 // display names of endpoints A and B ("" when unknown); the caller is
@@ -766,16 +783,24 @@ func (r *renderer) footer(resp TerrainProfileResponse, main chip, opt Options, p
 	} else {
 		parts = append(parts, "terrain only")
 	}
+	summaryY, creditY := summaryBaseline, creditBaseline
+	if resp.Coverage.Mixed {
+		summaryY, creditY = mixedSummaryBaseline, mixedCreditBaseline
+	}
 	summary := r.fs.fit(strings.Join(parts, " · "), summarySize, false, right-safeMargin)
-	r.text("summary", summary, safeMargin, summaryBaseline, summarySize, false, opaque(r.pal.Text))
+	r.text("summary", summary, safeMargin, summaryY, summarySize, false, opaque(r.pal.Text))
 
-	// The credit is never shortened and never left out (CC BY 4.0).
+	// The credits are never shortened and never left out (CC BY 4.0 for
+	// DHM, the Copernicus DEM licence for the fill).
 	muted := opaque(r.pal.TextMuted)
-	w := r.text("attribution", Credit, safeMargin, creditBaseline, attributionSize, false, muted)
+	w := r.text("attribution", Credit, safeMargin, creditY, attributionSize, false, muted)
+	if resp.Coverage.Mixed {
+		r.text("attributionFill", FillCredit, safeMargin, creditBaseline, attributionSize, false, muted)
+	}
 	if site := sanitize(opt.Site); site != "" {
 		site = r.fs.fit(site, attributionSize, false, right-(safeMargin+w+32))
 		if site != "" {
-			r.text("site", site, right-r.fs.measure(site, attributionSize, false), creditBaseline, attributionSize, false, muted)
+			r.text("site", site, right-r.fs.measure(site, attributionSize, false), creditY, attributionSize, false, muted)
 		}
 	}
 }
