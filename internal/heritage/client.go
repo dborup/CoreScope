@@ -72,8 +72,7 @@ func NewClient(opts ClientOptions) (*Client, error) {
 }
 
 // CellURL is the GetFeature URL for a valid cell. Nothing but the cell's
-// integer bbox varies. The live smoke check
-// (#803) sends it too.
+// integer bbox varies. The live smoke check (#803) sends it too.
 func (c *Client) CellURL(cell Cell) string {
 	b := cell.QueryBox(c.opts.MarginM)
 	return c.opts.BaseURL + "?" + fixedQuery + "&bbox=" +

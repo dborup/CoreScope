@@ -89,9 +89,17 @@ func tile(t testing.TB, format string) []byte {
 	return buf.Bytes()
 }
 
-const searchAnswer = `{"type":"FeatureCollection","features":[{"type":"Feature","id":"2025_fake_0001",` +
+// searchID and searchPath are the photo the fake search finds, in the href
+// shape the live STAC API returns (#819): on CDNHost, under a resolution/
+// year/10 km/1 km path.
+const (
+	searchID   = "2025_82_24_2_0138_00000126_100mm"
+	searchPath = "/skraafoto_server/100mm/2025/10km_622_57/1km_6223_575/" + searchID + ".tif"
+)
+
+const searchAnswer = `{"type":"FeatureCollection","features":[{"type":"Feature","id":"` + searchID + `",` +
 	`"collection":"skraafotos2025","properties":{"direction":"north","datetime":"2025-04-01T10:00:00Z"},` +
-	`"assets":{"data":{"href":"https://cdn.dataforsyningen.dk/skraafoto_server/COG_oblique_2025/fake/2025_fake_0001.tif"}}}]}`
+	`"assets":{"data":{"href":"` + skraafoto.CDNBase + searchPath + `"}}}]}`
 
 func writeRange(w http.ResponseWriter, r *http.Request, size int) {
 	var from, to int
@@ -192,7 +200,7 @@ var tokenlessProbes = []string{
 }
 
 // testCDNPath is a photo path for -skraafoto-cdn-path.
-const testCDNPath = "/skraafoto_server/COG_oblique_2025/given/2025_given_0001.tif"
+const testCDNPath = "/skraafoto_server/100mm/2025/10km_614_57/1km_6145_573/2025_83_36_1_0020_00003045_100mm.tif"
 
 // Without a config, every probe that needs the token is SKIP, nothing is
 // sent for it, and the tokenless probes still run: the exit is 0.
@@ -284,7 +292,7 @@ func TestTokenIsSentOnlyWhereNeededAndNeverPrinted(t *testing.T) {
 		t.Fatalf("%d requests with the token, want %d", withToken, len(tokenProbes))
 	}
 	// The CDN read is the photo the search found.
-	if l := resultLine(t, out, "skraafoto-cdn-range"); !strings.Contains(l, "2025_fake_0001.tif") {
+	if l := resultLine(t, out, "skraafoto-cdn-range"); !strings.Contains(l, "url="+skraafoto.CDNBase+searchPath) {
 		t.Fatalf("CDN read not the searched photo: %q", l)
 	}
 }
@@ -554,16 +562,18 @@ func TestProbeURLsAreTheClientBuilders(t *testing.T) {
 	}
 }
 
-// Skærmkort has no server-side request builder on master (#741 builds its
-// WMS URL in the browser), so it is listed as SKIP with the reason, never
-// as a hand-written URL.
+// Skærmkort has no Go request builder (#741 builds its WMS URL in the
+// browser), so it is listed as SKIP with that reason, never as a
+// hand-written URL. #741 is merged (#805), so the reason must not say it
+// is pending.
 func TestSkaermkortIsSkippedWithoutABuilder(t *testing.T) {
 	f := newFake(t)
 	code, out := runSmoke(t, f, "-config", writeConfig(t, `{"map":{"dhm":{"token":"`+testToken+`"}}}`))
 	if code != 0 {
 		t.Fatalf("exit %d\n%s", code, out)
 	}
-	if l := resultLine(t, out, "skaermkort-wms"); !strings.HasPrefix(l, "SKIP") || !strings.Contains(l, "#741") {
+	if l := resultLine(t, out, "skaermkort-wms"); !strings.HasPrefix(l, "SKIP") || !strings.Contains(l, "#741") ||
+		!strings.Contains(l, "built in the browser") || strings.Contains(l, "not merged") {
 		t.Fatalf("%q", l)
 	}
 	for _, s := range f.requests() {

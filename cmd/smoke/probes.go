@@ -21,10 +21,11 @@ var site = dhm.LatLon{Lat: 55.6761, Lon: 12.5683}
 // overlay's range, contours (from zoom 14) included, and the ortho's.
 const siteZoom = 14
 
-// skaermkortSkip is why Skærmkort is not probed: its request is built in
-// the browser, and the smoke check sends no hand-written URL.
-const skaermkortSkip = "no server-side request builder on master: the Skærmkort WMS URL is built in the browser " +
-	"(#741, not merged); add its builder here when it lands"
+// skaermkortSkip is why Skærmkort is not probed: #741 builds its request
+// in the browser only, and the smoke check sends no hand-written URL.
+const skaermkortSkip = "no Go request builder: the Skærmkort WMS URL is built in the browser " +
+	"(public/map-tile-providers.js, #741), with map.tiles.providers.dataforsyningen.token; " +
+	"probe it here once a Go builder exists"
 
 // settings are the command's knobs.
 type settings struct {
