@@ -643,13 +643,13 @@ func TestTerrainElevationEncodesFill(t *testing.T) {
 			if both {
 				e.dsm = []float32{4, 5, 6}
 			}
-			got, err := decodeTerrainElevation(e.encode(), 3, both)
+			got, err := decodeTerrainElevation(e.encode(), 3, both, false)
 			if err != nil || got.fill != level || got.dtm[2] != 3 || (both && got.dsm[0] != 4) {
 				t.Fatalf("level %d both %v: %+v %v", level, both, got, err)
 			}
 		}
 	}
-	got, err := decodeTerrainElevation(terrainElevation{dtm: []float32{1, 2, 3}, fillFailed: true}.encode(), 3, false)
+	got, err := decodeTerrainElevation(terrainElevation{dtm: []float32{1, 2, 3}, fillFailed: true}.encode(), 3, false, false)
 	if err != nil || !got.fillFailed || got.fill != fillNone {
 		t.Fatalf("failed fill: %+v %v", got, err)
 	}
@@ -659,7 +659,7 @@ func TestTerrainElevationEncodesFill(t *testing.T) {
 	for _, flag := range []byte{6, 10, 12, 0x10, 0x80} {
 		bad := append([]byte{}, enc...)
 		bad[4] = flag
-		if _, err := decodeTerrainElevation(bad, 3, false); err == nil {
+		if _, err := decodeTerrainElevation(bad, 3, false, false); err == nil {
 			t.Fatalf("flag %#x accepted", flag)
 		}
 	}

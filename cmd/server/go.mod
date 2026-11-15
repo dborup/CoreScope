@@ -88,3 +88,7 @@ replace github.com/meshcore-analyzer/copdem => ../../internal/copdem
 require github.com/meshcore-analyzer/heritage v0.0.0
 
 replace github.com/meshcore-analyzer/heritage => ../../internal/heritage
+
+require github.com/meshcore-analyzer/buildings v0.0.0
+
+replace github.com/meshcore-analyzer/buildings => ../../internal/buildings

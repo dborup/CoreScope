@@ -30,14 +30,16 @@ import (
 // Dataforsyningen, and no real token exists here.
 
 // fakeElevation answers every raster with elev at the pixel centres,
-// after checking the raster is inside the allow-list.
+// after checking the raster is inside the allow-list; a surface raster
+// with surface instead, when it is set.
 type fakeElevation struct {
-	t     *testing.T
-	elev  func(e, n float64) float32
-	hook  func(ctx context.Context, r dhm.RasterRequest) error
-	calls atomic.Int64
-	mu    sync.Mutex
-	model map[dhm.Model]int
+	t       *testing.T
+	elev    func(e, n float64) float32
+	surface func(e, n float64) float32
+	hook    func(ctx context.Context, r dhm.RasterRequest) error
+	calls   atomic.Int64
+	mu      sync.Mutex
+	model   map[dhm.Model]int
 }
 
 func newFakeElevation(t *testing.T, elev func(e, n float64) float32) *fakeElevation {
@@ -66,9 +68,13 @@ func (f *fakeElevation) FetchRaster(ctx context.Context, r dhm.RasterRequest) (d
 		NoData: -9999, HasNoData: true,
 		Georef: dhm.Georef{OriginE: r.BBox[0], OriginN: r.BBox[3],
 			PixelE: (r.BBox[2] - r.BBox[0]) / float64(r.Width), PixelN: (r.BBox[3] - r.BBox[1]) / float64(r.Height)}}
+	elev := f.elev
+	if r.Model == dhm.ModelSurface && f.surface != nil {
+		elev = f.surface
+	}
 	for row := 0; row < r.Height; row++ {
 		for col := 0; col < r.Width; col++ {
-			g.Values[row*r.Width+col] = f.elev(g.Georef.OriginE+(float64(col)+0.5)*g.Georef.PixelE,
+			g.Values[row*r.Width+col] = elev(g.Georef.OriginE+(float64(col)+0.5)*g.Georef.PixelE,
 				g.Georef.OriginN-(float64(row)+0.5)*g.Georef.PixelN)
 		}
 	}
@@ -408,10 +414,17 @@ func TestTerrainProfile_CacheFootprintAtMaxima(t *testing.T) {
 	if set.cacheEntries != 4096 || set.plan.MaxSamples != 3200 {
 		t.Fatalf("resolved maxima %d/%d, want 4096/3200", set.cacheEntries, set.plan.MaxSamples)
 	}
-	maxBytes := terrainCacheMaxBytes(set.cacheEntries, set.plan.MaxSamples)
-	const documentedMB = 105_000_000 // config.example.json _comment_cacheEntries
-	if maxBytes > documentedMB || float64(documentedMB-maxBytes) > 2_000_000 {
-		t.Fatalf("worst case %d bytes (%.1f MB) no longer matches the documented ~105 MB", maxBytes, float64(maxBytes)/1e6)
+	// config.example.json _comment_cacheEntries: ~105 MB, and ~118 MB with
+	// the building classification's class byte per sample (#730 M2).
+	for _, c := range []struct {
+		classified bool
+		documented int
+	}{{false, 105_000_000}, {true, 118_000_000}} {
+		maxBytes := terrainCacheMaxBytes(set.cacheEntries, set.plan.MaxSamples, c.classified)
+		if maxBytes > c.documented || float64(c.documented-maxBytes) > 2_000_000 {
+			t.Fatalf("classified %v: worst case %d bytes (%.1f MB) no longer matches the documented ~%d MB",
+				c.classified, maxBytes, float64(maxBytes)/1e6, c.documented/1_000_000)
+		}
 	}
 }
 

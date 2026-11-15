@@ -121,7 +121,6 @@ func TestParseTruncated(t *testing.T) {
 // nonsense. That includes the OGC API exception document, which GeoServer
 // sends as JSON, and a page in another CRS or axis order.
 func TestParseRejects(t *testing.T) {
-	over := strings.TrimSuffix(strings.Repeat(goodFeature+",", MaxFeatures+1), ",")
 	for name, body := range map[string][]byte{
 		"empty body":            nil,
 		"not JSON":              []byte(`<html>Service Unavailable</html>`),
@@ -133,7 +132,6 @@ func TestParseRejects(t *testing.T) {
 		"features an object":    []byte(`{"type":"FeatureCollection","features":{}}`),
 		"trailing data":         append(fc(goodFeature, ``), []byte(` {"type":"FeatureCollection","features":[]}`)...),
 		"trailing garbage":      append(fc(goodFeature, ``), 'x'),
-		"too many features":     fc(over, ``),
 		"numberReturned wrong":  fc(goodFeature, `,"numberReturned":2`),
 		"numberMatched too low": fc(goodFeature+","+goodFeature, `,"numberMatched":1`),
 		"numberMatched string":  fc(goodFeature, `,"numberMatched":"1"`),

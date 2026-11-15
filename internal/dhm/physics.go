@@ -118,11 +118,7 @@ func (l Link) Assess(surface []float32) Assessment {
 		if math.IsNaN(s) {
 			return unknown
 		}
-		d1 := float64(i) * step
-		d2 := l.DistanceM - d1
-		los := l.HeightA + (l.HeightB-l.HeightA)*d1/l.DistanceM
-		clearance := los - (s + EarthBulge(d1, d2, l.K))
-		ratio := clearance / FresnelRadius(l.LambdaM, d1, d2)
+		d1, clearance, ratio := l.clearanceAt(s, i, step)
 		if ratio < worst.WorstRatio {
 			worst = Assessment{WorstIndex: i, WorstAtM: d1, WorstClearanceM: clearance, WorstRatio: ratio}
 		}
@@ -144,6 +140,46 @@ func (l Link) Assess(surface []float32) Assessment {
 	worst.AntennaBelowA, worst.AntennaBelowB = clearanceA < 0, clearanceB < 0
 	worst.State = ClassifyClearance(worst.WorstRatio)
 	return worst
+}
+
+// clearanceAt is the distance from A of interior sample i of a series
+// spaced step apart, the clearance of a surface s there below the line of
+// sight, with the earth bulge added to the surface, and its ratio to the
+// first Fresnel radius there.
+func (l Link) clearanceAt(s float64, i int, step float64) (d1, clearance, ratio float64) {
+	d1 = float64(i) * step
+	d2 := l.DistanceM - d1
+	los := l.HeightA + (l.HeightB-l.HeightA)*d1/l.DistanceM
+	clearance = los - (s + EarthBulge(d1, d2, l.K))
+	return d1, clearance, clearance / FresnelRadius(l.LambdaM, d1, d2)
+}
+
+// Obstructions lists, in order, the samples that put the path in a's
+// state, a being l.Assess(surface): the interior samples whose clearance
+// ratio falls in that state's class (ClassifyClearance), and an end
+// whose surface is above its antenna (AntennaBelowA, AntennaBelowB). It
+// is nil for a clear or unknown state. The verdict does not use it; it
+// says where the verdict is decided, so a caller can tell what stands
+// there (#730 M2).
+func (l Link) Obstructions(surface []float32, a Assessment) []int {
+	n := len(surface)
+	if a.State == VerdictClear || a.State == VerdictUnknown || n < 3 {
+		return nil
+	}
+	step := l.DistanceM / float64(n-1)
+	var out []int
+	if a.AntennaBelowA {
+		out = append(out, 0)
+	}
+	for i := 1; i < n-1; i++ {
+		if _, _, ratio := l.clearanceAt(float64(surface[i]), i, step); ClassifyClearance(ratio) == a.State {
+			out = append(out, i)
+		}
+	}
+	if a.AntennaBelowB {
+		out = append(out, n-1)
+	}
+	return out
 }
 
 // Decimate picks at most max indices of n evenly spaced samples, always
