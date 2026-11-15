@@ -63,6 +63,7 @@ function setup(opts) {
   return { ctx, map, ctl, store: ctx.localStorage._raw, D: ctx.window.MC_DHMOverlays };
 }
 const layer = (ctl) => ctl.overlays && ctl.overlays[LABEL];
+const lastControl = (map) => map._controls[map._controls.length - 1];
 
 console.log('\n=== #792 colour-by-elevation overlay ===');
 
@@ -254,18 +255,22 @@ test('elevationOpacity: whole percent 10-100; built-in 60; only while offered', 
 });
 
 test('the layer opacity is the setting; a changed default reaches an open map at once', () => {
-  const { ctx, ctl } = setup({ section: { elevationOpacity: 35 } });
+  const { ctx, map, ctl } = setup({ section: { elevationOpacity: 35 }, hash: '#/map?elevation=1' });
   const l = layer(ctl);
+  assert.strictEqual(map.hasLayer(l), true);
   assert.strictEqual(l.options.opacity, 0.35);
-  let set = null;
-  l.setOpacity = (v) => { set = v; l.options.opacity = v; return l; };
+  // While on the map it follows dhm-defaults-changed (the #723 M4 rule).
   ctx.window.SITE_CONFIG = { dhmOverlays: { elevationOpacity: 80 } };
   ctx.window.dispatchEvent(new ctx.CustomEvent('dhm-defaults-changed'));
-  assert.strictEqual(set, 0.8);
-  // The same layer: the viewer's on/off and the tiles stay.
-  const after = ctx.window.MC_DHMOverlays && layer(setup().ctl);
-  assert(after);
-  // The other overlays' fixed opacities are unchanged.
+  assert.strictEqual(l.options.opacity, 0.8);
+  // Off the map it reads the setting when it is added again.
+  map.removeLayer(l);
+  ctx.window.SITE_CONFIG = { dhmOverlays: { elevationOpacity: 50 } };
+  map.addLayer(l);
+  assert.strictEqual(l.options.opacity, 0.5);
+  // The same layer object stays (no refetch), and the other overlays'
+  // fixed opacities are unchanged.
+  assert.strictEqual(layer(lastControl(map)), l);
   assert.strictEqual(ctl.overlays['Hillshade: terrain (DHM)'].options.opacity, 0.65);
   assert.strictEqual(ctl.overlays['Contour lines (DHM, zoom 14+)'].options.opacity, 1);
 });

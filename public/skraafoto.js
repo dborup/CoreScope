@@ -7,9 +7,10 @@
  * only when map.skraafoto.enabled is on and a token is configured, and it
  * never carries the token. Without it this module shows nothing at all.
  *
- * Entry points: a node with a fix (node page and side pane, nodeAction)
- * and the Path profile's ends and clicked chart point (terrain-profile.js,
- * actionButton). Each opens one dialog:
+ * Entry points: a node with a fix inside the block's bounds, Denmark
+ * (node page and side pane, nodeAction), and the Path profile's ends and
+ * clicked chart point (terrain-profile.js, actionButton). Each opens one
+ * dialog:
  *   - one search per point and year (GET searchUrl?lat=&lon=[&year=]),
  *     the newest year first, with a selector for the older ones;
  *   - a direction switcher for the five photos (N, E, S, W, nadir);
@@ -70,6 +71,15 @@
     var la = Number(lat), lo = Number(lon);
     if (!isFinite(la) || !isFinite(lo) || la < -90 || la > 90 || lo < -180 || lo > 180) return null;
     return { lat: round5(la), lon: round5(lo) };
+  }
+
+  /* covered: the point is inside the block's bounds, Denmark (#818), by
+   * the heritage overlay's bounds test (HeritageInfo.inBounds, loaded on
+   * every page). A block without bounds, an older server's, sets no
+   * limit. */
+  function covered(cfg, p) {
+    var hi = global.HeritageInfo;
+    return !hi || typeof hi.inBounds !== 'function' || hi.inBounds(cfg && cfg.bounds, p.lat, p.lon);
   }
 
   /* nodePoint is where a node's photos are: its own position, by the
@@ -240,6 +250,7 @@
     var state = { year: validYear(o.year) ? o.year : 0, dir: DIRECTIONS.indexOf(o.dir) >= 0 ? o.dir : 'north', resp: null, photos: [] };
     var seq = 0, pseq = 0, previewAbort = null, searchAbort = null;
     var kept = []; // [{ url, objectURL }], newest last
+    var shown = null; // the object URL that is the image's source
     var ui = {};
     var gone = false;
 
@@ -444,11 +455,19 @@
       return null;
     }
 
+    function isKept(objectURL) {
+      for (var i = 0; i < kept.length; i++) if (kept[i].objectURL === objectURL) return true;
+      return false;
+    }
+
+    /* keep holds a fetched photo for the dialog. A copy pushed out is
+     * revoked, unless it is the image's source: display() revokes that
+     * one when the next photo replaces it, close() when the dialog goes. */
     function keep(u, objectURL) {
       kept.push({ url: u, objectURL: objectURL });
       while (kept.length > MAX_KEPT) {
         var old = kept.shift();
-        if (old.objectURL !== ui.img.getAttribute('src')) revoke(old.objectURL);
+        if (old.objectURL !== shown) revoke(old.objectURL);
       }
     }
 
@@ -460,7 +479,10 @@
       ui.img.alt = 'Oblique aerial photo, ' + DIR_TEXT[p.direction].toLowerCase() + (photoDate(p.datetime) ? ', ' + photoDate(p.datetime) : '');
       ui.img.onload = function () { if (!gone) { ui.img.hidden = false; setState('ready', ''); } };
       ui.img.onerror = function () { if (!gone) { ui.img.hidden = true; setState('error', errorText(0)); } };
+      var was = shown;
+      shown = objectURL;
       ui.img.src = objectURL;
+      if (was && was !== objectURL && !isKept(was)) revoke(was);
     }
 
     /* show puts the chosen direction's photo up: the one preview it
@@ -552,6 +574,8 @@
         doc.removeEventListener('keydown', onKey, true);
         if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
         ui.img.removeAttribute('src');
+        if (shown && !isKept(shown)) revoke(shown);
+        shown = null;
         kept.forEach(function (k) { revoke(k.objectURL); });
         kept = [];
         if (current === api) current = null;
@@ -590,10 +614,12 @@
   }
 
   /* nodeAction is the node-detail button, or null when the photos are not
-   * offered or the node has no fix. Asks nothing until it is clicked. */
+   * offered, the node has no fix or its fix is outside the block's bounds
+   * (there the search always answers empty). Asks nothing until it is
+   * clicked. */
   function nodeAction(node, cfg) {
     var at = nodePoint(node);
-    if (!offered(cfg) || !at) return null;
+    if (!offered(cfg) || !at || !covered(cfg, at)) return null;
     var name = node.name || node.advert_name || '';
     return actionButton({
       cls: 'btn-primary node-terrain-action sf-node-action', testid: 'node-skraafoto', cfg: cfg,

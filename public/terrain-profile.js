@@ -817,6 +817,18 @@
    * map.heritage is enabled, and the same switch serves the endpoint. */
   function heritageOffered(cfg) { return !!(cfg && cfg.enabled === true); }
 
+  /* #723 M4 — this viewer's monument settings from the customizer, through
+   * the one rule in public/map-tile-providers.js (MC_HERITAGE_SETTINGS):
+   * profileWarning (whether to look up and show the warning at all) and
+   * warnDistanceM (list an end outside a zone only up to this distance;
+   * null lists everything the server reports). Without the rule on the
+   * page: the warning on, unfiltered, as in M3. */
+  var HERITAGE_VIEWER_DEFAULTS = { profileWarning: true, warnDistanceM: null };
+  function heritageViewerSettings() {
+    var R = global.MC_HERITAGE_SETTINGS;
+    return R && typeof R.resolve === 'function' ? R.resolve() : HERITAGE_VIEWER_DEFAULTS;
+  }
+
   /* heritageQuery is the lookup's query string for one end of a response
    * (the server's own snapped coordinates), or null without a real one. */
   function heritageQuery(end) {
@@ -858,9 +870,19 @@
    * { label, text, html, lead }: the chip label, the plain text (the chip
    * title), the note markup with every dataset value through esc(), and the
    * end that leads the chip (inside first, then the nearer). */
-  function heritageNote(answers, cfg) {
+  function heritageNote(answers, cfg, set) {
     if (!heritageOffered(cfg) || !answers) return null;
+    set = set || HERITAGE_VIEWER_DEFAULTS;
+    if (set.profileWarning === false) return null;
     var found = { a: heritageFinding(answers.a), b: heritageFinding(answers.b) };
+    // The viewer's distance narrows the list. An end inside a zone carries
+    // no distance (heritageFinding), so it is always listed, and so is one
+    // whose distance is unknown: the server still placed it in its radius.
+    var limit = typeof set.warnDistanceM === 'number' ? set.warnDistanceM : null;
+    ['a', 'b'].forEach(function (side) {
+      var f = found[side];
+      if (f && limit !== null && f.distanceM !== null && f.distanceM > limit) found[side] = null;
+    });
     if (!found.a && !found.b) return null;
     var lead = 'a';
     if (!found.a) lead = 'b';
@@ -1528,6 +1550,8 @@
     var themeH = { a: null, b: null };
     // #723 M3: monument lookups by query string (heritageAnswer).
     var heritageAnswers = new Map();
+    // #723 M4: the resolved profile the note was last asked for, and its seq.
+    var heritageShown = null;
     var ui = {};
     // #781: the hover cursor on the chart now drawn, else null.
     var cursor = null;
@@ -2170,10 +2194,22 @@
      * dropped. */
     function lookupHeritage(data, mine) {
       if (!heritageOffered(opts.heritage)) return;
+      heritageShown = { data: data, seq: mine };
+      // #723 M4: the warning switched off asks the server nothing.
+      if (!heritageViewerSettings().profileWarning) { setHeritage(null); return; }
       Promise.all([heritageAnswer(data.a), heritageAnswer(data.b)]).then(function (r) {
         if (mine !== seq || !open) return;
-        setHeritage(heritageNote({ a: r[0], b: r[1] }, opts.heritage));
+        setHeritage(heritageNote({ a: r[0], b: r[1] }, opts.heritage, heritageViewerSettings()));
       });
+    }
+
+    /* #723 M4 — the customizer moved a monument setting: the profile on
+     * screen redraws its note from the remembered answers (an end not
+     * asked about yet, with the warning just switched on, is asked once).
+     * Nothing is re-measured. */
+    function onHeritageSettingsChanged() {
+      if (!open || !heritageShown || heritageShown.seq !== seq) return;
+      lookupHeritage(heritageShown.data, seq);
     }
 
     /* scheduleRequest debounces the request for an edit. Whatever is still
@@ -2484,6 +2520,7 @@
         shut(false);
         if (global.removeEventListener) {
           global.removeEventListener('terrain-defaults-changed', onDefaultsChanged);
+          global.removeEventListener('heritage-defaults-changed', onHeritageSettingsChanged);
         }
         if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
         panel = null;
@@ -2496,6 +2533,7 @@
      * and only then — a colour pick is pure CSS and needs no re-measure. */
     if (global.addEventListener) {
       global.addEventListener('terrain-defaults-changed', onDefaultsChanged);
+      global.addEventListener('heritage-defaults-changed', onHeritageSettingsChanged);
     }
     return api;
   }

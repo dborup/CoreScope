@@ -36,8 +36,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays'];
+  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage'];
+  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -540,6 +540,36 @@
     return ML.settings(_mastsCfg(), sec && typeof sec === 'object' ? sec : {});
   }
 
+  // ── #723 M4 — ancient monuments settings ──
+  // Whether the monuments overlay starts on, its opacity, and whether (and
+  // how far out) the Path profile warns about a monument at an end. The
+  // keys, defaults and bounds are the rule in public/map-tile-providers.js
+  // (MC_HERITAGE_SETTINGS), shared with the overlay and the profile, so the
+  // customizer stores exactly what they use. Without the rule on the page no
+  // value is accepted. The server's map.heritage values stay server-only.
+  var _lastHeritage = null;
+
+  function _heritageRule() {
+    var R = window.MC_HERITAGE_SETTINGS;
+    return R && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function _heritageCfg() { return window.MC_getHeritageConfig ? window.MC_getHeritageConfig() : null; }
+
+  function isValidHeritageSetting(key, val) {
+    var R = _heritageRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective monuments settings (this section over the defaults), or
+   *  null without the rule. */
+  function heritageSettings(effectiveConfig) {
+    var R = _heritageRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.heritage;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
   // ── #734 — DHM overlay defaults ──
   // Which hillshade a map starts with, whether the contour lines do, the
   // contour min-zoom and (#792) the elevation colours' opacity. The rule, the built-ins and the server's bounds
@@ -781,6 +811,16 @@
           else console.warn('[customizer-v2] Invalid antenna sites setting rejected:', 'masts.' + mk2, mIn[mk2]);
         }
         if (Object.keys(mOut).length) clean[key] = mOut;
+      } else if (key === 'heritage' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #723 M4 — the monuments settings, each by the overlay's rule.
+        var hIn = delta[key], hOut = {}, hRule = _heritageRule(), hKeys = hRule ? hRule.KEYS : [];
+        for (var hki = 0; hki < hKeys.length; hki++) {
+          var hk2 = hKeys[hki];
+          if (!_own(hIn, hk2) || hIn[hk2] == null) continue;
+          if (isValidHeritageSetting(hk2, hIn[hk2])) hOut[hk2] = hIn[hk2];
+          else console.warn('[customizer-v2] Invalid ancient monuments setting rejected:', 'heritage.' + hk2, hIn[hk2]);
+        }
+        if (Object.keys(hOut).length) clean[key] = hOut;
       } else if (key === 'dhmOverlays' && typeof delta[key] === 'object' && delta[key] !== null) {
         // #734 — the DHM overlay defaults, each by the overlays' rule.
         var dIn = delta[key];
@@ -1085,6 +1125,15 @@
     }
     _lastMasts = mastsNow;
 
+    /* #723 M4 — the same for the monuments settings: the overlay re-reads
+     * its opacity and an open Path profile redraws its warning. */
+    var heritageNow = JSON.stringify(heritageSettings(effectiveConfig));
+    if (_lastHeritage !== null && _lastHeritage !== heritageNow) {
+      try {
+        window.dispatchEvent(new CustomEvent('heritage-defaults-changed'));
+      } catch (_e) { /* no CustomEvent: the next map reads them anyway */ }
+    }
+    _lastHeritage = heritageNow;
     /* #734 — the same for the DHM overlay defaults: an open map's layer
      * control re-reads the contour min-zoom on this event. */
     var dhmNow = JSON.stringify(dhmOverlaySettings(effectiveConfig));
@@ -1347,6 +1396,24 @@
           }
         }
       }
+      // #723 M4 — heritage: the monuments settings, two switches and two
+      // bounded whole numbers.
+      if (key === 'heritage' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var hrule = _heritageRule();
+        for (var hsk in obj[key]) {
+          if (!_own(obj[key], hsk)) continue;
+          if (hrule && hrule.KEYS.indexOf(hsk) === -1) {
+            console.warn('[customizer-v2] Unknown heritage key in import:', hsk);
+          } else if (obj[key][hsk] === null && hrule && hrule.DEFAULTS[hsk] === null) {
+            // The documented default written out (warnDistanceM: null) is
+            // the same as leaving the key out; writeOverrides skips it.
+          } else if (!isValidHeritageSetting(hsk, obj[key][hsk])) {
+            var hlim = hrule && hrule.LIMITS[hsk];
+            errors.push('Invalid ancient monuments setting: heritage.' + hsk + ' = "' + obj[key][hsk] + '" \u2014 must be ' +
+              (!hrule ? 'unavailable without the monuments overlay' : hlim ? 'a whole number ' + hlim[0] + '-' + hlim[1] : 'true or false'));
+          }
+        }
+      }
       // #734 — dhmOverlays: the hillshade enum, a boolean, a zoom inside
       // the server's contour range.
       if (key === 'dhmOverlays' && typeof obj[key] === 'object' && obj[key] !== null) {
@@ -1562,7 +1629,7 @@
       { id: 'theme', glyph: 'ph:palette', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', glyph: 'ph:target', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'home', glyph: 'ph:house', title: 'Home', badge: _tabBadge('home') },
-      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
+      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', glyph: 'ph:map-trifold', title: 'GeoFilter' },
       { id: 'export', glyph: 'ph:download-simple', title: 'Export' }
     ];
@@ -2045,6 +2112,7 @@
       _renderTerrainSettings() +
       _renderMastsSettings() +
       _renderDHMOverlaySettings() +
+      _renderHeritageSettings() +
     '</div>';
   }
 
@@ -2189,6 +2257,53 @@
         '</div>';
     }
     return html;
+  }
+
+  // ── #723 M4 Ancient monuments settings ──
+  // Shown only where the server offers the overlay; the two profile rows
+  // only where the Path profile tool is offered too. A value back at its
+  // default is a cleared override, and an empty warning distance is the
+  // default (everything the server reports).
+  function _renderHeritageSettings() {
+    var R = _heritageRule();
+    if (!R || !_heritageCfg()) return '';
+    var h = heritageSettings(_getEffective());
+    var tp = window.TerrainProfile;
+    var profile = !!(tp && typeof tp.offered === 'function' && tp.offered(window.MC_DHM_CFG));
+    var check = function (key, label, hint) {
+      var id = 'cv2-heritage-' + key;
+      return '<div class="cust-field"><label class="cust-check" for="' + id + '" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+        '<input type="checkbox" id="' + id + '" data-cv2-heritage="' + key + '"' + (h[key] ? ' checked' : '') + ' style="width:20px;height:20px">' +
+        '<span>' + label + _overrideDot('heritage', key) + '</span></label>' +
+        '<div class="cust-hint">' + hint + '</div></div>';
+    };
+    var num = function (key, label, hint, step, value, placeholder) {
+      var id = 'cv2-heritage-' + key, lim = R.LIMITS[key];
+      return '<div class="cust-terrain-row">' +
+        '<div><label for="' + id + '">' + label + _overrideDot('heritage', key) + '</label>' +
+          '<div class="cust-hint">' + hint + '</div></div>' +
+        '<input type="number" id="' + id + '" min="' + lim[0] + '" max="' + lim[1] + '" step="' + step + '" ' +
+          'inputmode="numeric" data-cv2-heritage="' + key + '" value="' + escAttr(value) + '"' +
+          (placeholder ? ' placeholder="' + escAttr(placeholder) + '"' : '') + '>' +
+      '</div>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Ancient Monuments</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">The Map\u2019s protected ancient monuments overlay (Slots- og Kulturstyrelsen, zoom ' + _heritageCfg().minZoom + '+) and its warning in the Path profile.</p>' +
+      check('enabled', 'Show protected ancient monuments on the map by default', 'A link that says otherwise, or your own last choice on the map, still wins.') +
+      num('opacityPct', 'Monuments overlay opacity (%)', 'How strongly the zones and points cover the map', 5, String(h.opacityPct)) +
+      (profile
+        ? check('profileWarning', 'Warn about monuments in the Path profile', 'Off: the profile asks the server nothing and shows no monument note. No note never means there is no monument.') +
+          num('warnDistanceM', 'Warn within (m) of a zone', 'Empty: every zone the server reports (its own radius). An end inside a zone is always shown.', 10,
+            h.warnDistanceM === null ? '' : String(h.warnDistanceM), 'server radius')
+        : '');
+  }
+
+  /* One monuments input: the checkbox, or a whole number by the rule; an
+   * empty warning distance is null (the default). */
+  function _heritageInputValue(key, inp) {
+    if (key === 'enabled' || key === 'profileWarning') return !!inp.checked;
+    if (key === 'warnDistanceM' && inp.value === '') return null;
+    return /^[0-9]{1,4}$/.test(inp.value) ? Number(inp.value) : undefined;
   }
 
   /* One antenna sites input: a whole number (or the checkbox) by the
@@ -2978,6 +3093,27 @@
       });
     });
 
+    // #723 M4 — ancient monuments settings. A value back at its default
+    // is a cleared override; a bad one is put back.
+    container.querySelectorAll('[data-cv2-heritage]').forEach(function (inp) {
+      var key = inp.dataset.cv2Heritage;
+      inp.addEventListener('change', function () {
+        var R = _heritageRule();
+        if (!R) return;
+        var v = _heritageInputValue(key, inp);
+        var now = heritageSettings(_getEffective());
+        if (v === undefined || (v !== null && !isValidHeritageSetting(key, v))) {
+          if (inp.type === 'checkbox') inp.checked = !!now[key];
+          else inp.value = now[key] === null ? '' : String(now[key]);
+          return;
+        }
+        if (v === R.DEFAULTS[key]) clearOverride('heritage', key);
+        else setOverride('heritage', key, v);
+        // A new default applies to the next map, not one the viewer chose.
+        if (key === 'enabled' && window.MC_forgetOverlayPref) window.MC_forgetOverlayPref('heritage-monuments');
+      });
+    });
+
     // #734 — DHM overlay defaults. A value back at the built-in is a
     // cleared override; a new on/off default applies to the next map, so
     // the remembered choice of that overlay is forgotten (as #724 M5).
@@ -3647,6 +3783,11 @@
     // #734 — exposed for tests; see test-issue-734-customizer-overlays.js.
     isValidDHMOverlaySetting: isValidDHMOverlaySetting,
     dhmOverlaySettings: dhmOverlaySettings,
-    renderDHMOverlaySettings: _renderDHMOverlaySettings
+    renderDHMOverlaySettings: _renderDHMOverlaySettings,
+    // #723 M4 — exposed for tests; see test-issue-723-m4-heritage-customizer.js.
+    HERITAGE_SETTING_KEYS: _heritageRule() ? _heritageRule().KEYS : [],
+    isValidHeritageSetting: isValidHeritageSetting,
+    heritageSettings: heritageSettings,
+    renderHeritageSettings: _renderHeritageSettings
   };
 })();
