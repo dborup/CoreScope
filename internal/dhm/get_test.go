@@ -2,6 +2,8 @@ package dhm
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -111,5 +113,40 @@ func TestGetBodyCancelAndTimeoutAreCategories(t *testing.T) {
 	wantGetReason(t, err, "timeout")
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("timeout took %v", d)
+	}
+}
+
+// netTimeout is a transport error that reports a timeout.
+type netTimeout struct{}
+
+func (netTimeout) Error() string { return "i/o timeout" }
+func (netTimeout) Timeout() bool { return true }
+
+// TransportFailure is the one error classification of GetBody and
+// internal/copdem's range reads (#773 review finding 5): the request's
+// own context decides "canceled", a deadline or transport timeout is
+// "timeout", anything else "transport". No error text survives.
+func TestTransportFailureCategories(t *testing.T) {
+	live := context.Background()
+	gone, cancel := context.WithCancel(live)
+	cancel()
+	late, stop := context.WithDeadline(live, time.Now().Add(-time.Second))
+	defer stop()
+	for _, c := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want string
+	}{
+		{"caller cancelled", gone, errors.New("read: connection reset"), "canceled"},
+		{"cancelled during a timeout", gone, netTimeout{}, "canceled"},
+		{"deadline passed", late, context.DeadlineExceeded, "timeout"},
+		{"wrapped deadline", live, fmt.Errorf("get: %w", context.DeadlineExceeded), "timeout"},
+		{"transport timeout", live, fmt.Errorf("get: %w", netTimeout{}), "timeout"},
+		{"connection refused", live, errors.New("dial tcp: connection refused"), "transport"},
+	} {
+		if got := FailureReason(TransportFailure(c.ctx, c.err)); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
 	}
 }

@@ -166,14 +166,15 @@ func (c *Client) get(ctx context.Context, adm *Admission, service string, q url.
 		return c.fetch(work, target, contentTypes, maxBody)
 	})
 	if err != nil {
-		return nil, ctxFailure(err)
+		return nil, ContextFailure(err)
 	}
 	return data, nil
 }
 
-// ctxFailure maps the caller's context error, when ctx ended its wait, to
-// a FetchError category; any other error passes through.
-func ctxFailure(err error) error {
+// ContextFailure maps the caller's context error, when ctx ended its
+// wait, to a FetchError category; any other error passes through. It is
+// shared with internal/copdem.
+func ContextFailure(err error) error {
 	switch {
 	case errors.Is(err, context.Canceled):
 		return FetchError{"canceled"}
