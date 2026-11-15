@@ -265,10 +265,10 @@ test('clears the terrain override section with cs-theme-overrides', () => {
   assert.strictEqual(env.localStorage.getItem('cs-theme-overrides'), null);
 });
 
-test('clears the six path-profile chart vars from root.style', () => {
+test('clears the path-profile chart vars from root.style', () => {
   const env = loadCustomizer();
   const vars = ['--terrain-fill', '--terrain-clutter', '--los-line',
-    '--fresnel-100', '--fresnel-60', '--profile-blocked'];
+    '--fresnel-100', '--fresnel-60', '--profile-blocked', '--terrain-building', '--terrain-vegetation'];
   vars.forEach((v) => env.rootStyle.setProperty(v, '#abcdef'));
   env.api.resetAll();
   vars.forEach((v) => {

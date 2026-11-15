@@ -426,6 +426,30 @@ func TestTerrainProfile_CacheFootprintAtMaxima(t *testing.T) {
 				c.classified, maxBytes, float64(maxBytes)/1e6, c.documented/1_000_000)
 		}
 	}
+	// #786 review F5: the note's size of one entry is the formula's, to
+	// a tenth of a KB, classified or not.
+	data, err := os.ReadFile(filepath.Join("..", "..", "config.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ex struct {
+		Map struct {
+			DHM struct {
+				Profile struct {
+					Note string `json:"_comment_cacheEntries"`
+				} `json:"profile"`
+			} `json:"dhm"`
+		} `json:"map"`
+	}
+	if err := json.Unmarshal(data, &ex); err != nil {
+		t.Fatal(err)
+	}
+	for _, classified := range []bool{false, true} {
+		kb := fmt.Sprintf("%.1f KB", float64(terrainCacheMaxBytes(1, set.plan.MaxSamples, classified))/1000)
+		if !strings.Contains(ex.Map.DHM.Profile.Note, kb) {
+			t.Errorf("classified %v: _comment_cacheEntries %q does not give one entry as %s", classified, ex.Map.DHM.Profile.Note, kb)
+		}
+	}
 }
 
 func TestTerrainProfile_SingleflightCollapses20Requests(t *testing.T) {

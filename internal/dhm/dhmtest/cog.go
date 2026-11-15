@@ -100,12 +100,11 @@ func blocks(n, t int) int { return (n + t - 1) / t }
 
 // cogLevel is one resolution level being written.
 type cogLevel struct {
-	w, h           int
-	lon0, lat0     float64 // centre of pixel (0, 0)
-	dLon, dLat     float64
-	blocks         [][]byte
-	entries        []COGEntry
-	offIdx, cntIdx int // entry indices of TileOffsets and TileByteCounts
+	w, h       int
+	lon0, lat0 float64 // centre of pixel (0, 0)
+	dLon, dLat float64
+	blocks     [][]byte
+	entries    []COGEntry
 }
 
 // COG writes the file.
@@ -134,27 +133,35 @@ func COG(o COGOptions) []byte {
 		if o.Edit != nil {
 			l.entries = o.Edit(li, l.entries)
 		}
-		l.offIdx, l.cntIdx = -1, -1
-		for i, e := range l.entries {
-			switch e.Tag {
-			case 324:
-				l.offIdx = i
-			case 325:
-				l.cntIdx = i
-			}
-		}
 	}
+	out := make([]TIFFLevel, len(levels))
+	for li, l := range levels {
+		out[li] = TIFFLevel{Entries: l.entries, Blocks: l.blocks}
+	}
+	return WriteTIFF(out, o.Pad)
+}
 
-	// Layout: header, then per level its IFD and out-of-line values, then
-	// the blocks of the last level first, as GDAL writes a COG.
+// TIFFLevel is one IFD of a file WriteTIFF lays out: its entries and the
+// stored bytes of its blocks.
+type TIFFLevel struct {
+	Entries []COGEntry
+	Blocks  [][]byte
+}
+
+// WriteTIFF lays out a little-endian classic TIFF: the header, then per
+// level its IFD and out-of-line values, then pad zero bytes, then the
+// blocks of the last level first, as GDAL writes a COG. A TileOffsets
+// entry (324) without Raw is filled with the blocks' offsets; every other
+// entry is written as given.
+func WriteTIFF(levels []TIFFLevel, pad int) []byte {
 	pos := 8
 	ifdAt := make([]int, len(levels))
 	extraAt := make([][]int, len(levels))
 	for li, l := range levels {
 		ifdAt[li] = pos
-		pos += 2 + 12*len(l.entries) + 4
-		extraAt[li] = make([]int, len(l.entries))
-		for i, e := range l.entries {
+		pos += 2 + 12*len(l.Entries) + 4
+		extraAt[li] = make([]int, len(l.Entries))
+		for i, e := range l.Entries {
 			if len(e.Data) > 4 && e.Raw == nil {
 				extraAt[li][i] = pos
 				pos += len(e.Data)
@@ -162,20 +169,22 @@ func COG(o COGOptions) []byte {
 			}
 		}
 	}
-	pos += o.Pad
+	pos += pad
 	blockAt := make([][]int, len(levels))
 	for li := len(levels) - 1; li >= 0; li-- {
-		for _, b := range levels[li].blocks {
+		for _, b := range levels[li].Blocks {
 			blockAt[li] = append(blockAt[li], pos)
 			pos += len(b)
 		}
 	}
 	// Now the block offsets are known: fill TileOffsets in place.
 	for li, l := range levels {
-		if l.offIdx >= 0 && l.entries[l.offIdx].Raw == nil {
-			d := l.entries[l.offIdx].Data
-			for i := 0; i < len(d)/4 && i < len(blockAt[li]); i++ {
-				binary.LittleEndian.PutUint32(d[4*i:], uint32(blockAt[li][i]))
+		for _, e := range l.Entries {
+			if e.Tag != 324 || e.Raw != nil {
+				continue
+			}
+			for i := 0; i < len(e.Data)/4 && i < len(blockAt[li]); i++ {
+				binary.LittleEndian.PutUint32(e.Data[4*i:], uint32(blockAt[li][i]))
 			}
 		}
 	}
@@ -185,9 +194,9 @@ func COG(o COGOptions) []byte {
 	binary.LittleEndian.PutUint32(out[4:], uint32(ifdAt[0]))
 	for li, l := range levels {
 		p := ifdAt[li]
-		binary.LittleEndian.PutUint16(out[p:], uint16(len(l.entries)))
+		binary.LittleEndian.PutUint16(out[p:], uint16(len(l.Entries)))
 		p += 2
-		for i, e := range l.entries {
+		for i, e := range l.Entries {
 			binary.LittleEndian.PutUint16(out[p:], e.Tag)
 			binary.LittleEndian.PutUint16(out[p+2:], e.Type)
 			binary.LittleEndian.PutUint32(out[p+4:], e.Count)
@@ -207,7 +216,7 @@ func COG(o COGOptions) []byte {
 		}
 	}
 	for li, l := range levels {
-		for i, b := range l.blocks {
+		for i, b := range l.Blocks {
 			copy(out[blockAt[li][i]:], b)
 		}
 	}
