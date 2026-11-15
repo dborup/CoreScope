@@ -81,11 +81,11 @@ const OVERLAYS = 2; // terrain + contours
     storage: { 'mc-terrain-dhm': '1', 'mc-contours-dhm': '1' },
     hash: '#/map?lat=56.16&lon=10.2&zoom=15',
     readySelector: '.mc-contour-pane img.leaflet-tile',
-    loadSettleMs: 1500, pauseMs, steps,
+    pauseMs, steps,
   });
   try {
     const normal = await B.runSession(browser, 'normal', opts(2500, NORMAL));
-    const aggressive = await B.runSession(browser, 'aggressive', opts(450, AGGRESSIVE));
+    const aggressive = await B.runSession(browser, 'aggressive', opts(0, AGGRESSIVE));
     for (const [name, r, steps] of [['normal', normal, NORMAL], ['aggressive', aggressive, AGGRESSIVE]]) {
       console.log(`  ${name}: ${r.count} tile requests ${JSON.stringify(r.byLayer)} of a ceiling of ` +
         `${OVERLAYS * B.sessionCeiling(steps, B.VIEWPORT)}; first view ${JSON.stringify(r.firstView)} (${r.elapsedS.toFixed(1)} s wall clock, not used)`);

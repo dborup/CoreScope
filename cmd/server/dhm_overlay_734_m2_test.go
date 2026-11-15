@@ -2,6 +2,9 @@ package main
 
 import (
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -85,6 +88,36 @@ func TestDHM734M2_BudgetDefaultsFitTwoOverlays(t *testing.T) {
 	}
 	if dhmTileRateLimitMax < 10*dhmTileRateLimitDefault {
 		t.Errorf("tileRateLimitPerMin max %d no longer leaves room above the default %d", dhmTileRateLimitMax, dhmTileRateLimitDefault)
+	}
+}
+
+// #798 delta review N4: the budget E2Es assert against their own copies
+// of the shipped defaults; pin those copies to the Go constants so a
+// change on either side cannot leave the E2Es checking a stale number.
+func TestDHM734M2_BudgetE2EsQuoteTheShippedDefaults(t *testing.T) {
+	want := map[string]int{
+		"TILE_BUDGET_PER_MIN": dhmTileRateLimitDefault,
+		"TILE_MAX_IN_FLIGHT":  dhmTileMaxInFlight,
+	}
+	files := map[string][]string{
+		"test-issue-681-dhm-tile-budget-e2e.js":    {"TILE_BUDGET_PER_MIN"},
+		"test-issue-734-dhm-overlay-budget-e2e.js": {"TILE_BUDGET_PER_MIN", "TILE_MAX_IN_FLIGHT"},
+	}
+	for file, names := range files {
+		src, err := os.ReadFile(filepath.Join("..", "..", file))
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		for _, name := range names {
+			m := regexp.MustCompile(`const ` + name + ` = (\d+);`).FindSubmatch(src)
+			if m == nil {
+				t.Errorf("%s: no `const %s = <n>;`", file, name)
+				continue
+			}
+			if got, _ := strconv.Atoi(string(m[1])); got != want[name] {
+				t.Errorf("%s: %s = %d, the Go default is %d", file, name, got, want[name])
+			}
+		}
 	}
 }
 

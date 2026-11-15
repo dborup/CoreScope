@@ -329,7 +329,9 @@ type dhmProxyOptions struct {
 // maxInFlight cap is a multiple of the same budget. #734 M2 raised it from
 // 64, measured with test-issue-734-dhm-overlay-budget-e2e.js: a cold
 // 1920x1080 Map view with a hillshade and the contour lines on (z15) is 90
-// tiles, 45 per overlay, so one full two-overlay view always fits, while a
+// tiles, 45 per overlay, so the usual two-overlay view fits; rare
+// alignments (up to 2x54 = 108 at 1920x1080) and larger screens (2560x1440:
+// up to 154) lean on the busy retry (#728 N3). Meanwhile a
 // flood holds at most 96 goroutines that read no body until they have an
 // upstream slot. An admitted tile waits behind at most 23 others for one
 // of the 4 slots: at the slowest cold tile measured on staging (0.35 s,
