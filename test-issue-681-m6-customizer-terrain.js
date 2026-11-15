@@ -22,7 +22,6 @@
  */
 'use strict';
 
-const vm = require('vm');
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
@@ -35,86 +34,7 @@ function test(name, fn) {
 
 // ── Sandbox ────────────────────────────────────────────────────────────────
 
-function makeStyle() {
-  const props = {};
-  return {
-    _props: props,
-    setProperty(name, value) { props[name] = String(value); },
-    removeProperty(name) { delete props[name]; },
-    getPropertyValue(name) { return props[name] || ''; },
-  };
-}
-
-function load(opts) {
-  opts = opts || {};
-  const store = {};
-  const localStorage = {
-    getItem(k) { return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; },
-    setItem(k, v) { store[k] = String(v); },
-    removeItem(k) { delete store[k]; },
-    _data: store,
-  };
-  const rootStyle = makeStyle();
-  const bodyStyle = makeStyle();
-  const warnings = [];
-  const body = {
-    style: bodyStyle, _attrs: {},
-    setAttribute(n, v) { this._attrs[n] = v; },
-    getAttribute(n) { return this._attrs[n] || null; },
-    removeAttribute(n) { delete this._attrs[n]; },
-    hasAttribute(n) { return n in this._attrs; },
-  };
-  const docEl = {
-    style: rootStyle,
-    getAttribute: (n) => (n === 'data-theme' ? (opts.theme || 'light') : null),
-    setAttribute() {}, removeAttribute() {},
-  };
-  const ctx = {
-    window: {
-      addEventListener() {}, dispatchEvent() {}, _events: [],
-      SITE_CONFIG: {}, setInstanceTitle() {},
-    },
-    document: {
-      readyState: 'complete',
-      createElement: () => ({
-        id: '', textContent: '', innerHTML: '', className: '',
-        setAttribute() {}, appendChild() {}, style: makeStyle(),
-        addEventListener() {}, querySelectorAll: () => [], querySelector: () => null,
-      }),
-      head: { appendChild() {} },
-      body: body,
-      documentElement: docEl,
-      getElementById: () => null,
-      addEventListener() {},
-      querySelector: () => null,
-      querySelectorAll: () => [],
-    },
-    console: Object.assign({}, console, { warn: (...a) => { warnings.push(a.join(' ')); } }),
-    localStorage,
-    setTimeout: (fn) => fn(),
-    clearTimeout() {},
-    Date, Math, Array, Object, JSON, String, Number, Boolean, Set,
-    parseInt, parseFloat, isNaN, isFinite, Infinity, NaN, undefined,
-    MutationObserver: class { observe() {} },
-    HashChangeEvent: class {},
-    CustomEvent: class { constructor(t, o) { this.type = t; this.detail = o && o.detail; } },
-    getComputedStyle: () => ({ getPropertyValue: () => '' }),
-  };
-  ctx.window.localStorage = localStorage;
-  ctx.window.CustomEvent = ctx.CustomEvent;
-  ctx.self = ctx.window;
-  if (opts.dhm !== undefined) ctx.window.MC_DHM_CFG = opts.dhm;
-  vm.createContext(ctx);
-  // index.html order: the shared height rule first, then the customizer.
-  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'antenna-height.js'), 'utf8'), ctx,
-    { filename: 'antenna-height.js' });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'customize-v2.js'), 'utf8'), ctx,
-    { filename: 'customize-v2.js' });
-  const api = ctx.window._customizerV2;
-  assert.ok(api, 'customize-v2.js must define window._customizerV2');
-  if (opts.server) api.init(opts.server);
-  return { api, ctx, localStorage, rootStyle, warnings };
-}
+const { loadCustomizer: load } = require('./tests/customizer-sandbox');
 
 const SOURCE = fs.readFileSync(path.join(__dirname, 'public', 'customize-v2.js'), 'utf8');
 /* The comments in customize-v2.js explain which DHM values stay on the

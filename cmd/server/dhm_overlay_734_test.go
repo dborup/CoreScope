@@ -144,7 +144,11 @@ func TestDHM734_EachIdServesItsOwnLayer(t *testing.T) {
 				if s.hits() != before+1 {
 					t.Fatalf("%s z%d: %s hits %d, want %d", c.id, c.z, c.upLayer, s.hits(), before+1)
 				}
-				assertUpstreamShape(t, c.id, s.queries[len(s.queries)-1], c.upLayer)
+				style := ""
+				if c.upLayer == contourLayer {
+					style = "roed" // #734 M2
+				}
+				assertUpstreamStyledShape(t, c.id, s.queries[len(s.queries)-1], c.upLayer, style)
 				assertNoToken(t, c.id, w, logs)
 			}
 			for _, s := range u.layers {
@@ -579,11 +583,11 @@ func TestDHM734_OpenAPIDocumentsLayersAsOverlayIDs(t *testing.T) {
 
 // ── /api/config/client ─────────────────────────────────────────────────────
 
-// The dhm block lists the overlays the page may offer, terrain and surface,
+// The dhm block lists the overlays the page may offer, terrain, surface
+// and (#734 M2) contours from z14, the threshold the owner measured (T3),
 // each with its zoom range and its own dataset link (#734 Q5, in the #733
-// credit's parts). contours is served but not offered until M2. Nothing
-// else in the block changes.
-func TestDHM734_ClientConfigOffersTerrainAndSurface(t *testing.T) {
+// credit's parts). Nothing else in the block changes.
+func TestDHM734_ClientConfigOffersTheOverlays(t *testing.T) {
 	u := newOverlayUpstreams(t)
 	srv, router := setupTestServer(t)
 	srv.cfg.DHM = DHMConfig{Enabled: true, Token: dhmTestToken}
@@ -606,6 +610,7 @@ func TestDHM734_ClientConfigOffersTerrainAndSurface(t *testing.T) {
 	want := []DHMOverlayClientConfig{
 		{ID: "terrain", MinZoom: 7, MaxZoom: 19, DatasetName: "Danmarks Højdemodel", DatasetURL: "https://dataforsyningen.dk/data/930"},
 		{ID: "surface", MinZoom: 7, MaxZoom: 19, DatasetName: "Danmarks Højdemodel", DatasetURL: "https://dataforsyningen.dk/data/928"},
+		{ID: "contours", MinZoom: 14, MaxZoom: 19, DatasetName: "Danmarks Højdemodel", DatasetURL: "https://dataforsyningen.dk/data/926"},
 	}
 	if len(b.Overlays) != len(want) {
 		t.Fatalf("overlays %s, want %d entries", raw, len(want))
@@ -649,8 +654,8 @@ func TestDHM734_ClientConfigOffersTerrainAndSurface(t *testing.T) {
 	if b.Layer != terrainLayer || b.Attribution != dhm.Attribution || b.DatasetName != dhm.DatasetName || b.DatasetURL != dhm.DatasetURL {
 		t.Fatalf("block changed: layer %q attribution %q dataset %q %q", b.Layer, b.Attribution, b.DatasetName, b.DatasetURL)
 	}
-	// Not offered: contours, and any upstream name beyond the #680 layer.
-	for _, s := range []string{"contours", contourLayer, surfaceLayer, exaggeratedLayer, "dhm_temp", "/data/926", dhmTestToken} {
+	// No upstream name beyond the #680 layer, no style and no token.
+	for _, s := range []string{contourLayer, surfaceLayer, exaggeratedLayer, "dhm_temp", "roed", "styles", dhmTestToken} {
 		if strings.Contains(string(raw), s) {
 			t.Errorf("dhm block carries %q: %s", s, raw)
 		}

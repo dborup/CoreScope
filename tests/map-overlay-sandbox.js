@@ -22,7 +22,8 @@
  *     tile layer has GridLayer's _isValidTile (always true here), which
  *     the #728 ortho layer extends; the tile pane records its attributes;
  *   - the map has a settable view (map.view: zoom and pixel bounds) behind
- *     getZoom and getPixelBounds, and tile layers getTileSize (#728 N3).
+ *     getZoom and getPixelBounds, and tile layers getTileSize (#728 N3);
+ *   - L.stamp, as Leaflet stamps the layer of each control input (#734).
  */
 'use strict';
 const vm = require('vm');
@@ -134,7 +135,12 @@ function makeLeaflet() {
     latLngBounds: (b) => ({ _bounds: b }),
     // _isValidTile is Leaflet's GridLayer bounds check, which the #728 ortho
     // layer extends; here every tile is valid.
-    tileLayer: (url, opts) => evented({ _url: url, options: opts || {}, kind: 'tile', _isValidTile: () => true, getTileSize: () => ({ x: 256, y: 256 }) }),
+    // setUrl as Leaflet's TileLayer.setUrl: the same layer, a new template.
+    tileLayer: (url, opts) => {
+      const l = evented({ _url: url, options: opts || {}, kind: 'tile', _isValidTile: () => true, getTileSize: () => ({ x: 256, y: 256 }) });
+      l.setUrl = (u) => { l._url = u; return l; };
+      return l;
+    },
     control: {
       layers: (base, overlays, opts) => {
         const overlayLabels = Object.keys(overlays || {}).map(name => {
@@ -156,6 +162,10 @@ function makeLeaflet() {
       },
     },
   };
+  // Leaflet's L.stamp: the id L.Control.Layers puts on each input as
+  // input.layerId (#734 M2 maps an input back to its overlay by it).
+  let lastId = 0;
+  L.stamp = (o) => o._leaflet_id || (o._leaflet_id = ++lastId);
   L.tileLayer.wms = (url, opts) => evented({ _url: url, options: opts || {}, kind: 'wms', getTileSize: () => ({ x: 256, y: 256 }) });
   // #724 — what public/masts-layer.js builds: layer groups of canvas
   // circle markers. A group on a map puts its members on that map.

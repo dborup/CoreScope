@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-807-map-hash-size-unknown-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #807 map label for a repeater without hash_size: on the fixture server at 1440x900 every rendered repeater label agrees with its node's hash_size (known size = that many prefix bytes, unknown = 1-byte prefix + ellipsis, hs-unknown class, aria and tooltip), and at 375x560 with a mocked /api/nodes a 2-byte and an unknown-size repeater plus a real tap on the unknown label opening a popup that says size unknown. About 8s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-busiest-repeaters-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
@@ -18,6 +26,14 @@
       "measurementNote": "New suite; #728 M1 Esri World Imagery base map and the Esri opt-in gate on Map and Live with an intercepted map.tiles client-config block, every third-party tile stubbed and a stubbed /api/map/dhm/wms: no Esri entry, customizer option or arcgisonline request while Esri is off; an Esri darkDefault/lightDefault or stored choice while off falls back to OSM with a console warning; with Esri on the imagery is offered, not requested until selected, loads {z}/{y}/{x} tiles to z19 with the exact credit and no filter in either theme; the customizer choice persists across a reload on Map and Live; and the DHM hillshade loads above it with both credits. Review round 3 adds Live's base-map credit: shown with no overlay, through every on/off order of the hillshade and the protected monuments (stubbed agency WMS), after explicit base picks and in-place Auto provider/theme swaps, in one control that no Live panel covers at 390x844, 740x360, 844x390 and 768x1024. About 70s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
     },
     {
+      "file": "test-issue-741-skaermkort-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #741 M1b Dataforsyningen Skaermkort base maps through WMS in EPSG:3857 on Map and Live, with an intercepted map.tiles client-config block and a dummy token, every api.dataforsyningen.dk request answered by a 512 px stub in the browser and every other third-party tile stubbed: off by default and for enabled-without-token and enabled-as-string (no layer-control or customizer entry, no request), a gated-off default falls back to OSM with a warning naming both switches; on, four styles offered and nothing requested until picked; every GetMap carries exactly the allow-listed parameters, 512x512, EPSG:3857, the dummy token once and a bbox of 512 px at the map zoom; the CC BY 4.0 credit with dataset and licence links; grey under the invert filter in dark; the DHM hillshade above it; Auto swaps WMS and OSM on a theme switch both ways; the customizer choice applies in place and after a reload; a 375x560 phone flow picks a style in the layer control and keeps it through a theme switch, a control rebuild and SPA navigation, with a reload back to Auto; nothing requested outside the bounds; at most 20 GetMap requests per 1920x1080 view. About 75s locally; no CI duration measured yet. Assigned to shard 2, next to the #728 base-map suites."
+    },
+    {
       "file": "test-issue-728-ortho-base-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
@@ -32,6 +48,14 @@
       "output": "e2e",
       "meanSeconds": 0,
       "measurementNote": "New suite; #733 DHM credit compliance with an intercepted map.dhm client-config block (credit link fields + profile: true), a stubbed /api/map/dhm/wms tile and a stubbed /api/terrain/profile: on Map and Live the hillshade credit names Klimadatastyrelsen, links the Danmarks Hojdemodel dataset and the CC BY 4.0 licence with target=_blank and rel=noopener, renders exactly the server's plain credit text, is visible and uncovered, and goes away with the overlay; a pre-#733 block without the link fields still shows the plain credit with no links; the profile chart footer carries the same two links plus the 'data bearbejdet' derived note, exactly once; and at 360x740 that footer stays inside the panel and the viewport, legible and uncovered, with both links at least 44px and hit by themselves. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds, next to the #728 credit suite."
+    },
+    {
+      "file": "test-issue-737-skraafoto-viewer-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #737 M2 Skraafoto (oblique aerial photo) viewer with an intercepted skraafoto client-config block (and dhm with profile: true), stubbed /api/skraafoto/search and /api/skraafoto/preview/{collection}/{item} in the M1 shapes, canvas-drawn JPEG previews and every other host refused: the gate (no block, a node without a fix, the node list), the node page dialog (loading, newest year facing north, five directions, the year selector without 2017, date, privacy note, credit links, Full resolution), lazy previews, a year change, Escape and Close focus return, the hash deep link and a cold deep link, search 429/503/502 and preview 503, an empty answer, the side pane, the Path profile A/B/clicked chart point (#781 mapping) and an unmoved head and chart, and real taps from a cold start at 375x560 and 640x360 above the bottom nav. About 15s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds, next to the #733 credit suite."
     },
     {
       "file": "test-issue-738-foreign-fill-ui-e2e.js",
@@ -66,6 +90,22 @@
       "measurementNote": "New suite; #681 M3 / #682 F3 DHM tile budget: a normal and an aggressive one-minute Map session at 1920x1080 with the overlay on (intercepted dhm client-config block, stubbed /api/map/dhm/wms), counting tile requests against the default map.dhm.tileRateLimitPerMin. About 50s locally; no CI duration measured yet. Assigned to shard 1 next to #680."
     },
     {
+      "file": "test-issue-734-dhm-overlays-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #734 M2 DHM hillshade pair and contour lines on Map and Live with an intercepted dhm client-config block (dhm.overlays), a stubbed /api/map/dhm/wms per overlay id and stubbed third-party tiles: in light and dark, checking surface unchecks terrain and the requests switch layers=terrain to layers=surface, the hash and storage follow and survive a reload, contours is its own toggle above the hillshade, every request has exactly the allow-listed keys, and each credit links its own dataset and the licence, visible and uncovered; no contour request below z14; and a real phone flow by taps from a cold start at 375x560 and 560x375. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the #680/#681 DHM suites."
+    },
+    {
+      "file": "test-issue-734-dhm-overlay-budget-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #734 M2 DHM tile budget with two overlays (hillshade + contours) from z15 at 1920x1080: a normal and an aggressive session against the default map.dhm.tileRateLimitPerMin and the cold first view against the admission bound. About 45s locally; no CI duration measured yet. Assigned to shard 1 next to #681's budget suite."
+    },
+    {
       "file": "test-issue-681-profile-tool-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },
@@ -92,6 +132,14 @@
       "measurementNote": "New suite; #681 M6 customizer terrain settings with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile that resolves ha/hb/model the way the server does: the five antenna-height defaults and the elevation-model select on the Display tab, the six chart colours on the Theme tab in light and dark, a changed antenna default re-measuring and redrawing an open profile without overruling an operator-set height or reaching the link, a changed chart colour becoming the chart's computed fill, a terrain-only default opening a terrain-only profile while a link that states the model still wins, 48px touch targets at 360x740 and 740x360, the export carrying the terrain section and no token with nothing under map.dhm in the client, and axe plus measured label contrast in light and dark. Review round 2 (PR#714) adds: a hex antenna height planted in storage is no default in the profile or the customizer, a pick over the translucent clutter colour keeps its alpha, and the Terrain Profile section is hidden with the profile off or no dhm block. About 85s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681 DHM suites."
     },
     {
+      "file": "test-issue-790-profile-mobile-pick-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #790 Map Path profile picking on phones with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile: at 375x667, 390x844, 360x740 and 667x375 with touch, after A the panel is a compact bar (the next step, Cancel and Close at 48px, no body, no chip) covering at most a third of the map, a tap on the map above it sets B in one request and the panel expands with the chart, Move A is compact while pending and expands after the tap, Cancel during Move B keeps B with no request, and Cancel with only A resets the profile on the Map page; axe on the bar in light and dark; the #781 hover dot after a compact Move B and back. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other #681/#721/#781 profile suites."
+    },
+    {
       "file": "test-issue-721-move-endpoints-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },
@@ -106,6 +154,14 @@
       "output": "e2e",
       "meanSeconds": 0,
       "measurementNote": "New suite; #727 M1 shareable /p links for the Map Path profile with an intercepted dhm client-config block (profile: true, share on or off) and a stubbed /api/terrain/profile: /p?profile=... lands on #/map with the panel open and one request carrying only the allow-listed keys, one document request and app.js loaded once with every asset below 400, Back leaves /p behind, the copy button hands out a /p link with dhm.share (and that link reopens the profile) and the #/map link without it, the raw /p HTML for a crawler User-Agent has the handoff script and filled OG tags, /p/ is a 301 to /p, and the same landing at 360x740. About 15s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681/#721 DHM suites."
+    },
+    {
+      "file": "test-issue-727-m4-share-customizer-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #727 M4 share previews in the customizer's Terrain Profile section with an intercepted dhm client-config block (profile, share and dhm.card) and a stubbed /api/terrain/profile: the switch (on by default), the operator's card theme and names (dark/shown and light/hidden) and the one palette line; off is stored as terrain.shareLinks false, survives a reload and makes Copy link hand out the #/map link, on again clears the override and hands out the /p link, all without re-measuring the open profile; resetAll restores it; no switch without dhm.share and none reachable with the Display tab disabled; the phone flow at 375x560 through the bottom nav's More sheet (48px row, a tap toggles and stores, no sideways overflow); axe in light and dark. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other #681/#727 DHM suites."
     },
     {
       "file": "test-issue-727-share-preview.js",
@@ -134,6 +190,14 @@
       "output": "e2e",
       "meanSeconds": 0,
       "measurementNote": "New suite; #781 Map Path profile hover cursor with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile: hovering the chart shows the dashed line at the sample under the pointer, the readout (distance, terrain, surface, clearance) and one dot on the drawn path at that fraction from A to B within 1.5 px; moving keeps the same dot; leaving hides all three; arrow keys step one sample and Shift ten with a polite readout; a touch drag at 360x740 moves the dot and it stays after the lift; 500 synthetic moves in one task cost one update and no chart rebuild, and spread over frames at most one per frame; Close and three Map visits leave no cursor listener, line or dot. About 40s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681/#721/#727/#746 DHM suites."
+    },
+    {
+      "file": "test-issue-794-half-profile-saved-view-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #794 a half-profile link from node detail keeps the viewer's saved Map view, with an intercepted dhm client-config block (profile: true) and /api/terrain/profile answered 503 (B is never picked): from a stored view near A (an animated pan) and far from it (an instant reset), at 1440x900 and on a 375x560 touch phone, entering through the node-detail action leaves localStorage map-view untouched once the pan to A has ended, a plain #/map and a reload open the stored view, and a pan by hand (mouse drag, or a one-finger CDP touch drag) on the half-profile page is saved. About 15s locally; no CI duration measured yet. Assigned to shard 1 next to the other #681/#746/#781 profile suites."
     },
     {
       "file": "test-issue-730-buildings-ui-e2e.js",

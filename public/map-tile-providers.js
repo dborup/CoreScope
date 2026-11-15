@@ -2,7 +2,8 @@
  *
  * Scope:
  *   - Multiple providers: OSM (default), Carto, Stamen, OpenTopoMap, USGS,
- *     Esri. OpenTopoMap, USGS and Esri are opt-in (map.tiles.providers.*.enabled).
+ *     Esri, Dataforsyningen (#741 Skærmkort, a WMS). OpenTopoMap, USGS, Esri
+ *     and Dataforsyningen are opt-in (map.tiles.providers.*.enabled).
  *   - MC_setDarkTileProvider(id) / MC_setLightTileProvider(id) persist per-browser
  *     to localStorage and dispatch `mc-tile-provider-changed`.
  *   - Resolves localStorage → server default → 'osm-dark' / 'osm-standard' (#332).
@@ -12,7 +13,7 @@
  *     plus the optional DHM terrain hillshade (#680), protected ancient
  *     monuments (#723) and Mastedatabasen antenna site (#724) overlays.
  *
- * No new deps — URL-only providers.
+ * No new deps — tile-URL and WMS providers, both built by createBaseLayer.
  */
 (function () {
   'use strict';
@@ -85,6 +86,45 @@
   var ESRI_IMAGERY_URL = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
   var ESRI_IMAGERY_ATTRIBUTION = ESRI_POWERED_BY + 'Tiles © Esri — Source: Esri, Vantor, Earthstar Geographics, and the GIS User Community';
 
+  /* #741 M1b — Skærmkortet from Klimadatastyrelsen / Dataforsyningen. It
+   * has no Web Mercator WMTS, so it comes from the one WMS that serves all
+   * three variants in EPSG:3857 (topo_skaermkort_DAF), built by the shared
+   * factory's WMS branch.
+   *   - The browser fetches the tiles itself, like Carto and Esri, with the
+   *     operator's base-map token: map.tiles.providers.dataforsyningen.token,
+   *     client-visible by design and never map.dhm.token (the server drops
+   *     a value that contains the DHM token). The gateway accepts the
+   *     parameter only as `token`/`TOKEN`, so it sits on the base URL, where
+   *     no Leaflet option can rename it.
+   *   - 512 px tiles: a 256 px GetMap renders each tile alone and cuts the
+   *     labels at its edges; 512 px halves the cuts and is a quarter of the
+   *     requests (there are no cache headers, so every pan is a fresh
+   *     render). Leaflet derives a WMS bbox from the tile's coordinates and
+   *     size, so a 512 px tile at zoom z covers its 512 px of that zoom;
+   *     zoomOffset -1 is the usual pairing and only affects a {z} template.
+   *   - Zoom 6-19 is the range the source pyramid has detail for, and the
+   *     bounds are the layers' own WGS84 box, so nothing is requested
+   *     outside Denmark.
+   *   - Dark mode is the grey variant under the existing invert filter: it
+   *     is achromatic, so it inverts to a neutral dark map. */
+  var SKAERMKORT_WMS_URL = 'https://api.dataforsyningen.dk/topo_skaermkort_DAF';
+  var SKAERMKORT_BOUNDS  = [[53.015, 2.47842], [58.6403, 17.5578]];
+  var SKAERMKORT_CREDIT  = {
+    attribution: 'Indeholder data fra Klimadatastyrelsen og GeoDanmark, Skærmkort, CC BY 4.0',
+    datasetName: 'Skærmkort', datasetUrl: 'https://dataforsyningen.dk/data/962',
+    licenseName: 'CC BY 4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/'
+  };
+  // The base-map token as the gate reads it: a non-blank string, trimmed;
+  // '' otherwise. Exact-case keys only, like every other provider block.
+  var _getDataforsyningenToken = function() {
+    var p = _cfg && _cfg.providers && _cfg.providers.dataforsyningen;
+    return (p && typeof p.token === 'string') ? p.token.trim() : '';
+  };
+  var _getSkaermkortUrl = function() { return SKAERMKORT_WMS_URL + '?token=' + encodeURIComponent(_getDataforsyningenToken()); };
+  function _skaermkortWms(layer) {
+    return { url: _getSkaermkortUrl, layers: layer, tileSize: 512, zoomOffset: -1, minZoom: 6, maxZoom: 19, bounds: SKAERMKORT_BOUNDS };
+  }
+
   var BASE_STYLES = {
     'carto-dark': { provider: 'carto', label: 'Carto Dark', url: function() { return _getCartoBase() + '/dark_all/{z}/{x}/{y}{r}.png'; }, invertFilter: null, type: 'dark', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
     'carto-light': { provider: 'carto', label: 'Carto Positron', url: function() { return _getCartoBase() + '/light_all/{z}/{x}/{y}{r}.png'; }, invertFilter: null, type: 'light', attribution: '© OpenStreetMap © CartoDB', maxZoom: 19 },
@@ -101,7 +141,12 @@
     'esri-darkgray-labels': { provider: 'esri', label: 'Esri Dark Gray Canvas', url: function() { return 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'; }, invertFilter: null, type: 'dark', attribution: ESRI_POWERED_BY + 'Tiles © Esri', maxZoom: 19 },
     // #728 — aerial photo: never inverted, so the same tiles serve both themes.
     'esri-imagery': { provider: 'esri', label: 'Esri World Imagery', url: function() { return ESRI_IMAGERY_URL; }, invertFilter: null, type: 'light', attribution: ESRI_IMAGERY_ATTRIBUTION, maxZoom: 19 },
-    'esri-imagery-dark': { provider: 'esri', label: 'Esri World Imagery', url: function() { return ESRI_IMAGERY_URL; }, invertFilter: null, type: 'dark', attribution: ESRI_IMAGERY_ATTRIBUTION, maxZoom: 19 }
+    'esri-imagery-dark': { provider: 'esri', label: 'Esri World Imagery', url: function() { return ESRI_IMAGERY_URL; }, invertFilter: null, type: 'dark', attribution: ESRI_IMAGERY_ATTRIBUTION, maxZoom: 19 },
+    // #741 M1b — WMS styles: a `wms` descriptor instead of a tile `url`.
+    'dataforsyningen-skaermkort': { provider: 'dataforsyningen', label: 'Skærmkort (Denmark)', wms: _skaermkortWms('dtk_skaermkort'), invertFilter: null, type: 'light', attribution: SKAERMKORT_CREDIT.attribution, maxZoom: 19 },
+    'dataforsyningen-skaermkort-graa': { provider: 'dataforsyningen', label: 'Skærmkort grå (Denmark)', wms: _skaermkortWms('dtk_skaermkort_graa'), invertFilter: null, type: 'light', attribution: SKAERMKORT_CREDIT.attribution, maxZoom: 19 },
+    'dataforsyningen-skaermkort-daempet': { provider: 'dataforsyningen', label: 'Skærmkort dæmpet (Denmark)', wms: _skaermkortWms('dtk_skaermkort_daempet'), invertFilter: null, type: 'light', attribution: SKAERMKORT_CREDIT.attribution, maxZoom: 19 },
+    'dataforsyningen-skaermkort-graa-dark': { provider: 'dataforsyningen', label: 'Skærmkort grå (Denmark)', wms: _skaermkortWms('dtk_skaermkort_graa'), invertFilter: INVERT_CSS, type: 'dark', attribution: SKAERMKORT_CREDIT.attribution, maxZoom: 19 }
   };
 
   var REGISTRY = {};
@@ -115,13 +160,17 @@
    * fallback), so the map still works. Say so once per page, naming the
    * switch, so an operator who upgraded past the Esri opt-in can find it. */
   var _warnedDefaults = {};
+  // What switches a gated provider on, when it is more than `enabled`.
+  var GATE_HINT = {
+    dataforsyningen: 'set map.tiles.providers.dataforsyningen.enabled: true and a non-empty map.tiles.providers.dataforsyningen.token'
+  };
   function _warnUnavailableDefault(key, id) {
     if (typeof id !== 'string' || !id || _hasId(id)) return;
     if (_warnedDefaults[key + '=' + id]) return;
     _warnedDefaults[key + '=' + id] = true;
     var style = Object.prototype.hasOwnProperty.call(BASE_STYLES, id) ? BASE_STYLES[id] : null;
     var why = style
-      ? 'its provider is not enabled (set map.tiles.providers.' + style.provider + '.enabled: true)'
+      ? 'its provider is not enabled (' + (GATE_HINT[style.provider] || 'set map.tiles.providers.' + style.provider + '.enabled: true') + ')'
       : 'it is not a known tile style';
     try {
       if (typeof console !== 'undefined' && console.warn) {
@@ -142,6 +191,10 @@
     // licensed under the Esri Master License Agreement, so an operator has
     // to switch it on deliberately; only the JSON boolean true counts.
     var HAS_ESRI = !!(_cfg && _cfg.providers && _cfg.providers.esri && _cfg.providers.esri.enabled === true);
+    // #741 — the same JSON-boolean opt-in, and a token, like Stamen: without
+    // one every Skærmkort tile is a 403.
+    var HAS_DATAFORSYNINGEN = !!(_cfg && _cfg.providers && _cfg.providers.dataforsyningen &&
+      _cfg.providers.dataforsyningen.enabled === true && _getDataforsyningenToken());
 
     // #332 — resolve the OSM credit against the configured vendor before
     // the registry is handed out. Keeping `attribution` a plain string here
@@ -149,6 +202,8 @@
     // helper, map.js/live.js legacy branches) stays unchanged.
     BASE_STYLES['osm-standard'].attribution = _getOsmAttribution();
     BASE_STYLES['osm-dark'].attribution     = _getOsmAttribution();
+    // #741 — the CC BY 4.0 credit links the dataset and the licence (#733).
+    var skaermkortCredit = buildCredit(SKAERMKORT_CREDIT.attribution, creditLinks(SKAERMKORT_CREDIT));
 
     REGISTRY = {};
     for (var key in BASE_STYLES) {
@@ -159,6 +214,10 @@
       if (style.provider === 'stamen' && HAS_STAMEN) REGISTRY[key] = style;
       if (style.provider === 'usgs' && HAS_USGS) REGISTRY[key] = style;
       if (style.provider === 'esri' && HAS_ESRI) REGISTRY[key] = style;
+      if (style.provider === 'dataforsyningen') {
+        style.attribution = skaermkortCredit;
+        if (HAS_DATAFORSYNINGEN) REGISTRY[key] = style;
+      }
     }
 
     // #332 — the fallback defaults must stay resolvable no matter how the
@@ -288,9 +347,10 @@
    * Returns a plain object so no caller needs to know that a style's `url`
    * may be a lazy function, nor to carry its own fallback URL/attribution:
    *
-   *   { id, url, attribution, refUrl, maxZoom, invertFilter }
+   *   { id, url, attribution, refUrl, maxZoom, invertFilter[, wms] }
    *
-   * `url` is always a string template (or null if a style is malformed) and
+   * `url` is always a string template (or null if a style is malformed, or
+   * a WMS style, #741) and
    * `attribution` always comes from the resolved provider — never from a
    * hard-coded CARTO credit. Re-resolved on every call so config landing
    * after map init still applies.
@@ -314,7 +374,7 @@
     var id       = isLight ? getActiveLightId() : getActiveId();
     var p        = REGISTRY[id] || BASE_STYLES[id] || BASE_STYLES[fallback];
     var u        = p ? (p.url || p.baseUrl) : null;
-    return {
+    var spec = {
       id: id,
       url: (typeof u === 'function' ? u() : u) || null,
       attribution: (p && p.attribution) || BASE_STYLES[fallback].attribution,
@@ -322,6 +382,21 @@
       maxZoom: (p && p.maxZoom) || 19,
       invertFilter: (p && p.invertFilter) || null
     };
+    // #741 M1b — a WMS style hands over its descriptor, as a copy with the
+    // lazy url resolved, so the pages can build it through the factory. A
+    // tile style gets no `wms` key at all: the field is purely additive.
+    if (p && p.wms) spec.wms = _resolveWms(p.wms);
+    return spec;
+  }
+
+  function _resolveWms(w) {
+    var o = {};
+    for (var k in w) {
+      if (!Object.prototype.hasOwnProperty.call(w, k)) continue;
+      o[k] = (k === 'bounds' && Array.isArray(w[k])) ? w[k].map(function (c) { return c.slice(); }) : w[k];
+    }
+    if (typeof o.url === 'function') o.url = o.url();
+    return o;
   }
 
   /* #741 M1a — createBaseLayer(spec, opts): the ONE place a provider spec
@@ -358,7 +433,7 @@
    * the overlays.
    */
   var WMS_SPEC_KEYS = ['layers', 'styles', 'format', 'transparent', 'version',
-                       'crs', 'tileSize', 'minZoom', 'maxZoom', 'bounds'];
+                       'crs', 'tileSize', 'zoomOffset', 'minZoom', 'maxZoom', 'bounds'];
 
   function _withOpts(o, opts) {
     if (opts) {
@@ -378,7 +453,7 @@
       var w = s.wms;
       o.styles = '';
       o.format = 'image/png';
-      o.transparent = false;
+      o.transparent = 'FALSE';
       o.version = '1.3.0';
       o.crs = L.CRS.EPSG3857;
       o.tileSize = 256;
@@ -387,9 +462,49 @@
         if (w[k] === undefined) continue;
         o[k] = (k === 'bounds') ? L.latLngBounds(w[k]) : w[k];
       }
-      return L.tileLayer.wms(typeof w.url === 'function' ? w.url() : w.url, _withOpts(o, opts));
+      // WMS 1.3.0 (OGC 06-042 §7.3.3.9) spells TRANSPARENT as TRUE or
+      // FALSE, and Dataforsyningen enforces it: Leaflet's boolean is sent
+      // as "false", which the Skærmkort service answers with a
+      // ServiceException ("TRANSPARENT must be either TRUE or FALSE")
+      // instead of a tile. Always send the uppercase string.
+      if (typeof o.transparent === 'boolean') o.transparent = o.transparent ? 'TRUE' : 'FALSE';
+      var url = typeof w.url === 'function' ? w.url() : w.url;
+      var layer = L.tileLayer.wms(url, _withOpts(o, opts));
+      layer._mcWmsKey = _wmsKey(w, url);
+      return layer;
     }
     return L.tileLayer(typeof s.url === 'function' ? s.url() : s.url, _withOpts(o, opts));
+  }
+
+  // What makes two WMS descriptors the same layer: the resolved URL (so the
+  // token too) and every option the factory passes on.
+  function _wmsKey(w, url) {
+    var o = {};
+    for (var i = 0; i < WMS_SPEC_KEYS.length; i++) {
+      if (w[WMS_SPEC_KEYS[i]] !== undefined) o[WMS_SPEC_KEYS[i]] = w[WMS_SPEC_KEYS[i]];
+    }
+    return url + ' ' + JSON.stringify(o);
+  }
+
+  /* #741 M1b — syncBaseLayer(group, layer, spec, opts): keeps the base
+   * layer in `group` (Map's and Live's Auto group) showing `spec`, and
+   * returns the layer that does. A tile template changes in place with
+   * setUrl, exactly as before. A WMS style cannot be a template swap: to or
+   * from one, or to another WMS, the layer is rebuilt by the factory and
+   * replaces the old one in the group. The same WMS again (a theme switch
+   * between styles of one layer) keeps the layer, so no tile is fetched
+   * twice. O(1) per theme or provider change. */
+  function syncBaseLayer(group, layer, spec, opts) {
+    var w = spec && spec.wms;
+    var key = w ? _wmsKey(w, typeof w.url === 'function' ? w.url() : w.url) : null;
+    if (layer && (layer._mcWmsKey || null) === key) {
+      if (!key) layer.setUrl(spec.url);
+      return layer;
+    }
+    var next = createBaseLayer(spec, opts);
+    if (layer) group.removeLayer(layer);
+    group.addLayer(next);
+    return next;
   }
 
   /* Optional map overlays: #680 DHM terrain hillshade, #723 protected
@@ -426,6 +541,25 @@
   var TERRAIN_LABEL = 'Terrain (DHM hillshade)';
   var HERITAGE_ID   = 'heritage-monuments';
 
+  /* #734 M2 — the DHM overlays by id, as /api/config/client lists them in
+   * dhm.overlays (cmd/server/dhm_proxy.go). The page sends the id as the
+   * tile request's `layers`, and the proxy maps it to the upstream layer
+   * and style, so no upstream name or style is ever spelled here.
+   *   - terrain and surface are one either-or hillshade ("group"): one
+   *     stored key and one hash parameter, ?terrain=1 (or =terrain) for
+   *     terrain, as since #680, and ?terrain=surface for surface. The
+   *     control shows them as two checkboxes of which at most one is
+   *     checked (_uncheckGroupSiblings); both unchecked is Off.
+   *   - contours is a toggle of its own, ?contours=1, above the hillshade
+   *     and from the server's minZoom, so no tile is asked for below it.
+   * Each credit links its own dataset (#734 Q5). A block without
+   * `overlays` comes from a server before #734: terrain only, as #680. */
+  var DHM_OVERLAY_LABELS = {
+    terrain: function () { return 'Hillshade: terrain (DHM)'; },
+    surface: function () { return 'Hillshade: surface, buildings and trees (DHM)'; },
+    contours: function (cfg) { return 'Contour lines (DHM, zoom ' + cfg.minZoom + '+)'; }
+  };
+
   // A path on this server: not protocol-relative ("//host"), and not
   // "/\host", which browsers read the same way.
   // A same-origin absolute path: "/" and then neither "/" nor "\\" (protocol-
@@ -442,6 +576,29 @@
   }
 
   function _isZoom(z) { return typeof z === 'number' && Math.floor(z) === z && z >= 0 && z <= 22; }
+
+  // The tile layer config of one DHM overlay id: the block's URL, bounds
+  // and credit with the overlay's own zoom range and dataset link, and
+  // `layers` = the id. null while the server does not offer it.
+  function getDHMOverlayConfig(id) {
+    var c = getTerrainConfig();
+    if (!c) return null;
+    if (!Array.isArray(c.overlays)) {
+      return id === 'terrain' ? Object.assign({}, c, { layers: c.layer, label: TERRAIN_LABEL }) : null;
+    }
+    for (var i = 0; i < c.overlays.length; i++) {
+      var e = c.overlays[i];
+      if (!e || e.id !== id || !DHM_OVERLAY_LABELS[id]) continue;
+      if (!_isZoom(e.minZoom) || !_isZoom(e.maxZoom) || e.maxZoom > 19 || e.minZoom > e.maxZoom) return null;
+      var cfg = Object.assign({}, c, {
+        layers: id, minZoom: e.minZoom, maxZoom: e.maxZoom,
+        datasetName: e.datasetName, datasetUrl: e.datasetUrl
+      });
+      cfg.label = DHM_OVERLAY_LABELS[id](cfg);
+      return cfg;
+    }
+    return null;
+  }
 
   function getHeritageConfig() {
     var c = window.MC_HERITAGE_CFG;
@@ -471,11 +628,33 @@
   var OVERLAYS = [
     {
       id: TERRAIN_ID, storageKey: 'mc-terrain-dhm', hashParam: 'terrain', layerProp: '_mcTerrainLayer',
+      group: 'dhm-hillshade', onValues: ['1', 'terrain'],
       pane: 'mcTerrainPane', paneZ: 250, paneClass: 'mc-terrain-pane', className: 'mc-terrain-tiles', opacity: 0.65,
       retryPlaceholders: true, // #728 N3: a DHM proxy tile
-      config: getTerrainConfig,
-      label: function () { return TERRAIN_LABEL; },
-      layers: function (cfg) { return cfg.layer; }
+      config: function () { return getDHMOverlayConfig('terrain'); },
+      label: function (cfg) { return cfg.label; },
+      layers: function (cfg) { return cfg.layers; }
+    },
+    {
+      // #734 M2: the surface hillshade, the terrain one's either-or twin
+      // (same key, parameter, pane and opacity).
+      id: 'dhm-surface', storageKey: 'mc-terrain-dhm', hashParam: 'terrain', layerProp: '_mcSurfaceLayer',
+      group: 'dhm-hillshade', onValues: ['surface'],
+      pane: 'mcTerrainPane', paneZ: 250, paneClass: 'mc-terrain-pane', className: 'mc-surface-tiles', opacity: 0.65,
+      retryPlaceholders: true,
+      config: function () { return getDHMOverlayConfig('surface'); },
+      label: function (cfg) { return cfg.label; },
+      layers: function (cfg) { return cfg.layers; }
+    },
+    {
+      // #734 M2: contour lines, drawn as served (opacity 1) between the
+      // hillshade (250) and the monuments (260).
+      id: 'dhm-contours', storageKey: 'mc-contours-dhm', hashParam: 'contours', layerProp: '_mcContourLayer',
+      pane: 'mcContourPane', paneZ: 255, paneClass: 'mc-contour-pane', className: 'mc-contour-tiles', opacity: 1,
+      retryPlaceholders: true,
+      config: function () { return getDHMOverlayConfig('contours'); },
+      label: function (cfg) { return cfg.label; },
+      layers: function (cfg) { return cfg.layers; }
     },
     {
       // Protection-zone polygons under the monument points. The WMS draws
@@ -507,11 +686,41 @@
     }
   ];
 
-  function resolveOverlayOn(hashValue, stored, defaultOn) {
-    if (hashValue === '1') return true;
-    if (hashValue === '0') return false;
-    if (stored === '1' || stored === '0') return stored === '1';
+  /* Whether an overlay is on: a hash value the parameter knows wins, then a
+   * known stored value, then the default. `onValues` are the values that
+   * mean this overlay and `knownValues` every value of its parameter
+   * (#734: the hillshade pair shares one); both default to #680's '1' and
+   * '1'/'0'. */
+  function resolveOverlayOn(hashValue, stored, defaultOn, onValues, knownValues) {
+    var onv = onValues || ['1'], known = knownValues || ['1', '0'];
+    if (known.indexOf(hashValue) >= 0) return onv.indexOf(hashValue) >= 0;
+    if (known.indexOf(stored) >= 0) return onv.indexOf(stored) >= 0;
     return !!defaultOn;
+  }
+
+  function _onValues(o) { return o.onValues || ['1']; }
+
+  // o and the overlays sharing its hash parameter (o may be outside
+  // OVERLAYS, like the ortho pick).
+  function _paramOverlays(o) {
+    return [o].concat(OVERLAYS.filter(function (m) { return m !== o && m.hashParam === o.hashParam; }));
+  }
+
+  // Every value of o's hash parameter: '0' and each overlay's on values.
+  function _knownValues(o) {
+    var known = ['0'];
+    _paramOverlays(o).forEach(function (m) { known = known.concat(_onValues(m)); });
+    return known;
+  }
+
+  // The value stored for hash value v of o's parameter: the first on value
+  // of the overlay v means ('terrain' is stored as #680's '1'), else '0'.
+  function _canonicalValue(o, v) {
+    var ms = _paramOverlays(o);
+    for (var i = 0; i < ms.length; i++) {
+      if (_onValues(ms[i]).indexOf(v) >= 0) return _onValues(ms[i])[0];
+    }
+    return '0';
   }
 
   function _hashParts() {
@@ -520,13 +729,19 @@
     return { base: qi >= 0 ? hash.slice(0, qi) : hash, params: new URLSearchParams(qi >= 0 ? hash.slice(qi + 1) : '') };
   }
 
-  function _readOverlayPref(o) {
+  function _rawOverlayPref(o) {
     var hv = null, stored = null;
     try { hv = _hashParts().params.get(o.hashParam); } catch (_) {}
     try { stored = window.localStorage && window.localStorage.getItem(o.storageKey); } catch (_) {}
-    var on = resolveOverlayOn(hv, stored, typeof o.defaultOn === 'function' ? o.defaultOn() : o.defaultOn);
-    if (hv === '1' || hv === '0') {
-      try { if (window.localStorage) window.localStorage.setItem(o.storageKey, on ? '1' : '0'); } catch (_) {}
+    return { hv: hv, stored: stored };
+  }
+
+  function _readOverlayPref(o) {
+    var p = _rawOverlayPref(o), known = _knownValues(o);
+    var on = resolveOverlayOn(p.hv, p.stored, typeof o.defaultOn === 'function' ? o.defaultOn() : o.defaultOn,
+      _onValues(o), known);
+    if (known.indexOf(p.hv) >= 0) {
+      try { if (window.localStorage) window.localStorage.setItem(o.storageKey, _canonicalValue(o, p.hv)); } catch (_) {}
     }
     return on;
   }
@@ -543,10 +758,16 @@
 
   // replaceState, so the SPA router does not re-run on the hash rewrite.
   function _saveOverlayPref(o, on) {
-    try { if (window.localStorage) window.localStorage.setItem(o.storageKey, on ? '1' : '0'); } catch (_) {}
+    if (!on && o.group) {
+      // A hillshade turned off while the other one is the choice (the
+      // control switching terrain → surface) leaves that choice alone.
+      var p = _rawOverlayPref(o);
+      if (!resolveOverlayOn(p.hv, p.stored, true, _onValues(o), _knownValues(o))) return;
+    }
+    try { if (window.localStorage) window.localStorage.setItem(o.storageKey, on ? _onValues(o)[0] : '0'); } catch (_) {}
     try {
       var h = _hashParts();
-      if (on) h.params.set(o.hashParam, '1');
+      if (on) h.params.set(o.hashParam, _onValues(o)[0]);
       else if (o.defaultOn) h.params.set(o.hashParam, '0');
       else h.params.delete(o.hashParam);
       var qs = h.params.toString();
@@ -603,12 +824,15 @@
    * byte-identical to the plain credit — only the markup differs — which
    * matters because Leaflet's control counts, finds and removes a credit by
    * its string. With nothing linked it is the plain credit itself. */
+  // #741: the registry builds the Skærmkort credit when it loads, so a page
+  // (or a test sandbox) whose DOM cannot build one gets the plain credit.
   function buildCredit(text, links) {
     var plain = typeof text === 'string' ? text : '';
     if (!plain || typeof document === 'undefined' || !document.createElement) return plain;
-    var box;
-    try { box = document.createElement('div'); } catch (_) { return plain; }
-    return appendCredit(box, plain, links) ? box.innerHTML : plain;
+    try {
+      var box = document.createElement('div');
+      return appendCredit(box, plain, links) ? box.innerHTML : plain;
+    } catch (_) { return plain; }
   }
 
   /* The credit links an overlay's config offers. An overlay whose owner's
@@ -788,6 +1012,46 @@
     if (_readOverlayPref(o)) map.addLayer(map[o.layerProp]);
   }
 
+  // The overlay whose layer a control input toggles (L.Control.Layers sets
+  // input.layerId = L.stamp(layer)), or null.
+  function _overlayOfInput(map, input) {
+    if (!input) return null;
+    for (var i = 0; i < OVERLAYS.length; i++) {
+      var l = map[OVERLAYS[i].layerProp];
+      if (l && input.layerId === L.stamp(l)) return OVERLAYS[i];
+    }
+    return null;
+  }
+
+  /* #734 M2 — at most one overlay of a group (the hillshade pair) on. When
+   * `input` has just been checked, unchecks the other checked inputs of its
+   * group; returns how many. It runs in the capture phase of the click,
+   * before L.Control.Layers' own handler reads every input, so Leaflet then
+   * removes the old layer and adds the new one in one pass, without a
+   * re-render of the control. Unchecking checks nothing: both off is Off. */
+  function _uncheckGroupSiblings(map, inputs, input) {
+    if (!input || input.type !== 'checkbox' || !input.checked) return 0;
+    var o = _overlayOfInput(map, input);
+    if (!o || !o.group) return 0;
+    var n = 0;
+    for (var i = 0; i < inputs.length; i++) {
+      var other = inputs[i];
+      if (other === input || !other.checked) continue;
+      var m = _overlayOfInput(map, other);
+      if (m && m !== o && m.group === o.group) { other.checked = false; n++; }
+    }
+    return n;
+  }
+
+  function _wireGroupInputs(map, control) {
+    var el = control.getContainer && control.getContainer();
+    if (!el || !el.addEventListener) return;
+    el.addEventListener('click', function (e) {
+      var inputs = el.querySelectorAll('.leaflet-control-layers-overlays input');
+      _uncheckGroupSiblings(map, inputs, e.target);
+    }, true);
+  }
+
   // Puts every offered overlay into `overlays` (label → layer) and drops
   // the layer of any the server no longer offers; layers survive control
   // rebuilds. Returns the offered ids in insertion order, which is the
@@ -946,6 +1210,14 @@
     return L.layerGroup([under, ortho]);
   }
 
+  /* #741 M1b — the base map last picked in a layer control, for the page
+   * session: every control (Map, Live, and the same page again after SPA
+   * navigation) starts from it, and a rebuild restores it whatever the
+   * theme. In memory only, so a reload starts from Auto; across reloads the
+   * customizer's choice applies, as for every non-ortho style. Auto and
+   * the Aerial entry (which has its own pref) clear it. */
+  var _sessionBasePick = null;
+
   // ── Public surface ──────────────────────────────────────────────────────
   
   window.MC_DARK_TILE_DEFAULT           = DEFAULT_ID;
@@ -961,12 +1233,14 @@
   window.MC_getTileSpec                 = getTileSpec;
   // #741 M1a — every base map, on every page, is built here.
   window.MC_createBaseLayer             = createBaseLayer;
+  window.MC_syncBaseLayer               = syncBaseLayer;
   window.MC_getTerrainConfig            = getTerrainConfig;
   window.MC_getHeritageConfig           = getHeritageConfig;
   window.MC_getMastsConfig              = getMastsConfig;
   window.MC_getOrthoConfig              = getOrthoConfig;
   window.MC_ORTHO_BASE_ID               = ORTHO_ID;
   window.MC_resolveOverlayOn            = resolveOverlayOn;
+  window.MC_uncheckGroupSiblings        = _uncheckGroupSiblings;
   window.MC_forgetOverlayPref           = forgetOverlayPref;
   window.MC_setLayerAttribution         = setLayerAttribution;
   window.MC_CREDIT_COMPACT_CLASS        = CREDIT_COMPACT_CLASS;
@@ -1003,9 +1277,7 @@
     var AUTO_LABEL = ' <span title="Follows the app\'s current light/dark theme">Auto</span>';
     var _control   = null;  // current L.control.layers instance
     var _layerMap  = {};    // provider-id → L.tileLayer
-    var _isAuto    = true;  // true when "Auto" is the active selection
-    var _overrideLightId = null;
-    var _overrideDarkId  = null;
+    var _isAuto    = !_sessionBasePick;  // true when "Auto" is the active selection
     // #728 M3 — the "Aerial (Denmark)" entry is the active base layer; the
     // viewer's stored or linked choice is read once, when it is first offered.
     var _orthoOn         = false;
@@ -1043,10 +1315,6 @@
       if (map._mcBaselayerchangeHandler) {
         try { map.off('baselayerchange', map._mcBaselayerchangeHandler); } catch (_) {}
       }
-
-      var isDark       = _isDarkEffective();
-      var activeDarkId  = _overrideDarkId || getActiveId();
-      var activeLightId = _overrideLightId || getActiveLightId();
 
       // Light providers first, then dark — natural grouping in the UI
       var lightIds = Object.keys(REGISTRY).filter(function (id) { return REGISTRY[id].type === 'light'; });
@@ -1105,11 +1373,14 @@
       var overlayIds = _collectOverlays(map, overlays);
       if (!overlayIds.length) overlays = null;
 
-      // A restored Aerial pick goes on the map before the control exists, as
-      // the overlays do (_wireOverlay): added later, it would make
-      // L.Control.Layers re-render its labels and undo the surgery below.
-      if (_orthoOn) {
-        map.addLayer(_layerMap[ORTHO_ID]);
+      // A restored Aerial pick, or (#741) the session's explicit pick, goes
+      // on the map before the control exists, as the overlays do
+      // (_wireOverlay): added later, it would make L.Control.Layers
+      // re-render its labels and undo the surgery below.
+      var restored = _orthoOn ? _layerMap[ORTHO_ID]
+        : (!_isAuto && _sessionBasePick && _layerMap[_sessionBasePick]) || null;
+      if (restored) {
+        map.addLayer(restored);
         try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
       }
 
@@ -1124,6 +1395,7 @@
             try { _decorateOverlay(map, overlayIds[oi], overlayLabels[oi]); } catch (_) {}
           }
         } catch (_) {}
+        try { _wireGroupInputs(map, _control); } catch (_) {}
       }
 
       // DOM surgery: map IDs to human-readable labels, inject separator, set data attributes.
@@ -1158,27 +1430,15 @@
         }
       } catch (_) {}
 
-      // Decide initial active layer
-      if (_orthoOn) {
-        // Already on the map, above.
-      } else if (_isAuto) {
-        // Ensure autoLayerGroup is on the map; explicit layers are off
-        _activateAuto();
-      } else {
-        // Re-select whichever explicit provider was active before rebuild
-        var prevId = isDark ? activeDarkId : activeLightId;
-        var prevLayer = _layerMap[prevId];
-        if (prevLayer) {
-          map.addLayer(prevLayer);
-          try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
-        } else {
-          _activateAuto(); // fallback
-        }
-      }
+      // Decide initial active layer: a restored pick is already on the map,
+      // above; otherwise Auto (also the fallback for a pick that is no
+      // longer offered).
+      if (!restored) _activateAuto();
 
       map._mcBaselayerchangeHandler = function (e) {
         if (e.name === ORTHO_ID) {
           _isAuto = false;
+          _sessionBasePick = null;
           if (!_orthoOn) { _orthoOn = true; _saveOverlayPref(ORTHO_PREF, true); }
           try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
           return;
@@ -1186,6 +1446,7 @@
         if (_orthoOn) { _orthoOn = false; _saveOverlayPref(ORTHO_PREF, false); }
 
         if (e.name === AUTO_KEY) {
+          _sessionBasePick = null;
           _activateAuto();
           return;
         }
@@ -1204,9 +1465,7 @@
         // Hide autoLayerGroup while an explicit layer is active
         try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
 
-        var p = REGISTRY[selectedId];
-        if (p.type === 'light') _overrideLightId = selectedId;
-        else                    _overrideDarkId  = selectedId;
+        _sessionBasePick = selectedId;
 
         // CSS invert filter is handled by the layer's own add/remove events above
       };

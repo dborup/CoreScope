@@ -251,6 +251,8 @@ console.log('\n=== #681 M5: antenna-height source badge ===');
     ['point-default', null, 'default'],
     ['operator-node', null, 'operator'],
     ['operator-role', null, 'operator'],
+    ['dsm-estimate', null, 'estimate'], // #789 M1
+    ['dsm-estimate', 'yours', 'estimate'],
     ['request', 'yours', 'yours'],
     ['request', 'link', 'link'],
     ['request', null, 'link'],
@@ -396,6 +398,28 @@ atest('an operator height shows "operator"', async () => {
   c.settle.resolve(ans);
   await sleep(0);
   assert.strictEqual(badgeOf(dom, 'a'), 'operator');
+});
+
+// #789 M1: the server's surface-model estimate is labelled as such, stays
+// flagged as assumed, and is never echoed back as a request height.
+atest('a surface-model estimate shows "estimate" and its source label', async () => {
+  const { TP: T, dom } = load();
+  const f = deferredFetch();
+  const tool = openTool(T, dom, f);
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_B });
+  const c = f.calls[0];
+  const ans = answerFor(c.url);
+  ans.a = { kind: 'node', groundM: 0, antennaM: 22, antennaSource: 'dsm-estimate', assumed: true };
+  c.settle.resolve(ans);
+  await sleep(0);
+  assert.strictEqual(badgeOf(dom, 'a'), 'estimate');
+  assert.strictEqual(dom.find('tp-assumed-a').textContent, 'Assumed \u2014 estimated from surface model');
+  assert.strictEqual(dom.find('tp-h-a').value, '22');
+  assert.strictEqual(TP.sourceLabel('dsm-estimate', null), 'estimated from surface model');
+  dom.find('tp-model-dtm').fire('click');
+  const url = f.calls[f.calls.length - 1].url;
+  assert.ok(!/[?&]ha=/.test(url), 'the estimate leaked into the request: ' + url);
 });
 
 // ── 5. Copy link ───────────────────────────────────────────────────────────

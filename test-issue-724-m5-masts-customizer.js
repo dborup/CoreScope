@@ -32,6 +32,7 @@ const path = require('path');
 const vm = require('vm');
 const assert = require('assert');
 const { makeSandbox, buildControl } = require('./tests/map-overlay-sandbox');
+const { loadCustomizer: loadCustomizerSandbox } = require('./tests/customizer-sandbox');
 
 let passed = 0, failed = 0;
 const pending = [];
@@ -313,66 +314,18 @@ test('masts-defaults-changed re-pins an open path for the new distance', async (
 
 // ── 6. The customizer ───────────────────────────────────────────────────────
 
-function makeStyle() {
-  const props = {};
-  return {
-    setProperty(name, value) { props[name] = String(value); },
-    removeProperty(name) { delete props[name]; },
-    getPropertyValue(name) { return props[name] || ''; },
-  };
-}
-
-/* customize-v2.js in the sandbox of test-issue-681-m6-customizer-terrain.js,
- * with the real masts-layer.js beside it. MC_getMastsConfig is the
- * registry's validator in the page; here it hands out the block as is (the
- * validator itself is covered in test-issue-724-masts-layer.js). */
+/* customize-v2.js in the shared customizer sandbox (tests/customizer-
+ * sandbox.js), with the real masts-layer.js beside it. MC_getMastsConfig is
+ * the registry's validator in the page; here it hands out the block as is
+ * (the validator itself is covered in test-issue-724-masts-layer.js). */
 function loadCustomizer(opts) {
   opts = opts || {};
-  const store = {};
-  const localStorage = {
-    getItem(k) { return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; },
-    setItem(k, v) { store[k] = String(v); },
-    removeItem(k) { delete store[k]; },
-  };
-  const warnings = [];
-  const events = [];
-  const el = () => ({ id: '', textContent: '', innerHTML: '', className: '', setAttribute() {}, appendChild() {}, style: makeStyle(),
-    addEventListener() {}, querySelectorAll: () => [], querySelector: () => null });
-  const ctx = {
-    window: {
-      addEventListener() {}, dispatchEvent: (ev) => { events.push(ev && ev.type); return true; },
-      SITE_CONFIG: {}, setInstanceTitle() {},
-    },
-    document: {
-      readyState: 'complete', createElement: el, head: { appendChild() {} },
-      body: { style: makeStyle(), setAttribute() {}, getAttribute: () => null, removeAttribute() {}, hasAttribute: () => false },
-      documentElement: { style: makeStyle(), getAttribute: () => 'light', setAttribute() {}, removeAttribute() {} },
-      getElementById: () => null, addEventListener() {}, querySelector: () => null, querySelectorAll: () => [],
-    },
-    console: Object.assign({}, console, { warn: (...a) => { warnings.push(a.join(' ')); } }),
-    localStorage,
-    setTimeout: (fn) => fn(), clearTimeout() {},
-    Date, Math, Array, Object, JSON, String, Number, Boolean, Set, Map,
-    parseInt, parseFloat, isNaN, isFinite, Infinity, NaN, undefined,
-    MutationObserver: class { observe() {} },
-    HashChangeEvent: class {},
-    CustomEvent: class { constructor(t, o) { this.type = t; this.detail = o && o.detail; } },
-    getComputedStyle: () => ({ getPropertyValue: () => '' }),
-  };
-  ctx.window.localStorage = localStorage;
-  ctx.window.CustomEvent = ctx.CustomEvent;
-  ctx.self = ctx.window;
   const cfg = 'cfg' in opts ? opts.cfg : MASTS;
-  ctx.window.MC_getMastsConfig = () => cfg;
-  vm.createContext(ctx);
-  if (!opts.noLayer) {
-    vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'masts-layer.js'), 'utf8'), ctx, { filename: 'masts-layer.js' });
-  }
-  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'antenna-height.js'), 'utf8'), ctx, { filename: 'antenna-height.js' });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'customize-v2.js'), 'utf8'), ctx, { filename: 'customize-v2.js' });
-  const api = ctx.window._customizerV2;
-  if (opts.server) api.init(opts.server);
-  return { api, ctx, localStorage, warnings, events };
+  return loadCustomizerSandbox({
+    server: opts.server,
+    scripts: opts.noLayer ? [] : ['masts-layer.js'],
+    setup: (ctx) => { ctx.window.MC_getMastsConfig = () => cfg; },
+  });
 }
 
 const stored = (c) => JSON.parse(c.localStorage.getItem('cs-theme-overrides') || '{}');

@@ -228,7 +228,9 @@ func cardNames(req terrainRequest) [2]string {
 
 // cardInputs digests everything but the elevations that the picture
 // depends on: the renderer and palette, the display options, both
-// endpoints as drawn, the resolved antenna heights and radio.
+// endpoints as drawn, the resolved antenna heights and radio. A cached
+// dsm-estimate (#789) is part of the resolved height, so v changes when
+// the estimate changes what is drawn.
 func (p *terrainProfiler) cardInputs(req terrainRequest, names [2]string) [16]byte {
 	c := p.card
 	h := sha256.New()
@@ -356,8 +358,8 @@ func (p *terrainProfiler) cardElevation(r *http.Request, req terrainRequest) (te
 	}
 	key := p.elevationKey(req)
 	if data, ok := p.cache.Get(key, p.now()); ok {
-		e, err := decodeTerrainElevation(data, n, both, p.classifies(both))
-		return e, cardReady(e, err), nil
+		e, ready := p.cardDecode(data, n, both, none)
+		return e, ready, nil
 	}
 	c := p.card
 	if !c.budget.take(p.now()) {
@@ -377,8 +379,8 @@ func (p *terrainProfiler) cardElevation(r *http.Request, req terrainRequest) (te
 	}
 	switch {
 	case err == nil:
-		e, derr := decodeTerrainElevation(data, n, both, p.classifies(both))
-		return e, cardReady(e, derr), nil
+		e, ready := p.cardDecode(data, n, both, none)
+		return e, ready, nil
 	case isTerrainBusy(err):
 		return none, false, err
 	case r.Context().Err() != nil:
@@ -388,6 +390,18 @@ func (p *terrainProfiler) cardElevation(r *http.Request, req terrainRequest) (te
 		p.logFailure("terrain share card raster", err)
 	}
 	return none, false, nil
+}
+
+// cardDecode decodes a cached profile for a card, classified exactly when
+// this profiler classifies the model. An entry that does not decode is
+// drawn as the degraded card from none, never from the zero value, whose
+// empty slices buildResponse cannot index (#727 M4).
+func (p *terrainProfiler) cardDecode(data []byte, n int, both bool, none terrainElevation) (terrainElevation, bool) {
+	e, err := decodeTerrainElevation(data, n, both, p.classifies(both))
+	if err != nil {
+		return none, false
+	}
+	return e, cardReady(e, nil)
 }
 
 // cardReady reports whether decoded elevations make a complete card. A

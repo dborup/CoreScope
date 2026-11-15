@@ -83,6 +83,11 @@
   /* The antenna sources the server reports when it had nothing but its own
    * built-in default — the only ones a customizer default may replace. */
   var PROMOTABLE_SOURCES = { 'role-default': true, 'point-default': true };
+  /* #789 M1: the server floors its surface-model estimate at the role
+   * height that would otherwise apply, max(role, surface + 2). The
+   * customizer role height is this viewer's role height, so it gets the
+   * same floor: it replaces an estimate only when it is higher. */
+  var FLOORED_SOURCES = { 'dsm-estimate': true };
 
   function validModel(m) { return m === 'dtm' || m === 'both'; }
 
@@ -116,13 +121,16 @@
 
   /* themeDefaults resolves the customizer's terrain section. Pass the raw
    * section to resolve a specific one; omit it to read the live config.
-   * Junk is not a default: an unusable value falls through to the server. */
+   * Junk is not a default: an unusable value falls through to the server.
+   * shareLinks is the viewer's preview-link switch (#727 M4): only an
+   * explicit false turns it off. */
   function themeDefaults(section) {
     var src = (section === undefined)
       ? (global.SITE_CONFIG && global.SITE_CONFIG.terrain)
       : section;
-    var out = { model: DEFAULT_MODEL, heights: {} };
+    var out = { model: DEFAULT_MODEL, heights: {}, shareLinks: true };
     if (!src || typeof src !== 'object') return out;
+    if (src.shareLinks === false) out.shareLinks = false;
     if (validModel(src.model)) out.model = src.model;
     Object.keys(THEME_HEIGHT_KEYS).forEach(function (role) {
       var h = themeHeightOf(src[THEME_HEIGHT_KEYS[role]]);
@@ -435,6 +443,38 @@
     a.appendChild(el('span', null, 'Terrain profile to…'));
     return a;
   }
+
+  // ── Oblique photo points (#737 M2) ───────────────────────────────────────
+
+  /* endPoint is end 'a' or 'b' of a measured profile as the server
+   * snapped it, or null. */
+  function endPoint(data, side) {
+    var e = (side === 'a' || side === 'b') && data ? data[side] : null;
+    var r = e ? pointRef(e.lat, e.lon) : null;
+    return r ? { lat: r.lat, lon: r.lon } : null;
+  }
+
+  /* pointAt is chart sample i as a map point: the #781 cursor's own
+   * mapping (its fraction of the path, interpolated as the map draws the
+   * line), so the photo is of the point the cursor showed. */
+  function pointAt(data, g, i) {
+    var C = global.TerrainProfileCursor;
+    var a = endPoint(data, 'a'), b = endPoint(data, 'b');
+    if (!C || !g || !g.x || !a || !b || !(i >= 0 && i < g.x.length) || i % 1) return null;
+    var ll = C.latLonAt([a.lat, a.lon], [b.lat, b.lon], C.fraction(g, i));
+    var r = pointRef(ll[0], ll[1]);
+    return r ? { lat: r.lat, lon: r.lon, distanceM: round(Number(g.d[i]), 2) } : null;
+  }
+
+  /* chartIndexAt is the sample under a click at clientX on the plot drawn
+   * in rect: the #781 nearest-sample search. -1 when there is none. */
+  function chartIndexAt(g, rect, clientX) {
+    var C = global.TerrainProfileCursor;
+    if (!C || !g || !g.x || !rect || !(rect.width > 0)) return -1;
+    return C.nearestIndex(g.x, (clientX - rect.left) / rect.width * g.view.w);
+  }
+
+  function fmtDistance(m) { return m >= 1000 ? (m / 1000).toFixed(2) + ' km' : Math.round(m) + ' m'; }
 
   // ── Fitting a linked path into view (#746) ───────────────────────────────
 
@@ -1351,6 +1391,9 @@
   var SOURCE_LABELS = {
     request: 'from this link',
     'operator-node': 'set by the operator for this node',
+    /* #789 M1 — the server's estimate: the surface (roof, treetop) around
+     * a repeater or room plus 2 m, never below the role default. */
+    'dsm-estimate': 'estimated from surface model',
     'operator-role': 'operator default for the role',
     'role-default': 'role default for this node type',
     'point-default': 'default for a map point'
@@ -1387,6 +1430,7 @@
   var HEIGHT_BADGES = {
     default: { label: 'default', title: 'A built-in default for this kind of endpoint, not a measured height.' },
     operator: { label: 'operator', title: 'Set by the operator of this instance (radio.antennaHeightsM).' },
+    estimate: { label: 'estimate', title: 'Estimated from the surface model: the roof or treetop around the node plus 2 m, never below the role default. A mast does not show in the surface model.' },
     yours: { label: 'yours', title: 'Your own height for this endpoint, remembered in this browser.' },
     link: { label: 'link', title: 'Taken from the link you opened.' },
     /* #681 M6 — the customizer's default for this kind of endpoint. Still a
@@ -1398,7 +1442,8 @@
     'role-default': 'default',
     'point-default': 'default',
     'operator-node': 'operator',
-    'operator-role': 'operator'
+    'operator-role': 'operator',
+    'dsm-estimate': 'estimate'
   };
 
   function heightBadge(source, origin) {
@@ -1427,6 +1472,24 @@
     firmware: 'MeshCore firmware default'
   };
 
+  /* #790: what the panel waits for, else null. While an end is still to be
+   * picked — A, B, or the new position of a Move A / Move B (#721) — the
+   * panel is a compact bar (title, this step, Cancel, Close), so on a
+   * phone the map above it stays free to tap. With both ends set and no
+   * move pending it is the full panel. */
+  var PHASE_STATUS = {
+    'pick-a': 'Pick the first point on the map.',
+    'pick-b': 'Pick the second point on the map.',
+    'move-a': 'Pick the new position for A on the map.',
+    'move-b': 'Pick the new position for B on the map.'
+  };
+  function compactPhase(st, moving) {
+    if (!st || !st.a) return 'pick-a';
+    if (!st.b) return 'pick-b';
+    if (moving === 'a' || moving === 'b') return 'move-' + moving;
+    return null;
+  }
+
   /* create builds the tool. The host owns picking and the map; this owns the
    * panel, the request and the deep link. Nothing runs until open(). */
   function create(opts) {
@@ -1451,6 +1514,9 @@
     var open = false, seq = 0, debounceTimer = null, panel = null, nodes = { a: null, b: null };
     // The end whose Move button is armed ('a' | 'b'), else null (#721).
     var moving = null;
+    /* #790: the phase syncCompact last drew (compactPhase), and whether the
+     * viewer folded the finished profile down to its head (the ▾/▴ toggle). */
+    var lastPhase = null, folded = false;
     // Where each height in `state` came from on this side of the wire:
     // 'yours' (typed, or remembered in localStorage), 'link', 'theme' (the
     // customizer's default for this kind of endpoint), or null.
@@ -1465,6 +1531,12 @@
     var ui = {};
     // #781: the hover cursor on the chart now drawn, else null.
     var cursor = null;
+    /* #737 M2: the oblique photo row, only while the server offers the
+     * photos. `drawn` is the profile on the chart with its geometry, and
+     * `picked` the chart point clicked on it; both go with the chart. */
+    var SF = global.Skraafoto;
+    var sfOffered = !!(SF && SF.offered(opts.skraafoto));
+    var drawn = null, picked = null;
 
     /* effectiveState is what we ask the server for: `state` with the
      * customizer's defaults filled into the heights it left empty. */
@@ -1482,13 +1554,16 @@
      * kind, role, antennaM and antennaSource — and reports whether anything
      * moved. An operator value, a remembered height and a link are all more
      * specific and are left alone; a customizer value equal to the server's
-     * own is not worth sending. */
+     * own is not worth sending. A surface-model estimate is replaced only by
+     * a higher customizer value (FLOORED_SOURCES). */
     function adoptThemeDefault(side, end, defs) {
       if (!end || themeH[side] !== null) return false;
       if ((side === 'a' ? state.ha : state.hb) !== null) return false;
-      if (!PROMOTABLE_SOURCES[end.antennaSource]) return false;
+      var floored = FLOORED_SOURCES[end.antennaSource];
+      if (!PROMOTABLE_SOURCES[end.antennaSource] && !floored) return false;
       var h = themeHeight(end, defs);
       if (h === null || h === clampHeight(end.antennaM)) return false;
+      if (floored && !(h > clampHeight(end.antennaM))) return false;
       themeH[side] = h;
       origin[side] = 'theme';
       return true;
@@ -1542,10 +1617,40 @@
       panel.setAttribute('data-testid', 'tp-panel');
 
       var head = el('header', 'tp-head');
-      head.appendChild(el('h3', 'tp-title', 'Path profile'));
+      /* #790 F4: on a finished profile the title is the ▾/▴ fold toggle
+       * (a disclosure button inside the heading), so the title row spends
+       * no extra 48 px on it — the 640 px landscape row has no room left
+       * for one (#784). In the compact bar the title is plain text. */
+      var title = el('h3', 'tp-title');
+      ui.titleText = el('span', '', 'Path profile');
+      title.appendChild(ui.titleText);
+      ui.fold = el('button', 'tp-fold', 'Path profile');
+      ui.fold.type = 'button';
+      // #796 N2: not the same name as the map's "Path profile" toggle.
+      ui.fold.setAttribute('aria-label', 'Path profile details');
+      ui.fold.hidden = true;
+      ui.fold.setAttribute('aria-expanded', 'true');
+      ui.fold.setAttribute('data-testid', 'tp-fold');
+      ui.foldGlyph = el('span', 'tp-fold-glyph', '\u25BE');
+      ui.foldGlyph.setAttribute('aria-hidden', 'true');
+      ui.fold.appendChild(ui.foldGlyph);
+      ui.fold.addEventListener('click', function () {
+        folded = !folded;
+        syncCompact();
+      });
+      title.appendChild(ui.fold);
+      head.appendChild(title);
+      /* #796 F5: the chips have a row of their own inside the title row. It
+       * takes the space between the title and Copy/Close and wraps inside
+       * itself, so no chip combination (or font) can push Close onto a
+       * second line and the chart under the bottom navigation. */
+      var chips = el('div', 'tp-chips');
+      head.appendChild(chips);
       ui.chip = el('span', 'tp-chip');
       ui.chip.setAttribute('data-testid', 'tp-verdict');
-      head.appendChild(ui.chip);
+      // #790: an empty chip is a grey pill that reads as a drag handle.
+      ui.chip.hidden = true;
+      chips.appendChild(ui.chip);
       /* #729: the surface (buildings and trees) verdict, when it is worse
        * than the terrain one. It rides beside the verdict rather than under
        * the chart because "Clear" beside an obvious building is read in the
@@ -1557,11 +1662,11 @@
        * on a plain span is not reliably announced, so it is text. */
       ui.surfaceSep = el('span', 'sr-only', '. ');
       ui.surfaceSep.hidden = true;
-      head.appendChild(ui.surfaceSep);
+      chips.appendChild(ui.surfaceSep);
       ui.surface = el('span', 'tp-chip tp-chip-surface');
       ui.surface.setAttribute('data-testid', 'tp-surface-chip');
       ui.surface.hidden = true;
-      head.appendChild(ui.surface);
+      chips.appendChild(ui.surface);
       /* Plan §3.2: the verdict must read "assumed heights" until the viewer
        * has confirmed both ends. A 10 m error in an assumed antenna height
        * swamps the 0.05 m DHM accuracy and can flip the verdict outright,
@@ -1572,7 +1677,20 @@
       ui.assumed.setAttribute('data-testid', 'tp-assumed-chip');
       ui.assumed.title = 'At least one antenna height is a default, not a measured value. Set both heights to confirm them.';
       ui.assumed.hidden = true;
-      head.appendChild(ui.assumed);
+      chips.appendChild(ui.assumed);
+      /* #790: Cancel, shown only in the compact bar. During a Move it is
+       * the Escape of #721 (the end stays); while picking it resets the
+       * profile, exactly as Close does, on the same page. */
+      ui.cancel = el('button', 'tp-cancel', 'Cancel');
+      ui.cancel.type = 'button';
+      ui.cancel.hidden = true;
+      ui.cancel.setAttribute('data-testid', 'tp-cancel');
+      // Focus goes back to the Move button in syncCompact, for this click
+      // and for Escape alike (#790 F1).
+      ui.cancel.addEventListener('click', function () {
+        if (moving) api.cancelMove(); else api.close();
+      });
+      head.appendChild(ui.cancel);
       ui.copy = el('button', 'tp-close tp-copy');
       ui.copy.type = 'button';
       ui.copy.disabled = true;
@@ -1593,6 +1711,13 @@
       close.addEventListener('click', function () { api.close(); });
       head.appendChild(close);
       panel.appendChild(head);
+      // #790: the compact bar's one line — what to do next. Outside the
+      // body, so collapsing the body can never hide it.
+      ui.pickStatus = el('p', 'tp-pick-status');
+      ui.pickStatus.setAttribute('role', 'status');
+      ui.pickStatus.setAttribute('data-testid', 'tp-pick-status');
+      ui.pickStatus.hidden = true;
+      panel.appendChild(ui.pickStatus);
       ui.copyStatus = el('p', 'tp-copy-status');
       ui.copyStatus.setAttribute('role', 'status');
       ui.copyStatus.setAttribute('data-testid', 'tp-copy-status');
@@ -1600,9 +1725,11 @@
 
       var body = el('div', 'tp-body');
       body.setAttribute('data-testid', 'tp-body');
+      ui.body = body;
       ui.chart = el('div', 'tp-chart');
       ui.chart.setAttribute('data-testid', 'tp-chart');
       body.appendChild(ui.chart);
+      if (sfOffered) body.appendChild(skraafotoRow());
 
       // The server's derived credit, with the dataset and the licence marks
       // as links to the dataset page and the licence itself: the CC BY 4.0
@@ -1773,6 +1900,72 @@
       return { wrap: wrap, name: name, input: input, source: source, badge: badge, move: move };
     }
 
+    /* #737 M2: "Oblique photo" at A, at B, and at the point last clicked
+     * on the chart (or picked with Enter at the keyboard cursor). Under
+     * the chart, not in the head: the title row must not wrap (#784
+     * review), and the chart itself does not move. Hidden until a chart
+     * is drawn, so a panel still waiting for B stays as compact as before
+     * (#790). Asks nothing until a button is pressed. */
+    function skraafotoRow() {
+      ui.sfRow = el('div', 'tp-sf-row');
+      ui.sfRow.setAttribute('role', 'group');
+      ui.sfRow.setAttribute('aria-label', 'Oblique photo');
+      ui.sfRow.setAttribute('data-testid', 'tp-sf-row');
+      ui.sfRow.hidden = true;
+      var lab = el('span', 'tp-sf-label', 'Oblique photo');
+      ui.sfRow.appendChild(lab);
+      function end(side, label) {
+        return function () {
+          var p = endPoint(drawn && drawn.data, side);
+          var ref = state[side];
+          return p && { lat: p.lat, lon: p.lon, label: label + ': ' + endpointLabel(ref, nodes[side] && nodes[side].name) };
+        };
+      }
+      [['a', 'A'], ['b', 'B']].forEach(function (s) {
+        var b = SF.actionButton({ cls: 'tp-seg-btn tp-sf-btn', testid: 'tp-sf-' + s[0], text: s[1], icon: false, cfg: opts.skraafoto,
+          title: 'Oblique aerial photo at ' + s[1], getPoint: end(s[0], s[1]) });
+        b.setAttribute('aria-label', 'Oblique photo at ' + s[1]);
+        ui.sfRow.appendChild(b);
+      });
+      ui.sfPoint = SF.actionButton({ cls: 'tp-seg-btn tp-sf-btn', testid: 'tp-sf-point', text: 'Chart point', icon: false, cfg: opts.skraafoto,
+        getPoint: function () {
+          return picked && { lat: picked.lat, lon: picked.lon, label: 'Profile point, ' + fmtDistance(picked.distanceM) + ' from A' };
+        } });
+      ui.sfRow.appendChild(ui.sfPoint);
+      setPicked(null);
+      ui.chart.addEventListener('click', function (e) {
+        var plot = drawn && e.target && e.target.closest ? e.target.closest('.tp-plot') : null;
+        var svg = plot && plot.querySelector('svg');
+        if (svg) setPicked(pointAt(drawn.data, drawn.g, chartIndexAt(drawn.g, svg.getBoundingClientRect(), e.clientX)));
+      });
+      ui.chart.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' || !drawn || !cursor || cursor.index() === null) return;
+        setPicked(pointAt(drawn.data, drawn.g, cursor.index()));
+      });
+      return ui.sfRow;
+    }
+
+    function setPicked(p) {
+      picked = p || null;
+      if (!ui.sfPoint) return;
+      ui.sfPoint.disabled = !picked;
+      ui.sfPoint.querySelector('.sf-action-text').textContent = picked ? 'Chart point · ' + fmtDistance(picked.distanceM) : 'Chart point';
+      ui.sfPoint.title = picked
+        ? 'Oblique aerial photo at the chart point ' + fmtDistance(picked.distanceM) + ' from A'
+        : 'Click or tap the chart to pick a point; Enter picks the keyboard cursor\'s point.';
+      ui.sfPoint.setAttribute('aria-label', picked ? 'Oblique photo at the chart point, ' + fmtDistance(picked.distanceM) + ' from A'
+        : 'Oblique photo at a chart point: click or tap the chart first');
+    }
+
+    /* setDrawn records the profile now on the chart (null: none), which
+     * drops a point picked on the one before. */
+    function setDrawn(data) {
+      drawn = data ? { data: data, g: chartGeometry(data) } : null;
+      if (!ui.sfRow) return;
+      setPicked(null);
+      ui.sfRow.hidden = !drawn;
+    }
+
     function swapControl() {
       var wrap = el('div', 'tp-field tp-swap-field');
       ui.swap = el('button', 'tp-seg-btn tp-swap', 'Swap A/B');
@@ -1795,6 +1988,48 @@
         b.setAttribute('aria-pressed', moving === pair[0] ? 'true' : 'false');
       });
       if (ui.swap) ui.swap.disabled = !both;
+      syncCompact();
+    }
+
+    /* syncCompact shows the full panel or the compact bar for the phase
+     * (#790). Only visibility changes: the chart, the cursor (#781) and
+     * every control stay built, so a cancelled Move comes back as it was. */
+    function syncCompact() {
+      if (!panel) return;
+      var phase = compactPhase(state, moving);
+      var compact = phase !== null;
+      var shut = compact || folded;
+      var active = doc.activeElement;
+      // Focus inside the body would be stranded once it is hidden.
+      var stranded = shut && active && ui.body.contains && ui.body.contains(active);
+      /* F1: a Move that ends (Cancel, Escape, a pick) hides Cancel; if it
+       * held focus, focus goes back to the Move button the move began at
+       * instead of falling to <body>. */
+      var back = null;
+      if (!compact && active && active === ui.cancel && (lastPhase === 'move-a' || lastPhase === 'move-b')) {
+        back = (lastPhase === 'move-a' ? ui.endA : ui.endB).move;
+      }
+      lastPhase = phase;
+      panel.classList.toggle('tp-compact', compact);
+      panel.classList.toggle('tp-folded', !compact && folded);
+      panel.setAttribute('data-phase', phase || 'ready');
+      ui.body.hidden = shut;
+      ui.copy.hidden = compact;
+      ui.cancel.hidden = !compact;
+      /* Folded, a finished profile keeps its head: the title, the verdict
+       * chips and the verdict as the status line; a real button, not a
+       * drag gesture. */
+      ui.fold.hidden = compact;
+      ui.titleText.hidden = !compact;
+      ui.fold.setAttribute('aria-expanded', folded ? 'false' : 'true');
+      ui.fold.title = folded ? 'Expand the path profile' : 'Collapse the path profile';
+      ui.foldGlyph.textContent = folded ? '\u25B4' : '\u25BE';
+      ui.pickStatus.hidden = !shut;
+      // Folded, the status line carries the verdict the body would show.
+      ui.pickStatus.textContent = compact ? PHASE_STATUS[phase] : (folded ? (ui.chip.title || '') : '');
+      if (compact && stranded && ui.cancel.focus) ui.cancel.focus();
+      else if (stranded && ui.fold.focus) ui.fold.focus();
+      else if (back && back.focus) back.focus();
     }
 
     /* endpointsChanged is the shared tail of a move and a swap: the panel
@@ -1828,8 +2063,11 @@
       if (!ui.chip) return;
       ui.chip.className = 'tp-chip tp-chip-' + chip.tone;
       ui.chip.textContent = chip.label;
+      ui.chip.hidden = !chip.label;
       ui.chip.setAttribute('data-state', chip.state);
       ui.chip.title = chip.detail;
+      // A folded panel shows the verdict as its status line (#790 F4).
+      if (folded) syncCompact();
     }
 
     /* setSurfaceChip shows the second chip and its explanatory line, or
@@ -1879,8 +2117,10 @@
       } catch (_) { /* a hash we cannot write is not worth breaking the tool for */ }
     }
 
+    /* The /p link needs the server's route (opts.shareRoute) and the
+     * viewer's customizer switch, read now so a change needs no reload. */
     function onCopy() {
-      var url = shareURL(state, global.location, opts.shareRoute === true);
+      var url = shareURL(state, global.location, opts.shareRoute === true && themeDefaults().shareLinks);
       if (!url) return;
       copyLink(url, opts.copyText || global.copyToClipboard).then(function (ok) {
         if (!ui.copyStatus) return;
@@ -1971,13 +2211,13 @@
       cursor = null;
     }
 
-    function attachCursor(data) {
+    function attachCursor(data, g) {
       detachCursor();
       var C = global.TerrainProfileCursor;
       if (!C || !opts.onCursor || !ui.chart || !ui.chart.querySelector) return;
       cursor = C.attach({
         plot: ui.chart.querySelector('.tp-plot'),
-        geometry: chartGeometry(data),
+        geometry: g || chartGeometry(data),
         data: data,
         onMove: opts.onCursor
       });
@@ -1986,6 +2226,7 @@
     function setStatus(text, cls) {
       if (!ui.chart) return;
       detachCursor();
+      setDrawn(null);
       ui.chart.textContent = '';
       var p = el('p', 'tp-status ' + (cls || ''), text);
       p.setAttribute('data-testid', 'tp-status');
@@ -2015,7 +2256,8 @@
         // name went through esc() at interpolation time.
         detachCursor();
         ui.chart.innerHTML = buildChart(data, names);
-        attachCursor(data);
+        setDrawn(data);
+        attachCursor(data, drawn.g);
       }
       ui.detail.textContent = chip.detail;
       var phys = data.physics || {};
@@ -2095,6 +2337,7 @@
       open = false;
       seq++;
       detachCursor();
+      setDrawn(null);
       if (debounceTimer) { global.clearTimeout(debounceTimer); debounceTimer = null; }
       state.a = null;
       state.b = null;
@@ -2224,6 +2467,9 @@
       open: function () {
         if (open) return;
         open = true;
+        // A new profile opens unfolded (#790 F4).
+        folded = false;
+        lastPhase = null;
         if (!panel) mount.appendChild(buildPanel());
         panel.classList.add('is-open');
         renderNames();
@@ -2261,6 +2507,8 @@
     FILL_OVERVIEW_M: FILL_OVERVIEW_M,
     ASSUMED_LABEL: ASSUMED_LABEL,
     ENDPOINT: ENDPOINT,
+    // #790: the compact bar's phase, read by the unit tests.
+    compactPhase: compactPhase,
     HASH_PARAM: HASH_PARAM,
     MAX_HEIGHT_M: MAX_HEIGHT_M,
     parseState: parseState,
@@ -2275,6 +2523,11 @@
     offered: offered,
     nodeEntryHash: nodeEntryHash,
     nodeEntryAction: nodeEntryAction,
+    // #737 M2: the node-detail fix rule and the photo points.
+    hasFix: hasFix,
+    endPoint: endPoint,
+    pointAt: pointAt,
+    chartIndexAt: chartIndexAt,
     // #772 F4: the fit margin, read back by tests instead of copied in.
     FIT_MARGIN_PX: FIT_MARGIN_PX,
     heightBadge: heightBadge,
