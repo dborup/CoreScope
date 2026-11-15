@@ -178,6 +178,12 @@ Step descriptions and checklist answers support Markdown (`**bold**`, `*italic*`
 
 User themes take priority over admin themes. Users can reset their personal theme to go back to the admin default.
 
+### Map layer settings
+
+Some of the customizer's Display settings belong to an optional map layer and only appear when the server offers that layer:
+
+- **Ancient Monuments**: the protected ancient monuments overlay and its Path profile warning. See [ancient-monuments.md](ancient-monuments.md).
+
 ## Full Example
 
 ```json
