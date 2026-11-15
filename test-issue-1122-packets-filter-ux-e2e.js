@@ -17,6 +17,9 @@
  */
 'use strict';
 const { chromium } = require('playwright');
+// The fixture is freshened once per shard: pin the packets window so the
+// rows do not depend on when this suite runs in it (#787).
+const { pinPacketsTimeWindow } = require('./tests/e2e-packets-window');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 
@@ -34,6 +37,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     args: ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
   });
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  await pinPacketsTimeWindow(ctx);
   const page = await ctx.newPage();
   page.setDefaultTimeout(8000);
   page.on('pageerror', (e) => console.error('[pageerror]', e.message));
@@ -49,7 +53,8 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       const sel = document.getElementById('fTimeWindow');
       if (sel) { sel.value = '0'; sel.dispatchEvent(new Event('change', { bubbles: true })); }
     });
-    await page.waitForFunction(() => document.querySelectorAll('#pktBody tr').length > 0, { timeout: 8000 });
+    // A packet row: an empty list also has one row, "No packets found" (#787).
+    await page.waitForSelector('#pktBody tr[data-hash]', { state: 'attached', timeout: 8000 });
   });
 
   await step('Filter help: backdrop + modal in viewport + rows still rendered', async () => {

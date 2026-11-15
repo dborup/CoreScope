@@ -296,6 +296,10 @@ type Config struct {
 	// browser receives only the fixed `masts` client block.
 	Masts MastsConfig `json:"-"`
 
+	// Skraafoto is map.skraafoto (#737), lifted out of Map the same way;
+	// the browser receives only the fixed `skraafoto` client block.
+	Skraafoto SkraafotoConfig `json:"-"`
+
 	// Radio holds the link-physics defaults of the terrain profile (#681).
 	Radio *RadioConfig `json:"radio,omitempty"`
 

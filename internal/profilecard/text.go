@@ -16,6 +16,7 @@ import (
 	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
 	"golang.org/x/image/vector"
+	"golang.org/x/text/unicode/norm"
 )
 
 // Text is drawn from the Go fonts, which cover Latin (æøå and the rest of
@@ -328,8 +329,12 @@ func sanitize(s string) string {
 // a name whose glyphs mostly fall outside the Go fonts (CJK, emoji) would
 // print as a row of boxes, so the caller falls back to "Node A". A few
 // unmappable runes in an otherwise drawable name are dropped instead.
+//
+// The name is composed (NFC) first: in NFD a letter and its accent are two
+// runes, and the Go fonts have no glyph for most combining marks, so
+// "Åbenrå" typed on a keyboard that decomposes would lose its rings.
 func (fs *fontSet) cardName(name string) string {
-	s := sanitize(name)
+	s := norm.NFC.String(sanitize(name))
 	total, missing := 0, 0
 	for _, r := range s {
 		if r == ' ' {

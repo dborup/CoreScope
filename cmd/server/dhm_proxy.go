@@ -298,12 +298,14 @@ func (c *Config) extractDHMConfig() {
 }
 
 // extractTypedMapBlocks lifts every typed block out of the client-visible
-// Map: map.dhm (#680), map.heritage (#723) and map.masts (#724).
+// Map: map.dhm (#680), map.heritage (#723), map.masts (#724) and
+// map.skraafoto (#737).
 func (c *Config) extractTypedMapBlocks() {
 	c.extractDHMConfig()
 	c.dropDHMTokenFromTiles()
 	c.extractHeritageConfig()
 	c.extractMastsConfig()
+	c.extractSkraafotoConfig()
 }
 
 // dropDHMTokenFromTiles keeps the DHM token out of the tile config, which

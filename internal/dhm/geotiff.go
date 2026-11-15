@@ -153,6 +153,10 @@ type tiffReader struct {
 	// strip decoder; for a tiled header it may be a prefix, and a read
 	// past buf but inside size is ErrShortHeader rather than malformed.
 	size uint64
+	// image is set by ParseTiledImage (#737): readIFD keeps
+	// imageReadTags instead of readTags, and reads UNDEFINED bytes (the
+	// JPEGTables). The float readers never see either.
+	image bool
 }
 
 // decodeGeoTIFF decodes a DHM GeoTIFF. The returned Grid carries the
@@ -295,14 +299,21 @@ func (r *tiffReader) readIFD(off uint64) (uint64, error) {
 	if err := r.within(off+2, n*12); err != nil {
 		return 0, err
 	}
-	r.fields = make(map[uint16]tiffField, len(readTags))
+	tags := readTags
+	if r.image {
+		tags = imageReadTags
+	}
+	r.fields = make(map[uint16]tiffField, len(tags))
 	for i := uint64(0); i < n; i++ {
 		e := b[off+2+i*12 : off+2+i*12+12]
 		tag, typ, count := r.order.Uint16(e), r.order.Uint16(e[2:]), r.order.Uint32(e[4:])
-		if !readTags[tag] {
+		if !tags[tag] {
 			continue
 		}
 		size := typeSize(typ)
+		if r.image && typ == typeUndefined {
+			size = 1
+		}
 		if size == 0 {
 			// A type the decoder never reads: kept without data, so a tag
 			// it needs fails its type check instead of looking absent.

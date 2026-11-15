@@ -126,11 +126,26 @@ type ProfileConfig struct {
 	MaxInFlight       *int     `json:"maxInFlight"`
 	// Share is the /p share route with per-profile link previews (#727).
 	Share ShareConfig `json:"share"`
+	// Card is the share card, GET /api/terrain/profile.png (#727 M3).
+	Card CardConfig `json:"card"`
 	// ForeignFill fills the samples DHM does not cover from Copernicus
 	// DEM GLO-30 (#738).
 	ForeignFill ForeignFillConfig `json:"foreignFill"`
 	// Buildings tells buildings from trees in the surface (#730).
 	Buildings BuildingsConfig `json:"buildings"`
+}
+
+// CardConfig is config.json `map.dhm.profile.card` (#727 M3): how the
+// share card is drawn and cached. Every field is optional.
+type CardConfig struct {
+	// Theme is "dark" (default: previews mostly sit on dark chat
+	// backgrounds) or "light": which theme.json palette the card uses.
+	Theme string `json:"theme"`
+	// Names puts node names on the card (default true); false draws
+	// "Node A"/"Node B". Hidden identities are never named either way.
+	Names *bool `json:"names"`
+	// CacheEntries bounds the rendered-card cache (default 64).
+	CacheEntries *int `json:"cacheEntries"`
 }
 
 // ForeignFillConfig is config.json `map.dhm.profile.foreignFill` (#738).
