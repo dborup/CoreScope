@@ -27,7 +27,8 @@ import (
 )
 
 // graphScore656PinnedFiles compute the pinned Bridge/Coverage scores or the
-// synthetic input graphs of TestGraphScore629_GoldenBitIdentical.
+// synthetic input graphs of TestGraphScore629_GoldenBitIdentical. A new
+// file that computes those scores or builds those graphs belongs here too.
 var graphScore656PinnedFiles = []string{
 	"bridge_score.go",
 	"coverage_score.go",
@@ -35,11 +36,14 @@ var graphScore656PinnedFiles = []string{
 	"graph_score_561_bench_test.go",
 	"graph_score_561_test.go",
 	"graph_score_629_bench_test.go",
+	"graph_score_629_test.go",
 }
 
 // fusableFloatMulAdds returns "file:line" for every float multiply that is a
 // direct operand of + or - (also += / -=) without an explicit conversion
-// around it, i.e. every site a compiler may legally fuse into an FMA.
+// around it, i.e. every same-expression multiply-add a compiler may fuse
+// into an FMA. A product stored in a local first and added in a later
+// statement is not detected.
 func fusableFloatMulAdds(t *testing.T, files []string) []string {
 	t.Helper()
 	fset := token.NewFileSet()

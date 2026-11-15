@@ -491,7 +491,7 @@ Paginated node list with filtering.
       "last_seen":     string (ISO),
       "first_seen":    string (ISO),
       "advert_count":  number,
-      "hash_size":     number | null,    // latest hash size (1–3 bytes)
+      "hash_size":     number | null,    // latest hash size (1–3 bytes); falls back to the newest size-declaring advert in the DB when none is in the window (#807)
       "hash_size_inconsistent": boolean, // true if flip-flopping
       "hash_sizes_seen": [number] | undefined, // present only if >1 unique size seen
       "last_heard":    string (ISO) | undefined, // from in-memory packets or path relay
