@@ -1058,6 +1058,14 @@
     return L.layerGroup([under, ortho]);
   }
 
+  /* #741 M1b — the base map last picked in a layer control, for the page
+   * session: every control (Map, Live, and the same page again after SPA
+   * navigation) starts from it, and a rebuild restores it whatever the
+   * theme. In memory only, so a reload starts from Auto; across reloads the
+   * customizer's choice applies, as for every non-ortho style. Auto and
+   * the Aerial entry (which has its own pref) clear it. */
+  var _sessionBasePick = null;
+
   // ── Public surface ──────────────────────────────────────────────────────
   
   window.MC_DARK_TILE_DEFAULT           = DEFAULT_ID;
@@ -1116,9 +1124,7 @@
     var AUTO_LABEL = ' <span title="Follows the app\'s current light/dark theme">Auto</span>';
     var _control   = null;  // current L.control.layers instance
     var _layerMap  = {};    // provider-id → L.tileLayer
-    var _isAuto    = true;  // true when "Auto" is the active selection
-    var _overrideLightId = null;
-    var _overrideDarkId  = null;
+    var _isAuto    = !_sessionBasePick;  // true when "Auto" is the active selection
     // #728 M3 — the "Aerial (Denmark)" entry is the active base layer; the
     // viewer's stored or linked choice is read once, when it is first offered.
     var _orthoOn         = false;
@@ -1156,10 +1162,6 @@
       if (map._mcBaselayerchangeHandler) {
         try { map.off('baselayerchange', map._mcBaselayerchangeHandler); } catch (_) {}
       }
-
-      var isDark       = _isDarkEffective();
-      var activeDarkId  = _overrideDarkId || getActiveId();
-      var activeLightId = _overrideLightId || getActiveLightId();
 
       // Light providers first, then dark — natural grouping in the UI
       var lightIds = Object.keys(REGISTRY).filter(function (id) { return REGISTRY[id].type === 'light'; });
@@ -1218,11 +1220,14 @@
       var overlayIds = _collectOverlays(map, overlays);
       if (!overlayIds.length) overlays = null;
 
-      // A restored Aerial pick goes on the map before the control exists, as
-      // the overlays do (_wireOverlay): added later, it would make
-      // L.Control.Layers re-render its labels and undo the surgery below.
-      if (_orthoOn) {
-        map.addLayer(_layerMap[ORTHO_ID]);
+      // A restored Aerial pick, or (#741) the session's explicit pick, goes
+      // on the map before the control exists, as the overlays do
+      // (_wireOverlay): added later, it would make L.Control.Layers
+      // re-render its labels and undo the surgery below.
+      var restored = _orthoOn ? _layerMap[ORTHO_ID]
+        : (!_isAuto && _sessionBasePick && _layerMap[_sessionBasePick]) || null;
+      if (restored) {
+        map.addLayer(restored);
         try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
       }
 
@@ -1271,27 +1276,15 @@
         }
       } catch (_) {}
 
-      // Decide initial active layer
-      if (_orthoOn) {
-        // Already on the map, above.
-      } else if (_isAuto) {
-        // Ensure autoLayerGroup is on the map; explicit layers are off
-        _activateAuto();
-      } else {
-        // Re-select whichever explicit provider was active before rebuild
-        var prevId = isDark ? activeDarkId : activeLightId;
-        var prevLayer = _layerMap[prevId];
-        if (prevLayer) {
-          map.addLayer(prevLayer);
-          try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
-        } else {
-          _activateAuto(); // fallback
-        }
-      }
+      // Decide initial active layer: a restored pick is already on the map,
+      // above; otherwise Auto (also the fallback for a pick that is no
+      // longer offered).
+      if (!restored) _activateAuto();
 
       map._mcBaselayerchangeHandler = function (e) {
         if (e.name === ORTHO_ID) {
           _isAuto = false;
+          _sessionBasePick = null;
           if (!_orthoOn) { _orthoOn = true; _saveOverlayPref(ORTHO_PREF, true); }
           try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
           return;
@@ -1299,6 +1292,7 @@
         if (_orthoOn) { _orthoOn = false; _saveOverlayPref(ORTHO_PREF, false); }
 
         if (e.name === AUTO_KEY) {
+          _sessionBasePick = null;
           _activateAuto();
           return;
         }
@@ -1317,9 +1311,7 @@
         // Hide autoLayerGroup while an explicit layer is active
         try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
 
-        var p = REGISTRY[selectedId];
-        if (p.type === 'light') _overrideLightId = selectedId;
-        else                    _overrideDarkId  = selectedId;
+        _sessionBasePick = selectedId;
 
         // CSS invert filter is handled by the layer's own add/remove events above
       };

@@ -370,6 +370,132 @@ test('D an enabled default is used, with no warning', () => {
   assert.deepStrictEqual(warned, []);
 });
 
+// ── P: a pick in the layer control lasts the session ──────────────────────
+console.log('\n── #741 P: a layer-control pick survives a theme switch, a rebuild and SPA navigation ──');
+
+/* Coordinator decision: no new persistence mechanism. A pick in the layer
+ * control lives in memory for the page session: it survives a theme switch,
+ * a rebuild of the control (config landing late) and leaving the Map or
+ * Live page and coming back (a new map and a new control). A reload starts
+ * from Auto again; across reloads the customizer's choice applies, as for
+ * every other non-ortho style. */
+const SK = 'dataforsyningen-skaermkort-daempet';
+const lastCtl = (map) => map._controls[map._controls.length - 1];
+// What L.Control.Layers does when a base radio is clicked.
+function pick(map, name) {
+  const base = lastCtl(map).base;
+  for (const k of Object.keys(base)) if (k !== name && base[k] && map.hasLayer(base[k])) map.removeLayer(base[k]);
+  if (base[name] && base[name].kind) map.addLayer(base[name]);
+  map.fire('baselayerchange', { name, layer: base[name] });
+}
+const shown = (map) => {
+  const base = lastCtl(map).base;
+  return Object.keys(base).filter(id => map.hasLayer(base[id]));
+};
+function setTheme(ctx, theme) { ctx.document.documentElement.getAttribute = () => theme; }
+
+test('P a pick shows that style, and the Auto group leaves the map', () => {
+  const ctx = makeSandbox({ mapCfg: ON() });
+  const { map } = buildControl(ctx, true);
+  assert.deepStrictEqual(shown(map), ['__auto__'], 'Auto first');
+  pick(map, SK);
+  assert.deepStrictEqual(shown(map), [SK]);
+});
+
+test('P the pick survives a rebuild of the control', () => {
+  const ctx = makeSandbox({ mapCfg: ON() });
+  const { map } = buildControl(ctx, true);
+  pick(map, SK);
+  const before = lastCtl(map);
+  ctx.window.MC_initTileRegistry(true); // config landing late rebuilds every control
+  assert.notStrictEqual(lastCtl(map), before, 'precondition: the control was rebuilt');
+  assert.deepStrictEqual(shown(map), [SK]);
+  assert.strictEqual(lastCtl(map).base[SK].kind, 'wms');
+});
+
+test('P the pick survives a theme switch, and a rebuild after it', () => {
+  const ctx = makeSandbox({ mapCfg: ON() });
+  const { map } = buildControl(ctx, true);
+  pick(map, SK);
+  setTheme(ctx, 'dark');
+  assert.deepStrictEqual(shown(map), [SK], 'a theme switch leaves an explicit pick alone');
+  ctx.window.MC_initTileRegistry(true);
+  assert.deepStrictEqual(shown(map), [SK], 'and a rebuild in the other theme restores the pick, not that theme\'s default');
+});
+
+test('P the pick survives SPA navigation: a new map and control start from it', () => {
+  const ctx = makeSandbox({ mapCfg: ON() });
+  const first = buildControl(ctx, true).map;
+  pick(first, SK);
+  const again = buildControl(ctx, true).map; // back on Map (or on to Live)
+  assert.deepStrictEqual(shown(again), [SK]);
+  pick(again, 'carto-voyager-dark');
+  assert.deepStrictEqual(shown(buildControl(ctx, true).map), ['carto-voyager-dark'], 'any registry style, either theme');
+});
+
+test('P a restored pick is on the map before the control exists (Leaflet would re-render the labels)', () => {
+  const ctx = makeSandbox({ mapCfg: ON() });
+  pick(buildControl(ctx, true).map, SK);
+  const seen = [];
+  const layers = ctx.L.control.layers;
+  ctx.L.control.layers = (base, overlays, opts) => {
+    const c = layers(base, overlays, opts);
+    const addTo = c.addTo;
+    c.addTo = (map) => { seen.push(map.hasLayer(base[SK])); return addTo(map); };
+    return c;
+  };
+  const { map } = buildControl(ctx, true); // SPA navigation
+  ctx.window.MC_initTileRegistry(true);    // and a rebuild (of both maps' controls)
+  assert.ok(seen.length >= 2 && seen.every(Boolean), 'on the map at every control creation: ' + JSON.stringify(seen));
+  assert.deepStrictEqual(shown(map), [SK]);
+});
+
+test('P picking Auto ends it', () => {
+  const ctx = makeSandbox({ mapCfg: ON() });
+  const { map } = buildControl(ctx, true);
+  pick(map, SK);
+  pick(map, '__auto__');
+  assert.deepStrictEqual(shown(buildControl(ctx, true).map), ['__auto__']);
+});
+
+// The #728 Aerial entry (server-proxied ortho tiles), as dhm.ortho sends it.
+const ORTHO_DHM = {
+  enabled: true, url: '/api/map/dhm/wms', layer: 'dhm_terraen_skyggekort', minZoom: 7, maxZoom: 19,
+  bounds: [[54.4265, 7.99125], [57.778, 15.5995]], attribution: 'DHM credit',
+  ortho: { url: '/api/map/dhm/ortho/{z}/{x}/{y}', minZoom: 7, maxZoom: 20,
+    bounds: [[54.4265, 7.99125], [57.778, 15.5995]], attribution: 'Ortho credit' },
+};
+
+test('P picking the Aerial entry ends it too (the Aerial pick has its own pref)', () => {
+  const ctx = makeSandbox({ mapCfg: ON(), dhm: ORTHO_DHM });
+  const { map } = buildControl(ctx, true);
+  pick(map, SK);
+  pick(map, 'dhm-ortho');
+  assert.deepStrictEqual(shown(buildControl(ctx, true).map), ['dhm-ortho'], 'the Aerial pref restores it');
+  ctx.location.hash = '#/map?ortho=0';
+  assert.deepStrictEqual(shown(buildControl(ctx, true).map), ['__auto__'], 'not the Skærmkort pick made before it');
+});
+
+test('P a reload starts from Auto: nothing new is stored', () => {
+  const storage = {};
+  const ctx = makeSandbox({ mapCfg: ON(), storage });
+  pick(buildControl(ctx, true).map, SK);
+  assert.deepStrictEqual(Object.keys(ctx.localStorage._raw).filter(k => k !== 'mc-ortho-base'), [],
+    'no new storage key: ' + JSON.stringify(ctx.localStorage._raw));
+  const reloaded = makeSandbox({ mapCfg: ON(), storage: ctx.localStorage._raw });
+  assert.deepStrictEqual(shown(buildControl(reloaded, true).map), ['__auto__']);
+});
+
+test('P a pick that is no longer offered falls back to Auto', () => {
+  const ctx = makeSandbox({ mapCfg: ON() });
+  const { map } = buildControl(ctx, true);
+  pick(map, SK);
+  ctx.window.MC_MAP_CFG = { tiles: {} };
+  ctx.window.MC_initTileRegistry(true);
+  assert.deepStrictEqual(shown(map), ['__auto__']);
+  assert.deepStrictEqual(shown(buildControl(ctx, true).map), ['__auto__']);
+});
+
 console.log('\n═══════════════════════════════════════');
 console.log('  #741 M1b Skærmkort: ' + passed + ' passed, ' + failed + ' failed');
 console.log('═══════════════════════════════════════');
