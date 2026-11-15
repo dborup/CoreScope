@@ -454,6 +454,33 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 }
 
+// rangeGet classifies its own transport failures through
+// dhm.TransportFailure with the request's context (#773 review finding
+// 5): a caller that leaves mid-request is "canceled", the per-request
+// timeout is "timeout". The flight above it reports the caller's own
+// context, so only a direct read shows this.
+func TestClientRangeGetTransportFailure(t *testing.T) {
+	b := newBucket(t)
+	b.Put(cph.Path(), smallTile(cph))
+	b.Hook = func(w http.ResponseWriter, r *http.Request) bool {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+		return true
+	}
+	c := newTestClient(t, b, func(o *Options) { o.Timeout = 3 * time.Second })
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(30*time.Millisecond, cancel)
+	if _, _, err := c.rangeGet(ctx, cph.Path(), 0, 15, 0, 16); failure(err) != "canceled" {
+		t.Fatalf("cancelled mid-request: %v", err)
+	}
+	c = newTestClient(t, b, func(o *Options) { o.Timeout = 30 * time.Millisecond })
+	if _, _, err := c.rangeGet(context.Background(), cph.Path(), 0, 15, 0, 16); failure(err) != "timeout" {
+		t.Fatalf("per-request timeout: %v", err)
+	}
+}
+
 // A cancelled read stops its upstream request and frees its slot; a
 // read waiting for a slot can be cancelled without reaching upstream; a
 // caller's deadline is "timeout" (mirrors internal/dhm client_ctx_test).
