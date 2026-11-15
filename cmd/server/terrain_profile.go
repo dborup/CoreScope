@@ -47,8 +47,9 @@ package main
 //     abroad, so a mixed profile's surface verdict is "unknown". The
 //     response says which stretches were filled, at which resolution, and
 //     carries the Copernicus credit. A failed fill leaves the profile
-//     partial with no verdict, as before, and is not cached. A path with
-//     no DHM sample still makes no upstream call at all.
+//     partial with no verdict, as before. Its DHM part is cached as
+//     usual; a cache hit tries only the fill again. A path with no DHM
+//     sample still makes no upstream call at all.
 //
 // The endpoint reads node positions from the in-memory node snapshot and
 // observer radios through a read-only query; it writes nothing.
@@ -64,6 +65,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -722,12 +724,10 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					return nil, err
 				}
+				// A profile left partial by a failed fill is kept too:
+				// the DHM part is good, and a hit retries only the fill.
 				enc := e.encode()
-				// A profile left partial by a failed fill is served but
-				// not kept: the next request tries the fill again.
-				if !e.fillFailed {
-					p.cache.Put(key, enc, p.now())
-				}
+				p.cache.Put(key, enc, p.now())
 				return enc, nil
 			})
 			if err != nil {
@@ -738,6 +738,9 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 		if elev, err = decodeTerrainElevation(data, n, tq.both); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
+		}
+		if hit && elev.fillFailed {
+			elev = p.retryFill(r, key, &plan, elev)
 		}
 	}
 	w.Header().Set("X-CoreScope-Cache", state)
@@ -823,7 +826,7 @@ func (s *Server) resolveTerrainEnd(ctx context.Context, ref terrainRef) (terrain
 // terrainElevation is the cached part of a profile: elevations per
 // sample, NaN without data; dsm is nil for model=dtm. fill is the
 // resolution the foreign fill gave the DTM (#738), fillFailed that it
-// was tried and failed (never cached).
+// was tried and failed, so a cache hit tries it again.
 type terrainElevation struct {
 	dtm, dsm   []float32
 	fill       int
@@ -937,6 +940,37 @@ func (p *terrainProfiler) applyFill(ctx context.Context, e *terrainElevation, pl
 	}
 }
 
+// retryFill tries the foreign fill again for a cached profile whose fill
+// failed. The DHM part comes from the cache, so a failing Copernicus
+// never re-fetches DHM (#773 review finding 1). The retry is upstream
+// work: it is charged to the per-client budget like a miss and shared by
+// concurrent callers. A success replaces the cache entry; whatever stops
+// the retry, the cached partial profile e is served as it is.
+func (p *terrainProfiler) retryFill(r *http.Request, key terrainKey, plan *dhm.Plan, e terrainElevation) terrainElevation {
+	if ok, _ := p.limiter.allow(r); !ok {
+		return e
+	}
+	data, _, err := p.flight.Do(r.Context(), key.String()+"|fill", p.deadline, func(ctx context.Context) ([]byte, error) {
+		// The fill writes into its own copy: this caller may leave, and
+		// serve e, while the retry still runs for the others.
+		f := terrainElevation{dtm: slices.Clone(e.dtm), dsm: e.dsm}
+		p.applyFill(ctx, &f, plan, p.startFill(ctx, plan))
+		enc := f.encode()
+		if !f.fillFailed {
+			p.cache.Put(key, enc, p.now())
+		}
+		return enc, nil
+	})
+	if err != nil {
+		return e
+	}
+	f, err := decodeTerrainElevation(data, len(e.dtm), e.dsm != nil)
+	if err != nil {
+		return e
+	}
+	return f
+}
+
 // noteFillFailure counts a failed fill and reports it at most once per
 // terrainRefusalLogEvery, by category: no URL, no upstream text.
 func (p *terrainProfiler) noteFillFailure(err error) {
@@ -948,8 +982,8 @@ func (p *terrainProfiler) noteFillFailure(err error) {
 	p.logf("[dhm] terrain profile foreign fill failed (%s): %d profile(s) left partial since the last report", dhm.FailureReason(err), n)
 }
 
-// encode is n, a flags byte (bit 0: a DSM; bits 1–2: the fill level),
-// then the float32s little-endian.
+// encode is n, a flags byte (bit 0: a DSM; bits 1–2: the fill level;
+// bit 3: the fill failed), then the float32s little-endian.
 func (e terrainElevation) encode() []byte {
 	n := len(e.dtm)
 	out := make([]byte, 5, 5+8*n)
@@ -958,6 +992,9 @@ func (e terrainElevation) encode() []byte {
 		out[4] = 1
 	}
 	out[4] |= byte(e.fill) << 1
+	if e.fillFailed {
+		out[4] |= 1 << 3
+	}
 	for _, s := range [][]float32{e.dtm, e.dsm} {
 		for _, v := range s {
 			out = binary.LittleEndian.AppendUint32(out, math.Float32bits(v))
@@ -971,7 +1008,9 @@ func decodeTerrainElevation(b []byte, n int, both bool) (terrainElevation, error
 	if both {
 		models = 2
 	}
-	if len(b) != 5+4*n*models || int(binary.LittleEndian.Uint32(b)) != n || (b[4]&1 == 1) != both || b[4]>>1 > fillOverview {
+	level, failed := int(b[4]>>1&3), b[4]&(1<<3) != 0
+	if len(b) != 5+4*n*models || int(binary.LittleEndian.Uint32(b)) != n || (b[4]&1 == 1) != both ||
+		b[4]>>4 != 0 || level > fillOverview || (failed && level != fillNone) {
 		return terrainElevation{}, errors.New("terrain cache entry does not match its key")
 	}
 	read := func(off int) []float32 {
@@ -981,7 +1020,7 @@ func decodeTerrainElevation(b []byte, n int, both bool) (terrainElevation, error
 		}
 		return out
 	}
-	e := terrainElevation{dtm: read(5), fill: int(b[4] >> 1)}
+	e := terrainElevation{dtm: read(5), fill: level, fillFailed: failed}
 	if both {
 		e.dsm = read(5 + 4*n)
 	}

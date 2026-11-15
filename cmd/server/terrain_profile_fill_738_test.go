@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -211,28 +212,38 @@ func TestTerrainFill_OutOfExtent(t *testing.T) {
 	checkMixed(t, resp)
 }
 
-// A failed fill degrades to today's partial profile with the DHM part
-// (#738 decision 4), logs the category only, and is not cached: the next
-// request tries again.
-func TestTerrainFill_FailureDegradesAndIsNotCached(t *testing.T) {
+// A failed fill degrades the profile to its DHM part and is logged once
+// by category. The DHM part is cached as usual and only the fill is tried
+// again (#773 review finding 1): five views of a path whose fill keeps
+// failing cost one DHM fetch, not five.
+func TestTerrainFill_FailedFillKeepsDHMCached(t *testing.T) {
 	b := copdemtest.New() // empty: every listed tile is a 404
 	t.Cleanup(b.Close)
-	env, _ := newFillEnv(t, b, dhm.ProfileConfig{})
-	for i := 0; i < 2; i++ {
-		w := env.get(pathQuery(cphPt, malmoPt))
+	env, src := newFillEnv(t, b, dhm.ProfileConfig{})
+	var dhmCalls int64
+	var states []string
+	for i := 0; i < 5; i++ {
+		w := env.get(pathQuery(cphPt, malmoPt, "model=both"))
 		resp := decodeProfile(t, w)
 		if resp.Coverage.State != "partial" || resp.Verdict.State != "unknown" || resp.Coverage.Mixed || resp.Coverage.Fill != nil || resp.AttributionFill != "" {
 			t.Fatalf("request %d: coverage %+v, verdict %s", i, resp.Coverage, resp.Verdict.State)
 		}
-		if got := w.Header().Get("X-CoreScope-Cache"); got != "miss" {
-			t.Fatalf("request %d: cache %q, want miss (a degraded profile is not cached)", i, got)
+		if i == 0 {
+			dhmCalls = src.calls.Load()
 		}
+		states = append(states, w.Header().Get("X-CoreScope-Cache"))
 	}
-	if env.p.cache.Len() != 0 {
-		t.Fatal("degraded profile cached")
+	if dhmCalls == 0 || src.calls.Load() != dhmCalls {
+		t.Fatalf("%d DHM raster calls after five requests, want the first request's %d", src.calls.Load(), dhmCalls)
 	}
-	if b.Requests.Load() < 2 {
-		t.Fatalf("%d bucket requests: the second profile did not try again", b.Requests.Load())
+	if got := strings.Join(states, ","); got != "miss,hit,hit,hit,hit" {
+		t.Fatalf("cache states %s", got)
+	}
+	if env.p.cache.Len() != 1 {
+		t.Fatalf("%d cache entries, want the degraded profile's DHM part", env.p.cache.Len())
+	}
+	if b.Requests.Load() < 5 {
+		t.Fatalf("%d bucket requests: a cached partial profile did not try the fill again", b.Requests.Load())
 	}
 	logs := env.logs.String()
 	if !strings.Contains(logs, "[dhm] terrain profile foreign fill failed (status 404)") {
@@ -240,6 +251,57 @@ func TestTerrainFill_FailureDegradesAndIsNotCached(t *testing.T) {
 	}
 	if strings.Contains(logs, "amazonaws") || strings.Contains(logs, "Copernicus_DSM") || strings.Count(logs, "foreign fill failed") != 1 {
 		t.Fatalf("log names the upstream, or is not throttled: %q", logs)
+	}
+}
+
+// A fill that succeeds on a retry completes the cached profile: the next
+// view is mixed and makes no upstream call at all.
+func TestTerrainFill_RetriedFillCompletesCachedProfile(t *testing.T) {
+	var failing atomic.Bool
+	failing.Store(true)
+	ok := everywhere(999)
+	env, f := newScriptedEnv(t, func(ctx context.Context, p *dhm.Plan) (copdem.Result, error) {
+		if failing.Load() {
+			return copdem.Result{}, dhm.FetchError{Reason: "status 503"}
+		}
+		return ok(ctx, p)
+	})
+	src := env.p.src.(*fakeElevation)
+	if resp := decodeProfile(t, env.get(pathQuery(cphPt, malmoPt))); resp.Coverage.Mixed {
+		t.Fatalf("failed fill served as mixed: %+v", resp.Coverage)
+	}
+	dhmCalls := src.calls.Load()
+	failing.Store(false)
+	for i := 0; i < 2; i++ {
+		w := env.get(pathQuery(cphPt, malmoPt))
+		resp := decodeProfile(t, w)
+		if w.Header().Get("X-CoreScope-Cache") != "hit" || resp.Coverage.State != "full" || !resp.Coverage.Mixed || resp.AttributionFill == "" {
+			t.Fatalf("view %d: cache %q, coverage %+v", i, w.Header().Get("X-CoreScope-Cache"), resp.Coverage)
+		}
+		checkMixed(t, resp)
+	}
+	if f.count() != 2 || src.calls.Load() != dhmCalls {
+		t.Fatalf("%d fills (want the failure and one retry), %d DHM calls (want %d)", f.count(), src.calls.Load(), dhmCalls)
+	}
+}
+
+// The retry is upstream work, so it is charged to the per-client budget
+// like a miss; a client over it still gets the cached partial profile,
+// not a 429, and no fill is tried.
+func TestTerrainFill_RetryOverBudgetServesCachedPartial(t *testing.T) {
+	f := &scriptedFill{fn: func(ctx context.Context, p *dhm.Plan) (copdem.Result, error) {
+		return copdem.Result{}, dhm.FetchError{Reason: "status 503"}
+	}}
+	pc := dhm.ProfileConfig{RateLimitPerMin: intp(1), ForeignFill: dhm.ForeignFillConfig{Enabled: true}}
+	env := newTerrainEnvWith(t, newFakeElevation(t, flatElev(fillDHMHeight)), pc, nil, func(d *terrainProfilerDeps) { d.fill = f })
+	for i := 0; i < 2; i++ {
+		w := env.get(pathQuery(cphPt, malmoPt))
+		if resp := decodeProfile(t, w); w.Code != 200 || resp.Coverage.State != "partial" {
+			t.Fatalf("request %d: %d, coverage %+v", i, w.Code, resp.Coverage)
+		}
+	}
+	if f.count() != 1 {
+		t.Fatalf("%d fills, want only the first request's", f.count())
 	}
 }
 
@@ -587,8 +649,14 @@ func TestTerrainElevationEncodesFill(t *testing.T) {
 			}
 		}
 	}
+	got, err := decodeTerrainElevation(terrainElevation{dtm: []float32{1, 2, 3}, fillFailed: true}.encode(), 3, false)
+	if err != nil || !got.fillFailed || got.fill != fillNone {
+		t.Fatalf("failed fill: %+v %v", got, err)
+	}
 	enc := terrainElevation{dtm: []float32{1, 2, 3}}.encode()
-	for _, flag := range []byte{6, 8, 0x80} {
+	// 6: fill level 3; 10, 12: a failed fill with a fill level; 0x10, 0x80:
+	// unknown bits.
+	for _, flag := range []byte{6, 10, 12, 0x10, 0x80} {
 		bad := append([]byte{}, enc...)
 		bad[4] = flag
 		if _, err := decodeTerrainElevation(bad, 3, false); err == nil {
