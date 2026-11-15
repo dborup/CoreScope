@@ -26,9 +26,10 @@ type MultiPolygon [][][][2]float64
 
 // ErrGeometry is every refusal of a geometry: a type that is not Polygon or
 // MultiPolygon, a polygon without rings, a ring under four positions, a
-// position with fewer than two values or outside the reader's window, or
-// more vertices than the reader's budget. Callers wrap or replace it with
-// their own response-shape error; the detail is never shown to a client.
+// position with fewer than two values or outside the reader's window
+// (ErrOutsideWindow), or more vertices than the reader's budget
+// (ErrVertexBudget). Callers wrap or replace it with their own
+// response-shape error; the detail is never shown to a client.
 var ErrGeometry = errors.New("dhm: unexpected polygon geometry")
 
 // ErrVertexBudget is the refusal of a geometry that would take the reader
@@ -37,6 +38,14 @@ var ErrGeometry = errors.New("dhm: unexpected polygon geometry")
 // a caller that skips a bad feature and reads on (internal/buildings) stops
 // here instead, since every later feature would be refused as well.
 var ErrVertexBudget = fmt.Errorf("%w: vertex budget exceeded", ErrGeometry)
+
+// ErrOutsideWindow is the refusal of a position outside the reader's
+// window. It is an ErrGeometry too. It means the service answered in
+// another CRS or axis order, which affects every feature of the document,
+// so a caller that skips a bad feature refuses the whole document on it
+// (internal/buildings): skipping every footprint of a lat/lon answer would
+// read as "no buildings here".
+var ErrOutsideWindow = fmt.Errorf("%w: position outside the window", ErrGeometry)
 
 // PolygonReader decodes the GeoJSON polygon geometries of one document into
 // EPSG:25832 metres. One reader reads every geometry of one document, so the
@@ -117,8 +126,11 @@ func (r *PolygonReader) read(typ string, coords json.RawMessage) (MultiPolygon, 
 			}
 			pts := make([][2]float64, len(ring))
 			for i, pos := range ring {
-				if len(pos) < 2 || pos[0] < minE || pos[0] > maxE || pos[1] < minN || pos[1] > maxN {
+				if len(pos) < 2 {
 					return nil, ErrGeometry
+				}
+				if pos[0] < minE || pos[0] > maxE || pos[1] < minN || pos[1] > maxN {
+					return nil, ErrOutsideWindow
 				}
 				pts[i] = [2]float64{pos[0], pos[1]}
 			}

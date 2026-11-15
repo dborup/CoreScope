@@ -60,3 +60,31 @@ func TestReadBudgetErrorIsDistinct(t *testing.T) {
 		t.Fatalf("shape error %v reads as a budget error", err)
 	}
 }
+
+// TestReadWindowErrorIsDistinct (#730 M1b): a position outside the window
+// is ErrOutsideWindow, still an ErrGeometry. It means the service answered
+// in another CRS or axis order, which affects every feature of the
+// document, so a caller that skips a bad feature must refuse the document
+// here instead: skipping every footprint of a lat/lon page would report
+// "no buildings" with confidence.
+func TestReadWindowErrorIsDistinct(t *testing.T) {
+	for name, coords := range map[string]string{
+		"lat/lon degrees": `[[[9.42,55.75],[9.43,55.75],[9.43,55.76],[9.42,55.75]]]`,
+		"swapped axes":    `[[[6179000,526000],[6179000,526100],[6179100,526100],[6179000,526000]]]`,
+		"in a hole":       `[` + square + `,[[526040,6179040],[526060,6179040],[526060,7179060],[526040,6179040]]]`,
+	} {
+		_, err := reader(100).Read("Polygon", json.RawMessage(coords))
+		if !errors.Is(err, ErrOutsideWindow) || !errors.Is(err, ErrGeometry) {
+			t.Errorf("%s: err %v, want ErrOutsideWindow wrapping ErrGeometry", name, err)
+		}
+	}
+	for name, tc := range map[string]struct{ typ, coords string }{
+		"ring of three":      {"Polygon", `[[[526000,6179000],[526100,6179000],[526000,6179000]]]`},
+		"one-value position": {"Polygon", `[[[526000],[526100,6179000],[526100,6179100],[526000,6179000]]]`},
+		"point geometry":     {"Point", `[526000,6179000]`},
+	} {
+		if _, err := reader(100).Read(tc.typ, json.RawMessage(tc.coords)); errors.Is(err, ErrOutsideWindow) {
+			t.Errorf("%s: a shape error reads as a window error", name)
+		}
+	}
+}
