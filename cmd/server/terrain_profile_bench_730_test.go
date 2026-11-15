@@ -79,6 +79,21 @@ func BenchmarkTerrainProfileP50(b *testing.B) {
 		benchWantBuilding(b, env, q)
 		benchTerrainP50(b, env.terrainEnv, func(int) string { return q }, "hit")
 	})
+	// #730 M3 (#786 review F2): with the footprint service down, a hit on
+	// the degraded profile retries the building phase alone, on the
+	// cached rasters. Before M3 such a profile was a plain hit for 10
+	// minutes and then a full miss (on/miss), rasters included.
+	b.Run("on/hit-degraded", func(b *testing.B) {
+		env := benchBuildingsEnv(b, dhm.ProfileConfig{})
+		env.ogc.answer = func([4]float64) (int, []byte, bool) { return 503, nil, true }
+		q := pathQuery(dokk1A, dokk1B)
+		env.get(q)
+		rasters := env.src.calls.Load()
+		benchTerrainP50(b, env.terrainEnv, func(int) string { return q }, "hit")
+		if r := env.src.calls.Load(); r != rasters {
+			b.Fatalf("%d rasters fetched by hits", r-rasters)
+		}
+	})
 	b.Run("on/miss", func(b *testing.B) {
 		if b.N > 400 {
 			b.Fatal("at most 400 distinct paths")
