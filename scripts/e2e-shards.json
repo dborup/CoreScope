@@ -90,6 +90,22 @@
       "measurementNote": "New suite; #681 M3 / #682 F3 DHM tile budget: a normal and an aggressive one-minute Map session at 1920x1080 with the overlay on (intercepted dhm client-config block, stubbed /api/map/dhm/wms), counting tile requests against the default map.dhm.tileRateLimitPerMin. About 50s locally; no CI duration measured yet. Assigned to shard 1 next to #680."
     },
     {
+      "file": "test-issue-734-dhm-overlays-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #734 M2 DHM hillshade pair and contour lines on Map and Live with an intercepted dhm client-config block (dhm.overlays), a stubbed /api/map/dhm/wms per overlay id and stubbed third-party tiles: in light and dark, checking surface unchecks terrain and the requests switch layers=terrain to layers=surface, the hash and storage follow and survive a reload, contours is its own toggle above the hillshade, every request has exactly the allow-listed keys, and each credit links its own dataset and the licence, visible and uncovered; no contour request below z14; and a real phone flow by taps from a cold start at 375x560 and 560x375. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the #680/#681 DHM suites."
+    },
+    {
+      "file": "test-issue-734-dhm-overlay-budget-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #734 M2 DHM tile budget with two overlays (hillshade + contours) from z15 at 1920x1080: a normal and an aggressive session against the default map.dhm.tileRateLimitPerMin and the cold first view against the admission bound. About 45s locally; no CI duration measured yet. Assigned to shard 1 next to #681's budget suite."
+    },
+    {
       "file": "test-issue-681-profile-tool-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

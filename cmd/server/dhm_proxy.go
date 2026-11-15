@@ -206,10 +206,9 @@ type DHMOverlayClientConfig struct {
 	DatasetURL  string `json:"datasetUrl"`
 }
 
-// dhmClientOverlayIDs are the overlays offered to the page. The proxy
-// also serves contours, which joins here in #734 M2 once its style and
-// first zoom are settled on staging.
-var dhmClientOverlayIDs = []string{"terrain", "surface"}
+// dhmClientOverlayIDs are the overlays offered to the page: every id the
+// proxy serves (#734 M2 adds contours, from z14).
+var dhmClientOverlayIDs = []string{"terrain", "surface", "contours"}
 
 func dhmOverlayClientConfigs() []DHMOverlayClientConfig {
 	out := make([]DHMOverlayClientConfig, 0, len(dhmClientOverlayIDs))
@@ -435,29 +434,41 @@ type dhmProxyOptions struct {
 }
 
 // dhmTileMaxInFlight is the shipped bound on cold-tile fetch workers
-// (#744): 16x the upstream concurrency of 4, like the profile's
-// maxInFlight cap is a multiple of the same budget. A cold 1920x1080 Map
-// view is 8x5 visible tiles plus Leaflet's edge buffer, so at least one
-// full view always fits, while a flood holds at most 64 goroutines that
-// read no body until they have an upstream slot. An admitted tile waits
-// behind at most 15 others for one of the 4 slots, and the 10 s Timeout
-// still bounds that wait.
-const dhmTileMaxInFlight = 64
+// (#744): 24x the upstream concurrency of 4, like the profile's
+// maxInFlight cap is a multiple of the same budget. #734 M2 raised it from
+// 64, measured with test-issue-734-dhm-overlay-budget-e2e.js: a cold
+// 1920x1080 Map view with a hillshade and the contour lines on (z15) is 90
+// tiles, 45 per overlay, so the usual two-overlay view fits; rare
+// alignments (up to 2x54 = 108 at 1920x1080) and larger screens (2560x1440:
+// up to 154) lean on the busy retry (#728 N3). Meanwhile a
+// flood holds at most 96 goroutines that read no body until they have an
+// upstream slot. An admitted tile waits behind at most 23 others for one
+// of the 4 slots: at the slowest cold tile measured on staging (0.35 s,
+// #734 T9) that is 8.4 s, inside the 10 s Timeout that bounds the wait.
+const dhmTileMaxInFlight = 96
 
 // dhmTileRateLimitDefault is the shipped per-client budget of tiles that
-// miss the server cache, per minute. Measured with
-// test-issue-681-dhm-tile-budget-e2e.js on a 1920×1080 Map with the HTTP
-// cache off (so upper bounds): a normal session — load, three zoom steps
-// in, four pans, two out — requested 308 tiles; an aggressive one through
-// the whole zoom range 8→16→8 with sixteen pans requested 812 in 18 s.
-// 1200 is 3.9× the normal session and covers the aggressive one, so a
-// person using the map never meets it, while a script walking the ~97 M
-// tiles of DHM coverage is held to 20 per second per address.
-const dhmTileRateLimitDefault = 1200
+// miss the server cache, per minute, shared by every overlay. Sized from
+// the tile ceilings of the scripted sessions in tests/dhm-tile-budget.js
+// (a 1920×1080 Map, HTTP cache off, so upper bounds; every step bounded by
+// the tiles its view change can touch, at a person's pace of 2.5 s per
+// view, times 1.3 for flick glides the scripts leave out). One overlay
+// from z8 (test-issue-681-dhm-tile-budget-e2e.js): a normal session —
+// load, three zoom steps in, four pans, two out — has a ceiling of 384
+// tiles in 25 s, 1198/min with the headroom: the earlier 1200 fitted one
+// overlay. Two overlays, a hillshade and the contour lines, from z15
+// (#734 M2, test-issue-734-dhm-overlay-budget-e2e.js): a normal session —
+// two zoom steps in, four pans, two out — has a ceiling of 660 tiles in
+// 22.5 s, 2288/min with the headroom, and an aggressive one 15→19→15 with
+// sixteen pans a ceiling of 1692 as one burst. 2400 is the next round
+// step over 2288, so a person using the map never meets it, while a
+// script walking the ~97 M tiles of DHM coverage is held to 40 per second
+// per address.
+const dhmTileRateLimitDefault = 2400
 
 // dhmTileRateLimitMax bounds map.dhm.tileRateLimitPerMin like
 // profile.rateLimitPerMin bounds its own key (0-6000, 600x its default of
-// 10): about 50x the shipped tile default, comfortably under the point
+// 10): 25x the shipped tile default, comfortably under the point
 // (perMin above ~6e10, where time.Minute/perMin truncates to zero) where
 // the limiter would silently stop limiting (#690 review N2).
 const dhmTileRateLimitMax = 60000

@@ -13,6 +13,17 @@ import (
 // to the upstream service, layer and style. Every test runs against a fake
 // upstream (httptest); none reaches Dataforsyningen.
 
+// wantOverlayQuery is the upstream GetMap query for one tile of an
+// overlay's upstream layer: #680's, with the layer's style. The styles are
+// spelled out here, not taken from the table, so a changed style fails.
+func wantOverlayQuery(layer string, k TileKey) url.Values {
+	q := wantHillshadeQuery(layer, k)
+	if layer == "dhm_kurve_traditionel" {
+		q.Set("styles", "roed") // #734 M2
+	}
+	return q
+}
+
 // overlayTileQuery is the browser's tile query (Leaflet 1.9.4,
 // L.tileLayer.wms) for tile k with layers = layers.
 func overlayTileQuery(layers string, k TileKey) url.Values {
@@ -39,7 +50,8 @@ func TestOverlay734_TableIsExact(t *testing.T) {
 	}{
 		{"terrain", "dhm_DAF", "dhm_terraen_skyggekort", "", 7, 19, "https://dataforsyningen.dk/data/930"},
 		{"surface", "dhm_DAF", "dhm_overflade_skyggekort", "", 7, 19, "https://dataforsyningen.dk/data/928"},
-		{"contours", "dhm_DAF", "dhm_kurve_traditionel", "", 14, 19, "https://dataforsyningen.dk/data/926"},
+		// #734 M2: roed, the one named style that reads on both themes.
+		{"contours", "dhm_DAF", "dhm_kurve_traditionel", "roed", 14, 19, "https://dataforsyningen.dk/data/926"},
 	}
 	ids := make([]string, 0, len(cases))
 	for _, c := range cases {
@@ -220,7 +232,7 @@ func TestOverlayQueryCheck734_DAF(t *testing.T) {
 	c := newTestClient(t, u, &logSink{})
 	k := lonLatTile(15, 10.2, 56.16)
 	for _, layer := range []string{"dhm_terraen_skyggekort", "dhm_overflade_skyggekort", "dhm_kurve_traditionel"} {
-		if _, err := c.Get(WMSService, wantHillshadeQuery(layer, k), "image/png"); err != nil {
+		if _, err := c.Get(WMSService, wantOverlayQuery(layer, k), "image/png"); err != nil {
 			t.Fatalf("%s: exact query rejected: %v", layer, err)
 		}
 	}
@@ -228,14 +240,22 @@ func TestOverlayQueryCheck734_DAF(t *testing.T) {
 		t.Fatalf("upstream hits %d, want 3", u.hits.Load())
 	}
 	mutate := func(layer string, k TileKey, f func(url.Values)) url.Values {
-		q := wantHillshadeQuery(layer, k)
+		q := wantOverlayQuery(layer, k)
 		f(q)
 		return q
 	}
 	same := func(url.Values) {}
 	bad := map[string]url.Values{
-		"surface style gul":    mutate("dhm_overflade_skyggekort", k, func(q url.Values) { q.Set("styles", "gul") }),
-		"contours style roed":  mutate("dhm_kurve_traditionel", k, func(q url.Values) { q.Set("styles", "roed") }),
+		"surface style gul": mutate("dhm_overflade_skyggekort", k, func(q url.Values) { q.Set("styles", "gul") }),
+		// #734 M2: the exact-style allow-list. An unknown style is a 200
+		// ServiceException upstream (owner check T3), and every other
+		// named style is another rendering.
+		"contours no style":    mutate("dhm_kurve_traditionel", k, func(q url.Values) { q.Set("styles", "") }),
+		"contours style gul":   mutate("dhm_kurve_traditionel", k, func(q url.Values) { q.Set("styles", "gul") }),
+		"contours style hvid":  mutate("dhm_kurve_traditionel", k, func(q url.Values) { q.Set("styles", "hvid") }),
+		"contours style ROED":  mutate("dhm_kurve_traditionel", k, func(q url.Values) { q.Set("styles", "ROED") }),
+		"contours bad style":   mutate("dhm_kurve_traditionel", k, func(q url.Values) { q.Set("styles", "nosuchstyle") }),
+		"surface style roed":   mutate("dhm_overflade_skyggekort", k, func(q url.Values) { q.Set("styles", "roed") }),
 		"surface jpeg":         mutate("dhm_overflade_skyggekort", k, func(q url.Values) { q.Set("format", "image/jpeg") }),
 		"surface extra key":    mutate("dhm_overflade_skyggekort", k, func(q url.Values) { q.Set("exceptions", "XML") }),
 		"surface token":        mutate("dhm_overflade_skyggekort", k, func(q url.Values) { q.Set("token", testToken) }),
@@ -305,7 +325,7 @@ func TestFetchOverlay734_UpstreamShape(t *testing.T) {
 				t.Fatalf("path %q", u.paths[0])
 			}
 			got, _ := url.ParseQuery(u.rawQuery[0])
-			if want := wantHillshadeQuery(c.layer, k); got.Encode() != want.Encode() {
+			if want := wantOverlayQuery(c.layer, k); got.Encode() != want.Encode() {
 				t.Fatalf("upstream query\n got %s\nwant %s", got.Encode(), want.Encode())
 			}
 			if u.tokens[0] != testToken || strings.Contains(strings.ToLower(u.rawQuery[0]), "token") {
