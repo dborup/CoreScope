@@ -26,9 +26,12 @@ package main
 //     is cached like any other, marked degraded, and a hit on it retries
 //     the building phase alone on the cached rasters (retryBuildings, as
 //     #773 retries the foreign fill), so a failing footprint service
-//     never makes DHM fetch a raster twice (#786 review F2). A
-//     deterministic answer (nothing elevated, a truncated segment) is not
-//     degraded and is never retried.
+//     never makes DHM fetch a raster twice (#786 review F2). The retries
+//     are spaced (terrainRetryGate): at most one per cached profile per
+//     terrainBuildingsRetryEvery, the failed lookup counting as the
+//     first, so during an outage a hit is a plain hit (#797 review
+//     finding 2). A deterministic answer (nothing elevated, a truncated
+//     segment) is not degraded and is never retried.
 //   - The classes are one byte per sample in the profile's cache entry,
 //     behind a flag bit, so an entry of another format is rejected and
 //     fetched again rather than misread.
@@ -53,6 +56,13 @@ import (
 // terrainBuildingsDeadline bounds the building phase of one profile
 // fetch, or of its retry (#730 research §6).
 const terrainBuildingsDeadline = 5 * time.Second
+
+// terrainBuildingsRetryEvery spaces the building retries of one cached
+// degraded profile: M2's 10-minute cadence for a failed lookup, kept on
+// the cached rasters. Hardcoded for now; like the other buildings knobs it
+// belongs under map.dhm.profile.buildings.* and later in the customizer
+// (AGENTS.md rule 8).
+const terrainBuildingsRetryEvery = 10 * time.Minute
 
 // terrainBuildingsMaxSegments is the most segments one profile's corridor
 // has: 80.2 km in 10 km segments.
@@ -232,16 +242,24 @@ func buildingsFailure(err error) error {
 // lookup failed (#786 review F2). The rasters come from the cache, so a
 // failing footprint service never makes DHM fetch them twice, and the
 // Fetcher's cache holds the pages of the segments that did answer, so
-// only the failed ones are asked again. Like a miss, the retry is charged
-// to the client and holds a profile admission slot, and concurrent
-// callers share it; refused, it is not made. A classification that is no
-// longer degraded replaces the cache entry; whatever stops the retry, the
-// cached profile e is served as it is.
+// only the failed ones are asked again. A retry is made only when the
+// gate says one is due (#797 review finding 2); otherwise, and for every
+// hit that arrives while one runs, e is served at once, uncharged and
+// without a slot. Like a miss, the retry itself is charged to the client
+// and holds a profile admission slot; refused, it is not made and the
+// next hit may try. A classification that is no longer degraded replaces
+// the cache entry; whatever stops the retry, the cached profile e is
+// served as it is.
 func (p *terrainProfiler) retryBuildings(r *http.Request, key terrainKey, plan *dhm.Plan, e terrainElevation) terrainElevation {
-	if ok, _ := p.limiter.allow(r); !ok {
+	k := key.String()
+	if !p.buildingsRetry.claim(k, p.now()) {
 		return e
 	}
-	data, _, err := p.flight.Do(r.Context(), key.String()+"|buildings", p.deadline, func(ctx context.Context) ([]byte, error) {
+	if ok, _ := p.limiter.allow(r); !ok {
+		p.buildingsRetry.release(k)
+		return e
+	}
+	data, _, err := p.flight.Do(r.Context(), k+"|buildings", p.deadline, func(ctx context.Context) ([]byte, error) {
 		select {
 		case p.admit <- struct{}{}:
 			defer func() { <-p.admit }()
@@ -254,14 +272,19 @@ func (p *terrainProfiler) retryBuildings(r *http.Request, key terrainKey, plan *
 			return nil, err
 		}
 		enc := f.encode()
-		if !f.classes.degraded {
+		if f.classes.degraded {
+			// Failed again: the next try is a cadence from now.
+			p.buildingsRetry.hold(k, p.now())
+		} else {
 			p.cache.Put(key, enc, p.now())
+			p.buildingsRetry.release(k)
 		}
 		return enc, nil
 	})
 	if errors.Is(err, errTerrainBusy) {
-		// No upstream work was done: give the charge back.
+		// No upstream work was done: give the charge and the turn back.
 		p.limiter.refund(r)
+		p.buildingsRetry.release(k)
 	}
 	if err != nil {
 		return e
@@ -271,6 +294,70 @@ func (p *terrainProfiler) retryBuildings(r *http.Request, key terrainKey, plan *
 		return e
 	}
 	return f
+}
+
+// terrainRetryGate spaces the building retries of the cached degraded
+// profiles (#797 review finding 2): a profile whose lookup was just tried
+// is held until every has passed. It holds at most max profiles, the
+// profile cache's entry count, so it is bounded like the cache it serves:
+// when full it drops the holds that have run out, and with none to drop
+// it refuses a new retry rather than grow.
+type terrainRetryGate struct {
+	mu    sync.Mutex
+	every time.Duration
+	max   int
+	next  map[string]time.Time // key → the earliest next retry
+}
+
+func newTerrainRetryGate(every time.Duration, max int) *terrainRetryGate {
+	return &terrainRetryGate{every: every, max: max, next: make(map[string]time.Time)}
+}
+
+// claim reports whether a retry of key is due at now, and if so holds key
+// for the cadence, so concurrent hits find it held and start none.
+func (g *terrainRetryGate) claim(key string, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if t, ok := g.next[key]; ok && now.Before(t) {
+		return false
+	}
+	return g.holdLocked(key, now)
+}
+
+// hold records that key was tried at now: no retry before now+every.
+func (g *terrainRetryGate) hold(key string, now time.Time) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.holdLocked(key, now)
+}
+
+func (g *terrainRetryGate) holdLocked(key string, now time.Time) bool {
+	if _, ok := g.next[key]; !ok && len(g.next) >= g.max {
+		for k, t := range g.next {
+			if !now.Before(t) {
+				delete(g.next, k)
+			}
+		}
+		if len(g.next) >= g.max {
+			return false
+		}
+	}
+	g.next[key] = now.Add(g.every)
+	return true
+}
+
+// release forgets key: its retry was refused before any upstream work, or
+// it succeeded and the profile is no longer degraded.
+func (g *terrainRetryGate) release(key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.next, key)
+}
+
+func (g *terrainRetryGate) len() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.next)
 }
 
 // used reports whether any sample was classified, i.e. whether footprints

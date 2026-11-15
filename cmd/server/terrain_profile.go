@@ -306,6 +306,8 @@ type terrainProfiler struct {
 	// map.dhm.profile.buildings is off. buildingsDeadline bounds its phase.
 	buildings         terrainBuildingSource
 	buildingsDeadline time.Duration
+	// buildingsRetry spaces the retries of degraded profiles (#797).
+	buildingsRetry *terrainRetryGate
 
 	freqMu  sync.Mutex
 	freqAt  time.Time
@@ -394,6 +396,7 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 
 		buildings:         bsrc,
 		buildingsDeadline: terrainBuildingsDeadline,
+		buildingsRetry:    newTerrainRetryGate(terrainBuildingsRetryEvery, set.cacheEntries),
 	}
 }
 
@@ -784,6 +787,11 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 				if p.classifies(tq.both) {
 					if e.classes, err = p.classifyBuildings(ctx, &plan, e); err != nil {
 						return nil, err
+					}
+					if e.classes.degraded {
+						// The lookup was just tried: a hit retries it
+						// only once the cadence has passed.
+						p.buildingsRetry.hold(key.String(), p.now())
 					}
 				}
 				// A profile left partial by a failed fill, or degraded by a

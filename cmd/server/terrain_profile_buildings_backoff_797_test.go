@@ -9,6 +9,10 @@ package main
 // stubOGC.
 
 import (
+	"context"
+	"math"
+	"net/http"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -171,6 +175,15 @@ func TestTerrainBuildings_RetryEndingTruncatedIsStored(t *testing.T) {
 	if n := ogc.calls.Load(); n != 4 {
 		t.Fatalf("%d corridor calls after the retry, want 4", n)
 	}
+	// The entry itself now holds the truncated answer, not degraded. The
+	// Fetcher's page cache would hide a second retry from the call count,
+	// so the entry is read back.
+	if e := cachedProfile(t, env, q); e.classes == nil || e.classes.degraded || e.classes.state != terrainClassPartial || !e.classes.truncated {
+		t.Fatalf("cached classification %+v, want partial, truncated, not degraded", e.classes)
+	}
+	if n := env.p.buildingsRetry.len(); n != 0 {
+		t.Fatalf("%d profiles held for a retry, want none", n)
+	}
 	for _, after := range []time.Duration{2, 5} {
 		now = start.Add(after * terrainBuildingsRetryEvery)
 		w := env.get(q)
@@ -182,6 +195,58 @@ func TestTerrainBuildings_RetryEndingTruncatedIsStored(t *testing.T) {
 			t.Fatalf("at +%v: %d corridor calls, want still 4: the truncated answer was not stored", after*terrainBuildingsRetryEvery, n)
 		}
 	}
+}
+
+// TestTerrainBuildings_RefusedRetryGivesTheTurnBack: a due retry the
+// client's budget refuses does no upstream work, so it does not use up
+// the profile's turn: another client's hit at the same moment retries.
+func TestTerrainBuildings_RefusedRetryGivesTheTurnBack(t *testing.T) {
+	ogc := newStubOGC(t, dokk1Footprint)
+	var failing atomic.Bool
+	failing.Store(true)
+	ogc.answer = func([4]float64) (int, []byte, bool) { return 503, nil, failing.Load() }
+	env := newBuildingsEnv(t, dokk1Ground, dokk1Surface, ogc, dhm.ProfileConfig{RateLimitPerMin: intp(1)})
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	env.p.now = func() time.Time { return now }
+	q := pathQuery(dokk1A, dokk1B)
+	from := func(addr string) func(*http.Request) { return func(r *http.Request) { r.RemoteAddr = addr } }
+
+	wantClassification(t, decodeProfile(t, env.get(q, from("192.0.2.1:1234"))), "unavailable", false) // its one charge
+	failing.Store(false)
+	now = now.Add(terrainBuildingsRetryEvery)
+	wantClassification(t, decodeProfile(t, env.get(q, from("192.0.2.1:1234"))), "unavailable", false) // refused
+	if n := ogc.calls.Load(); n != 1 {
+		t.Fatalf("%d corridor calls, want 1: the refused retry was made", n)
+	}
+	wantClassification(t, decodeProfile(t, env.get(q, from("192.0.2.2:1234"))), "full", false)
+	if n := ogc.calls.Load(); n != 2 {
+		t.Fatalf("%d corridor calls, want 2", n)
+	}
+}
+
+// cachedProfile is the profile entry the cache holds for q, decoded.
+func cachedProfile(t *testing.T, env *buildingsEnv, q string) terrainElevation {
+	t.Helper()
+	vals, _ := url.ParseQuery(q)
+	tq, err := parseTerrainQuery(vals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, rerr := env.srv.resolveTerrainRequest(context.Background(), env.p, tq)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	n := len(req.plan.E)
+	key := terrainKey{A: req.ka, B: req.kb, Both: tq.both, Samples: n, StepCm: int64(math.Round(req.plan.StepM * 100)), Fill: env.p.fill != nil}
+	data, ok := env.p.cache.Get(key, env.p.now())
+	if !ok {
+		t.Fatal("no cache entry for the profile")
+	}
+	e, err := decodeTerrainElevation(data, n, tq.both, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
 }
 
 // TestTerrainRetryGate_Bounded: the gate holds at most max profiles. A

@@ -81,18 +81,30 @@ func BenchmarkTerrainProfileP50(b *testing.B) {
 	})
 	// #730 M3 (#786 review F2): with the footprint service down, a hit on
 	// the degraded profile retries the building phase alone, on the
-	// cached rasters. Before M3 such a profile was a plain hit for 10
-	// minutes and then a full miss (on/miss), rasters included.
-	b.Run("on/hit-degraded", func(b *testing.B) {
+	// cached rasters, at most once per terrainBuildingsRetryEvery (#797).
+	// Before M3 such a profile was a plain hit for 10 minutes and then a
+	// full miss (on/miss), rasters included. on/hit-degraded is a hit
+	// inside the cadence, on/hit-degraded-due one with a retry due.
+	degraded := func(b *testing.B, every time.Duration, wantCalls func(n int32) bool) {
 		env := benchBuildingsEnv(b, dhm.ProfileConfig{})
 		env.ogc.answer = func([4]float64) (int, []byte, bool) { return 503, nil, true }
+		env.p.buildingsRetry = newTerrainRetryGate(every, env.p.set.cacheEntries)
 		q := pathQuery(dokk1A, dokk1B)
 		env.get(q)
-		rasters := env.src.calls.Load()
+		rasters, calls := env.src.calls.Load(), env.ogc.calls.Load()
 		benchTerrainP50(b, env.terrainEnv, func(int) string { return q }, "hit")
 		if r := env.src.calls.Load(); r != rasters {
 			b.Fatalf("%d rasters fetched by hits", r-rasters)
 		}
+		if n := env.ogc.calls.Load() - calls; !wantCalls(n) {
+			b.Fatalf("%d footprint requests for %d hits", n, b.N)
+		}
+	}
+	b.Run("on/hit-degraded", func(b *testing.B) {
+		degraded(b, terrainBuildingsRetryEvery, func(n int32) bool { return n == 0 })
+	})
+	b.Run("on/hit-degraded-due", func(b *testing.B) {
+		degraded(b, 0, func(n int32) bool { return n > 0 })
 	})
 	b.Run("on/miss", func(b *testing.B) {
 		if b.N > 400 {

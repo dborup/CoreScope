@@ -63,10 +63,11 @@ func TestTerrainBuildings_ProfileDeadlineDuringBuildingPhase(t *testing.T) {
 
 // TestTerrainBuildings_FailedLookupRetriesOnlyTheBuildings (#786 review
 // F2): a profile whose footprint lookup failed is cached for the
-// profile's TTL like any other, and a hit on it asks the footprint
-// service again, on the cached rasters: no raster is fetched twice,
-// however long the service stays down or the profile is asked for. The
-// first classified answer replaces the entry, and later hits ask nothing.
+// profile's TTL like any other, and a hit on it once the retry cadence
+// has passed (#797) asks the footprint service again, on the cached
+// rasters: no raster is fetched twice, however long the service stays
+// down or the profile is asked for. The first classified answer replaces
+// the entry, and later hits ask nothing.
 func TestTerrainBuildings_FailedLookupRetriesOnlyTheBuildings(t *testing.T) {
 	ogc := newStubOGC(t, dokk1Footprint)
 	var failing atomic.Bool
@@ -90,16 +91,18 @@ func TestTerrainBuildings_FailedLookupRetriesOnlyTheBuildings(t *testing.T) {
 		return resp
 	}
 	get("miss", "unavailable", 1)
-	// Still down: each hit asks again, and serves the cached profile.
+	// Inside the cadence a hit serves the cached profile and asks nothing.
+	get("hit", "unavailable", 1)
+	// Still down: a due hit asks again, and serves the cached profile.
+	now = now.Add(terrainBuildingsRetryEvery)
 	get("hit", "unavailable", 2)
-	now = now.Add(11 * time.Minute) // past M2's 10-minute retry TTL
-	get("hit", "unavailable", 3)
 	failing.Store(false)
-	resp := get("hit", "full", 4)
+	now = now.Add(terrainBuildingsRetryEvery)
+	resp := get("hit", "full", 3)
 	wantCause(t, resp, "building")
 	sameVerdictAsOff(t, resp, "dokk1/0")
 	now = now.Add(time.Hour)
-	get("hit", "full", 4)
+	get("hit", "full", 3)
 }
 
 // TestTerrainBuildings_RetryAsksOnlyTheFailedSegment: of a 15 km
@@ -111,6 +114,8 @@ func TestTerrainBuildings_RetryAsksOnlyTheFailedSegment(t *testing.T) {
 	failing.Store(true)
 	ogc.answer = func(line [4]float64) (int, []byte, bool) { return 503, nil, failing.Load() && firstSegment(line) }
 	env := newBuildingsEnv(t, forestGround, fifteenSurface, ogc, dhm.ProfileConfig{})
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	env.p.now = func() time.Time { return now }
 	q := pathQuery(fifteenA, fifteenB)
 
 	resp := decodeProfile(t, env.get(q))
@@ -120,6 +125,7 @@ func TestTerrainBuildings_RetryAsksOnlyTheFailedSegment(t *testing.T) {
 	}
 	rasters := env.src.calls.Load()
 	failing.Store(false)
+	now = now.Add(terrainBuildingsRetryEvery)
 	w := env.get(q)
 	resp = decodeProfile(t, w)
 	if w.Header().Get("X-CoreScope-Cache") != "hit" {
@@ -147,18 +153,22 @@ func lineOf(m []string) [4]float64 {
 	return line
 }
 
-// TestTerrainBuildings_RetryIsBudgeted: the retry is upstream work, so it
-// is charged to the client like a miss and holds a profile admission
+// TestTerrainBuildings_RetryIsBudgeted: a due retry is upstream work, so
+// it is charged to the client like a miss and holds a profile admission
 // slot. A retry the budget or the admission refuses is not made: the
-// cached profile is served, 200, without a call, and the refused
-// admission gives its charge back.
+// cached profile is served, 200, without a call, the refused admission
+// gives its charge back, and the next hit may try again.
 func TestTerrainBuildings_RetryIsBudgeted(t *testing.T) {
 	t.Run("per client", func(t *testing.T) {
 		ogc := newStubOGC(t, dokk1Footprint)
 		ogc.answer = func([4]float64) (int, []byte, bool) { return 503, nil, true }
 		env := newBuildingsEnv(t, dokk1Ground, dokk1Surface, ogc, dhm.ProfileConfig{RateLimitPerMin: intp(2)})
+		now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+		env.p.now = func() time.Time { return now }
 		q := pathQuery(dokk1A, dokk1B)
 		for i, want := range []int32{1, 2, 2, 2} {
+			// Every request is due; the limiter keeps its own clock.
+			now = now.Add(terrainBuildingsRetryEvery)
 			w := env.get(q)
 			if w.Code != 200 {
 				t.Fatalf("request %d: %d, want 200 from the cache", i, w.Code)
@@ -174,9 +184,12 @@ func TestTerrainBuildings_RetryIsBudgeted(t *testing.T) {
 		failing.Store(true)
 		ogc.answer = func([4]float64) (int, []byte, bool) { return 503, nil, failing.Load() }
 		env := newBuildingsEnv(t, dokk1Ground, dokk1Surface, ogc, dhm.ProfileConfig{MaxInFlight: intp(1), RateLimitPerMin: intp(3)})
+		now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+		env.p.now = func() time.Time { return now }
 		q := pathQuery(dokk1A, dokk1B)
 		decodeProfile(t, env.get(q)) // charge 1
 		failing.Store(false)
+		now = now.Add(terrainBuildingsRetryEvery) // due; not changed again
 		release := make(chan struct{})
 		env.src.hook = func(ctx context.Context, r dhm.RasterRequest) error {
 			select {
@@ -200,7 +213,8 @@ func TestTerrainBuildings_RetryIsBudgeted(t *testing.T) {
 			t.Fatalf("other profile: %d", c)
 		}
 		env.src.hook = nil
-		// The refund left one charge: the retry runs and classifies.
+		// The refund left one charge, and the refusal gave the turn back:
+		// the retry runs and classifies.
 		w = env.get(q)
 		resp = decodeProfile(t, w)
 		wantClassification(t, resp, "full", false)
