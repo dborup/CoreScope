@@ -10,13 +10,22 @@ import (
 )
 
 // NewNoRedirectClient is the HTTP client of a keyless upstream
-// (internal/mastedb, internal/heritage, internal/copdem): timeout per
-// request including the body (0: none, the request's context bounds it),
-// and no redirect is ever followed, so a request only reaches the
-// endpoint whose shape was checked.
+// (internal/mastedb, internal/heritage, internal/copdem, internal/buildings,
+// internal/skraafoto): timeout per request including the body (0: none, the
+// request's context bounds it), and no redirect is ever followed, so a
+// request only reaches the endpoint whose shape was checked.
+//
+// Transparent gzip is off, as on the DHM client (#684): Dataforsyningen's
+// services cut gzip bodies short over HTTP/2, so with Go's automatic
+// Accept-Encoding: gzip a 200 body ends in "unexpected EOF" and every
+// request fails as "transport". Seen live on the INSPIRE buildings API on
+// staging, 2026-11-15 (#730); uncompressed the same response reads whole.
 func NewNoRedirectClient(timeout time.Duration) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DisableCompression = true
 	return &http.Client{
 		Timeout:       timeout,
+		Transport:     tr,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }
