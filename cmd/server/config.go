@@ -1114,9 +1114,12 @@ func (c *Config) migrateDeprecatedConfig() {
 		migrated = true
 	}
 	if len(c.Tiles) > 0 {
+		// A copy, not the legacy block itself: the two are shipped side by
+		// side, and dropUngatedTileTokens drops the gated tokens from the
+		// legacy one only.
 		for k, v := range c.Tiles {
 			if tilesMap[k] == nil {
-				tilesMap[k] = v
+				tilesMap[k] = cloneJSON(v)
 			}
 		}
 		migrated = true
@@ -1126,18 +1129,43 @@ func (c *Config) migrateDeprecatedConfig() {
 	}
 }
 
+// jsonObject is a JSON object as encoding/json decodes it into
+// interface{}. It is an alias, not a defined type: a decoded object's
+// dynamic type is the unnamed map type, and a type assertion to a defined
+// type would never match it.
+type jsonObject = map[string]interface{}
+
 // jsonObjectAt follows path through nested JSON objects as encoding/json
 // decodes them into interface{}, by exact-case key, and returns the object
 // at its end. Anything that is not an object on the way, or at the end,
 // gives a nil map, which reads as empty.
-func jsonObjectAt(v interface{}, path ...string) (m map[string]interface{}) {
+func jsonObjectAt(v interface{}, path ...string) (m jsonObject) {
 	for i := 0; ; i++ {
-		m, _ = v.(map[string]interface{})
+		m, _ = v.(jsonObject)
 		if i == len(path) {
 			return m
 		}
 		v = m[path[i]]
 	}
+}
+
+// cloneJSON deep-copies a value decoded by encoding/json into interface{}.
+func cloneJSON(v interface{}) interface{} {
+	switch t := v.(type) {
+	case jsonObject:
+		m := make(jsonObject, len(t))
+		for k, e := range t {
+			m[k] = cloneJSON(e)
+		}
+		return m
+	case []interface{}:
+		a := make([]interface{}, len(t))
+		for i, e := range t {
+			a[i] = cloneJSON(e)
+		}
+		return a
+	}
+	return v
 }
 
 // gatedTileProvider is an opt-in tile provider as map-tile-providers.js
@@ -1158,7 +1186,7 @@ var gatedTileProviders = []gatedTileProvider{
 // on reports whether block switches g on, read as map-tile-providers.js
 // reads it: exact-case keys, enabled the JSON boolean true, and with
 // needsToken a string token that is not blank.
-func (g gatedTileProvider) on(block map[string]interface{}) bool {
+func (g gatedTileProvider) on(block jsonObject) bool {
 	enabled, _ := block["enabled"].(bool)
 	token, _ := block["token"].(string)
 	return enabled && (!g.needsToken || strings.TrimSpace(token) != "")
@@ -1168,55 +1196,69 @@ func (g gatedTileProvider) on(block map[string]interface{}) bool {
 // /api/config/client unless the browser would use it. The Dataforsyningen
 // base-map token (#741) is client-visible on purpose, but only while
 // map.tiles.providers.dataforsyningen is switched on: an operator who
-// answers misuse with enabled false must stop publishing it. In map.tiles
-// and the legacy top-level tiles, every token key of any spelling in a
-// block named like the provider is deleted, unless it is the exact-case
-// token of the exact-case block and that block is on. A providers member,
-// a provider block or a map.tiles that is not an object holds no gate the
-// browser can read, so it is deleted whole. A non-blank value dropped is
-// logged by key, never by value. Runs once, at load.
+// answers misuse with enabled false must stop publishing it. The browser
+// reads that one exact-case path and nothing else, so in every block named
+// like map.tiles, its providers or the provider, in any spelling, and in
+// the legacy top-level tiles, which the browser never reads (what it needs
+// was copied into map.tiles by migrateDeprecatedConfig), every token key
+// of any spelling is deleted; the one exception is the exact-case token at
+// the exact-case path while that block is on. A block on the way that is
+// not an object holds no gate the browser can read, so it is deleted
+// whole. A non-blank value dropped is logged by key, never by value. Runs
+// once, at load, after migrateDeprecatedConfig.
 func (c *Config) dropUngatedTileTokens() {
 	var dropped []string
-	if t, ok := c.Map["tiles"]; ok && jsonObjectAt(t) == nil {
-		delete(c.Map, "tiles")
-		dropped = append(dropped, "map.tiles")
+	for k, v := range c.Map {
+		if !strings.EqualFold(k, "tiles") {
+			continue
+		}
+		tiles := jsonObjectAt(v)
+		if tiles == nil {
+			delete(c.Map, k)
+			dropped = append(dropped, "map."+k)
+			continue
+		}
+		dropUngatedTokensIn(tiles, "map."+k, k == "tiles", &dropped)
 	}
-	dropUngatedTokensIn(jsonObjectAt(c.Map, "tiles"), "map.tiles", &dropped)
-	dropUngatedTokensIn(c.Tiles, "tiles", &dropped)
+	dropUngatedTokensIn(c.Tiles, "tiles", false, &dropped)
 	for _, p := range dropped {
-		log.Printf("[config] %s was removed from the client config: the Dataforsyningen base-map token is shipped to browsers only while map.tiles.providers.dataforsyningen.enabled is true and its token is non-empty", p)
+		log.Printf("[config] %s was removed from the client config: the Dataforsyningen base-map token is shipped to browsers only as map.tiles.providers.dataforsyningen.token, and only while that block's enabled is true and its token is non-empty", p)
 	}
 }
 
-func dropUngatedTokensIn(tiles map[string]interface{}, path string, dropped *[]string) {
-	if tiles == nil {
-		return
-	}
-	if p, ok := tiles["providers"]; ok && jsonObjectAt(p) == nil {
-		delete(tiles, "providers")
-		*dropped = append(*dropped, path+".providers")
-		return
-	}
-	providers := jsonObjectAt(tiles, "providers")
-	for k, v := range providers {
-		for _, g := range gatedTileProviders {
-			if !g.needsToken || !strings.EqualFold(k, g.key) {
-				continue
-			}
-			block := jsonObjectAt(v)
-			if block == nil {
-				delete(providers, k)
-				*dropped = append(*dropped, path+".providers."+k)
-				continue
-			}
-			keep := k == g.key && g.on(block)
-			for bk, bv := range block {
-				if !strings.EqualFold(bk, "token") || (keep && bk == "token") {
+// dropUngatedTokensIn drops the gated tokens from tiles, a map.tiles-like
+// block at path; readable says whether the browser reads that block.
+func dropUngatedTokensIn(tiles jsonObject, path string, readable bool, dropped *[]string) {
+	for pk, p := range tiles {
+		if !strings.EqualFold(pk, "providers") {
+			continue
+		}
+		providers := jsonObjectAt(p)
+		if providers == nil {
+			delete(tiles, pk)
+			*dropped = append(*dropped, path+"."+pk)
+			continue
+		}
+		for k, v := range providers {
+			for _, g := range gatedTileProviders {
+				if !g.needsToken || !strings.EqualFold(k, g.key) {
 					continue
 				}
-				delete(block, bk)
-				if str, isStr := bv.(string); !isStr || strings.TrimSpace(str) != "" {
-					*dropped = append(*dropped, path+".providers."+k+"."+bk)
+				block := jsonObjectAt(v)
+				if block == nil {
+					delete(providers, k)
+					*dropped = append(*dropped, path+"."+pk+"."+k)
+					continue
+				}
+				keep := readable && pk == "providers" && k == g.key && g.on(block)
+				for bk, bv := range block {
+					if !strings.EqualFold(bk, "token") || (keep && bk == "token") {
+						continue
+					}
+					delete(block, bk)
+					if str, isStr := bv.(string); !isStr || strings.TrimSpace(str) != "" {
+						*dropped = append(*dropped, path+"."+pk+"."+k+"."+bk)
+					}
 				}
 			}
 		}
