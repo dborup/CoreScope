@@ -126,8 +126,49 @@ type DHMClientConfig struct {
 	DatasetURL  string `json:"datasetUrl"`
 	LicenseName string `json:"licenseName"`
 	LicenseURL  string `json:"licenseUrl"`
+	// Overlays are the DHM overlays the page may offer, by the id it puts
+	// in a tile request's `layers` (#734). Layer stays the #680 value for
+	// pages that predate them.
+	Overlays []DHMOverlayClientConfig `json:"overlays"`
 	// Ortho is present only while map.dhm.ortho.enabled is set (#728).
 	Ortho *DHMOrthoClientConfig `json:"ortho,omitempty"`
+}
+
+// DHMOverlayClientConfig is one entry of `dhm.overlays` in
+// /api/config/client (#734): an overlay id, the zoom range the proxy
+// serves it at, and the dataset its credit links (#733, #734 Q5). The
+// credit text and the licence are the block's own: every overlay is
+// Klimadatastyrelsen's rendering of Danmarks Højdemodel under CC BY 4.0,
+// shown as served.
+type DHMOverlayClientConfig struct {
+	ID          string `json:"id"`
+	MinZoom     int    `json:"minZoom"`
+	MaxZoom     int    `json:"maxZoom"`
+	DatasetName string `json:"datasetName"`
+	DatasetURL  string `json:"datasetUrl"`
+}
+
+// dhmClientOverlayIDs are the overlays offered to the page. The proxy
+// also serves contours, which joins here in #734 M2 once its style and
+// first zoom are settled on staging.
+var dhmClientOverlayIDs = []string{"terrain", "surface"}
+
+func dhmOverlayClientConfigs() []DHMOverlayClientConfig {
+	out := make([]DHMOverlayClientConfig, 0, len(dhmClientOverlayIDs))
+	for _, id := range dhmClientOverlayIDs {
+		o, ok := dhm.LookupOverlay(id)
+		if !ok {
+			continue // TestDHM734_OfferedOverlaysAreTableIDs pins that none is skipped
+		}
+		out = append(out, DHMOverlayClientConfig{
+			ID:          o.ID,
+			MinZoom:     o.MinZoom,
+			MaxZoom:     o.MaxZoom,
+			DatasetName: dhm.DatasetName,
+			DatasetURL:  o.DatasetURL,
+		})
+	}
+	return out
 }
 
 // DHMOrthoClientConfig is `dhm.ortho` of /api/config/client (#728): what
@@ -186,6 +227,7 @@ func dhmClientConfig() *DHMClientConfig {
 		DatasetURL:  dhm.DatasetURL,
 		LicenseName: dhm.LicenseName,
 		LicenseURL:  dhm.LicenseURL,
+		Overlays:    dhmOverlayClientConfigs(),
 	}
 }
 

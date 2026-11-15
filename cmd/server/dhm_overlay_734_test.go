@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -566,5 +567,100 @@ func TestDHM734_OpenAPIDocumentsLayersAsOverlayIDs(t *testing.T) {
 	// Nothing in the spec still claims layers is the one fixed value.
 	if strings.Contains(op.Description, "layers="+terrainLayer+", styles=") {
 		t.Errorf("route description still pins layers=%s", terrainLayer)
+	}
+}
+
+// ── /api/config/client ─────────────────────────────────────────────────────
+
+// The dhm block lists the overlays the page may offer, terrain and surface,
+// each with its zoom range and its own dataset link (#734 Q5, in the #733
+// credit's parts). contours is served but not offered until M2. Nothing
+// else in the block changes.
+func TestDHM734_ClientConfigOffersTerrainAndSurface(t *testing.T) {
+	u := newOverlayUpstreams(t)
+	srv, router := setupTestServer(t)
+	srv.cfg.DHM = DHMConfig{Enabled: true, Token: dhmTestToken}
+	srv.dhm = newOverlayProxy(t, u, "", &dhmLogSink{}, nil)
+
+	raw := clientDHMRaw(t, router)
+	if raw == nil {
+		t.Fatal("no dhm block while the proxy is active")
+	}
+	var b struct {
+		Overlays    []map[string]json.RawMessage `json:"overlays"`
+		Layer       string                       `json:"layer"`
+		Attribution string                       `json:"attribution"`
+		DatasetName string                       `json:"datasetName"`
+		DatasetURL  string                       `json:"datasetUrl"`
+	}
+	if err := json.Unmarshal(raw, &b); err != nil {
+		t.Fatal(err)
+	}
+	want := []DHMOverlayClientConfig{
+		{ID: "terrain", MinZoom: 7, MaxZoom: 19, DatasetName: "Danmarks Højdemodel", DatasetURL: "https://dataforsyningen.dk/data/930"},
+		{ID: "surface", MinZoom: 7, MaxZoom: 19, DatasetName: "Danmarks Højdemodel", DatasetURL: "https://dataforsyningen.dk/data/928"},
+	}
+	if len(b.Overlays) != len(want) {
+		t.Fatalf("overlays %s, want %d entries", raw, len(want))
+	}
+	for i, entry := range b.Overlays {
+		keys := make([]string, 0, len(entry))
+		for k := range entry {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		if want := []string{"datasetName", "datasetUrl", "id", "maxZoom", "minZoom"}; !reflect.DeepEqual(keys, want) {
+			t.Fatalf("overlay %d keys %v, want %v", i, keys, want)
+		}
+		buf, _ := json.Marshal(entry)
+		var got DHMOverlayClientConfig
+		if err := json.Unmarshal(buf, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want[i] {
+			t.Errorf("overlay %d = %+v, want %+v", i, got, want[i])
+		}
+		// The dataset mark is in the unchanged credit text, so the page
+		// can link it (#733).
+		if !strings.Contains(b.Attribution, got.DatasetName) {
+			t.Errorf("attribution %q lacks the mark %q", b.Attribution, got.DatasetName)
+		}
+		// Every offered id is served at both ends of its range and
+		// refused just outside it.
+		p := srv.dhm
+		if w := doTile(p, overlayTile(got.ID, got.MinZoom, 0)); w.Code != 200 {
+			t.Errorf("%s at its minZoom %d: status %d", got.ID, got.MinZoom, w.Code)
+		}
+		if w := doTile(p, overlayTile(got.ID, got.MaxZoom, 0)); w.Code != 200 {
+			t.Errorf("%s at its maxZoom %d: status %d", got.ID, got.MaxZoom, w.Code)
+		}
+		if w := doTile(p, overlayTile(got.ID, got.MinZoom-1, 0)); w.Code != http.StatusBadRequest {
+			t.Errorf("%s below its minZoom: status %d", got.ID, w.Code)
+		}
+	}
+	// The rest of the block is #680/#733's, unchanged.
+	if b.Layer != terrainLayer || b.Attribution != dhm.Attribution || b.DatasetName != dhm.DatasetName || b.DatasetURL != dhm.DatasetURL {
+		t.Fatalf("block changed: layer %q attribution %q dataset %q %q", b.Layer, b.Attribution, b.DatasetName, b.DatasetURL)
+	}
+	// Not offered: contours, and any upstream name beyond the #680 layer.
+	for _, s := range []string{"contours", contourLayer, surfaceLayer, exaggeratedLayer, "dhm_temp", "/data/926", dhmTestToken} {
+		if strings.Contains(string(raw), s) {
+			t.Errorf("dhm block carries %q: %s", s, raw)
+		}
+	}
+}
+
+// The offered ids are a subset of the table's, in its order, so the page
+// never offers an id the proxy refuses.
+func TestDHM734_OfferedOverlaysAreTableIDs(t *testing.T) {
+	table := dhm.OverlayIDs()
+	next := 0
+	for _, c := range dhmOverlayClientConfigs() {
+		for next < len(table) && table[next] != c.ID {
+			next++
+		}
+		if next == len(table) {
+			t.Fatalf("offered overlay %q is not in the table %v (or out of order)", c.ID, table)
+		}
 	}
 }
