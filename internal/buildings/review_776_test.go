@@ -5,6 +5,11 @@ package buildings
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"regexp"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -38,4 +43,64 @@ func TestFetcherWithoutNowUsesTheClock(t *testing.T) {
 	if got := f.now(); time.Since(got) > time.Minute || time.Until(got) > time.Minute {
 		t.Fatalf("now() = %v, want the wall clock", got)
 	}
+}
+
+// TestQueryLimitIsBuiltFromMaxFeatures (#776 review N2): the query's
+// limit was the literal "1000" beside the constant MaxFeatures, pinned
+// together only by a test, so changing one would leave the other behind
+// until that test ran. The limit must be written from MaxFeatures itself:
+// fixedQuery's expression holds strconv.Itoa(MaxFeatures), and none of its
+// string literals carries a number after "limit=". Both values are 1000
+// today, so only the source can show the drift.
+func TestQueryLimitIsBuiltFromMaxFeatures(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "client.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expr ast.Expr
+	ast.Inspect(file, func(n ast.Node) bool {
+		if vs, ok := n.(*ast.ValueSpec); ok {
+			for i, name := range vs.Names {
+				if name.Name == "fixedQuery" && i < len(vs.Values) {
+					expr = vs.Values[i]
+				}
+			}
+		}
+		return expr == nil
+	})
+	if expr == nil {
+		t.Fatal("client.go declares no fixedQuery")
+	}
+	literalLimit := regexp.MustCompile(`limit=[0-9]`)
+	fromMax := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.BasicLit:
+			if v, err := strconv.Unquote(n.Value); err == nil && literalLimit.MatchString(v) {
+				t.Errorf("fixedQuery spells the limit as a literal: %s", n.Value)
+			}
+		case *ast.CallExpr:
+			sel, ok := n.Fun.(*ast.SelectorExpr)
+			if pkg, isIdent := selX(sel); ok && isIdent && pkg == "strconv" && sel.Sel.Name == "Itoa" && len(n.Args) == 1 {
+				if id, ok := n.Args[0].(*ast.Ident); ok && id.Name == "MaxFeatures" {
+					fromMax = true
+				}
+			}
+		}
+		return true
+	})
+	if !fromMax {
+		t.Error("fixedQuery does not write its limit with strconv.Itoa(MaxFeatures)")
+	}
+}
+
+func selX(sel *ast.SelectorExpr) (string, bool) {
+	if sel == nil {
+		return "", false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return "", false
+	}
+	return id.Name, true
 }
