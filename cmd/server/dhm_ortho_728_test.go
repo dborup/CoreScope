@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -258,6 +260,36 @@ func TestDHMOrtho728_InvalidTileIsTransparentNoStoreAndNeverCached(t *testing.T)
 				t.Fatalf("failure not logged by category: %q", logs.String())
 			}
 		})
+	}
+}
+
+// #769 review N1: through the proxy with its shipped client options, an
+// ortho body over the 1 MiB tile cap is a transparent no-store tile and is
+// never cached; a padded tile at the cap is served.
+func TestDHMOrtho728_BodyCap(t *testing.T) {
+	const tileCap = 1 << 20
+	for _, tc := range []struct {
+		size  int
+		state string
+	}{{tileCap, "miss"}, {tileCap + 1, "unavailable"}} {
+		body := append(append([]byte{}, orthoJPEG...), make([]byte, tc.size-len(orthoJPEG))...)
+		up := newFakeUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.Write(body)
+		})
+		p := newTestOrthoProxy(t, up, &dhmLogSink{}, nil)
+		w := doOrtho(orthoRouter(p), aarhusOrtho(0))
+		if tc.state == "miss" {
+			if w.Code != http.StatusOK || !bytes.Equal(w.Body.Bytes(), body) ||
+				w.Header().Get("Content-Type") != "image/jpeg" || w.Header().Get("X-CoreScope-Tile") != "miss" {
+				t.Fatalf("at the cap: status %d, %d bytes, headers %v; want the padded JPEG", w.Code, w.Body.Len(), w.Header())
+			}
+			continue
+		}
+		assertTransparentOrtho(t, "over the cap", w, "unavailable", "no-store")
+		if n := p.orthoCache.Len(); n != 0 {
+			t.Fatalf("ortho cache holds %d entries after an oversize tile", n)
+		}
 	}
 }
 
@@ -607,7 +639,7 @@ func TestDHMOrtho728_OfferedAndRouted(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	if got := strings.Join(keys, ","); got != "attribution,bounds,datasetName,datasetUrl,licenseName,licenseUrl,maxZoom,minZoom,url" {
+	if got := strings.Join(keys, ","); got != "attribution,bounds,datasetName,datasetUrl,foreignMask,licenseName,licenseUrl,maxZoom,minZoom,url" {
 		t.Fatalf("dhm.ortho keys %s", got)
 	}
 	var o DHMOrthoClientConfig
@@ -616,6 +648,19 @@ func TestDHMOrtho728_OfferedAndRouted(t *testing.T) {
 	}{&o}); err != nil {
 		t.Fatal(err)
 	}
+	// M3: the mask of tiles the base layer skips is dhm's, as built.
+	wantMask := dhm.OrthoForeignMask()
+	if o.ForeignMask == nil || !reflect.DeepEqual(*o.ForeignMask, wantMask) {
+		t.Fatalf("dhm.ortho.foreignMask %+v, want %+v", o.ForeignMask, wantMask)
+	}
+	var rawMask struct {
+		Bits json.RawMessage `json:"bits"`
+	}
+	json.Unmarshal(block.Ortho["foreignMask"], &rawMask)
+	if want := `"` + base64.StdEncoding.EncodeToString(wantMask.Bits) + `"`; string(rawMask.Bits) != want {
+		t.Fatalf("foreignMask.bits is not the mask's standard base64: %.40s…", rawMask.Bits)
+	}
+	o.ForeignMask = nil
 	c := dhm.Coverage
 	want := DHMOrthoClientConfig{
 		URL: "/api/map/dhm/ortho/{z}/{x}/{y}", MinZoom: 7, MaxZoom: 20,

@@ -4004,7 +4004,8 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 .matrix-char span { display: block; text-align: center; white-space: nowrap; line-height: 1; }
 
 /* === Matrix Theme === */
-.matrix-theme .leaflet-tile-pane {
+.matrix-theme .leaflet-tile-pane,
+.matrix-theme .mc-ortho-pane {
   filter: brightness(1.1) contrast(1.2) sepia(0.6) hue-rotate(70deg) saturate(2);
 }
 .matrix-theme.leaflet-container::before {
