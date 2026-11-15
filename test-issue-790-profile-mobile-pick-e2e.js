@@ -346,6 +346,15 @@ const PHONE_VIEW = { lat: 37.5, lon: -122.85, zoom: 10 };
       assert(v.fold.expanded === 'true' && v.fold.glyph === '▾', 'expanded toggle: ' + JSON.stringify(v.fold));
       assert(v.fold.inTitle && v.fold.name === 'Path profile', 'the toggle is not the title: ' + JSON.stringify(v.fold));
       assert(v.titleText === 'Path profile▾', 'the title row reads ' + JSON.stringify(v.titleText));
+      /* #796 N2: the accessible names tell the fold and the map's profile
+       * toggle apart. */
+      const names = await page.evaluate(() => {
+        const name = (e) => e && (e.getAttribute('aria-label') || e.textContent.trim());
+        return { fold: name(document.querySelector('[data-testid="tp-fold"]')),
+          toggles: Array.from(document.querySelectorAll('.map-profile-toggle')).map(name) };
+      });
+      assert(names.fold === 'Path profile details' && names.toggles.length > 0 && names.toggles.indexOf(names.fold) < 0,
+        'accessible names: ' + JSON.stringify(names));
       await page.tap('[data-testid="tp-fold"]');
       await page.waitForTimeout(250);
       v = await panelView(page);

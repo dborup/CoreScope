@@ -386,9 +386,12 @@ atest('fold: the head keeps title, verdict chip and the verdict as status; unfol
   assert.strictEqual(v.glyph, '\u25BE');
   const fold = env.dom.find('tp-fold');
   assert.strictEqual(fold.tagName, 'BUTTON', 'the toggle is not a button');
-  // The title is the toggle: its text is its name, no second title shown.
+  // The title is the toggle: it shows the title text, no second title.
   assert.strictEqual(v.name, 'Path profile', 'the toggle is not the title: ' + v.name);
-  assert.strictEqual(fold.getAttribute('aria-label'), null, 'an aria-label would hide the title text');
+  /* #796 N2: its accessible name is not the map toggle's "Path profile",
+   * and it starts with the visible text (WCAG 2.5.3 label in name). */
+  const label = fold.getAttribute('aria-label');
+  assert(label && label !== 'Path profile' && label.indexOf(v.name) === 0, 'fold aria-label: ' + label);
   assert.strictEqual(fold.parentNode.children[0].hidden, true, 'the plain title shows beside the toggle: the title reads twice');
   const calls = fetchJSON.calls.length;
   fold.fire('click');

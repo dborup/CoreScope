@@ -139,14 +139,14 @@
 
   /**
    * Shows `hint` in the profile panel, or hides it (null). The chip goes
-   * into the title row right before the copy button, after the other
-   * chips; the note right after the detail line. Built once per panel.
+   * last into the title row's chip row, after the other chips; the note
+   * right after the detail line. Built once per panel.
    */
   function render(panel, hint) {
     if (!panel) return;
-    var head = panel.querySelector('.tp-head');
+    var row = panel.querySelector('.tp-chips');
     var detail = panel.querySelector('.tp-detail');
-    if (!head || !detail) return;
+    if (!row || !detail) return;
     var doc = panel.ownerDocument || document;
     var ui = panel._mcMastHint;
     if (!ui) {
@@ -162,9 +162,9 @@
       ui.chip.setAttribute('data-testid', 'tp-mast-hint');
       ui.note.className = 'tp-mast-note';
       ui.note.setAttribute('data-testid', 'tp-mast-note');
-      var copy = panel.querySelector('.tp-copy');
-      head.insertBefore(ui.sep, copy);
-      head.insertBefore(ui.chip, copy);
+      // Last in the title row's chip row, which wraps on its own (#796 F5).
+      row.appendChild(ui.sep);
+      row.appendChild(ui.chip);
       detail.parentNode.insertBefore(ui.note, detail.nextSibling);
     }
     var show = !!hint;

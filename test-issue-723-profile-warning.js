@@ -341,9 +341,14 @@ test('panel: the chip and then the note sit under the detail, not in the title r
   const env = load();
   const { tool } = openTool(env);
   tool.open();
-  const head = env.dom.find('tp-verdict').parentNode;
+  // #796 F5: the chips have their own row inside the title row.
+  const chips = env.dom.find('tp-verdict').parentNode;
+  assert(/\btp-chips\b/.test(chips.className), 'the verdict is not in the chip row: ' + chips.className);
+  const head = chips.parentNode;
   const ids = head.children.map(c => c.attrs['data-testid'] || c.className);
-  assert(ids.indexOf('tp-heritage-chip') < 0, 'the chip is in the title row: ' + ids.join(' | '));
+  const cids = chips.children.map(c => c.attrs['data-testid'] || c.className);
+  assert(ids.indexOf('tp-heritage-chip') < 0 && cids.indexOf('tp-heritage-chip') < 0,
+    'the chip is in the title row: ' + ids.concat(cids).join(' | '));
   assert(ids.indexOf('tp-copy-link') >= 0 && ids.indexOf('tp-close') > ids.indexOf('tp-copy-link'), 'title row: ' + ids.join(' | '));
   const body = env.dom.find('tp-body');
   const bids = body.children.map(c => c.attrs['data-testid'] || c.className);

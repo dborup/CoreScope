@@ -1389,6 +1389,8 @@
       title.appendChild(ui.titleText);
       ui.fold = el('button', 'tp-fold', 'Path profile');
       ui.fold.type = 'button';
+      // #796 N2: not the same name as the map's "Path profile" toggle.
+      ui.fold.setAttribute('aria-label', 'Path profile details');
       ui.fold.hidden = true;
       ui.fold.setAttribute('aria-expanded', 'true');
       ui.fold.setAttribute('data-testid', 'tp-fold');
@@ -1401,11 +1403,17 @@
       });
       title.appendChild(ui.fold);
       head.appendChild(title);
+      /* #796 F5: the chips have a row of their own inside the title row. It
+       * takes the space between the title and Copy/Close and wraps inside
+       * itself, so no chip combination (or font) can push Close onto a
+       * second line and the chart under the bottom navigation. */
+      var chips = el('div', 'tp-chips');
+      head.appendChild(chips);
       ui.chip = el('span', 'tp-chip');
       ui.chip.setAttribute('data-testid', 'tp-verdict');
       // #790: an empty chip is a grey pill that reads as a drag handle.
       ui.chip.hidden = true;
-      head.appendChild(ui.chip);
+      chips.appendChild(ui.chip);
       /* #729: the surface (buildings and trees) verdict, when it is worse
        * than the terrain one. It rides beside the verdict rather than under
        * the chart because "Clear" beside an obvious building is read in the
@@ -1417,11 +1425,11 @@
        * on a plain span is not reliably announced, so it is text. */
       ui.surfaceSep = el('span', 'sr-only', '. ');
       ui.surfaceSep.hidden = true;
-      head.appendChild(ui.surfaceSep);
+      chips.appendChild(ui.surfaceSep);
       ui.surface = el('span', 'tp-chip tp-chip-surface');
       ui.surface.setAttribute('data-testid', 'tp-surface-chip');
       ui.surface.hidden = true;
-      head.appendChild(ui.surface);
+      chips.appendChild(ui.surface);
       /* Plan §3.2: the verdict must read "assumed heights" until the viewer
        * has confirmed both ends. A 10 m error in an assumed antenna height
        * swamps the 0.05 m DHM accuracy and can flip the verdict outright,
@@ -1432,7 +1440,7 @@
       ui.assumed.setAttribute('data-testid', 'tp-assumed-chip');
       ui.assumed.title = 'At least one antenna height is a default, not a measured value. Set both heights to confirm them.';
       ui.assumed.hidden = true;
-      head.appendChild(ui.assumed);
+      chips.appendChild(ui.assumed);
       /* #790: Cancel, shown only in the compact bar. During a Move it is
        * the Escape of #721 (the end stays); while picking it resets the
        * profile, exactly as Close does, on the same page. */
