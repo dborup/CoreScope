@@ -153,6 +153,10 @@ func (p *Plan) chunk(first, last int) (planChunk, bool) {
 // Calls is the number of rasters fetched per elevation model.
 func (p *Plan) Calls() int { return len(p.chunks) }
 
+// Inside reports whether DHM covers sample i (Covers): the samples the
+// rasters are fetched for. The #738 foreign fill takes exactly the others.
+func (p *Plan) Inside(i int) bool { return p.inside[i] }
+
 // Covered is the number of samples DHM covers.
 func (p *Plan) Covered() int {
 	n := 0

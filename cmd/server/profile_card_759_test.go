@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dhm"
 	"github.com/meshcore-analyzer/profilecard"
 )
@@ -137,7 +140,7 @@ func TestProfileCard_NamesAreInTheCardKey(t *testing.T) {
 // as the document carries it, entities and all.
 func rawMeta(t *testing.T, body, key string) string {
 	t.Helper()
-	m := regexp.MustCompile(`<meta (?:property|name)="` + regexp.QuoteMeta(key) + `" content="([^"]*)">`).FindAllStringSubmatch(body, -1)
+	m := regexp.MustCompile(`<meta (?:property|name)="`+regexp.QuoteMeta(key)+`" content="([^"]*)">`).FindAllStringSubmatch(body, -1)
 	if len(m) != 1 {
 		t.Fatalf("%d %s tags", len(m), key)
 	}
@@ -230,5 +233,32 @@ func TestTerrainProfile_OpenAPI503MatchesAdmission(t *testing.T) {
 	}
 	if !strings.Contains(text, "take no slot") {
 		t.Fatalf("503 text does not say joiners take no slot: %q", text)
+	}
+}
+
+// Merge with #738: a profile whose foreign fill failed is cached for its
+// DHM part, and the JSON route tries the fill again on a hit. Its card is
+// degraded (max-age 60, not cached), never an immutable complete card of a
+// profile that can still change, and /p adds no verdict word for it.
+func TestProfileCard_FailedFillIsNotAComplete(t *testing.T) {
+	failing := func(context.Context, *dhm.Plan) (copdem.Result, error) {
+		return copdem.Result{}, errors.New("bucket down")
+	}
+	f := &scriptedFill{fn: failing}
+	pc := dhm.ProfileConfig{ForeignFill: dhm.ForeignFillConfig{Enabled: true}, Share: dhm.ShareConfig{Enabled: true}}
+	env := newTerrainEnvWith(t, newFakeElevation(t, flatElev(fillDHMHeight)), pc, nil, func(d *terrainProfilerDeps) { d.fill = f })
+	q := pathQuery(cphPt, malmoPt)
+	card := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		env.router.ServeHTTP(w, httptest.NewRequest("GET", cardRoute+"?"+q, nil))
+		return w
+	}
+	wantCard(t, card(), "degraded")
+	wantCard(t, card(), "degraded")
+	if env.p.card.cache.Len() != 0 {
+		t.Fatal("a card of a failed fill was cached")
+	}
+	if f.count() == 0 {
+		t.Fatal("precondition: the fill was never tried")
 	}
 }

@@ -55,45 +55,17 @@ func (h Hillshade) String() string {
 	return "terrain"
 }
 
-func (h Hillshade) service() string {
-	if h == HillshadeExaggerated {
-		return ExaggeratedWMSService
-	}
-	return WMSService
-}
+// overlay is how the terrain id is fetched under layer h (#734).
+func (h Hillshade) overlay() Overlay { return overlayTerrain.Resolve(h) }
 
-func (h Hillshade) layer() string {
-	if h == HillshadeExaggerated {
-		return ExaggeratedHillshadeLayer
-	}
-	return HillshadeLayer
-}
+func (h Hillshade) service() string { return h.overlay().Service }
+
+func (h Hillshade) layer() string { return h.overlay().Layer }
 
 // hillshadeQuery is the tile's GetMap query for layer h: #680's upstream
 // query with only the layer changed.
 func (k TileKey) hillshadeQuery(h Hillshade) url.Values {
-	q := k.upstreamQuery()
-	q.Set("layers", h.layer())
-	return q
-}
-
-// hillshadeQueryCheck accepts q only if it is exactly the hillshadeQuery of
-// the tile its bbox names, so Client.Get cannot send any other request to
-// h's service: no other layer, format or parameter.
-func hillshadeQueryCheck(h Hillshade) func(url.Values) error {
-	return func(q url.Values) error {
-		if len(q["bbox"]) != 1 {
-			return ErrBadRequest
-		}
-		k, err := TileFromBBox(q["bbox"][0])
-		if err != nil {
-			return err
-		}
-		if q.Encode() != k.hillshadeQuery(h).Encode() {
-			return ErrBadRequest
-		}
-		return nil
-	}
+	return k.overlayQuery(h.overlay())
 }
 
 // FetchHillshade fetches one tile of layer h. Only a complete 256×256 PNG
@@ -109,14 +81,7 @@ func (c *Client) FetchHillshade(h Hillshade, k TileKey) ([]byte, error) {
 // (FetchError "canceled"/"timeout"). The shared call stops once no
 // caller waits for it any more, which removes queued work.
 func (c *Client) FetchHillshadeAdmitted(ctx context.Context, adm *Admission, h Hillshade, k TileKey) ([]byte, error) {
-	data, err := c.get(ctx, adm, h.service(), k.hillshadeQuery(h), []string{"image/png"})
-	if err != nil {
-		return nil, err
-	}
-	if err := checkTilePNG(data); err != nil {
-		return nil, err
-	}
-	return data, nil
+	return c.FetchOverlayAdmitted(ctx, adm, h.overlay(), k)
 }
 
 // checkTilePNG accepts data only if it decodes completely as a TileSize ×

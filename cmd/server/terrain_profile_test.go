@@ -97,16 +97,27 @@ type terrainEnv struct {
 // newTerrainEnv is a test server with the profile enabled on src.
 func newTerrainEnv(t *testing.T, src dhm.ElevationSource, pc dhm.ProfileConfig, radio *RadioConfig) *terrainEnv {
 	t.Helper()
+	return newTerrainEnvWith(t, src, pc, radio, nil)
+}
+
+// newTerrainEnvWith is newTerrainEnv with the profiler's dependencies
+// edited first (#738: the foreign fill's client).
+func newTerrainEnvWith(t *testing.T, src dhm.ElevationSource, pc dhm.ProfileConfig, radio *RadioConfig, edit func(*terrainProfilerDeps)) *terrainEnv {
+	t.Helper()
 	srv, router := setupTestServer(t)
 	logs := &dhmLogSink{}
 	pc.Enabled = true
 	srv.cfg.Radio = radio
-	srv.terrain = newTerrainProfiler(pc, radio, terrainProfilerDeps{
+	d := terrainProfilerDeps{
 		src:        src,
 		logf:       logs.logf,
 		logFailure: func(what string, err error) { logs.logf("[dhm] upstream %s failed (%s)", what, dhm.FailureReason(err)) },
 		observers:  func() ([]Observer, error) { return nil, nil },
-	})
+	}
+	if edit != nil {
+		edit(&d)
+	}
+	srv.terrain = newTerrainProfiler(pc, radio, d)
 	if srv.terrain == nil {
 		t.Fatal("newTerrainProfiler returned nil for an enabled profile")
 	}
@@ -814,6 +825,10 @@ func TestTerrainProfile_LeavingDenmarkIsPartial(t *testing.T) {
 		{"Øresund, Copenhagen→Saltholm east", "55.67610,12.56830", "55.66000,12.86000"},
 		{"Øresund, Helsingør→Copenhagen", "56.03610,12.61360", "55.67610,12.56830"},
 		{"Øresund, Copenhagen→Saltholm", "55.67610,12.56830", "55.64000,12.76000"},
+		// #763 — Peberholm is Danish (Tårnby Kommune); while the generator
+		// listed it as Swedish, its buffered outline made these partial.
+		{"Øresund, Dragør→Saltholm", "55.59300,12.67200", "55.64000,12.76000"},
+		{"Øresund, Dragør→Peberholm", "55.59300,12.67200", "55.59900,12.75270"},
 		// #704 — Okseøerne are Danish islets 2.1 km off the German shore
 		// of Flensborg Fjord, outside the 1250 m buffer, so a path that
 		// ends on one keeps its verdict. The coordinates are surveyed

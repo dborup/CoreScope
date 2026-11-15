@@ -89,3 +89,11 @@ replace github.com/meshcore-analyzer/mastedb => ../../internal/mastedb
 require github.com/meshcore-analyzer/profilecard v0.0.0
 
 replace github.com/meshcore-analyzer/profilecard => ../../internal/profilecard
+
+require github.com/meshcore-analyzer/copdem v0.0.0
+
+replace github.com/meshcore-analyzer/copdem => ../../internal/copdem
+
+require github.com/meshcore-analyzer/heritage v0.0.0
+
+replace github.com/meshcore-analyzer/heritage => ../../internal/heritage

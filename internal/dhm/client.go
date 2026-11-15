@@ -21,12 +21,15 @@ const DefaultBaseURL = "https://api.dataforsyningen.dk/"
 // feature that needs another DHM service adds it here, next to its own
 // request shape.
 var allowedServices = map[string]serviceShape{
-	// The tile proxy rebuilds every WMS query from a validated TileKey;
-	// the check holds any other caller to that shape too.
-	WMSService: {check: hillshadeQueryCheck(HillshadeTerrain)},
+	// The tile proxy rebuilds every WMS query from a validated overlay
+	// and TileKey; the check holds any other caller to those shapes too:
+	// the terrain (#680), surface and contour (#734) tiles.
+	WMSService: {check: overlayQueryCheck(WMSService)},
 	WCSService: {check: checkCoverageQuery, raster: true},
 	// #687: only the exaggerated hillshade's exact tile shape.
-	ExaggeratedWMSService: {check: hillshadeQueryCheck(HillshadeExaggerated)},
+	ExaggeratedWMSService: {check: overlayQueryCheck(ExaggeratedWMSService)},
+	// #728: only the orthophoto's exact GetTile shape.
+	OrthoWMTSService: {check: orthoQueryCheck},
 }
 
 // serviceShape is what the Client enforces per service.
@@ -163,14 +166,15 @@ func (c *Client) get(ctx context.Context, adm *Admission, service string, q url.
 		return c.fetch(work, target, contentTypes, maxBody)
 	})
 	if err != nil {
-		return nil, ctxFailure(err)
+		return nil, ContextFailure(err)
 	}
 	return data, nil
 }
 
-// ctxFailure maps the caller's context error, when ctx ended its wait, to
-// a FetchError category; any other error passes through.
-func ctxFailure(err error) error {
+// ContextFailure maps the caller's context error, when ctx ended its
+// wait, to a FetchError category; any other error passes through. It is
+// shared with internal/copdem.
+func ContextFailure(err error) error {
 	switch {
 	case errors.Is(err, context.Canceled):
 		return FetchError{"canceled"}

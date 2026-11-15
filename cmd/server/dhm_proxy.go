@@ -13,6 +13,14 @@ package main
 // tile, the #680 terrain hillshade (dhm_DAF) is served instead. Browsers
 // keep requesting the #680 shape either way.
 //
+// #734: the browser names the overlay by id in `layers` (terrain, surface
+// or contours; internal/dhm/overlay.go), and the server maps it to the
+// upstream layer. terrain is the #687 chain above, and the #680 layer name
+// stays its alias for one release. surface (the surface hillshade) and
+// contours (2.5 m contour lines, from z14) have no fallback. Every
+// overlay keeps its own cache entries and shares the one per-client
+// budget and admission bound.
+//
 // Security properties, each pinned by dhm_proxy_test.go and the
 // internal/dhm tests:
 //   - Not an open proxy. The upstream service is a constant, every client
@@ -36,7 +44,16 @@ package main
 //     (map.dhm.tileRateLimitPerMin, #682 review F3): 429 with Retry-After
 //     beyond it. Cached tiles and tiles outside Denmark are not charged.
 //
-// The endpoint never touches SQLite.
+// #728: with map.dhm.ortho.enabled, the same proxy also serves the Danish
+// spring orthophoto as a base-map tile at /api/map/dhm/ortho/{z}/{x}/{y}
+// (WMTS orto_foraar_webm_DAF, internal/dhm/ortho.go). It holds to every
+// property above: the path is validated to a TileKey and nothing else, any
+// query string is refused, the upstream query is rebuilt, only a decoded
+// 256×256 JPEG is served, and the same coverage gate, per-client budget
+// and admission bound apply. Its JPEGs live in their own cache instance,
+// so they never evict hillshade tiles.
+//
+// The endpoints never touch SQLite.
 
 import (
 	"bytes"
@@ -51,11 +68,15 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/meshcore-analyzer/dhm"
 )
 
 const (
-	dhmClientPath    = "/api/map/dhm/wms"
+	dhmClientPath = "/api/map/dhm/wms"
+	// dhmOrthoRoute is the ortho tile route (#728) and, as the browser's
+	// Leaflet URL template, the url of dhm.ortho in /api/config/client.
+	dhmOrthoRoute    = "/api/map/dhm/ortho/{z}/{x}/{y}"
 	dhmBrowserMaxAge = 24 * time.Hour
 	// dhmFallbackMaxAge is the browser cache lifetime of a terrain tile
 	// served in place of a failed exaggerated one (#687), so the browser
@@ -85,9 +106,16 @@ type DHMClientConfig struct {
 	// previews (#727): the profile is served and map.dhm.profile.share.
 	// enabled is set. Without it the copy button hands out the plain
 	// #/map?profile= link, exactly as before.
-	Share       bool          `json:"share"`
-	Bounds      [2][2]float64 `json:"bounds"` // [[south, west], [north, east]]
-	Attribution string        `json:"attribution"`
+	Share bool `json:"share"`
+	// PointAntenna is how the profile resolves a free map point's antenna
+	// height when the request names none (#746): radio.antennaHeightsM.point,
+	// else the built-in default. A point has no per-node key, so this is the
+	// whole rule, and the Map page can apply a customizer point default in
+	// the one request a drop makes instead of asking twice. Present only
+	// with Profile.
+	PointAntenna *DHMPointAntenna `json:"pointAntenna,omitempty"`
+	Bounds       [2][2]float64    `json:"bounds"` // [[south, west], [north, east]]
+	Attribution  string           `json:"attribution"`
 	// The credit's parts (#733). Dataforsyningen's terms require the
 	// credit to link both the dataset and the licence, and Leaflet's
 	// attribution control is the page's, not the server's, so the link
@@ -98,27 +126,126 @@ type DHMClientConfig struct {
 	DatasetURL  string `json:"datasetUrl"`
 	LicenseName string `json:"licenseName"`
 	LicenseURL  string `json:"licenseUrl"`
+	// AttributionDerived is the credit of a view computed from DHM
+	// (dhm.AttributionDerived): the profile chart footer shows it, with the
+	// same two marks as links. Sent so the page keeps no copy of any
+	// credit string (#765).
+	AttributionDerived string `json:"attributionDerived"`
+	// Overlays are the DHM overlays the page may offer, by the id it puts
+	// in a tile request's `layers` (#734). Layer stays the #680 value for
+	// pages that predate them.
+	Overlays []DHMOverlayClientConfig `json:"overlays"`
+	// Ortho is present only while map.dhm.ortho.enabled is set (#728).
+	Ortho *DHMOrthoClientConfig `json:"ortho,omitempty"`
+}
+
+// DHMOverlayClientConfig is one entry of `dhm.overlays` in
+// /api/config/client (#734): an overlay id, the zoom range the proxy
+// serves it at, and the dataset its credit links (#733, #734 Q5). The
+// credit text and the licence are the block's own: every overlay is
+// Klimadatastyrelsen's rendering of Danmarks Højdemodel under CC BY 4.0,
+// shown as served.
+type DHMOverlayClientConfig struct {
+	ID          string `json:"id"`
+	MinZoom     int    `json:"minZoom"`
+	MaxZoom     int    `json:"maxZoom"`
+	DatasetName string `json:"datasetName"`
+	DatasetURL  string `json:"datasetUrl"`
+}
+
+// dhmClientOverlayIDs are the overlays offered to the page. The proxy
+// also serves contours, which joins here in #734 M2 once its style and
+// first zoom are settled on staging.
+var dhmClientOverlayIDs = []string{"terrain", "surface"}
+
+func dhmOverlayClientConfigs() []DHMOverlayClientConfig {
+	out := make([]DHMOverlayClientConfig, 0, len(dhmClientOverlayIDs))
+	for _, id := range dhmClientOverlayIDs {
+		o, ok := dhm.LookupOverlay(id)
+		if !ok {
+			continue // TestDHM734_OfferedOverlaysAreTableIDs pins that none is skipped
+		}
+		out = append(out, DHMOverlayClientConfig{
+			ID:          o.ID,
+			MinZoom:     o.MinZoom,
+			MaxZoom:     o.MaxZoom,
+			DatasetName: dhm.DatasetName,
+			DatasetURL:  o.DatasetURL,
+		})
+	}
+	return out
+}
+
+// DHMOrthoClientConfig is `dhm.ortho` of /api/config/client (#728): what
+// the orthophoto base layer needs, built from constants only. Its credit
+// parts follow #733, like the hillshade's.
+type DHMOrthoClientConfig struct {
+	URL         string        `json:"url"` // Leaflet URL template
+	MinZoom     int           `json:"minZoom"`
+	MaxZoom     int           `json:"maxZoom"`
+	Bounds      [2][2]float64 `json:"bounds"` // [[south, west], [north, east]]
+	Attribution string        `json:"attribution"`
+	DatasetName string        `json:"datasetName"`
+	DatasetURL  string        `json:"datasetUrl"`
+	LicenseName string        `json:"licenseName"`
+	LicenseURL  string        `json:"licenseUrl"`
+	// ForeignMask marks the z12 tiles inside Bounds that DHM does not
+	// cover: Skåne, Schleswig and Rügen away from the coast (M3). The
+	// base layer requests no ortho tile there, so the Esri imagery under
+	// it shows and no upstream fetch is spent on another country.
+	ForeignMask *dhm.TileMask `json:"foreignMask"`
+}
+
+// dhmCoverageBounds is dhm.Coverage as Leaflet bounds.
+func dhmCoverageBounds() [2][2]float64 {
+	c := dhm.Coverage
+	return [2][2]float64{{c.South, c.West}, {c.North, c.East}}
+}
+
+func dhmOrthoClientConfig(mask *dhm.TileMask) *DHMOrthoClientConfig {
+	return &DHMOrthoClientConfig{
+		URL:         dhmOrthoRoute,
+		MinZoom:     dhm.OrthoMinZoom,
+		MaxZoom:     dhm.OrthoMaxZoom,
+		Bounds:      dhmCoverageBounds(),
+		Attribution: dhm.OrthoAttribution,
+		DatasetName: dhm.OrthoDatasetName,
+		DatasetURL:  dhm.OrthoDatasetURL,
+		LicenseName: dhm.LicenseName,
+		LicenseURL:  dhm.LicenseURL,
+		ForeignMask: mask,
+	}
+}
+
+// DHMPointAntenna is a free point's antenna height without a request
+// height, and its source: "operator-role" or "point-default", as in a
+// profile response's antennaSource.
+type DHMPointAntenna struct {
+	M      float64 `json:"m"`
+	Source string  `json:"source"`
 }
 
 func dhmClientConfig() *DHMClientConfig {
-	c := dhm.Coverage
 	return &DHMClientConfig{
-		Enabled:     true,
-		URL:         dhmClientPath,
-		Layer:       dhm.HillshadeLayer,
-		MinZoom:     dhm.MinZoom,
-		MaxZoom:     dhm.MaxZoom,
-		Bounds:      [2][2]float64{{c.South, c.West}, {c.North, c.East}},
-		Attribution: dhm.Attribution,
-		DatasetName: dhm.DatasetName,
-		DatasetURL:  dhm.DatasetURL,
-		LicenseName: dhm.LicenseName,
-		LicenseURL:  dhm.LicenseURL,
+		Enabled:            true,
+		URL:                dhmClientPath,
+		Layer:              dhm.HillshadeLayer,
+		MinZoom:            dhm.MinZoom,
+		MaxZoom:            dhm.MaxZoom,
+		Bounds:             dhmCoverageBounds(),
+		Attribution:        dhm.Attribution,
+		DatasetName:        dhm.DatasetName,
+		DatasetURL:         dhm.DatasetURL,
+		LicenseName:        dhm.LicenseName,
+		LicenseURL:         dhm.LicenseURL,
+		AttributionDerived: dhm.AttributionDerived,
+		Overlays:           dhmOverlayClientConfigs(),
 	}
 }
 
 // dhmTileQueryParams documents the exact tile request shape for OpenAPI:
-// every fixed key with its only accepted value, plus bbox, all required.
+// every fixed key with its only accepted value, layers as the enum of
+// overlay ids (#734), plus bbox, all required.
 func dhmTileQueryParams() []paramMeta {
 	fixed := dhm.TileParams()
 	names := make([]string, 0, len(fixed))
@@ -128,6 +255,14 @@ func dhmTileQueryParams() []paramMeta {
 	sort.Strings(names)
 	out := make([]paramMeta, 0, len(names)+1)
 	for _, k := range names {
+		if k == "layers" {
+			// TileParams' layers is the #680 value, the terrain alias.
+			out = append(out, paramMeta{Name: k, Type: "string", Required: true,
+				Enum: append(dhm.OverlayIDs(), fixed[k]),
+				Description: "the overlay id: terrain, surface or contours; " + strconv.Quote(fixed[k]) +
+					" is the #680 alias of terrain, accepted for one release"})
+			continue
+		}
 		desc := "must be exactly " + strconv.Quote(fixed[k])
 		if fixed[k] == "" {
 			desc = "must be present and empty"
@@ -166,6 +301,11 @@ type dhmProxyOptions struct {
 	// tileMaxInFlight bounds distinct cold-tile fetches, running or
 	// queued (#744); defaultDHMProxyOptions sets dhmTileMaxInFlight.
 	tileMaxInFlight int
+	// The ortho cache (#728), apart from the hillshade cache so large
+	// JPEGs never evict hillshade tiles. Used only with map.dhm.ortho.
+	orthoCacheMaxEntries int
+	orthoCacheMaxBytes   int
+	orthoCacheTTL        time.Duration
 }
 
 // dhmTileMaxInFlight is the shipped bound on cold-tile fetch workers
@@ -221,23 +361,105 @@ func defaultDHMProxyOptions() dhmProxyOptions {
 		cacheMaxBytes:   64 << 20,
 		cacheTTL:        24 * time.Hour,
 		tileMaxInFlight: dhmTileMaxInFlight,
+		// The #728 plan's proposal at ~25 KB a tile; staging measures real
+		// ortho tile sizes before these are final. Aerial photos change
+		// about once a year, hence the long TTL.
+		orthoCacheMaxEntries: 2048,
+		orthoCacheMaxBytes:   96 << 20,
+		orthoCacheTTL:        7 * 24 * time.Hour,
 	}
 }
 
 type dhmProxy struct {
-	client  *dhm.Client
-	layer   dhm.Hillshade // configured upstream layer
-	cache   *dhm.Cache[dhmCacheKey]
+	client *dhm.Client
+	layer  dhm.Hillshade // configured upstream layer
+	cache  *dhm.Cache[dhmCacheKey]
+	// orthoCache holds ortho tiles (#728); nil while map.dhm.ortho is off,
+	// and the ortho route then answers 404.
+	orthoCache *dhm.Cache[dhmCacheKey]
+	// orthoMask is dhm.OrthoForeignMask, built when the proxy starts so no
+	// client config request pays for it (#728 M3); nil with orthoCache.
+	orthoMask *dhm.TileMask
+	// limiter and admit are shared by every tile product: one token, one
+	// fair-use budget.
 	limiter *ipRateLimiter // nil: no per-client limit
 	admit   *dhm.Admission // bound on cold-tile fetch workers (#744)
 	now     func() time.Time
 }
 
-// dhmCacheKey is a tile of the upstream layer it was actually fetched
-// from, so a terrain fallback is never served as an exaggerated tile.
+// dhmProduct is what a cached tile shows (#728).
+type dhmProduct uint8
+
+const (
+	dhmProductTerrain     dhmProduct = iota // #680 hillshade
+	dhmProductExaggerated                   // #687 hillshade
+	dhmProductOrtho                         // #728 orthophoto
+	dhmProductSurface                       // #734 surface hillshade
+	dhmProductContours                      // #734 contour lines
+)
+
+// overlayProduct is the product an upstream overlay's tiles are, by its
+// upstream layer: the terrain id is two products, one per #687 layer.
+// Every overlay in internal/dhm's table has one (TestDHM734_
+// EveryOverlayHasItsOwnProduct); one without would be a programming
+// error, and must not share another product's cache entries.
+func overlayProduct(o dhm.Overlay) dhmProduct {
+	switch o.Layer {
+	case dhm.HillshadeLayer:
+		return dhmProductTerrain
+	case dhm.ExaggeratedHillshadeLayer:
+		return dhmProductExaggerated
+	case dhm.SurfaceLayer:
+		return dhmProductSurface
+	case dhm.ContourLayer:
+		return dhmProductContours
+	}
+	panic("dhm: overlay without a cache product")
+}
+
+// name is the product in a log line that names two of them.
+func (pr dhmProduct) name() string {
+	switch pr {
+	case dhmProductExaggerated:
+		return "exaggerated"
+	case dhmProductOrtho:
+		return "ortho"
+	case dhmProductSurface:
+		return "surface"
+	case dhmProductContours:
+		return "contours"
+	}
+	return "terrain"
+}
+
+// tileLabel is what a log line says failed or was refused.
+func (pr dhmProduct) tileLabel() string {
+	switch pr {
+	case dhmProductExaggerated:
+		return "exaggerated hillshade tile"
+	case dhmProductOrtho:
+		return "ortho tile"
+	case dhmProductSurface:
+		return "surface hillshade tile"
+	case dhmProductContours:
+		return "contour tile"
+	}
+	return "hillshade tile"
+}
+
+func hillshadeProduct(h dhm.Hillshade) dhmProduct {
+	if h == dhm.HillshadeExaggerated {
+		return dhmProductExaggerated
+	}
+	return dhmProductTerrain
+}
+
+// dhmCacheKey is a tile of the product it actually is, so a terrain
+// fallback is never served as an exaggerated tile (#687), nor any tile as
+// another product's.
 type dhmCacheKey struct {
-	Layer dhm.Hillshade
-	Tile  dhm.TileKey
+	Product dhmProduct
+	Tile    dhm.TileKey
 }
 
 // newDHMProxy returns nil unless map.dhm is enabled with a token: an
@@ -252,7 +474,7 @@ func newDHMProxy(cfg dhm.Config, opts dhmProxyOptions) *dhmProxy {
 		// The value is not echoed: it could be a misplaced token.
 		opts.client.Logf(`[dhm] config map.dhm.layer must be "exaggerated" or "terrain"; using "terrain"`)
 	}
-	return &dhmProxy{
+	p := &dhmProxy{
 		client: client,
 		layer:  layer,
 		cache:  dhm.NewCache[dhmCacheKey](opts.cacheMaxEntries, opts.cacheMaxBytes, opts.cacheTTL),
@@ -261,6 +483,12 @@ func newDHMProxy(cfg dhm.Config, opts dhmProxyOptions) *dhmProxy {
 		admit: dhm.NewAdmission(opts.tileMaxInFlight),
 		now:   opts.client.Now,
 	}
+	if cfg.Ortho.Enabled {
+		p.orthoCache = dhm.NewCache[dhmCacheKey](opts.orthoCacheMaxEntries, opts.orthoCacheMaxBytes, opts.orthoCacheTTL)
+		mask := dhm.OrthoForeignMask()
+		p.orthoMask = &mask
+	}
+	return p
 }
 
 // dhmTransparentPNG is served outside coverage and on any upstream failure,
@@ -273,11 +501,16 @@ var dhmTransparentPNG = func() []byte {
 	return buf.Bytes()
 }()
 
-// writeDHMTile writes a tile the browser may cache for maxAge; 0 is
+// writeDHMTile writes a PNG tile the browser may cache for maxAge; 0 is
 // no-store.
 func writeDHMTile(w http.ResponseWriter, data []byte, maxAge time.Duration, state string) {
+	writeTileImage(w, "image/png", data, maxAge, state)
+}
+
+// writeTileImage is writeDHMTile for any image type.
+func writeTileImage(w http.ResponseWriter, contentType string, data []byte, maxAge time.Duration, state string) {
 	h := w.Header()
-	h.Set("Content-Type", "image/png")
+	h.Set("Content-Type", contentType)
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-CoreScope-Tile", state)
 	if maxAge > 0 {
@@ -294,7 +527,7 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	key, err := dhm.ParseTileRequest(r.URL.Query())
+	overlay, key, err := dhm.ParseTileRequest(r.URL.Query())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, dhm.ErrBadRequest.Error())
 		return
@@ -303,15 +536,16 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeDHMTile(w, dhmTransparentPNG, dhmBrowserMaxAge, "outside")
 		return
 	}
+	src := overlay.Resolve(p.layer) // the terrain id is the configured chain (#687)
 	// Only a tile that will go upstream is charged to the client.
-	if _, cached := p.cache.Get(dhmCacheKey{Layer: p.layer, Tile: key}, p.now()); !cached {
+	if _, cached := p.cache.Get(dhmCacheKey{Product: overlayProduct(src), Tile: key}, p.now()); !cached {
 		if ok, retry := p.limiter.allow(r); !ok {
 			writeRateLimited(w, retry)
 			return
 		}
 	}
 	ctx := r.Context()
-	data, hit, err := p.layerTile(ctx, p.layer, key)
+	data, hit, err := p.layerTile(ctx, src, key)
 	if err == nil {
 		writeDHMTile(w, data, dhmBrowserMaxAge, tileState("", hit))
 		return
@@ -323,51 +557,107 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// #744: refused before any upstream work, so the charge is given
 		// back, as for a refused profile (#705/#707).
 		p.limiter.refund(r)
-		p.client.LogRefusal("hillshade tile")
+		p.client.LogRefusal(overlayProduct(overlay).tileLabel())
 		writeDHMTile(w, dhmTransparentPNG, 0, "busy")
 		return
 	}
-	if p.layer == dhm.HillshadeTerrain {
-		p.client.LogFailure("hillshade tile", err)
-		writeDHMTile(w, dhmTransparentPNG, 0, "unavailable")
-		return
-	}
-	if !dhm.FallbackEligible(err) {
-		// A timeout or a full budget: retrying on terrain would only wait
-		// again (#688 review F1).
-		p.client.LogFailure("exaggerated hillshade tile", err)
+	fallback, hasFallback := src.Fallback()
+	if !hasFallback || !dhm.FallbackEligible(err) {
+		// No fallback (#734: only the exaggerated terrain has one), or a
+		// timeout or a full budget: retrying on the fallback would only
+		// wait again (#688 review F1).
+		p.client.LogFailure(overlayProduct(src).tileLabel(), err)
 		writeDHMTile(w, dhmTransparentPNG, 0, "unavailable")
 		return
 	}
 	// #687: the exaggerated tile failed; serve the terrain tile instead.
-	data, hit, fallbackErr := p.layerTile(ctx, dhm.HillshadeTerrain, key)
+	data, hit, fallbackErr := p.layerTile(ctx, fallback, key)
 	if ctx.Err() != nil {
 		return
 	}
 	if fallbackErr != nil {
-		p.client.LogFailure("hillshade tile", dhm.FetchError{Reason: "exaggerated " + dhm.FailureReason(err) +
-			", terrain " + dhm.FailureReason(fallbackErr)})
+		first, second := overlayProduct(src), overlayProduct(fallback)
+		p.client.LogFailure(second.tileLabel(), dhm.FetchError{Reason: first.name() + " " + dhm.FailureReason(err) +
+			", " + second.name() + " " + dhm.FailureReason(fallbackErr)})
 		writeDHMTile(w, dhmTransparentPNG, 0, "unavailable")
 		return
 	}
-	p.client.LogFallback("exaggerated hillshade tile", err)
+	p.client.LogFallback(overlayProduct(src).tileLabel(), err)
 	writeDHMTile(w, data, dhmFallbackMaxAge, tileState("fallback", hit))
 }
 
-// layerTile returns the tile of one upstream layer, from the cache or
+// layerTile returns the tile of one upstream overlay, from the cache or
 // upstream, and whether it was a cache hit. Only successes are cached. A
 // cold tile is admitted against p.admit and waited for until ctx is done.
-func (p *dhmProxy) layerTile(ctx context.Context, h dhm.Hillshade, k dhm.TileKey) ([]byte, bool, error) {
-	ck := dhmCacheKey{Layer: h, Tile: k}
+func (p *dhmProxy) layerTile(ctx context.Context, o dhm.Overlay, k dhm.TileKey) ([]byte, bool, error) {
+	ck := dhmCacheKey{Product: overlayProduct(o), Tile: k}
 	if data, ok := p.cache.Get(ck, p.now()); ok {
 		return data, true, nil
 	}
-	data, err := p.client.FetchHillshadeAdmitted(ctx, p.admit, h, k)
+	data, err := p.client.FetchOverlayAdmitted(ctx, p.admit, o, k)
 	if err != nil {
 		return nil, false, err
 	}
 	p.cache.Put(ck, data, p.now())
 	return data, false, nil
+}
+
+// serveOrtho serves one orthophoto tile (#728) of
+// GET /api/map/dhm/ortho/{z}/{x}/{y}, with the hillshade's coverage gate,
+// per-client budget and admission bound. Failures are a transparent PNG,
+// which a base layer shows as the map background.
+func (p *dhmProxy) serveOrtho(w http.ResponseWriter, r *http.Request) {
+	if p.orthoCache == nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if r.URL.RawQuery != "" || r.URL.ForceQuery {
+		writeError(w, http.StatusBadRequest, dhm.ErrBadRequest.Error())
+		return
+	}
+	v := mux.Vars(r)
+	key, err := dhm.ParseOrthoTile(v["z"], v["x"], v["y"])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, dhm.ErrBadRequest.Error())
+		return
+	}
+	if !key.IntersectsCoverage() {
+		writeDHMTile(w, dhmTransparentPNG, dhmBrowserMaxAge, "outside")
+		return
+	}
+	ck := dhmCacheKey{Product: dhmProductOrtho, Tile: key}
+	if data, ok := p.orthoCache.Get(ck, p.now()); ok {
+		writeTileImage(w, "image/jpeg", data, dhmBrowserMaxAge, "hit")
+		return
+	}
+	// Only a tile that will go upstream is charged, from the hillshade's
+	// budget: one client, one token.
+	if ok, retry := p.limiter.allow(r); !ok {
+		writeRateLimited(w, retry)
+		return
+	}
+	ctx := r.Context()
+	data, err := p.client.FetchOrthoAdmitted(ctx, p.admit, key)
+	if err == nil {
+		p.orthoCache.Put(ck, data, p.now())
+		writeTileImage(w, "image/jpeg", data, dhmBrowserMaxAge, "miss")
+		return
+	}
+	if ctx.Err() != nil {
+		return // the client left: nobody to answer, nothing to log
+	}
+	if errors.Is(err, dhm.ErrAdmissionFull) {
+		p.limiter.refund(r)
+		p.client.LogRefusal("ortho tile")
+		writeDHMTile(w, dhmTransparentPNG, 0, "busy")
+		return
+	}
+	p.client.LogFailure("ortho tile", err)
+	writeDHMTile(w, dhmTransparentPNG, 0, "unavailable")
 }
 
 // tileState is the X-CoreScope-Tile value: hit/miss, or with a prefix
@@ -401,6 +691,13 @@ func (s *Server) dhmClientConfig() *DHMClientConfig {
 	c := dhmClientConfig()
 	c.Profile = s.terrain != nil
 	c.Share = s.terrain != nil && s.terrain.set.share.enabled
+	if s.terrain != nil {
+		h, src, _ := s.terrain.antenna(terrainEnd{kind: "point"}, nil)
+		c.PointAntenna = &DHMPointAntenna{M: h, Source: src}
+	}
+	if s.dhm.orthoCache != nil {
+		c.Ortho = dhmOrthoClientConfig(s.dhm.orthoMask)
+	}
 	return c
 }
 
@@ -410,4 +707,14 @@ func (s *Server) handleDHMTile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.dhm.ServeHTTP(w, r)
+}
+
+// handleDHMOrtho is GET /api/map/dhm/ortho/{z}/{x}/{y} (#728): 404 unless
+// map.dhm is active and map.dhm.ortho.enabled.
+func (s *Server) handleDHMOrtho(w http.ResponseWriter, r *http.Request) {
+	if s.dhm == nil {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	s.dhm.serveOrtho(w, r)
 }

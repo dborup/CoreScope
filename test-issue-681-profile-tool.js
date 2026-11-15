@@ -713,12 +713,13 @@ test('the chart is an accessible image with the verdict in its title', () => {
   assert.ok(/clear/i.test(m[1]), m[1]);
 });
 
-test('the CC BY 4.0 credit is the shared constant, not micro text in the SVG', () => {
+test('the CC BY 4.0 credit is the panel\'s line, not micro text in the SVG', () => {
   // Review F7: a 9px label inside an 820-unit viewBox stretched onto a
   // 340px panel renders about 3px tall. A licence credit nobody can read
   // is not a credit, so it is the panel's HTML line now; the E2E pins
-  // that it is visible, and visible exactly once.
-  assert.strictEqual(TP.ATTRIBUTION, 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0');
+  // that it is visible, and visible exactly once. Its text comes from the
+  // server's dhm block (#765, test-issue-733-dhm-credit.js).
+  assert.strictEqual(typeof TP.footerCredit, 'function');
   const svg = TP.buildChart(flatPath(), {});
   assert.strictEqual(svg.indexOf('Klimadatastyrelsen'), -1, 'the credit is back inside the stretched chart');
 });
@@ -1267,17 +1268,32 @@ test('a junk model in the link falls back to the customizer default', () => {
   assert.strictEqual(TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=dsm', { model: 'dtm' }).model, 'dtm');
 });
 
-test('the link leaves the model out only for both under a both default', () => {
+test('a junk model in the link is not a stated model (#765)', () => {
+  // Only a model the tool knows is a decision: a junk value must not pin
+  // the default it fell back to against a later customizer change.
+  ['dsm', '', 'DTM', 'both '].forEach((m) => {
+    const st = TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=' + encodeURIComponent(m));
+    assert.strictEqual(st.modelExplicit, false, 'model=' + JSON.stringify(m) + ' counted as stated');
+  });
+  assert.strictEqual(TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=dtm').modelExplicit, true);
+  assert.strictEqual(TP.parseState('profile=' + PK_A + ',' + PK_B).modelExplicit, false);
+});
+
+test('the link leaves the model out only for a "both" nobody stated', () => {
   const both = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: 'both' };
   const dtm = Object.assign({}, both, { model: 'dtm' });
-  assert.strictEqual(TP.serializeState(both, { model: 'both' }).model, undefined);
-  assert.strictEqual(TP.serializeState(dtm, { model: 'both' }).model, 'dtm');
-  // With a customizer default of dtm the asymmetry flips: now "both" is the
-  // choice that has to be written down, or reopening the link would undo it.
-  assert.strictEqual(TP.serializeState(both, { model: 'dtm' }).model, 'both');
-  // Review PR#714: anything but "both" is always written down, whatever the
-  // sharer's own default is — the recipient may not share it.
-  assert.strictEqual(TP.serializeState(dtm, { model: 'dtm' }).model, 'dtm');
+  const stated = Object.assign({}, both, { modelExplicit: true });
+  // serializeState takes no default: the sharer's own default never
+  // decides what the link says (#765).
+  assert.strictEqual(TP.serializeState(both).model, undefined);
+  // Review PR#714: anything but "both" is always written down — the
+  // recipient may not share the sharer's default.
+  assert.strictEqual(TP.serializeState(dtm).model, 'dtm');
+  // #746: a stated "both" is written down, or a recipient on a dtm default
+  // would reopen the link as terrain-only.
+  const qs = new URLSearchParams(TP.serializeState(stated)).toString();
+  assert.strictEqual(new URLSearchParams(qs).get('model'), 'both');
+  assert.strictEqual(TP.parseState(qs, { model: 'dtm' }).model, 'both');
 });
 
 test('a terrain-only link means terrain-only to a recipient on the standard default', () => {
@@ -1285,7 +1301,7 @@ test('a terrain-only link means terrain-only to a recipient on the standard defa
   // the customizer. The link must not quietly turn into terrain + surface.
   const state = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: 'dtm',
     ha: null, hb: null, k: null, freq: null };
-  const url = TP.shareURL(state, { origin: 'https://x.test', pathname: '/' }, TP.themeDefaults({ model: 'dtm' }));
+  const url = TP.shareURL(state, { origin: 'https://x.test', pathname: '/' });
   const qs = url.split('#/map?')[1];
   assert.strictEqual(new URLSearchParams(qs).get('model'), 'dtm', 'the link left the model out: ' + url);
   assert.strictEqual(TP.parseState(qs, TP.themeDefaults(null)).model, 'dtm');
@@ -1294,9 +1310,10 @@ test('a terrain-only link means terrain-only to a recipient on the standard defa
 
 test('a non-default model round-trips through the link under either default', () => {
   [['dtm', 'both'], ['both', 'dtm']].forEach(([def, chosen]) => {
+    // Chosen: the viewer picked it, so it is stated (#746).
     const state = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: chosen,
-      ha: null, hb: null, k: null, freq: null };
-    const qs = new URLSearchParams(TP.serializeState(state, { model: def })).toString();
+      modelExplicit: true, ha: null, hb: null, k: null, freq: null };
+    const qs = new URLSearchParams(TP.serializeState(state)).toString();
     assert.strictEqual(TP.parseState(qs, { model: def }).model, chosen, def + ' default, ' + chosen + ' chosen');
   });
 });
@@ -1446,7 +1463,7 @@ atest('a customizer height never reaches the shared link', async () => {
   const st = tool.getState();
   assert.strictEqual(st.ha, null, 'an ambient default became part of the state');
   assert.strictEqual(st.hb, null);
-  const url = live.TP.shareURL(st, { origin: 'https://x.test', pathname: '/' }, live.TP.themeDefaults(terrainCfg({ heightRepeater: 25 })));
+  const url = live.TP.shareURL(st, { origin: 'https://x.test', pathname: '/' });
   assert.strictEqual(url.indexOf('ha='), -1, 'a customizer default was written into the link');
 });
 
@@ -1552,6 +1569,423 @@ atest('destroy unhooks the customizer listener', async () => {
   assert.ok(hooks.some(([t]) => t === 'terrain-defaults-changed'), 'the tool never subscribed');
   tool.destroy();
   assert.ok(!hooks.some(([t]) => t === 'terrain-defaults-changed'), 'the subscription outlived the tool');
+});
+
+// ── #746 §1: teardown leaves the destination hash alone ────────────────────
+
+console.log('\n=== #746: teardown never rewrites the next page\'s hash ===');
+
+/* loadRouted is loadLive with an address bar: a location whose hash
+ * replaceState writes, the way the browser does. The router changes the
+ * hash first and destroys the old page after (public/app.js navigate), so
+ * by the time destroy() runs the hash belongs to the destination. */
+function loadRouted(hash) {
+  const live = loadLive();
+  const location = { protocol: 'https:', host: 'fixture.invalid', origin: 'https://fixture.invalid',
+    pathname: '/', search: '', hash: hash || '#/map' };
+  live.win.location = location;
+  live.win.history = { state: null, replaceState(_s, _t, url) { location.hash = url.slice(url.indexOf('#')); } };
+  return live;
+}
+
+function hashParamsOf(location) {
+  return new URLSearchParams(location.hash.split('?')[1] || '');
+}
+
+atest('destroy after the router moved to another profile keeps that profile', async () => {
+  const live = loadRouted('#/map');
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=both'));
+  assert.strictEqual(hashParamsOf(live.win.location).get('profile'), PK_A + ',' + PK_B, 'setup: the open profile is not in the hash');
+  const next = '#/map?region=AAR&profile=' + PK_B + ',' + PK_A + '&model=dtm&ha=12';
+  live.win.location.hash = next;
+  tool.destroy();
+  assert.strictEqual(live.win.location.hash, next, 'teardown rewrote the destination hash');
+});
+
+atest('destroy after leaving for another page writes nothing either', async () => {
+  const live = loadRouted('#/map');
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B));
+  // History back to a page that happens to carry a key the tool owns.
+  live.win.location.hash = '#/nodes?model=dtm';
+  tool.destroy();
+  assert.strictEqual(live.win.location.hash, '#/nodes?model=dtm');
+});
+
+atest('the Close button still takes the profile out of the hash, and only it', async () => {
+  const live = loadRouted('#/map?region=AAR');
+  let closed = 0;
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch(), onClose: () => { closed++; } });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B + '&ha=12'));
+  live.dom.find('tp-close').fire('click');
+  assert.strictEqual(live.win.location.hash, '#/map?region=AAR', 'an explicit Close left the profile behind');
+  assert.strictEqual(closed, 1, 'the host was not told about the close');
+  assert.strictEqual(tool.isOpen(), false);
+});
+
+atest('destroy still closes the panel, drops answers in flight and tells the host', async () => {
+  const live = loadRouted('#/map');
+  const f = deferredFetch();
+  let closed = 0;
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: f, onClose: () => { closed++; } });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B));
+  tool.destroy();
+  assert.strictEqual(tool.isOpen(), false);
+  assert.strictEqual(closed, 1, 'the host lost its cleanup call');
+  f.calls[0].settle.resolve(answer('blocked'));
+  await sleep(0);
+  assert.notStrictEqual(chipOf(live.dom).state, 'blocked', 'a destroyed panel still took an answer');
+});
+
+// ── #746 §2: the link keeps the model it was given ─────────────────────────
+
+console.log('\n=== #746: an explicit model survives another viewer\'s default ===');
+
+test('a copied link keeps an explicit model=both for a recipient on a dtm default', () => {
+  const state = TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=both', { model: 'both' });
+  const link = TP.shareURL(state, { origin: 'https://x.test', pathname: '/' });
+  const qs = link.split('#/map?')[1];
+  assert.strictEqual(new URLSearchParams(qs).get('model'), 'both', 'the link dropped the model: ' + link);
+  assert.strictEqual(TP.parseState(qs, { model: 'dtm' }).model, 'both');
+});
+
+test('the same holds for the /p share link', () => {
+  const state = TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=both', { model: 'both' });
+  const link = TP.shareURL(state, { origin: 'https://x.test', pathname: '/' }, true);
+  assert.strictEqual(new URLSearchParams(link.split('?')[1]).get('model'), 'both', link);
+});
+
+test('a link without a model gets none, whatever the sharer\'s own default', () => {
+  // Presence, not a comparison with the current default: the link never
+  // said "both", so it does not start saying so under a dtm default.
+  // serializeState is not given the sharer's default at all (#765).
+  const state = TP.parseState('profile=' + PK_A + ',' + PK_B, { model: 'both' });
+  assert.strictEqual(TP.serializeState(state).model, undefined);
+});
+
+atest('an imported model=both stays pinned when the customizer moves to dtm', async () => {
+  const live = loadLive();
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'both' }) };
+  const f = deferredFetch();
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: f, syncHash: false });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=both', live.TP.themeDefaults()));
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'dtm' }) };
+  tool.defaultsChangedForTests();
+  assert.strictEqual(tool.getState().model, 'both', 'the customizer overrode a model the link stated');
+  assert.ok(/model=both/.test(f.calls[f.calls.length - 1].url), 'measured ' + f.calls[f.calls.length - 1].url);
+});
+
+atest('an imported link without a model still follows the customizer', async () => {
+  const live = loadLive();
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'both' }) };
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch(), syncHash: false });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B, live.TP.themeDefaults()));
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'dtm' }) };
+  tool.defaultsChangedForTests();
+  assert.strictEqual(tool.getState().model, 'dtm');
+});
+
+atest('a model picked with the buttons rides the hash, even when it is the standard one', async () => {
+  const live = loadRouted('#/map');
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'dtm' }) };
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B, live.TP.themeDefaults()));
+  assert.strictEqual(hashParamsOf(live.win.location).get('model'), 'dtm', 'setup: terrain-only always rides');
+  live.dom.find('tp-model-both').fire('click');
+  assert.strictEqual(hashParamsOf(live.win.location).get('model'), 'both', 'a chosen "both" left the hash: ' + live.win.location.hash);
+});
+
+/* #765 §6: a stated model belongs to the profile that stated it. After a
+ * Close the next path is the viewer's own, so its link does not carry the
+ * old link's model, and a customizer change moves it again. */
+atest('a Close forgets that the model was stated (#765)', async () => {
+  const live = loadRouted('#/map');
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'both' }) };
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=both', live.TP.themeDefaults()));
+  assert.strictEqual(tool.getState().modelExplicit, true, 'setup: the link did not state its model');
+  live.dom.find('tp-close').fire('click');
+  assert.strictEqual(tool.getState().modelExplicit, false, 'the stated model outlived the Close');
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_B });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_A });
+  assert.strictEqual(hashParamsOf(live.win.location).get('model'), null,
+    'the next profile carries the closed link\'s model: ' + live.win.location.hash);
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'dtm' }) };
+  tool.defaultsChangedForTests();
+  assert.strictEqual(tool.getState().model, 'dtm', 'the closed link\'s model still pins the next profile');
+});
+
+atest('a model picked with the buttons is forgotten by a Close too (#765)', async () => {
+  const live = loadRouted('#/map');
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'dtm' }) };
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B, live.TP.themeDefaults()));
+  live.dom.find('tp-model-both').fire('click');
+  assert.strictEqual(tool.getState().modelExplicit, true, 'setup: the pick was not stated');
+  tool.close();
+  assert.strictEqual(tool.getState().modelExplicit, false, 'the pick outlived the Close');
+});
+
+/* #772 F2 (review of #770): §6 reset modelExplicit on Close, but not
+ * state.model itself, so a Close only looked like it forgot the closed
+ * link's model when that model happened to equal the customizer's default.
+ * Here the default is 'both' and the closed link stated 'dtm', so the gap
+ * shows: the next hand-picked path must use the viewer's own default. */
+atest('a Close also drops the closed link\'s model value, not only modelExplicit (#772 F2)', async () => {
+  const live = loadRouted('#/map');
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'both' }) };
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=dtm', live.TP.themeDefaults()));
+  assert.strictEqual(tool.getState().model, 'dtm', 'setup: the link did not state dtm');
+  tool.close();
+  assert.strictEqual(tool.getState().model, 'both', 'the closed link\'s model outlived the Close');
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_B });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_A });
+  assert.strictEqual(hashParamsOf(live.win.location).get('model'), null,
+    'the next hand-picked path carries the closed link\'s model: ' + live.win.location.hash);
+});
+
+// ── #746 §3: a height edit invalidates the answer in flight at once ────────
+
+console.log('\n=== #746: no stale answer while a height edit waits for its debounce ===');
+
+/* loadTimed is loadLive with timers the test fires itself, so "the old
+ * answer lands inside the debounce window" is a fact, not a race. */
+function loadTimed() {
+  const live = loadLive();
+  const timers = new Map();
+  let next = 0;
+  live.win.setTimeout = (fn) => { timers.set(++next, fn); return next; };
+  live.win.clearTimeout = (id) => { timers.delete(id); };
+  live.fireTimers = () => { for (const [id, fn] of [...timers]) { timers.delete(id); fn(); } };
+  live.timers = timers;
+  return live;
+}
+
+atest('the old answer landing inside the debounce window is dropped', async () => {
+  const live = loadTimed();
+  const f = deferredFetch();
+  const tool = openPair(live.TP, live.dom, f);
+  live.dom.find('tp-h-a-plus').fire('click');
+  assert.strictEqual(tool.getState().ha, 1);
+  assert.strictEqual(f.calls.length, 1, 'setup: the edit must still be waiting for its debounce');
+  assert.strictEqual(live.timers.size, 1, 'setup: no debounce timer');
+  f.calls[0].settle.resolve(answer('blocked'));
+  await sleep(0);
+  assert.strictEqual(live.dom.find('tp-h-a').value, '1', 'the old answer overwrote the height being edited');
+  assert.strictEqual(chipOf(live.dom).state, 'pending', 'the old answer reached the chip: ' + JSON.stringify(chipOf(live.dom)));
+  live.fireTimers();
+  assert.strictEqual(f.calls.length, 2);
+  assert.ok(/[?&]ha=1(&|$)/.test(f.calls[1].url), 'the edit was not measured: ' + f.calls[1].url);
+  f.calls[1].settle.resolve(answer('clear'));
+  await sleep(0);
+  assert.strictEqual(chipOf(live.dom).state, 'clear', 'the new answer was not drawn');
+});
+
+atest('a failure of the old request inside the debounce window is dropped too', async () => {
+  const live = loadTimed();
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  live.dom.find('tp-h-b-minus').fire('click');
+  f.calls[0].settle.reject(new Error('upstream timed out'));
+  await sleep(0);
+  assert.strictEqual(chipOf(live.dom).state, 'pending', 'the old failure reached the chip');
+});
+
+// ── #746 §4: the DSM is segmented on its own gaps ──────────────────────────
+
+console.log('\n=== #746: the surface line never bridges a surface gap ===');
+
+function surfacePath(dtm, dsm) {
+  const d = flatPath();
+  d.model = 'both';
+  d.distanceM = 1000;
+  d.samples = dsm.map((v, i) => ({ d: i * 250, dtm: dtm[i], dsm: v }));
+  d.verdict = { state: 'clear', model: 'dtm', criterion: 0.6, worstClearanceM: 9, worstAtM: 500, worstF1Fraction: 1,
+    surface: { state: 'unknown', worstClearanceM: null, worstAtM: null, worstF1Fraction: null } };
+  return d;
+}
+const surfaceLines = (svg) => [...svg.matchAll(/<polyline points="([^"]+)" fill="none" stroke="var\(--terrain-clutter\)"/g)].map(m => m[1]);
+const clutterBands = (svg) => [...svg.matchAll(/<polygon points="([^"]+)" fill="var\(--terrain-clutter\)"/g)].map(m => m[1]);
+
+test('a DSM gap over complete terrain splits the surface line and band in two', () => {
+  const d = surfacePath([0, 0, 0, 0, 0], [4, 6, null, 1, 5]);
+  const g = TP.chartGeometry(d);
+  eq(g.surfaceSegments, [{ from: 0, to: 1 }, { from: 3, to: 4 }]);
+  eq(g.clutterSegments, [{ from: 0, to: 1 }, { from: 3, to: 4 }]);
+  const svg = TP.buildChart(d, { nameA: 'Alfa', nameB: 'Bravo' });
+  const lines = surfaceLines(svg);
+  assert.strictEqual(lines.length, 2, 'one surface line per covered stretch: ' + JSON.stringify(lines));
+  assert.strictEqual(lines[0].split(' ').length, 2);
+  assert.strictEqual(lines[1].split(' ').length, 2);
+  assert.strictEqual(clutterBands(svg).length, 2, 'the band bridged the gap too');
+  // No point of either line sits at the missing sample's x.
+  const xGap = String(g.x[2]);
+  lines.concat(clutterBands(svg)).forEach(pts => {
+    assert.ok(pts.split(' ').every(p => p.split(',')[0] !== xGap), 'drawn across the gap: ' + pts);
+  });
+});
+
+test('a lone DSM sample between gaps draws no line of one point', () => {
+  const svg = TP.buildChart(surfacePath([0, 0, 0, 0, 0], [4, null, 6, null, 5]), {});
+  eq(surfaceLines(svg), []);
+});
+
+test('a DTM gap still breaks the band, but surface data on both sides of it keeps its own line', () => {
+  const d = surfacePath([0, 0, null, 0, 0], [5, 5, 5, 5, 5]);
+  d.coverage = { state: 'partial', pct: 80, firstGapM: 500 };
+  const g = TP.chartGeometry(d);
+  eq(g.clutterSegments, [{ from: 0, to: 1 }, { from: 3, to: 4 }]);
+  eq(g.surfaceSegments, [{ from: 0, to: 4 }]);
+  const svg = TP.buildChart(d, {});
+  assert.strictEqual(clutterBands(svg).length, 2);
+  assert.strictEqual(surfaceLines(svg).length, 1);
+});
+
+test('terrain only: no surface segments at all', () => {
+  const g = TP.chartGeometry(flatPath());
+  eq(g.surfaceSegments, []);
+  eq(g.clutterSegments, []);
+});
+
+// ── #746 N1 (#736 review): no surface chip while a new profile is pending ──
+
+console.log('\n=== #746 N1: the surface chip goes with the answer it described ===');
+
+/* The Dokk1 answer: terrain clear, buildings blocked, so the surface chip
+ * and its explanatory line are both shown. */
+function surfaceAnswer() {
+  const a = answer('clear');
+  a.model = 'both';
+  a.samples = [{ d: 0, dtm: 0, dsm: 0 }, { d: 500, dtm: 0, dsm: 28 }, { d: 1000, dtm: 0, dsm: 0 }];
+  a.verdict.surface = { state: 'blocked', worstClearanceM: -17.5, worstAtM: 500, worstF1Fraction: -2.6 };
+  return a;
+}
+
+atest('the surface chip and its note are hidden as soon as a new profile is asked for', async () => {
+  const live = loadLive();
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  f.calls[0].settle.resolve(surfaceAnswer());
+  await sleep(0);
+  const chip = live.dom.find('tp-surface-chip'), note = live.dom.find('tp-surface-note');
+  assert.strictEqual(chip.hidden, false, 'setup: the surface chip is not shown');
+  assert.strictEqual(note.hidden, false, 'setup: the surface note is not shown');
+  // A model switch asks at once (no debounce), through request() alone.
+  live.dom.find('tp-model-dtm').fire('click');
+  assert.strictEqual(f.calls.length, 2, 'setup: the switch did not ask');
+  assert.strictEqual(chipOf(live.dom).state, 'pending');
+  assert.strictEqual(chip.hidden, true, 'the old surface chip stayed up beside a pending verdict');
+  assert.strictEqual(chip.textContent, '', 'the hidden chip still carries the old words');
+  assert.strictEqual(note.hidden, true, 'the old surface note stayed up');
+});
+
+// ── #746 N2 (#736 review): the two chips are read as two statements ────────
+
+console.log('\n=== #746 N2: a screen-reader break between the verdict chips ===');
+
+atest('a visually hidden separator sits between the terrain and surface chips', async () => {
+  const live = loadLive();
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  f.calls[0].settle.resolve(surfaceAnswer());
+  await sleep(0);
+  const chip = live.dom.find('tp-verdict'), surf = live.dom.find('tp-surface-chip');
+  const kids = chip.parentNode.children;
+  const between = kids.slice(kids.indexOf(chip) + 1, kids.indexOf(surf));
+  assert.strictEqual(between.length, 1, 'expected exactly one element between the chips');
+  const sep = between[0];
+  assert.strictEqual(sep.className, 'sr-only', 'the separator must be visually hidden');
+  assert.strictEqual(sep.textContent, '. ');
+  assert.strictEqual(sep.hidden, false, 'the separator is hidden while the surface chip is shown');
+  // Read in order, the header now says two sentences, not "ClearBuildings".
+  const spoken = kids.filter(k => !k.hidden).map(k => k.textContent).join('');
+  assert.ok(spoken.indexOf('Terrain: Clear. Buildings/trees: Blocked') >= 0, spoken);
+});
+
+atest('the separator goes with the surface chip', async () => {
+  const live = loadLive();
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  f.calls[0].settle.resolve(answer('clear'));
+  await sleep(0);
+  const chip = live.dom.find('tp-verdict');
+  const sep = chip.parentNode.children[chip.parentNode.children.indexOf(chip) + 1];
+  assert.strictEqual(live.dom.find('tp-surface-chip').hidden, true, 'setup: a surface chip is shown');
+  assert.strictEqual(sep.hidden, true, 'a separator with nothing after it');
+});
+
+// ── #746: fit a linked profile above the panel ─────────────────────────────
+
+console.log('\n=== #746: the map fits a linked path into the room the panel leaves ===');
+
+/* Sizes measured on the Map page: the panel is anchored to the bottom at
+ * full width and capped at 420 px, which it reaches once the chart is in;
+ * while pending on a desktop it is 295 px. */
+test('desktop, panel still pending: the padding reserves the panel at its cap', () => {
+  const p = TP.fitPadding(848, 295, 420);
+  eq(p.paddingTopLeft, [32, 32]);
+  eq(p.paddingBottomRight, [32, 452]);
+});
+
+test('phone portrait: the path fits in the strip above the panel', () => {
+  eq(TP.fitPadding(632, 420, 420).paddingBottomRight, [32, 452]);
+});
+
+test('a panel taller than its cap counts as it is', () => {
+  eq(TP.fitPadding(900, 500, 420).paddingBottomRight, [32, 532]);
+});
+
+test('short landscape: with no useful strip left, the panel is not reserved', () => {
+  eq(TP.fitPadding(252, 240, 420).paddingBottomRight, [32, 32]);
+});
+
+test('an unreadable cap falls back to the panel as it is', () => {
+  eq(TP.fitPadding(848, 295, NaN).paddingBottomRight, [32, 327]);
+  eq(TP.fitPadding(848, 0, NaN).paddingBottomRight, [32, 32]);
+});
+
+// ── #746 N-c (#750 review): the chart title carries the explanation ────────
+
+console.log('\n=== #746 N-c: the chart <title> says why, not only what ===');
+
+const titleOf = (svg) => ((svg.match(/<title>([\s\S]*?)<\/title>/) || [])[1] || '');
+
+test('the title carries the terrain verdict\'s detail', () => {
+  const d = flatPath();
+  const title = titleOf(TP.buildChart(d, { nameA: 'Alfa', nameB: 'Bravo' }));
+  const chip = TP.verdictChip(d);
+  assert.ok(title.indexOf(chip.label + '. ' + chip.detail) >= 0, 'title = ' + title);
+});
+
+test('the title carries the surface chip\'s detail and its note', () => {
+  const d = dokk1Path();
+  const title = titleOf(TP.buildChart(d, { nameA: 'Alfa', nameB: 'Bravo' }));
+  const surf = TP.surfaceChip(d);
+  assert.ok(title.indexOf(surf.label + '. ' + surf.detail + ' ' + TP.SURFACE_NOTE) >= 0, 'title = ' + title);
+});
+
+test('the title carries the antenna-below detail, the remedy included', () => {
+  const d = Object.assign(flatPath(), { model: 'both' });
+  d.samples = [{ d: 0, dtm: 0, dsm: 19.99 }, { d: 500, dtm: 0, dsm: 0 }, { d: 1000, dtm: 0, dsm: 0 }];
+  d.verdict.surface = below('A').verdict.surface;
+  const title = titleOf(TP.buildChart(d, {}));
+  const surf = TP.surfaceChip(d);
+  assert.ok(/set its antenna height above the ground/.test(surf.detail), 'setup: ' + surf.detail);
+  assert.ok(title.indexOf(surf.detail) >= 0, 'title = ' + title);
+});
+
+// ── #746 N-d (#750 review): one antenna or two ─────────────────────────────
+
+console.log('\n=== #746 N-d: "antennas" for both ends, "antenna" for one ===');
+
+[['A', 'higher than the antenna there.'], ['B', 'higher than the antenna there.'],
+ ['both', 'higher than the antennas there.']].forEach(([endpoint, words]) => {
+  test('reason at ' + endpoint + ': the detail says "' + words + '"', () => {
+    const detail = TP.surfaceChip(below(endpoint)).detail;
+    assert.ok(detail.indexOf(words) >= 0, detail);
+  });
 });
 
 // ── Summary ────────────────────────────────────────────────────────────────

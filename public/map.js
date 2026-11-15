@@ -423,6 +423,11 @@
     if (typeof window.MC_createLayerControl === 'function') {
       window.MC_createLayerControl(map, autoLayerGroup, 'topleft');
     }
+    // #723 M2: click-for-info on the monuments overlay. The profile
+    // tool's picking and A/B dragging win over it.
+    if (window.HeritageInfo) {
+      window.HeritageInfo.attach(map, { isBusy: function () { return !!profileArm || !!profileDrag; } });
+    }
 
     mapThemeObs = new MutationObserver(function () {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
@@ -459,10 +464,11 @@
       });
     }
 
-    // Save position on move
+    // Save position on move. A profile link's fit is the link's view, not
+    // the viewer's, so it is not saved (#765).
     map.on('moveend', () => {
       const c = map.getCenter();
-      localStorage.setItem('map-view', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
+      if (!profileFitting) localStorage.setItem('map-view', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
       userHasMoved = true;
     });
 
@@ -2707,6 +2713,7 @@
   // Inert until armed: no request, no map listener and no marker handler
   // exists before the user presses the toggle.
   var profileTool = null;     // the terrain-profile.js controller
+  var profileMastHint = null; // #724 M4: masts-hint.js, null unless the masts layer is offered
   var profileArm = null;      // 'a' | 'b' while picking, else null
   var profileLine = null;     // the measured path
   var profileGhost = null;    // live preview from A to the pointer
@@ -2720,6 +2727,12 @@
   var profileDrag = null;     // { side } while an end is dragged
   // A drop this close to a marker lands on it: half the 48px touch target.
   var PROFILE_SNAP_PX = 24;
+  // A linked path is fitted no closer than this: a 20 m path at zoom 19
+  // would show nothing around it (#746).
+  var PROFILE_FIT_MAX_ZOOM = 16;
+  // True only while profileFitPath moves the map, so the moveend handler
+  // leaves the viewer's stored view alone (#765).
+  var profileFitting = false;
   // #711: the one node a half link named that the Map page's own list does
   // not hold (an area filter or the last-heard window left it out). One
   // entry, replaced by the next half link, so it cannot grow.
@@ -2798,6 +2811,11 @@
       resolveNode: profileResolveNode,
       // #727: the copy button hands out a /p link when the server serves it.
       shareRoute: window.TerrainProfile.shareOffered(window.MC_DHM_CFG),
+      // #746: the server's rule for a free point's height, so a drop onto
+      // one is measured with the customizer's point default in one request.
+      pointAntenna: window.MC_DHM_CFG.pointAntenna || null,
+      // #765: the chart footer's credit and its links, from the server.
+      dhm: window.MC_DHM_CFG,
       onMoveStart: function (side) { profileArmFor(side, true); },
       onMoveCancel: profileDisarm,
       onEndpointsChange: profileDrawLine,
@@ -2807,6 +2825,11 @@
         profileSyncButton();
       }
     });
+    // #724 M4: the interference hint reads the antenna-site cells around
+    // each end through the masts layer's own loader; no request of its own.
+    profileMastHint = window.MastsHint && window.MC_getMastsConfig
+      ? window.MastsHint.attach({ map: map, cfg: window.MC_getMastsConfig(), panel: function () { return profileTool && profileTool.el(); } })
+      : null;
     if (!profileKeyHandler) {
       // Escape drops a drag or disarms the picker, either way keeping the
       // old end (#721); a second Escape closes the panel.
@@ -2965,6 +2988,7 @@
     profileDrag = null;
     if (profileLine && map) { try { map.removeLayer(profileLine); } catch (_) {} }
     profileLine = null;
+    if (profileMastHint) profileMastHint.clear();
     ['a', 'b'].forEach(function (side) {
       if (profileEnds[side] && map) { try { map.removeLayer(profileEnds[side]); } catch (_) {} }
       profileEnds[side] = null;
@@ -2986,6 +3010,7 @@
     else profileLine = L.polyline([a, b], { className: 'tp-path-line', interactive: false, weight: 3 }).addTo(map);
     profileEndMarker('a', a);
     profileEndMarker('b', b);
+    if (profileMastHint) profileMastHint.update(a, b);
   }
 
   // ── #721: drag an end ──
@@ -3132,6 +3157,33 @@
     if (!tool) return;
     tool.setState(st);
     profileDrawLine();
+    profileFitPath();
+  }
+
+  /* profileFitPath brings a profile opened from the URL (a deep link or a
+   * /p handoff) into view above the panel (#746): someone who receives a
+   * link sees where the path is, not their own last view. Once, when the
+   * link is opened: a move or a pan afterwards is the viewer's own view.
+   * A node end the Map page's list does not hold has no position here, and
+   * the stored view stays.
+   *
+   * The fit itself is never saved as the viewer's view (#765): a later
+   * plain #/map or a reload opens their own view again. Without animation
+   * Leaflet fires moveend inside fitBounds, so the flag covers exactly
+   * this one move. */
+  function profileFitPath() {
+    var st = profileTool && profileTool.getState();
+    var a = st && profileRefLatLng(st.a), b = st && profileRefLatLng(st.b);
+    var panel = profileTool && profileTool.el();
+    if (!map || !a || !b || !panel) return;
+    var cap = parseFloat(getComputedStyle(panel).getPropertyValue('--tp-panel-max-h'));
+    var pad = window.TerrainProfile.fitPadding(map.getSize().y, panel.offsetHeight, cap);
+    profileFitting = true;
+    try {
+      map.fitBounds(L.latLngBounds([a, b]), Object.assign(pad, { maxZoom: PROFILE_FIT_MAX_ZOOM, animate: false }));
+    } finally {
+      profileFitting = false;
+    }
   }
 
   function destroyProfileTool() {
@@ -3141,6 +3193,7 @@
     profileKeyHandler = null;
     if (profileTool) profileTool.destroy();
     profileTool = null;
+    profileMastHint = null;
     profileExtraNode = null;
     profileBtn = null;
     profileHintEl = null;

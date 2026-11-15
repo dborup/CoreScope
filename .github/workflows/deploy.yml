@@ -235,6 +235,9 @@ jobs:
           # internal/mastedb (#724): Mastedatabasen WFS client and GML parser.
           # Its own module, not yet imported by cmd/server, so nothing else runs it.
           (cd internal/mastedb && go test -race ./...)
+          # internal/copdem (#738): Copernicus GLO-30 foreign fill for the
+          # terrain profile (tile list, range client, block sampler).
+          (cd internal/copdem && go test -race ./...)
           # internal/profilecard (#727 M2): share-card renderer. cmd/server
           # imports it since #727 M3, but its own tests run only here.
           (cd internal/profilecard && go test -race ./...)
@@ -244,6 +247,13 @@ jobs:
           # budget fails at 50 ms, twice the 25 ms target it logs against,
           # and the geometry ratio is a median of rounds (#759 review).
           (cd internal/profilecard && go test -count=1 -run 'TestRenderWithinBudget|TestRenderTimeIndependentOfSampleCount|TestGeometryLinearInSamples' -v ./... | grep -E '^(=== RUN|--- |ok|FAIL|PASS)|per card|draw:|geometry:')
+          # internal/heritage (#723 M2): protection-zone WFS client, parser and
+          # nearest-zone maths, tested against a fake WFS.
+          (cd internal/heritage && go test -race ./...)
+          # internal/buildings (#730 M1b): INSPIRE building-footprint corridor
+          # client, parser and classifier, tested against a fake OGC API. Its
+          # own module, not yet imported by cmd/server, so nothing else runs it.
+          (cd internal/buildings && go test -race ./...)
           # internal/regions is its own module: the server/ingestor steps
           # above compile it but never run its tests, and it now holds the
           # hashRegions/hashRegionsPath loader both processes share (#360).

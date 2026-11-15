@@ -291,7 +291,7 @@ func (s *Server) handleTerrainProfileCard(w http.ResponseWriter, r *http.Request
 	}
 	c := p.card
 	names := cardNames(req)
-	key := cardKey{terrainKey: req.elevationKey(), Inputs: p.cardInputs(req, names)}
+	key := cardKey{terrainKey: p.elevationKey(req), Inputs: p.cardInputs(req, names)}
 	if b, ok := c.cache.Get(key, p.now()); ok {
 		writeCard(w, b, "hit")
 		return
@@ -345,10 +345,10 @@ func (p *terrainProfiler) cardElevation(r *http.Request, req terrainRequest) (te
 		// Nothing of the path is inside DHM: complete, and free.
 		return none, true, nil
 	}
-	key := req.elevationKey()
+	key := p.elevationKey(req)
 	if data, ok := p.cache.Get(key, p.now()); ok {
 		e, err := decodeTerrainElevation(data, n, both)
-		return e, err == nil, nil
+		return e, cardReady(e, err), nil
 	}
 	c := p.card
 	if !c.budget.take(p.now()) {
@@ -369,7 +369,7 @@ func (p *terrainProfiler) cardElevation(r *http.Request, req terrainRequest) (te
 	switch {
 	case err == nil:
 		e, derr := decodeTerrainElevation(data, n, both)
-		return e, derr == nil, nil
+		return e, cardReady(e, derr), nil
 	case isTerrainBusy(err):
 		return none, false, err
 	case r.Context().Err() != nil:
@@ -379,6 +379,15 @@ func (p *terrainProfiler) cardElevation(r *http.Request, req terrainRequest) (te
 		p.logFailure("terrain share card raster", err)
 	}
 	return none, false, nil
+}
+
+// cardReady reports whether decoded elevations make a complete card. A
+// profile whose foreign fill failed (#738) is cached for its DHM part, and
+// the JSON route tries the fill again on a hit; a card of it would be
+// served immutable while the profile can still change, so it is degraded
+// instead, and refreshes once the fill has been retried.
+func cardReady(e terrainElevation, err error) bool {
+	return err == nil && !e.fillFailed
 }
 
 // noteDegraded counts a degraded card served for a spent share budget and
@@ -501,12 +510,12 @@ func (p *terrainProfiler) cachedResponse(req terrainRequest) (TerrainProfileResp
 			e.dsm = nanSlice(n)
 		}
 	} else {
-		data, ok := p.cache.Get(req.elevationKey(), p.now())
+		data, ok := p.cache.Get(p.elevationKey(req), p.now())
 		if !ok {
 			return TerrainProfileResponse{}, false
 		}
 		var err error
-		if e, err = decodeTerrainElevation(data, n, both); err != nil {
+		if e, err = decodeTerrainElevation(data, n, both); !cardReady(e, err) {
 			return TerrainProfileResponse{}, false
 		}
 	}

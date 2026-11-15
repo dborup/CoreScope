@@ -6,12 +6,14 @@ package main
 // protected ancient monuments (fredede fortidsminder) and their protection
 // zones as a WMS overlay. Unlike the DHM hillshade (#680) the service needs
 // no token and answers with Access-Control-Allow-Origin: *, so the browser
-// fetches the tiles directly and the server has no proxy: its only part is
-// the opt-in `heritage` block of /api/config/client, which tells the page
-// the overlay may be offered and with which fixed parameters.
+// fetches the tiles directly and the server has no proxy. The server's
+// part is the opt-in `heritage` block of /api/config/client, which tells
+// the page the overlay may be offered and with which fixed parameters,
+// and (#723 M2) the click-for-info query, heritage_query.go.
 //
 // Every value below is fixed in code. map.heritage only switches the block
-// on; an operator cannot point browsers at another service through it.
+// on and bounds the query; an operator cannot point browsers or the server
+// at another service through it.
 
 const (
 	// heritageWMSURL is the agency's GeoServer. Only the /ffgeoserver/public/
@@ -39,9 +41,18 @@ const (
 // [[south, west], [north, east]]. Leaflet requests no tile outside it.
 var heritageBounds = [2][2]float64{{54.4646, 8.0899}, {57.7289, 15.5689}}
 
-// HeritageConfig is config.json `map.heritage` (Config.Heritage). Default off.
+// HeritageConfig is config.json `map.heritage` (Config.Heritage). Default
+// off. Enabled offers the overlay and the click-for-info endpoint
+// (heritage_query.go); the other keys bound that endpoint, and a nil one
+// takes the server default (resolveHeritageSettings).
 type HeritageConfig struct {
-	Enabled bool `json:"enabled"`
+	Enabled           bool     `json:"enabled"`
+	RadiusM           *int     `json:"radiusM"`
+	CacheEntries      *int     `json:"cacheEntries"`
+	CacheTTLHours     *float64 `json:"cacheTTLHours"`
+	UpstreamTimeoutMs *int     `json:"upstreamTimeoutMs"`
+	RateLimitPerMin   *int     `json:"rateLimitPerMin"`
+	MaxInFlight       *int     `json:"maxInFlight"`
 }
 
 // HeritageClientConfig is the `heritage` block of /api/config/client.

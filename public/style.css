@@ -2930,6 +2930,31 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 .mc-masts-popup .mc-masts-popup-hint { font-size: 12px; margin: 6px 0; padding-left: 6px; border-left: 3px solid var(--mast-interference); }
 .mc-masts-popup .mc-masts-popup-note { font-size: 11px; color: var(--text-muted); margin: 6px 0 0; }
 
+/* #723 M2 heritage popup */
+/* Click-for-info on the protected ancient monuments overlay
+   (heritage-info.js). Colours follow the theme through the variables. */
+.mc-heritage-popup .leaflet-popup-content { margin: 10px 14px; min-width: 180px; }
+.mc-heritage-info { color: var(--text); line-height: 1.35; }
+.mc-heritage-title { font-weight: 600; font-size: 14px; margin: 0 24px 6px 0; overflow-wrap: anywhere; }
+.mc-heritage-fields {
+  display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0;
+}
+.mc-heritage-fields dt { color: var(--text-muted); }
+.mc-heritage-fields dd { margin: 0; overflow-wrap: anywhere; }
+.mc-heritage-msg { margin-right: 18px; }
+.mc-heritage-note { margin-top: 6px; color: var(--text-muted); font-style: italic; }
+.mc-heritage-credit { margin-top: 8px; font-size: 11px; color: var(--text-muted); }
+/* Leaflet styles the button as .leaflet-container a.leaflet-popup-close-button,
+   so these need the same specificity plus the popup class to win. */
+.leaflet-container .mc-heritage-popup a.leaflet-popup-close-button { color: var(--text-muted); }
+@media (pointer: coarse) {
+  .leaflet-container .mc-heritage-popup a.leaflet-popup-close-button {
+    width: 44px; height: 44px; line-height: 44px; font-size: 24px;
+  }
+  .mc-heritage-title, .mc-heritage-msg { margin-right: 40px; }
+}
+/* end #723 M2 heritage popup */
+
 /* ---- Leaflet overrides for theme ---- */
 .leaflet-control-zoom a {
   background: color-mix(in srgb, var(--surface-1) 92%, transparent) !important;
@@ -3979,7 +4004,8 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
 .matrix-char span { display: block; text-align: center; white-space: nowrap; line-height: 1; }
 
 /* === Matrix Theme === */
-.matrix-theme .leaflet-tile-pane {
+.matrix-theme .leaflet-tile-pane,
+.matrix-theme .mc-ortho-pane {
   filter: brightness(1.1) contrast(1.2) sepia(0.6) hue-rotate(70deg) saturate(2);
 }
 .matrix-theme.leaflet-container::before {
@@ -6322,6 +6348,9 @@ body.embed #app.app-fixed {
 .tp-end-marker.leaflet-drag-target .tp-end-dot { transform: scale(1.15); }
 
 .tp-panel {
+  /* The cap is a variable so the Map page can keep a linked path clear of
+     the panel before the chart has grown it to the cap (#746). */
+  --tp-panel-max-h: 420px;
   position: absolute;
   left: 0;
   right: 0;
@@ -6332,7 +6361,7 @@ body.embed #app.app-fixed {
   min-height: 0;
   /* Never taller than the map area minus a strip of map, and never taller
      than the chart plus its controls need. */
-  max-height: min(420px, calc(100% - 24px));
+  max-height: min(var(--tp-panel-max-h), calc(100% - 24px));
   background: var(--card-bg);
   color: var(--text);
   border-top: 1px solid var(--border);
@@ -6458,6 +6487,21 @@ body.embed #app.app-fixed {
    holds to 4.5:1 in both themes; only the wrapping differs, because
    "Buildings/trees: Blocked" is the longest chip in the row. */
 .tp-chip-surface { white-space: normal; }
+/* #724 M4 — the interference hint: a cellular transmitter in the 700/800/900
+   MHz bands near an end. The antenna-site layer's interference colour, so
+   the chip and the map ring read as one thing; the strong tier (within
+   100 m) is filled. Its line under the detail text says what it means. */
+.tp-chip-mast { border-color: var(--mast-interference); color: var(--mast-interference); white-space: normal; }
+.tp-chip-mast-strong { background: var(--mast-interference); color: var(--surface-1, var(--card-bg)); }
+.tp-mast-note {
+  margin: 2px 0 0;
+  padding-left: 6px;
+  border-left: 3px solid var(--mast-interference);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+.tp-mast-note[hidden] { display: none; }
 /* The line that explains what a surface verdict means for a radio link.
    Shown only with the chip it explains, so it is hidden by default. */
 .tp-surface-note {

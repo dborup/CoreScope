@@ -22,29 +22,11 @@
    * test-xss-escape-sinks.js lifts it and would refuse a second. */
   function esc(s) { return s == null ? '' : String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
-  // The single CC BY 4.0 credit line, same text as internal/dhm (#680).
-  var ATTRIBUTION = 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0';
-  var LICENCE_MARK = 'CC BY 4.0';
-  var ATTRIBUTION_URL = 'https://creativecommons.org/licenses/by/4.0/';
-  /* #733 — Dataforsyningen's terms ("Vilkår for brug af data", v3.1,
-   * https://dataforsyningen.dk/Vilkaar) also want the credit to link the
-   * dataset and to say whether the data was changed. The profile is
-   * computed from DHM — sampled, interpolated and assessed — so this line
-   * carries the derived note; the hillshade tiles are the agency's own
-   * rendering and do not (public/map-tile-providers.js).
-   *
-   * internal/dhm owns all of these strings; test-issue-733-dhm-credit.js
-   * keeps this copy and the Go one equal. */
-  var DATASET_MARK = 'Danmarks Højdemodel';
-  var DATASET_URL = 'https://dataforsyningen.dk/data/930';
-  var DERIVED_NOTE = 'data bearbejdet';
-  var ATTRIBUTION_DERIVED = ATTRIBUTION + ' — ' + DERIVED_NOTE;
-  // In the order they occur in the line: the walk below takes each mark's
-  // first occurrence in what is left of the text.
-  var CREDIT_LINKS = [
-    { mark: DATASET_MARK, href: DATASET_URL, rel: 'noopener noreferrer', testid: 'tp-credit-dataset' },
-    { mark: LICENCE_MARK, href: ATTRIBUTION_URL, rel: 'noopener noreferrer license', testid: 'tp-credit-link' }
-  ];
+  /* #765 — the chart footer's CC BY 4.0 credit comes from the server's dhm
+   * block (cmd/server/dhm_proxy.go, from internal/dhm): no credit string is
+   * kept here. footerCredit below builds it. */
+  // The footer's own test ids for the two links creditLinks names.
+  var CREDIT_TESTIDS = { dataset: 'tp-credit-dataset', license: 'tp-credit-link' };
   var ASSUMED_LABEL = 'assumed heights';
   var ENDPOINT = '/api/terrain/profile';
   var HASH_PARAM = 'profile';
@@ -209,7 +191,10 @@
 
   /* parseState returns null when the pair itself is unusable — that is the
    * one thing the link cannot do without. A junk model/k/freq falls back to
-   * the default instead, so one bad control never costs the whole link. */
+   * the default instead, so one bad control never costs the whole link.
+   * modelExplicit records whether the link stated the model at all: a
+   * stated model is a decision that a copied link and a later customizer
+   * change both keep, whatever the default is (#746). */
   function parseState(input, defaults) {
     var p = toParams(input);
     if (!p) return null;
@@ -219,6 +204,7 @@
       a: refs[0],
       b: refs[1],
       model: modelOf(p.get('model'), defaults),
+      modelExplicit: validModel(p.get('model')),
       ha: clampHeight(p.get('ha')),
       hb: clampHeight(p.get('hb')),
       k: boundedNumber(p.get('k'), 0.5, 10, 4),
@@ -295,18 +281,20 @@
     return best ? markerRef(best.key, best.lat, best.lon, isNode) : pointRef(drop.lat, drop.lon);
   }
 
-  /* serializeState writes only what differs from the defaults, so a plain
-   * two-node link stays short and the round trip is exact. */
-  function serializeState(state, defaults) {
+  /* serializeState writes only what was decided, so a plain two-node link
+   * stays short and the round trip is exact. */
+  function serializeState(state) {
     var out = {};
     if (!state || !state.a || !state.b) return out;
     out[HASH_PARAM] = refToParam(state.a) + ',' + refToParam(state.b);
     /* The model rides the link whenever it is not the standard "both",
      * whatever this viewer's own default is: the recipient may not share it,
-     * so a terrain-only link must say so (review PR#714). It also rides when
-     * it differs from this viewer's default, so with a customizer default of
-     * "dtm" a chosen terrain + surface survives reopening the link. */
-    if (validModel(state.model) && (state.model !== DEFAULT_MODEL || state.model !== modelOf(null, defaults))) {
+     * so a terrain-only link must say so (review PR#714). It also rides
+     * whenever it was stated — by the link this state came from or by the
+     * viewer's own pick — so a recipient on another default sees the same
+     * profile (#746). Presence, not a comparison with this viewer's
+     * default, which the recipient does not share either. */
+    if (validModel(state.model) && (state.model !== DEFAULT_MODEL || state.modelExplicit === true)) {
       out.model = state.model;
     }
     if (state.ha !== null && state.ha !== undefined) out.ha = String(state.ha);
@@ -326,7 +314,7 @@
      * default of "dtm" has to be stated or the request would quietly come
      * back with a surface model nobody asked for. */
     p.set('model', state.model === 'dtm' ? 'dtm' : 'both');
-    var ser = serializeState(state, { model: state.model });
+    var ser = serializeState(state);
     ['ha', 'hb', 'k', 'freq'].forEach(function (key) { if (ser[key] !== undefined) p.set(key, ser[key]); });
     return ENDPOINT + '?' + p.toString();
   }
@@ -335,8 +323,8 @@
    * once both ends are set, and while B is still being picked the half link
    * profile=<A> that parseStart reads back, so a reload keeps A. A point as
    * A has no half link: parseStart only takes a node key. */
-  function hashParams(state, defaults) {
-    if (state && state.a && state.b) return serializeState(state, defaults);
+  function hashParams(state) {
+    if (state && state.a && state.b) return serializeState(state);
     var out = {};
     if (state && state.a && !state.b && state.a.kind === 'node') out[HASH_PARAM] = refToParam(state.a);
     return out;
@@ -375,9 +363,9 @@
    * chat; otherwise the plain #/map link, exactly as before #727. Both carry
    * the same serializeState decisions, so a customizer default never rides
    * either one. */
-  function shareURL(state, loc, defaults, route) {
+  function shareURL(state, loc, route) {
     if (!state || !state.a || !state.b || !loc) return null;
-    var ser = serializeState(state, defaults);
+    var ser = serializeState(state);
     if (route !== true) return profileURL(loc, '#/map', ser, true);
     var p = new URLSearchParams();
     Object.keys(ser).forEach(function (key) { p.set(key, ser[key]); });
@@ -440,6 +428,27 @@
     a.appendChild(icon);
     a.appendChild(el('span', null, 'Terrain profile to…'));
     return a;
+  }
+
+  // ── Fitting a linked path into view (#746) ───────────────────────────────
+
+  var FIT_MARGIN_PX = 32;
+  // Below this much map between the panel and the top edge there is no
+  // useful strip to fit a path into.
+  var FIT_MIN_FREE_PX = 120;
+
+  /* fitPadding is the Leaflet fitBounds padding that puts a path in the
+   * part of a mapH-tall map the panel leaves free. The panel is anchored to
+   * the bottom at full width, so it costs bottom padding only, and it is
+   * reserved at panelMaxH (its CSS cap, --tp-panel-max-h) even while it is
+   * shorter: it grows to the cap when the chart arrives. With no useful
+   * strip left (a short landscape screen) the panel is not reserved, and
+   * the path fits the whole map rather than a sliver. */
+  function fitPadding(mapH, panelH, panelMaxH) {
+    var m = FIT_MARGIN_PX;
+    var reserve = Math.max(Number(panelH) || 0, isFinite(panelMaxH) ? Number(panelMaxH) : 0);
+    var bottom = (reserve > 0 && mapH - reserve - 2 * m >= FIT_MIN_FREE_PX) ? reserve + m : m;
+    return { paddingTopLeft: [m, m], paddingBottomRight: [m, bottom] };
   }
 
   // ── Per-viewer height memory ─────────────────────────────────────────────
@@ -654,6 +663,18 @@
     return null;
   }
 
+  /* runsWhere lists the contiguous runs of indices 0..n-1 for which has(i)
+   * holds, as { from, to }, inclusive. */
+  function runsWhere(n, has) {
+    var out = [], run = null;
+    for (var i = 0; i < n; i++) {
+      if (!has(i)) { run = null; continue; }
+      if (run) run.to = i;
+      else { run = { from: i, to: i }; out.push(run); }
+    }
+    return out;
+  }
+
   /* chartGeometry turns one /api/terrain/profile response into plot
    * coordinates. Elevations are drawn with the earth bulge added, which is
    * how the server assesses them, so what the eye reads off the chart and
@@ -712,20 +733,16 @@
     function yOf(z) { return r2(plot.y + plot.h * (zMax - z) / span); }
 
     // Contiguous runs of samples with elevation, and the gaps between them.
-    var segments = [], gaps = [], run = null, gap = null;
-    for (i = 0; i < n; i++) {
-      if (terrain[i] === null) {
-        if (run) { segments.push(run); run = null; }
-        if (!gap) gap = { fromM: d[i], toM: d[i], x1: r2(xs[i]), x2: r2(xs[i]) };
-        else { gap.toM = d[i]; gap.x2 = r2(xs[i]); }
-      } else {
-        if (gap) { gaps.push(gap); gap = null; }
-        if (!run) run = { from: i, to: i };
-        else run.to = i;
-      }
-    }
-    if (run) segments.push(run);
-    if (gap) gaps.push(gap);
+    var segments = runsWhere(n, function (j) { return terrain[j] !== null; });
+    var gaps = runsWhere(n, function (j) { return terrain[j] === null; }).map(function (r) {
+      return { fromM: d[r.from], toM: d[r.to], x1: r2(xs[r.from]), x2: r2(xs[r.to]) };
+    });
+    /* The surface has gaps of its own (#746): its line follows the surface
+     * samples alone, and the clutter band, which needs both edges, the
+     * samples with both. Neither may join two valid points across a
+     * missing one. */
+    var surfaceSegments = both ? runsWhere(n, function (j) { return surface[j] !== null; }) : [];
+    var clutterSegments = both ? runsWhere(n, function (j) { return surface[j] !== null && terrain[j] !== null; }) : [];
 
     /* Intrusion runs: where the clearance below the line of sight is under
      * the server's criterion fraction of the Fresnel radius.
@@ -771,6 +788,8 @@
       f60BotY: los.map(function (l, j) { return yOf(l - criterion * f1[j]); }),
       baseY: r2(plot.y + plot.h),
       segments: segments,
+      surfaceSegments: surfaceSegments,
+      clutterSegments: clutterSegments,
       gaps: gaps,
       intrusions: intrusions,
       criterion: criterion
@@ -866,20 +885,19 @@
         + '" fill="var(--terrain-fill)" stroke="var(--terrain-fill)" stroke-width="1"/>');
     });
 
-    // 2. DSM: the clutter band between terrain and surface, plus its line.
-    if (g.surfaceY) {
-      g.segments.forEach(function (seg) {
-        var up = [], down = [];
-        for (var i = seg.from; i <= seg.to; i++) {
-          if (g.surfaceY[i] === null) continue;
-          up.push(g.x[i] + ',' + g.surfaceY[i]);
-          down.unshift(g.x[i] + ',' + g.terrainY[i]);
-        }
-        if (up.length < 2) return;
-        out.push('<polygon points="' + up.join(' ') + ' ' + down.join(' ') + '" fill="var(--terrain-clutter)" stroke="none"/>');
-        out.push('<polyline points="' + up.join(' ') + '" fill="none" stroke="var(--terrain-clutter)" stroke-width="1.2"/>');
-      });
-    }
+    // 2. DSM: the clutter band between terrain and surface, plus its line,
+    //    each split on its own gaps.
+    g.clutterSegments.forEach(function (seg) {
+      if (seg.to === seg.from) return;
+      var down = [];
+      for (var i = seg.to; i >= seg.from; i--) down.push(g.x[i] + ',' + g.terrainY[i]);
+      out.push('<polygon points="' + polyline(g.x, g.surfaceY, seg.from, seg.to) + ' ' + down.join(' ')
+        + '" fill="var(--terrain-clutter)" stroke="none"/>');
+    });
+    g.surfaceSegments.forEach(function (seg) {
+      if (seg.to === seg.from) return;
+      out.push('<polyline points="' + polyline(g.x, g.surfaceY, seg.from, seg.to) + '" fill="none" stroke="var(--terrain-clutter)" stroke-width="1.2"/>');
+    });
 
     // 3/4. Fresnel bands: 60 % inside the full first zone.
     out.push('<polyline points="' + polyline(g.x, g.f60TopY, 0, g.x.length - 1) + '" fill="none" stroke="var(--fresnel-60)" stroke-width="1" stroke-dasharray="4 3"/>');
@@ -938,26 +956,28 @@
     return e;
   }
 
-  /* #733 — appends `text` to `parent`, with each link's mark turned into an
-   * anchor, taking each mark's first occurrence in what is left of the
-   * text. Text nodes and elements only: nothing here builds markup, so a
-   * credit string can never become HTML. A mark that is not in the text is
-   * skipped, so the line still renders if the wording changes. */
-  function appendCredit(parent, text, links) {
-    var rest = text == null ? '' : String(text);
-    (links || []).forEach(function (l) {
-      var i = rest.indexOf(l.mark);
-      if (i < 0) return;
-      if (i > 0) parent.appendChild(el('span', null, rest.slice(0, i)));
-      var a = el('a', 'tp-credit-link', l.mark);
-      a.setAttribute('href', l.href);
-      a.setAttribute('target', '_blank');
-      a.setAttribute('rel', l.rel);
-      a.setAttribute('data-testid', l.testid);
-      parent.appendChild(a);
-      rest = rest.slice(i + l.mark.length);
+  /* footerCredit fills the chart footer from the server's dhm block
+   * (#733, #765). The profile is computed from DHM — sampled, interpolated
+   * and assessed — so the line is the block's derived credit, which says
+   * the data was changed; the hillshade tiles are the agency's own
+   * rendering and keep the plain one (public/map-tile-providers.js). The
+   * dataset and licence marks become links through the one credit walker,
+   * MC_appendCredit. A block without the derived credit falls back to the
+   * plain one, which still names the owner and the licence, and without the
+   * walker (map-tile-providers.js did not load) the credit is still shown,
+   * as plain text. */
+  function footerCredit(parent, cfg) {
+    cfg = cfg || {};
+    var text = typeof cfg.attributionDerived === 'string' && cfg.attributionDerived ? cfg.attributionDerived : cfg.attribution;
+    text = typeof text === 'string' ? text : '';
+    if (typeof global.MC_appendCredit !== 'function' || typeof global.MC_creditLinks !== 'function') {
+      parent.textContent = text;
+      return parent;
+    }
+    global.MC_appendCredit(parent, text, global.MC_creditLinks(cfg), function (a, link) {
+      a.className = 'tp-credit-link';
+      if (CREDIT_TESTIDS[link.key]) a.setAttribute('data-testid', CREDIT_TESTIDS[link.key]);
     });
-    if (rest) parent.appendChild(el('span', null, rest));
     return parent;
   }
 
@@ -1066,7 +1086,7 @@
      * arm a picker for one end. Swap needs nothing from the host. */
     var canPick = typeof opts.onMoveStart === 'function';
 
-    var state = { a: null, b: null, model: themeDefaults().model, ha: null, hb: null, k: null, freq: null };
+    var state = { a: null, b: null, model: themeDefaults().model, modelExplicit: false, ha: null, hb: null, k: null, freq: null };
     var open = false, seq = 0, debounceTimer = null, panel = null, nodes = { a: null, b: null };
     // The end whose Move button is armed ('a' | 'b'), else null (#721).
     var moving = null;
@@ -1079,9 +1099,6 @@
      * travel in a shared link, and after a reload the badge has to read
      * "default" again rather than "link" (#681 M6). */
     var themeH = { a: null, b: null };
-    // True once the viewer, or a link, has stated the model outright — a
-    // later customizer change then leaves it alone.
-    var modelPinned = false;
     var ui = {};
 
     /* effectiveState is what we ask the server for: `state` with the
@@ -1095,34 +1112,53 @@
       };
     }
 
-    /* adoptThemeDefaults applies a customizer height to an endpoint the
-     * server answered out of its own built-in default, and reports whether
-     * anything moved. An operator value, a remembered height and a link are
-     * all more specific and are left alone; a customizer value equal to what
-     * the server already returned is not worth a second request. Called once
-     * per measurement, so it cannot loop. */
+    /* adoptThemeDefault applies a customizer height to one end the server
+     * resolves out of its own built-in default — `end` is that resolution:
+     * kind, role, antennaM and antennaSource — and reports whether anything
+     * moved. An operator value, a remembered height and a link are all more
+     * specific and are left alone; a customizer value equal to the server's
+     * own is not worth sending. */
+    function adoptThemeDefault(side, end, defs) {
+      if (!end || themeH[side] !== null) return false;
+      if ((side === 'a' ? state.ha : state.hb) !== null) return false;
+      if (!PROMOTABLE_SOURCES[end.antennaSource]) return false;
+      var h = themeHeight(end, defs);
+      if (h === null || h === clampHeight(end.antennaM)) return false;
+      themeH[side] = h;
+      origin[side] = 'theme';
+      return true;
+    }
+
+    /* adoptThemeDefaults applies adoptThemeDefault to both ends of an
+     * answer. Called once per measurement, so it cannot loop. */
     function adoptThemeDefaults(data) {
       var defs = themeDefaults();
-      var changed = false;
+      var a = adoptThemeDefault('a', data && data.a, defs);
+      var b = adoptThemeDefault('b', data && data.b, defs);
+      return a || b;
+    }
+
+    /* presetPointDefaults decides a free point's customizer height before
+     * asking (#746). A point has no per-node key, so the server's whole
+     * rule for it is known up front (dhm.pointAntenna, passed in as
+     * opts.pointAntenna), and the first request can carry the height
+     * instead of a second one after the answer. A node can have an operator
+     * height of its own, so it still waits for the answer. */
+    function presetPointDefaults() {
+      var rule = opts.pointAntenna;
+      if (!rule || typeof rule !== 'object') return;
+      var defs = themeDefaults();
       ['a', 'b'].forEach(function (side) {
-        var end = (data && data[side]) || null;
-        if (!end || themeH[side] !== null) return;
-        if ((side === 'a' ? state.ha : state.hb) !== null) return;
-        if (!PROMOTABLE_SOURCES[end.antennaSource]) return;
-        var h = themeHeight(end, defs);
-        if (h === null || h === clampHeight(end.antennaM)) return;
-        themeH[side] = h;
-        origin[side] = 'theme';
-        changed = true;
+        if (!state[side] || state[side].kind !== 'point') return;
+        adoptThemeDefault(side, { kind: 'point', antennaM: rule.m, antennaSource: rule.source }, defs);
       });
-      return changed;
     }
 
     /* The customizer can move these defaults while the panel is open. Drop
      * what was adopted from the old values and measure again. */
     function onDefaultsChanged() {
       var defs = themeDefaults();
-      if (!modelPinned && state.model !== defs.model) {
+      if (!state.modelExplicit && state.model !== defs.model) {
         state.model = defs.model;
         syncModelButtons();
       }
@@ -1149,6 +1185,14 @@
        * than the terrain one. It rides beside the verdict rather than under
        * the chart because "Clear" beside an obvious building is read in the
        * title row and nowhere else. */
+      /* #746 N2: the chips are separate statements, but a screen reader
+       * reads adjacent inline text as one ("Terrain: ClearBuildings/trees:
+       * Blocked"). A visually hidden full stop between them, shown and
+       * hidden with the surface chip, makes it two sentences. aria-label
+       * on a plain span is not reliably announced, so it is text. */
+      ui.surfaceSep = el('span', 'sr-only', '. ');
+      ui.surfaceSep.hidden = true;
+      head.appendChild(ui.surfaceSep);
       ui.surface = el('span', 'tp-chip tp-chip-surface');
       ui.surface.setAttribute('data-testid', 'tp-surface-chip');
       ui.surface.hidden = true;
@@ -1195,12 +1239,11 @@
       ui.chart.setAttribute('data-testid', 'tp-chart');
       body.appendChild(ui.chart);
 
-      // The shared credit text, with the dataset and the licence marks as
-      // links to the dataset page and the licence itself, and the note that
-      // the profile is derived from DHM: the CC BY 4.0 obligations, spelled
-      // out once (#680, #733).
+      // The server's derived credit, with the dataset and the licence marks
+      // as links to the dataset page and the licence itself: the CC BY 4.0
+      // obligations, spelled out once (#680, #733, #765).
       ui.credit = el('p', 'tp-credit-line');
-      appendCredit(ui.credit, ATTRIBUTION_DERIVED, CREDIT_LINKS);
+      footerCredit(ui.credit, opts.dhm);
       body.appendChild(ui.credit);
 
       ui.detail = el('p', 'tp-detail');
@@ -1236,7 +1279,9 @@
         b.addEventListener('click', function () {
           if (state.model === m[0]) return;
           state.model = m[0];
-          modelPinned = true;
+          // The viewer's own pick: a later customizer change leaves it
+          // alone, and it rides the link.
+          state.modelExplicit = true;
           syncModelButtons();
           request();
         });
@@ -1359,9 +1404,9 @@
 
     /* endpointsChanged is the shared tail of a move and a swap: the panel
      * names, the hash at once (replaceState), and one debounced request. An
-     * answer still in flight belongs to the old ends, so it is dropped. */
+     * answer still in flight belongs to the old ends, so scheduleRequest
+     * drops it. */
     function endpointsChanged() {
-      seq++;
       renderNames();
       setStatus('Measuring the terrain along the path…', 'tp-loading');
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
@@ -1400,6 +1445,7 @@
         ui.surface.setAttribute('data-state', show ? surf.state : '');
         ui.surface.title = show ? surf.detail : '';
       }
+      if (ui.surfaceSep) ui.surfaceSep.hidden = !show;
       if (ui.surfaceNote) ui.surfaceNote.hidden = !(show && surf.note);
     }
 
@@ -1407,13 +1453,13 @@
       if (!syncHash) return;
       try {
         var loc = global.location;
-        var next = profileURL(loc, loc.hash, open ? hashParams(state, themeDefaults()) : {}, false);
+        var next = profileURL(loc, loc.hash, open ? hashParams(state) : {}, false);
         global.history.replaceState(global.history.state, '', next);
       } catch (_) { /* a hash we cannot write is not worth breaking the tool for */ }
     }
 
     function onCopy() {
-      var url = shareURL(state, global.location, themeDefaults(), opts.shareRoute === true);
+      var url = shareURL(state, global.location, opts.shareRoute === true);
       if (!url) return;
       copyLink(url, opts.copyText || global.copyToClipboard).then(function (ok) {
         if (!ui.copyStatus) return;
@@ -1421,7 +1467,13 @@
       });
     }
 
+    /* scheduleRequest debounces the request for an edit. Whatever is still
+     * in flight was asked for the state before the edit, so it is dropped
+     * now, not when the debounced request goes out: otherwise an old
+     * answer landing inside the window overwrites the height being edited,
+     * the chart and the verdict (#746). */
     function scheduleRequest() {
+      seq++;
       if (debounceTimer) global.clearTimeout(debounceTimer);
       debounceTimer = global.setTimeout(function () { debounceTimer = null; request(); }, HEIGHT_DEBOUNCE_MS);
       writeHash();
@@ -1512,6 +1564,7 @@
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
       setSurfaceChip(null);
       if (ui.assumed) ui.assumed.hidden = true;
+      presetPointDefaults();
       return fetchJSON(requestURL(effectiveState())).then(function (data) {
         if (mine !== seq || !open) return;
         /* The server answers which height it used and where it came from,
@@ -1532,11 +1585,33 @@
       });
     }
 
+    /* shut closes the panel and drops every answer still in flight. Only
+     * an explicit Close takes the profile out of the hash. A stated model
+     * belonged to the profile that is closing: the next path is the
+     * viewer's own and follows the customizer again (#765, #772 F2). */
+    function shut(rewriteHash) {
+      if (!open) return;
+      open = false;
+      seq++;
+      if (debounceTimer) { global.clearTimeout(debounceTimer); debounceTimer = null; }
+      state.a = null;
+      state.b = null;
+      state.model = themeDefaults().model;
+      state.modelExplicit = false;
+      moving = null;
+      themeH.a = null;
+      themeH.b = null;
+      if (panel) panel.classList.remove('is-open');
+      if (rewriteHash) writeHash();
+      if (opts.onClose) opts.onClose();
+    }
+
     var api = {
       el: function () { return panel; },
       isOpen: function () { return open; },
       getState: function () {
-        return { a: state.a, b: state.b, model: state.model, ha: state.ha, hb: state.hb, k: state.k, freq: state.freq };
+        return { a: state.a, b: state.b, model: state.model, modelExplicit: state.modelExplicit,
+          ha: state.ha, hb: state.hb, k: state.k, freq: state.freq };
       },
       /* setEndpoint fills one end and, when both are set, measures. A node
        * or point with a remembered height adopts it immediately. */
@@ -1562,10 +1637,10 @@
         state.b = next.b || null;
         state.model = validModel(next.model) ? next.model : themeDefaults().model;
         /* A link that spells the model out is a decision, and a later
-         * customizer change must not quietly override it. parseState has
-         * already resolved an absent one to the default, so the difference
-         * from the default is what the link actually said. */
-        modelPinned = state.model !== themeDefaults().model;
+         * customizer change must not quietly override it. parseState says
+         * whether it did; comparing with the default cannot, since a stated
+         * model can equal it (#746). */
+        state.modelExplicit = next.modelExplicit === true;
         state.ha = next.ha === undefined ? null : next.ha;
         state.hb = next.hb === undefined ? null : next.hb;
         state.k = next.k === undefined ? null : next.k;
@@ -1651,22 +1726,13 @@
         renderNames();
         writeHash();
       },
-      close: function () {
-        if (!open) return;
-        open = false;
-        seq++;
-        if (debounceTimer) { global.clearTimeout(debounceTimer); debounceTimer = null; }
-        state.a = null;
-        state.b = null;
-        moving = null;
-        themeH.a = null;
-        themeH.b = null;
-        if (panel) panel.classList.remove('is-open');
-        writeHash();
-        if (opts.onClose) opts.onClose();
-      },
+      close: function () { shut(true); },
+      /* destroy is teardown, not a Close: the router updates the address
+       * bar before it destroys the old page (public/app.js navigate), so
+       * the hash already belongs to the destination and is left alone
+       * (#746). */
       destroy: function () {
-        api.close();
+        shut(false);
         if (global.removeEventListener) {
           global.removeEventListener('terrain-defaults-changed', onDefaultsChanged);
         }
@@ -1686,14 +1752,7 @@
   }
 
   global.TerrainProfile = {
-    ATTRIBUTION: ATTRIBUTION,
-    ATTRIBUTION_URL: ATTRIBUTION_URL,
-    ATTRIBUTION_DERIVED: ATTRIBUTION_DERIVED,
-    DATASET_MARK: DATASET_MARK,
-    DATASET_URL: DATASET_URL,
-    DERIVED_NOTE: DERIVED_NOTE,
-    CREDIT_LINKS: CREDIT_LINKS,
-    appendCredit: appendCredit,
+    footerCredit: footerCredit,
     ASSUMED_LABEL: ASSUMED_LABEL,
     ENDPOINT: ENDPOINT,
     HASH_PARAM: HASH_PARAM,
@@ -1705,10 +1764,13 @@
     snapEndpoint: snapEndpoint,
     shareURL: shareURL,
     shareOffered: shareOffered,
+    fitPadding: fitPadding,
     parseProfilePair: parseProfilePair,
     offered: offered,
     nodeEntryHash: nodeEntryHash,
     nodeEntryAction: nodeEntryAction,
+    // #772 F4: the fit margin, read back by tests instead of copied in.
+    FIT_MARGIN_PX: FIT_MARGIN_PX,
     heightBadge: heightBadge,
     copyLink: copyLink,
     serializeState: serializeState,

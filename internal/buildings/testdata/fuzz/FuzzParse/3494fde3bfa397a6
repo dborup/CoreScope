@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"tYpe\":\"FeatureCollection\",\"feAtures\":[{\"tYpe\":\"Feature\",\"00\":\"0000000000\",\"geometrY\":{\"tYpe\":\"MultiPolygon\",\"CoordinAtes\":[]}}]}")

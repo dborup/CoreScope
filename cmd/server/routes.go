@@ -106,6 +106,9 @@ type Server struct {
 	// masts is the #724 antenna sites proxy; nil while map.masts is off
 	// (the endpoint then answers 404).
 	masts *mastsProxy
+	// heritage is the #723 M2 click-for-info query; nil unless
+	// map.heritage is enabled.
+	heritage *heritageQuery
 
 	// Cached /api/analytics/wardriving response — per-window, recomputed at most once every 30s
 	wardrivingStatsMu       sync.Mutex
@@ -237,6 +240,7 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 		masts: newMastsProxyFromConfig(cfg),
 	}
 	s.terrain = newTerrainProfilerFromConfig(cfg, s.dhm, db)
+	s.heritage = newHeritageQueryFromConfig(cfg)
 	return s
 }
 
@@ -338,9 +342,11 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/config/theme", s.handleConfigTheme).Methods("GET")
 	r.HandleFunc("/api/config/map", s.handleConfigMap).Methods("GET")
 	r.HandleFunc("/api/map/dhm/wms", s.handleDHMTile).Methods("GET")
+	r.HandleFunc(dhmOrthoRoute, s.handleDHMOrtho).Methods("GET")
 	r.HandleFunc("/api/terrain/profile", s.handleTerrainProfile).Methods("GET")
 	r.HandleFunc(cardRoute, s.handleTerrainProfileCard).Methods("GET")
 	r.HandleFunc("/api/masts", s.handleMasts).Methods("GET")
+	r.HandleFunc("/api/terrain/heritage", s.handleHeritageInfo).Methods("GET")
 	r.HandleFunc("/api/config/geo-filter", s.handleConfigGeoFilter).Methods("GET")
 	r.HandleFunc("/api/config/areas", s.handleConfigAreas).Methods("GET")
 	r.HandleFunc("/api/config/areas/polygons", s.handleConfigAreasPolygons).Methods("GET")

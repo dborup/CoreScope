@@ -51,6 +51,8 @@ const DHM_BLOCK = {
   attribution: ATTRIBUTION,
   datasetName: DATASET_MARK, datasetUrl: DATASET_URL,
   licenseName: 'CC BY 4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
+  // #765: the server sends the derived credit, and the footer shows it.
+  attributionDerived: ATTRIBUTION_DERIVED,
 };
 const PNG_1X1 = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGM4ceIEAAS0AlkWLoFAAAAAAElFTkSuQmCC',

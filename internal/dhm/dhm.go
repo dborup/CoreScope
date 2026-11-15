@@ -7,7 +7,7 @@
 // what every DHM feature needs exactly once:
 //
 //   - Config: the operator's `map.dhm` block (enabled, token, layer,
-//     tile rate limit, terrain profile).
+//     tile rate limit, terrain profile, orthophoto).
 //   - Client: the upstream HTTP client. The token goes in the `token`
 //     request header (Dataforsyningen's recommended method), never in a
 //     URL, so no upstream URL can leak it. The client also enforces the
@@ -20,15 +20,25 @@
 //     DatasetName, DatasetURL, LicenseName, LicenseURL, DerivedNote) for
 //     the views that render the dataset and licence links (#733).
 //
-// The hillshade tile shape (#680) lives in wms.go, and the exaggerated
-// hillshade service (#687) in hillshade.go. The elevation raster
+// The hillshade tile shape (#680) lives in wms.go, the exaggerated
+// hillshade service (#687) in hillshade.go, the overlay ids the browser
+// names a tile by (terrain, surface, contours; #734) in overlay.go, and
+// the orthophoto base-map tile (#728, a WMTS on the same token) in
+// ortho.go, with the mask of the tiles its base layer skips in
+// ortho_mask.go. The elevation raster
 // shape for the terrain profile (#681) lives in wcs.go, behind the
 // ElevationSource interface, which returns a decoded Grid (grid.go) read by
-// a stdlib-only float32 GeoTIFF decoder (geotiff.go); utm.go projects
+// a stdlib-only float32 GeoTIFF decoder (geotiff.go), which also reads the
+// tiled EPSG:4326 GeoTIFFs of the Copernicus GLO-30 foreign fill block by
+// block (geotiff_tiled.go, #738; the fill itself is internal/copdem); utm.go projects
 // lat/lon to the rasters' EPSG:25832. profile.go plans the samples and
 // rasters of a terrain profile, physics.go assesses the link, and flight.go
-// coalesces calls with cancellation. Further features add their own
-// request shape next to them and reuse the rest.
+// coalesces calls with cancellation. get.go is the bounded, no-redirect
+// GET of the keyless upstreams (internal/mastedb, internal/heritage), and
+// polygon.go the shared GeoJSON polygon reading, vertex cap and
+// point-in-polygon maths those features measure a point with (#730 M1a).
+// Further features add their own request shape next to them and reuse the
+// rest.
 package dhm
 
 import "strings"
@@ -92,6 +102,14 @@ type Config struct {
 	TileRateLimitPerMin *int `json:"tileRateLimitPerMin"`
 	// Profile is the terrain profile endpoint (#681).
 	Profile ProfileConfig `json:"profile"`
+	// Ortho is the orthophoto base layer (#728).
+	Ortho OrthoConfig `json:"ortho"`
+}
+
+// OrthoConfig is config.json `map.dhm.ortho` (#728). Off unless Enabled;
+// it uses map.dhm's token, so it is also off while map.dhm is inactive.
+type OrthoConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 // ProfileConfig is config.json `map.dhm.profile`. A nil field takes the
@@ -110,6 +128,9 @@ type ProfileConfig struct {
 	Share ShareConfig `json:"share"`
 	// Card is the share card, GET /api/terrain/profile.png (#727 M3).
 	Card CardConfig `json:"card"`
+	// ForeignFill fills the samples DHM does not cover from Copernicus
+	// DEM GLO-30 (#738).
+	ForeignFill ForeignFillConfig `json:"foreignFill"`
 }
 
 // CardConfig is config.json `map.dhm.profile.card` (#727 M3): how the
@@ -123,6 +144,16 @@ type CardConfig struct {
 	Names *bool `json:"names"`
 	// CacheEntries bounds the rendered-card cache (default 64).
 	CacheEntries *int `json:"cacheEntries"`
+}
+
+// ForeignFillConfig is config.json `map.dhm.profile.foreignFill` (#738).
+// Off unless Enabled: it sends requests to a third party (the AWS Open
+// Data bucket of Copernicus DEM). A nil field takes the server default;
+// cmd/server resolves and bounds every value.
+type ForeignFillConfig struct {
+	Enabled      bool `json:"enabled"`
+	BlockCacheMB *int `json:"blockCacheMB"`
+	TimeoutMs    *int `json:"timeoutMs"`
 }
 
 // ShareConfig is config.json `map.dhm.profile.share` (#727). Off unless
