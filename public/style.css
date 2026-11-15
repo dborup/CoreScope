@@ -5684,6 +5684,8 @@ body { touch-action: pan-y; }
  * Stacked just under the modal scrim (#818): a hint stays above the
  * page, the bottom nav and the drawers, but never covers a dialog on the
  * --z-modal scale (the Skraafoto viewer at 375x560 on a first visit).
+ * The transient status UI at 9000 to 9999 (the warm-up banner, toasts,
+ * the analytics warm-up pill) now lies above a hint, as it should.
  * Comments live ABOVE the rule body, not interleaved, because a stray
  * em-dash or sequence inside the body has historically caused some CSS
  * parsers to drop the entire rule from the CSSOM. */

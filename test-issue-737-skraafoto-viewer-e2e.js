@@ -34,13 +34,13 @@
  *   8. Path profile: A, B and a clicked chart point (the #781 mapping) open
  *      the viewer at those coordinates; the panel's head and chart do not
  *      move when the row is on;
- *   9. phones, 375x560 portrait and 640x360 landscape: on a first visit
- *      (no gesture hint marked as seen) from `/` to the viewer by real
- *      taps (More, Nodes, the node's row, the action), and from a shared
- *      profile link — the dialog sits above the bottom nav and inside the
- *      viewport, its controls are hit by themselves, the gesture hints
- *      that are up do not cover it (#818), and the profile panel keeps
- *      its layout;
+ *   9. phones, 375x560 portrait and 640x360 landscape, each a cold start
+ *      from `/` (no gesture hint marked as seen) by real taps: More, Nodes,
+ *      the node's row, then the action — or "Terrain profile to…", a tap
+ *      on the map for B (#790) and a tap on the chart — the dialog sits
+ *      above the bottom nav and inside the viewport, its controls are hit
+ *      by themselves, the gesture hints that are up do not cover it
+ *      (#818), and the profile panel keeps its layout;
  *  10. a node name is text, never markup;
  *  11. a node outside the block's bounds (Denmark) has no action, while
  *      "Terrain profile to…" is still offered (#818).
@@ -48,7 +48,9 @@
  * The fixture's nodes are in California: the node used here is moved to
  * Aarhus in the stubbed /api/nodes answers (o.abroad keeps it where it is).
  *
- * SHOTS_DIR=dir also writes screenshots for the PR.
+ * SHOTS_DIR=dir also writes screenshots for the PR. CPU_THROTTLE=4 slows
+ * every page's CPU by that factor (CDP Emulation.setCPUThrottlingRate),
+ * to check that no step depends on how fast the page renders.
  *
  * Usage:
  *   BASE_URL=http://localhost:13581 node test-issue-737-skraafoto-viewer-e2e.js
@@ -59,6 +61,7 @@ const { chromium } = require('playwright');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const SHOTS = process.env.SHOTS_DIR || '';
+const THROTTLE = Number(process.env.CPU_THROTTLE) || 1;
 const PROFILE_PATH = '/api/terrain/profile';
 const SEARCH_PATH = '/api/skraafoto/search';
 const PREVIEW_PREFIX = '/api/skraafoto/preview/';
@@ -112,14 +115,18 @@ const sampleX = (i) => Math.round((PLOT_X + PLOT_W * i / (N - 1)) * 100) / 100;
 
 let passed = 0, failed = 0;
 async function step(name, fn) {
-  try { await fn(); passed++; console.log('  ✓ ' + name); }
-  catch (e) { failed++; console.error('  ✗ ' + name + ': ' + e.message); }
+  try { await fn(); passed++; console.log('  ✓ ' + name); return true; }
+  catch (e) { failed++; console.error('  ✗ ' + name + ': ' + e.message); return false; }
 }
 function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
 function profileFor(q) {
+  // An end is lat,lon, or a node's key (the node entry's A): the node
+  // under test is answered at Aarhus, where it is moved to.
   const end = (side) => {
-    const ll = (q.get(side) || '').split(',').map(Number);
+    const v = q.get(side) || '';
+    if (/^[0-9a-f]{64}$/i.test(v)) return { lat: AARHUS.lat, lon: AARHUS.lon, kind: 'node', role: 'repeater', groundM: 30, antennaM: 10, antennaSource: 'role-default', assumed: true };
+    const ll = v.split(',').map(Number);
     return { lat: ll[0], lon: ll[1], kind: 'point', groundM: 30, antennaM: 10, antennaSource: 'point-default', assumed: true };
   };
   const samples = [];
@@ -196,7 +203,7 @@ function searchAnswer(q, o) {
       viewport: o.viewport || { width: 1280, height: 860 },
       hasTouch: !!o.touch, isMobile: !!o.touch,
     });
-    const rec = { search: [], preview: [], external: [], errors: [], release: null };
+    const rec = { search: [], preview: [], profile: [], external: [], errors: [], release: null };
     let hold = o.holdSearch ? new Promise(r => { rec.release = r; }) : null;
     await ctx.route(BASE + '/api/config/client', async (route) => {
       const response = await route.fetch();
@@ -233,6 +240,7 @@ function searchAnswer(q, o) {
     });
     await ctx.route(url => new URL(url).pathname === PROFILE_PATH, async (route) => {
       const u = new URL(route.request().url());
+      rec.profile.push(u);
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profileFor(u.searchParams)) });
     });
     // The node under test, in every /api/nodes answer (list, detail).
@@ -264,6 +272,13 @@ function searchAnswer(q, o) {
       }
     });
     await ctx.addInitScript((firstVisit) => {
+      // A page load's last theme-refresh comes 300 ms after the theme
+      // config lands (app.js, customize-v2.js init); an earlier one, on
+      // data-theme, may come first. See themeSettled.
+      window.__sfThemeSettled = false;
+      window.addEventListener('theme-refresh', () => {
+        if (window._customizerV2 && window._customizerV2.initDone) window.__sfThemeSettled = true;
+      });
       try {
         localStorage.setItem('meshcore-theme', 'light');
         localStorage.setItem('meshcore-map-clustering', 'false');
@@ -274,6 +289,7 @@ function searchAnswer(q, o) {
       } catch (_) {}
     }, !!o.firstVisit);
     const page = await ctx.newPage();
+    if (THROTTLE > 1) await (await ctx.newCDPSession(page)).send('Emulation.setCPUThrottlingRate', { rate: THROTTLE });
     page.on('pageerror', e => rec.errors.push(String(e)));
     return { ctx, page, rec };
   }
@@ -300,14 +316,22 @@ function searchAnswer(q, o) {
   MOVED_PK = PK;
   const LAT5 = AARHUS.lat.toFixed(5), LON5 = AARHUS.lon.toFixed(5);
 
+  /* themeSettled waits for the page load's last theme-refresh. The nodes
+   * list, the node page and the map's markers render again on it, and an
+   * element found before it may be replaced (#823 review, F1). */
+  async function themeSettled(page) {
+    await page.waitForFunction(() => window.__sfThemeSettled, null, { timeout: 15000 });
+  }
   async function gotoNode(page, pk, extra) {
     await page.goto(`${BASE}/#/nodes/${pk}${extra || ''}`, { waitUntil: 'domcontentloaded' });
+    await themeSettled(page);
     await page.waitForSelector('.node-full-card', { timeout: 30000 });
     await page.waitForFunction(() => window.MeshConfigReady !== undefined, null, { timeout: 15000 });
     await page.evaluate(() => window.MeshConfigReady);
   }
   async function gotoProfile(page) {
     await page.goto(`${BASE}/#/map?profile=${P}`, { waitUntil: 'domcontentloaded' });
+    await themeSettled(page);
     await page.waitForSelector(PANEL + '.is-open', { timeout: 30000 });
     await page.waitForSelector(PLOT, { timeout: 15000 });
   }
@@ -564,6 +588,7 @@ function searchAnswer(q, o) {
   {
     const { ctx, page, rec } = await newCtx({});
     await page.goto(`${BASE}/#/nodes`, { waitUntil: 'domcontentloaded' });
+    await themeSettled(page);
     const row = `tr[data-key="${nodes.fixed.pk}"]`;
     await page.waitForSelector(row, { timeout: 30000 });
     await page.click(row + ' td:nth-child(2)');
@@ -652,25 +677,44 @@ function searchAnswer(q, o) {
     });
   }
 
-  // ── 9. Phones: a first visit by real taps from `/`, and a profile link ────
+  // ── 9. Phones: a cold start from `/` by real taps ─────────────────────────
   /* tapToNode is a first visit's way to a node: `/`, then More, Nodes and
-   * the node's row, each a tap; on a phone the row opens the node page. */
-  async function tapToNode(page, pk) {
+   * the node's row, each a tap; on a phone the row opens the node page.
+   * Opened while the page load's last theme-refresh is pending, the nodes
+   * list renders a second time and the row found first is replaced, so
+   * the taps start once it has run (themeSettled). The row is tapped
+   * through a locator, which scrolls by itself and finds it again.
+   * o.dismiss taps "Got it" on each gesture hint as it comes up: on `/`
+   * and on the list, which between them show every hint a phone has. */
+  async function tapToNode(page, pk, o) {
+    o = o || {};
     await page.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
+    await themeSettled(page);
+    if (o.dismiss) await dismissHints(page);
     await page.tap('[data-bottom-nav-tab="more"]');
     await page.tap('[data-bottom-nav-more-route="nodes"]');
-    const row = page.locator(`tr[data-key="${pk}"]`);
-    await row.waitFor({ timeout: 30000 });
-    await row.scrollIntoViewIfNeeded();
-    await row.locator('td:visible').first().tap();
+    const cell = page.locator(`tr[data-key="${pk}"] td:visible`).first();
+    await cell.waitFor({ timeout: 30000 });
+    if (o.dismiss) await dismissHints(page, 'row-swipe');
+    await cell.tap();
     await page.waitForSelector('.node-full-card', { timeout: 30000 });
     await page.waitForSelector(ACTION, { timeout: 10000 });
-    await hintsUp(page);
+    if (!o.dismiss) await hintsUp(page);
   }
   /* hintsUp waits for the first visit's gesture hints, shown 800 ms after
    * a route change (gesture-hints.js) and up for 8 s. */
   async function hintsUp(page) {
     await page.waitForSelector('.gesture-hint:not(.gesture-hint-fading)', { timeout: 5000 });
+  }
+  /* dismissHints waits for the route's hints (or the one named) and taps
+   * "Got it" on each, the newest first, as it lies on top: it is then
+   * marked as seen and not shown again. They are up within a second of
+   * the route change, far from their 8 s fade. */
+  async function dismissHints(page, id) {
+    await page.waitForSelector(id ? `[data-gesture-hint="${id}"]:not(.gesture-hint-fading)` : '.gesture-hint:not(.gesture-hint-fading)', { timeout: 5000 });
+    const ids = await page.$$eval('.gesture-hint', els => els.map(e => e.getAttribute('data-gesture-hint')));
+    for (const h of ids.reverse()) await page.tap(`[data-gesture-hint="${h}"] [data-gesture-hint-dismiss]`);
+    await page.waitForFunction(() => !document.querySelector('.gesture-hint'), null, { timeout: 3000 });
   }
   /* noHintOver: on a first visit the gesture hints are up; none of them
    * may cover the viewer (#818). Each hint that overlaps the dialog is
@@ -724,79 +768,136 @@ function searchAnswer(q, o) {
     // Over whatever the page has there (the profile panel, z-index 1200).
     assert(await hitsItself(page, IMG), 'the photo is covered');
   }
-  for (const [label, viewport] of [['375x560 portrait', { width: 375, height: 560 }], ['640x360 landscape', { width: 640, height: 360 }]]) {
-    {
-      const { ctx, page, rec } = await newCtx({ viewport, touch: true, firstVisit: true });
+  /* mapSpot is a point on the visible map, for a tap that picks an end:
+   * the map is hit there and around it, not the panel, a control or a
+   * marker (by 32 px, beyond the 24 px snap), and not node A's marker. */
+  async function mapSpot(page) {
+    return page.evaluate(() => {
+      const box = document.getElementById('leaflet-map').getBoundingClientRect();
+      const marks = Array.from(document.querySelectorAll('.leaflet-marker-icon, .leaflet-interactive')).map(el => el.getBoundingClientRect());
+      const BLOCK = '.leaflet-control, .map-controls, .map-controls-toggle, .map-profile-toggle, .map-profile-hint, .tp-panel, .leaflet-marker-icon, .leaflet-interactive';
+      for (let y = box.y + 40; y < box.bottom - 20; y += 10) {
+        for (let x = box.x + 60; x < box.right - 60; x += 14) {
+          if (!marks.every(r => x < r.x - 32 || x > r.right + 32 || y < r.y - 32 || y > r.bottom + 32)) continue;
+          const ok = [[0, 0], [-20, 0], [20, 0], [0, -20], [0, 20]].every(([dx, dy]) => {
+            const hit = document.elementFromPoint(x + dx, y + dy);
+            return hit && hit.closest('.leaflet-container') && !hit.closest(BLOCK);
+          });
+          if (ok) return { x: Math.round(x), y: Math.round(y) };
+        }
+      }
+      return null;
+    });
+  }
+
+  /* A first visit to the viewer: the hints that are up must not cover it. */
+  async function firstVisitViewer(label, viewport) {
+    const { ctx, page, rec } = await newCtx({ viewport, touch: true, firstVisit: true });
+    const reached = await step(`${label} first visit: from / to the viewer by taps, no gesture hint marked as seen`, async () => {
       await tapToNode(page, nodes.fixed.pk);
-      await page.locator(ACTION).scrollIntoViewIfNeeded();
       await page.tap(ACTION);
       await waitReady(page);
-      await step(`${label} first visit: from / to the viewer by taps, no gesture hint marked as seen`, async () => {
-        assert(page.url().includes('#/nodes/' + PK), page.url());
-        const seen = await page.evaluate(() => Object.keys(localStorage).filter(k => /^meshcore-gesture-hints-/.test(k) && localStorage.getItem(k) === 'seen'));
-        assert(seen.length === 0, 'marked as seen: ' + seen.join(','));
-      });
-      await step(`${label} first visit: no gesture hint covers the viewer`, async () => {
-        await noHintOver(page);
-      });
-      await shot(page, '818-first-visit-' + viewport.width);
-      await step(`${label} node page: the dialog sits above the bottom nav, controls hit by themselves`, async () => {
-        await aboveNav(page);
-      });
-      await step(`${label} node page: tapping a direction and Close work`, async () => {
-        await page.tap(DIR('east'));
-        await waitReady(page);
-        assert(await page.getAttribute(DIR('east'), 'aria-pressed') === 'true', 'east not selected');
-        for (const sel of [FULL, NOTE]) {
-          await page.locator(sel).scrollIntoViewIfNeeded();
-          assert(await hitsItself(page, sel), sel + ' covered');
-        }
-        await page.tap(CLOSE);
-        await page.waitForSelector(DIALOG, { state: 'detached', timeout: 3000 });
-        assert(await active(page) === 'node-skraafoto', 'focus on ' + await active(page));
-        assert(rec.errors.length === 0, rec.errors.join(' | '));
-      });
-      await shot(page, '737-node-' + viewport.width);
-      await ctx.close();
-    }
-    {
-      // From a shared profile link, hints seen: on a phone the panel
-      // covers the map while it waits for B (#790), so B cannot be picked
-      // by a tap yet, and on a first visit at 640x360 the tab-swipe hint
-      // lies over the row's B button (the page's, not the viewer's).
-      const { ctx, page, rec } = await newCtx({ viewport, touch: true });
-      await gotoProfile(page);
-      await page.waitForSelector(SF_ROW, { timeout: 5000 });
-      const pr = await rect(page, PLOT + ' svg');
-      await page.tap(PLOT + ' svg', { position: { x: pr.w * sampleX(50) / VIEW_W, y: pr.h / 2 } });
-      await page.waitForFunction((s) => !document.querySelector(s).disabled, SF_POINT, { timeout: 3000 });
-      await page.locator(SF_POINT).scrollIntoViewIfNeeded();
-      await step(`${label} profile: the row's buttons are 44 px targets, hit by themselves`, async () => {
-        for (const sel of [SF_A, SF_B, SF_POINT]) {
-          await page.locator(sel).scrollIntoViewIfNeeded();
-          const b = await rect(page, sel);
-          assert(b.h >= 44 && b.w >= 44, `${sel} ${b.w}x${b.h}`);
-          assert(await hitsItself(page, sel), sel + ' covered');
-        }
-      });
-      await page.tap(SF_POINT);
+      assert(page.url().includes('#/nodes/' + PK), page.url());
+      const seen = await page.evaluate(() => Object.keys(localStorage).filter(k => /^meshcore-gesture-hints-/.test(k) && localStorage.getItem(k) === 'seen'));
+      assert(seen.length === 0, 'marked as seen: ' + seen.join(','));
+    });
+    if (!reached) { await ctx.close(); return; }
+    await step(`${label} first visit: no gesture hint covers the viewer`, async () => {
+      await noHintOver(page);
+    });
+    await shot(page, '818-first-visit-' + viewport.width);
+    await step(`${label} node page: the dialog sits above the bottom nav, controls hit by themselves`, async () => {
+      await aboveNav(page);
+    });
+    await step(`${label} node page: tapping a direction and Close work`, async () => {
+      await page.tap(DIR('east'));
       await waitReady(page);
-      await step(`${label} profile: the viewer opens above the profile panel and the bottom nav`, async () => {
-        const q = rec.search[0].searchParams;
-        const want = await page.evaluate(() => window.TerrainProfileCursor.latLonAt([56.17, 10.12], [56.12, 10.22], 0.5));
-        assert(q.get('lat') === want[0].toFixed(5) && q.get('lon') === want[1].toFixed(5), q.toString());
-        await aboveNav(page);
-      });
-      await shot(page, '737-profile-' + viewport.width);
-      await step(`${label} profile: Close taps back to the point button, the panel is intact`, async () => {
-        await page.tap(CLOSE);
-        await page.waitForSelector(DIALOG, { state: 'detached', timeout: 3000 });
-        assert(await active(page) === 'tp-sf-point', 'focus on ' + await active(page));
-        assert(await page.isVisible(PANEL), 'panel gone');
-        assert(rec.errors.length === 0, rec.errors.join(' | '));
-      });
-      await ctx.close();
-    }
+      assert(await page.getAttribute(DIR('east'), 'aria-pressed') === 'true', 'east not selected');
+      for (const sel of [FULL, NOTE]) {
+        await page.locator(sel).scrollIntoViewIfNeeded();
+        assert(await hitsItself(page, sel), sel + ' covered');
+      }
+      await page.tap(CLOSE);
+      await page.waitForSelector(DIALOG, { state: 'detached', timeout: 3000 });
+      assert(await active(page) === 'node-skraafoto', 'focus on ' + await active(page));
+      assert(rec.errors.length === 0, rec.errors.join(' | '));
+    });
+    await shot(page, '737-node-' + viewport.width);
+    await ctx.close();
+  }
+
+  /* A cold start to the Path profile, the way #790 lets a phone pick B:
+   * the node's "Terrain profile to…", a tap on the visible map for B, then
+   * a tap on the chart. The hints are dismissed with "Got it" as they come
+   * up: one of them lies over the page's own panel until then (#823
+   * review, F4), and the page's layering is not this viewer's. */
+  async function coldStartProfile(label, viewport) {
+    const { ctx, page, rec } = await newCtx({ viewport, touch: true, firstVisit: true });
+    let ends = null;
+    const reached = await step(`${label} cold start: from / to a profile by taps, B picked on the map`, async () => {
+      await tapToNode(page, nodes.fixed.pk, { dismiss: true });
+      await page.tap('[data-testid="node-terrain-profile"]');
+      await page.waitForSelector(PANEL + '.is-open[data-phase="pick-b"]', { timeout: 30000 });
+      await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
+      await page.waitForTimeout(500);
+      const spot = await mapSpot(page);
+      assert(spot, 'no map left to tap for B: the panel covers it');
+      await page.touchscreen.tap(spot.x, spot.y);
+      await page.waitForSelector(SF_ROW + ':not([hidden])', { timeout: 10000 });
+      await page.waitForSelector(PLOT, { timeout: 15000 });
+      assert(rec.profile.length === 1, 'B issued ' + rec.profile.length + ' requests');
+      const q = rec.profile[0].searchParams;
+      assert(q.get('a') === PK, 'a = ' + q.get('a'));
+      const b = (q.get('b') || '').split(',').map(Number);
+      assert(b.length === 2 && b.every(Number.isFinite), 'b = ' + q.get('b'));
+      ends = { a: [AARHUS.lat, AARHUS.lon], b };
+      const seen = await page.evaluate(() => Object.keys(localStorage).filter(k => /^meshcore-gesture-hints-/.test(k) && localStorage.getItem(k) === 'seen'));
+      assert(seen.length > 0, 'no hint was shown to dismiss: not a first visit');
+      assert(await page.$('.gesture-hint') === null, 'a hint is still up');
+    });
+    if (!reached) { await ctx.close(); return; }
+    const pr = await rect(page, PLOT + ' svg');
+    await page.tap(PLOT + ' svg', { position: { x: pr.w * sampleX(50) / VIEW_W, y: pr.h / 2 } });
+    await page.waitForFunction((s) => !document.querySelector(s).disabled, SF_POINT, { timeout: 3000 });
+    await step(`${label} profile: the row's buttons are 44 px targets, hit by themselves`, async () => {
+      for (const sel of [SF_A, SF_B, SF_POINT]) {
+        await page.locator(sel).scrollIntoViewIfNeeded();
+        const b = await rect(page, sel);
+        assert(b.h >= 44 && b.w >= 44, `${sel} ${b.w}x${b.h}`);
+        assert(await hitsItself(page, sel), sel + ' covered');
+      }
+    });
+    await step(`${label} profile: B opens the viewer at the tapped point`, async () => {
+      await page.tap(SF_B);
+      await waitReady(page);
+      const q = rec.search[rec.search.length - 1].searchParams;
+      assert(q.get('lat') === ends.b[0].toFixed(5) && q.get('lon') === ends.b[1].toFixed(5), q.toString() + ' want ' + ends.b);
+      await page.tap(CLOSE);
+      await page.waitForSelector(DIALOG, { state: 'detached', timeout: 3000 });
+      assert(await active(page) === 'tp-sf-b', 'focus on ' + await active(page));
+    });
+    await page.tap(SF_POINT);
+    await waitReady(page);
+    await step(`${label} profile: the viewer opens above the profile panel and the bottom nav`, async () => {
+      const q = rec.search[rec.search.length - 1].searchParams;
+      const want = await page.evaluate((e) => window.TerrainProfileCursor.latLonAt(e.a, e.b, 0.5), ends);
+      assert(q.get('lat') === want[0].toFixed(5) && q.get('lon') === want[1].toFixed(5), q.toString() + ' want ' + want);
+      await aboveNav(page);
+    });
+    await shot(page, '737-profile-' + viewport.width);
+    await step(`${label} profile: Close taps back to the point button, the panel is intact`, async () => {
+      await page.tap(CLOSE);
+      await page.waitForSelector(DIALOG, { state: 'detached', timeout: 3000 });
+      assert(await active(page) === 'tp-sf-point', 'focus on ' + await active(page));
+      assert(await page.isVisible(PANEL), 'panel gone');
+      assert(rec.errors.length === 0, rec.errors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  for (const [label, viewport] of [['375x560 portrait', { width: 375, height: 560 }], ['640x360 landscape', { width: 640, height: 360 }]]) {
+    await firstVisitViewer(label, viewport);
+    await coldStartProfile(label, viewport);
   }
 
   // A tablet: the bottom nav is shown (≤768 px) but the phone padding is not,
