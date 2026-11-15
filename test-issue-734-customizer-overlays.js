@@ -78,10 +78,10 @@ console.log('\n=== #734 customizer: DHM overlay defaults ===');
 
 // ── 1. Keys and validSetting ────────────────────────────────────────────────
 
-test('the keys are hillshade, contours and contourMinZoom (the M3 opacity is not one yet)', () => {
+test('the keys are hillshade, contours, contourMinZoom and (#792) elevationOpacity', () => {
   const { D } = overlaySetup();
   assert(D, 'MC_DHMOverlays missing');
-  assert.deepStrictEqual(Array.from(D.SETTING_KEYS), ['hillshade', 'contours', 'contourMinZoom']);
+  assert.deepStrictEqual(Array.from(D.SETTING_KEYS), ['hillshade', 'contours', 'contourMinZoom', 'elevationOpacity']);
   assert.deepStrictEqual(Array.from(D.HILLSHADE_VALUES), ['off', 'terrain', 'surface']);
 });
 
