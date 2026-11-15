@@ -18,13 +18,19 @@
  *   2. Picking Skærmkort dæmpet there swaps the Map in place to
  *      dtk_skaermkort_daempet; after a reload the choice is still selected
  *      in the customizer and the Map loads it (round trip).
- *   3. Reset All Customizations clears that choice: the Map swaps back to
- *      the built-in OSM base map in place and the key is gone.
+ *   3. Reset All Customizations is offered with that choice as the only
+ *      customization, and clears it: the Map swaps back to the built-in OSM
+ *      base map in place and the key is gone.
  *   4. Gate off with a saved Dataforsyningen light and dark choice: the
  *      lists offer no Dataforsyningen style, the built-in defaults are
  *      selected, the Map shows OSM tiles in light and, after a theme switch
  *      from the More sheet, in dark — never a blank map — and nothing is
  *      requested from Dataforsyningen.
+ *   5. The config landing while the viewer types in a customizer field
+ *      (Branding → Site Name) keeps the focus and the next keystroke: the
+ *      base-map lists are filled without rebuilding the panel.
+ *   6. The config landing while a base-map select itself has the focus
+ *      leaves that select alone; the lists fill once the focus leaves it.
  *
  * Usage:
  *   BASE_URL=http://localhost:13800 node test-issue-741-customizer-e2e.js
@@ -143,8 +149,6 @@ const dfIn = (ids) => ids.filter((id) => id.indexOf('dataforsyningen-') === 0);
   await step('Phone 375x560, gate on, customizer opened before the config lands: the lists fill in place; dæmpet applies, round-trips a reload, and Reset All restores OSM', async () => {
     const { ctx, page, rec, release } = await newPhone({
       tiles: { providers: { dataforsyningen: ON } }, holdConfig: true,
-      // Reset All is offered once there is any customization to reset.
-      storage: { 'cs-theme-overrides': JSON.stringify({ theme: { accent: '#3366cc' } }) },
     });
     try {
       await page.goto(`${BASE}/${DK}`, { waitUntil: 'domcontentloaded' });
@@ -221,6 +225,66 @@ const dfIn = (ids) => ids.filter((id) => id.indexOf('dataforsyningen-') === 0);
       } finally { await ctx.close(); }
     });
   }
+
+  // 5 — the config lands while the viewer types in the panel
+  await step('Phone 375x560, gate on, typing in Site Name when the config lands: the focus and the next keystroke are kept, and the lists still fill', async () => {
+    const { ctx, page, rec, release } = await newPhone({ tiles: { providers: { dataforsyningen: ON } }, holdConfig: true });
+    try {
+      await page.goto(`${BASE}/${DK}`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('[data-bottom-nav-tab="more"]', { state: 'visible', timeout: 20000 });
+      await openDisplay(page);
+      await page.tap('.cust-tab[data-tab="branding"]');
+      const field = '.cust-panel[data-panel="branding"].active input[data-cv2-field="branding.siteName"]';
+      await page.waitForSelector(field, { state: 'visible', timeout: 4000 });
+      await page.tap(field);
+      await page.evaluate((sel) => { document.querySelector(sel).__e2e741 = true; }, field);
+      await page.keyboard.type('Ab');
+      release();
+      await page.waitForFunction(() => window.MeshConfigReady !== undefined, null, { timeout: 10000 });
+      await page.evaluate(() => window.MeshConfigReady).catch(() => {});
+      await page.waitForTimeout(600);
+      const focus = await page.evaluate(() => {
+        const a = document.activeElement;
+        return { same: !!(a && a.__e2e741), tag: a && a.tagName };
+      });
+      assert(focus.same, 'the Site Name input lost the focus when the config landed (active: ' + focus.tag + ')');
+      await page.keyboard.type('c');
+      const value = await page.evaluate(() => document.activeElement && document.activeElement.value);
+      assert(/Abc$/.test(value || ''), 'a keystroke was lost: ' + JSON.stringify(value));
+      const l = await lists(page);
+      assert(JSON.stringify(dfIn(l.light.opts).sort()) === JSON.stringify(LIGHT_DF.slice().sort()), 'light list after the config: ' + l.light.opts.join(','));
+      assert(JSON.stringify(dfIn(l.dark.opts)) === JSON.stringify(DARK_DF), 'dark list after the config: ' + l.dark.opts.join(','));
+      assert(rec.errors.length === 0, 'errors: ' + rec.errors.join(' | '));
+    } finally { await ctx.close(); }
+  });
+
+  // 6 — the config lands while a base-map select has the focus
+  await step('Phone 375x560, gate on, the light select focused when the config lands: it keeps the focus, and the lists fill when the focus leaves', async () => {
+    const { ctx, page, rec, release } = await newPhone({ tiles: { providers: { dataforsyningen: ON } }, holdConfig: true });
+    try {
+      await page.goto(`${BASE}/${DK}`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('[data-bottom-nav-tab="more"]', { state: 'visible', timeout: 20000 });
+      await openDisplay(page);
+      await page.locator('#cv2-light-tile-provider').scrollIntoViewIfNeeded();
+      await page.focus('#cv2-light-tile-provider');
+      await page.evaluate(() => { document.getElementById('cv2-light-tile-provider').__e2e741 = true; });
+      release();
+      await page.waitForFunction(() => window.MeshConfigReady !== undefined, null, { timeout: 10000 });
+      await page.evaluate(() => window.MeshConfigReady).catch(() => {});
+      await page.waitForTimeout(600);
+      assert(await page.evaluate(() => !!(document.activeElement && document.activeElement.__e2e741)), 'the focused select was replaced under the viewer');
+      // The focus leaves the select.
+      await page.evaluate(() => document.activeElement.blur());
+      await page.waitForTimeout(300);
+      const l = await lists(page);
+      assert(JSON.stringify(dfIn(l.light.opts).sort()) === JSON.stringify(LIGHT_DF.slice().sort()), 'light list after the focus left: ' + l.light.opts.join(','));
+      assert(JSON.stringify(dfIn(l.dark.opts)) === JSON.stringify(DARK_DF), 'dark list after the focus left: ' + l.dark.opts.join(','));
+      // The rebuilt selects still work: a pick is stored.
+      await pick(page, '#cv2-light-tile-provider', 'dataforsyningen-skaermkort-graa');
+      assert(await page.evaluate(() => localStorage.getItem('mc-light-tile-provider')) === 'dataforsyningen-skaermkort-graa', 'a pick on the rebuilt select was not stored');
+      assert(rec.errors.length === 0, 'errors: ' + rec.errors.join(' | '));
+    } finally { await ctx.close(); }
+  });
 
   await browser.close();
   console.log(`\n${passed} passed, ${failed} failed`);

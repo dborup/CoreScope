@@ -2040,7 +2040,7 @@
       '<button type="button" class="cust-dl-btn" data-cv2-reset-hints data-reset-gesture-hints>↺ Reset gesture hints</button>' +
       _renderChannelsShowEncryptedToggle() +
       _renderHide1ByteHopsToggle() +
-      _renderTileProviderSelector() +
+      '<div data-cv2-tile-providers>' + (_shownTileSelectorHtml = _renderTileProviderSelector()) + '</div>' +
       _renderTerrainSettings() +
       _renderMastsSettings() +
       _renderDHMOverlaySettings() +
@@ -2233,6 +2233,10 @@
   // Persists per-browser via MC_setDarkTileProvider; map.js / live.js
   // listen for `mc-tile-provider-changed` and swap tiles live.
   
+  // The Map Tiles block as last rendered into the panel (see the #741
+  // fromConfig listener, which replaces only that block when it changes).
+  var _shownTileSelectorHtml = null;
+
   function _renderTileProviderSelector() {
     var reg = (typeof window !== 'undefined') && window.MC_TILE_PROVIDERS;
     if (!reg) return '';
@@ -2727,10 +2731,23 @@
     if (pruneConfirmBtn) pruneConfirmBtn.addEventListener('click', function () { _gfPruneConfirm(container); });
   }
 
+  // Base-map picks live in their own keys (MC_set*TileProvider), not in the
+  // overrides, but Reset All clears them too (#1430, #741).
+  var TILE_PICK_KEYS = ['mc-light-tile-provider', 'mc-dark-tile-provider'];
+
+  // #741 — is there anything for Reset All to reset? A theme override, or a
+  // base-map choice on its own.
+  function _hasResettableCustomization() {
+    if (Object.keys(readOverrides()).length > 0) return true;
+    try {
+      return TILE_PICK_KEYS.some(function (k) { return localStorage.getItem(k) != null; });
+    } catch (_e) { return false; }
+  }
+
   function _renderExport() {
     var delta = readOverrides();
     var json = JSON.stringify(delta, null, 2);
-    var hasDelta = Object.keys(delta).length > 0;
+    var hasDelta = _hasResettableCustomization();
 
     return '<div class="cust-panel' + (_activeTab === 'export' ? ' active' : '') + '" data-panel="export">' +
       '<p class="cust-section-title">Export / Import</p>' +
@@ -2826,6 +2843,21 @@
     if (inner) _renderPanel(inner);
   }
 
+  // #1420 / #741 — the light and dark base-map dropdowns persist the pick
+  // and fire mc-tile-provider-changed (through MC_set*TileProvider).
+  function _bindTileProviderSelects(container) {
+    container.querySelectorAll('[data-cv2-dark-tile-provider]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        if (typeof window.MC_setDarkTileProvider === 'function') window.MC_setDarkTileProvider(sel.value);
+      });
+    });
+    container.querySelectorAll('[data-cv2-light-tile-provider]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        if (typeof window.MC_setLightTileProvider === 'function') window.MC_setLightTileProvider(sel.value);
+      });
+    });
+  }
+
   function _bindEvents(container) {
     // Tab switching
     container.querySelectorAll('.cust-tab').forEach(function (btn) {
@@ -2875,25 +2907,7 @@
       });
     });
 
-    // #1420 Dark-tile provider dropdown — persists + fires mc-tile-provider-changed
-    container.querySelectorAll('[data-cv2-dark-tile-provider]').forEach(function (sel) {
-      sel.addEventListener('change', function () {
-        var id = sel.value;
-        if (typeof window.MC_setDarkTileProvider === 'function') {
-          window.MC_setDarkTileProvider(id);
-        }
-      });
-    });
-
-    // Light-tile provider dropdown — persists + fires mc-tile-provider-changed
-    container.querySelectorAll('[data-cv2-light-tile-provider]').forEach(function (sel) {
-      sel.addEventListener('change', function () {
-        var id = sel.value;
-        if (typeof window.MC_setLightTileProvider === 'function') {
-          window.MC_setLightTileProvider(id);
-        }
-      });
-    });
+    _bindTileProviderSelects(container);
 
     // #1454 Show-encrypted-channels checkbox — persists + fires
     // mc-channels-show-encrypted-changed; channels.js re-fetches live.
@@ -3372,12 +3386,38 @@
   // #741 — the base-map lists come from the tile registry, which is rebuilt
   // when /api/config/client lands. On a cold start (a slow phone) the panel
   // can already be open by then, listing only the providers known at parse
-  // time; re-render it once so the operator's gated styles (Dataforsyningen,
-  // Esri, ...) appear, or vanish, in place. A closed panel re-renders on open.
+  // time, so the operator's gated styles (Dataforsyningen, Esri, ...) must
+  // appear, or vanish, in place. A closed panel re-renders on open.
+  //
+  // Only the Map Tiles block is replaced, and only when its markup changed:
+  // a full panel re-render would destroy whatever input the viewer is typing
+  // in (and collapse the phone keyboard), the case the debounced re-render
+  // above also avoids. If one of the base-map selects itself has the focus,
+  // the block is replaced once the focus leaves it.
+  function _refreshTileProviderBlock() {
+    if (!_panelEl || _panelEl.classList.contains('hidden')) return;
+    var block = _panelEl.querySelector('[data-cv2-tile-providers]');
+    if (!block) return;
+    var html = _renderTileProviderSelector();
+    if (html === _shownTileSelectorHtml) return;
+    if (block.contains(document.activeElement)) {
+      if (block.hasAttribute('data-cv2-refresh-pending')) return;
+      block.setAttribute('data-cv2-refresh-pending', '');
+      block.addEventListener('focusout', function onOut() {
+        block.removeEventListener('focusout', onOut);
+        block.removeAttribute('data-cv2-refresh-pending');
+        // Once the focus has moved on (it may move to the other select).
+        setTimeout(_refreshTileProviderBlock, 0);
+      });
+      return;
+    }
+    block.innerHTML = html;
+    _shownTileSelectorHtml = html;
+    _bindTileProviderSelects(block);
+  }
   try {
     window.addEventListener('mc-tile-provider-changed', function (e) {
-      if (!(e && e.detail && e.detail.fromConfig)) return;
-      if (_panelEl && !_panelEl.classList.contains('hidden')) _refreshPanel();
+      if (e && e.detail && e.detail.fromConfig) _refreshTileProviderBlock();
     });
   } catch (_e) { /* no window events (tests) */ }
 
@@ -3655,6 +3695,7 @@
     dhmOverlaySettings: dhmOverlaySettings,
     renderDHMOverlaySettings: _renderDHMOverlaySettings,
     // #741 — exposed for tests; see test-issue-741-customizer-base-maps.js.
-    renderTileProviderSelector: _renderTileProviderSelector
+    renderTileProviderSelector: _renderTileProviderSelector,
+    hasResettableCustomization: _hasResettableCustomization
   };
 })();

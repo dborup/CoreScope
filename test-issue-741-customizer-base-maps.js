@@ -20,6 +20,8 @@
  *      the operator turns the gate on again.
  *   R  Reset all: clears the light choice as well as the dark one, and
  *      re-applies the effective light provider so open maps swap back.
+ *   X  Reset all is offered (Export tab) when the only customization is a
+ *      base-map choice, light or dark — not only with a theme override.
  *
  * No token is real and nothing is fetched.
  *
@@ -207,6 +209,26 @@ test('R4 Reset all leaves no tile key behind, after the re-apply', () => {
   const p = page(ON, Object.assign({}, STALE));
   p.cust.api.resetAll();
   assert.deepStrictEqual(Object.keys(p.storage._raw).filter((k) => /tile-provider/.test(k)), []);
+});
+
+// ── X. Reset all is offered for a base-map-only customization ───────────────
+
+test('X1 nothing customized: Reset all is not offered', () => {
+  assert.strictEqual(page(ON).cust.api.hasResettableCustomization(), false);
+});
+test('X2 only a light base-map choice: Reset all is offered', () => {
+  assert.strictEqual(page(ON, { 'mc-light-tile-provider': 'dataforsyningen-skaermkort-graa' }).cust.api.hasResettableCustomization(), true);
+});
+test('X3 only a dark base-map choice: Reset all is offered', () => {
+  assert.strictEqual(page(ON, { 'mc-dark-tile-provider': 'dataforsyningen-skaermkort-graa-dark' }).cust.api.hasResettableCustomization(), true);
+});
+test('X4 a theme override alone still offers Reset all', () => {
+  assert.strictEqual(page(ON, { 'cs-theme-overrides': JSON.stringify({ theme: { accent: '#3366cc' } }) }).cust.api.hasResettableCustomization(), true);
+});
+test('X5 after Reset all of a base-map-only choice, Reset all is no longer offered', () => {
+  const p = page(ON, { 'mc-light-tile-provider': 'dataforsyningen-skaermkort' });
+  p.cust.api.resetAll();
+  assert.strictEqual(p.cust.api.hasResettableCustomization(), false);
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
