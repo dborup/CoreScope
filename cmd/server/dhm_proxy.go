@@ -108,6 +108,10 @@ type DHMClientConfig struct {
 	// enabled is set. Without it the copy button hands out the plain
 	// #/map?profile= link, exactly as before.
 	Share bool `json:"share"`
+	// Card is the share card's look as the operator set it (#727 M4),
+	// so the customizer can say what a shared link's preview shows; a
+	// viewer's own settings never reach the card. Present only with Share.
+	Card *DHMCardClientConfig `json:"card,omitempty"`
 	// PointAntenna is how the profile resolves a free map point's antenna
 	// height when the request names none (#746): radio.antennaHeightsM.point,
 	// else the built-in default. A point has no per-node key, so this is the
@@ -232,6 +236,22 @@ func dhmOrthoClientConfig(mask *dhm.TileMask) *DHMOrthoClientConfig {
 		LicenseURL:  dhm.LicenseURL,
 		ForeignMask: mask,
 	}
+}
+
+// DHMCardClientConfig is the client config's dhm.card (#727 M4): the two
+// display choices of map.dhm.profile.card, resolved. Nothing else of the
+// card block (its cache size) reaches the browser.
+type DHMCardClientConfig struct {
+	Theme string `json:"theme"` // "dark" or "light"
+	Names bool   `json:"names"` // node names on the card
+}
+
+func cardClientConfig(set cardSettings) *DHMCardClientConfig {
+	theme := "light"
+	if set.dark {
+		theme = "dark"
+	}
+	return &DHMCardClientConfig{Theme: theme, Names: set.names}
 }
 
 // DHMPointAntenna is a free point's antenna height without a request
@@ -708,6 +728,9 @@ func (s *Server) dhmClientConfig() *DHMClientConfig {
 	c := dhmClientConfig()
 	c.Profile = s.terrain != nil
 	c.Share = s.terrain != nil && s.terrain.set.share.enabled
+	if c.Share {
+		c.Card = cardClientConfig(s.terrain.set.card)
+	}
 	if s.terrain != nil {
 		h, src, _ := s.terrain.antenna(terrainEnd{kind: "point"}, nil)
 		c.PointAntenna = &DHMPointAntenna{M: h, Source: src}
