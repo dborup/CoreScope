@@ -122,6 +122,7 @@
     "dhm": {
       "_comment": "#680 — optional 'Terrain (DHM hillshade)' overlay on the Map and Live pages (Denmark only). Needs a personal Dataforsyningen token (free, from dataforsyningen.dk). The token stays on the server: browsers fetch tiles from /api/map/dhm/wms, which adds it, and it is never sent to clients, written to responses or logged. Off unless enabled is true and token is non-empty; otherwise the overlay is not offered and the endpoint returns 404.",
       "_comment_layer": "#687 — which DHM hillshade the server fetches: 'exaggerated' (default; the clearer quickDHM_skyggekort_terraen_overdrevet from wms/dhm_temp) or 'terrain' (dhm_terraen_skyggekort from dhm_DAF). With 'exaggerated', any tile that fails upstream is served from the terrain layer instead. Any other value logs a warning and uses 'terrain'. Browsers are unaffected either way.",
+      "_comment_overlays": "#734 - the tile proxy serves DHM overlays by id: 'terrain' (the hillshade 'layer' picks, as above), 'surface' (dhm_overflade_skyggekort, the surface hillshade with buildings and trees, zoom 7-19) and 'contours' (dhm_kurve_traditionel, 2.5 m contour lines, zoom 14-19). Browsers send the id, never an upstream layer name. surface and contours have no fallback, and every overlay draws on the same tileRateLimitPerMin budget and upstream limits. /api/config/client offers terrain and surface whenever map.dhm is enabled with a token; contours follows in a later release. There is no key to set.",
       "enabled": false,
       "token": "",
       "layer": "exaggerated",

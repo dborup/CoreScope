@@ -21,9 +21,11 @@
 //     the views that render the dataset and licence links (#733).
 //
 // The hillshade tile shape (#680) lives in wms.go, the exaggerated
-// hillshade service (#687) in hillshade.go, and the orthophoto base-map
-// tile (#728, a WMTS on the same token) in ortho.go, with the mask of the
-// tiles its base layer skips in ortho_mask.go. The elevation raster
+// hillshade service (#687) in hillshade.go, the overlay ids the browser
+// names a tile by (terrain, surface, contours; #734) in overlay.go, and
+// the orthophoto base-map tile (#728, a WMTS on the same token) in
+// ortho.go, with the mask of the tiles its base layer skips in
+// ortho_mask.go. The elevation raster
 // shape for the terrain profile (#681) lives in wcs.go, behind the
 // ElevationSource interface, which returns a decoded Grid (grid.go) read by
 // a stdlib-only float32 GeoTIFF decoder (geotiff.go); utm.go projects

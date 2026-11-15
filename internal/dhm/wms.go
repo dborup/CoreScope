@@ -28,12 +28,11 @@ const (
 
 // tileParams is the exact browser request shape (Leaflet 1.9.4
 // L.tileLayer.wms with the overlay options in map-tile-providers.js),
-// apart from bbox.
+// apart from layers, which names the overlay (#734), and bbox.
 var tileParams = map[string]string{
 	"service":     "WMS",
 	"request":     "GetMap",
 	"version":     "1.3.0",
-	"layers":      HillshadeLayer,
 	"styles":      "",
 	"format":      "image/png",
 	"transparent": "true",
@@ -42,13 +41,17 @@ var tileParams = map[string]string{
 	"crs":         "EPSG:3857",
 }
 
-// TileParams returns a copy of the fixed browser query parameters (every
-// key except bbox) with their exact values, e.g. for API documentation.
+// TileParams returns a copy of the browser query parameters (every key
+// except bbox) as the Map page sends them, e.g. for API documentation.
+// Every key but layers must have exactly its value; layers is the #680
+// value, the terrain id's legacy alias (#734 Q7), and may be any
+// OverlayIDs id instead.
 func TileParams() map[string]string {
-	out := make(map[string]string, len(tileParams))
+	out := make(map[string]string, len(tileParams)+1)
 	for k, v := range tileParams {
 		out[k] = v
 	}
+	out["layers"] = legacyTerrainLayers
 	return out
 }
 
@@ -57,14 +60,27 @@ type TileKey struct{ Z, X, Y int }
 
 func (k TileKey) String() string { return fmt.Sprintf("%d/%d/%d", k.Z, k.X, k.Y) }
 
-// ParseTileRequest validates a browser tile query and returns the tile it
-// names. Any deviation is ErrBadRequest.
-func ParseTileRequest(q url.Values) (TileKey, error) {
-	free, err := ExactQuery(q, tileParams, "bbox")
+// ParseTileRequest validates a browser tile query and returns the overlay
+// and the tile it names (#734): layers is an overlay id or the legacy
+// terrain alias, and the tile's zoom is inside that overlay's range. Any
+// deviation is ErrBadRequest.
+func ParseTileRequest(q url.Values) (Overlay, TileKey, error) {
+	free, err := ExactQuery(q, tileParams, "layers", "bbox")
 	if err != nil {
-		return TileKey{}, err
+		return Overlay{}, TileKey{}, err
 	}
-	return TileFromBBox(free["bbox"])
+	o, ok := parseOverlayID(free["layers"])
+	if !ok {
+		return Overlay{}, TileKey{}, ErrBadRequest
+	}
+	k, err := TileFromBBox(free["bbox"])
+	if err != nil {
+		return Overlay{}, TileKey{}, err
+	}
+	if k.Z < o.MinZoom || k.Z > o.MaxZoom {
+		return Overlay{}, TileKey{}, ErrBadRequest
+	}
+	return o, k, nil
 }
 
 // TileFromBBox accepts a bbox only if it is exactly one Web Mercator tile
@@ -138,14 +154,16 @@ func (k TileKey) IntersectsCoverage() bool {
 		north > Coverage.South && south < Coverage.North
 }
 
-// upstreamQuery is the GetMap query for the tile, rebuilt from the
-// validated key: nothing is copied from the browser's query string.
+// upstreamQuery is the terrain hillshade's GetMap query for the tile,
+// rebuilt from the validated key: nothing is copied from the browser's
+// query string. overlayQuery sets another overlay's layer and style.
 func (k TileKey) upstreamQuery() url.Values {
 	b := k.BBox()
 	q := url.Values{}
 	for key, v := range tileParams {
 		q.Set(key, v)
 	}
+	q.Set("layers", HillshadeLayer)
 	// WMS 1.3.0 spells the boolean TRUE; Leaflet sends `true`.
 	q.Set("transparent", "TRUE")
 	q.Set("bbox", strings.Join([]string{

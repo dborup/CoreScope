@@ -21,12 +21,13 @@ const DefaultBaseURL = "https://api.dataforsyningen.dk/"
 // feature that needs another DHM service adds it here, next to its own
 // request shape.
 var allowedServices = map[string]serviceShape{
-	// The tile proxy rebuilds every WMS query from a validated TileKey;
-	// the check holds any other caller to that shape too.
-	WMSService: {check: hillshadeQueryCheck(HillshadeTerrain)},
+	// The tile proxy rebuilds every WMS query from a validated overlay
+	// and TileKey; the check holds any other caller to those shapes too:
+	// the terrain (#680), surface and contour (#734) tiles.
+	WMSService: {check: overlayQueryCheck(WMSService)},
 	WCSService: {check: checkCoverageQuery, raster: true},
 	// #687: only the exaggerated hillshade's exact tile shape.
-	ExaggeratedWMSService: {check: hillshadeQueryCheck(HillshadeExaggerated)},
+	ExaggeratedWMSService: {check: overlayQueryCheck(ExaggeratedWMSService)},
 	// #728: only the orthophoto's exact GetTile shape.
 	OrthoWMTSService: {check: orthoQueryCheck},
 }

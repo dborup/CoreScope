@@ -206,7 +206,9 @@ const OBS_ONLY = {
       const config = await response.json();
       delete config.dhm;
       if (o.dhm === 'no-profile') config.dhm = Object.assign({}, DHM_BLOCK, { profile: false });
-      else if (o.dhm !== 'off') config.dhm = DHM_BLOCK;
+      else if (o.dhm === 'off') { /* no dhm block at all */ }
+      else if (o.dhm && typeof o.dhm === 'object') config.dhm = Object.assign({}, DHM_BLOCK, o.dhm);
+      else config.dhm = DHM_BLOCK;
       await route.fulfill({ response, json: config });
     });
     if (o.observerOnly) {
@@ -362,12 +364,19 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
           return b ? { text: b.textContent, shown: !b.hidden && getComputedStyle(b).display !== 'none' } : null;
         })(),
         credit: (panel && panel.textContent.indexOf('Klimadatastyrelsen') >= 0) || false,
-        // Counted over visible leaf elements, so the chart footer and the
-        // empty-state paragraph never both show the credit.
-        credits: panel ? Array.from(panel.querySelectorAll('text, p, span, div')).filter(e =>
-          e.children.length === 0
-          && (e.textContent || '').indexOf('Klimadatastyrelsen') >= 0
-          && !e.closest('[hidden]')).length : 0,
+        // Counted over visible text nodes, not leaf elements (#772 F5): the
+        // shared walker (#765) leaves the text around a linked footer's two
+        // <a> elements as bare text nodes, so a leaf-element count would
+        // miss it. Matches the walk test-issue-733-dhm-credit-e2e.js uses.
+        credits: panel ? (() => {
+          const w = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT);
+          let n = 0;
+          while (w.nextNode()) {
+            const t = w.currentNode;
+            if (t.nodeValue.indexOf('Klimadatastyrelsen') >= 0 && !t.parentElement.closest('[hidden]')) n++;
+          }
+          return n;
+        })() : 0,
         hash: location.hash,
       };
     });
@@ -562,6 +571,30 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
 
     await step('no console errors through the whole flow', async () => {
       assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  // ── #772 F5: the credit counter survives a linked footer ───────────────────
+  // Unlike every other context in this file, the dhm block here carries the
+  // link fields (#733/#765), so the footer renders two <a> elements and the
+  // credit text is split into bare text nodes around them, the same shape
+  // test-issue-733-dhm-credit-e2e.js already drives.
+  {
+    const { ctx, page, rec } = await newCtx({ dhm: {
+      datasetName: 'Danmarks Højdemodel', datasetUrl: 'https://dataforsyningen.dk/data/930',
+      licenseName: 'CC BY 4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
+      attributionDerived: ATTRIBUTION + ' — data bearbejdet',
+    } });
+    await gotoMap(page);
+    await step('the credit counter still counts a linked footer (#772 F5)', async () => {
+      await page.click(TOGGLE);
+      await clickMarkers(page, 2);
+      await page.waitForTimeout(900);
+      const st = await panelState(page);
+      assert(st.open, 'panel did not open');
+      assert(st.credit, 'no CC BY 4.0 credit in the panel');
+      assert(st.credits === 1, 'the CC BY 4.0 credit appears ' + st.credits + ' times with a linked footer');
     });
     await ctx.close();
   }
