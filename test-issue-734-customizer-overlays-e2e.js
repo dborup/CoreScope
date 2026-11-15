@@ -23,7 +23,10 @@
  *      contours off over the stored defaults;
  *   4. round trip: the export JSON carries the section; without a dhm block
  *      the section is absent;
- *   5. no console errors.
+ *   5. no console errors;
+ *   6. changing the hillshade or contours default forgets the viewer's
+ *      remembered layer-control choice for that overlay, so the next map
+ *      starts with the new default (v0.2.9 review nit, #826 F1).
  *
  * Usage:
  *   BASE_URL=http://localhost:13700 node test-issue-734-customizer-overlays-e2e.js
@@ -300,6 +303,36 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         });
         const json = JSON.parse(text);
         assert(json.dhmOverlays && json.dhmOverlays.hillshade === 'surface' && json.dhmOverlays.contours === true, text);
+      });
+    } finally { await ctx.close(); }
+  }
+
+  // ── 6. A new default forgets the remembered layer-control choice ──
+  {
+    const storage = { 'mc-terrain-dhm': '1', 'mc-contours-dhm': '1' };
+    const { ctx, page, rec } = await newCtx({ storage });
+    try {
+      await step('changing a default forgets the remembered choice for that overlay', async () => {
+        await page.goto(`${BASE}/#/map?lat=${AARHUS.lat}&lon=${AARHUS.lon}&zoom=15`, { waitUntil: 'domcontentloaded' });
+        await waitMap(page);
+        let s = await state(page);
+        assert(s.checked.terrain && s.checked.contours, 'the remembered choice did not apply: ' + JSON.stringify(s.checked));
+        await page.click('#customizeToggle');
+        await page.waitForSelector('.cust-overlay:not(.hidden)', { timeout: 5000 });
+        await page.click('.cust-tab[data-tab="display"]');
+        await page.waitForSelector('.cust-panel[data-panel="display"].active', { timeout: 4000 });
+        await page.selectOption('[data-cv2-overlay="hillshade"]', 'surface');
+        await page.waitForTimeout(400);
+        await page.click('[data-cv2-overlay="contours"]');
+        await page.waitForTimeout(400);
+        const left = await page.evaluate(() => [localStorage.getItem('mc-terrain-dhm'), localStorage.getItem('mc-contours-dhm')]);
+        assert(left[0] === null && left[1] === null, 'remembered choices left: ' + JSON.stringify(left));
+        await page.goto(`${BASE}/#/map?lat=${AARHUS.lat}&lon=${AARHUS.lon}&zoom=15`, { waitUntil: 'domcontentloaded' });
+        await page.reload({ waitUntil: 'domcontentloaded' });
+        await waitMap(page);
+        s = await state(page);
+        assert(s.checked.surface && !s.checked.terrain && s.checked.contours, 'next map: ' + JSON.stringify(s.checked));
+        assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
       });
     } finally { await ctx.close(); }
   }

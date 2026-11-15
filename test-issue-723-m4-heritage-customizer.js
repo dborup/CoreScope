@@ -280,6 +280,15 @@ test('heritage is a known object section', () => {
   assert(/must be an object/.test(bad.errors.join(' ')), bad.errors.join(' '));
 });
 
+test('isValidHeritageSetting is exported and judges one key/value', () => {
+  // v0.2.9 review nit (#828 round 3, I2): the export had no test.
+  const { api } = loadCustomizer();
+  assert.strictEqual(typeof api.isValidHeritageSetting, 'function');
+  assert.strictEqual(api.isValidHeritageSetting('opacityPct', 50), true);
+  assert.strictEqual(api.isValidHeritageSetting('opacityPct', 'x'), false);
+  assert.strictEqual(api.isValidHeritageSetting('radiusM', 50), false);
+});
+
 test('only valid settings are stored; each rejected one warns', () => {
   const c = loadCustomizer();
   c.api.writeOverrides({ heritage: { enabled: 'yes', opacityPct: 5, profileWarning: false, warnDistanceM: 400, radiusM: 50 } });

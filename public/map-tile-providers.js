@@ -556,12 +556,14 @@
    *     hash (?terrain=1, ?heritage=1, ?masts=0, ?mastsInt=1). A =1 / =0 in
    *     the hash wins over the stored choice and is saved, like Live's
    *     ?heard= (#660). An overlay is off until chosen, except one marked
-   *     defaultOn, whose "off" is then written to the hash as =0. defaultOn
-   *     may be a function: the antenna sites' default is the customizer's
-   *     (#724 M5), and their "off" is written as =0 either way. The DHM
-   *     overlays have a customDefault instead (#734, the customizer's
-   *     dhmOverlays): used only when neither the hash nor storage says, and
-   *     their "off" is written as =0 only while that default is on.
+   *     defaultOn, whose "off" is then written to the hash as =0 while that
+   *     default is on. defaultOn may be a function, asked each time: the
+   *     antenna sites' and the monuments' defaults are the customizer's
+   *     (#724 M5, #723 M4). The antenna sites are also marked offInHash, so
+   *     their "off" is written as =0 either way. The DHM overlays have a
+   *     customDefault instead (#734, the customizer's dhmOverlays): used
+   *     only when neither the hash nor storage says, and their "off" is
+   *     written as =0 only while that default is on (see _offInHash).
    *   - A map without an attribution control (Live) gets one for its
    *     lifetime (_ensureAttribution), because the base map's credit and
    *     every overlay's credit are required.

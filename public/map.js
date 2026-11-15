@@ -202,7 +202,7 @@
     // reads the aria-label only (avoids "check mark 3 E" literal announcements).
     var visible = (glyph ? glyph + '\u2009' : '') + shortHash + (hsUnknown ? '\u2026' : '');
     var unknownClass = hsUnknown ? ' hs-unknown' : '';
-    var titleAttr = hsUnknown ? ' title="Hash size unknown \u2014 no advert seen yet"' : '';
+    var titleAttr = hsUnknown ? ' title="Hash size unknown \u2014 no size-declaring advert known"' : '';
     var html = '<div class="mc-mb-label' + statusClass + unknownClass + '"' + titleAttr + ' role="img" aria-label="' + ariaStatus + '">' +
       '<span aria-hidden="true">' + visible + '</span>' + obsIndicator + '</div>';
     return L.divIcon({

@@ -31,6 +31,8 @@
  *      base-map lists are filled without rebuilding the panel.
  *   6. The config landing while a base-map select itself has the focus
  *      leaves that select alone; the lists fill once the focus leaves it.
+ *   7. A config event that changes neither list leaves the open selects
+ *      alone (the block is replaced only when its markup changed).
  *
  * Usage:
  *   BASE_URL=http://localhost:13800 node test-issue-741-customizer-e2e.js
@@ -282,6 +284,29 @@ const dfIn = (ids) => ids.filter((id) => id.indexOf('dataforsyningen-') === 0);
       // The rebuilt selects still work: a pick is stored.
       await pick(page, '#cv2-light-tile-provider', 'dataforsyningen-skaermkort-graa');
       assert(await page.evaluate(() => localStorage.getItem('mc-light-tile-provider')) === 'dataforsyningen-skaermkort-graa', 'a pick on the rebuilt select was not stored');
+      assert(rec.errors.length === 0, 'errors: ' + rec.errors.join(' | '));
+    } finally { await ctx.close(); }
+  });
+
+  // 7 — a config event that changes no list leaves the open block alone
+  //     (v0.2.9 review nit, #828 N2): the selects are not rebuilt.
+  await step('Phone 375x560, gate off, customizer open: a config event with unchanged lists does not rebuild the base-map selects', async () => {
+    const { ctx, page, rec } = await newPhone({ tiles: { providers: { dataforsyningen: { enabled: false, token: TOKEN } } } });
+    try {
+      await page.goto(`${BASE}/${DK}`, { waitUntil: 'domcontentloaded' });
+      await settle(page);
+      await openDisplay(page);
+      await page.evaluate(() => {
+        document.getElementById('cv2-light-tile-provider').__e2e741 = true;
+        document.getElementById('cv2-dark-tile-provider').__e2e741 = true;
+        window.dispatchEvent(new CustomEvent('mc-tile-provider-changed', { detail: { type: 'light', fromConfig: true } }));
+      });
+      await page.waitForTimeout(300);
+      const kept = await page.evaluate(() => ({
+        light: !!(document.getElementById('cv2-light-tile-provider') || {}).__e2e741,
+        dark: !!(document.getElementById('cv2-dark-tile-provider') || {}).__e2e741,
+      }));
+      assert(kept.light && kept.dark, 'the base-map selects were rebuilt: ' + JSON.stringify(kept));
       assert(rec.errors.length === 0, 'errors: ' + rec.errors.join(' | '));
     } finally { await ctx.close(); }
   });
