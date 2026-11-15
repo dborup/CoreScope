@@ -84,6 +84,15 @@ func TestClientConfigTokenSeparation741(t *testing.T) {
 		{"legacy top-level tiles block", dhmBlock, `"tiles": {"providers": {` + base + `}}`, true},
 		{"legacy top-level tiles block, gate off", dhmBlock, `"tiles": {"providers": {"dataforsyningen": {"enabled": false, "token": "` + baseMapTestToken + `"}}}`, false},
 		{"legacy top-level tiles block, gate off, not migrated", dhmBlock + `, "tiles": {"providers": {"osm": {"enabled": false}}}`, `"tiles": {"providers": {"dataforsyningen": {"token": "` + baseMapTestToken + `"}}}`, false},
+		// The browser never reads the legacy top-level tiles block, so its
+		// own gate does not count: only what migrates into map.tiles ships.
+		{"legacy tiles on, map.tiles block off", `"tiles": {"providers": {"dataforsyningen": {"enabled": false, "token": ""}}}`, `"tiles": {"providers": {` + base + `}}`, false},
+		{"legacy tiles on, map.tiles.providers without it", `"tiles": {"providers": {"esri": {"enabled": true}}}`, `"tiles": {"providers": {` + base + `}}`, false},
+		// Nor does it read case variants of map.tiles or of its providers.
+		{"map.tiles.Providers case variant", `"tiles": {"Providers": {` + base + `}}`, "", false},
+		{"map.Tiles case variant", `"Tiles": {"providers": {` + base + `}}`, "", false},
+		{"map.TILES case variant next to map.tiles", `"tiles": {"darkDefault": "osm-dark"}, "TILES": {"PROVIDERS": {` + base + `}}`, "", false},
+		{"map.Tiles is not an object", `"Tiles": "` + baseMapTestToken + `"`, "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -213,18 +222,27 @@ func TestClientConfigReusedDHMTokenIsLogged741(t *testing.T) {
 	}
 }
 
-// With the gate on, only the exact-case block keeps its token: a case
-// variant next to it is dropped, and the on block is shipped untouched.
+// With the gate on, only the exact-case token of the exact-case block is
+// shipped: a case-variant block next to it, or a case-variant token key
+// inside it, is dropped, and the rest of the on block is untouched.
 func TestClientConfigShipsOnlyTheGatedBaseMapToken741(t *testing.T) {
 	const variantToken = "basemap-741-case-variant"
-	body, _ := clientConfigFor(t, `{"map": {"tiles": {"providers": {
-		"dataforsyningen": {"enabled": true, "token": "`+baseMapTestToken+`"},
-		"Dataforsyningen": {"enabled": true, "token": "`+variantToken+`"}}}}}`)
-	if !strings.Contains(body, `"dataforsyningen":{"enabled":true,"token":"`+baseMapTestToken+`"}`) {
-		t.Fatalf("the gated block is not shipped as configured: %s", body)
+	on := `"dataforsyningen": {"enabled": true, "token": "` + baseMapTestToken + `"`
+	cases := []struct{ name, providers string }{
+		{"case-variant block next to it", on + `}, "Dataforsyningen": {"enabled": true, "token": "` + variantToken + `"}`},
+		{"Token key inside it", on + `, "Token": "` + variantToken + `"}`},
+		{"TOKEN key inside it", on + `, "TOKEN": "` + variantToken + `"}`},
 	}
-	if strings.Contains(body, variantToken) {
-		t.Fatalf("a case-variant block's token is shipped: %s", body)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _ := clientConfigFor(t, `{"map": {"tiles": {"providers": {`+tc.providers+`}}}}`)
+			if !strings.Contains(body, `"dataforsyningen":{"enabled":true,"token":"`+baseMapTestToken+`"}`) {
+				t.Fatalf("the gated block is not shipped as configured: %s", body)
+			}
+			if strings.Contains(body, variantToken) {
+				t.Fatalf("a case-variant token is shipped: %s", body)
+			}
+		})
 	}
 }
 
