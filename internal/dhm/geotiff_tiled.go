@@ -3,6 +3,7 @@ package dhm
 import (
 	"encoding/binary"
 	"errors"
+	"math"
 )
 
 // #738 M1 — the tiled float32 GeoTIFF of a Copernicus DEM GLO-30 tile,
@@ -38,6 +39,15 @@ const (
 	blockSlack = 8192
 	// subfileReducedImage is NewSubfileType bit 0: an overview.
 	subfileReducedImage = 1
+	// edgeTolerance is how far, in pixels, an edge or a point may lie
+	// past a level's extent and still count as on it (#795): half a
+	// pixel, the shift between a GLO-30 tile and its PixelIsPoint raster,
+	// whose first pixel centre is the tile's north-west corner, plus
+	// rounding.
+	edgeTolerance = 0.5 + 1e-6
+	// sizeTolerance is how far, in pixels, a level's width or height may
+	// differ from the box it fits: rounding only.
+	sizeTolerance = 1e-6
 )
 
 // ErrShortHeader is ParseTiledGeoTIFF's answer when the IFDs continue
@@ -178,6 +188,21 @@ func (r *tiffReader) tiledLevel(g Georef) (TiledLevel, error) {
 		l.offsets[i], l.counts[i] = off, c
 	}
 	return l, nil
+}
+
+// Fits reports whether the full resolution covers the box west, south,
+// east, north in degrees: its width and height the box's, and each edge
+// within half a pixel of the box's (#795). A GLO-30 tile's raster is its
+// 1° square shifted half a pixel north-west; a raster of another place or
+// another size does not fit.
+func (t *TiledGeoTIFF) Fits(west, south, east, north float64) bool {
+	l := &t.Levels[0]
+	g := l.Georef
+	w, h := float64(l.Width)*g.PixelE, float64(l.Height)*g.PixelN
+	return math.Abs(w-(east-west)) <= sizeTolerance*g.PixelE &&
+		math.Abs(h-(north-south)) <= sizeTolerance*g.PixelN &&
+		math.Abs(g.OriginE-west) <= edgeTolerance*g.PixelE &&
+		math.Abs(g.OriginN-north) <= edgeTolerance*g.PixelN
 }
 
 // BlocksAcross is the number of block columns.
