@@ -29,11 +29,15 @@
 //     footprint, over an along-track bucket index per segment, so the cost
 //     is O(samples + vertices); Needed says which segments to fetch at all
 //     (classify.go).
+//   - Fetcher: the Client behind a bounded per-segment cache (dhm.Cache),
+//     coalescing (dhm.Flight), an in-flight bound (dhm.Admission) and an
+//     upstream concurrency limit (fetcher.go).
 //
 // The polygon reading and the point-in-polygon maths are internal/dhm's
 // (polygon.go), shared with internal/heritage.
 //
-// Nothing here is wired into the server yet (#730 M2).
+// Nothing here is wired into the server yet: the terrain profile route,
+// its response fields and the credit come with #730 M2.
 package buildings
 
 import "github.com/meshcore-analyzer/dhm"
