@@ -16,6 +16,10 @@
 //
 //   - Corridor: the validated straight line of one profile, its radius and
 //     its segments; Segment is one segment's query line (corridor.go).
+//   - Parse: a strict, geometry-only reader of the GeoJSON answer into a
+//     Page of footprints. A truncated answer is marked, a broken footprint
+//     is skipped and counted, and an answer in another CRS or over the
+//     vertex budget is refused whole (parse.go).
 //
 // The polygon reading and the point-in-polygon maths are internal/dhm's
 // (polygon.go), shared with internal/heritage.
