@@ -140,6 +140,7 @@ run test-issue-680-dhm-terrain.js
 run test-issue-723-heritage-overlay.js
 run test-issue-724-masts-layer.js
 run test-issue-724-masts-hint.js
+run test-issue-724-m5-masts-customizer.js
 run test-issue-723-heritage-info.js
 run test-issue-681-profile-tool.js
 run test-issue-681-m5-node-entry.js
