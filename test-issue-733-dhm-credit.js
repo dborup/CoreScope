@@ -220,47 +220,62 @@ test('#723 monuments: no link fields, so the courtesy credit stays plain', () =>
 
 // ── The profile footer ─────────────────────────────────────────────────────
 
+/* #765: the footer is built from the server's dhm block through the one
+ * credit walker in map-tile-providers.js, so both files run in the same
+ * sandbox, in page order. */
 function loadTP() {
   const doc = {
     createElement: makeElement, createTextNode: makeTextNode,
     addEventListener() {}, body: { appendChild() {} },
+    documentElement: { getAttribute: () => 'light' },
     querySelector: () => null, querySelectorAll: () => [],
   };
+  const storage = { getItem: () => null, setItem() {}, removeItem() {} };
   const win = {
     addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
-    innerWidth: 1280, innerHeight: 800, document: doc,
-    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+    matchMedia: () => ({ matches: false }),
+    innerWidth: 1280, innerHeight: 800, document: doc, localStorage: storage,
   };
   const ctx = {
     window: win, document: doc, console, Math, Date, JSON, Array, Object, String, Number,
     RegExp, Error, TypeError, Boolean, isNaN, isFinite, parseInt, parseFloat,
     URLSearchParams, Map, Set, Promise, encodeURIComponent, decodeURIComponent,
     setTimeout: () => 0, clearTimeout: () => {},
+    location: { hash: '#/map', pathname: '/', search: '' }, history: { state: null, replaceState() {} },
+    CustomEvent: function (type, init) { this.type = type; this.detail = (init && init.detail) || null; },
   };
-  ctx.localStorage = win.localStorage;
+  ctx.localStorage = storage;
   vm.createContext(ctx);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'antenna-height.js'), 'utf8'), ctx);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'terrain-profile.js'), 'utf8'), ctx);
+  for (const f of ['map-tile-providers.js', 'antenna-height.js', 'terrain-profile.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', f), 'utf8'), ctx);
+  }
   assert.ok(ctx.window.TerrainProfile, 'terrain-profile.js must define window.TerrainProfile');
-  return { TP: ctx.window.TerrainProfile, doc };
+  return { TP: ctx.window.TerrainProfile, win };
 }
 
-const { TP } = loadTP();
+const { TP, win: TP_WIN } = loadTP();
 
-console.log('\n=== #733 profile chart footer ===');
+// The dhm block with the derived credit cmd/server sends since #765.
+const PROFILE_BLOCK = Object.assign({}, DHM_BLOCK, { profile: true, attributionDerived: GO_ATTRIBUTION_DERIVED });
 
-test('the footer credit says the profile is derived from DHM', () => {
-  assert.strictEqual(TP.DERIVED_NOTE, GO.DerivedNote);
-  assert.strictEqual(TP.ATTRIBUTION_DERIVED, GO_ATTRIBUTION_DERIVED);
-  assert.ok(TP.ATTRIBUTION_DERIVED.indexOf(TP.ATTRIBUTION) === 0, TP.ATTRIBUTION_DERIVED);
-  assert.ok(TP.ATTRIBUTION_DERIVED.indexOf(TP.DERIVED_NOTE) > 0, TP.ATTRIBUTION_DERIVED);
-  // The plain line must not claim the hillshade tiles were changed.
-  assert.strictEqual(TP.ATTRIBUTION.indexOf(TP.DERIVED_NOTE), -1, TP.ATTRIBUTION);
+function footerOf(cfg) {
+  const p = makeElement('p');
+  TP.footerCredit(p, cfg);
+  return p;
+}
+
+console.log('\n=== #733 / #765 profile chart footer ===');
+
+test('the footer is the server\'s derived credit, the profile being computed from DHM', () => {
+  const p = footerOf(PROFILE_BLOCK);
+  assert.strictEqual(p.textContent, GO_ATTRIBUTION_DERIVED);
+  assert.ok(p.textContent.endsWith(GO.DerivedNote), p.textContent);
+  // The owner is named exactly once, so the panel shows one credit.
+  assert.strictEqual(p.textContent.split(GO.Owner).length - 1, 1, p.textContent);
 });
 
 test('the footer links the dataset and the licence, both with rel=noopener', () => {
-  const p = makeElement('p');
-  TP.appendCredit(p, TP.ATTRIBUTION_DERIVED, TP.CREDIT_LINKS);
+  const p = footerOf(PROFILE_BLOCK);
   const as = anchors(p.innerHTML);
   assert.strictEqual(as.length, 2, p.innerHTML);
   assert.deepStrictEqual(as.map(a => a.text), [GO.DatasetName, GO.LicenseName]);
@@ -273,38 +288,102 @@ test('the footer links the dataset and the licence, both with rel=noopener', () 
     assert.ok(/\bnoopener\b/.test(a.attrs.rel), a.attrs.rel);
   });
   assert.ok(/\blicense\b/.test(as[1].attrs.rel), as[1].attrs.rel);
+  // The panel's own link style.
+  p.children.filter(c => c.tagName === 'A').forEach(a => assert.strictEqual(a.className, 'tp-credit-link'));
 });
 
-test('the footer renders the whole credit text, derived note last', () => {
-  const p = makeElement('p');
-  TP.appendCredit(p, TP.ATTRIBUTION_DERIVED, TP.CREDIT_LINKS);
+test('the footer follows the block, not a copy of its strings (#765)', () => {
+  // Wording and targets the page has never seen: only a footer built from
+  // the block can show them.
+  const cfg = Object.assign({}, PROFILE_BLOCK, {
+    attributionDerived: 'Contains data from the Danish Agency, Elevation Model DK, CC BY 4.0 — data processed',
+    datasetName: 'Elevation Model DK', datasetUrl: 'https://example.test/dataset',
+    licenseUrl: 'https://example.test/licence',
+  });
+  const p = footerOf(cfg);
+  assert.strictEqual(p.textContent, cfg.attributionDerived);
+  const as = anchors(p.innerHTML);
+  assert.deepStrictEqual(as.map(a => [a.text, a.attrs.href]),
+    [['Elevation Model DK', 'https://example.test/dataset'], ['CC BY 4.0', 'https://example.test/licence']]);
+});
+
+test('a block without the derived credit falls back to the plain one', () => {
+  const p = footerOf(DHM_BLOCK);
+  assert.strictEqual(p.textContent, GO_ATTRIBUTION);
+  assert.strictEqual(anchors(p.innerHTML).length, 2, p.innerHTML);
+});
+
+test('a block without the link fields renders the plain text, unlinked', () => {
+  const p = footerOf(PLAIN_BLOCK);
+  assert.strictEqual(p.textContent, GO_ATTRIBUTION);
+  assert.strictEqual(anchors(p.innerHTML).length, 0, p.innerHTML);
+});
+
+test('a dataset target that is not absolute https is not linked in the footer either', () => {
+  const p = footerOf(Object.assign({}, PROFILE_BLOCK, { datasetUrl: 'javascript:alert(1)' }));
+  const as = anchors(p.innerHTML);
+  assert.deepStrictEqual(as.map(a => a.text), [GO.LicenseName], p.innerHTML);
   assert.strictEqual(p.textContent, GO_ATTRIBUTION_DERIVED);
-  assert.ok(p.textContent.endsWith(GO.DerivedNote), p.textContent);
-  // Exactly one leaf element names the owner, so the panel's credit count
-  // (test-issue-681-profile-tool-e2e.js) still sees one credit.
-  assert.strictEqual(p.children.filter(c => (c.textContent || '').indexOf(GO.Owner) >= 0).length, 1);
 });
 
-test('appendCredit builds nodes, never markup', () => {
-  const p = makeElement('p');
-  TP.appendCredit(p, '<b>fra</b> ' + GO.DatasetName + ' & "x"', TP.CREDIT_LINKS);
+test('nothing in the footer becomes markup', () => {
+  const p = footerOf(Object.assign({}, PROFILE_BLOCK, {
+    attributionDerived: '<b>fra</b> ' + GO.DatasetName + ' & "x"',
+  }));
   assert.strictEqual(/<b>|&(?!amp;|quot;|lt;|gt;)/.test(p.innerHTML), false, p.innerHTML);
   assert.strictEqual(p.textContent, '<b>fra</b> ' + GO.DatasetName + ' & "x"');
+});
+
+test('without the walker the footer still shows the credit as plain text', () => {
+  // map-tile-providers.js failed to load: the credit is not lost with it.
+  const saved = [TP_WIN.MC_appendCredit, TP_WIN.MC_creditLinks];
+  TP_WIN.MC_appendCredit = undefined; TP_WIN.MC_creditLinks = undefined;
+  try {
+    const p = footerOf(PROFILE_BLOCK);
+    assert.strictEqual(p.textContent, GO_ATTRIBUTION_DERIVED);
+    assert.strictEqual(anchors(p.innerHTML).length, 0);
+  } finally { [TP_WIN.MC_appendCredit, TP_WIN.MC_creditLinks] = saved; }
+});
+
+// ── One walker ─────────────────────────────────────────────────────────────
+
+console.log('\n=== #765 one credit walker ===');
+
+test('the map credit and the footer are one walk: same text, same links', () => {
+  const html = credit(makeSandbox({ dhm: DHM_BLOCK }), DHM_BLOCK);
+  const p = footerOf(DHM_BLOCK);
+  assert.strictEqual(p.textContent, textOf(html));
+  assert.deepStrictEqual(anchors(p.innerHTML).map(a => [a.text, a.attrs.href, a.attrs.rel, a.attrs.target]),
+    anchors(html).map(a => [a.text, a.attrs.href, a.attrs.rel, a.attrs.target]));
+});
+
+test('marks are consumed in text order: a list out of order links only the later mark', () => {
+  // The contract _overlayCredit documents: each mark is looked for after
+  // the previous anchor, so a list must follow the text.
+  const p = makeElement('p');
+  const links = TP_WIN.MC_creditLinks(DHM_BLOCK).slice().reverse();
+  assert.strictEqual(TP_WIN.MC_appendCredit(p, GO_ATTRIBUTION, links), 1);
+  assert.deepStrictEqual(anchors(p.innerHTML).map(a => a.text), [GO.LicenseName], p.innerHTML);
+  assert.strictEqual(p.textContent, GO_ATTRIBUTION);
+});
+
+test('terrain-profile.js keeps no walker and no credit string of its own', () => {
+  const src = fs.readFileSync(path.join(__dirname, 'public', 'terrain-profile.js'), 'utf8');
+  assert.strictEqual(/function appendCredit\b/.test(src), false, 'a second credit walker is back');
+  ['ATTRIBUTION', 'ATTRIBUTION_DERIVED', 'ATTRIBUTION_URL', 'DATASET_MARK', 'DATASET_URL', 'DERIVED_NOTE', 'CREDIT_LINKS', 'appendCredit']
+    .forEach(k => assert.strictEqual(TP[k], undefined, 'TerrainProfile.' + k + ' is still exported'));
 });
 
 // ── One definition ─────────────────────────────────────────────────────────
 
 console.log('\n=== #733 one credit definition ===');
 
-test('the JS credit strings equal the Go ones', () => {
+test('the block this suite drives is the Go credit, joined as Go joins it', () => {
   assert.ok(GO_SRC.indexOf(GO_ATTRIBUTION_EXPR) >= 0, 'internal/dhm/dhm.go no longer joins Attribution from the parts');
   assert.ok(GO_SRC.indexOf(GO_DERIVED_EXPR) >= 0, 'internal/dhm/dhm.go no longer joins AttributionDerived from Attribution + DerivedNote');
-  assert.strictEqual(TP.ATTRIBUTION, GO_ATTRIBUTION);
-  assert.strictEqual(TP.ATTRIBUTION_DERIVED, GO_ATTRIBUTION_DERIVED);
-  assert.strictEqual(TP.DATASET_MARK, GO.DatasetName);
-  assert.strictEqual(TP.DATASET_URL, GO.DatasetURL);
-  assert.strictEqual(TP.ATTRIBUTION_URL, GO.LicenseURL);
-  assert.strictEqual(TP.DERIVED_NOTE, GO.DerivedNote);
+  // cmd/server/dhm_credit_733_test.go pins that the server sends these.
+  assert.strictEqual(PROFILE_BLOCK.attribution, GO_ATTRIBUTION);
+  assert.strictEqual(PROFILE_BLOCK.attributionDerived, GO_ATTRIBUTION_DERIVED);
 });
 
 /* Comments may of course name the owner and cite the terms; a second
@@ -321,15 +400,16 @@ function codeOnly(src) {
   }).join('\n');
 }
 
-test('only terrain-profile.js carries the credit strings in public/', () => {
+test('no public/ file carries the credit strings', () => {
   const files = fs.readdirSync(path.join(__dirname, 'public')).filter(f => f.endsWith('.js'));
   const carrying = files.filter(f => {
     const src = codeOnly(fs.readFileSync(path.join(__dirname, 'public', f), 'utf8'));
     return src.indexOf(GO.Owner) >= 0 || src.indexOf(GO.DatasetURL) >= 0 || src.indexOf(GO.DerivedNote) >= 0;
   });
-  // The map credit comes from the server's dhm block, so no second copy of
-  // the owner, the dataset link or the derived note belongs in public/.
-  assert.deepStrictEqual(carrying, ['terrain-profile.js']);
+  // The map credit and the profile footer both come from the server's dhm
+  // block (#765), so no copy of the owner, the dataset link or the derived
+  // note belongs anywhere in public/.
+  assert.deepStrictEqual(carrying, []);
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
