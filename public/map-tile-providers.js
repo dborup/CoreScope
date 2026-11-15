@@ -569,7 +569,9 @@
    * only if it is still loaded (not unloaded or aborted, which is also
    * what happens to every tile when its layer leaves the map) and in view
    * at the map's zoom. A no-store answer is fetched again; an `outside`
-   * one comes from the browser cache without a request. Bounded: one
+   * one is not: it is cached (Chromium HTTP cache, max-age one day), so the
+   * same-URL reload is answered from the cache, is not refetched, and
+   * costs no request. Bounded: one
    * retry per tile element (so at most one extra request per tile), and
    * every pending timer is cleared when the layer leaves the map.
    */
