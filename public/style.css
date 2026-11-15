@@ -6486,6 +6486,21 @@ body.embed #app.app-fixed {
    holds to 4.5:1 in both themes; only the wrapping differs, because
    "Buildings/trees: Blocked" is the longest chip in the row. */
 .tp-chip-surface { white-space: normal; }
+/* #724 M4 — the interference hint: a cellular transmitter in the 700/800/900
+   MHz bands near an end. The antenna-site layer's interference colour, so
+   the chip and the map ring read as one thing; the strong tier (within
+   100 m) is filled. Its line under the detail text says what it means. */
+.tp-chip-mast { border-color: var(--mast-interference); color: var(--mast-interference); white-space: normal; }
+.tp-chip-mast-strong { background: var(--mast-interference); color: var(--surface-1, var(--card-bg)); }
+.tp-mast-note {
+  margin: 2px 0 0;
+  padding-left: 6px;
+  border-left: 3px solid var(--mast-interference);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+.tp-mast-note[hidden] { display: none; }
 /* The line that explains what a surface verdict means for a radio link.
    Shown only with the chip it explains, so it is hidden by default. */
 .tp-surface-note {

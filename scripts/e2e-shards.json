@@ -116,6 +116,14 @@
       "measurementNote": "New suite; #724 M3 Mastedatabasen antenna sites layer on Map and Live with an intercepted masts client-config block and a stubbed /api/masts that generates synthetic sites inside each requested cell (neither the proxy's upstream nor Mastedatabasen is ever contacted): not offered without the block and no request, the two toggles with the sites on and the interference layer off by default plus the credit, the zoom-13 gate (no request, status line), every request a single in-extent cell=E,N with at most 4 in flight and no cell twice on a z13 1920x1080 view, the interference and sites toggles with ?mastsInt=1 / ?masts=0 and the deep link, a clicked site's popup with published fields only and hostile stub text inert, and a pan away and back with no repeated request. About 35s locally; no CI duration measured yet. Assigned to shard 1 next to the #680/#723 overlay suites."
     },
     {
+      "file": "test-issue-724-masts-hint-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #724 M4 interference hint in the Map Path profile with intercepted dhm and masts client-config blocks, a stubbed /api/terrain/profile and a stubbed /api/masts with fixed synthetic sites (neither the proxy's upstream, Mastedatabasen nor DHM is ever contacted): an end 320 m from an 800 MHz site shows the chip in the title row and its note, hostile stub text inert, and with both overlays off only the end cells are asked for, each once; dark-theme chip colour; 40 m from a 900 MHz site is the strong tier; an 1800 MHz site, an 800 MHz site 520 m away and a band-less GSM-R site give no hint; without the masts block no chip and no request; at 375 px the chip stays inside the panel; leaving the Map page with a path open three times leaves no theme-refresh listener or data-theme observer behind (#768 review 1). About 25s locally; no CI duration measured yet. Assigned to shard 1 next to the #724 M3 suite."
+    },
+    {
       "file": "test-issue-723-heritage-info-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },
