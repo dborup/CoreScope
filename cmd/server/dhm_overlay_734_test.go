@@ -323,43 +323,50 @@ func TestDHM734_LegacyAliasIsTerrain(t *testing.T) {
 // ── One shared budget ──────────────────────────────────────────────────────
 
 // Terrain, surface and contour tiles from one address drain one budget;
-// cached and outside-coverage tiles are not charged.
+// cached and outside-coverage tiles are not charged. Under both
+// map.dhm.layer values: with the default, a cached terrain tile is the
+// exaggerated product's, and must still be found free.
 func TestDHM734_SharedRateLimit(t *testing.T) {
-	const client = "198.51.100.34:1000"
-	u := newOverlayUpstreams(t)
-	p := newOverlayProxy(t, u, "terrain", &dhmLogSink{}, func(o *dhmProxyOptions) { o.rateLimitPerMin = 2 })
-	do := func(q url.Values, remote string) *httptest.ResponseRecorder {
-		w := httptest.NewRecorder()
-		p.ServeHTTP(w, overlayRequest(q, remote))
-		return w
+	for _, cfg := range []struct{ layer, terrainUp string }{{"terrain", terrainLayer}, {"", exaggeratedLayer}} {
+		t.Run("map.dhm.layer="+cfg.layer, func(t *testing.T) {
+			const client = "198.51.100.34:1000"
+			u := newOverlayUpstreams(t)
+			p := newOverlayProxy(t, u, cfg.layer, &dhmLogSink{}, func(o *dhmProxyOptions) { o.rateLimitPerMin = 2 })
+			do := func(q url.Values, remote string) *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				p.ServeHTTP(w, overlayRequest(q, remote))
+				return w
+			}
+			terrainBody := u.layers[cfg.terrainUp].stub
+			assertTile(t, "terrain miss", do(overlayTile("terrain", 15, 0), client), terrainBody, "miss", ccTile)
+			assertTile(t, "surface miss", do(overlayTile("surface", 15, 0), client), surfaceStub, "miss", ccTile)
+			// Cached tiles are free, under any id that names them.
+			for i := 0; i < 5; i++ {
+				assertTile(t, "terrain hit", do(overlayTile("terrain", 15, 0), client), terrainBody, "hit", ccTile)
+				assertTile(t, "alias hit", do(overlayTile(terrainLayer, 15, 0), client), terrainBody, "hit", ccTile)
+				assertTile(t, "surface hit", do(overlayTile("surface", 15, 0), client), surfaceStub, "hit", ccTile)
+			}
+			// Outside coverage is free for every overlay.
+			bx, by := lonLatTile(15, 13.40, 52.52) // Berlin
+			for _, id := range []string{"terrain", "surface", "contours"} {
+				q := leafletQuery(15, bx, by)
+				q.Set("layers", id)
+				assertTile(t, id+" outside", do(q, client), dhmTransparentPNG, "outside", ccTile)
+			}
+			// The budget of 2 is spent: the next miss of any overlay is 429.
+			for _, q := range []url.Values{overlayTile("surface", 15, 1), overlayTile("terrain", 15, 1), overlayTile("contours", 15, 0), overlayTile(terrainLayer, 15, 2)} {
+				w := do(q, client)
+				if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" {
+					t.Fatalf("layers=%s: status %d, Retry-After %q; want 429", q.Get("layers"), w.Code, w.Header().Get("Retry-After"))
+				}
+			}
+			if n := u.total(); n != 2 {
+				t.Fatalf("upstream hits %d, want 2", n)
+			}
+			// Another address has its own budget.
+			assertTile(t, "other client", do(overlayTile("contours", 15, 0), "198.51.100.35:1000"), contourStub, "miss", ccTile)
+		})
 	}
-	assertTile(t, "terrain miss", do(overlayTile("terrain", 15, 0), client), terrainStub, "miss", ccTile)
-	assertTile(t, "surface miss", do(overlayTile("surface", 15, 0), client), surfaceStub, "miss", ccTile)
-	// Cached tiles are free, under any id that names them.
-	for i := 0; i < 5; i++ {
-		assertTile(t, "terrain hit", do(overlayTile("terrain", 15, 0), client), terrainStub, "hit", ccTile)
-		assertTile(t, "alias hit", do(overlayTile(terrainLayer, 15, 0), client), terrainStub, "hit", ccTile)
-		assertTile(t, "surface hit", do(overlayTile("surface", 15, 0), client), surfaceStub, "hit", ccTile)
-	}
-	// Outside coverage is free for every overlay.
-	bx, by := lonLatTile(15, 13.40, 52.52) // Berlin
-	for _, id := range []string{"terrain", "surface", "contours"} {
-		q := leafletQuery(15, bx, by)
-		q.Set("layers", id)
-		assertTile(t, id+" outside", do(q, client), dhmTransparentPNG, "outside", ccTile)
-	}
-	// The budget of 2 is spent: the next miss of any overlay is 429.
-	for _, q := range []url.Values{overlayTile("surface", 15, 1), overlayTile("terrain", 15, 1), overlayTile("contours", 15, 0), overlayTile(terrainLayer, 15, 2)} {
-		w := do(q, client)
-		if w.Code != http.StatusTooManyRequests || w.Header().Get("Retry-After") == "" {
-			t.Fatalf("layers=%s: status %d, Retry-After %q; want 429", q.Get("layers"), w.Code, w.Header().Get("Retry-After"))
-		}
-	}
-	if n := u.total(); n != 2 {
-		t.Fatalf("upstream hits %d, want 2", n)
-	}
-	// Another address has its own budget.
-	assertTile(t, "other client", do(overlayTile("contours", 15, 0), "198.51.100.35:1000"), contourStub, "miss", ccTile)
 }
 
 // ── Admission ──────────────────────────────────────────────────────────────
