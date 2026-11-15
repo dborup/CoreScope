@@ -6574,6 +6574,21 @@ body.embed #app.app-fixed {
   .tp-head::after { content: ''; order: 1; flex-basis: 100%; height: 0; }
   .tp-head .tp-chip { order: 2; }
 }
+/* #790: while an end is still to be picked (A, B, or a pending Move A/B) the
+   panel is a compact bar: title, the next step, Cancel and Close. The body
+   and the copy button are [hidden] by terrain-profile.js and the chips
+   leave the bar here, so a phone keeps the map above it free to tap. */
+.tp-cancel { margin-left: auto; }
+/* .tp-close makes the copy button inline-flex, which beats [hidden]. */
+.tp-copy[hidden] { display: none; }
+.tp-panel.tp-compact .tp-chip,
+.tp-panel.tp-compact .tp-head::after { display: none; }
+.tp-pick-status {
+  margin: 0;
+  padding: 6px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
 .tp-copy-status { margin: 0; padding: 2px 8px; font-size: var(--fs-sm); color: var(--text-muted); }
 .tp-copy-status:empty { display: none; }
 /* Each credit link keeps the credit line's size, but gets a 48 px hit box
@@ -6683,7 +6698,8 @@ body.embed #app.app-fixed {
 .tp-step:hover { background: var(--row-hover); }
 .tp-step:focus-visible,
 .tp-height:focus-visible,
-.tp-seg-btn:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.tp-seg-btn:focus-visible,
+.tp-cancel:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
 .tp-height {
   width: 72px;
   min-height: 48px;
@@ -6696,7 +6712,8 @@ body.embed #app.app-fixed {
   text-align: center;
 }
 .tp-seg { display: flex; gap: 4px; flex-wrap: wrap; }
-.tp-seg-btn {
+.tp-seg-btn,
+.tp-cancel {
   min-height: 48px;
   padding: 0 12px;
   border: 1px solid var(--border);
@@ -6707,6 +6724,7 @@ body.embed #app.app-fixed {
   cursor: pointer;
 }
 .tp-seg-btn.active { background: var(--selected-bg); border-color: var(--los-line); }
+.tp-cancel:hover { background: var(--row-hover); }
 .tp-seg-btn:disabled { opacity: 0.45; cursor: default; }
 /* #721: Move A / Move B sit under their end's name; Swap between the ends. */
 .tp-move { align-self: flex-start; min-width: 48px; }

@@ -1148,6 +1148,24 @@
     firmware: 'MeshCore firmware default'
   };
 
+  /* #790: what the panel waits for, else null. While an end is still to be
+   * picked — A, B, or the new position of a Move A / Move B (#721) — the
+   * panel is a compact bar (title, this step, Cancel, Close), so on a
+   * phone the map above it stays free to tap. With both ends set and no
+   * move pending it is the full panel. */
+  var PHASE_STATUS = {
+    'pick-a': 'Pick the first point on the map.',
+    'pick-b': 'Pick the second point on the map.',
+    'move-a': 'Pick the new position for A on the map.',
+    'move-b': 'Pick the new position for B on the map.'
+  };
+  function compactPhase(st, moving) {
+    if (!st || !st.a) return 'pick-a';
+    if (!st.b) return 'pick-b';
+    if (moving === 'a' || moving === 'b') return 'move-' + moving;
+    return null;
+  }
+
   /* create builds the tool. The host owns picking and the map; this owns the
    * panel, the request and the deep link. Nothing runs until open(). */
   function create(opts) {
@@ -1264,6 +1282,8 @@
       head.appendChild(el('h3', 'tp-title', 'Path profile'));
       ui.chip = el('span', 'tp-chip');
       ui.chip.setAttribute('data-testid', 'tp-verdict');
+      // #790: an empty chip is a grey pill that reads as a drag handle.
+      ui.chip.hidden = true;
       head.appendChild(ui.chip);
       /* #729: the surface (buildings and trees) verdict, when it is worse
        * than the terrain one. It rides beside the verdict rather than under
@@ -1292,6 +1312,25 @@
       ui.assumed.title = 'At least one antenna height is a default, not a measured value. Set both heights to confirm them.';
       ui.assumed.hidden = true;
       head.appendChild(ui.assumed);
+      /* #790: Cancel, shown only in the compact bar. During a Move it is
+       * the Escape of #721 (the end stays); while picking it resets the
+       * profile, exactly as Close does, on the same page. */
+      ui.cancel = el('button', 'tp-cancel', 'Cancel');
+      ui.cancel.type = 'button';
+      ui.cancel.hidden = true;
+      ui.cancel.setAttribute('data-testid', 'tp-cancel');
+      ui.cancel.addEventListener('click', function () {
+        if (moving) {
+          var side = moving;
+          api.cancelMove();
+          // The bar is gone; focus goes back to the Move button it came from.
+          var mv = (side === 'a' ? ui.endA : ui.endB).move;
+          if (mv && mv.focus) mv.focus();
+        } else {
+          api.close();
+        }
+      });
+      head.appendChild(ui.cancel);
       ui.copy = el('button', 'tp-close tp-copy');
       ui.copy.type = 'button';
       ui.copy.disabled = true;
@@ -1312,6 +1351,13 @@
       close.addEventListener('click', function () { api.close(); });
       head.appendChild(close);
       panel.appendChild(head);
+      // #790: the compact bar's one line — what to do next. Outside the
+      // body, so collapsing the body can never hide it.
+      ui.pickStatus = el('p', 'tp-pick-status');
+      ui.pickStatus.setAttribute('role', 'status');
+      ui.pickStatus.setAttribute('data-testid', 'tp-pick-status');
+      ui.pickStatus.hidden = true;
+      panel.appendChild(ui.pickStatus);
       ui.copyStatus = el('p', 'tp-copy-status');
       ui.copyStatus.setAttribute('role', 'status');
       ui.copyStatus.setAttribute('data-testid', 'tp-copy-status');
@@ -1319,6 +1365,7 @@
 
       var body = el('div', 'tp-body');
       body.setAttribute('data-testid', 'tp-body');
+      ui.body = body;
       ui.chart = el('div', 'tp-chart');
       ui.chart.setAttribute('data-testid', 'tp-chart');
       body.appendChild(ui.chart);
@@ -1494,6 +1541,26 @@
         b.setAttribute('aria-pressed', moving === pair[0] ? 'true' : 'false');
       });
       if (ui.swap) ui.swap.disabled = !both;
+      syncCompact();
+    }
+
+    /* syncCompact shows the full panel or the compact bar for the phase
+     * (#790). Only visibility changes: the chart, the cursor (#781) and
+     * every control stay built, so a cancelled Move comes back as it was. */
+    function syncCompact() {
+      if (!panel) return;
+      var phase = compactPhase(state, moving);
+      var compact = phase !== null;
+      // Focus inside the body would be stranded once it is hidden.
+      var stranded = compact && ui.body.contains && doc.activeElement && ui.body.contains(doc.activeElement);
+      panel.classList.toggle('tp-compact', compact);
+      panel.setAttribute('data-phase', phase || 'ready');
+      ui.body.hidden = compact;
+      ui.copy.hidden = compact;
+      ui.cancel.hidden = !compact;
+      ui.pickStatus.hidden = !compact;
+      ui.pickStatus.textContent = compact ? PHASE_STATUS[phase] : '';
+      if (stranded && ui.cancel.focus) ui.cancel.focus();
     }
 
     /* endpointsChanged is the shared tail of a move and a swap: the panel
@@ -1525,6 +1592,7 @@
       if (!ui.chip) return;
       ui.chip.className = 'tp-chip tp-chip-' + chip.tone;
       ui.chip.textContent = chip.label;
+      ui.chip.hidden = !chip.label;
       ui.chip.setAttribute('data-state', chip.state);
       ui.chip.title = chip.detail;
     }
@@ -1887,6 +1955,7 @@
 
   global.TerrainProfile = {
     footerCredit: footerCredit,
+    compactPhase: compactPhase,
     fillCredit: fillCredit,
     mixedNote: mixedNote,
     FILL_OVERVIEW_M: FILL_OVERVIEW_M,
