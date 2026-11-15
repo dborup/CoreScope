@@ -5,21 +5,26 @@
  * end to end tells its elevated surface samples apart (cmd/server
  * terrain_buildings.go): classification.state, samples[].cls "b"/"v" and
  * verdict.surface.cause. The panel colours the surface band by class,
- * names the cause in the surface chip, adds a muted note when the
- * classification is partial, credits the footprints from the server's
+ * names the cause in the surface chip ("Blocked by building", or "Through
+ * trees" in a milder tone), adds a muted note when the classification is
+ * partial or unavailable, credits the footprints from the server's
  * dhm.buildings block, and the hover readout names the class.
  *
  * Covers:
  *   1. band colouring: runs by class, tiling the clutter band exactly;
  *      unclassified answers draw byte for byte what they drew before;
- *   2. the surface chip for each cause × classification state × coverage;
- *   3. the partial note; the legend; the accessible title and name;
+ *   2. the surface chip for each cause × classification state × coverage,
+ *      and #729's rule that it is never a second verdict;
+ *   3. the partial and unavailable notes; the legend; the accessible
+ *      title and name;
  *   4. escaping through the file's esc(): node names and junk classes;
  *   5. the credit from dhm.buildings through the one walker, and no
  *      public/ file carries a credit string of the footprints;
  *   6. the hover readout's class;
  *   7. the customizer keys and the CSS tokens, with their contrast;
- *   8. perf: a 1024-sample profile of alternating classes.
+ *   8. perf: a 1024-sample profile of alternating classes;
+ *   9. the panel: a failed answer takes the note and the footprints'
+ *      credit away (#797 review finding 6, mutant F1).
  *
  * Runs via: node test-issue-730-buildings-ui.js
  */
@@ -253,27 +258,36 @@ test('a class the server never sends is no class, and is never echoed', () => {
 
 console.log('\n=== #730 M3 the surface chip ===');
 
-test('Dokk1: "Buildings: Blocked", warn tone, the detail says it is a building', () => {
+test('Dokk1: "Blocked by building", warn tone, the detail says it is a building', () => {
   const c = TP.surfaceChip(dokk1());
-  assert.strictEqual(c.label, 'Buildings: Blocked');
+  assert.strictEqual(c.label, 'Blocked by building');
   assert.strictEqual(c.tone, 'warn');
   assert.strictEqual(c.show, true);
   assert.ok(/building footprint/i.test(c.detail), c.detail);
 });
 
-test('forest: "Trees/other: Marginal"', () => {
+test('forest: "Marginal — through trees", in the milder tone', () => {
   const c = TP.surfaceChip(forest());
-  assert.strictEqual(c.label, 'Trees/other: Marginal');
+  assert.strictEqual(c.label, 'Marginal — through trees');
+  assert.strictEqual(c.tone, 'mild');
   assert.strictEqual(c.show, true);
   assert.ok(/trees or other/i.test(c.detail), c.detail);
+  const blocked = forest();
+  blocked.verdict.surface.state = 'blocked';
+  assert.strictEqual(TP.surfaceChip(blocked).label, 'Through trees');
+  assert.strictEqual(TP.surfaceChip(blocked).tone, 'mild');
 });
 
-test('the chip matrix: the cause is named only for a full classification', () => {
+test('the chip matrix: the cause is named for a full or partial classification', () => {
   const generic = TP.surfaceChip(unclassified(dokk1()));
   assert.strictEqual(generic.label, 'Buildings/trees: Blocked');
-  const want = {
-    full: { building: 'Buildings: Blocked', vegetation: 'Trees/other: Blocked' },
-  };
+  // The server's cause is exact on a partial classification too: it says
+  // building only where a classified building obstructs, and vegetation
+  // only when every obstructing raised sample is classified trees/other
+  // (cmd/server terrainClasses.surfaceCause; #797 review finding 4).
+  const named = { building: 'Blocked by building', vegetation: 'Through trees' };
+  const want = { full: named, partial: named };
+  const tones = { building: 'warn', vegetation: 'mild' };
   ['full', 'partial', 'unavailable', null].forEach(state => {
     ['building', 'vegetation', 'unknown', undefined, '<b>x</b>'].forEach(cause => {
       const p = dokk1({ state });
@@ -282,10 +296,34 @@ test('the chip matrix: the cause is named only for a full classification', () =>
       const label = (want[state] && want[state][cause]) || generic.label;
       assert.strictEqual(c.label, label, state + '/' + cause);
       assert.strictEqual(c.show, generic.show, state + '/' + cause + ' moved show');
-      assert.strictEqual(c.tone, 'warn');
+      assert.strictEqual(c.tone, label === generic.label ? 'warn' : tones[cause], state + '/' + cause + ' tone');
       if (label === generic.label) assert.strictEqual(c.detail, generic.detail, state + '/' + cause + ' detail');
     });
   });
+});
+
+test('#729: the cause is never a second verdict', () => {
+  // Every surface state × terrain state × cause × classification: the
+  // chip shows exactly when the generic one would, in the warn tone or
+  // the milder one (never ok, bad or unknown), names no verdict but the
+  // surface's own, and leaves the terrain chip as it is.
+  const WORDS = { clear: 'Clear', fresnel100: 'Usable', fresnel60: 'Marginal', blocked: 'Blocked' };
+  const states = Object.keys(WORDS);
+  states.forEach(surface => states.forEach(terrain => ['building', 'vegetation'].forEach(cause => ['full', 'partial'].forEach(cs => {
+    const p = dokk1({ state: cs });
+    p.verdict.state = terrain;
+    p.verdict.surface.state = surface;
+    p.verdict.surface.cause = cause;
+    const q = unclassified(p);
+    const c = TP.surfaceChip(p), g = TP.surfaceChip(q);
+    const at = [surface, terrain, cause, cs].join('/');
+    assert.strictEqual(c.show, g.show, at + ': show');
+    assert.ok(c.tone === 'warn' || c.tone === 'mild', at + ': tone ' + c.tone);
+    states.filter(x => x !== surface).forEach(x => {
+      assert.ok(c.label.indexOf(WORDS[x]) < 0, at + ': "' + c.label + '" names ' + WORDS[x]);
+    });
+    assert.strictEqual(JSON.stringify(TP.verdictChip(p)), JSON.stringify(TP.verdictChip(q)), at + ': terrain chip');
+  }))));
 });
 
 test('the cause never shows a chip the terrain/surface rule would not', () => {
@@ -304,7 +342,8 @@ test('partial coverage: the surface is unknown, whatever the cause says', () => 
   const p = dokk1();
   p.coverage = { state: 'partial', pct: 80, firstGapM: 200 };
   const c = TP.surfaceChip(p);
-  assert.ok(!/^Buildings:|^Trees/.test(c.label), c.label);
+  assert.ok(!/building|trees/.test(c.label.replace('Buildings/trees: ', '')), c.label);
+  assert.strictEqual(c.tone, 'warn');
 });
 
 test('an antenna below the surface keeps its own chip', () => {
@@ -325,12 +364,18 @@ test('"Terrain only": no chip and no note', () => {
 
 console.log('\n=== #730 M3 note, legend and accessible text ===');
 
-test('the muted note appears for a partial classification only', () => {
-  assert.strictEqual(TP.classNote(dokk1({ state: 'partial' })), TP.CLASS_PARTIAL_NOTE);
-  assert.ok(/could not be told apart/.test(TP.CLASS_PARTIAL_NOTE), TP.CLASS_PARTIAL_NOTE);
-  ['full', 'unavailable', null].forEach(s => assert.strictEqual(TP.classNote(dokk1({ state: s })), null, String(s)));
-  const part = dokk1({ state: 'partial' }); part.coverage = { state: 'partial', pct: 80, firstGapM: 200 };
-  assert.strictEqual(TP.classNote(part), null, 'partial coverage');
+test('the muted note: partial says part of the path, unavailable the whole path', () => {
+  assert.strictEqual(TP.classNote(dokk1({ state: 'partial' })), 'Buildings could not be told apart from trees on part of this path.');
+  // #797 review finding 1: the lookup failed, so nothing could be told
+  // apart; the hint line says so instead of saying nothing.
+  assert.strictEqual(TP.classNote(dokk1({ state: 'unavailable' })), 'Buildings could not be told apart from trees on this path.');
+  ['full', null].forEach(s => assert.strictEqual(TP.classNote(dokk1({ state: s })), null, String(s)));
+  ['partial', 'unavailable'].forEach(s => {
+    const part = dokk1({ state: s }); part.coverage = { state: 'partial', pct: 80, firstGapM: 200 };
+    assert.strictEqual(TP.classNote(part), null, s + ' on partial coverage');
+    const dtm = dokk1({ state: s }); dtm.model = 'dtm';
+    assert.strictEqual(TP.classNote(dtm), null, s + ' on model=dtm');
+  });
   assert.strictEqual(TP.classNote(null), null);
 });
 
@@ -351,9 +396,9 @@ test('the legend names both classes in text, and only when a class is drawn', ()
 test('the accessible name and the title carry the cause; the title the band and the note', () => {
   const svg = TP.buildChart(dokk1({ state: 'full' }), {});
   const label = svg.match(/aria-label="([^"]*)"/)[1];
-  assert.ok(/Buildings: Blocked/.test(label), label);
+  assert.ok(/Blocked by building/.test(label), label);
   const title = svg.match(/<title>([^<]*)<\/title>/)[1];
-  assert.ok(/Buildings: Blocked/.test(title), title);
+  assert.ok(/Blocked by building/.test(title), title);
   assert.ok(/surface band/i.test(title), title);
   const p = dokk1({ state: 'partial' });
   assert.ok(TP.buildChart(p, {}).match(/<title>([^<]*)<\/title>/)[1].indexOf(TP.CLASS_PARTIAL_NOTE) >= 0, 'partial note in the title');
@@ -454,6 +499,10 @@ test('the readout names the class of the hovered sample, and keeps its four rows
   assert.strictEqual(roof.lines.length, 4);
   assert.strictEqual(roof.lines[2], 'Surface 33.0 m (building)');
   assert.strictEqual(CUR.readout(g, p, 3).lines[2], 'Surface 5.4 m');
+  // The roof's edges (#797 review finding 6, mutant F2): samples 12 and
+  // 16 are the first and last on the roof, 11 and 17 the ground beside.
+  eq([11, 12, 16, 17].map(i => CUR.readout(g, p, i).lines[2]),
+    ['Surface 5.4 m', 'Surface 33.0 m (building)', 'Surface 33.0 m (building)', 'Surface 5.4 m']);
   const f = forest();
   assert.strictEqual(CUR.readout(TP.chartGeometry(f), f, 100).lines[2], 'Surface 68.0 m (trees/other)');
   // Unclassified, or an unavailable classification: no class.
@@ -523,6 +572,13 @@ test('contrast ≥ 3:1: each class against the panel, and the two classes agains
   });
 });
 
+test('the milder chip tone is drawn from theme tokens only, and is not the warn colour', () => {
+  const m = CSS.match(/\.tp-chip-mild\s*\{([^}]*)\}/);
+  assert.ok(m, 'no .tp-chip-mild rule');
+  assert.ok(!/#[0-9a-f]{3,8}\b|rgb/i.test(m[1]), 'hardcoded colour: ' + m[1]);
+  assert.ok(/color:\s*var\(--text\)/.test(m[1]), 'text colour: ' + m[1]);
+});
+
 test('the customizer maps both tokens, among the terrain chart colours', () => {
   const src = fs.readFileSync(path.join(__dirname, 'public', 'customize-v2.js'), 'utf8');
   const map = src.match(/var THEME_CSS_MAP = \{([\s\S]*?)\};/)[1];
@@ -555,5 +611,87 @@ test('1024 samples of alternating classes: geometry and SVG in well under 50 ms'
   assert.ok(ms < 50, ms + ' ms');
 });
 
-console.log('\n' + passed + ' passed, ' + failed + ' failed');
-process.exit(failed ? 1 : 0);
+// ── 9. The panel ───────────────────────────────────────────────────────────
+
+/* A panel on a recording fake DOM with real timers, as the #723 suite
+ * drives it; fetchJSON answers from `answers`, one per request. */
+function loadPanel() {
+  const vm = require('vm');
+  const { makeTextNode } = require('./tests/map-overlay-sandbox');
+  const made = [];
+  function mk(tag) {
+    const e = makeElement(tag);
+    e.hidden = false; e.disabled = false; e.title = '';
+    e.addEventListener = () => {}; e.removeEventListener = () => {};
+    e.classList.toggle = (c, w) => { const v = w === undefined ? !e.classList.contains(c) : !!w; if (v) e.classList.add(c); else e.classList.remove(c); };
+    e.removeChild = (c) => { e.children = e.children.filter(x => x !== c); return c; };
+    made.push(e);
+    return e;
+  }
+  const body = mk('body');
+  const doc = { createElement: mk, createTextNode: makeTextNode, addEventListener() {}, body, documentElement: { getAttribute: () => 'light' }, querySelector: () => null, querySelectorAll: () => [] };
+  const loc = { origin: 'http://x', pathname: '/', search: '', hash: '#/map' };
+  const history = { state: null, replaceState() {} };
+  const win = {
+    addEventListener() {}, removeEventListener() {}, dispatchEvent() {}, matchMedia: () => ({ matches: false }),
+    innerWidth: 1280, innerHeight: 800, document: doc, location: loc, history, setTimeout, clearTimeout,
+    localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+  };
+  const ctx = {
+    window: win, document: doc, console, Math, Date, JSON, Array, Object, String, Number, RegExp, Error, TypeError,
+    Boolean, isNaN, isFinite, parseInt, parseFloat, URLSearchParams, Map, Set, Promise, encodeURIComponent,
+    decodeURIComponent, setTimeout, clearTimeout, location: loc, history, CustomEvent: function () {},
+  };
+  vm.createContext(ctx);
+  ['map-tile-providers.js', 'antenna-height.js', 'terrain-profile.js'].forEach(f =>
+    vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', f), 'utf8'), ctx));
+  const answers = [];
+  const tool = ctx.window.TerrainProfile.create({
+    mount: body, dhm: DHM_BLOCK,
+    fetchJSON: () => { const a = answers.shift(); return a instanceof Error ? Promise.reject(a) : Promise.resolve(a); },
+  });
+  const find = (id) => made.filter(e => e.attrs['data-testid'] === id).pop() || null;
+  let lon = 10.2142;
+  return {
+    answers,
+    // A new path, so the panel asks again.
+    measure: () => { lon += 0.001; tool.setState({ a: { kind: 'point', lat: 56.1535, lon }, b: { kind: 'point', lat: 56.1514, lon: 10.2150 } }); },
+    state: () => {
+      const note = find('tp-class-note'), credit = made.filter(e => e.className === 'tp-credit-line').pop();
+      return { note: note && !note.hidden ? note.textContent : null, credit: credit ? credit.textContent : null, verdict: find('tp-verdict').textContent };
+    },
+  };
+}
+const SETTLE_MS = 450; // the panel's request debounce is 350 ms
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const asyncTests = [];
+
+asyncTests.push(['a failed answer takes the note and the footprints\' credit away', async () => {
+  const P = loadPanel();
+  const partial = dokk1({ state: 'partial' });
+  // A request that fails, and an answer the panel cannot draw: both end
+  // on "No profile", with no note and DHM's credit alone.
+  const broken = dokk1({ state: 'partial' });
+  broken.samples = { length: 1 };
+  [new Error('Request failed (502)'), broken].forEach(bad => {
+    P.answers.push(partial, bad);
+  });
+  for (const what of ['a failed request', 'an answer it cannot draw']) {
+    P.measure();
+    await sleep(SETTLE_MS);
+    eq([P.state().note, P.state().credit], [TP.classNote(partial), BLD_CREDIT], what + ': the partial answer first');
+    P.measure();
+    await sleep(SETTLE_MS);
+    eq(P.state(), { note: null, credit: DHM_DERIVED, verdict: 'No profile' }, what);
+  }
+}]);
+
+(async () => {
+  console.log('\n=== #730 M3 the panel ===');
+  for (const [name, fn] of asyncTests) {
+    try { await fn(); passed++; console.log('  ✅ ' + name); }
+    catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  console.log('\n' + passed + ' passed, ' + failed + ' failed');
+  process.exit(failed ? 1 : 0);
+})();

@@ -9,19 +9,20 @@
  * third-party service is ever contacted.
  *
  * Asserts, in light and dark:
- *   1. a Dokk1-like path (#729): the surface chip says "Buildings: Blocked",
+ *   1. a Dokk1-like path (#729): the surface chip says "Blocked by building",
  *      the roof is drawn in --terrain-building, the legend names both
  *      classes, the hover readout says "(building)" on the roof, and the
  *      footer carries the footprints' credit with its four links;
- *   2. a forest path: "Trees/other: Marginal", the canopy in
- *      --terrain-vegetation, no building;
- *   3. a partial classification keeps the generic chip and shows the muted
- *      note; an unavailable one shows neither, nor a legend, and the DHM
- *      credit;
+ *   2. a forest path: "Marginal — through trees" in the milder chip tone,
+ *      the canopy in --terrain-vegetation, no building;
+ *   3. a partial classification still names the server's cause and shows
+ *      the muted note; an unavailable one keeps the generic chip and shows
+ *      its own note, but no legend, and the DHM credit (#797 review
+ *      findings 1 and 4);
  *   4. axe is clean on the panel;
  * and:
  *   5. mobile landscape (740x360, touch): the chart and the chips stay in
- *      view with the panel open, and the credit links are 44 px targets
+ *      view with the panel open, and the credit links are 48 px targets
  *      hit by themselves;
  *   6. no request leaves localhost, and no console error is logged.
  *
@@ -66,6 +67,7 @@ const DHM_BLOCK = {
   },
 };
 const PARTIAL_NOTE = 'Buildings could not be told apart from trees on part of this path.';
+const UNAVAILABLE_NOTE = 'Buildings could not be told apart from trees on this path.';
 
 // The reference paths. B picks the stub's answer.
 const DOKK1_A = '56.15360,10.21410', DOKK1_B = '56.15147,10.21420';
@@ -197,8 +199,10 @@ function profileBody(q) {
       const bands = (cls) => Array.from(document.querySelectorAll('[data-testid="tp-chart"] polygon.tp-band-' + cls))
         .map(p => getComputedStyle(p).fill);
       const legend = q('tp-legend');
+      const chipEl = q('tp-surface-chip');
       return {
-        chip: shown(q('tp-surface-chip')) ? q('tp-surface-chip').textContent : null,
+        chip: shown(chipEl) ? chipEl.textContent : null,
+        chipTone: shown(chipEl) ? { mild: chipEl.classList.contains('tp-chip-mild'), border: getComputedStyle(chipEl).borderTopStyle } : null,
         note: shown(q('tp-class-note')) ? q('tp-class-note').textContent : null,
         legend: shown(legend) ? Array.from(legend.querySelectorAll('.tp-legend-item')).map(e => e.textContent) : null,
         building: bands('b'), vegetation: bands('v'),
@@ -233,19 +237,20 @@ function profileBody(q) {
     'button-name', 'aria-command-name', 'link-name', 'duplicate-id', 'nested-interactive', 'aria-allowed-attr'];
 
   for (const theme of ['light', 'dark']) {
-    await step(`${theme}: Dokk1 — "Buildings: Blocked", the roof in the building colour, legend, credit`, async () => {
+    await step(`${theme}: Dokk1 — "Blocked by building", the roof in the building colour, legend, credit`, async () => {
       const { ctx, page, rec } = await newCtx({ theme });
       try {
         await openProfile(page, link(DOKK1_A, DOKK1_B));
         const s = await panelState(page);
-        assert(s.chip === 'Buildings: Blocked', 'chip = ' + JSON.stringify(s.chip));
+        assert(s.chip === 'Blocked by building', 'chip = ' + JSON.stringify(s.chip));
+        assert(!s.chipTone.mild && s.chipTone.border === 'solid', 'building tone ' + JSON.stringify(s.chipTone));
         assert(s.building.length === 1 && s.vegetation.length === 0, 'bands b ' + s.building.length + ', v ' + s.vegetation.length);
         assert(s.buildingToken && s.building[0] === s.buildingToken, 'roof fill ' + s.building[0] + ', token ' + s.buildingToken);
         assert(JSON.stringify(s.legend) === JSON.stringify(['Building', 'Trees/other']), 'legend ' + JSON.stringify(s.legend));
         assert(s.note === null, 'note on a full classification: ' + s.note);
         assert(s.credit === BLD_CREDIT, 'credit = ' + JSON.stringify(s.credit));
         assert(JSON.stringify(s.links) === JSON.stringify(LINKS.map(l => l.concat('_blank'))), 'links ' + JSON.stringify(s.links));
-        assert(/Buildings: Blocked/.test(s.label), 'accessible name ' + s.label);
+        assert(/Blocked by building/.test(s.label), 'accessible name ' + s.label);
         await shot(page, `730-m3-dokk1-${theme}.jpg`);
 
         // The hover readout on the roof (138 m of 237 m).
@@ -264,12 +269,13 @@ function profileBody(q) {
       } finally { await ctx.close(); }
     });
 
-    await step(`${theme}: forest — "Trees/other: Marginal", the canopy in the trees colour, no building`, async () => {
+    await step(`${theme}: forest — "Marginal — through trees" in the milder tone, the canopy in the trees colour, no building`, async () => {
       const { ctx, page, rec } = await newCtx({ theme });
       try {
         await openProfile(page, link(FOREST_A, FOREST_B));
         const s = await panelState(page);
-        assert(s.chip === 'Trees/other: Marginal', 'chip = ' + JSON.stringify(s.chip));
+        assert(s.chip === 'Marginal — through trees', 'chip = ' + JSON.stringify(s.chip));
+        assert(s.chipTone.mild && s.chipTone.border === 'dashed', 'trees tone ' + JSON.stringify(s.chipTone));
         assert(s.vegetation.length === 1 && s.building.length === 0, 'bands b ' + s.building.length + ', v ' + s.vegetation.length);
         assert(s.vegetationToken && s.vegetation[0] === s.vegetationToken, 'canopy fill ' + s.vegetation[0] + ', token ' + s.vegetationToken);
         assert(s.credit === BLD_CREDIT, 'credit = ' + JSON.stringify(s.credit));
@@ -278,12 +284,12 @@ function profileBody(q) {
       } finally { await ctx.close(); }
     });
 
-    await step(`${theme}: partial keeps the generic chip and adds the note; unavailable adds nothing`, async () => {
+    await step(`${theme}: partial names the cause and adds its note; unavailable keeps the generic chip and adds its own`, async () => {
       const { ctx, page, rec } = await newCtx({ theme });
       try {
         await openProfile(page, link(DOKK1_A, PARTIAL_B));
         let s = await panelState(page);
-        assert(s.chip === 'Buildings/trees: Blocked', 'partial chip = ' + JSON.stringify(s.chip));
+        assert(s.chip === 'Blocked by building', 'partial chip = ' + JSON.stringify(s.chip));
         assert(s.note === PARTIAL_NOTE, 'partial note = ' + JSON.stringify(s.note));
         assert(s.building.length === 1, 'the classified part of the roof is still drawn');
         assert(JSON.stringify(s.legend) === JSON.stringify(['Building', 'Trees/other', 'Not told apart']), 'legend ' + JSON.stringify(s.legend));
@@ -293,19 +299,21 @@ function profileBody(q) {
         await page.waitForSelector('[data-testid="tp-verdict"][data-state="clear"]', { timeout: 10000 });
         s = await panelState(page);
         assert(s.chip === 'Buildings/trees: Blocked', 'unavailable chip = ' + JSON.stringify(s.chip));
-        assert(s.note === null && s.legend === null, 'note ' + s.note + ', legend ' + JSON.stringify(s.legend));
+        assert(s.note === UNAVAILABLE_NOTE, 'unavailable note = ' + JSON.stringify(s.note));
+        assert(s.legend === null, 'legend ' + JSON.stringify(s.legend));
         assert(s.credit === DHM_DERIVED, 'credit = ' + JSON.stringify(s.credit));
         assert(s.links.map(l => l[0]).join() === 'tp-credit-dataset,tp-credit-link', 'links ' + JSON.stringify(s.links));
         noNetwork(rec);
       } finally { await ctx.close(); }
     });
 
-    await step(`${theme}: axe is clean on the panel, Dokk1 and partial`, async () => {
+    await step(`${theme}: axe is clean on the panel, Dokk1, forest (the milder chip), partial and unavailable`, async () => {
       const { AxeBuilder } = require('@axe-core/playwright');
       const { ctx, page } = await newCtx({ theme });
       try {
-        for (const b of [DOKK1_B, PARTIAL_B]) {
-          await openProfile(page, link(DOKK1_A, b));
+        for (const [a, b] of [[DOKK1_A, DOKK1_B], [FOREST_A, FOREST_B], [DOKK1_A, PARTIAL_B], [DOKK1_A, UNAVAILABLE_B]]) {
+          await page.goto('about:blank'); // a fresh panel per path, never the last one's
+          await openProfile(page, link(a, b));
           const res = await new AxeBuilder({ page }).include(PANEL).withRules(AXE_RULES).analyze();
           const v = res.violations.map(x => x.id + ' x' + x.nodes.length + ' ' + x.nodes.map(n => n.target.join(' ')).join(' | '));
           assert(res.violations.length === 0, 'axe violations: ' + v.join(', '));
@@ -316,7 +324,7 @@ function profileBody(q) {
 
   // ── Mobile landscape ─────────────────────────────────────────────────────
   for (const theme of ['light', 'dark']) {
-    await step(`${theme}: 740x360 touch — the chart and chips stay in view, the credit links are 44 px targets`, async () => {
+    await step(`${theme}: 740x360 touch — the chart and chips stay in view, the credit links are 48 px targets`, async () => {
       const { ctx, page, rec } = await newCtx({ theme, viewport: { width: 740, height: 360 }, touch: true });
       try {
         await openProfile(page, link(DOKK1_A, DOKK1_B));
@@ -346,7 +354,9 @@ function profileBody(q) {
             const hit = document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2);
             return { w: b.width, h: b.height, hit: hit === a || a.contains(hit), inView: b.top >= 0 && b.bottom <= innerHeight };
           }, id);
-          assert(t.w >= 44 && t.h >= 44, id + ' is ' + t.w + 'x' + t.h);
+          // AGENTS/house rule and the M3 criterion: 48 px
+          // (test-issue-2052-touch-target-css.js MIN).
+          assert(t.w >= 48 && t.h >= 48, id + ' is ' + t.w + 'x' + t.h);
           assert(t.hit && t.inView, id + ' is covered or out of view: ' + JSON.stringify(t));
         }
         noNetwork(rec);
