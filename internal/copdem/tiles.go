@@ -61,6 +61,13 @@ func (t Tile) name() string {
 // Path is the URL path of t's GeoTIFF in the bucket.
 func (t Tile) Path() string { return "/" + t.name() + "/" + t.name() + ".tif" }
 
+// URL is the URL of t's GeoTIFF: what the client reads, and what the live
+// smoke check (#803) reads.
+func (t Tile) URL() string { return pathURL(t.Path()) }
+
+// pathURL is the bucket URL of a Path.
+func pathURL(path string) string { return baseURL + path }
+
 // tilePathRe is the allow-list of request paths: a GLO-30 1″ DEM tile
 // in the region, folder and file named alike. Nothing else in the bucket
 // (tileList.txt, the AUXFILES, other products) is ever requested.

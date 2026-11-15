@@ -20,9 +20,10 @@ const Host = "copernicus-dem-30m.s3.amazonaws.com"
 const baseURL = "https://" + Host
 
 const (
-	// headerBytes is the first read of a tile: GLO-30 keeps every IFD and
-	// block table in its first ~1.3 KB (IFDS_BEFORE_DATA).
-	headerBytes = 16 << 10
+	// HeaderBytes is the first read of a tile: GLO-30 keeps every IFD and
+	// block table in its first ~1.3 KB (IFDS_BEFORE_DATA). The live smoke
+	// check (#803) reads the same range.
+	HeaderBytes = 16 << 10
 	// maxHeaderBytes is a header after its one extension.
 	maxHeaderBytes = 64 << 10
 	// maxBlockBody caps a block read: the largest block the header parser
@@ -151,7 +152,7 @@ type header struct {
 	calls int
 }
 
-// header reads t's layout: one range read of headerBytes, extended once
+// header reads t's layout: one range read of HeaderBytes, extended once
 // up to maxHeaderBytes when the IFDs continue. Only a listed tile is read
 // (rangeGet).
 func (c *Client) header(ctx context.Context, t Tile) (header, error) {
@@ -182,14 +183,14 @@ func (c *Client) header(ctx context.Context, t Tile) (header, error) {
 // never sampled.
 func (c *Client) fetchHeader(work context.Context, t Tile) ([]byte, error) {
 	path := t.Path()
-	buf, size, err := c.rangeGet(work, path, 0, headerBytes-1, 0, headerBytes)
+	buf, size, err := c.rangeGet(work, path, 0, HeaderBytes-1, 0, HeaderBytes)
 	if err != nil {
 		return nil, err
 	}
 	calls := 1
 	tiff, err := dhm.ParseTiledGeoTIFF(buf, size)
-	if errors.Is(err, dhm.ErrShortHeader) && len(buf) == headerBytes {
-		more, _, err2 := c.rangeGet(work, path, headerBytes, min(maxHeaderBytes, size)-1, size, maxHeaderBytes-headerBytes)
+	if errors.Is(err, dhm.ErrShortHeader) && len(buf) == HeaderBytes {
+		more, _, err2 := c.rangeGet(work, path, HeaderBytes, min(maxHeaderBytes, size)-1, size, maxHeaderBytes-HeaderBytes)
 		if err2 != nil {
 			return nil, err2
 		}
@@ -260,5 +261,5 @@ func (c *Client) rangeGet(work context.Context, path string, from, to, size int6
 	}
 	ctx, cancel := context.WithTimeout(work, c.opts.Timeout)
 	defer cancel()
-	return dhm.RangeRead(ctx, c.http, baseURL+path, r, &c.requests)
+	return dhm.RangeRead(ctx, c.http, pathURL(path), r, &c.requests)
 }

@@ -119,7 +119,7 @@ func TestFetchRasterReturnsGeoreferencedGrid(t *testing.T) {
 	}
 }
 
-// N1: only the canonical spelling coverageQuery builds goes upstream.
+// N1: only the canonical spelling CoverageQuery builds goes upstream.
 func TestClientGetWCSRejectsNonCanonicalSpelling(t *testing.T) {
 	u := tiffUpstream(t)
 	c := newTestClient(t, u, &logSink{})
@@ -136,7 +136,7 @@ func TestClientGetWCSRejectsNonCanonicalSpelling(t *testing.T) {
 		"leading zero hght":  func(q url.Values) { q.Set("height", "0179") },
 	}
 	for name, f := range cases {
-		q := someRaster().coverageQuery()
+		q := someRaster().CoverageQuery()
 		f(q)
 		if _, err := c.Get(WCSService, q, "image/tiff"); !errors.Is(err, ErrBadRequest) {
 			t.Errorf("%s: err %v, want ErrBadRequest", name, err)
@@ -145,7 +145,7 @@ func TestClientGetWCSRejectsNonCanonicalSpelling(t *testing.T) {
 	if u.hits.Load() != 0 {
 		t.Fatalf("%d non-canonical queries reached upstream", u.hits.Load())
 	}
-	if _, err := c.Get(WCSService, someRaster().coverageQuery(), "image/tiff"); err != nil {
+	if _, err := c.Get(WCSService, someRaster().CoverageQuery(), "image/tiff"); err != nil {
 		t.Fatalf("canonical query rejected: %v", err)
 	}
 }
@@ -262,7 +262,7 @@ func TestClientGetWMSOnlyTileShape(t *testing.T) {
 	for name, q := range map[string]url.Values{
 		"empty":            {},
 		"GetCapabilities":  {"service": {"WMS"}, "request": {"GetCapabilities"}},
-		"WCS-shaped query": someRaster().coverageQuery(),
+		"WCS-shaped query": someRaster().CoverageQuery(),
 	} {
 		if _, err := c.Get(WMSService, q, "image/png"); !errors.Is(err, ErrBadRequest) {
 			t.Errorf("%s: err %v, want ErrBadRequest", name, err)

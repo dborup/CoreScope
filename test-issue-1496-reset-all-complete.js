@@ -13,13 +13,16 @@
  *   - #681 M6: the `terrain` override section, and the six path-profile
  *     chart vars (--terrain-fill, --terrain-clutter, --los-line,
  *     --fresnel-100, --fresnel-60, --profile-blocked)
+ *   - #734: the `dhmOverlays` section (the DHM overlay defaults), back to
+ *     the built-ins with dhm-defaults-changed after the pipeline re-runs
  *
  * Must NOT touch:
  *   - localStorage: meshcore-theme (theme light/dark),
  *     meshcore-gesture-hints-* (own button), meshcore-favorites,
  *     mc-channels-* selection state, mc-terrain-h:* (the viewer's own
  *     per-endpoint antenna heights — the profile panel's data, not the
- *     customizer's, exactly like favorites)
+ *     customizer's, exactly like favorites), mc-terrain-dhm /
+ *     mc-contours-dhm (the viewer's own DHM layer-control choices)
  */
 'use strict';
 
@@ -124,7 +127,11 @@ function makeSandbox() {
   return { ctx, body, rootStyle, bodyStyle, localStorage, bodyAttrs };
 }
 
-function loadCustomizer() {
+// opts.dhm: a dhm client block, which also loads the real
+// public/map-tile-providers.js before the customizer (index.html order), so
+// the #734 DHM overlay defaults have their rule.
+function loadCustomizer(opts) {
+  opts = opts || {};
   const env = makeSandbox();
   // Provide a stub MeshCorePresets.clearPreset so resetAll can call it.
   let clearPresetCalls = 0;
@@ -158,6 +165,10 @@ function loadCustomizer() {
 
   const code = fs.readFileSync(path.join(__dirname, 'public', 'customize-v2.js'), 'utf8');
   vm.createContext(env.ctx);
+  if (opts.dhm) {
+    env.ctx.window.MC_DHM_CFG = opts.dhm;
+    vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'map-tile-providers.js'), 'utf8'), env.ctx, { filename: 'map-tile-providers.js' });
+  }
   vm.runInContext(code, env.ctx, { filename: 'customize-v2.js' });
   env.api = env.ctx.window._customizerV2;
   return env;
@@ -289,6 +300,44 @@ test('every THEME_CSS_MAP variable is covered by reset, terrain included', () =>
   env.api.TERRAIN_COLOR_KEYS.forEach((k) => {
     assert.ok(map[k], k + ' is not in THEME_CSS_MAP, so reset would miss it');
   });
+});
+
+// ── #734 — the DHM overlay defaults ──
+
+const DHM_BLOCK = {
+  enabled: true, url: '/api/map/dhm/wms', layer: 'dhm_terraen_skyggekort',
+  minZoom: 7, maxZoom: 19, bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
+  overlays: [
+    { id: 'terrain', minZoom: 7, maxZoom: 19 },
+    { id: 'surface', minZoom: 7, maxZoom: 19 },
+    { id: 'contours', minZoom: 14, maxZoom: 19 },
+  ],
+};
+
+test('resets the DHM overlay defaults to the built-ins and tells an open map', () => {
+  const env = loadCustomizer({ dhm: DHM_BLOCK });
+  env.api.writeOverrides({ dhmOverlays: { hillshade: 'surface', contours: true, contourMinZoom: 16 } });
+  env.api.init({});
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(env.api.dhmOverlaySettings(env.ctx.window.SITE_CONFIG))),
+    { hillshade: 'surface', contours: true, contourMinZoom: 16 }, 'the section did not apply');
+  env.ctx.window._events.length = 0;
+  env.api.resetAll();
+  env.api.init({}); // the Reset button runs the pipeline next
+  assert.strictEqual(env.localStorage.getItem('cs-theme-overrides'), null);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(env.api.dhmOverlaySettings(env.ctx.window.SITE_CONFIG))),
+    { hillshade: 'off', contours: false, contourMinZoom: 14 });
+  assert.ok(env.ctx.window._events.some(e => e.type === 'dhm-defaults-changed'), 'no dhm-defaults-changed after reset');
+});
+
+test('does NOT clear the viewer’s own DHM layer-control choices', () => {
+  // mc-terrain-dhm / mc-contours-dhm are what the viewer picked in the map's
+  // layer control, like mc-masts: not customizer state.
+  const env = loadCustomizer({ dhm: DHM_BLOCK });
+  env.localStorage.setItem('mc-terrain-dhm', 'surface');
+  env.localStorage.setItem('mc-contours-dhm', '1');
+  env.api.resetAll();
+  assert.strictEqual(env.localStorage.getItem('mc-terrain-dhm'), 'surface');
+  assert.strictEqual(env.localStorage.getItem('mc-contours-dhm'), '1');
 });
 
 test('does NOT clear the viewer’s own remembered antenna heights', () => {

@@ -809,6 +809,86 @@ test('F10 the real registry drives map.js to the Skærmkort WMS', () => {
   assert.strictEqual(l.options.layers, 'dtk_skaermkort_daempet');
 });
 
+/* #741 M2 — Natur- og Friluftskort reaches every per-page resolver the
+ * Skærmkort styles reach, through the real registry: the same descriptor
+ * shape, so no page needed a change, and these pin that it stays so. */
+const NATUR_ID = 'dataforsyningen-natur-friluft';
+const NATUR_URL = 'https://api.dataforsyningen.dk/wms/natur_friluftskort?token=tok';
+const NATUR_ON = (extra) => ({ tiles: Object.assign({ lightDefault: NATUR_ID,
+  providers: { dataforsyningen: { enabled: true, token: 'tok' } } }, extra || {}) });
+function naturLayer(l, maxZoom) {
+  assert.strictEqual(l.kind, 'wms', 'a WMS layer, not ' + l.kind + ' ' + l._url);
+  assert.strictEqual(l._url, NATUR_URL);
+  assert.strictEqual(l.options.layers, 'Natur_Friluft_basis');
+  assert.strictEqual(l.options.tileSize, 512);
+  assert.strictEqual(l.options.zoomOffset, -1);
+  assert.strictEqual(l.options.maxZoom, maxZoom);
+  assert.strictEqual(String(l.options.attribution).replace(/<[^>]+>/g, ''),
+    'Indeholder data fra Klimadatastyrelsen, Natur- og Friluftskort, CC BY 4.0');
+}
+
+for (const page of [
+  { file: 'map.js', resolver: '_resolveTileUrl', from: 'const _initTile = _resolveTileUrl(isDark);',
+    locals: () => ({ isDark: false, _darkRefLayer: null, autoLayerGroup: group() }) },
+  { file: 'live.js', resolver: '_liveResolveTile', from: 'const _liveInitTile = _liveResolveTile(isDark);',
+    locals: () => ({ isDark: false, _liveDarkRefLayer: null, liveAutoLayerGroup: group() }) },
+]) {
+  test('F10 M2 the real registry drives ' + page.file + ' to the Natur WMS', () => {
+    const ctx = siteCtx(null, { mapCfg: NATUR_ON() });
+    Object.assign(ctx, page.locals());
+    vm.runInContext(extractFn(page.file, page.resolver) + '\n' +
+      extract(page.file, page.from, 'window.MC_applyTileFilter();'), ctx, { filename: page.file });
+    naturLayer(only(ctx), 19);
+  });
+}
+
+for (const page of [
+  { file: 'map.js', resolver: '_resolveTileUrl', sync: '_syncDarkTiles', group: 'autoLayerGroup', locals: () => ({ _darkRefLayer: null }) },
+  { file: 'live.js', resolver: '_liveResolveTile', sync: '_liveSyncDarkTiles', group: 'liveAutoLayerGroup', locals: () => ({ _liveDarkRefLayer: null }) },
+]) {
+  test('F10 M2 ' + page.file + ' Auto swaps Skærmkort for Natur when the customizer picks it', () => {
+    const ctx = siteCtx(null, { mapCfg: NATUR_ON({ lightDefault: 'dataforsyningen-skaermkort' }) });
+    const g = group();
+    ctx[page.group] = g;
+    ctx.map = makeMap();
+    Object.assign(ctx, page.locals());
+    ctx.__l0 = vm.runInContext('window.MC_createBaseLayer(window.MC_getTileSpec("light"), { maxZoom: 19 })', ctx);
+    assert.strictEqual(ctx.__l0.options.layers, 'dtk_skaermkort', 'precondition: Skærmkort first');
+    g.addLayer(ctx.__l0);
+    vm.runInContext('var tileLayer = __l0;\n' + extractFn(page.file, page.resolver) + '\n' + extractFn(page.file, page.sync), ctx);
+    assert.strictEqual(ctx.window.MC_setLightTileProvider(NATUR_ID), true, 'selectable as a light style');
+    vm.runInContext(page.sync + '(false);', ctx);
+    const l = vm.runInContext('tileLayer', ctx);
+    naturLayer(l, 19);
+    assert.deepStrictEqual(Array.from(g._layers), [l], 'the Skærmkort layer left the Auto group');
+    vm.runInContext(page.sync + '(false);', ctx);
+    assert.strictEqual(vm.runInContext('tileLayer', ctx), l, 'the same WMS again rebuilds nothing');
+  });
+}
+
+test('F10 M2 the regions map builds the Natur WMS', () => {
+  const ctx = siteCtx(null, { mapCfg: NATUR_ON() });
+  Object.assign(ctx, { root: ctx.window, map: makeMap(), tileLayer: null });
+  vm.runInContext(extract('regions-map.js',
+    "const theme = document.documentElement.getAttribute('data-theme')",
+    "map.getPane('tilePane').style.filter = tile && tile.invertFilter ? tile.invertFilter : '';"), ctx, { filename: 'regions-map.js' });
+  naturLayer(only(ctx), 19);
+  assert.strictEqual(ctx.map.panes.tilePane.style.filter, '', 'light only: never inverted');
+});
+
+for (const [name, to, nth, mapVar] of [
+  ['geo-filter modal preview', '.addTo(_gfModalMap);', 0, '_gfModalMap'],
+  ['geo-filter tab preview', '.addTo(_gfMap);', 1, '_gfMap'],
+]) {
+  test('F10 M2 the customizer ' + name + ' builds the Natur WMS', () => {
+    const ctx = siteCtx(null, { mapCfg: NATUR_ON() });
+    ctx[mapVar] = makeMap();
+    vm.runInContext(extractFn('customize-v2.js', '_cv2PreviewTile') + '\n' +
+      extract('customize-v2.js', 'var _cv2Tile = _cv2PreviewTile();', to, nth), ctx, { filename: 'customize-v2.js' });
+    naturLayer(only(ctx), 19);
+  });
+}
+
 /* The Auto layer follows the theme and the customizer's provider. A tile
  * template still changes in place (setUrl), exactly as before; a change to
  * or from a WMS style, or to another WMS, needs a layer of the other kind,
