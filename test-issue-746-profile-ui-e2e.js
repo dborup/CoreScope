@@ -26,6 +26,9 @@
  *   6. #765 §1 — the fit is never saved as the viewer's view: after a link
  *      the stored view is unchanged and a plain #/map opens it again, while
  *      the viewer's own pan is still saved.
+ *   7. #765 §3 — a path long enough to fill the strip above the panel is
+ *      fitted with the panel reserved at its cap, so B is still above the
+ *      panel once the chart has grown it.
  *
  * Usage:
  *   BASE_URL=http://localhost:13581 node test-issue-746-profile-ui-e2e.js
@@ -382,6 +385,43 @@ function hashParams(hash) {
         return { lat: c.lat, lng: c.lng, zoom: window.__mc_map.getZoom() };
       });
       assert(isElsewhere(view), 'the Map page opened at ' + JSON.stringify(view));
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  /* #765 §3: the fit reserves the panel at its cap (--tp-panel-max-h), not
+   * at the pending height it has when the fit runs. That only shows on a
+   * path long enough to fill the strip above the panel: a north-south path
+   * made 5% taller, at zoom 13, than the strip above the panel at its cap.
+   * Reserving the cap fits it one zoom out; reserving the pending panel
+   * fits it at zoom 13, and B ends up under the panel once the chart has
+   * grown it. The path is sized from the page's own map and cap, so the
+   * case holds at any desktop size. */
+  {
+    const { ctx, page, rec } = await newCtx({ storage: ELSEWHERE });
+    await step('fit (#765): a long path stays above the panel once the chart has grown it', async () => {
+      await page.goto(`${BASE}/#/map?profile=${P1}`, { waitUntil: 'domcontentloaded' });
+      await waitForRequestFor(page, rec, P1);
+      const long = await page.evaluate(() => {
+        const panel = document.querySelector('[data-testid="tp-panel"]');
+        const cap = parseFloat(getComputedStyle(panel).getPropertyValue('--tp-panel-max-h'));
+        const mapH = document.getElementById('leaflet-map').clientHeight;
+        const strip = mapH - 2 * 32 - cap;            // the fit margin is 32 px a side
+        const z = 13, half = 1.05 * strip / 2, crs = L.CRS.EPSG3857;
+        const mid = crs.latLngToPoint(L.latLng(56.15, 10.2), z);
+        const n = crs.pointToLatLng(L.point(mid.x, mid.y - half), z);
+        const s = crs.pointToLatLng(L.point(mid.x, mid.y + half), z);
+        return { pair: [n.lat, n.lng, s.lat, s.lng].map(v => v.toFixed(5)).join(','),
+          cap, mapH, strip, panelH: panel.offsetHeight };
+      });
+      assert(long.cap > 0 && long.strip > 120, 'setup: no useful strip above the panel ' + JSON.stringify(long));
+      assert(long.panelH >= long.cap - 1, 'setup: the loaded panel is not at its cap ' + JSON.stringify(long));
+      await page.evaluate((h) => { location.hash = h; }, `#/map?profile=${long.pair}`);
+      await waitForRequestFor(page, rec, long.pair);
+      await page.waitForTimeout(400);
+      const v = await endsInView(page);
+      assert(v.ok, 'an end is off the map or under the panel: ' + JSON.stringify(Object.assign(v, long)));
       assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     });
     await ctx.close();
