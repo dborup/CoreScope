@@ -665,7 +665,8 @@ func TestSkraafoto737_ClientConfig(t *testing.T) {
 		t.Fatalf("%v %s", err, w.Body.String())
 	}
 	want := SkraafotoClientConfig{Enabled: true, SearchURL: "/api/skraafoto/search", PreviewURL: "/api/skraafoto/preview/{collection}/{item}",
-		MaxPx: 1024, Note: "Public aerial photos from Klimadatastyrelsen, shown at reduced size.", Credit: skraafotoCredit()}
+		MaxPx: 1024, Note: "Public aerial photos from Klimadatastyrelsen, shown at reduced size.", Credit: skraafotoCredit(),
+		Bounds: dhmCoverageBounds()}
 	if *cc.Skraafoto != want {
 		t.Fatalf("%+v", *cc.Skraafoto)
 	}
