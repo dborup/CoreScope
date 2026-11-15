@@ -73,8 +73,10 @@ const CREDIT = 'Indeholder data fra Klimadatastyrelsen og GeoDanmark, Skærmkort
 const DATASET_URL = 'https://dataforsyningen.dk/data/962';
 const LICENSE_URL = 'https://creativecommons.org/licenses/by/4.0/';
 
+// The Skærmkort styles; Natur- og Friluftskort (M2) shares the gate and is
+// pinned by test-issue-741-natur-friluft.js.
 const offered = (mapCfg) => Object.keys(makeSandbox({ mapCfg }).window.MC_TILE_PROVIDERS)
-  .filter(id => id.indexOf('dataforsyningen-') === 0).sort();
+  .filter(id => id.indexOf('dataforsyningen-skaermkort') === 0).sort();
 
 // ── G: the gate ───────────────────────────────────────────────────────────
 console.log('\n── #741 G: off unless enabled === true and a token ──');
@@ -138,7 +140,7 @@ test('G the gate follows config that lands after load (MC_initTileRegistry)', ()
 });
 
 test('G the other providers are unaffected', () => {
-  const on = Object.keys(makeSandbox({ mapCfg: ON() }).window.MC_TILE_PROVIDERS).filter(id => ALL_IDS.indexOf(id) < 0).sort();
+  const on = Object.keys(makeSandbox({ mapCfg: ON() }).window.MC_TILE_PROVIDERS).filter(id => id.indexOf('dataforsyningen-') !== 0).sort();
   const off = Object.keys(makeSandbox({ mapCfg: { tiles: {} } }).window.MC_TILE_PROVIDERS).sort();
   assert.deepStrictEqual(on, off);
 });
