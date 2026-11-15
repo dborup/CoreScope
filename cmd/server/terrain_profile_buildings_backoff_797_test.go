@@ -13,6 +13,7 @@ import (
 	"context"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"sync/atomic"
 	"testing"
@@ -104,42 +105,75 @@ func TestTerrainBuildings_HitDuringOutageIsFree(t *testing.T) {
 
 // TestTerrainBuildings_ConcurrentHitsShareOneRetry: while a due retry
 // waits on the footprint service, the hits that arrive are served the
-// cached profile at once and start no retry of their own.
+// cached profile at once and start no retry of their own. Nothing here
+// waits on the clock (#834): the stub signals each request as it
+// arrives, the retry is held until the test lets the service answer, and
+// no deadline or timeout of the chain can end it first. A hit that
+// started a retry would reach the stub; one that waited on the running
+// retry would join its flight.
 func TestTerrainBuildings_ConcurrentHitsShareOneRetry(t *testing.T) {
 	ogc := newStubOGC(t, dokk1Footprint)
-	ogc.hold = make(chan struct{})
+	var failing atomic.Bool
+	failing.Store(true)
+	ogc.answer = func([4]float64) (int, []byte, bool) { return 503, nil, failing.Load() }
+	arrived := make(chan struct{}, 16)
+	ogc.arrived = arrived
 	env := newBuildingsEnv(t, dokk1Ground, dokk1Surface, ogc, dhm.ProfileConfig{})
-	env.p.buildingsDeadline = 300 * time.Millisecond
+	env.p.buildings = ogc.untimedSource(env.p.set)
+	env.p.deadline, env.p.buildingsDeadline = time.Hour, time.Hour
 	start := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 	now := start
 	env.p.now = func() time.Time { return now }
 	q := pathQuery(dokk1A, dokk1B)
 
-	wantClassification(t, decodeProfile(t, env.get(q)), "unavailable", false)
+	wantClassification(t, decodeProfile(t, env.get(q)), "unavailable", false) // the service is down
+	<-arrived
 	if n := ogc.calls.Load(); n != 1 {
 		t.Fatalf("%d corridor calls on the miss, want 1", n)
 	}
+	// The service is back, and answers when the test lets it.
+	hold := make(chan struct{})
+	ogc.mu.Lock()
+	ogc.hold = hold
+	ogc.mu.Unlock()
+	failing.Store(false)
 	now = start.Add(terrainBuildingsRetryEvery) // due; not changed again
-	env.p.buildingsDeadline = time.Minute
-	first := make(chan TerrainProfileResponse, 1)
-	go func() { first <- decodeProfile(t, env.get(q)) }()
-	waitUntil(t, "the retry at the footprint service", func() bool { return ogc.running.Load() == 1 })
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() { first <- env.get(q) }()
+	select {
+	case <-arrived: // the retry is at the footprint service, held
+	case w := <-first:
+		t.Fatalf("the due hit was served without a retry: %+v", decodeProfile(t, w).Classification)
+	}
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
 	for i := 0; i < 8; i++ {
-		done := make(chan TerrainProfileResponse, 1)
-		go func() { done <- decodeProfile(t, env.get(q)) }()
-		select {
-		case resp := <-done:
-			wantClassification(t, resp, "unavailable", false)
-		case <-time.After(2 * time.Second):
-			close(ogc.hold)
-			t.Fatalf("hit %d waited for the running retry", i)
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() { done <- env.get(q) }()
+	wait:
+		for {
+			select {
+			case w := <-done:
+				if c := w.Header().Get("X-CoreScope-Cache"); c != "hit" {
+					t.Fatalf("hit %d: cache %q", i, c)
+				}
+				wantClassification(t, decodeProfile(t, w), "unavailable", false)
+				break wait
+			case <-arrived:
+				t.Fatalf("hit %d started a retry of its own", i)
+			case <-poll.C:
+				// Only the first hit waits on the retry's flight.
+				if n := env.p.flight.Pending(); n != 1 {
+					t.Fatalf("hit %d: %d callers wait on the running retry, want 1", i, n)
+				}
+			}
 		}
 	}
 	if n := ogc.calls.Load(); n != 2 {
 		t.Fatalf("%d corridor calls, want 2: the hits started retries of their own", n)
 	}
-	close(ogc.hold) // the service answers: the one retry classifies
-	wantClassification(t, <-first, "full", false)
+	close(hold) // the service answers: the one retry classifies
+	wantClassification(t, decodeProfile(t, <-first), "full", false)
 	wantClassification(t, decodeProfile(t, env.get(q)), "full", false)
 	if n := ogc.calls.Load(); n != 2 {
 		t.Fatalf("%d corridor calls after the retry, want still 2", n)
