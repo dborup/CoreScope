@@ -404,12 +404,29 @@ test('no public/ file carries the credit strings', () => {
   const files = fs.readdirSync(path.join(__dirname, 'public')).filter(f => f.endsWith('.js'));
   const carrying = files.filter(f => {
     const src = codeOnly(fs.readFileSync(path.join(__dirname, 'public', f), 'utf8'));
-    return src.indexOf(GO.Owner) >= 0 || src.indexOf(GO.DatasetURL) >= 0 || src.indexOf(GO.DerivedNote) >= 0;
+    // #772 F3: the licence URL and the dataset name are credit strings too
+    // (a copy of either would let a public/ file drift from the server's
+    // block the same way a copy of the owner would), so the guard covers
+    // all five strings, not just three.
+    return src.indexOf(GO.Owner) >= 0 || src.indexOf(GO.DatasetURL) >= 0 || src.indexOf(GO.DerivedNote) >= 0
+      || src.indexOf(GO.LicenseURL) >= 0 || src.indexOf(GO.DatasetName) >= 0;
   });
   // The map credit and the profile footer both come from the server's dhm
-  // block (#765), so no copy of the owner, the dataset link or the derived
-  // note belongs anywhere in public/.
+  // block (#765), so no copy of the owner, the dataset link, the licence
+  // link, the dataset name or the derived note belongs anywhere in public/.
   assert.deepStrictEqual(carrying, []);
+});
+
+test('the licence-URL and dataset-name check does not trip on OpenTopoMap\'s own licence (#772 F3)', () => {
+  // OpenTopoMap's CC BY-SA 3.0 link (public/map-tile-providers.js) shares a
+  // creativecommons.org/licenses prefix with GO.LicenseURL but a different
+  // licence and version, and "OpenTopoMap" is not GO.DatasetName. Neither
+  // is a substring of the other, so the stricter guard above must not flag
+  // map-tile-providers.js on their account.
+  const src = codeOnly(fs.readFileSync(path.join(__dirname, 'public', 'map-tile-providers.js'), 'utf8'));
+  assert.ok(src.indexOf('creativecommons.org/licenses/by-sa/3.0') >= 0, 'setup: OpenTopoMap licence link missing');
+  assert.strictEqual(src.indexOf(GO.LicenseURL), -1, 'OpenTopoMap\'s link false-positives as the DHM licence URL');
+  assert.strictEqual(src.indexOf(GO.DatasetName), -1, 'map-tile-providers.js unexpectedly names the DHM dataset');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed');

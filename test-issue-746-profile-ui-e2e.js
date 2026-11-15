@@ -429,14 +429,19 @@ function hashParams(hash) {
         const panel = document.querySelector('[data-testid="tp-panel"]');
         const cap = parseFloat(getComputedStyle(panel).getPropertyValue('--tp-panel-max-h'));
         const mapH = document.getElementById('leaflet-map').clientHeight;
-        const strip = mapH - 2 * 32 - cap;            // the fit margin is 32 px a side
+        // #772 F4: read the fit margin back from the module instead of a
+        // copied literal, so a change to FIT_MARGIN_PX cannot quietly test
+        // a different geometry here.
+        const margin = window.TerrainProfile.FIT_MARGIN_PX;
+        const strip = mapH - 2 * margin - cap;
         const z = 13, half = 1.05 * strip / 2, crs = L.CRS.EPSG3857;
         const mid = crs.latLngToPoint(L.latLng(56.15, 10.2), z);
         const n = crs.pointToLatLng(L.point(mid.x, mid.y - half), z);
         const s = crs.pointToLatLng(L.point(mid.x, mid.y + half), z);
         return { pair: [n.lat, n.lng, s.lat, s.lng].map(v => v.toFixed(5)).join(','),
-          cap, mapH, strip, panelH: panel.offsetHeight };
+          cap, mapH, strip, panelH: panel.offsetHeight, margin };
       });
+      assert(long.margin > 0, 'setup: window.TerrainProfile.FIT_MARGIN_PX is not a positive number: ' + JSON.stringify(long));
       assert(long.cap > 0 && long.strip > 120, 'setup: no useful strip above the panel ' + JSON.stringify(long));
       assert(long.panelH >= long.cap - 1, 'setup: the loaded panel is not at its cap ' + JSON.stringify(long));
       await page.evaluate((h) => { location.hash = h; }, `#/map?profile=${long.pair}`);

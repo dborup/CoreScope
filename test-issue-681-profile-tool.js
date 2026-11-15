@@ -1727,6 +1727,25 @@ atest('a model picked with the buttons is forgotten by a Close too (#765)', asyn
   assert.strictEqual(tool.getState().modelExplicit, false, 'the pick outlived the Close');
 });
 
+/* #772 F2 (review of #770): §6 reset modelExplicit on Close, but not
+ * state.model itself, so a Close only looked like it forgot the closed
+ * link's model when that model happened to equal the customizer's default.
+ * Here the default is 'both' and the closed link stated 'dtm', so the gap
+ * shows: the next hand-picked path must use the viewer's own default. */
+atest('a Close also drops the closed link\'s model value, not only modelExplicit (#772 F2)', async () => {
+  const live = loadRouted('#/map');
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'both' }) };
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=dtm', live.TP.themeDefaults()));
+  assert.strictEqual(tool.getState().model, 'dtm', 'setup: the link did not state dtm');
+  tool.close();
+  assert.strictEqual(tool.getState().model, 'both', 'the closed link\'s model outlived the Close');
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_B });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_A });
+  assert.strictEqual(hashParamsOf(live.win.location).get('model'), null,
+    'the next hand-picked path carries the closed link\'s model: ' + live.win.location.hash);
+});
+
 // ── #746 §3: a height edit invalidates the answer in flight at once ────────
 
 console.log('\n=== #746: no stale answer while a height edit waits for its debounce ===');
