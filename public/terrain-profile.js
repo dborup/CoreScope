@@ -22,29 +22,11 @@
    * test-xss-escape-sinks.js lifts it and would refuse a second. */
   function esc(s) { return s == null ? '' : String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
-  // The single CC BY 4.0 credit line, same text as internal/dhm (#680).
-  var ATTRIBUTION = 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0';
-  var LICENCE_MARK = 'CC BY 4.0';
-  var ATTRIBUTION_URL = 'https://creativecommons.org/licenses/by/4.0/';
-  /* #733 — Dataforsyningen's terms ("Vilkår for brug af data", v3.1,
-   * https://dataforsyningen.dk/Vilkaar) also want the credit to link the
-   * dataset and to say whether the data was changed. The profile is
-   * computed from DHM — sampled, interpolated and assessed — so this line
-   * carries the derived note; the hillshade tiles are the agency's own
-   * rendering and do not (public/map-tile-providers.js).
-   *
-   * internal/dhm owns all of these strings; test-issue-733-dhm-credit.js
-   * keeps this copy and the Go one equal. */
-  var DATASET_MARK = 'Danmarks Højdemodel';
-  var DATASET_URL = 'https://dataforsyningen.dk/data/930';
-  var DERIVED_NOTE = 'data bearbejdet';
-  var ATTRIBUTION_DERIVED = ATTRIBUTION + ' — ' + DERIVED_NOTE;
-  // In the order they occur in the line: the walk below takes each mark's
-  // first occurrence in what is left of the text.
-  var CREDIT_LINKS = [
-    { mark: DATASET_MARK, href: DATASET_URL, rel: 'noopener noreferrer', testid: 'tp-credit-dataset' },
-    { mark: LICENCE_MARK, href: ATTRIBUTION_URL, rel: 'noopener noreferrer license', testid: 'tp-credit-link' }
-  ];
+  /* #765 — the chart footer's CC BY 4.0 credit comes from the server's dhm
+   * block (cmd/server/dhm_proxy.go, from internal/dhm): no credit string is
+   * kept here. footerCredit below builds it. */
+  // The footer's own test ids for the two links creditLinks names.
+  var CREDIT_TESTIDS = { dataset: 'tp-credit-dataset', license: 'tp-credit-link' };
   var ASSUMED_LABEL = 'assumed heights';
   var ENDPOINT = '/api/terrain/profile';
   var HASH_PARAM = 'profile';
@@ -974,26 +956,28 @@
     return e;
   }
 
-  /* #733 — appends `text` to `parent`, with each link's mark turned into an
-   * anchor, taking each mark's first occurrence in what is left of the
-   * text. Text nodes and elements only: nothing here builds markup, so a
-   * credit string can never become HTML. A mark that is not in the text is
-   * skipped, so the line still renders if the wording changes. */
-  function appendCredit(parent, text, links) {
-    var rest = text == null ? '' : String(text);
-    (links || []).forEach(function (l) {
-      var i = rest.indexOf(l.mark);
-      if (i < 0) return;
-      if (i > 0) parent.appendChild(el('span', null, rest.slice(0, i)));
-      var a = el('a', 'tp-credit-link', l.mark);
-      a.setAttribute('href', l.href);
-      a.setAttribute('target', '_blank');
-      a.setAttribute('rel', l.rel);
-      a.setAttribute('data-testid', l.testid);
-      parent.appendChild(a);
-      rest = rest.slice(i + l.mark.length);
+  /* footerCredit fills the chart footer from the server's dhm block
+   * (#733, #765). The profile is computed from DHM — sampled, interpolated
+   * and assessed — so the line is the block's derived credit, which says
+   * the data was changed; the hillshade tiles are the agency's own
+   * rendering and keep the plain one (public/map-tile-providers.js). The
+   * dataset and licence marks become links through the one credit walker,
+   * MC_appendCredit. A block without the derived credit falls back to the
+   * plain one, which still names the owner and the licence, and without the
+   * walker (map-tile-providers.js did not load) the credit is still shown,
+   * as plain text. */
+  function footerCredit(parent, cfg) {
+    cfg = cfg || {};
+    var text = typeof cfg.attributionDerived === 'string' && cfg.attributionDerived ? cfg.attributionDerived : cfg.attribution;
+    text = typeof text === 'string' ? text : '';
+    if (typeof global.MC_appendCredit !== 'function' || typeof global.MC_creditLinks !== 'function') {
+      parent.textContent = text;
+      return parent;
+    }
+    global.MC_appendCredit(parent, text, global.MC_creditLinks(cfg), function (a, link) {
+      a.className = 'tp-credit-link';
+      if (CREDIT_TESTIDS[link.key]) a.setAttribute('data-testid', CREDIT_TESTIDS[link.key]);
     });
-    if (rest) parent.appendChild(el('span', null, rest));
     return parent;
   }
 
@@ -1255,12 +1239,11 @@
       ui.chart.setAttribute('data-testid', 'tp-chart');
       body.appendChild(ui.chart);
 
-      // The shared credit text, with the dataset and the licence marks as
-      // links to the dataset page and the licence itself, and the note that
-      // the profile is derived from DHM: the CC BY 4.0 obligations, spelled
-      // out once (#680, #733).
+      // The server's derived credit, with the dataset and the licence marks
+      // as links to the dataset page and the licence itself: the CC BY 4.0
+      // obligations, spelled out once (#680, #733, #765).
       ui.credit = el('p', 'tp-credit-line');
-      appendCredit(ui.credit, ATTRIBUTION_DERIVED, CREDIT_LINKS);
+      footerCredit(ui.credit, opts.dhm);
       body.appendChild(ui.credit);
 
       ui.detail = el('p', 'tp-detail');
@@ -1768,14 +1751,7 @@
   }
 
   global.TerrainProfile = {
-    ATTRIBUTION: ATTRIBUTION,
-    ATTRIBUTION_URL: ATTRIBUTION_URL,
-    ATTRIBUTION_DERIVED: ATTRIBUTION_DERIVED,
-    DATASET_MARK: DATASET_MARK,
-    DATASET_URL: DATASET_URL,
-    DERIVED_NOTE: DERIVED_NOTE,
-    CREDIT_LINKS: CREDIT_LINKS,
-    appendCredit: appendCredit,
+    footerCredit: footerCredit,
     ASSUMED_LABEL: ASSUMED_LABEL,
     ENDPOINT: ENDPOINT,
     HASH_PARAM: HASH_PARAM,

@@ -81,7 +81,8 @@ function fakeDom() {
   }
   const body = mkEl('body');
   return {
-    doc: { createElement: mkEl, body: body, addEventListener() {}, querySelector: () => null, querySelectorAll: () => [] },
+    doc: { createElement: mkEl, createTextNode: (t) => ({ nodeType: 3, textContent: String(t), parentNode: null }),
+      body: body, addEventListener() {}, querySelector: () => null, querySelectorAll: () => [] },
     body: body,
     find: (id) => made.filter(e => e.attrs['data-testid'] === id).pop() || null,
   };
@@ -104,6 +105,8 @@ function load(extra) {
     setTimeout, clearTimeout, document: dom.doc,
   };
   vm.createContext(ctx);
+  // In page order: the credit walker (#765) comes before the profile.
+  vm.runInContext(fs.readFileSync('public/map-tile-providers.js', 'utf8'), ctx);
   vm.runInContext(fs.readFileSync('public/antenna-height.js', 'utf8'), ctx);
   vm.runInContext(fs.readFileSync('public/terrain-profile.js', 'utf8'), ctx);
   const TP = ctx.window.TerrainProfile;
@@ -493,17 +496,24 @@ atest('the panel says so when copying fails, and does not throw', async () => {
 
 console.log('\n=== #681 M5: CC BY 4.0 credit link ===');
 
-test('ATTRIBUTION_URL is the CC BY 4.0 licence over https', () => {
-  assert.strictEqual(TP.ATTRIBUTION_URL, 'https://creativecommons.org/licenses/by/4.0/');
+/* The credit fields of the server's dhm block. The footer is built from
+ * them (#765), so the values here are this test's own: whatever the block
+ * says is what the panel shows. test-issue-733-dhm-credit.js pins the real
+ * strings against internal/dhm. */
+const CREDIT_BLOCK = Object.assign({}, ON, {
+  attribution: 'Data fra Ejeren, Datasættet, CC BY 4.0',
+  attributionDerived: 'Data fra Ejeren, Datasættet, CC BY 4.0 — data bearbejdet',
+  datasetName: 'Datasættet', datasetUrl: 'https://example.test/datasaet',
+  licenseName: 'CC BY 4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
 });
 
 test('the panel credit links "CC BY 4.0" and the dataset in a new tab', () => {
   const { TP: T, dom } = load();
-  openTool(T, dom, deferredFetch()).open();
+  openTool(T, dom, deferredFetch(), { dhm: CREDIT_BLOCK }).open();
   const link = dom.find('tp-credit-link');
   assert.ok(link, 'the credit has no licence link');
   assert.strictEqual(link.tagName, 'A');
-  assert.strictEqual(link.attrs.href, T.ATTRIBUTION_URL);
+  assert.strictEqual(link.attrs.href, CREDIT_BLOCK.licenseUrl);
   assert.strictEqual(link.textContent, 'CC BY 4.0');
   assert.strictEqual(link.attrs.target, '_blank');
   assert.ok(/noopener/.test(link.attrs.rel || ''), 'rel = ' + link.attrs.rel);
@@ -512,16 +522,24 @@ test('the panel credit links "CC BY 4.0" and the dataset in a new tab', () => {
   const dataset = dom.find('tp-credit-dataset');
   assert.ok(dataset, 'the credit has no dataset link');
   assert.strictEqual(dataset.tagName, 'A');
-  assert.strictEqual(dataset.attrs.href, T.DATASET_URL);
-  assert.strictEqual(dataset.textContent, T.DATASET_MARK);
+  assert.strictEqual(dataset.attrs.href, CREDIT_BLOCK.datasetUrl);
+  assert.strictEqual(dataset.textContent, CREDIT_BLOCK.datasetName);
   assert.strictEqual(dataset.attrs.target, '_blank');
   assert.ok(/noopener/.test(dataset.attrs.rel || ''), 'rel = ' + dataset.attrs.rel);
-  // The text around the links plus the links reads exactly the shared
-  // credit, derived note last.
+  // The text around the links plus the links reads exactly the block's
+  // derived credit (#765).
   const line = link.parentNode;
   assert.strictEqual(dataset.parentNode, line, 'the two links are not on the same line');
-  assert.strictEqual(line.children.map(c => c.textContent).join(''), T.ATTRIBUTION_DERIVED);
-  assert.ok(T.ATTRIBUTION_DERIVED.endsWith(T.DERIVED_NOTE), T.ATTRIBUTION_DERIVED);
+  assert.strictEqual(line.children.map(c => c.textContent).join(''), CREDIT_BLOCK.attributionDerived);
+});
+
+test('a panel without a dhm block links nothing it would have to invent', () => {
+  // The host always passes the block; without one the page has no credit
+  // string of its own to fall back to (#765).
+  const { TP: T, dom } = load();
+  openTool(T, dom, deferredFetch()).open();
+  assert.strictEqual(dom.find('tp-credit-link'), null);
+  assert.strictEqual(dom.find('tp-credit-dataset'), null);
 });
 
 // ── 7. #711 polish ─────────────────────────────────────────────────────────

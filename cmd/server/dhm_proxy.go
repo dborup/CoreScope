@@ -105,6 +105,11 @@ type DHMClientConfig struct {
 	DatasetURL  string `json:"datasetUrl"`
 	LicenseName string `json:"licenseName"`
 	LicenseURL  string `json:"licenseUrl"`
+	// AttributionDerived is the credit of a view computed from DHM
+	// (dhm.AttributionDerived): the profile chart footer shows it, with the
+	// same two marks as links. Sent so the page keeps no copy of any
+	// credit string (#765).
+	AttributionDerived string `json:"attributionDerived"`
 }
 
 // DHMPointAntenna is a free point's antenna height without a request
@@ -129,6 +134,8 @@ func dhmClientConfig() *DHMClientConfig {
 		DatasetURL:  dhm.DatasetURL,
 		LicenseName: dhm.LicenseName,
 		LicenseURL:  dhm.LicenseURL,
+
+		AttributionDerived: dhm.AttributionDerived,
 	}
 }
 

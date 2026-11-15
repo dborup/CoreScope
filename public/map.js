@@ -2808,6 +2808,8 @@
       // #746: the server's rule for a free point's height, so a drop onto
       // one is measured with the customizer's point default in one request.
       pointAntenna: window.MC_DHM_CFG.pointAntenna || null,
+      // #765: the chart footer's credit and its links, from the server.
+      dhm: window.MC_DHM_CFG,
       onMoveStart: function (side) { profileArmFor(side, true); },
       onMoveCancel: profileDisarm,
       onEndpointsChange: profileDrawLine,

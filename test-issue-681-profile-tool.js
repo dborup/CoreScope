@@ -713,12 +713,13 @@ test('the chart is an accessible image with the verdict in its title', () => {
   assert.ok(/clear/i.test(m[1]), m[1]);
 });
 
-test('the CC BY 4.0 credit is the shared constant, not micro text in the SVG', () => {
+test('the CC BY 4.0 credit is the panel\'s line, not micro text in the SVG', () => {
   // Review F7: a 9px label inside an 820-unit viewBox stretched onto a
   // 340px panel renders about 3px tall. A licence credit nobody can read
   // is not a credit, so it is the panel's HTML line now; the E2E pins
-  // that it is visible, and visible exactly once.
-  assert.strictEqual(TP.ATTRIBUTION, 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0');
+  // that it is visible, and visible exactly once. Its text comes from the
+  // server's dhm block (#765, test-issue-733-dhm-credit.js).
+  assert.strictEqual(typeof TP.footerCredit, 'function');
   const svg = TP.buildChart(flatPath(), {});
   assert.strictEqual(svg.indexOf('Klimadatastyrelsen'), -1, 'the credit is back inside the stretched chart');
 });
