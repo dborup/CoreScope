@@ -52,4 +52,16 @@ const (
 
 	// LicenseURL is the Copernicus DEM licence.
 	LicenseURL = "https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/DEM/resources/license/License-COPDEM-30.pdf"
+
+	// LicenseName is the licence's mark in Credit, linked to LicenseURL.
+	LicenseName = "Copernicus DEM licence"
+
+	// DatasetURL is the dataset's page, linked from DatasetName in Credit.
+	DatasetURL = "https://registry.opendata.aws/copernicus-dem/"
+
+	// Credit is the short credit line the profile UI shows on a mixed
+	// profile, in place of the long AttributionDerived line, which the UI
+	// keeps one step away (#738 decision 2). Its DatasetName and
+	// LicenseName marks become links, in that order.
+	Credit = "Outside Denmark: produced using " + DatasetName + ", provided under COPERNICUS by the European Union and ESA (" + LicenseName + ")"
 )

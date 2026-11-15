@@ -69,6 +69,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dhm"
 )
 
@@ -137,6 +138,22 @@ type DHMClientConfig struct {
 	Overlays []DHMOverlayClientConfig `json:"overlays"`
 	// Ortho is present only while map.dhm.ortho.enabled is set (#728).
 	Ortho *DHMOrthoClientConfig `json:"ortho,omitempty"`
+	// Fill is the foreign fill's credit (#738 M2), present only while the
+	// profile is served with map.dhm.profile.foreignFill.enabled.
+	Fill *DHMFillClientConfig `json:"fill,omitempty"`
+}
+
+// DHMFillClientConfig is the Copernicus DEM credit of a mixed profile
+// (#738 M2), in parts, from internal/copdem: the profile panel shows
+// Credit with the dataset and licence marks as links, through the same
+// walker as the DHM credit, so the page keeps no copy of it. The long
+// Art. 6(b) line is the profile response's attributionFill.
+type DHMFillClientConfig struct {
+	Credit      string `json:"credit"`
+	DatasetName string `json:"datasetName"`
+	DatasetURL  string `json:"datasetUrl"`
+	LicenseName string `json:"licenseName"`
+	LicenseURL  string `json:"licenseUrl"`
 }
 
 // DHMOverlayClientConfig is one entry of `dhm.overlays` in
@@ -686,6 +703,15 @@ func (s *Server) dhmClientConfig() *DHMClientConfig {
 	}
 	if s.dhm.orthoCache != nil {
 		c.Ortho = dhmOrthoClientConfig()
+	}
+	if s.terrain != nil && s.terrain.fill != nil {
+		c.Fill = &DHMFillClientConfig{
+			Credit:      copdem.Credit,
+			DatasetName: copdem.DatasetName,
+			DatasetURL:  copdem.DatasetURL,
+			LicenseName: copdem.LicenseName,
+			LicenseURL:  copdem.LicenseURL,
+		}
 	}
 	return c
 }
