@@ -1983,6 +1983,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 
 	if s.store != nil {
 		hashInfo := s.store.GetNodeHashSizeInfo()
+		lastKnownHS := s.store.LastKnownHashSizes() // #807
 		relayWindow := s.cfg.GetHealthThresholds().RelayActiveHours
 		// #1257: bulk-compute relay info + usefulness scores ONCE per
 		// request (cached 15s) instead of calling the per-node helpers
@@ -2021,6 +2022,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		for _, node := range nodes {
 			if pk, ok := node["public_key"].(string); ok {
 				EnrichNodeWithHashSize(node, hashInfo[pk])
+				EnrichNodeWithLastKnownHashSize(node, lastKnownHS[pk])
 				mbEntry, _ := s.store.GetMultibyteCapFor(pk)
 				EnrichNodeWithMultiByte(node, mbEntry)
 				if role, _ := node["role"].(string); role == "repeater" || role == "room" {
@@ -2154,6 +2156,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		hashInfo := s.store.GetNodeHashSizeInfo()
 		EnrichNodeWithHashSize(node, hashInfo[pubkey])
+		EnrichNodeWithLastKnownHashSize(node, s.store.LastKnownHashSizes()[pubkey]) // #807
 		mbEntry, _ := s.store.GetMultibyteCapFor(pubkey)
 		EnrichNodeWithMultiByte(node, mbEntry)
 		if role, _ := node["role"].(string); role == "repeater" || role == "room" {

@@ -5281,6 +5281,14 @@ body[data-cb-preset="achromat"] {
 .mc-mb-label.status-confirmed { border-left-color: var(--mc-mb-confirmed); }
 .mc-mb-label.status-suspected { border-left-color: var(--mc-mb-suspected); }
 .mc-mb-label.status-unknown   { border-left-color: var(--mc-mb-unknown);   }
+/* #807: hash size unknown (no advert known) — the label shows the 1-byte
+   prefix plus an ellipsis; a dashed outline in the label's own text colour
+   keeps it from reading as a confirmed 1-byte repeater. */
+.mc-mb-label.hs-unknown {
+  font-style: italic;
+  outline: 1px dashed currentColor;
+  outline-offset: -1px;
+}
 
 /* Forced-colors / Windows High Contrast — degrade gracefully (audit item 7). */
 @media (forced-colors: active) {

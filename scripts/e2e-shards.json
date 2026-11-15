@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-807-map-hash-size-unknown-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #807 map label for a repeater without hash_size: on the fixture server at 1440x900 every rendered repeater label agrees with its node's hash_size (known size = that many prefix bytes, unknown = 1-byte prefix + ellipsis, hs-unknown class, aria and tooltip), and at 375x560 with a mocked /api/nodes a 2-byte and an unknown-size repeater plus a real tap on the unknown label opening a popup that says size unknown. About 8s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-busiest-repeaters-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
