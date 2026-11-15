@@ -6502,6 +6502,23 @@ body.embed #app.app-fixed {
   color: var(--text-muted);
 }
 .tp-mast-note[hidden] { display: none; }
+/* #723 M3 — a protected ancient monument at an end. The chip takes the
+   warn tone from .tp-chip-warn and stays on one line, so in a short
+   landscape panel it does not grow the title row and push the chart down;
+   the note under the detail line carries the wording, the type and the
+   distance. */
+.tp-chip-heritage { white-space: nowrap; }
+.tp-heritage-note {
+  margin: 2px 0 0;
+  padding-left: 6px;
+  border-left: 3px solid var(--warning);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+.tp-heritage-note[hidden] { display: none; }
+.tp-heritage-warning { color: var(--text); font-weight: var(--fw-semibold, 600); }
+.tp-heritage-credit { font-size: 11px; }
 /* The line that explains what a surface verdict means for a radio link.
    Shown only with the chip it explains, so it is hidden by default. */
 .tp-surface-note {

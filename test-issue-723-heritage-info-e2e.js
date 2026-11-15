@@ -271,10 +271,16 @@ function profileFor(q) {
       await clickMap(page, 150, 60);
       await page.waitForTimeout(800);
       assert(rec.profile.length >= 1, 'no profile request');
-      assert(rec.info.length === 0, 'lookups while picking: ' + rec.info.length);
+      // Since #723 M3 the profile itself asks about its ends, at the
+      // server's 5-decimal coordinates (profileFor: both at 55.75, 9.42,
+      // so one lookup); a click asks at 6 decimals. Only clicks count here.
+      const isProfileEnd = (u) => u.searchParams.get('lat') === '55.75000' && u.searchParams.get('lon') === '9.42000';
+      const clicks = () => rec.info.filter(u => !isProfileEnd(u));
+      assert(rec.info.length - clicks().length === 1, 'profile end lookups: ' + (rec.info.length - clicks().length));
+      assert(clicks().length === 0, 'lookups while picking: ' + clicks().length);
       assert(!(await page.$('.mc-heritage-popup')), 'heritage popup while picking');
       await clickMap(page, 0, -150);
-      assert(rec.info.length === 1, 'no lookup once the picker is done: ' + rec.info.length);
+      assert(clicks().length === 1, 'no lookup once the picker is done: ' + clicks().length);
       assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     } finally { await ctx.close(); }
   });
