@@ -241,6 +241,10 @@ jobs:
           # internal/heritage (#723 M2): protection-zone WFS client, parser and
           # nearest-zone maths, tested against a fake WFS.
           (cd internal/heritage && go test -race ./...)
+          # internal/buildings (#730 M1b): INSPIRE building-footprint corridor
+          # client, parser and classifier, tested against a fake OGC API. Its
+          # own module, not yet imported by cmd/server, so nothing else runs it.
+          (cd internal/buildings && go test -race ./...)
           # internal/regions is its own module: the server/ingestor steps
           # above compile it but never run its tests, and it now holds the
           # hashRegions/hashRegionsPath loader both processes share (#360).

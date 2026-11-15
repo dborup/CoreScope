@@ -133,9 +133,9 @@ func TestReadNaNAndInf(t *testing.T) {
 }
 
 // TestReadVertexCap: the budget is the whole document's, counted inclusively
-// (exactly MaxVertices is allowed, one more is refused), and it is charged
-// even by the geometry that overruns it, so splitting the vertices over
-// several features or rings does not evade it.
+// (exactly MaxVertices is allowed, one more is refused), and every geometry
+// Read accepts is charged, so splitting the vertices over several features
+// or rings does not evade it.
 func TestReadVertexCap(t *testing.T) {
 	ring := func(n int) string {
 		parts := make([]string, n)

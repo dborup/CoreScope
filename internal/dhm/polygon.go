@@ -3,6 +3,7 @@ package dhm
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 )
 
@@ -25,10 +26,26 @@ type MultiPolygon [][][][2]float64
 
 // ErrGeometry is every refusal of a geometry: a type that is not Polygon or
 // MultiPolygon, a polygon without rings, a ring under four positions, a
-// position with fewer than two values or outside the reader's window, or
-// more vertices than the reader's budget. Callers wrap or replace it with
-// their own response-shape error; the detail is never shown to a client.
+// position with fewer than two values or outside the reader's window
+// (ErrOutsideWindow), or more vertices than the reader's budget
+// (ErrVertexBudget). Callers wrap or replace it with their own
+// response-shape error; the detail is never shown to a client.
 var ErrGeometry = errors.New("dhm: unexpected polygon geometry")
+
+// ErrVertexBudget is the refusal of a geometry that would take the reader
+// past MaxVertices. It is an ErrGeometry too (errors.Is), so a caller that
+// refuses the whole document on any bad geometry need not tell them apart;
+// a caller that skips a bad feature and reads on (internal/buildings) stops
+// here instead, since every later feature would be refused as well.
+var ErrVertexBudget = fmt.Errorf("%w: vertex budget exceeded", ErrGeometry)
+
+// ErrOutsideWindow is the refusal of a position outside the reader's
+// window. It is an ErrGeometry too. It means the service answered in
+// another CRS or axis order, which affects every feature of the document,
+// so a caller that skips a bad feature refuses the whole document on it
+// (internal/buildings): skipping every footprint of a lat/lon answer would
+// read as "no buildings here".
+var ErrOutsideWindow = fmt.Errorf("%w: position outside the window", ErrGeometry)
 
 // PolygonReader decodes the GeoJSON polygon geometries of one document into
 // EPSG:25832 metres. One reader reads every geometry of one document, so the
@@ -53,7 +70,8 @@ type PolygonReader struct {
 	vertices int
 }
 
-// Vertices is the number of vertices read so far, across every Read.
+// Vertices is the number of vertices of every geometry Read has returned,
+// across every Read. A refused geometry is not counted.
 func (r *PolygonReader) Vertices() int { return r.vertices }
 
 // Read decodes one GeoJSON geometry's "type" and "coordinates" into a
@@ -61,10 +79,25 @@ func (r *PolygonReader) Vertices() int { return r.vertices }
 // reader's budget. A Polygon is returned as a MultiPolygon of one. A third
 // value in a position (height) is allowed and ignored.
 //
+// A refused geometry charges nothing (#730 M1b): the rings it had already
+// validated are refunded, so a caller that skips a bad feature keeps the
+// whole budget for the good ones. The budget therefore bounds the vertices
+// a caller measures against, while the decoding work of a refused geometry
+// is bounded by the caller's body cap.
+//
 // JSON itself keeps NaN and ±Inf out: they are not JSON numbers, and a
 // finite literal too large for a float64 is an encoding/json error. So a
 // position that passes the window is always finite.
 func (r *PolygonReader) Read(typ string, coords json.RawMessage) (MultiPolygon, error) {
+	start := r.vertices
+	out, err := r.read(typ, coords)
+	if err != nil {
+		r.vertices = start
+	}
+	return out, err
+}
+
+func (r *PolygonReader) read(typ string, coords json.RawMessage) (MultiPolygon, error) {
 	var multi [][][][]float64
 	switch typ {
 	case "MultiPolygon":
@@ -93,13 +126,16 @@ func (r *PolygonReader) Read(typ string, coords json.RawMessage) (MultiPolygon, 
 			}
 			pts := make([][2]float64, len(ring))
 			for i, pos := range ring {
-				if len(pos) < 2 || pos[0] < minE || pos[0] > maxE || pos[1] < minN || pos[1] > maxN {
+				if len(pos) < 2 {
 					return nil, ErrGeometry
+				}
+				if pos[0] < minE || pos[0] > maxE || pos[1] < minN || pos[1] > maxN {
+					return nil, ErrOutsideWindow
 				}
 				pts[i] = [2]float64{pos[0], pos[1]}
 			}
 			if r.vertices += len(pts); r.vertices > r.MaxVertices {
-				return nil, ErrGeometry
+				return nil, ErrVertexBudget
 			}
 			rings = append(rings, pts)
 		}
