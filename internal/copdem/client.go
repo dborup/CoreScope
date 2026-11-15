@@ -126,14 +126,13 @@ func NewClient(opts Options) *Client {
 		t.DisableCompression = true
 		tr = t
 	}
+	// Never follow a redirect, to any host: a 3xx is not a 206 and fails
+	// like any other status. Each request's context carries its timeout.
+	hc := dhm.NewNoRedirectClient(0)
+	hc.Transport = tr
 	return &Client{
-		opts: opts,
-		http: &http.Client{
-			Transport: tr,
-			// Never follow a redirect, to any host: a 3xx is not a 206 and
-			// fails like any other status.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
+		opts:    opts,
+		http:    hc,
 		sem:     make(chan struct{}, opts.Concurrency),
 		decode:  make(chan struct{}, opts.Concurrency),
 		adm:     dhm.NewAdmission(opts.MaxPending),
@@ -266,7 +265,7 @@ func (c *Client) rangeGet(work context.Context, path string, from, to, size int6
 	c.requests.Add(1)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, 0, transportFailure(err)
+		return nil, 0, dhm.TransportFailure(ctx, err)
 	}
 	// Closed unread on every refusal: a body that is not the range asked
 	// for is never downloaded.
@@ -289,21 +288,10 @@ func (c *Client) rangeGet(work context.Context, path string, from, to, size int6
 	// is read, whatever Content-Length says.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, n+1))
 	if err != nil {
-		return nil, 0, transportFailure(err)
+		return nil, 0, dhm.TransportFailure(ctx, err)
 	}
 	if int64(len(body)) != n {
 		return nil, 0, dhm.FetchError{Reason: "bad content length"}
 	}
 	return body, total, nil
-}
-
-// transportFailure reduces a transport or body error to its category.
-func transportFailure(err error) error {
-	if errors.Is(err, context.DeadlineExceeded) || dhm.IsTimeout(err) {
-		return dhm.FetchError{Reason: "timeout"}
-	}
-	if errors.Is(err, context.Canceled) {
-		return dhm.FetchError{Reason: "canceled"}
-	}
-	return dhm.FetchError{Reason: "transport"}
 }
