@@ -48,12 +48,39 @@ const HopResolver = loadResolver();
 // to give the real code a baseline to compare against. It throws when the edit
 // no longer applies, so a refactor cannot turn a comparison into a no-op.
 function realmResolver(edit) {
+  return realmWindow(edit).HopResolver;
+}
+function realmWindow(edit) {
   const src = fs.readFileSync(path.join(REPO, 'public', 'hop-resolver.js'), 'utf8');
   const code = edit ? edit(src) : src;
   if (edit && code === src) throw new Error('realmResolver: the source edit did not apply');
   const w = {};
   new Function('window', 'console', code)(w, { debug: () => {} });
-  return w.HopResolver;
+  return w;
+}
+// #657 — a machine-independent cost meter. The edit counts every solvePath()
+// call and every DP relaxation (the two inner loops that make a solve
+// O(hops x MAX_GAP x cands²)) on `window`, so a perf gate can assert on work
+// done instead of wall-clock time, which a GC or JIT pause can blow up.
+// `base` optionally switches a mechanism off first (e.g. withoutRescue).
+function countingResolver(base) {
+  const edits = [
+    ['function solvePath(C, steps, start, end, bans, probe) {', 'function solvePath(C, steps, start, end, bans, probe) { window.solves++;'],
+    ['const v = Fp[j] + row[j * K + k];', 'const v = Fp[j] + row[j * K + k]; window.work++;'],
+    ['const v = Bq[l] + row[base + l];', 'const v = Bq[l] + row[base + l]; window.work++;'],
+  ];
+  const w = realmWindow(src => {
+    let out = base ? base(src) : src;
+    for (const [a, b] of edits) {
+      if (out.split(a).length !== 2) throw new Error('countingResolver: ' + a + ' must occur exactly once');
+      out = out.replace(a, b);
+    }
+    return out;
+  });
+  return {
+    R: w.HopResolver,
+    measure(fn) { w.solves = 0; w.work = 0; const out = fn(w.HopResolver); return { out: out, solves: w.solves, work: w.work }; },
+  };
 }
 // The #657 rescue pass switched off: inferPath() as #655 shipped it.
 const withoutRescue = src => src.replace('pass < dedupKeys.size', 'pass < 0');
@@ -1065,6 +1092,19 @@ console.log('\n=== #657: a node banned out of the path entirely is rescued ===')
     assert(names(R) === names(Before), 'a rescue that raises the total cost is undone (got ' + names(R) + ')');
   }
 
+  // Undoing a rejected pass restores its bans, not only its solution: the
+  // next pass, the confidence re-solve and the final answer all read `bans`.
+  // On this 3-hop path a pass is rejected and a later pass then places all
+  // three nodes; with the rejected pass's bans left in place only one fits.
+  // Input found by a 4,000-case search, pinned literally.
+  {
+    const t = randomPath(3247, { prefixes: 3, cands: 4, hops: 20 }, true);
+    const names = Res => placedBy(Res, t).map(e => e.located ? e.name : '-').join(' ');
+    const KeepBans = realmResolver(src => src.replace('beforeBans.forEach((b, i) => { bans[i] = b; });', ''));
+    assert(names(KeepBans) !== names(R), 'fixture: keeping a rejected pass\'s bans changes this path (' + names(KeepBans) + ')');
+    assert(names(R) === 'n0-1 n0-2 n0-0', 'a rejected pass\'s bans are undone, so all 3 nodes are placed (got ' + names(R) + ')');
+  }
+
   // Two single-prefix paths (one prefix repeated along 18-20 hops, 4 located
   // candidates) where the details of the probe decide how much is rescued.
   // Seed 6 needs the probe to price a node with it banned EVERYWHERE: left
@@ -1082,9 +1122,14 @@ console.log('\n=== #657: a node banned out of the path entirely is rescued ===')
 
   // The invariant holds through the rescue. Random paths of 1-63 hops over
   // 1-8 prefixes with 1-16 candidates, some with server hints and neighbour
-  // links: no node is placed twice, and the worst stays far below the J gate.
+  // links: no node is placed twice, and the rescue's extra work is bounded.
+  // The work gate counts DP relaxations against the same input without the
+  // rescue, so it is the same number on every machine (deterministic); the
+  // wall-clock worst is printed as a benchmark only. Measured maxima: 1.83x
+  // the solves and 1.80x the relaxations of #655.
   {
-    let dup = 0, worst = 0, rescued = 0;
+    const Counted = countingResolver(), CountedBefore = countingResolver(withoutRescue);
+    let dup = 0, worst = 0, rescued = 0, worstSolveRatio = 0, worstWorkRatio = 0;
     for (let seed = 1; seed <= 300; seed++) {
       const r = rng(seed);
       const P = 1 + Math.floor(r() * 8), cands = 1 + Math.floor(r() * 16), L = 1 + Math.floor(r() * 63);
@@ -1119,11 +1164,43 @@ console.log('\n=== #657: a node banned out of the path entirely is rescued ===')
       dup += keys.length - new Set(keys).size;
       Before.init(nodes); Before.setPathAffinity(graph);
       if (Before.inferPath(hops, opts).map(e => e.pubkey).join() !== out.map(e => e.pubkey).join()) rescued++;
+      const run = Res => { Res.init(nodes); Res.setPathAffinity(graph); return Res.inferPath(hops, opts); };
+      const now = Counted.measure(run), was = CountedBefore.measure(run);
+      worstSolveRatio = Math.max(worstSolveRatio, now.solves / was.solves);
+      worstWorkRatio = Math.max(worstWorkRatio, now.work / Math.max(1, was.work));
     }
-    console.log('    300 random paths: ' + rescued + ' changed by the rescue, worst ' + worst.toFixed(1) + ' ms');
+    console.log('    300 random paths: ' + rescued + ' changed by the rescue; worst ' + worstSolveRatio.toFixed(2) +
+      'x the solves and ' + worstWorkRatio.toFixed(2) + 'x the DP relaxations of #655' +
+      ' (benchmark, not asserted: slowest single run ' + worst.toFixed(1) + ' ms)');
     assert(rescued > 0, 'fixture: the random paths exercise the rescue (' + rescued + ' changed)');
     assert(dup === 0, 'no node is placed twice on 300 random paths through the rescue (got ' + dup + ')');
-    assert(worst < 120, 'and the slowest of them stays under the 120 ms gate (' + worst.toFixed(1) + ' ms)');
+    assert(worstWorkRatio <= 2.5, 'and the rescue at most 2.5x the DP work of #655 on any of them (worst ' +
+      worstWorkRatio.toFixed(2) + 'x the relaxations, ' + worstSolveRatio.toFixed(2) + 'x the solves)');
+  }
+
+  // Complexity, not time: one prefix repeated along n and 2n hops (16 located
+  // candidates, the #598 J worst case). Each solve is linear in the hops, and
+  // the rescue adds a bounded number of solves (at most one pass per lost
+  // node), so doubling the path at most about doubles the work. A rescue
+  // that grew with hops x passes would show ~4x here. Counted, not timed.
+  {
+    const Counted = countingResolver();
+    const nodes16 = [];
+    for (let c = 0; c < 16; c++) {
+      nodes16.push({ public_key: '00' + c.toString(16).padStart(2, '0') + '0'.repeat(60), name: 'r' + c,
+        role: 'repeater', lat: 50 + (c % 4) * 0.25, lon: 5 + Math.floor(c / 4) * 0.25 });
+    }
+    const runL = L => Counted.measure(Res => {
+      Res.init(nodes16); Res.setPathAffinity({});
+      return Res.inferPath(new Array(L).fill('00'), { observer: { lat: 53, lon: 5.3 }, origin: { lat: 50, lon: 5 } });
+    });
+    const n = runL(32), n2 = runL(64);
+    const growth = n2.work / n.work;
+    console.log('    one prefix x 16 candidates: 32 hops ' + n.solves + ' solves / ' + n.work + ' relaxations, 64 hops ' +
+      n2.solves + ' / ' + n2.work + ' (' + growth.toFixed(2) + 'x)');
+    assert(n2.out.filter(e => e.located).length >= 16, 'fixture: the 64-hop path places its 16 candidates');
+    assert(n2.solves <= n.solves + 2, '#657: doubling the hops adds no rescue passes (' + n.solves + ' -> ' + n2.solves + ' solves)');
+    assert(growth <= 2.5, '#657: doubling the hops at most ~doubles the DP work (' + growth.toFixed(2) + 'x; O(n²) would be ~4x)');
   }
 }
 
