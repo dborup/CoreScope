@@ -36,3 +36,27 @@ func TestReadRefundsAFailedRead(t *testing.T) {
 		t.Fatalf("vertices %d, want 10", r.Vertices())
 	}
 }
+
+// TestReadBudgetErrorIsDistinct: overrunning the budget is ErrVertexBudget,
+// which is still an ErrGeometry for callers that refuse the whole document
+// (internal/heritage), while a caller that skips bad features can stop at
+// the budget instead of skipping every feature after it. The overrun is
+// refunded like any other failure, so Vertices stays the accepted count.
+func TestReadBudgetErrorIsDistinct(t *testing.T) {
+	r := reader(8)
+	if _, err := r.Read("Polygon", json.RawMessage(`[`+square+`]`)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := r.Read("Polygon", json.RawMessage(`[`+square+`]`))
+	if !errors.Is(err, ErrVertexBudget) || !errors.Is(err, ErrGeometry) {
+		t.Fatalf("overrun: err %v, want ErrVertexBudget wrapping ErrGeometry", err)
+	}
+	if r.Vertices() != 5 {
+		t.Fatalf("vertices %d after the overrun, want 5", r.Vertices())
+	}
+	// A shape error is not a budget error.
+	_, err = reader(100).Read("Point", json.RawMessage(`[526000,6179000]`))
+	if !errors.Is(err, ErrGeometry) || errors.Is(err, ErrVertexBudget) {
+		t.Fatalf("shape error %v reads as a budget error", err)
+	}
+}
