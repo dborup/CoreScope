@@ -164,6 +164,14 @@
       "measurementNote": "New suite; #723 M2 click-for-info on the protected ancient monuments overlay on Map and Live with an intercepted heritage client-config block, a stubbed and recorded GET /api/terrain/heritage and the agency's WMS answered by a 1x1 PNG (neither the WMS nor the WFS is contacted): no lookup with the overlay off or at zoom 11, one lat/lon-only lookup and the monument popup at zoom 13, the overlay going off closing it, dataset HTML shown as text and never run, a node marker click and Path profile picking winning over the lookup, a 44x44 close button at 360x740 touch on both pages, a popup closed while its lookup is pending staying closed (the lookup aborted) on both pages, and the popup's theme variables in light and dark. About 85s locally; no CI duration measured yet. Assigned to shard 1 next to the #723 M1 suite."
     },
     {
+      "file": "test-issue-723-profile-warning-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #723 M3 protected ancient monument warning in the Map Path profile with intercepted dhm and heritage client-config blocks, a stubbed /api/terrain/profile and a stubbed, recorded GET /api/terrain/heritage (the agency's WMS/WFS, DHM and every other outside host are stubbed or refused): no lookup without the heritage block; A inside a zone, B 42 m from one and both at once each show the warn chip in the title row and the note under the detail line with the neutral wording, type, distance and credit, one lat/lon-only lookup per end, and the verdict chip exactly as without the block; a height edit adds no lookup and Close takes the note away; nothing near, 502 and 429 stay silent with no all-clear text; hostile dataset text is inert; at 740x360, 568x320 and 844x390 touch the note does not move the chart, which stays hit-testable on screen; the chip and note border use --warning in light and dark. About 16s locally; no CI duration measured yet. Assigned to shard 1 next to the #723 M1/M2 suites."
+    },
+    {
       "file": "test-issue-674-1byte-hop-modes-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

@@ -2819,6 +2819,8 @@
       pointAntenna: window.MC_DHM_CFG.pointAntenna || null,
       // #765: the chart footer's credit and its links, from the server.
       dhm: window.MC_DHM_CFG,
+      // #723 M3: the monuments block; with it, each end is looked up.
+      heritage: window.MC_getHeritageConfig ? window.MC_getHeritageConfig() : null,
       onMoveStart: function (side) { profileArmFor(side, true); },
       onMoveCancel: profileDisarm,
       onEndpointsChange: profileDrawLine,

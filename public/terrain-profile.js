@@ -13,7 +13,9 @@
  *
  * Nothing is fetched, and no listener is attached, until the tool is armed:
  * the panel DOM is built on first open and one request is issued per
- * profile, with the height inputs debounced.
+ * profile, with the height inputs debounced. With the server's heritage
+ * block, a resolved profile then looks up each end once in the protected
+ * monuments register (#723 M3), remembering the answers.
  */
 (function (global) {
   'use strict';
@@ -674,6 +676,100 @@
     };
   }
 
+  // ── Protected ancient monuments (#723 M3) ────────────────────────────────
+
+  /* After a profile resolves, each end is looked up in the protected
+   * ancient monuments register through the server
+   * (GET /api/terrain/heritage, cmd/server/heritage_query.go). An end
+   * inside a protection zone, or within the server's radius of one, gets a
+   * warn-tone chip and a note under the detail line. Both are advisory.
+   * The verdict is the server's and stays as it is.
+   *
+   * The wording is neutral on purpose. No public source we could read
+   * says, for this exact layer, that it is the statutory 100 m
+   * fortidsmindebeskyttelseslinje (naturbeskyttelsesloven § 18), so the
+   * note makes no legal claim (owner decision on #723). Silence is never
+   * an all-clear: nothing near, a failed lookup and a disabled block all
+   * show nothing, and no text says that an end is free of monuments. */
+  var HERITAGE_ENDPOINT = '/api/terrain/heritage';
+  var HERITAGE_WARNING = 'Protected ancient monument / protection zone nearby — check before building';
+  // Answers kept per create(), so a height edit or a model switch re-asks
+  // nothing, and moving one end asks only for that end.
+  var HERITAGE_KEEP = 8;
+
+  /* heritageOffered: the server sends the heritage block only while
+   * map.heritage is enabled, and the same switch serves the endpoint. */
+  function heritageOffered(cfg) { return !!(cfg && cfg.enabled === true); }
+
+  /* heritageQuery is the lookup's query string for one end of a response
+   * (the server's own snapped coordinates), or null without a real one. */
+  function heritageQuery(end) {
+    var lat = end && end.lat, lon = end && end.lon;
+    if (typeof lat !== 'number' || typeof lon !== 'number' || !isFinite(lat) || !isFinite(lon)
+      || lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+    return 'lat=' + fmtCoord(lat) + '&lon=' + fmtCoord(lon);
+  }
+
+  /* heritageFinding reads one answer: the zone the end is in or near, or
+   * null for no answer, nothing near, or a shape we do not know. Cast at
+   * the boundary: only a real boolean is "inside" and only a non-negative
+   * number is a distance. */
+  function heritageFinding(resp) {
+    var n = resp && typeof resp === 'object' ? resp.nearest : null;
+    if (!n || typeof n !== 'object') return null;
+    var inside = n.insideZone === true;
+    var d = !inside && typeof n.distanceM === 'number' && isFinite(n.distanceM) && n.distanceM >= 0 ? Math.round(n.distanceM) : null;
+    return {
+      type: typeof n.type === 'string' && n.type ? n.type : 'Protected monument',
+      inside: inside,
+      distanceM: d,
+      credit: typeof resp.attribution === 'string' ? resp.attribution : ''
+    };
+  }
+
+  /* An end outside a zone by less than half a metre (distanceM rounds to
+   * 0; the server sends whole metres) is on its edge, not "about 0 m". */
+  function heritageLine(side, f) {
+    var where = f.inside ? 'inside its protection zone'
+      : f.distanceM === 0 ? 'at the edge of its protection zone'
+      : f.distanceM !== null ? 'about ' + f.distanceM + ' m from its protection zone' : 'near its protection zone';
+    return side + ': ' + f.type + ', ' + where + '.';
+  }
+
+  /* heritageNote builds the chip and note for both ends' answers
+   * ({ a, b }: a response body, or null for a lookup that failed or was
+   * never made), or returns null when there is nothing to show.
+   * { label, text, html, lead }: the chip label, the plain text (the chip
+   * title), the note markup with every dataset value through esc(), and the
+   * end that leads the chip (inside first, then the nearer). */
+  function heritageNote(answers, cfg) {
+    if (!heritageOffered(cfg) || !answers) return null;
+    var found = { a: heritageFinding(answers.a), b: heritageFinding(answers.b) };
+    if (!found.a && !found.b) return null;
+    var lead = 'a';
+    if (!found.a) lead = 'b';
+    else if (found.b && !found.a.inside && (found.b.inside
+      || (found.b.distanceM !== null && (found.a.distanceM === null || found.b.distanceM < found.a.distanceM)))) lead = 'b';
+    var f = found[lead];
+    var credit = (found.a && found.a.credit) || (found.b && found.b.credit)
+      || (typeof cfg.attribution === 'string' ? cfg.attribution : '');
+    var lines = [], html = ['<strong class="tp-heritage-warning">' + esc(HERITAGE_WARNING) + '</strong>'];
+    [['a', 'A'], ['b', 'B']].forEach(function (s) {
+      if (!found[s[0]]) return;
+      var line = heritageLine(s[1], found[s[0]]);
+      lines.push(line);
+      html.push('<span class="tp-heritage-end" data-side="' + s[0] + '">' + esc(line) + '</span>');
+    });
+    if (credit) html.push('<span class="tp-heritage-credit">' + esc(credit) + '</span>');
+    return {
+      label: f.inside ? 'In monument zone' : f.distanceM === 0 ? 'At monument zone edge'
+        : 'Monument zone' + (f.distanceM !== null ? ' ~' + f.distanceM + ' m' : ''),
+      text: [HERITAGE_WARNING + '.'].concat(lines, credit ? [credit] : []).join(' '),
+      html: html.join(' '),
+      lead: lead
+    };
+  }
+
   // ── Physics, for drawing only ────────────────────────────────────────────
 
   function earthBulge(d1, d2, k) { return d1 * d2 / (2 * k * EARTH_RADIUS_M); }
@@ -1181,6 +1277,8 @@
      * travel in a shared link, and after a reload the badge has to read
      * "default" again rather than "link" (#681 M6). */
     var themeH = { a: null, b: null };
+    // #723 M3: monument lookups by query string (heritageAnswer).
+    var heritageAnswers = new Map();
     var ui = {};
     // #781: the hover cursor on the chart now drawn, else null.
     var cursor = null;
@@ -1352,6 +1450,21 @@
       ui.surfaceNote.hidden = true;
       body.appendChild(ui.surfaceNote);
 
+      /* #723 M3: a protected ancient monument at an end — a chip, then
+       * its note: the warning, each end's zone type and distance, and the
+       * register's credit. Not in the title row: with the surface chip and
+       * "assumed heights" there, one more chip wrapped Copy and Close onto
+       * a second row and pushed the chart off a short landscape screen
+       * (#784 review). Under the chart it moves nothing. */
+      ui.heritage = el('span', 'tp-chip tp-chip-warn tp-chip-heritage');
+      ui.heritage.setAttribute('data-testid', 'tp-heritage-chip');
+      ui.heritage.hidden = true;
+      body.appendChild(ui.heritage);
+      ui.heritageNote = el('p', 'tp-heritage-note');
+      ui.heritageNote.setAttribute('data-testid', 'tp-heritage-note');
+      ui.heritageNote.hidden = true;
+      body.appendChild(ui.heritageNote);
+
       var controls = el('div', 'tp-controls');
       ui.endA = endpointControl('a', 'A');
       ui.endB = endpointControl('b', 'B');
@@ -1502,6 +1615,7 @@
      * drops it. */
     function endpointsChanged() {
       renderNames();
+      setHeritage(null);
       setStatus('Measuring the terrain along the path…', 'tp-loading');
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
       setSurfaceChip(null);
@@ -1570,6 +1684,54 @@
       copyLink(url, opts.copyText || global.copyToClipboard).then(function (ok) {
         if (!ui.copyStatus) return;
         ui.copyStatus.textContent = ok ? 'Link copied' : 'Could not copy the link. It is in the address bar.';
+      });
+    }
+
+    /* setHeritage shows a heritageNote result, or takes the chip and its
+     * note away together (null). */
+    function setHeritage(note) {
+      if (!ui.heritage) return;
+      var show = !!note;
+      ui.heritage.hidden = ui.heritageNote.hidden = !show;
+      ui.heritage.textContent = show ? note.label : '';
+      ui.heritage.title = show ? note.text : '';
+      ui.heritage.setAttribute('data-lead', show ? note.lead : '');
+      // Sink: heritageNote's markup, every dataset value through esc().
+      ui.heritageNote.innerHTML = show ? note.html : '';
+    }
+
+    /* heritageAnswer is one end's lookup as a promise of its body, or of
+     * null when it fails or there is nothing to ask. Answers are kept by
+     * query, most recently used last, at most HERITAGE_KEEP; a failure is
+     * not kept, so the next profile may ask again. */
+    function heritageAnswer(end) {
+      var key = heritageQuery(end);
+      if (key === null) return Promise.resolve(null);
+      var p = heritageAnswers.get(key);
+      if (p) {
+        heritageAnswers.delete(key);
+      } else {
+        p = fetchJSON(HERITAGE_ENDPOINT + '?' + key).then(function (body) {
+          return body && typeof body === 'object' ? body : null;
+        }, function () {
+          if (heritageAnswers.get(key) === p) heritageAnswers.delete(key);
+          return null;
+        });
+      }
+      heritageAnswers.set(key, p);
+      if (heritageAnswers.size > HERITAGE_KEEP) heritageAnswers.delete(heritageAnswers.keys().next().value);
+      return p;
+    }
+
+    /* lookupHeritage asks about both ends of the profile `mine` drew. It
+     * runs once per resolved profile, so the profile's own debounce
+     * coalesces it too; an answer for ends that have moved since is
+     * dropped. */
+    function lookupHeritage(data, mine) {
+      if (!heritageOffered(opts.heritage)) return;
+      Promise.all([heritageAnswer(data.a), heritageAnswer(data.b)]).then(function (r) {
+        if (mine !== seq || !open) return;
+        setHeritage(heritageNote({ a: r[0], b: r[1] }, opts.heritage));
       });
     }
 
@@ -1691,6 +1853,7 @@
       renderNames();
       writeHash();
       var mine = ++seq;
+      setHeritage(null);
       setStatus('Measuring the terrain along the path…', 'tp-loading');
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
       setSurfaceChip(null);
@@ -1707,6 +1870,7 @@
          * sees one chart rather than two. */
         if (!adopted && adoptThemeDefaults(data)) { request(true); return; }
         render(data);
+        lookupHeritage(data, mine);
       }).catch(function (err) {
         if (mine !== seq || !open) return;
         setChip({ state: 'error', tone: 'unknown', label: 'No profile', detail: String(err && err.message || err) });
@@ -1735,6 +1899,7 @@
       moving = null;
       themeH.a = null;
       themeH.b = null;
+      setHeritage(null);
       if (panel) panel.classList.remove('is-open');
       if (rewriteHash) writeHash();
       if (opts.onClose) opts.onClose();
@@ -1921,6 +2086,8 @@
     rememberHeight: rememberHeight,
     verdictChip: verdictChip,
     surfaceChip: surfaceChip,
+    HERITAGE_WARNING: HERITAGE_WARNING,
+    heritageNote: heritageNote,
     SURFACE_NOTE: SURFACE_NOTE,
     chartGeometry: chartGeometry,
     buildChart: buildChart,
