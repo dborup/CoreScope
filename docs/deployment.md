@@ -1322,6 +1322,38 @@ docker compose logs -f | grep '\[ingestor\]'
 docker stats corescope
 ```
 
+### Upstream smoke check before a release candidate
+
+The clients for the external map and terrain services (DHM, INSPIRE
+buildings, the heritage and Mastedatabasen WFS, Copernicus DEM, Skråfoto)
+are unit-tested against fakes only. A request the real service rejects
+therefore passes every test. #802 was such a case: a filter the INSPIRE
+GeoServer answers with HTTP 400. Before tagging a release candidate, run
+the live smoke check (#803) from a checkout with Go installed:
+
+```bash
+scripts/smoke-upstreams.sh -config /path/to/config.json
+```
+
+- It sends each client's one allow-listed request once, read-only, using
+  the URL that the client's own code builds. It prints one line per
+  upstream: `PASS`, `FAIL` or `SKIP`, the HTTP status, the content type,
+  the body size and a shape check (a tile's image type and size, a TIFF
+  magic number, a JSON `features` array, a GML `FeatureCollection`, the
+  `Content-Range` of a 206).
+- `-config` names the server's `config.json`. Only `map.dhm.token` is read
+  from it. The token is sent only in the `token` header of the DHM and
+  Skråfoto search requests. It is never printed, and every line is
+  redacted. Without `-config`, or without a token, those probes are
+  `SKIP` and the tokenless ones still run.
+- The Skråfoto CDN read uses the photo that the search found. Without the
+  token, give a photo's CDN path with `-skraafoto-cdn-path
+  /skraafoto_server/….tif`. Otherwise that probe is `SKIP`.
+- The exit status is 1 if any upstream fails, 2 if the config cannot be
+  read, and 0 otherwise. `SKIP` does not fail the run.
+- It is never run in CI. Run it by hand, and paste the output into the
+  release candidate's notes.
+
 ---
 
 ## Backup & Restore
