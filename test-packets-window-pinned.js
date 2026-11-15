@@ -10,12 +10,13 @@
  * from about 14 to 15.3 minutes after the freshen, and the suite saw an empty
  * table. The cause was the suite's dependence on shard timing, not #777's code.
  *
- * Every suite in scripts/e2e-shards.json that waits for `#pktBody
- * tr[data-hash]` must therefore set the window itself: through the shared
- * helper tests/e2e-packets-window.js, a `meshcore-time-window` localStorage
- * seed, or a `timeWindow=` link. A suite whose /api/packets is stubbed in the
- * browser does not depend on the fixture and is listed in STUBBED with the
- * reason.
+ * Every suite in scripts/e2e-shards.json that reads the packet table's rows
+ * (ROW_PATTERNS: a `#pktBody tr`/`td` selector, a `#pktTable tbody` selector,
+ * or the rows of getElementById('pktBody')) must therefore set the window
+ * itself: through the shared helper tests/e2e-packets-window.js, a
+ * `meshcore-time-window` localStorage seed, or a `timeWindow=` link (#787). A
+ * suite whose /api/packets is stubbed in the browser does not depend on the
+ * fixture and is listed in STUBBED with the reason.
  *
  * The helper is run here the way Playwright runs it, against the key and the
  * normalizeTimeWindow that packets.js really uses, so a helper that stores a
@@ -31,7 +32,15 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = __dirname;
-const ROW_SELECTOR = '#pktBody tr[data-hash]';
+// A packets-page row read. The empty table still holds one <tr> ("No packets
+// found"), so a suite that waits for `#pktBody tr` or counts rows > 0 passes
+// on an empty window and then tests nothing, or fails further on.
+const ROW_PATTERNS = [
+  /#pktBody\s*(?:>\s*)?(?:tr|td)\b/,         // #pktBody tr[data-hash], > tr, td.col-path, row counts
+  /#pktBody\s+[.[]/,                          // #pktBody .path-hops, a cell's contents
+  /#pktTable\s+tbody\b/,                      // #pktTable tbody tr
+  /getElementById\(\s*['"]pktBody['"]\s*\)/,  // .rows, .children, querySelectorAll on the body
+];
 const PINS = [/\bpinPacketsTimeWindow\(/, /meshcore-time-window/, /timeWindow=/];
 
 // Suites that answer /api/packets themselves (page.route), so the fixture's
@@ -43,20 +52,31 @@ const STUBBED = {
 const checks = [];
 function check(name, fn) { checks.push({ name, fn }); }
 
+function readsRows(src) {
+  return ROW_PATTERNS.some(re => re.test(src));
+}
+
 function suitesNeedingRows(manifest, read) {
   return manifest.suites
     .map(s => s.file)
     .filter(f => !STUBBED[f])
     .map(f => ({ file: f, src: read(f) }))
-    .filter(s => s.src !== null && s.src.indexOf(ROW_SELECTOR) >= 0);
+    .filter(s => s.src !== null && readsRows(s.src));
 }
 
 // A suite that uses the helper pins every context it opens: each
-// `const X = await browser.newContext(` needs a `pinPacketsTimeWindow(X)`.
+// `const X = await browser.newContext(` needs a `pinPacketsTimeWindow(X)`
+// before the next context is opened. Suites reuse names (`ctx` per block), so
+// one pin must not cover every context of that name (#787).
 function unpinnedContexts(src) {
   if (!/\bpinPacketsTimeWindow\(/.test(src)) return [];
-  const names = [...src.matchAll(/\bconst\s+(\w+)\s*=\s*await\s+\w+\.newContext\(/g)].map(m => m[1]);
-  return names.filter(n => !new RegExp('\\bpinPacketsTimeWindow\\(\\s*' + n + '\\s*[,)]').test(src));
+  const decls = [...src.matchAll(/\bconst\s+(\w+)\s*=\s*await\s+\w+\.newContext\(/g)];
+  return decls
+    .filter((m, i) => {
+      const own = src.slice(m.index, i + 1 < decls.length ? decls[i + 1].index : src.length);
+      return !new RegExp('\\bpinPacketsTimeWindow\\(\\s*' + m[1] + '\\s*[,)]').test(own);
+    })
+    .map(m => m[1]);
 }
 
 function unpinned(suites) {
@@ -106,9 +126,14 @@ console.log('=== E2E suites that need packet rows pin the time window ===');
 const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'scripts/e2e-shards.json'), 'utf8'));
 const suites = suitesNeedingRows(manifest, readSuite);
 
-check('the scan finds the suites that wait for packet rows', () => {
+check('the scan finds the suites that read packet rows', () => {
   const files = suites.map(s => s.file);
-  for (const f of ['test-touch-gestures-coverage-e2e.js', 'test-gestures-1062-e2e.js']) {
+  for (const f of [
+    'test-touch-gestures-coverage-e2e.js', 'test-gestures-1062-e2e.js',
+    // #787: `#pktBody tr` waits and row counts, not only `tr[data-hash]`.
+    'test-issue-1122-packets-filter-ux-e2e.js', 'test-issue-1128-multi-viewport-e2e.js',
+    'test-issue-1128-packets-layout-e2e.js', 'test-issue-620-region-dropdown-viewport-e2e.js',
+  ]) {
     assert.ok(files.includes(f), f + ' was not found by the scan (selector or manifest changed?)');
   }
 });
@@ -126,28 +151,62 @@ check('the STUBBED exemptions still stub /api/packets', () => {
   }
 });
 
-// The detector itself: an unpinned row-waiting suite is flagged, and each pin
-// form clears it.
+// The detector itself: each row read is found, a non-row mention is not, an
+// unpinned row-reading suite is flagged, and each pin form clears it.
+check('detector: every member of the row family is a row read', () => {
+  for (const s of [
+    "page.waitForSelector('#pktBody tr[data-hash]')",
+    "page.locator('#pktBody tr').first().waitFor()",
+    "document.querySelectorAll('#pktBody tr').length > 0",
+    "page.locator('#pktBody tr').count()",
+    "page.$$eval('#pktBody tr:not([id^=vscroll]) .col-type .badge', f)",
+    "document.querySelector('#pktBody > tr:not(.group-child)')",
+    "page.waitForSelector('#pktBody tr.group-header')",
+    "document.querySelectorAll('#pktBody td.col-path')",
+    "document.querySelectorAll('#pktBody td[data-filter-field=\"type\"]')",
+    "document.querySelectorAll('#pktBody .path-hops')",
+    "document.querySelectorAll('#pktTable tbody tr').length",
+    "document.getElementById('pktBody').rows.length",
+    "document.getElementById(\"pktBody\").children.length",
+  ]) assert.ok(readsRows(s), 'not seen as a row read: ' + s);
+  for (const s of [
+    "page.waitForSelector('#pktBody')",
+    "page.waitForSelector('#pktTable', { state: 'attached' })",
+    "page.waitForSelector('#nodesBody tr[data-hash]')",
+    "page.goto(BASE + '/#/packets')",
+    "#pktBody. Serial behavior pushes",
+  ]) assert.ok(!readsRows(s), 'seen as a row read: ' + s);
+});
+
 check('detector: an unpinned suite is flagged and each pin form clears it', () => {
-  const fake = { suites: [{ file: 'a.js' }, { file: 'b.js' }, { file: 'c.js' }, { file: 'd.js' }, { file: 'e.js' }] };
+  const fake = { suites: [{ file: 'a.js' }, { file: 'b.js' }, { file: 'c.js' }, { file: 'd.js' }, { file: 'e.js' }, { file: 'f.js' }] };
   const src = {
-    'a.js': `await page.waitForSelector('${ROW_SELECTOR}')`,
-    'b.js': `await pinPacketsTimeWindow(ctx); await page.waitForSelector('${ROW_SELECTOR}')`,
-    'c.js': `localStorage.setItem('meshcore-time-window', '60'); '${ROW_SELECTOR}'`,
-    'd.js': `page.goto(BASE + '/#/packets?timeWindow=60'); '${ROW_SELECTOR}'`,
-    'e.js': `page.goto(BASE + '/#/nodes')`,
+    'a.js': "await page.waitForFunction(() => document.querySelectorAll('#pktBody tr').length > 0)",
+    'b.js': "await pinPacketsTimeWindow(ctx); await page.waitForSelector('#pktBody tr[data-hash]')",
+    'c.js': "localStorage.setItem('meshcore-time-window', '60'); '#pktBody tr'",
+    'd.js': "page.goto(BASE + '/#/packets?timeWindow=60'); '#pktTable tbody tr'",
+    'e.js': "page.goto(BASE + '/#/nodes')",
+    'f.js': "await page.locator('#pktBody tr').first().waitFor({ state: 'attached' })",
   };
   const found = suitesNeedingRows(fake, f => src[f]);
-  assert.deepStrictEqual(found.map(s => s.file), ['a.js', 'b.js', 'c.js', 'd.js']);
-  assert.deepStrictEqual(unpinned(found), ['a.js']);
+  assert.deepStrictEqual(found.map(s => s.file), ['a.js', 'b.js', 'c.js', 'd.js', 'f.js']);
+  assert.deepStrictEqual(unpinned(found), ['a.js', 'f.js']);
 });
 
 check('detector: a helper user with one unpinned context is flagged', () => {
-  const src = `const ctx = await browser.newContext({});\nawait pinPacketsTimeWindow(ctx);\n` +
-    `const ctxD = await browser.newContext({});\n'${ROW_SELECTOR}'`;
+  const src = "const ctx = await browser.newContext({});\nawait pinPacketsTimeWindow(ctx);\n" +
+    "const ctxD = await browser.newContext({});\n'#pktBody tr'";
   assert.deepStrictEqual(unpinnedContexts(src), ['ctxD']);
   assert.deepStrictEqual(unpinned([{ file: 'f.js', src }]), ['f.js']);
   assert.deepStrictEqual(unpinnedContexts(src + '\nawait pinPacketsTimeWindow(ctxD);'), []);
+});
+
+check('detector: a pin covers only the context opened just before it', () => {
+  const open = "{ const ctx = await browser.newContext({});\n";
+  const pin = "  await pinPacketsTimeWindow(ctx);\n";
+  assert.deepStrictEqual(unpinnedContexts(open + pin + "}\n" + open + "}\n'#pktBody tr'"), ['ctx']);
+  assert.deepStrictEqual(unpinnedContexts(open + "}\n" + open + pin + "}\n'#pktBody tr'"), ['ctx']);
+  assert.deepStrictEqual(unpinnedContexts(open + pin + "}\n" + open + pin + "}\n'#pktBody tr'"), []);
 });
 
 // The helper, run: packets.js must read back the pinned window, on a phone
