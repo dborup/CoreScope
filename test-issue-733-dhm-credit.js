@@ -367,13 +367,14 @@ function codeOnly(src) {
   }).join('\n');
 }
 
-/* #741 M1b: the Skærmkort base map is a different product of the same
- * agency, fetched by the browser itself, so its credit is defined once in
- * map-tile-providers.js (SKAERMKORT_CREDIT) and necessarily names
- * Klimadatastyrelsen and CC BY 4.0 too. That one block is the only
- * exemption: it is cut out before the scan, and it must name the Skærmkort
- * dataset and none of the DHM-specific strings. */
-const SKAERMKORT_START = 'var SKAERMKORT_CREDIT  = {';
+/* #741 M1b/M2: the Skærmkort and Natur- og Friluftskort base maps are
+ * other products of the same agency, fetched by the browser itself, so
+ * their credits are defined once in map-tile-providers.js
+ * (DATAFORSYNINGEN_CREDITS) and necessarily name Klimadatastyrelsen and
+ * CC BY 4.0 too. That one block is the only exemption: it is cut out before
+ * the scan, and it must name the two datasets and none of the DHM-specific
+ * strings. */
+const SKAERMKORT_START = 'var DATAFORSYNINGEN_CREDITS = {';
 function withoutSkaermkortCredit(f, src) {
   if (f !== 'map-tile-providers.js') return src;
   const i = src.indexOf(SKAERMKORT_START);
@@ -381,13 +382,14 @@ function withoutSkaermkortCredit(f, src) {
   return src.slice(0, i) + src.slice(src.indexOf('};', i) + 2);
 }
 
-test('the one exempted block is the Skærmkort credit and carries nothing of the DHM credit', () => {
+test('the one exempted block is the Dataforsyningen base-map credits and carries nothing of the DHM credit', () => {
   const src = fs.readFileSync(path.join(__dirname, 'public', 'map-tile-providers.js'), 'utf8');
   const i = src.indexOf(SKAERMKORT_START);
-  assert.ok(i >= 0, 'SKAERMKORT_CREDIT not found: update the exemption with it');
+  assert.ok(i >= 0, 'DATAFORSYNINGEN_CREDITS not found: update the exemption with it');
   assert.strictEqual(src.indexOf(SKAERMKORT_START, i + 1), -1, 'one definition');
   const block = src.slice(i, src.indexOf('};', i) + 2);
   assert.ok(block.indexOf('https://dataforsyningen.dk/data/962') >= 0, block);
+  assert.ok(block.indexOf('https://dataforsyningen.dk/data/2683') >= 0, block);
   for (const s of [GO.DatasetURL, GO.DatasetName, GO.DerivedNote]) {
     assert.strictEqual(block.indexOf(s), -1, 'the Skærmkort credit copies the DHM credit\'s ' + s);
   }

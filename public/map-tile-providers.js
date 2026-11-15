@@ -2,8 +2,9 @@
  *
  * Scope:
  *   - Multiple providers: OSM (default), Carto, Stamen, OpenTopoMap, USGS,
- *     Esri, Dataforsyningen (#741 Skærmkort, a WMS). OpenTopoMap, USGS, Esri
- *     and Dataforsyningen are opt-in (map.tiles.providers.*.enabled).
+ *     Esri, Dataforsyningen (#741 Skærmkort and Natur- og Friluftskort,
+ *     WMS). OpenTopoMap, USGS, Esri and Dataforsyningen are opt-in
+ *     (map.tiles.providers.*.enabled).
  *   - MC_setDarkTileProvider(id) / MC_setLightTileProvider(id) persist per-browser
  *     to localStorage and dispatch `mc-tile-provider-changed`.
  *   - Resolves localStorage → server default → 'osm-dark' / 'osm-standard' (#332).
@@ -106,13 +107,37 @@
    *     bounds are the layers' own WGS84 box, so nothing is requested
    *     outside Denmark.
    *   - Dark mode is the grey variant under the existing invert filter: it
-   *     is achromatic, so it inverts to a neutral dark map. */
-  var SKAERMKORT_WMS_URL = 'https://api.dataforsyningen.dk/topo_skaermkort_DAF';
-  var SKAERMKORT_BOUNDS  = [[53.015, 2.47842], [58.6403, 17.5578]];
-  var SKAERMKORT_CREDIT  = {
-    attribution: 'Indeholder data fra Klimadatastyrelsen og GeoDanmark, Skærmkort, CC BY 4.0',
-    datasetName: 'Skærmkort', datasetUrl: 'https://dataforsyningen.dk/data/962',
-    licenseName: 'CC BY 4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/'
+   *     is achromatic, so it inverts to a neutral dark map.
+   *
+   * #741 M2 — Natur- og Friluftskort, the same way: its WMTS is EPSG:25832
+   * only, and wms/natur_friluftskort serves EPSG:3857 (owner token checks).
+   * Same gate, same token, same tile options as Skærmkort, so the same
+   * number of requests per view and no tile churn of its own; only the
+   * service, the layer and the credit differ.
+   *   - Natur_Friluft_basis only: the service's Vejdirektoratet layer comes
+   *     under a second terms document nobody has read yet, and the place
+   *     and road names are separate layers (Stednavne, Vejnavne) that would
+   *     add render time to a service that is already ~1 s a tile cold.
+   *   - Light only: a colour-coded outdoor map (forest, water, paths) has no
+   *     achromatic variant, and the invert filter would turn its fills dark
+   *     and muddy, as for the standard and dæmpet Skærmkort, which are
+   *     light only too. Picked in the dark theme it shows as published.
+   *   - The bounds are Skærmkort's: the Natur capabilities need a token, so
+   *     its own box was not read; both cover Denmark. */
+  var DATAFORSYNINGEN_API    = 'https://api.dataforsyningen.dk/';
+  var DATAFORSYNINGEN_BOUNDS = [[53.015, 2.47842], [58.6403, 17.5578]];
+  // The CC BY 4.0 credits, with their dataset and licence links (#733).
+  var DATAFORSYNINGEN_CREDITS = {
+    skaermkort: {
+      attribution: 'Indeholder data fra Klimadatastyrelsen og GeoDanmark, Skærmkort, CC BY 4.0',
+      datasetName: 'Skærmkort', datasetUrl: 'https://dataforsyningen.dk/data/962',
+      licenseName: 'CC BY 4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/'
+    },
+    naturFriluft: {
+      attribution: 'Indeholder data fra Klimadatastyrelsen, Natur- og Friluftskort, CC BY 4.0',
+      datasetName: 'Natur- og Friluftskort', datasetUrl: 'https://dataforsyningen.dk/data/2683',
+      licenseName: 'CC BY 4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/'
+    }
   };
   // The base-map token as the gate reads it: a non-blank string, trimmed;
   // '' otherwise. Exact-case keys only, like every other provider block.
@@ -120,9 +145,13 @@
     var p = _cfg && _cfg.providers && _cfg.providers.dataforsyningen;
     return (p && typeof p.token === 'string') ? p.token.trim() : '';
   };
-  var _getSkaermkortUrl = function() { return SKAERMKORT_WMS_URL + '?token=' + encodeURIComponent(_getDataforsyningenToken()); };
-  function _skaermkortWms(layer) {
-    return { url: _getSkaermkortUrl, layers: layer, tileSize: 512, zoomOffset: -1, minZoom: 6, maxZoom: 19, bounds: SKAERMKORT_BOUNDS };
+  // A WMS descriptor for one layer of a Dataforsyningen service, with the
+  // base-map token on its base URL, re-read whenever the URL is resolved.
+  function _dataforsyningenWms(service, layer) {
+    return {
+      url: function() { return DATAFORSYNINGEN_API + service + '?token=' + encodeURIComponent(_getDataforsyningenToken()); },
+      layers: layer, tileSize: 512, zoomOffset: -1, minZoom: 6, maxZoom: 19, bounds: DATAFORSYNINGEN_BOUNDS
+    };
   }
 
   var BASE_STYLES = {
@@ -142,11 +171,14 @@
     // #728 — aerial photo: never inverted, so the same tiles serve both themes.
     'esri-imagery': { provider: 'esri', label: 'Esri World Imagery', url: function() { return ESRI_IMAGERY_URL; }, invertFilter: null, type: 'light', attribution: ESRI_IMAGERY_ATTRIBUTION, maxZoom: 19 },
     'esri-imagery-dark': { provider: 'esri', label: 'Esri World Imagery', url: function() { return ESRI_IMAGERY_URL; }, invertFilter: null, type: 'dark', attribution: ESRI_IMAGERY_ATTRIBUTION, maxZoom: 19 },
-    // #741 M1b — WMS styles: a `wms` descriptor instead of a tile `url`.
-    'dataforsyningen-skaermkort': { provider: 'dataforsyningen', label: 'Skærmkort (Denmark)', wms: _skaermkortWms('dtk_skaermkort'), invertFilter: null, type: 'light', attribution: SKAERMKORT_CREDIT.attribution, maxZoom: 19 },
-    'dataforsyningen-skaermkort-graa': { provider: 'dataforsyningen', label: 'Skærmkort grå (Denmark)', wms: _skaermkortWms('dtk_skaermkort_graa'), invertFilter: null, type: 'light', attribution: SKAERMKORT_CREDIT.attribution, maxZoom: 19 },
-    'dataforsyningen-skaermkort-daempet': { provider: 'dataforsyningen', label: 'Skærmkort dæmpet (Denmark)', wms: _skaermkortWms('dtk_skaermkort_daempet'), invertFilter: null, type: 'light', attribution: SKAERMKORT_CREDIT.attribution, maxZoom: 19 },
-    'dataforsyningen-skaermkort-graa-dark': { provider: 'dataforsyningen', label: 'Skærmkort grå (Denmark)', wms: _skaermkortWms('dtk_skaermkort_graa'), invertFilter: INVERT_CSS, type: 'dark', attribution: SKAERMKORT_CREDIT.attribution, maxZoom: 19 }
+    // #741 M1b — WMS styles: a `wms` descriptor instead of a tile `url`,
+    // and a `credit` the registry builds the linked attribution from.
+    'dataforsyningen-skaermkort': { provider: 'dataforsyningen', label: 'Skærmkort (Denmark)', wms: _dataforsyningenWms('topo_skaermkort_DAF', 'dtk_skaermkort'), invertFilter: null, type: 'light', credit: DATAFORSYNINGEN_CREDITS.skaermkort, maxZoom: 19 },
+    'dataforsyningen-skaermkort-graa': { provider: 'dataforsyningen', label: 'Skærmkort grå (Denmark)', wms: _dataforsyningenWms('topo_skaermkort_DAF', 'dtk_skaermkort_graa'), invertFilter: null, type: 'light', credit: DATAFORSYNINGEN_CREDITS.skaermkort, maxZoom: 19 },
+    'dataforsyningen-skaermkort-daempet': { provider: 'dataforsyningen', label: 'Skærmkort dæmpet (Denmark)', wms: _dataforsyningenWms('topo_skaermkort_DAF', 'dtk_skaermkort_daempet'), invertFilter: null, type: 'light', credit: DATAFORSYNINGEN_CREDITS.skaermkort, maxZoom: 19 },
+    // #741 M2 — light only (see above).
+    'dataforsyningen-natur-friluft': { provider: 'dataforsyningen', label: 'Natur- og Friluftskort (Denmark)', wms: _dataforsyningenWms('wms/natur_friluftskort', 'Natur_Friluft_basis'), invertFilter: null, type: 'light', credit: DATAFORSYNINGEN_CREDITS.naturFriluft, maxZoom: 19 },
+    'dataforsyningen-skaermkort-graa-dark': { provider: 'dataforsyningen', label: 'Skærmkort grå (Denmark)', wms: _dataforsyningenWms('topo_skaermkort_DAF', 'dtk_skaermkort_graa'), invertFilter: INVERT_CSS, type: 'dark', credit: DATAFORSYNINGEN_CREDITS.skaermkort, maxZoom: 19 }
   };
 
   var REGISTRY = {};
@@ -202,8 +234,6 @@
     // helper, map.js/live.js legacy branches) stays unchanged.
     BASE_STYLES['osm-standard'].attribution = _getOsmAttribution();
     BASE_STYLES['osm-dark'].attribution     = _getOsmAttribution();
-    // #741 — the CC BY 4.0 credit links the dataset and the licence (#733).
-    var skaermkortCredit = buildCredit(SKAERMKORT_CREDIT.attribution, creditLinks(SKAERMKORT_CREDIT));
 
     REGISTRY = {};
     for (var key in BASE_STYLES) {
@@ -214,10 +244,10 @@
       if (style.provider === 'stamen' && HAS_STAMEN) REGISTRY[key] = style;
       if (style.provider === 'usgs' && HAS_USGS) REGISTRY[key] = style;
       if (style.provider === 'esri' && HAS_ESRI) REGISTRY[key] = style;
-      if (style.provider === 'dataforsyningen') {
-        style.attribution = skaermkortCredit;
-        if (HAS_DATAFORSYNINGEN) REGISTRY[key] = style;
-      }
+      if (style.provider === 'dataforsyningen' && HAS_DATAFORSYNINGEN) REGISTRY[key] = style;
+      // #741 — a style's CC BY 4.0 credit, its dataset and licence linked
+      // by the shared walker (#733); built here, where the DOM is ready.
+      if (style.credit) style.attribution = buildCredit(style.credit.attribution, creditLinks(style.credit));
     }
 
     // #332 — the fallback defaults must stay resolvable no matter how the
@@ -712,8 +742,9 @@
    * byte-identical to the plain credit — only the markup differs — which
    * matters because Leaflet's control counts, finds and removes a credit by
    * its string. With nothing linked it is the plain credit itself. */
-  // #741: the registry builds the Skærmkort credit when it loads, so a page
-  // (or a test sandbox) whose DOM cannot build one gets the plain credit.
+  // #741: the registry builds the Dataforsyningen credits when it loads, so
+  // a page (or a test sandbox) whose DOM cannot build one gets the plain
+  // credit.
   function buildCredit(text, links) {
     var plain = typeof text === 'string' ? text : '';
     if (!plain || typeof document === 'undefined' || !document.createElement) return plain;
