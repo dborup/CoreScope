@@ -7,6 +7,8 @@ import (
 	"io"
 	"strings"
 	"unicode"
+
+	"github.com/meshcore-analyzer/dhm"
 )
 
 // Zone is one protection zone: the dataset fields the server reports and
@@ -19,7 +21,7 @@ type Zone struct {
 	Status       string           `json:"status,omitempty"`   // fred_status
 	ProtectionNo string           `json:"frednr,omitempty"`   // frednr
 	SystemNo     string           `json:"systemnr,omitempty"` // systemnr
-	Polygons     [][][][2]float64 `json:"polygons"`
+	Polygons     dhm.MultiPolygon `json:"polygons"`
 }
 
 // Page is one cell's zones. Truncated means the WFS had more zones in the
@@ -67,14 +69,12 @@ var crsNames = map[string]bool{
 	"http://www.opengis.net/gml/srs/epsg.xml#25832": true,
 }
 
-// The plausible EPSG:25832 window around Denmark, wide enough for every
-// zone near the cell extent. Coordinates outside it mean the service
-// answered in another CRS or axis order (lat/lon degrees, or northing
-// first), which must not be measured as metres.
-const (
-	minEasting, maxEasting   = 100000, 1100000
-	minNorthing, maxNorthing = 5900000, 6600000
-)
+// coordWindow is the plausible EPSG:25832 window around Denmark, minE,
+// minN, maxE, maxN, wide enough for every zone near the cell extent.
+// Coordinates outside it mean the service answered in another CRS or axis
+// order (lat/lon degrees, or northing first), which must not be measured as
+// metres. dhm.PolygonReader enforces it (#730 M1a).
+var coordWindow = [4]float64{100000, 5900000, 1100000, 6600000}
 
 // Parse reads a WFS GeoJSON FeatureCollection of the zone layer. Anything
 // off-shape is an error: another document type, trailing data, more than
@@ -104,7 +104,7 @@ func Parse(body []byte) (Page, error) {
 			page.Truncated = true
 		}
 	}
-	vertices := 0
+	geom := dhm.PolygonReader{Window: coordWindow, MaxVertices: MaxVertices}
 	for i := range doc.Features {
 		f := &doc.Features[i]
 		if f.Type != "Feature" {
@@ -113,12 +113,9 @@ func Parse(body []byte) (Page, error) {
 		if f.Geometry == nil {
 			continue
 		}
-		polys, n, err := polygons(f.Geometry.Type, f.Geometry.Coordinates)
+		polys, err := geom.Read(f.Geometry.Type, f.Geometry.Coordinates)
 		if err != nil {
 			return Page{}, err
-		}
-		if vertices += n; vertices > MaxVertices {
-			return Page{}, errShape
 		}
 		z := Zone{Polygons: polys}
 		for _, p := range []struct {
@@ -138,51 +135,6 @@ func Parse(body []byte) (Page, error) {
 		page.Zones = append(page.Zones, z)
 	}
 	return page, nil
-}
-
-// polygons decodes Polygon or MultiPolygon coordinates and validates every
-// position; it returns the vertex count too.
-func polygons(typ string, raw json.RawMessage) ([][][][2]float64, int, error) {
-	var multi [][][][]float64
-	switch typ {
-	case "MultiPolygon":
-		if err := json.Unmarshal(raw, &multi); err != nil {
-			return nil, 0, err
-		}
-	case "Polygon":
-		var poly [][][]float64
-		if err := json.Unmarshal(raw, &poly); err != nil {
-			return nil, 0, err
-		}
-		multi = [][][][]float64{poly}
-	default:
-		return nil, 0, errShape
-	}
-	out := make([][][][2]float64, 0, len(multi))
-	n := 0
-	for _, poly := range multi {
-		if len(poly) == 0 {
-			return nil, 0, errShape
-		}
-		rings := make([][][2]float64, 0, len(poly))
-		for _, ring := range poly {
-			if len(ring) < 4 {
-				return nil, 0, errShape
-			}
-			pts := make([][2]float64, len(ring))
-			for i, pos := range ring {
-				// A third value (height) is allowed and ignored.
-				if len(pos) < 2 || pos[0] < minEasting || pos[0] > maxEasting || pos[1] < minNorthing || pos[1] > maxNorthing {
-					return nil, 0, errShape
-				}
-				pts[i] = [2]float64{pos[0], pos[1]}
-			}
-			n += len(pts)
-			rings = append(rings, pts)
-		}
-		out = append(out, rings)
-	}
-	return out, n, nil
 }
 
 // text is a property as display text: a string or a number in its JSON

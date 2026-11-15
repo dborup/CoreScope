@@ -713,12 +713,13 @@ test('the chart is an accessible image with the verdict in its title', () => {
   assert.ok(/clear/i.test(m[1]), m[1]);
 });
 
-test('the CC BY 4.0 credit is the shared constant, not micro text in the SVG', () => {
+test('the CC BY 4.0 credit is the panel\'s line, not micro text in the SVG', () => {
   // Review F7: a 9px label inside an 820-unit viewBox stretched onto a
   // 340px panel renders about 3px tall. A licence credit nobody can read
   // is not a credit, so it is the panel's HTML line now; the E2E pins
-  // that it is visible, and visible exactly once.
-  assert.strictEqual(TP.ATTRIBUTION, 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0');
+  // that it is visible, and visible exactly once. Its text comes from the
+  // server's dhm block (#765, test-issue-733-dhm-credit.js).
+  assert.strictEqual(typeof TP.footerCredit, 'function');
   const svg = TP.buildChart(flatPath(), {});
   assert.strictEqual(svg.indexOf('Klimadatastyrelsen'), -1, 'the credit is back inside the stretched chart');
 });
@@ -1267,19 +1268,32 @@ test('a junk model in the link falls back to the customizer default', () => {
   assert.strictEqual(TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=dsm', { model: 'dtm' }).model, 'dtm');
 });
 
+test('a junk model in the link is not a stated model (#765)', () => {
+  // Only a model the tool knows is a decision: a junk value must not pin
+  // the default it fell back to against a later customizer change.
+  ['dsm', '', 'DTM', 'both '].forEach((m) => {
+    const st = TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=' + encodeURIComponent(m));
+    assert.strictEqual(st.modelExplicit, false, 'model=' + JSON.stringify(m) + ' counted as stated');
+  });
+  assert.strictEqual(TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=dtm').modelExplicit, true);
+  assert.strictEqual(TP.parseState('profile=' + PK_A + ',' + PK_B).modelExplicit, false);
+});
+
 test('the link leaves the model out only for a "both" nobody stated', () => {
   const both = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: 'both' };
   const dtm = Object.assign({}, both, { model: 'dtm' });
   const stated = Object.assign({}, both, { modelExplicit: true });
-  assert.strictEqual(TP.serializeState(both, { model: 'both' }).model, undefined);
-  assert.strictEqual(TP.serializeState(dtm, { model: 'both' }).model, 'dtm');
-  // #746: a stated "both" is written down under either default, or a
-  // recipient on a dtm default would reopen the link as terrain-only.
-  assert.strictEqual(TP.serializeState(stated, { model: 'both' }).model, 'both');
-  assert.strictEqual(TP.serializeState(stated, { model: 'dtm' }).model, 'both');
-  // Review PR#714: anything but "both" is always written down, whatever the
-  // sharer's own default is — the recipient may not share it.
-  assert.strictEqual(TP.serializeState(dtm, { model: 'dtm' }).model, 'dtm');
+  // serializeState takes no default: the sharer's own default never
+  // decides what the link says (#765).
+  assert.strictEqual(TP.serializeState(both).model, undefined);
+  // Review PR#714: anything but "both" is always written down — the
+  // recipient may not share the sharer's default.
+  assert.strictEqual(TP.serializeState(dtm).model, 'dtm');
+  // #746: a stated "both" is written down, or a recipient on a dtm default
+  // would reopen the link as terrain-only.
+  const qs = new URLSearchParams(TP.serializeState(stated)).toString();
+  assert.strictEqual(new URLSearchParams(qs).get('model'), 'both');
+  assert.strictEqual(TP.parseState(qs, { model: 'dtm' }).model, 'both');
 });
 
 test('a terrain-only link means terrain-only to a recipient on the standard default', () => {
@@ -1299,7 +1313,7 @@ test('a non-default model round-trips through the link under either default', ()
     // Chosen: the viewer picked it, so it is stated (#746).
     const state = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: chosen,
       modelExplicit: true, ha: null, hb: null, k: null, freq: null };
-    const qs = new URLSearchParams(TP.serializeState(state, { model: def })).toString();
+    const qs = new URLSearchParams(TP.serializeState(state)).toString();
     assert.strictEqual(TP.parseState(qs, { model: def }).model, chosen, def + ' default, ' + chosen + ' chosen');
   });
 });
@@ -1645,9 +1659,9 @@ test('the same holds for the /p share link', () => {
 test('a link without a model gets none, whatever the sharer\'s own default', () => {
   // Presence, not a comparison with the current default: the link never
   // said "both", so it does not start saying so under a dtm default.
+  // serializeState is not given the sharer's default at all (#765).
   const state = TP.parseState('profile=' + PK_A + ',' + PK_B, { model: 'both' });
-  assert.strictEqual(TP.serializeState(state, { model: 'both' }).model, undefined);
-  assert.strictEqual(TP.serializeState(state, { model: 'dtm' }).model, undefined);
+  assert.strictEqual(TP.serializeState(state).model, undefined);
 });
 
 atest('an imported model=both stays pinned when the customizer moves to dtm', async () => {
@@ -1680,6 +1694,37 @@ atest('a model picked with the buttons rides the hash, even when it is the stand
   assert.strictEqual(hashParamsOf(live.win.location).get('model'), 'dtm', 'setup: terrain-only always rides');
   live.dom.find('tp-model-both').fire('click');
   assert.strictEqual(hashParamsOf(live.win.location).get('model'), 'both', 'a chosen "both" left the hash: ' + live.win.location.hash);
+});
+
+/* #765 §6: a stated model belongs to the profile that stated it. After a
+ * Close the next path is the viewer's own, so its link does not carry the
+ * old link's model, and a customizer change moves it again. */
+atest('a Close forgets that the model was stated (#765)', async () => {
+  const live = loadRouted('#/map');
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'both' }) };
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=both', live.TP.themeDefaults()));
+  assert.strictEqual(tool.getState().modelExplicit, true, 'setup: the link did not state its model');
+  live.dom.find('tp-close').fire('click');
+  assert.strictEqual(tool.getState().modelExplicit, false, 'the stated model outlived the Close');
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_B });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_A });
+  assert.strictEqual(hashParamsOf(live.win.location).get('model'), null,
+    'the next profile carries the closed link\'s model: ' + live.win.location.hash);
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'dtm' }) };
+  tool.defaultsChangedForTests();
+  assert.strictEqual(tool.getState().model, 'dtm', 'the closed link\'s model still pins the next profile');
+});
+
+atest('a model picked with the buttons is forgotten by a Close too (#765)', async () => {
+  const live = loadRouted('#/map');
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'dtm' }) };
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B, live.TP.themeDefaults()));
+  live.dom.find('tp-model-both').fire('click');
+  assert.strictEqual(tool.getState().modelExplicit, true, 'setup: the pick was not stated');
+  tool.close();
+  assert.strictEqual(tool.getState().modelExplicit, false, 'the pick outlived the Close');
 });
 
 // ── #746 §3: a height edit invalidates the answer in flight at once ────────

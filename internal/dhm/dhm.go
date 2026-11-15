@@ -31,7 +31,9 @@
 // lat/lon to the rasters' EPSG:25832. profile.go plans the samples and
 // rasters of a terrain profile, physics.go assesses the link, and flight.go
 // coalesces calls with cancellation. get.go is the bounded, no-redirect
-// GET of the keyless upstreams (internal/mastedb, internal/heritage).
+// GET of the keyless upstreams (internal/mastedb, internal/heritage), and
+// polygon.go the shared GeoJSON polygon reading, vertex cap and
+// point-in-polygon maths those features measure a point with (#730 M1a).
 // Further features add their own request shape next to them and reuse the
 // rest.
 package dhm

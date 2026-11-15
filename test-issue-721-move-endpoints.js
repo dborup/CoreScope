@@ -609,6 +609,21 @@ atest('a height the viewer set on the point still wins over every default', asyn
   assert.strictEqual(fetchJSON.params(0).get('ha'), '7');
 });
 
+/* #765 §2: the up-front height is a point's alone. A node end with the
+ * point rule in hand still waits for the answer, and then takes its role
+ * height, never the point height. */
+atest('a node end never takes the customizer point height up front', async () => {
+  const { env, tool, fetchJSON } = openPointTool(30);
+  env.win.SITE_CONFIG = { terrain: { heightPoint: 30, heightRepeater: 12 } };
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  tool.setEndpoint('b', POINT);
+  await sleep(SETTLE_MS);
+  assert.strictEqual(fetchJSON.params(0).get('ha'), null, 'the node end was sent the point height: ' + fetchJSON.calls[0]);
+  assert.strictEqual(fetchJSON.params(0).get('hb'), '30', 'setup: the point end lost its up-front height');
+  assert.strictEqual(lastParams(fetchJSON).get('ha'), '12', 'the node end did not take its role height: ' + fetchJSON.calls.join(' | '));
+  assert.strictEqual(env.dom.find('tp-h-a').value, '12');
+});
+
 atest('without the server\'s point rule the customizer height still lands, as before', async () => {
   const { env, tool, fetchJSON } = openPointTool(30, null);
   tool.setEndpoint('a', POINT);

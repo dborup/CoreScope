@@ -63,10 +63,11 @@ func TestClientDHMBlockCarriesCreditLinks(t *testing.T) {
 		got = append(got, k)
 	}
 	sort.Strings(got)
-	// Exactly these keys: the four credit fields the links need, and
-	// nothing else new (overlays is #734's per-overlay dataset links).
+	// Exactly these keys: the four credit fields the links need, the
+	// derived credit the profile footer shows (#765), the per-overlay
+	// dataset links (#734), and nothing else new.
 	want := []string{
-		"attribution", "bounds", "datasetName", "datasetUrl", "enabled",
+		"attribution", "attributionDerived", "bounds", "datasetName", "datasetUrl", "enabled",
 		"layer", "licenseName", "licenseUrl", "maxZoom", "minZoom",
 		"overlays", "profile", "share", "url",
 	}
@@ -101,7 +102,25 @@ func TestClientDHMBlockCarriesCreditLinks(t *testing.T) {
 	if strings.Contains(b.Attribution, dhm.DerivedNote) {
 		t.Errorf("overlay credit claims derived data: %q", b.Attribution)
 	}
-	// Four more public strings must not become four more ways to leak the
+	// #765: the profile footer is built from this block, so the derived
+	// credit travels with it and public/ keeps no copy of any credit
+	// string. Read from the raw keys, so a block without it fails here and
+	// not only in the browser.
+	var derived string
+	if err := json.Unmarshal(keys["attributionDerived"], &derived); err != nil {
+		t.Fatalf("dhm.attributionDerived: %v (block %s)", err, raw)
+	}
+	if derived != dhm.AttributionDerived {
+		t.Errorf("dhm.attributionDerived = %q, want %q", derived, dhm.AttributionDerived)
+	}
+	// The footer turns the same two marks into links, so both must occur
+	// in the derived credit too.
+	for _, mark := range []string{b.DatasetName, b.LicenseName} {
+		if !strings.Contains(derived, mark) {
+			t.Errorf("attributionDerived %q does not contain the link mark %q", derived, mark)
+		}
+	}
+	// Five more public strings must not become five more ways to leak the
 	// token.
 	if strings.Contains(string(raw), dhmTestToken) {
 		t.Fatalf("token in the dhm block: %s", raw)

@@ -126,6 +126,11 @@ type DHMClientConfig struct {
 	DatasetURL  string `json:"datasetUrl"`
 	LicenseName string `json:"licenseName"`
 	LicenseURL  string `json:"licenseUrl"`
+	// AttributionDerived is the credit of a view computed from DHM
+	// (dhm.AttributionDerived): the profile chart footer shows it, with the
+	// same two marks as links. Sent so the page keeps no copy of any
+	// credit string (#765).
+	AttributionDerived string `json:"attributionDerived"`
 	// Overlays are the DHM overlays the page may offer, by the id it puts
 	// in a tile request's `layers` (#734). Layer stays the #680 value for
 	// pages that predate them.
@@ -216,18 +221,19 @@ type DHMPointAntenna struct {
 
 func dhmClientConfig() *DHMClientConfig {
 	return &DHMClientConfig{
-		Enabled:     true,
-		URL:         dhmClientPath,
-		Layer:       dhm.HillshadeLayer,
-		MinZoom:     dhm.MinZoom,
-		MaxZoom:     dhm.MaxZoom,
-		Bounds:      dhmCoverageBounds(),
-		Attribution: dhm.Attribution,
-		DatasetName: dhm.DatasetName,
-		DatasetURL:  dhm.DatasetURL,
-		LicenseName: dhm.LicenseName,
-		LicenseURL:  dhm.LicenseURL,
-		Overlays:    dhmOverlayClientConfigs(),
+		Enabled:            true,
+		URL:                dhmClientPath,
+		Layer:              dhm.HillshadeLayer,
+		MinZoom:            dhm.MinZoom,
+		MaxZoom:            dhm.MaxZoom,
+		Bounds:             dhmCoverageBounds(),
+		Attribution:        dhm.Attribution,
+		DatasetName:        dhm.DatasetName,
+		DatasetURL:         dhm.DatasetURL,
+		LicenseName:        dhm.LicenseName,
+		LicenseURL:         dhm.LicenseURL,
+		AttributionDerived: dhm.AttributionDerived,
+		Overlays:           dhmOverlayClientConfigs(),
 	}
 }
 
