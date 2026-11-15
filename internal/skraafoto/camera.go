@@ -26,9 +26,10 @@ import (
 //   - Image coordinates in mm, x right and y up from the image centre:
 //     x = x₀ − f·u/w, y = y₀ − f·v/w, where (x₀, y₀) is
 //     principal_point_offset. Its sign comes from the east photo, whose
-//     y₀ is 6.68 mm (1777 px): subtracting it instead misses the image
-//     corners by about 3550 px. x₀ is 0 in every item seen, so its sign
-//     is taken to follow y₀'s.
+//     y₀ is 6.68 mm (1777 px): subtracting it instead misses an image
+//     corner by 3377 px at worst, each corner's height free in −2…40 m
+//     as in the corner test (3230 px over −10…60 m). x₀ is 0 in every
+//     item seen, so its sign is taken to follow y₀'s.
 //   - Pixels: column = cols/2 + x/sx, row = rows/2 − y/sy, with (sx, sy)
 //     pixel_spacing, and (0, 0) the top-left corner of the top-left
 //     pixel. proj:shape is [rows, cols] and sensor_array_dimensions

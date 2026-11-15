@@ -43,7 +43,7 @@ func TestParseCollections(t *testing.T) {
 func TestParseSearch(t *testing.T) {
 	u := &skraafototest.Upstream{}
 	body := `{"type":"FeatureCollection","features":[` + u.Feature("skraafotos2025", "west") + `]}`
-	items, err := ParseSearch([]byte(body), 2025, West)
+	items, _, err := ParseSearch([]byte(body), 2025, West)
 	if err != nil || len(items) != 1 {
 		t.Fatal(items, err)
 	}
@@ -53,22 +53,41 @@ func TestParseSearch(t *testing.T) {
 	if *it != want {
 		t.Fatalf("%+v\nwant %+v", *it, want)
 	}
-	if items, err := ParseSearch([]byte(`{"type":"FeatureCollection","features":[]}`), 2025, West); len(items) != 0 || err != nil {
+	if items, _, err := ParseSearch([]byte(`{"type":"FeatureCollection","features":[]}`), 2025, West); len(items) != 0 || err != nil {
 		t.Fatalf("no photo: %v %v", items, err)
 	}
-	// Several photos, in the API's order, at most SearchLimit; one of
-	// another direction among them fails the search.
+	// Several photos, in the API's order, at most SearchLimit.
 	var many []string
 	for i := 0; i < SearchLimit+2; i++ {
 		many = append(many, strings.Replace(u.Feature("skraafotos2025", "west"), "_00003045", fmt.Sprintf("_0000304%d", i), 1))
 	}
-	items, err = ParseSearch([]byte(`{"features":[`+strings.Join(many, ",")+`]}`), 2025, West)
-	if err != nil || len(items) != SearchLimit || items[0].ID != "2025_83_36_4_0020_00003040" || items[SearchLimit-1].ID != "2025_83_36_4_0020_00003044" {
-		t.Fatalf("%d photos: %v", len(items), err)
+	items, skipped, err := ParseSearch([]byte(`{"features":[`+strings.Join(many, ",")+`]}`), 2025, West)
+	if err != nil || skipped != 0 || len(items) != SearchLimit || items[0].ID != "2025_83_36_4_0020_00003040" || items[SearchLimit-1].ID != "2025_83_36_4_0020_00003044" {
+		t.Fatalf("%d photos, %d skipped: %v", len(items), skipped, err)
 	}
-	many[1] = u.Feature("skraafotos2025", "north")
-	if _, err := ParseSearch([]byte(`{"features":[`+strings.Join(many, ",")+`]}`), 2025, West); err == nil {
-		t.Fatal("a photo of another direction among the candidates was accepted")
+	// A bad candidate after the first is left out and counted, whatever
+	// is wrong with it, even a shape that does not decode; the rest keep
+	// their order, and the sixth is not pulled in.
+	bad := map[int]string{
+		1: u.Feature("skraafotos2025", "north"),
+		2: strings.Replace(many[2], `"id":"2025_`, `"id":5,"x":"`, 1),
+		4: `"not a feature"`,
+	}
+	cands := append([]string(nil), many...)
+	for i, f := range bad {
+		cands[i] = f
+	}
+	items, skipped, err = ParseSearch([]byte(`{"features":[`+strings.Join(cands, ",")+`]}`), 2025, West)
+	if err != nil || skipped != len(bad) || len(items) != 2 || items[0].ID != "2025_83_36_4_0020_00003040" || items[1].ID != "2025_83_36_4_0020_00003043" {
+		t.Fatalf("bad candidates: %+v, %d skipped, %v", items, skipped, err)
+	}
+	// A bad first candidate still fails the search: it is the photo a
+	// search before M3a showed.
+	for name, f := range bad {
+		cands := append([]string{f}, many[1:]...)
+		if items, _, err := ParseSearch([]byte(`{"features":[`+strings.Join(cands, ",")+`]}`), 2025, West); err == nil {
+			t.Errorf("first candidate %d: accepted %+v", name, items)
+		}
 	}
 	for name, mod := range map[string]func(string) string{
 		"other direction": func(s string) string { return strings.Replace(s, `"direction":"west"`, `"direction":"north"`, 1) },
@@ -82,7 +101,7 @@ func TestParseSearch(t *testing.T) {
 		"not json":        func(s string) string { return s[:len(s)/2] },
 		"features object": func(string) string { return `{"type":"FeatureCollection","features":{}}` },
 	} {
-		if items, err := ParseSearch([]byte(mod(body)), 2025, West); err == nil {
+		if items, _, err := ParseSearch([]byte(mod(body)), 2025, West); err == nil {
 			t.Errorf("%s: accepted %+v", name, items)
 		}
 	}
@@ -91,7 +110,7 @@ func TestParseSearch(t *testing.T) {
 	for _, href := range []string{"https://evil.example/x.tif", "", "https://skraafoto-cdn.dataforsyningen.dk/skraafoto_server/a/b.tif?token=x"} {
 		u.Href = func(string) string { return href }
 		body := `{"type":"FeatureCollection","features":[` + u.Feature("skraafotos2025", "west") + `]}`
-		items, err := ParseSearch([]byte(body), 2025, West)
+		items, _, err := ParseSearch([]byte(body), 2025, West)
 		if err != nil || len(items) != 1 || items[0].Path != "" {
 			t.Errorf("href %q: %+v %v", href, items, err)
 		}
@@ -124,7 +143,7 @@ func FuzzParseSearch(f *testing.F) {
 	f.Add([]byte(`{"features":[` + strings.Replace(strings.Replace(u.Feature("skraafotos2025", "north"), `"pers:omega":1.5`, `"pers:omega":0,"pers:phi":0,"pers:kappa":0,"proj:shape":[2,3],"pers:crs":25832,"pers:vertical_crs":5799,"pers:perspective_center":[574500,6224500,1000],"pers:rotation_matrix":[1,0,0,0,1,0,0,0,1],"pers:interior_orientation":{"focal_length":100,"pixel_spacing":[0.1,0.1],"principal_point_offset":[0,0],"sensor_array_dimensions":[3,2]}`, 1),
 		`[[[574000,6224000],[575000,6224000],[575000,6225000],[574000,6224000]]]`, `[[[574000,6224000]]]`, 1) + `]}`))
 	f.Fuzz(func(t *testing.T, body []byte) {
-		items, err := ParseSearch(body, 2025, North)
+		items, _, err := ParseSearch(body, 2025, North)
 		if err != nil {
 			return
 		}

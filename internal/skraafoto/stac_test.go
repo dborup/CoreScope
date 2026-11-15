@@ -45,7 +45,7 @@ func TestSTAC_SearchShape(t *testing.T) {
 	u := skraafototest.New()
 	defer u.Close()
 	s := newTestSTAC(t, u)
-	items, err := s.Search(context.Background(), 2025, 574380, 6224120, East)
+	items, _, err := s.Search(context.Background(), 2025, 574380, 6224120, East)
 	if err != nil || len(items) != 1 || items[0].Direction != East || items[0].Collection != "skraafotos2025" {
 		t.Fatal(items, err)
 	}
@@ -96,7 +96,7 @@ func TestSTAC_SearchRefusesBadArguments(t *testing.T) {
 		year int
 		d    Direction
 	}{{2017, North}, {2025, "up"}, {2025, ""}, {1999, North}} {
-		if _, err := s.Search(context.Background(), c.year, 574380, 6224120, c.d); err == nil {
+		if _, _, err := s.Search(context.Background(), c.year, 574380, 6224120, c.d); err == nil {
 			t.Errorf("%+v accepted", c)
 		}
 	}
