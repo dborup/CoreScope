@@ -115,3 +115,83 @@ func TestClientConfigShipsBaseMapTokenWhereTheBrowserReadsIt741(t *testing.T) {
 		t.Fatalf("map.tiles.providers.dataforsyningen not shipped as configured: %s", body)
 	}
 }
+
+// Both tokens come from the same Dataforsyningen account, so the likeliest
+// leak is the operator pasting the DHM token as the base-map token too.
+// The client-visible map must then lose that value, never ship it.
+func TestClientConfigDropsReusedDHMToken741(t *testing.T) {
+	dhmBlock := `"dhm": {"enabled": true, "token": "` + dhmTestToken + `", "layer": "terrain"}`
+	cases := []struct {
+		name, doc string
+	}{
+		{"reused as the base-map token",
+			`{"map": {` + dhmBlock + `, "tiles": {"providers": {"dataforsyningen": {"enabled": true, "token": "` + dhmTestToken + `"}}}}}`},
+		{"reused with whitespace around it",
+			`{"map": {` + dhmBlock + `, "tiles": {"providers": {"dataforsyningen": {"enabled": true, "token": "  ` + dhmTestToken + ` "}}}}}`},
+		{"reused under a case variant of the key",
+			`{"map": {` + dhmBlock + `, "tiles": {"providers": {"DATAFORSYNINGEN": {"TOKEN": "` + dhmTestToken + `"}}}}}`},
+		{"reused as another provider's token",
+			`{"map": {` + dhmBlock + `, "tiles": {"providers": {"stamen": {"enabled": true, "token": "` + dhmTestToken + `"}}}}}`},
+		{"inside a legacy tile URL",
+			`{"map": {` + dhmBlock + `, "tiles": {"darkUrl": "https://api.dataforsyningen.dk/x/{z}/{x}/{y}?token=` + dhmTestToken + `"}}}`},
+		{"inside an array",
+			`{"map": {` + dhmBlock + `, "tiles": {"notes": ["a", "` + dhmTestToken + `"]}}}`},
+		{"in the legacy top-level tiles block",
+			`{"map": {` + dhmBlock + `}, "tiles": {"providers": {"dataforsyningen": {"enabled": true, "token": "` + dhmTestToken + `"}}}}`},
+		{"in a legacy top-level block next to map.tiles",
+			`{"map": {` + dhmBlock + `, "tiles": {"darkDefault": "osm-dark"}}, "tiles": {"providers": {"dataforsyningen": {"token": "` + dhmTestToken + `"}}}}`},
+		// map.tiles has its own providers, so the legacy block is not
+		// migrated into it and is shipped on its own.
+		{"in a legacy top-level block that is not migrated",
+			`{"map": {` + dhmBlock + `, "tiles": {"providers": {"osm": {"enabled": false}}}}, "tiles": {"providers": {"dataforsyningen": {"token": "` + dhmTestToken + `"}}}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, cfg := clientConfigFor(t, tc.doc)
+			if strings.Contains(body, dhmTestToken) {
+				t.Fatalf("the reused DHM token is in /api/config/client: %s", body)
+			}
+			if cfg.DHM.Token != dhmTestToken || !cfg.DHM.Active() {
+				t.Fatalf("the DHM proxy must keep its own token: %+v", cfg.DHM)
+			}
+		})
+	}
+	// The rest of the block is untouched.
+	body, _ := clientConfigFor(t, cases[0].doc)
+	if !strings.Contains(body, `"dataforsyningen":{"enabled":true}`) {
+		t.Fatalf("only the reused value is dropped: %s", body)
+	}
+}
+
+// The drop is logged, naming the key and never the value.
+func TestClientConfigReusedDHMTokenIsLogged741(t *testing.T) {
+	dir := t.TempDir()
+	writeConfigFile(t, dir, "config.json", `{"map": {"dhm": {"enabled": true, "token": "`+dhmTestToken+`"},
+		"tiles": {"providers": {"dataforsyningen": {"enabled": true, "token": "`+dhmTestToken+`"}}}}}`)
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	_, err := LoadConfig(dir)
+	log.SetOutput(os.Stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "map.tiles.providers.dataforsyningen.token") || !strings.Contains(out, "map.dhm.token") {
+		t.Fatalf("the drop is not logged with the key it removed:\n%s", out)
+	}
+	if strings.Contains(out, dhmTestToken) {
+		t.Fatalf("the log line prints the token:\n%s", out)
+	}
+	buf.Reset()
+	writeConfigFile(t, dir, "config.json", `{"map": {"dhm": {"enabled": true, "token": "`+dhmTestToken+`"},
+		"tiles": {"providers": {"dataforsyningen": {"enabled": true, "token": "`+baseMapTestToken+`"}}}}}`)
+	log.SetOutput(&buf)
+	_, err = LoadConfig(dir)
+	log.SetOutput(os.Stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(buf.String(), "map.dhm.token") {
+		t.Fatalf("logged a reuse with two different tokens:\n%s", buf.String())
+	}
+}
