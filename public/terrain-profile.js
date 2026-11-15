@@ -1955,12 +1955,13 @@
 
   global.TerrainProfile = {
     footerCredit: footerCredit,
-    compactPhase: compactPhase,
     fillCredit: fillCredit,
     mixedNote: mixedNote,
     FILL_OVERVIEW_M: FILL_OVERVIEW_M,
     ASSUMED_LABEL: ASSUMED_LABEL,
     ENDPOINT: ENDPOINT,
+    // #790: the compact bar's phase, read by the unit tests.
+    compactPhase: compactPhase,
     HASH_PARAM: HASH_PARAM,
     MAX_HEIGHT_M: MAX_HEIGHT_M,
     parseState: parseState,

@@ -92,6 +92,14 @@
       "measurementNote": "New suite; #681 M6 customizer terrain settings with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile that resolves ha/hb/model the way the server does: the five antenna-height defaults and the elevation-model select on the Display tab, the six chart colours on the Theme tab in light and dark, a changed antenna default re-measuring and redrawing an open profile without overruling an operator-set height or reaching the link, a changed chart colour becoming the chart's computed fill, a terrain-only default opening a terrain-only profile while a link that states the model still wins, 48px touch targets at 360x740 and 740x360, the export carrying the terrain section and no token with nothing under map.dhm in the client, and axe plus measured label contrast in light and dark. Review round 2 (PR#714) adds: a hex antenna height planted in storage is no default in the profile or the customizer, a pick over the translucent clutter colour keeps its alpha, and the Terrain Profile section is hidden with the profile off or no dhm block. About 85s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681 DHM suites."
     },
     {
+      "file": "test-issue-790-profile-mobile-pick-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #790 Map Path profile picking on phones with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile: at 375x667, 390x844, 360x740 and 667x375 with touch, after A the panel is a compact bar (the next step, Cancel and Close at 48px, no body, no chip) covering at most a third of the map, a tap on the map above it sets B in one request and the panel expands with the chart, Move A is compact while pending and expands after the tap, Cancel during Move B keeps B with no request, and Cancel with only A resets the profile on the Map page; axe on the bar in light and dark; the #781 hover dot after a compact Move B and back. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other #681/#721/#781 profile suites."
+    },
+    {
       "file": "test-issue-721-move-endpoints-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },
@@ -122,14 +130,6 @@
       "output": "e2e",
       "meanSeconds": 0,
       "measurementNote": "New suite; #781 Map Path profile hover cursor with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile: hovering the chart shows the dashed line at the sample under the pointer, the readout (distance, terrain, surface, clearance) and one dot on the drawn path at that fraction from A to B within 1.5 px; moving keeps the same dot; leaving hides all three; arrow keys step one sample and Shift ten with a polite readout; a touch drag at 360x740 moves the dot and it stays after the lift; 500 synthetic moves in one task cost one update and no chart rebuild, and spread over frames at most one per frame; Close and three Map visits leave no cursor listener, line or dot. About 40s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681/#721/#727/#746 DHM suites."
-    },
-    {
-      "file": "test-issue-790-profile-mobile-pick-e2e.js",
-      "shard": 1,
-      "env": { "BASE_URL": "$BASE_URL" },
-      "output": "e2e",
-      "meanSeconds": 0,
-      "measurementNote": "New suite; #790 Map Path profile picking on phones with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile: at 375x667, 390x844, 360x740 and 667x375 with touch, after A the panel is a compact bar (the next step, Cancel and Close at 48px, no body, no chip) covering at most a third of the map, a tap on the map above it sets B in one request and the panel expands with the chart, Move A is compact while pending and expands after the tap, Cancel during Move B keeps B with no request, and Cancel with only A resets the profile on the Map page; axe on the bar in light and dark; the #781 hover dot after a compact Move B and back. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other #681/#721/#781 profile suites."
     },
     {
       "file": "test-issue-723-heritage-overlay-e2e.js",
