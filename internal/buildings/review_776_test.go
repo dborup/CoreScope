@@ -5,11 +5,13 @@ package buildings
 
 import (
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -144,5 +146,46 @@ func TestClassifyHighSkipShareIsUnusable(t *testing.T) {
 				break
 			}
 		}
+	}
+}
+
+// TestOverFullPageIsTruncated (#776 review N4): a page with more features
+// than the MaxFeatures it was asked for failed whole, as a "bad response",
+// so the server would read the segment as unavailable. It is a corridor
+// with more buildings than one page holds: a truncated page, whose
+// samples stay unclassified, like any other truncated page. Its
+// footprints are not read, since they would not be used. Counts that
+// contradict the page are still refused.
+func TestOverFullPageIsTruncated(t *testing.T) {
+	over := strings.TrimSuffix(strings.Repeat(goodFeature+",", MaxFeatures+1), ",")
+	for name, body := range map[string][]byte{
+		"no counts":        fc(over, ``),
+		"counts agree":     fc(over, fmt.Sprintf(`,"numberMatched":%d,"numberReturned":%d`, MaxFeatures+1, MaxFeatures+1)),
+		"more matched yet": fc(over, fmt.Sprintf(`,"numberMatched":%d`, 5000)),
+	} {
+		page, err := Parse(body)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if !page.Truncated || len(page.Footprints) != 0 || page.Skipped != 0 {
+			t.Errorf("%s: truncated %v, %d footprints, %d skipped; want a truncated page without footprints",
+				name, page.Truncated, len(page.Footprints), page.Skipped)
+		}
+	}
+	for name, body := range map[string][]byte{
+		"numberReturned wrong": fc(over, fmt.Sprintf(`,"numberReturned":%d`, MaxFeatures)),
+		"numberMatched low":    fc(over, fmt.Sprintf(`,"numberMatched":%d`, MaxFeatures)),
+	} {
+		if _, err := Parse(body); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+
+	// Through the client: a truncated page, not a failure.
+	srv, _ := fakeOGC(t, answer(200, "application/json", fc(over, ``)))
+	page, err := testClient(srv.URL).FetchSegment(context.Background(), dokk1Segment(t))
+	if err != nil || !page.Truncated {
+		t.Fatalf("FetchSegment: truncated %v, err %v; want a truncated page", page.Truncated, err)
 	}
 }
