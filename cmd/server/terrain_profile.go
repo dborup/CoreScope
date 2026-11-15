@@ -1023,7 +1023,7 @@ func (p *terrainProfiler) retryFill(r *http.Request, key terrainKey, plan *dhm.P
 	data, _, err := p.flight.Do(r.Context(), key.String()+"|fill", p.deadline, func(ctx context.Context) ([]byte, error) {
 		// The fill writes into its own copy: this caller may leave, and
 		// serve e, while the retry still runs for the others.
-		f := terrainElevation{dtm: slices.Clone(e.dtm), dsm: e.dsm}
+		f := terrainElevation{dtm: slices.Clone(e.dtm), dsm: e.dsm, classes: e.classes}
 		p.applyFill(ctx, &f, plan, p.startFill(ctx, plan))
 		enc := f.encode()
 		if !f.fillFailed {
@@ -1034,7 +1034,7 @@ func (p *terrainProfiler) retryFill(r *http.Request, key terrainKey, plan *dhm.P
 	if err != nil {
 		return e
 	}
-	f, err := decodeTerrainElevation(data, len(e.dtm), e.dsm != nil, false)
+	f, err := decodeTerrainElevation(data, len(e.dtm), e.dsm != nil, e.classes != nil)
 	if err != nil {
 		return e
 	}

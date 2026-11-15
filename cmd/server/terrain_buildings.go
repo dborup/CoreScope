@@ -12,9 +12,10 @@ package main
 //     same per-IP charge as the rasters: a cache miss is charged once, as
 //     before, and a hit (or a request that joins a running fetch) makes no
 //     building call at all. There is no new charge path.
-//   - Only model=both with full coverage is classified, and only the
-//     segments with an elevated sample are fetched: a path where nothing
-//     stands above T costs no request.
+//   - Only model=both that DHM covers end to end is classified (not a
+//     partial one, nor one the foreign fill completed, #738: neither has a
+//     surface verdict), and only the segments with an elevated sample are
+//     fetched: a path where nothing stands above T costs no request.
 //   - The phase has its own deadline (terrainBuildingsDeadline, inside the
 //     profile's 25 s), and the footprints come through one shared
 //     buildings.Fetcher: at most 4 upstream requests at once server-wide,
@@ -134,13 +135,13 @@ func unclassified(n int) *terrainClasses {
 func (p *terrainProfiler) classifyBuildings(ctx context.Context, plan *dhm.Plan, e terrainElevation) (*terrainClasses, error) {
 	n := len(plan.E)
 	out := unclassified(n)
-	if e.dsm == nil || n < 2 {
+	if e.dsm == nil || n < 2 || plan.Covered() < n {
+		// Not wholly inside DHM: no surface verdict (#689 N1, #738), so
+		// nothing to tell apart, and no request.
 		return out, nil
 	}
 	for _, v := range e.dtm {
 		if math.IsNaN(float64(v)) {
-			// Not fully covered: no verdict on either model (#689 N1), so
-			// nothing to tell apart, and no request.
 			return out, nil
 		}
 	}
