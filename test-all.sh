@@ -64,6 +64,7 @@ run test-my-repeaters-dashboard.js
 run test-repeater-metric-scatter.js
 run test-top-routes-overlay.js
 run test-important-links-byte-filter.js
+run test-issue-807-hash-size-unknown.js
 run test-url-state.js
 run test-page-title-563.js
 run test-node-adverts.js
@@ -146,10 +147,12 @@ run test-issue-723-profile-warning.js
 run test-issue-681-profile-tool.js
 run test-issue-681-m5-node-entry.js
 run test-issue-681-m6-customizer-terrain.js
+run test-issue-790-profile-compact.js
 run test-issue-721-move-endpoints.js
 run test-issue-727-share-link.js
 run test-issue-727-m4-share-customizer.js
 run test-issue-781-profile-cursor.js
+run test-issue-737-skraafoto-viewer.js
 run test-issue-390-legacy-tile-followups.js
 run test-issue-728-esri-imagery.js
 run test-issue-728-ortho-base.js
@@ -157,6 +160,7 @@ run test-issue-728-dhm-tile-retry.js
 run test-issue-728-ortho-followups.js
 run test-packets-window-pinned.js
 run test-issue-733-dhm-credit.js
+run test-issue-734-dhm-overlays.js
 run test-issue-738-foreign-fill-ui.js
 run test-issue-730-buildings-ui.js
 run test-issue-752-inset-attribution.js

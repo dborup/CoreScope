@@ -616,6 +616,18 @@
     return _statusFromAge(ageLegacy, _nodeStaleMs(roleOrNode));
   };
 
+  // ─── Hash size ───
+  // getKnownHashSize(node) -> 1 | 2 | 3 | null
+  //   The node's path hash size only when the server actually knows it
+  //   (hash_size on /api/nodes: from an advert in the packet-store window, or
+  //   the node's last known advert, #807). null means unknown, and callers
+  //   must not read it as 1-byte. 4 is reserved by the firmware (#1211) and
+  //   is treated as unknown. Cast at the boundary: "2" -> 2.
+  window.getKnownHashSize = function (node) {
+    var hs = node ? Number(node.hash_size) : NaN;
+    return (hs === 1 || hs === 2 || hs === 3) ? hs : null;
+  };
+
   // ─── Tile URLs ───
   // #332 — these are the LAST-RESORT templates, used only when
   // map-tile-providers.js has not loaded (standalone pages, unit tests) or
@@ -828,6 +840,9 @@
     window.MC_HERITAGE_CFG = cfg.heritage || null;
     // #724 — antenna sites overlay; absent unless map.masts is on.
     window.MC_MASTS_CFG = cfg.masts || null;
+    // #737 — oblique aerial photos (public/skraafoto.js); absent unless the
+    // server's Skråfoto proxy is on. Never carries the token.
+    window.MC_SKRAAFOTO_CFG = cfg.skraafoto || null;
     if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);
     if (cfg.snrThresholds) Object.assign(SNR_THRESHOLDS, cfg.snrThresholds);
     if (cfg.distThresholds) Object.assign(DIST_THRESHOLDS, cfg.distThresholds);

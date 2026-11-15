@@ -189,7 +189,7 @@ function expectedOptions(ctx, id) {
     layers: LAYERS[id],
     styles: '',
     format: 'image/png',
-    transparent: false,
+    transparent: 'FALSE',
     version: '1.3.0',
     crs: ctx.L.CRS.EPSG3857,
     tileSize: 512,

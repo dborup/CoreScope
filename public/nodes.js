@@ -311,18 +311,29 @@
     return table ? `<tr><td>Hash Prefix</td><td>${value}</td></tr>` : `<dt>Hash Prefix</dt><dd>${value}</dd>`;
   }
 
-  /* #681 M5 — "Terrain profile to…" on node detail. terrain-profile.js owns
-   * the link and the gate (profile switched on, node has a fix), so this
-   * only waits for the client config and appends what it hands back. A
-   * re-render that replaced the row first gets nothing. */
-  function mountTerrainProfileAction(row, n) {
-    var tp = window.TerrainProfile;
-    if (!row || !tp || typeof tp.nodeEntryAction !== 'function') return;
+  /* Node-detail actions owned by other modules: #681 M5 "Terrain profile
+   * to…" (terrain-profile.js) and #737 M2 "Oblique photo" (skraafoto.js).
+   * Each module owns its button and its gate (feature switched on, node
+   * has a fix), so this only waits for the client config and appends what
+   * it hands back, in this order. A re-render that replaced the row first
+   * gets nothing. */
+  function mountConfigAction(row, testid, build) {
     Promise.resolve(window.MeshConfigReady).catch(function () {}).then(function () {
-      if (!row.isConnected || row.querySelector('[data-testid="node-terrain-profile"]')) return;
-      var action = tp.nodeEntryAction(n, window.MC_DHM_CFG);
+      if (!row.isConnected || row.querySelector('[data-testid="' + testid + '"]')) return;
+      var action = build();
       if (action) row.appendChild(action);
     });
+  }
+
+  function mountNodeActions(row, n) {
+    if (!row) return;
+    var tp = window.TerrainProfile, sf = window.Skraafoto;
+    if (tp && typeof tp.nodeEntryAction === 'function') {
+      mountConfigAction(row, 'node-terrain-profile', function () { return tp.nodeEntryAction(n, window.MC_DHM_CFG); });
+    }
+    if (sf && typeof sf.nodeAction === 'function') {
+      mountConfigAction(row, 'node-skraafoto', function () { return sf.nodeAction(n, window.MC_SKRAAFOTO_CFG); });
+    }
   }
 
   // Tablet slide-over body. The API's node object carries `name`; advert_name
@@ -1223,7 +1234,7 @@
         });
       });
 
-      mountTerrainProfileAction(body.querySelector('.node-full-actions'), n);
+      mountNodeActions(body.querySelector('.node-full-actions'), n);
 
       bindNodeAdverts(document.getElementById('node-packets'));
 
@@ -2238,7 +2249,7 @@
       } catch {}
     }
 
-    mountTerrainProfileAction(panel.querySelector('.node-detail-actions'), n);
+    mountNodeActions(panel.querySelector('.node-detail-actions'), n);
 
     // Wire "Details" button via the unified navigateToNode helper
     var detailBtn = panel.querySelector('.node-detail-btn');

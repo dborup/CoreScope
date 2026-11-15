@@ -169,7 +169,7 @@ test('F3 the WMS options are the allow-listed set, with the GetMap defaults', ()
     layers: 'stub_layer',
     styles: '',
     format: 'image/png',
-    transparent: false,
+    transparent: 'FALSE',
     version: '1.3.0',
     crs: ctx.L.CRS.EPSG3857,
     tileSize: 512,
@@ -237,7 +237,7 @@ test('F3 the descriptor can override every default', () => {
     transparent: true, version: '1.1.1', crs, tileSize: 1024,
   } });
   sameOptions(layer.options, {
-    layers: 'a', styles: 'fancy', format: 'image/jpeg', transparent: true,
+    layers: 'a', styles: 'fancy', format: 'image/jpeg', transparent: 'TRUE',
     version: '1.1.1', crs, tileSize: 1024,
   });
 });
@@ -768,7 +768,7 @@ const WMS_SPEC = {
 };
 function wmsOptions(ctx, extra) {
   return Object.assign({
-    attribution: STUB_CREDIT, maxZoom: 19, styles: '', format: 'image/png', transparent: false,
+    attribution: STUB_CREDIT, maxZoom: 19, styles: '', format: 'image/png', transparent: 'FALSE',
     version: '1.3.0', crs: ctx.L.CRS.EPSG3857, tileSize: 512, layers: STUB_WMS.layers,
     zoomOffset: -1, minZoom: 6, bounds: ctx.L.latLngBounds(STUB_WMS.bounds),
   }, extra || {});

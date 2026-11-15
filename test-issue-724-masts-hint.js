@@ -336,8 +336,10 @@ function fakePanel() {
   const panel = mk('tp-panel');
   const head = panel.appendChild(mk('tp-head'));
   head.appendChild(mk('tp-title'));
-  head.appendChild(mk('tp-chip'));
-  head.appendChild(mk('tp-chip tp-chip-assumed'));
+  // The profile's chip row (#796 F5): the chips wrap in it, not the head.
+  const chips = head.appendChild(mk('tp-chips'));
+  chips.appendChild(mk('tp-chip'));
+  chips.appendChild(mk('tp-chip tp-chip-assumed'));
   const copy = head.appendChild(mk('tp-close tp-copy'));
   head.appendChild(mk('tp-close'));
   const body = panel.appendChild(mk('tp-body'));
@@ -350,7 +352,7 @@ function fakePanel() {
   };
   panel.querySelector = (sel) => find(panel, sel.replace(/^\./, ''));
   panel.ownerDocument = { createElement: () => { const e = mk(''); made.push(e); return e; } };
-  return { panel, head, copy, detail, made, find };
+  return { panel, head, chips, copy, detail, made, find };
 }
 
 test('the hint fetches the endpoint cells through the layer loader, overlays off and below the gate', async () => {
@@ -509,14 +511,15 @@ test('a pinned cell the view also needs is fetched once and drawn when the layer
 
 // ── 7. Panel ────────────────────────────────────────────────────────────────
 
-test('the chip sits with the other chips, before the copy button, text only', () => {
+test('the chip sits last in the chip row, after the other chips, text only', () => {
   const fp = fakePanel();
   const hostile = '<img src=x onerror="window.__xss=1">';
   H.render(fp.panel, H.hintFor({ a: { distanceM: 120, bands: [800], tier: 'near', site: { street: hostile } }, b: null }));
   const chip = fp.find(fp.head, 'tp-chip-mast');
   assert(chip, 'no chip');
-  assert.strictEqual(chip.parentNode, fp.head);
-  assert.strictEqual(chip.nextSibling, fp.copy, 'chip not right before the copy button');
+  assert.strictEqual(chip.parentNode, fp.chips, 'chip not in the chip row');
+  assert.strictEqual(chip.nextSibling, null, 'chip not last in the chip row');
+  assert.strictEqual(fp.chips.children[fp.chips.children.length - 2].className, 'sr-only', 'no full stop before the chip');
   assert(/\btp-chip\b/.test(chip.className) && /\btp-chip-mast-near\b/.test(chip.className), chip.className);
   assert.strictEqual(chip.attrs['data-testid'], 'tp-mast-hint');
   assert.strictEqual(chip.attrs['data-tier'], 'near');

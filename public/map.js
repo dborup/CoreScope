@@ -178,9 +178,14 @@
   }
 
   function makeRepeaterLabelIcon(node, isStale, isAlsoObserver, mbStatus) {
-    var hs = node.hash_size || 1;
+    // #807: an unknown size is drawn as the 1-byte prefix WITH an unknown
+    // marker (ellipsis, dashed outline, aria/tooltip text), never as a
+    // confirmed 1-byte label. "?" is already the multi-byte "suspected" glyph.
+    var knownHs = getKnownHashSize(node);
+    var hs = knownHs || 1;
     // Show the short mesh hash ID (first N bytes of pubkey, uppercased)
     var shortHash = node.public_key ? node.public_key.slice(0, hs * 2).toUpperCase() : '??';
+    var hsUnknown = knownHs === null;
     // #1356 V3: glyph is the primary non-color status carrier, hash is the data,
     // status color is a thin left-border (CSS class drives the hue).
     var status = mbStatus || null;
@@ -188,14 +193,17 @@
     var statusClass = status ? (' ' + (MB_STATUS_CLASS[status] || MB_STATUS_CLASS.unknown)) : '';
     var ariaStatus = status ? ('multi-byte ' + status + ', hash ' + shortHash)
                             : ('repeater hash ' + shortHash);
+    if (hsUnknown) ariaStatus += ', hash size unknown';
     // Observer indicator stays a star — it is an orthogonal signal, not a status color.
     var obsIndicator = isAlsoObserver
       ? ' <span aria-hidden="true" style="color:' + (ROLE_COLORS.observer || '#f1c40f') + ';font-size:13px;line-height:1;" title="Also an observer"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-star-fill"/></svg></span>'
       : '';
     // Glyph + thin-space (U+2009) + hash. Visible content is aria-hidden so AT
     // reads the aria-label only (avoids "check mark 3 E" literal announcements).
-    var visible = (glyph ? glyph + '\u2009' : '') + shortHash;
-    var html = '<div class="mc-mb-label' + statusClass + '" role="img" aria-label="' + ariaStatus + '">' +
+    var visible = (glyph ? glyph + '\u2009' : '') + shortHash + (hsUnknown ? '\u2026' : '');
+    var unknownClass = hsUnknown ? ' hs-unknown' : '';
+    var titleAttr = hsUnknown ? ' title="Hash size unknown \u2014 no advert seen yet"' : '';
+    var html = '<div class="mc-mb-label' + statusClass + unknownClass + '"' + titleAttr + ' role="img" aria-label="' + ariaStatus + '">' +
       '<span aria-hidden="true">' + visible + '</span>' + obsIndicator + '</div>';
     return L.divIcon({
       html: html,
@@ -2018,12 +2026,13 @@
   // Pure predicate for the Byte Size filter — shared by renderMarkers and
   // the Important Links overlay (renderTopRoutes) so the two never drift.
   // Applies only to the repeater role (byteSize is a repeater-only concept);
-  // every other role always passes. Missing hash_size falls back to 1,
-  // matching makeRepeaterLabelIcon's hash-length fallback.
+  // every other role always passes. An unknown hash size is bucketed with
+  // 1-byte, as before #807: the label shows its 1-byte prefix (marked as
+  // unknown), and this filter selects, it does not claim a size.
   function nodePassesByteSizeFilter(node, byteSize) {
     if (byteSize === 'all') return true;
     if ((node.role || 'companion') !== 'repeater') return true;
-    const hs = node.hash_size || 1;
+    const hs = getKnownHashSize(node) || 1;
     return String(hs) === byteSize;
   }
 
@@ -2533,10 +2542,13 @@
     // Check if this node is also an observer (combined repeater+observer)
     const matchingObs = node.public_key ? _observerByPubkey.get(node.public_key.toLowerCase()) : null;
     const obsBadge = matchingObs ? ` <span style="display:inline-block;padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;background:${ROLE_COLORS.observer || '#f1c40f'};color:#fff;">OBSERVER</span>` : '';
-    const hs = node.hash_size || 1;
+    // #807: unknown size shows the 1-byte prefix and says the size is unknown.
+    const knownHs = getKnownHashSize(node);
+    const hs = knownHs || 1;
     const hashPrefix = node.public_key ? node.public_key.slice(0, hs * 2).toUpperCase() : '—';
+    const hsNote = knownHs ? `(${knownHs}B)` : '(size unknown)';
     const hashPrefixRow = `<dt style="color:var(--text-muted);float:left;clear:left;width:80px;padding:2px 0;">Hash Prefix</dt>
-          <dd style="font-family:var(--mono);font-size:11px;font-weight:700;margin-left:88px;padding:2px 0;">${safeEsc(hashPrefix)} <span style="font-weight:400;color:var(--text-muted);">(${hs}B)</span></dd>`;
+          <dd style="font-family:var(--mono);font-size:11px;font-weight:700;margin-left:88px;padding:2px 0;">${safeEsc(hashPrefix)} <span style="font-weight:400;color:var(--text-muted);">${hsNote}</span></dd>`;
     // Multi-byte support indicator for repeaters
     var mbRow = '';
     if (node.role === 'repeater' && node.multi_byte_status) {
@@ -2734,8 +2746,9 @@
   // A linked path is fitted no closer than this: a 20 m path at zoom 19
   // would show nothing around it (#746).
   var PROFILE_FIT_MAX_ZOOM = 16;
-  // True only while profileFitPath moves the map, so the moveend handler
-  // leaves the viewer's stored view alone (#765).
+  // True only while a profile link moves the map (the fit of a full link,
+  // the pan to A of a half link), so the moveend handler leaves the
+  // viewer's stored view alone (#765, #794). See profileLinkMove.
   var profileFitting = false;
   // #711: the one node a half link named that the Map page's own list does
   // not hold (an area filter or the last-heard window left it out). One
@@ -2822,6 +2835,9 @@
       dhm: window.MC_DHM_CFG,
       // #723 M3: the monuments block; with it, each end is looked up.
       heritage: window.MC_getHeritageConfig ? window.MC_getHeritageConfig() : null,
+      // #737 M2: the oblique photos block; with it, A, B and a chart point
+      // offer the photo viewer.
+      skraafoto: window.MC_SKRAAFOTO_CFG || null,
       onMoveStart: function (side) { profileArmFor(side, true); },
       onMoveCancel: profileDisarm,
       onEndpointsChange: profileDrawLine,
@@ -3178,7 +3194,7 @@
       if (!alive() || !ensureProfileTool()) return;
       profileArmFor('a');
       profilePick(start);
-      if (profileAnchor && map) map.panTo(profileAnchor);
+      if (profileAnchor && map) profileLinkMove(function () { map.panTo(profileAnchor); });
       return;
     }
     var tool = ensureProfileTool();
@@ -3196,9 +3212,7 @@
    * the stored view stays.
    *
    * The fit itself is never saved as the viewer's view (#765): a later
-   * plain #/map or a reload opens their own view again. Without animation
-   * Leaflet fires moveend inside fitBounds, so the flag covers exactly
-   * this one move. */
+   * plain #/map or a reload opens their own view again. */
   function profileFitPath() {
     var st = profileTool && profileTool.getState();
     var a = st && profileRefLatLng(st.a), b = st && profileRefLatLng(st.b);
@@ -3206,12 +3220,39 @@
     if (!map || !a || !b || !panel) return;
     var cap = parseFloat(getComputedStyle(panel).getPropertyValue('--tp-panel-max-h'));
     var pad = window.TerrainProfile.fitPadding(map.getSize().y, panel.offsetHeight, cap);
-    profileFitting = true;
-    try {
+    profileLinkMove(function () {
       map.fitBounds(L.latLngBounds([a, b]), Object.assign(pad, { maxZoom: PROFILE_FIT_MAX_ZOOM, animate: false }));
-    } finally {
+    });
+  }
+
+  /* profileLinkMove makes one map move on behalf of a profile link and keeps
+   * it out of the viewer's stored view (#765, #794). Leaflet ends every
+   * move with exactly one moveend: inside the call when it does not
+   * animate (or the jump is too far to animate), or when the animation
+   * ends — a drag or map.remove() stops it early, and that still fires
+   * moveend. So an animated pan releases the guard on its own moveend, not
+   * when the call returns: it would otherwise be saved after all.
+   *
+   * Only that moveend (#817). Another can come first: setView stops a
+   * running animation (drag inertia) with a moveend inside the call, and
+   * an invalidateSize() mid-pan fires one while the pan still runs. So the
+   * listener goes on after the call, and a moveend while the pan animation
+   * is still in progress is not the pan's. Leaflet clears _inProgress
+   * before the pan's own moveend. The save handler was registered first,
+   * so it still sees the guard. */
+  function profileLinkMove(move) {
+    profileFitting = true;
+    move();
+    if (!profilePanAnimating()) { profileFitting = false; return; }
+    map.on('moveend', function release() {
+      if (profilePanAnimating()) return;
+      map.off('moveend', release);
       profileFitting = false;
-    }
+    });
+  }
+
+  function profilePanAnimating() {
+    return !!(map && map._panAnim && map._panAnim._inProgress);
   }
 
   function destroyProfileTool() {
@@ -3668,6 +3709,8 @@
       inferredRouteHops: inferredRouteHops, hide1ByteRoutePositions: hide1ByteRoutePositions,
       tagPathHopTokens: tagPathHopTokens, routeEdgeCounts: routeEdgeCounts,
       nodePassesByteSizeFilter: nodePassesByteSizeFilter,
+      // #807: label + popup rendering for unknown hash sizes.
+      makeRepeaterLabelIcon: makeRepeaterLabelIcon, buildPopup: buildPopup,
       nodePassesScopeFilter: nodePassesScopeFilter, buildScopeOptions: buildScopeOptions,
       nodePassesRelayedScopeFilter: nodePassesRelayedScopeFilter, buildRelayedScopeOptions: buildRelayedScopeOptions,
       nodePassesConfiguredScopeFilter: nodePassesConfiguredScopeFilter, buildConfiguredScopeOptions: buildConfiguredScopeOptions,

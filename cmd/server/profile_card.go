@@ -228,7 +228,9 @@ func cardNames(req terrainRequest) [2]string {
 
 // cardInputs digests everything but the elevations that the picture
 // depends on: the renderer and palette, the display options, both
-// endpoints as drawn, the resolved antenna heights and radio.
+// endpoints as drawn, the resolved antenna heights and radio. A cached
+// dsm-estimate (#789) is part of the resolved height, so v changes when
+// the estimate changes what is drawn.
 func (p *terrainProfiler) cardInputs(req terrainRequest, names [2]string) [16]byte {
 	c := p.card
 	h := sha256.New()
