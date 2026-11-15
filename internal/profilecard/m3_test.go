@@ -3,6 +3,7 @@ package profilecard
 import (
 	"image/color"
 	"math"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -289,7 +290,10 @@ func TestPendingCard(t *testing.T) {
 // #755 review Low: the sample-count test's +1 ms slack was about the whole
 // draw, so an O(samples×columns) resampler survived it. geometry is the
 // only part of a render that sees the samples; it is timed alone, as the
-// fastest of many runs, against a ratio with no absolute slack.
+// fastest of many runs, against a ratio with no absolute slack. The ratio
+// is the median of geometryRounds rounds, each timing both sizes back to
+// back, so a burst of load on a shared runner skews a round, not the
+// verdict (#759 review finding 4).
 func TestGeometryLinearInSamples(t *testing.T) {
 	if raceEnabled {
 		t.Skip("timing is meaningless under -race")
@@ -313,9 +317,52 @@ func TestGeometryLinearInSamples(t *testing.T) {
 		return best
 	}
 	fastest(large)
-	s, l := fastest(small), fastest(large)
-	t.Logf("geometry: 1024 samples %v, 3200 samples %v (%.2fx)", s, l, float64(l)/float64(s))
-	if l > s*2 {
-		t.Errorf("3200 samples took %v against %v for 1024: work per sample and column", l, s)
+	ratios := make([]float64, geometryRounds)
+	for i := range ratios {
+		s, l := fastest(small), fastest(large)
+		ratios[i] = float64(l) / float64(s)
+		t.Logf("geometry round %d: 1024 samples %v, 3200 samples %v (%.2fx)", i, s, l, ratios[i])
+	}
+	sort.Float64s(ratios)
+	median := ratios[len(ratios)/2]
+	t.Logf("geometry: median ratio %.2fx over %d rounds", median, len(ratios))
+	if median > 2 {
+		t.Errorf("3200 samples took a median %.2fx the time of 1024: work per sample and column", median)
+	}
+}
+
+// geometryRounds is odd, so the median is one round's ratio.
+const geometryRounds = 5
+
+// #759 review RM6: a title too long for its row stops safeMargin short of
+// the badge pill, not at it. Names of narrow glyphs over a range of
+// lengths make some cut land within a few px of the bound.
+func TestLongTitleKeepsTheGapBeforeTheBadge(t *testing.T) {
+	cut := 0
+	for n := 36; n <= 70; n++ {
+		names := [2]string{"Il" + strings.Repeat("i", n), "Il" + strings.Repeat("l", n)}
+		_, runs, err := render(fxClear(), names, DefaultPalette(true), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var title, badge textRun
+		for _, r := range runs {
+			switch r.Role {
+			case "title":
+				title = r
+			case "badge":
+				badge = r
+			}
+		}
+		if title.Size < titleSize || strings.Contains(title.Text, "…") {
+			cut++
+		}
+		pill := badge.X - 18
+		if end := title.X + title.W; end > pill-safeMargin {
+			t.Errorf("%dpx %q ends at %d, within %d px of the badge pill at %d", title.Size, title.Text, end, pill-end, pill)
+		}
+	}
+	if cut == 0 {
+		t.Fatal("precondition: no title was shrunk or shortened")
 	}
 }

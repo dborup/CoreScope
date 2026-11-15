@@ -74,6 +74,11 @@ type textRun struct {
 	X, Y, W    int
 }
 
+// Credit is the DHM credit every card draws: the derived credit (#733),
+// because a card is computed from DHM data rather than shown as served,
+// and it is the credit of the profile it pictures.
+const Credit = dhm.AttributionDerived
+
 // Render draws the card for resp and returns it as a PNG. names are the
 // display names of endpoints A and B ("" when unknown); the caller is
 // responsible for only passing names of nodes the profile API would
@@ -765,10 +770,8 @@ func (r *renderer) footer(resp TerrainProfileResponse, main chip, opt Options, p
 	r.text("summary", summary, safeMargin, summaryBaseline, summarySize, false, opaque(r.pal.Text))
 
 	// The credit is never shortened and never left out (CC BY 4.0).
-	// TODO(#733): a card is a derived work of DHM data; switch to the
-	// "derived" credit constant once #733 adds it to internal/dhm.
 	muted := opaque(r.pal.TextMuted)
-	w := r.text("attribution", dhm.Attribution, safeMargin, creditBaseline, attributionSize, false, muted)
+	w := r.text("attribution", Credit, safeMargin, creditBaseline, attributionSize, false, muted)
 	if site := sanitize(opt.Site); site != "" {
 		site = r.fs.fit(site, attributionSize, false, right-(safeMargin+w+32))
 		if site != "" {

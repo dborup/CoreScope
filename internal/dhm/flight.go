@@ -29,6 +29,9 @@ type flightCall[V any] struct {
 	err     error
 	waiters int
 	cancel  context.CancelFunc
+	// held: the call runs to its end or its timeout even with no waiter
+	// left, and stays joinable meanwhile (DoAdmittedHeld).
+	held bool
 }
 
 // Do runs fn once per key at a time and returns its result to every
@@ -43,6 +46,23 @@ func (g *Flight[V]) Do(ctx context.Context, key string, timeout time.Duration, f
 // the worker has returned, so adm bounds live workers, queued or running.
 // Joining a running call takes no slot. A nil adm admits everything.
 func (g *Flight[V]) DoAdmitted(ctx context.Context, key string, timeout time.Duration, adm *Admission, fn func(context.Context) (V, error)) (v V, shared bool, err error) {
+	return g.do(ctx, key, timeout, adm, fn, false)
+}
+
+// DoAdmittedHeld is DoAdmitted, except that a call it starts is not
+// cancelled when every caller has given up: it runs on to its end or its
+// timeout, holding its adm slot, and later callers can still join it. A
+// caller can thus stop waiting without wasting the work it started (#759
+// review finding 3). It adds no goroutine: the worker DoAdmitted starts
+// anyway is what runs on, so adm still bounds the held calls. Joining a
+// running call does not change whether that call is held. timeout must
+// be positive, or the call is not held: an unbounded call that nobody
+// waits for would never end.
+func (g *Flight[V]) DoAdmittedHeld(ctx context.Context, key string, timeout time.Duration, adm *Admission, fn func(context.Context) (V, error)) (v V, shared bool, err error) {
+	return g.do(ctx, key, timeout, adm, fn, timeout > 0)
+}
+
+func (g *Flight[V]) do(ctx context.Context, key string, timeout time.Duration, adm *Admission, fn func(context.Context) (V, error), held bool) (v V, shared bool, err error) {
 	g.mu.Lock()
 	if g.calls == nil {
 		g.calls = make(map[string]*flightCall[V])
@@ -60,7 +80,7 @@ func (g *Flight[V]) DoAdmitted(ctx context.Context, key string, timeout time.Dur
 		if timeout > 0 {
 			work, cancel = context.WithTimeout(context.Background(), timeout)
 		}
-		c = &flightCall[V]{done: make(chan struct{}), waiters: 1, cancel: cancel}
+		c = &flightCall[V]{done: make(chan struct{}), waiters: 1, cancel: cancel, held: held}
 		g.calls[key] = c
 		go func() {
 			c.val, c.err = fn(work)
@@ -84,7 +104,7 @@ func (g *Flight[V]) DoAdmitted(ctx context.Context, key string, timeout time.Dur
 	case <-ctx.Done():
 		g.mu.Lock()
 		c.waiters--
-		if c.waiters == 0 {
+		if c.waiters == 0 && !c.held {
 			// Nobody wants the result any more: stop the work, and let
 			// the next caller start afresh rather than join a dying call.
 			c.cancel()

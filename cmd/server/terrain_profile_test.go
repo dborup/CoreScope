@@ -1840,7 +1840,10 @@ func TestTerrainProfile_AdmissionLogNamesConfiguredMaxInFlight(t *testing.T) {
 	}
 }
 
-// #707 nit 4: the leader is refused, so its joiners are refused with it.
+// #707 nit 4: the 503 text must not claim more than sharing gives. Since
+// #744 (DoAdmitted) a refused call is never registered, so the old "refused
+// with it" wording is gone too; TestTerrainProfile_OpenAPI503MatchesAdmission
+// pins the current text (#759 review finding 9).
 func TestTerrainProfile_OpenAPI503DoesNotOverstateSharing(t *testing.T) {
 	_, router := setupTestServer(t)
 	spec := buildOpenAPISpec(router, "test")
@@ -1848,8 +1851,5 @@ func TestTerrainProfile_OpenAPI503DoesNotOverstateSharing(t *testing.T) {
 	text := string(raw)
 	if strings.Contains(text, "share it and are not refused") {
 		t.Fatal("503 text still claims joiners are never refused")
-	}
-	if !strings.Contains(text, "refused with it") {
-		t.Fatal("503 text must say joiners of a refused fetch are refused with it")
 	}
 }

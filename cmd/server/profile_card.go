@@ -18,7 +18,9 @@ package main
 //     (share.upstreamPerMin) and then the shared fetch (p.flight under
 //     p.admit, the same maxInFlight as the panel's profiles). A spent
 //     budget, an upstream failure or a slow upstream gives a degraded
-//     card: 200, max-age 60, no verdict. A crawler that got an error would
+//     card: 200, max-age 60, no verdict. A slow fetch is not cut short: it
+//     runs on to the profile deadline, held in its maxInFlight slot, and
+//     its profile is cached for the next fetch. A crawler that got an error would
 //     keep "no preview" for a long time; a degraded card refreshes itself;
 //   - the render: one per card key at a time (c.flight), at most
 //     cardRenderSlots at once (c.admit).
@@ -56,7 +58,7 @@ const (
 	// cardRendererVersion is part of every card key and v: bump it when
 	// the renderer draws differently, so no stale card is served or kept
 	// by a crawler.
-	cardRendererVersion = "727m3.1"
+	cardRendererVersion = "727m3.2"
 	// cardBytesPerEntry is the byte bound per cached card. Real cards are
 	// 80–94 KB (#755 review); 128 KiB leaves room for an unusual one, and
 	// the default 64 entries keep the plan's ~8 MiB (#727 plan §3.2).
@@ -66,7 +68,8 @@ const (
 	cardCacheTTL            = 24 * time.Hour
 	// cardShareWait is how long a card waits for upstream before it is
 	// served degraded: an image fetch is more patient than an HTML one,
-	// but a crawler's is not endless (#727 plan §3.3).
+	// but a crawler's is not endless (#727 plan §3.3). The fetch itself
+	// runs on to the profile deadline and is cached (cardElevation).
 	cardShareWait = 10 * time.Second
 	// cardRenderSlotsMax bounds concurrent renders (~10 ms of CPU each).
 	cardRenderSlotsMax = 4
@@ -354,7 +357,11 @@ func (p *terrainProfiler) cardElevation(r *http.Request, req terrainRequest) (te
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), c.wait)
 	defer cancel()
-	data, shared, err := p.flight.DoAdmitted(ctx, key.String(), p.deadline, p.admit, p.elevationCall(key, &req.plan, both))
+	// Held: when the card stops waiting, the fetch its token bought runs
+	// on to p.deadline under its maxInFlight slot and is cached, so the
+	// crawler's re-fetch gets the complete card instead of spending another
+	// token on another fetch that is cut short (#759 review finding 3).
+	data, shared, err := p.flight.DoAdmittedHeld(ctx, key.String(), p.deadline, p.admit, p.elevationCall(key, &req.plan, both))
 	if shared || isTerrainBusy(err) {
 		// Joining a running fetch, or being refused, did no upstream work.
 		c.budget.refund()

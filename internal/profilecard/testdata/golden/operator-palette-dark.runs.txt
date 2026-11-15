@@ -13,5 +13,5 @@ axis-x        16px regular x=  96 y=524 w=   9 0
 axis-x        16px regular x= 612 y=524 w=  49 7.3 km
 axis-x        16px regular x=1118 y=524 w=  58 14.6 km
 summary       20px regular x=  24 y=574 w= 769 Worst clearance 3.1 m at 8106.4 m · heights assumed (46 m / 34 m) · terrain + surface
-attribution   18px regular x=  24 y=604 w= 606 Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0
+attribution   18px regular x=  24 y=604 w= 760 Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0 — data bearbejdet
 site          18px regular x=1057 y=604 w= 119 mesh.example

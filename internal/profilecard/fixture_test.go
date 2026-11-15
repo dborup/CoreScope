@@ -157,7 +157,7 @@ func build(s spec) TerrainProfileResponse {
 	}
 	resp := TerrainProfileResponse{
 		DistanceM: round2(s.distM), StepM: round2(step), SampleCount: n,
-		Model: "dtm", Attribution: dhm.Attribution, Samples: []TerrainSample{},
+		Model: "dtm", Attribution: dhm.AttributionDerived, Samples: []TerrainSample{},
 	}
 	if dsm != nil {
 		resp.Model = "both"

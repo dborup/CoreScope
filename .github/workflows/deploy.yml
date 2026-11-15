@@ -238,9 +238,11 @@ jobs:
           # internal/profilecard (#727 M2): share-card renderer. cmd/server
           # imports it since #727 M3, but its own tests run only here.
           (cd internal/profilecard && go test -race ./...)
-          # The per-card time budget (25 ms) and the sample-count timing
-          # tests skip themselves under -race, which slows rendering ~10x:
-          # run them once more without it, so CI enforces them (#755 review).
+          # The per-card time budget and the sample-count timing tests skip
+          # themselves under -race, which slows rendering ~10x: run them
+          # once more without it, so CI enforces them (#755 review). The
+          # budget fails at 50 ms, twice the 25 ms target it logs against,
+          # and the geometry ratio is a median of rounds (#759 review).
           (cd internal/profilecard && go test -count=1 -run 'TestRenderWithinBudget|TestRenderTimeIndependentOfSampleCount|TestGeometryLinearInSamples' -v ./... | grep -E '^(=== RUN|--- |ok|FAIL|PASS)|per card|draw:|geometry:')
           # internal/regions is its own module: the server/ingestor steps
           # above compile it but never run its tests, and it now holds the

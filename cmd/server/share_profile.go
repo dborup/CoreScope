@@ -24,7 +24,8 @@ package main
 //     map, where the panel explains the problem.
 //   - No upstream call, no per-client charge: the page needs only the
 //     in-memory node snapshot and the elevation cache. When the profile is
-//     cached, the title gains the card's verdict word (#727 M3).
+//     cached and has a verdict, the title gains the card's verdict word
+//     (#727 M3); a path with none (outside DHM) keeps a plain title.
 //   - og:image is the share card (profile_card.go), 1200×630, with its
 //     text alternative; its v changes once the profile is cached.
 //   - Every request-derived value reaches the document through ogText
@@ -181,8 +182,8 @@ func splitProfilePair(raw string) ([2]string, bool) {
 
 // sharePage is the preview text for one resolved request. It reads the
 // request, the operator's radio config and the elevation cache, never
-// upstream: a cached profile adds the verdict word to the title, the same
-// word the card's badge shows (profilecard.MainVerdict).
+// upstream: a cached profile with a verdict adds the verdict word to the
+// title, the same word the card's badge shows (profilecard.MainVerdict).
 func (p *terrainProfiler) sharePage(req terrainRequest) ogPage {
 	overrides := [2]*float64{req.q.ha, req.q.hb}
 	pts := [2]dhm.LatLon{req.a, req.b}
@@ -215,7 +216,11 @@ func (p *terrainProfiler) sharePage(req terrainRequest) ogPage {
 	resp, ready := p.cachedResponse(req)
 	opt := p.card.options()
 	if ready {
-		pg.Title += " · " + profilecard.MainVerdict(resp).Word
+		// A path with no verdict (outside DHM, or not covered end to end)
+		// keeps the title plain (#727 plan); the card's badge still says so.
+		if v := profilecard.MainVerdict(resp); v.Known {
+			pg.Title += " · " + v.Word
+		}
 	} else {
 		resp = p.pendingResponse(req)
 		opt.Pending = true

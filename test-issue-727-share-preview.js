@@ -14,8 +14,8 @@
  * Asserts:
  *   1. /p fetched with a crawler User-Agent (no JavaScript) carries
  *      og:image = twitter:image = an absolute card URL with v, 1200x630,
- *      og:image:alt naming both nodes, og:title with the verdict word, and
- *      robots noindex;
+ *      og:image:alt naming both nodes, og:title without a verdict word
+ *      (the path is outside DHM, so it has none), and robots noindex;
  *   2. that URL is image/png, 1200x630 by its IHDR, nosniff, immutable,
  *      X-CoreScope-Card miss then hit with the same bytes;
  *   3. changing ha changes og:image and the card's bytes;
@@ -234,8 +234,10 @@ async function mockUp(browser, p, shots) {
         assert.equal(p.height, '630');
         assert.equal(p.robots, 'noindex');
         // Outside DHM there is nothing to fetch: the profile is ready at
-        // once, and the title carries the card's verdict word.
-        assert.match(p.title, /^Path profile: \d+(\.\d)? km · No verdict$/);
+        // once, and has no verdict, so the title carries no verdict word
+        // (#727 plan, #759 review finding 7); the card's badge still says
+        // "No verdict".
+        assert.match(p.title, /^Path profile: \d+(\.\d+)? (km|m)$/);
         assert(p.alt.startsWith('Terrain profile from KN6PLV-BrkOxfLA-Yebes to R5-D4 300D Rak, '), 'alt: ' + p.alt);
       });
 
