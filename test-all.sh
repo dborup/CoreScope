@@ -64,6 +64,7 @@ run test-my-repeaters-dashboard.js
 run test-repeater-metric-scatter.js
 run test-top-routes-overlay.js
 run test-important-links-byte-filter.js
+run test-issue-807-hash-size-unknown.js
 run test-url-state.js
 run test-page-title-563.js
 run test-node-adverts.js

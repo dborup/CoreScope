@@ -616,6 +616,18 @@
     return _statusFromAge(ageLegacy, _nodeStaleMs(roleOrNode));
   };
 
+  // ─── Hash size ───
+  // getKnownHashSize(node) -> 1 | 2 | 3 | null
+  //   The node's path hash size only when the server actually knows it
+  //   (hash_size on /api/nodes: from an advert in the packet-store window, or
+  //   the node's last known advert, #807). null means unknown, and callers
+  //   must not read it as 1-byte. 4 is reserved by the firmware (#1211) and
+  //   is treated as unknown. Cast at the boundary: "2" -> 2.
+  window.getKnownHashSize = function (node) {
+    var hs = node ? Number(node.hash_size) : NaN;
+    return (hs === 1 || hs === 2 || hs === 3) ? hs : null;
+  };
+
   // ─── Tile URLs ───
   // #332 — these are the LAST-RESORT templates, used only when
   // map-tile-providers.js has not loaded (standalone pages, unit tests) or
