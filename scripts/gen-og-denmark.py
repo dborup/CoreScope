@@ -5,29 +5,49 @@ Rewrites the block between the "gen-og-denmark:begin/end" markers in
 scripts/og-image-meshview.html; render the PNG afterwards with
 node scripts/render-og-image.js.
 
-Source (https://www.naturalearthdata.com/, public domain; no attribution
-required): Natural Earth 1:10m Cultural Vectors, Admin 0 - Countries,
-v5.1.1, the polygons with ADM0_A3 == "DNK" (Denmark proper: Jutland and
-all islands; Greenland and the Faroes are separate entries).
+Source (#739 M2): Klimadatastyrelsen, Topografisk Landpolygon
+(https://dataforsyningen.dk/data/4826), the same GeoPackage
+(landpolygon/full) as the DHM coverage gate's Danish side
+(scripts/gen-dhm-foreign-land.py, #739 M1), read through the same
+reader (scripts/landpolygon_gpkg.py), layer OG_LAYER: the 1:1 000 000
+level of the Danish land polygon, EPSG:25832. Every Danish island in it
+above MIN_AREA_PX2 is drawn, Saltholm and the small islands of the
+South Funen archipelago included. Terms: "Vilkår for brug af frie
+geografiske data" (1 December 2022); the attribution line they require,
+the GeoPackage's sha256 and the layer's last_change are written into the
+generated block. The GeoPackage needs a free Dataforsyningen login and is
+never checked in; only the derived SVG path is.
 
 Construction:
-  * Equirectangular projection with x scaled by cos(56 deg), so Denmark is
-    not stretched; PX_PER_DEG pixels per degree of latitude.
+  * EPSG:25832 -> WGS84 (pyproj), then equirectangular with x scaled by
+    cos(56 deg), so Denmark is not stretched; PX_PER_DEG pixels per
+    degree of latitude.
   * Bornholm (14.7 E) is moved into a framed inset at the lower right,
     at true scale, as on printed maps of Denmark; everything else keeps
-    its true position.
-  * Douglas-Peucker with SIMPLIFY_PX tolerance, topology preserved.
-    Parts smaller than MIN_AREA_PX2 (islets) are dropped.
+    its true position. One shift, from Bornholm's own bounds, moves
+    every part east of BORNHOLM_LON.
+  * Each part's outer ring only (lakes are not drawn). Parts smaller
+    than MIN_AREA_PX2 (about 7.4 km2) are dropped; the rest are
+    simplified with Douglas-Peucker at SIMPLIFY_PX, topology preserved.
+    0.6 px is about 440 m on the ground (1 px = 1/153 deg of latitude,
+    about 727 m): under one pixel of the 1200x630 card, and the order
+    of the 1:1 000 000 level's own generalisation. The number of parts
+    and the mainland bbox before simplification are written into the
+    block as source_parts / source_bbox_px, so a test can check the
+    outline against its source without the GeoPackage.
   * NODES / LINKS are given as lon/lat of real towns. The script fails
     if a node is not at least MARGIN_PX inside land, so the network always
     sits on land. It is still a stylised network, not real topology.
 
-Dev-only tool, not part of the build; no shapefile is committed. Pinned
-versions (the output is byte-identical with these):
-  python3 -m venv .venv && .venv/bin/pip install pyshp==3.1.8 shapely==2.2.0 numpy==2.5.4
-  curl -LO https://naturalearth.s3.amazonaws.com/10m_cultural/ne_10m_admin_0_countries.zip
-  unzip ne_10m_admin_0_countries.zip -d ne
-  .venv/bin/python scripts/gen-og-denmark.py ne/ne_10m_admin_0_countries.shp
+Dev-only tool, not part of the build. Same venv and GeoPackage as
+scripts/gen-dhm-foreign-land.py (see there for how to fetch them); pinned
+versions, the output is byte-identical run to run with these (macOS
+arm64, Python 3.14.3, GEOS 3.14.1):
+  uv venv -p 3.14 ~/geodata/venv
+  VIRTUAL_ENV=~/geodata/venv uv pip install numpy==2.5.4 pyproj==3.8.0 \
+      pyshp==3.1.8 shapely==2.2.0
+  ~/geodata/venv/bin/python -I scripts/gen-og-denmark.py ~/geodata/landpolygon.gpkg
+  node scripts/render-og-image.js
 """
 import math
 import os
@@ -35,17 +55,24 @@ import re
 import sys
 
 import numpy as np
-import shapefile
 import shapely
+from pyproj import Transformer
 from shapely.affinity import translate
-from shapely.geometry import Point, shape
+from shapely.geometry import Point
+from shapely.ops import unary_union
 
+# -I drops the script's directory from sys.path; the shared GeoPackage
+# reader lives next to this script.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import landpolygon_gpkg  # noqa: E402
+
+OG_LAYER = "landpolygon_1000"
 PX_PER_DEG = 153.0            # px per degree latitude: ~500 px for Denmark
 LAT_TOP = 57.77               # Skagen is 57.75
 LON_LEFT = 8.07               # Blavand is 8.09
 ORIGIN_X, ORIGIN_Y = 712.0, 62.0
 COS_LAT = math.cos(math.radians(56.0))
-SIMPLIFY_PX = 0.6
+SIMPLIFY_PX = 0.6             # about 440 m on the ground
 MIN_AREA_PX2 = 14.0
 MARGIN_PX = 4.0
 BORNHOLM_LON = 13.5           # polygons east of this are Bornholm
@@ -87,8 +114,15 @@ def project(lon, lat):  # works on scalars and numpy arrays
             ORIGIN_Y + (LAT_TOP - lat) * PX_PER_DEG)
 
 
-def project_geom(g):
-    return shapely.transform(g, lambda a: np.column_stack(project(a[:, 0], a[:, 1])))
+to_lonlat = Transformer.from_crs("EPSG:25832", "EPSG:4326", always_xy=True).transform
+
+
+def project_utm(g):
+    """EPSG:25832 metres to card pixels."""
+    def f(a):
+        lon, lat = to_lonlat(a[:, 0], a[:, 1])
+        return np.column_stack(project(lon, lat))
+    return shapely.transform(g, f)
 
 
 def fmt(v):
@@ -103,37 +137,29 @@ def path_d(poly):
 
 def main():
     if len(sys.argv) != 2:
-        sys.exit('usage: gen-og-denmark.py ne_10m_admin_0_countries.shp')
-    r = shapefile.Reader(sys.argv[1])
-    land = None
-    for s, rec in zip(r.shapes(), r.records()):
-        if rec.as_dict()['ADM0_A3'] == 'DNK':
-            land = shape(s.__geo_interface__)
-    if land is None:
-        sys.exit('no ADM0_A3 == DNK in ' + sys.argv[1])
-
-    parts = []
-    for p in land.geoms:
-        if p.centroid.x > BORNHOLM_LON:
-            g = project_geom(p)
-            b = g.bounds
-            g = translate(g, INSET[0] + (INSET[2] - (b[2] - b[0])) / 2 - b[0],
-                          INSET[1] + (INSET[3] - (b[3] - b[1])) / 2 - b[1])
-            shift = (g.bounds[0] - b[0], g.bounds[1] - b[1])
-            parts.append((g, shift))
-        else:
-            parts.append((project_geom(p), (0.0, 0.0)))
+        sys.exit('usage: gen-og-denmark.py landpolygon.gpkg')
+    gpkg = sys.argv[1]
+    polys, changed = landpolygon_gpkg.read_layer(gpkg, OG_LAYER)
+    land = unary_union(polys)
+    parts = [project_utm(shapely.Polygon(p.exterior))
+             for p in getattr(land, 'geoms', [land]) if isinstance(p, shapely.Polygon)]
+    parts = [g for g in parts if g.area >= MIN_AREA_PX2]
+    east_x = project(BORNHOLM_LON, LAT_TOP)[0]
+    east = [g for g in parts if g.centroid.x > east_x]
+    main_parts = [g for g in parts if g.centroid.x <= east_x]
+    if not east or not main_parts:
+        sys.exit('no Bornholm or no mainland in ' + OG_LAYER)
+    b = max(east, key=lambda g: g.area).bounds
+    bh = (INSET[0] + (INSET[2] - (b[2] - b[0])) / 2 - b[0],
+          INSET[1] + (INSET[3] - (b[3] - b[1])) / 2 - b[1])
+    source_bbox = unary_union(main_parts).bounds
     kept = []
-    for g, shift in parts:
-        if g.area < MIN_AREA_PX2:
-            continue
-        g = g.simplify(SIMPLIFY_PX, preserve_topology=True)
-        if g.geom_type == 'Polygon' and not g.is_empty:
-            kept.append((g, shift))
-    kept.sort(key=lambda t: -t[0].area)
-
-    # Bornholm shift: recompute from its own polygon (same for all its nodes).
-    bh = [t for t in parts if t[1] != (0.0, 0.0)][0][1]
+    for g in main_parts + [translate(g, *bh) for g in east]:
+        s = g.simplify(SIMPLIFY_PX, preserve_topology=True)
+        if s.geom_type != 'Polygon' or s.is_empty:
+            sys.exit('part at %s did not survive simplification' % (g.centroid,))
+        kept.append(s)
+    kept.sort(key=lambda g: (-g.area, g.bounds))
 
     def xy(name):
         lon, lat = NODES[name][:2]
@@ -142,11 +168,17 @@ def main():
 
     for name in NODES:
         x, y = xy(name)
-        if not any(g.buffer(-MARGIN_PX).contains(Point(x, y)) for g, _ in kept):
+        if not any(g.buffer(-MARGIN_PX).contains(Point(x, y)) for g in kept):
             sys.exit('node %s at (%.1f, %.1f) is not %g px inside land' % (name, x, y, MARGIN_PX))
 
-    lines = ['  <!-- gen-og-denmark:begin (generated by scripts/gen-og-denmark.py; do not edit by hand) -->']
-    for g, _ in kept:
+    lines = ['  <!-- gen-og-denmark:begin (generated by scripts/gen-og-denmark.py; do not edit by hand) -->',
+             '  <!-- Denmark: Topografisk Landpolygon layer=%s last_change=%s' % (OG_LAYER, changed[:10]),
+             '       gpkg_sha256=%s' % landpolygon_gpkg.file_sha256(gpkg),
+             '       simplify_px=%s min_area_px2=%s source_parts=%d source_bbox_px=%s' % (
+                 fmt(SIMPLIFY_PX), fmt(MIN_AREA_PX2), len(parts), ','.join(fmt(v) for v in source_bbox)),
+             '       ' + landpolygon_gpkg.attribution(changed),
+             '       Terms: Vilkår for brug af frie geografiske data, ' + landpolygon_gpkg.TERMS_URL + ' -->']
+    for g in kept:
         lines.append('  <path class="outline" d="%s"/>' % path_d(g))
     lines.append('  <rect class="inset" x="%s" y="%s" width="%s" height="%s" rx="6"/>' % tuple(fmt(v) for v in INSET))
     lines.append('  <g class="links">')
@@ -172,7 +204,8 @@ def main():
     if not pat.search(text):
         sys.exit('markers missing in ' + html)
     open(html, 'w', encoding='utf-8').write(pat.sub(lambda m: block, text))
-    print('%d parts, %d bytes of SVG' % (len(kept), len(block)), file=sys.stderr)
+    nv = sum(len(g.exterior.coords) - 1 for g in kept)
+    print('%s: %d parts, %d vertices, %d bytes of SVG' % (OG_LAYER, len(kept), nv, len(block)), file=sys.stderr)
 
 
 if __name__ == '__main__':
