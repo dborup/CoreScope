@@ -27,7 +27,7 @@ const MaxVertices = 50000
 // corridor than it returned, so the segment's samples stay unclassified.
 // Skipped counts features without a usable footprint (no geometry, not a
 // polygon, a ring under four positions, an empty MultiPolygon), which were
-// left out.
+// left out; a page that skipped too many is not used either (usable).
 //
 // A Page may be shared between callers (Fetcher): treat it as read-only.
 // The JSON tags are the cache encoding only.
@@ -35,6 +35,19 @@ type Page struct {
 	Footprints []dhm.MultiPolygon `json:"footprints"`
 	Truncated  bool               `json:"truncated,omitempty"`
 	Skipped    int                `json:"skipped,omitempty"`
+}
+
+// maxSkippedOneIn: a page that skipped more than 1 in maxSkippedOneIn of
+// its features is not used.
+const maxSkippedOneIn = 20
+
+// usable reports whether the page can classify its segment: complete, and
+// with at most 1 in maxSkippedOneIn of its features skipped. A skipped
+// feature is a building whose footprint was lost, and its samples would
+// read as Vegetation; a page that lost them all would read as a corridor
+// without buildings (#776 review N3). Real pages skip none.
+func (p *Page) usable() bool {
+	return !p.Truncated && p.Skipped*maxSkippedOneIn <= p.Skipped+len(p.Footprints)
 }
 
 var errShape = errors.New("buildings: unexpected response shape")

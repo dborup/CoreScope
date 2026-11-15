@@ -13,7 +13,8 @@ type Class byte
 
 const (
 	// Unclassified: not elevated, or no usable footprints for its segment
-	// (not fetched, failed, truncated, over the work cap), or off the track.
+	// (not fetched, failed, truncated, too many skipped, over the work
+	// cap), or off the track.
 	Unclassified Class = 0
 	// Building: at least MinBuildingFraction of the window lies inside a
 	// footprint.
@@ -133,7 +134,7 @@ func Classify(c Corridor, s Samples, pages []*Page, o Options) ([]Class, error) 
 		}
 		if !built[k] {
 			built[k] = true
-			if p := pages[k]; p != nil && !p.Truncated {
+			if p := pages[k]; p != nil && p.usable() {
 				idx[k] = c.index(k, p, h)
 			}
 		}
