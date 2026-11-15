@@ -41,7 +41,7 @@ func syntheticBridgeEdges(nodes, edges int, seed int64) []BridgeEdge {
 			return
 		}
 		seen[pair{a, b}] = true
-		out = append(out, BridgeEdge{A: keys[a], B: keys[b], Weight: 0.01 + 0.99*rng.Float64()})
+		out = append(out, BridgeEdge{A: keys[a], B: keys[b], Weight: 0.01 + float64(0.99*rng.Float64())}) // no FMA (#656)
 	}
 	for i := 1; i < nodes && len(out) < edges; i++ {
 		add(i, rng.Intn(i))
