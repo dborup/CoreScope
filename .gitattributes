@@ -6,6 +6,7 @@
 *.jpg binary
 *.ico binary
 *.db binary
+*.bin binary
 
 # Squad: union merge for append-only team state files
 .squad/decisions.md merge=union

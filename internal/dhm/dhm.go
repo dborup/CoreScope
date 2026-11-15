@@ -24,7 +24,9 @@
 // hillshade service (#687) in hillshade.go. The elevation raster
 // shape for the terrain profile (#681) lives in wcs.go, behind the
 // ElevationSource interface, which returns a decoded Grid (grid.go) read by
-// a stdlib-only float32 GeoTIFF decoder (geotiff.go); utm.go projects
+// a stdlib-only float32 GeoTIFF decoder (geotiff.go), which also reads the
+// tiled EPSG:4326 GeoTIFFs of the Copernicus GLO-30 foreign fill block by
+// block (geotiff_tiled.go, #738; the fill itself is internal/copdem); utm.go projects
 // lat/lon to the rasters' EPSG:25832. profile.go plans the samples and
 // rasters of a terrain profile, physics.go assesses the link, and flight.go
 // coalesces calls with cancellation. Further features add their own
