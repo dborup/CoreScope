@@ -27,6 +27,8 @@ var allowedServices = map[string]serviceShape{
 	WCSService: {check: checkCoverageQuery, raster: true},
 	// #687: only the exaggerated hillshade's exact tile shape.
 	ExaggeratedWMSService: {check: hillshadeQueryCheck(HillshadeExaggerated)},
+	// #728: only the orthophoto's exact GetTile shape.
+	OrthoWMTSService: {check: orthoQueryCheck},
 }
 
 // serviceShape is what the Client enforces per service.

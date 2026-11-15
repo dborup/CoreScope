@@ -23,6 +23,12 @@
  *      deep link (desktop) and a /p handoff (360x740 phone) put both ends
  *      inside the map and above the panel; a pan or a Move afterwards is
  *      not undone by a second fit; without a profile the stored view stays.
+ *   6. #765 §1 — the fit is never saved as the viewer's view: after a link
+ *      the stored view is unchanged and a plain #/map opens it again, while
+ *      the viewer's own pan is still saved.
+ *   7. #765 §3 — a path long enough to fill the strip above the panel is
+ *      fitted with the panel reserved at its cap, so B is still above the
+ *      panel once the chart has grown it.
  *
  * Usage:
  *   BASE_URL=http://localhost:13581 node test-issue-746-profile-ui-e2e.js
@@ -167,23 +173,38 @@ function hashParams(hash) {
   const lastAsked = (rec) => rec.profile[rec.profile.length - 1].searchParams;
 
   // ── 1. §1: teardown leaves the destination hash alone ─────────────────
+  // Each step opens its own context and history, so none of them depends
+  // on another having passed (#765 §7).
+  const SECOND = `#/map?profile=${P2}&model=dtm&ha=12`;
+
+  /* openTwoLinks opens the P1 link, then switches to the second link on
+   * the Map page, and waits until each one has been measured. */
+  async function openTwoLinks(page, rec) {
+    await page.goto(`${BASE}/#/map?profile=${P1}&ha=19&hb=19`, { waitUntil: 'domcontentloaded' });
+    await waitForRequestFor(page, rec, P1);
+    await page.evaluate((h) => { location.hash = h; }, SECOND);
+    await waitForRequestFor(page, rec, P2);
+  }
+
   {
     const { ctx, page, rec } = await newCtx();
     await step('§1: a second profile link on the Map page opens that profile', async () => {
-      await page.goto(`${BASE}/#/map?profile=${P1}&ha=19&hb=19`, { waitUntil: 'domcontentloaded' });
-      await waitForRequestFor(page, rec, P1);
-      const next = `#/map?profile=${P2}&model=dtm&ha=12`;
-      await page.evaluate((h) => { location.hash = h; }, next);
-      await waitForRequestFor(page, rec, P2);
+      await openTwoLinks(page, rec);
       const hp = hashParams(await page.evaluate(() => location.hash));
       assert(hp.get('profile') === P2, 'the destination profile left the hash: ' + hp.toString());
       assert(hp.get('model') === 'dtm' && hp.get('ha') === '12', 'the destination controls left the hash: ' + hp.toString());
       const q = lastAsked(rec);
       assert(q.get('model') === 'dtm' && q.get('ha') === '12', 'measured with ' + q.toString());
     });
+    await ctx.close();
+  }
+
+  {
+    const { ctx, page, rec } = await newCtx();
     await step('§1: Back returns to the first profile, still open', async () => {
-      await page.goBack({ waitUntil: 'domcontentloaded' });
+      await openTwoLinks(page, rec);
       const before = rec.profile.length;
+      await page.goBack({ waitUntil: 'domcontentloaded' });
       const t0 = Date.now();
       while (rec.profile.length === before && Date.now() - t0 < 10000) await page.waitForTimeout(100);
       await waitForRequestFor(page, rec, P1);
@@ -191,8 +212,15 @@ function hashParams(hash) {
       assert(hp.get('profile') === P1 && hp.get('ha') === '19', 'Back lost the first profile: ' + hp.toString());
       const q = lastAsked(rec);
       assert(q.get('a') + ',' + q.get('b') === P1 && q.get('ha') === '19', 'Back measured ' + q.toString());
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     });
+    await ctx.close();
+  }
+
+  {
+    const { ctx, page, rec } = await newCtx();
     await step('§1: the Close button still clears the profile from the hash', async () => {
+      await openTwoLinks(page, rec);
       await page.click('[data-testid="tp-close"]');
       const hp = hashParams(await page.evaluate(() => location.hash));
       assert(hp.get('profile') === null && hp.get('ha') === null, 'Close left ' + hp.toString());
@@ -324,6 +352,11 @@ function hashParams(hash) {
       assert(Math.hypot(panned.a.x - before.a.x, panned.a.y - before.a.y) > 60, 'setup: the pan did not move the map');
       assert(Math.abs(after.a.x - panned.a.x) <= 1 && Math.abs(after.a.y - panned.a.y) <= 1,
         'the map moved after the pan: ' + JSON.stringify({ before: before.a, panned: panned.a, after: after.a }));
+      // #765 §1: only the fit is kept out of the stored view; the viewer's
+      // own pan is saved as always.
+      const saved = await page.evaluate(() => ({ s: JSON.parse(localStorage.getItem('map-view')), c: window.__mc_map.getCenter(), z: window.__mc_map.getZoom() }));
+      assert(Math.abs(saved.s.lat - saved.c.lat) < 1e-9 && Math.abs(saved.s.lng - saved.c.lng) < 1e-9 && saved.s.zoom === saved.z,
+        'the pan was not saved: ' + JSON.stringify(saved));
     });
     await step('fit: a Move afterwards is not followed by a second fit', async () => {
       const before = await endsInView(page);
@@ -338,6 +371,79 @@ function hashParams(hash) {
       assert(rec.profile.length === n + 1, 'the move was not measured');
       assert(Math.abs(after.b.x - before.b.x) <= 1 && Math.abs(after.b.y - before.b.y) <= 1,
         'the map moved after Move A: ' + JSON.stringify({ before: before.b, after: after.b }));
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  /* storedView is the viewer's saved Map view, as map.js writes it. */
+  async function storedView(page) {
+    return JSON.parse(await page.evaluate(() => localStorage.getItem('map-view')));
+  }
+  // A live center comes back through Leaflet's pixel rounding, so it is
+  // compared to about 100 m; the fitted path is 37 km away.
+  const isElsewhere = (v) => !!v && Math.abs(v.lat - 56.08) < 1e-3 && Math.abs(v.lng - 9.62) < 1e-3 && v.zoom === 12;
+
+  // #765 §1: the fit is the link's view, not the viewer's, so it is never
+  // saved. The init script seeds the stored view on every page load, so
+  // the plain Map page is reached by a hash change, not a reload.
+  {
+    const { ctx, page, rec } = await newCtx({ storage: ELSEWHERE });
+    await step('fit (#765): the profile fit is not saved over the stored view', async () => {
+      await page.goto(`${BASE}/#/map?profile=${P1}&ha=19&hb=19`, { waitUntil: 'domcontentloaded' });
+      await waitForRequestFor(page, rec, P1);
+      await page.waitForTimeout(400);
+      assert((await endsInView(page)).ok, 'setup: the link was not fitted');
+      const v = await storedView(page);
+      assert(isElsewhere(v), 'the fit overwrote the stored view: ' + JSON.stringify(v));
+    });
+    await step('fit (#765): a plain #/map afterwards opens the stored view', async () => {
+      await page.evaluate(() => { window.__mc_map.__before765 = true; });
+      await page.evaluate(() => { location.hash = '#/map'; });
+      await page.waitForFunction(() => window.__mc_map && !window.__mc_map.__before765
+        && document.querySelector('#leaflet-map[data-loaded="true"]'), null, { timeout: 30000 });
+      const view = await page.evaluate(() => {
+        const c = window.__mc_map.getCenter();
+        return { lat: c.lat, lng: c.lng, zoom: window.__mc_map.getZoom() };
+      });
+      assert(isElsewhere(view), 'the Map page opened at ' + JSON.stringify(view));
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  /* #765 §3: the fit reserves the panel at its cap (--tp-panel-max-h), not
+   * at the pending height it has when the fit runs. That only shows on a
+   * path long enough to fill the strip above the panel: a north-south path
+   * made 5% taller, at zoom 13, than the strip above the panel at its cap.
+   * Reserving the cap fits it one zoom out; reserving the pending panel
+   * fits it at zoom 13, and B ends up under the panel once the chart has
+   * grown it. The path is sized from the page's own map and cap, so the
+   * case holds at any desktop size. */
+  {
+    const { ctx, page, rec } = await newCtx({ storage: ELSEWHERE });
+    await step('fit (#765): a long path stays above the panel once the chart has grown it', async () => {
+      await page.goto(`${BASE}/#/map?profile=${P1}`, { waitUntil: 'domcontentloaded' });
+      await waitForRequestFor(page, rec, P1);
+      const long = await page.evaluate(() => {
+        const panel = document.querySelector('[data-testid="tp-panel"]');
+        const cap = parseFloat(getComputedStyle(panel).getPropertyValue('--tp-panel-max-h'));
+        const mapH = document.getElementById('leaflet-map').clientHeight;
+        const strip = mapH - 2 * 32 - cap;            // the fit margin is 32 px a side
+        const z = 13, half = 1.05 * strip / 2, crs = L.CRS.EPSG3857;
+        const mid = crs.latLngToPoint(L.latLng(56.15, 10.2), z);
+        const n = crs.pointToLatLng(L.point(mid.x, mid.y - half), z);
+        const s = crs.pointToLatLng(L.point(mid.x, mid.y + half), z);
+        return { pair: [n.lat, n.lng, s.lat, s.lng].map(v => v.toFixed(5)).join(','),
+          cap, mapH, strip, panelH: panel.offsetHeight };
+      });
+      assert(long.cap > 0 && long.strip > 120, 'setup: no useful strip above the panel ' + JSON.stringify(long));
+      assert(long.panelH >= long.cap - 1, 'setup: the loaded panel is not at its cap ' + JSON.stringify(long));
+      await page.evaluate((h) => { location.hash = h; }, `#/map?profile=${long.pair}`);
+      await waitForRequestFor(page, rec, long.pair);
+      await page.waitForTimeout(400);
+      const v = await endsInView(page);
+      assert(v.ok, 'an end is off the map or under the panel: ' + JSON.stringify(Object.assign(v, long)));
       assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     });
     await ctx.close();

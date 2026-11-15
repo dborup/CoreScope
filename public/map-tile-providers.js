@@ -467,57 +467,79 @@
   /* #733 — Dataforsyningen's terms for Klimadatastyrelsen data under
    * CC BY 4.0 ("Vilkår for brug af data", v3.1,
    * https://dataforsyningen.dk/Vilkaar) require the credit to link the
-   * dataset and the licence, so the hillshade credit renders those two
-   * marks inside its own text as anchors. The marks and their targets come
-   * from the server's dhm block (cmd/server/dhm_proxy.go), which takes them
-   * from internal/dhm — the one credit definition.
+   * dataset and the licence, so a DHM credit renders those two marks inside
+   * its own text as anchors. The marks and their targets come from the
+   * server's dhm block (cmd/server/dhm_proxy.go), which takes them from
+   * internal/dhm — the one credit definition.
    *
-   * Leaflet's attribution control takes an HTML string, so the anchors are
-   * built with createElement in a detached container and handed over as its
-   * innerHTML: no credit string is ever concatenated into markup, and the
-   * DOM does the escaping. Only an absolute https target becomes a link;
+   * appendCredit is the one walker that does it (#765): the overlay credit
+   * below and the profile chart footer (public/terrain-profile.js) both go
+   * through it. It appends `text` to `parent` as text nodes, with each
+   * link's mark turned into an anchor, so no credit string is ever
+   * concatenated into markup. Only an absolute https target becomes a link;
    * anything else leaves the text alone, so a credit never silently turns
    * into a javascript: link and a block without the fields degrades to the
-   * plain credit.
-   *
-   * The rendered TEXT stays byte-identical to the plain credit — only the
-   * markup differs — which matters because Leaflet's control counts, finds
-   * and removes a credit by its string.
+   * plain credit. A mark that is not in the rest of the text is skipped.
+   * `decorate(a, link)`, when given, may add a class or a test id to each
+   * anchor. Returns how many anchors it made.
    */
-  function buildCredit(text, links) {
-    var plain = typeof text === 'string' ? text : '';
-    if (!plain || typeof document === 'undefined' || !document.createElement) return plain;
-    var box, rest = plain, linked = 0;
-    try { box = document.createElement('div'); } catch (_) { return plain; }
+  function appendCredit(parent, text, links, decorate) {
+    var rest = typeof text === 'string' ? text : '', linked = 0;
     (links || []).forEach(function (l) {
       if (!l || typeof l.mark !== 'string' || !l.mark) return;
       if (typeof l.href !== 'string' || l.href.indexOf('https://') !== 0) return;
       var i = rest.indexOf(l.mark);
       if (i < 0) return;
-      if (i > 0) box.appendChild(document.createTextNode(rest.slice(0, i)));
+      if (i > 0) parent.appendChild(document.createTextNode(rest.slice(0, i)));
       var a = document.createElement('a');
       a.setAttribute('href', l.href);
       a.setAttribute('target', '_blank');
       a.setAttribute('rel', l.rel || 'noopener noreferrer');
       a.textContent = l.mark;
-      box.appendChild(a);
+      if (decorate) decorate(a, l);
+      parent.appendChild(a);
       rest = rest.slice(i + l.mark.length);
       linked++;
     });
-    if (!linked) return plain;
-    if (rest) box.appendChild(document.createTextNode(rest));
-    return box.innerHTML;
+    if (rest) parent.appendChild(document.createTextNode(rest));
+    return linked;
   }
 
-  /* The credit links an overlay's config offers, in the order they occur in
-   * the credit text. An overlay whose owner's terms ask for no link (the
-   * #723 monuments: free use under the agency's own rules, textual data
-   * CC0) carries none of these fields and keeps its plain credit. */
+  /* Leaflet's attribution control takes an HTML string, so the overlay
+   * credit is walked into a detached container and handed over as its
+   * innerHTML: the DOM does the escaping. The rendered TEXT stays
+   * byte-identical to the plain credit — only the markup differs — which
+   * matters because Leaflet's control counts, finds and removes a credit by
+   * its string. With nothing linked it is the plain credit itself. */
+  function buildCredit(text, links) {
+    var plain = typeof text === 'string' ? text : '';
+    if (!plain || typeof document === 'undefined' || !document.createElement) return plain;
+    var box;
+    try { box = document.createElement('div'); } catch (_) { return plain; }
+    return appendCredit(box, plain, links) ? box.innerHTML : plain;
+  }
+
+  /* The credit links an overlay's config offers. An overlay whose owner's
+   * terms ask for no link (the #723 monuments: free use under the agency's
+   * own rules, textual data CC0) carries none of these fields and keeps its
+   * plain credit. `key` names each link for a caller that decorates it.
+   *
+   * Ordering contract (#765): appendCredit consumes the marks in text
+   * order. Each mark is looked for only in the text after the previous
+   * anchor, so this list must follow the order the marks occur in the
+   * credit — the dataset before the licence, as in "…, Danmarks
+   * Højdemodel, CC BY 4.0". A mark listed after one that follows it in the
+   * text is not found and stays plain text, silently. */
+  function creditLinks(cfg) {
+    return [
+      { key: 'dataset', mark: cfg.datasetName, href: cfg.datasetUrl, rel: 'noopener noreferrer' },
+      { key: 'license', mark: cfg.licenseName, href: cfg.licenseUrl, rel: 'noopener noreferrer license' }
+    ];
+  }
+
+  // The marks are consumed in text order: see the ordering contract above.
   function _overlayCredit(cfg) {
-    return buildCredit(cfg.attribution, [
-      { mark: cfg.datasetName, href: cfg.datasetUrl, rel: 'noopener noreferrer' },
-      { mark: cfg.licenseName, href: cfg.licenseUrl, rel: 'noopener noreferrer license' }
-    ]);
+    return buildCredit(cfg.attribution, creditLinks(cfg));
   }
 
   function _createOverlayLayer(map, o, cfg) {
@@ -672,6 +694,8 @@
   // #733 — exposed so a caller (and the unit tests) build an overlay credit
   // the one way, rather than assembling the links a second time.
   window.MC_buildCredit                 = buildCredit;
+  window.MC_appendCredit                = appendCredit;
+  window.MC_creditLinks                 = creditLinks;
   // #752 — every map without Leaflet's own attribution control needs one,
   // not just Live: the inset maps call this (compact: true) right after
   // they attach the viewer's provider.

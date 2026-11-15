@@ -24,7 +24,9 @@
  *   3. a pre-#733 block (no link fields) still shows the plain credit, with
  *      no dataset or licence link — the degradation path;
  *   4. the profile chart footer carries the same two links plus the
- *      "derived" note, exactly once, with the owner named;
+ *      "derived" note, exactly once, with the owner named, and it is the
+ *      server's block that says so: a changed wording or link target in
+ *      the block shows as sent (#765);
  *   5. 360px portrait: the footer credit is inside the panel and the
  *      viewport, legible, uncovered, and each link's own hit box is at
  *      least 44px tall and hit by itself at its centre;
@@ -59,11 +61,14 @@ const DHM_BLOCK = {
   attribution: ATTRIBUTION,
   datasetName: DATASET_MARK, datasetUrl: DATASET_URL,
   licenseName: LICENCE_MARK, licenseUrl: LICENCE_URL,
+  // #765: the profile footer is built from this block.
+  attributionDerived: ATTRIBUTION_DERIVED,
 };
 // The block a server without #733 sends: the same credit text, no links.
 const PLAIN_BLOCK = (() => {
   const b = Object.assign({}, DHM_BLOCK);
   delete b.datasetName; delete b.datasetUrl; delete b.licenseName; delete b.licenseUrl;
+  delete b.attributionDerived;
   return b;
 })();
 
@@ -126,7 +131,7 @@ function profileBody(q) {
     await ctx.route(BASE + '/api/config/client', async (route) => {
       const response = await route.fetch();
       const config = await response.json();
-      config.dhm = o.plain ? PLAIN_BLOCK : DHM_BLOCK;
+      config.dhm = o.dhm || (o.plain ? PLAIN_BLOCK : DHM_BLOCK);
       await route.fulfill({ response, json: config });
     });
     await ctx.route(url => new URL(url).pathname === DHM_PATH, async (route) => {
@@ -290,10 +295,18 @@ function profileBody(q) {
         size: parseFloat(cs.fontSize),
         dataset: link('[data-testid="tp-credit-dataset"]'),
         licence: link('[data-testid="tp-credit-link"]'),
-        // The panel's credit count: leaf elements naming the owner.
-        credits: Array.from(panel.querySelectorAll('text, p, span, div')).filter(e =>
-          e.children.length === 0 && (e.textContent || '').indexOf('Klimadatastyrelsen') >= 0
-          && !e.closest('[hidden]')).length,
+        // The panel's credit count: visible text nodes naming the owner.
+        // Text nodes, not leaf elements: the shared walker (#765) leaves
+        // the text between the links as bare text in the line.
+        credits: (() => {
+          const w = document.createTreeWalker(panel, NodeFilter.SHOW_TEXT);
+          let n = 0;
+          while (w.nextNode()) {
+            const t = w.currentNode;
+            if (t.nodeValue.indexOf('Klimadatastyrelsen') >= 0 && !t.parentElement.closest('[hidden]')) n++;
+          }
+          return n;
+        })(),
         insidePanel: panelR.left - 1 <= r.left && r.right <= panelR.right + 1,
         inViewport: r.top >= 0 && r.bottom <= innerHeight + 1 && r.height > 0,
         covered: (() => {
@@ -332,6 +345,30 @@ function profileBody(q) {
       // Shown exactly once, as before: the footer is the only credit.
       assert(f.credits === 1, 'the credit appears ' + f.credits + ' times in the panel');
       assert(rec.all.filter(u => /dataforsyningen\.dk/i.test(u)).length === 0, 'a request reached dataforsyningen.dk');
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
+    } finally { await ctx.close(); }
+  });
+
+  // #765: the footer comes from the server's block, so a wording or a link
+  // target the page has never seen still shows exactly as the server sent
+  // it. Nothing in this block is a real address.
+  await step('the profile footer follows the server\'s dhm block (#765)', async () => {
+    const block = Object.assign({}, DHM_BLOCK, {
+      attributionDerived: ATTRIBUTION_DERIVED + ' (#765)',
+      datasetUrl: 'https://example.test/dataset-765',
+      licenseUrl: 'https://example.test/licence-765',
+    });
+    const { ctx, page, rec } = await newCtx({ dhm: block });
+    try {
+      await gotoMap(page, '#/map', PAIR_LINK);
+      await page.waitForSelector('[data-testid="tp-panel"]', { timeout: 20000 });
+      await page.waitForTimeout(900);
+      const f = await footer(page);
+      assert(f, 'no credit line in the profile panel');
+      assert(f.text === block.attributionDerived, 'footer text = ' + JSON.stringify(f.text));
+      assert(f.dataset && f.dataset.href === block.datasetUrl, 'dataset link = ' + JSON.stringify(f.dataset));
+      assert(f.licence && f.licence.href === block.licenseUrl, 'licence link = ' + JSON.stringify(f.licence));
+      assert(f.credits === 1, 'the credit appears ' + f.credits + ' times in the panel');
       assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     } finally { await ctx.close(); }
   });

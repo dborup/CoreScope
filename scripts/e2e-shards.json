@@ -116,6 +116,14 @@
       "measurementNote": "New suite; #724 M3 Mastedatabasen antenna sites layer on Map and Live with an intercepted masts client-config block and a stubbed /api/masts that generates synthetic sites inside each requested cell (neither the proxy's upstream nor Mastedatabasen is ever contacted): not offered without the block and no request, the two toggles with the sites on and the interference layer off by default plus the credit, the zoom-13 gate (no request, status line), every request a single in-extent cell=E,N with at most 4 in flight and no cell twice on a z13 1920x1080 view, the interference and sites toggles with ?mastsInt=1 / ?masts=0 and the deep link, a clicked site's popup with published fields only and hostile stub text inert, and a pan away and back with no repeated request. About 35s locally; no CI duration measured yet. Assigned to shard 1 next to the #680/#723 overlay suites."
     },
     {
+      "file": "test-issue-723-heritage-info-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #723 M2 click-for-info on the protected ancient monuments overlay on Map and Live with an intercepted heritage client-config block, a stubbed and recorded GET /api/terrain/heritage and the agency's WMS answered by a 1x1 PNG (neither the WMS nor the WFS is contacted): no lookup with the overlay off or at zoom 11, one lat/lon-only lookup and the monument popup at zoom 13, the overlay going off closing it, dataset HTML shown as text and never run, a node marker click and Path profile picking winning over the lookup, a 44x44 close button at 360x740 touch on both pages, a popup closed while its lookup is pending staying closed (the lookup aborted) on both pages, and the popup's theme variables in light and dark. About 85s locally; no CI duration measured yet. Assigned to shard 1 next to the #723 M1 suite."
+    },
+    {
       "file": "test-issue-674-1byte-hop-modes-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },
