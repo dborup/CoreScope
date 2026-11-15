@@ -38,15 +38,16 @@ func TestSTAC_Years(t *testing.T) {
 
 // The one query shape of a search, as the official viewer sends it
 // (src/modules/api.js queryItems): the collection's items endpoint, a
-// contains(Point) and direction filter in EPSG:25832, limit 1. Nothing
+// contains(Point) and direction filter in EPSG:25832, limit SearchLimit
+// (5, #737 M3a: the server picks the best-centred among them). Nothing
 // else, and the token only in its header.
 func TestSTAC_SearchShape(t *testing.T) {
 	u := skraafototest.New()
 	defer u.Close()
 	s := newTestSTAC(t, u)
-	it, err := s.Search(context.Background(), 2025, 574380, 6224120, East)
-	if err != nil || it == nil || it.Direction != East || it.Collection != "skraafotos2025" {
-		t.Fatal(it, err)
+	items, err := s.Search(context.Background(), 2025, 574380, 6224120, East)
+	if err != nil || len(items) != 1 || items[0].Direction != East || items[0].Collection != "skraafotos2025" {
+		t.Fatal(items, err)
 	}
 	log := u.Log()
 	if len(log) != 1 {
@@ -72,7 +73,7 @@ func TestSTAC_SearchShape(t *testing.T) {
 		t.Fatalf("keys %v", keys)
 	}
 	epsg := "http://www.opengis.net/def/crs/EPSG/0/25832"
-	if q.Get("limit") != "1" || q.Get("filter-lang") != "cql-json" || q.Get("crs") != epsg || q.Get("filter-crs") != epsg {
+	if q.Get("limit") != "5" || q.Get("filter-lang") != "cql-json" || q.Get("crs") != epsg || q.Get("filter-crs") != epsg {
 		t.Fatalf("query %v", q)
 	}
 	wantFilter := `{"and":[{"contains":[{"property":"geometry"},{"type":"Point","coordinates":[574380,6224120]}]},{"eq":[{"property":"direction"},"east"]}]}`

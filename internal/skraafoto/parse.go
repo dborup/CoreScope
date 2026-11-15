@@ -19,10 +19,22 @@ type Item struct {
 	// Path is the photo's COG on the CDN (CDNPath), or "" when its asset
 	// href was not one: the photo is still listed, without a preview.
 	Path string
+	// Camera is the photo's camera model (#737 M3a), or nil when the
+	// item has none that holds together: the photo is still listed,
+	// without a projected point.
+	Camera *Camera
 }
 
+// SearchLimit is how many photos a search asks for per direction: the
+// API orders them by how near the point is to each footprint's centroid,
+// which in an oblique photo is not the image centre, so the server picks
+// among these (#737 M3a).
+const SearchLimit = 5
+
 // The STAC v2 shapes, only the fields read. Everything else an item
-// carries (geometry, pers:*, links, providers) is ignored.
+// carries (links, providers) is ignored; the geometry and the camera
+// fields are read apart (parseCamera), so a shape there that is not
+// understood costs the camera, never the photo.
 type stacCollections struct {
 	Collections *[]struct {
 		ID string `json:"id"`
@@ -34,17 +46,35 @@ type stacFeatureCollection struct {
 }
 
 type stacFeature struct {
-	ID         string `json:"id"`
-	Collection string `json:"collection"`
-	Properties struct {
-		Datetime  string `json:"datetime"`
-		Direction string `json:"direction"`
-	} `json:"properties"`
-	Assets struct {
+	ID         string          `json:"id"`
+	Collection string          `json:"collection"`
+	Geometry   json.RawMessage `json:"geometry"`
+	Properties stacProperties  `json:"properties"`
+	Assets     struct {
 		Data struct {
 			Href string `json:"href"`
 		} `json:"data"`
 	} `json:"assets"`
+}
+
+// stacProperties are an item's properties: the two every photo needs,
+// and the whole object for parseCamera.
+type stacProperties struct {
+	Datetime  string
+	Direction string
+	raw       json.RawMessage
+}
+
+func (p *stacProperties) UnmarshalJSON(b []byte) error {
+	var s struct {
+		Datetime  string `json:"datetime"`
+		Direction string `json:"direction"`
+	}
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	p.Datetime, p.Direction, p.raw = s.Datetime, s.Direction, append(json.RawMessage(nil), b...)
+	return nil
 }
 
 var errBadJSON = dhm.FetchError{Reason: "bad stac response"}
@@ -76,26 +106,32 @@ func ParseCollections(body []byte) ([]int, error) {
 	return years, nil
 }
 
-// ParseSearch returns the first photo of a search of year's collection
-// facing d, or nil when there is none. The photo must be what was asked
-// for: its collection, its direction, an id of that year, a datetime. An
-// asset that is not on the CDN leaves Path empty.
-func ParseSearch(body []byte, year int, d Direction) (*Item, error) {
+// ParseSearch returns the photos of a search of year's collection facing
+// d, in the API's order, at most SearchLimit; none is an empty list. Each
+// must be what was asked for: its collection, its direction, an id of
+// that year, a datetime. An asset that is not on the CDN leaves Path
+// empty.
+func ParseSearch(body []byte, year int, d Direction) ([]Item, error) {
 	var fc stacFeatureCollection
 	if err := json.Unmarshal(body, &fc); err != nil || fc.Features == nil {
 		return nil, errBadJSON
 	}
-	if len(*fc.Features) == 0 {
-		return nil, nil
+	fs := *fc.Features
+	if len(fs) > SearchLimit {
+		fs = fs[:SearchLimit]
 	}
-	it, err := (*fc.Features)[0].item(Collection(year))
-	if err != nil {
-		return nil, err
+	items := make([]Item, 0, len(fs))
+	for i := range fs {
+		it, err := fs[i].item(Collection(year))
+		if err != nil {
+			return nil, err
+		}
+		if it.Direction != d {
+			return nil, errBadJSON
+		}
+		items = append(items, it)
 	}
-	if it.Direction != d {
-		return nil, errBadJSON
-	}
-	return &it, nil
+	return items, nil
 }
 
 // ParseItem returns photo id of collection c from an item body. A photo
@@ -133,5 +169,6 @@ func (f *stacFeature) item(c string) (Item, error) {
 	if p, err := CDNPath(f.Assets.Data.Href, f.ID); err == nil {
 		it.Path = p
 	}
+	it.Camera = parseCamera(f.Properties.raw, f.Geometry)
 	return it, nil
 }

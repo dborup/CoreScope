@@ -110,6 +110,8 @@ const (
 	terrainSnap = 1e5
 	// terrainMaxAntennaM bounds an antenna height above ground.
 	terrainMaxAntennaM = 100
+	// terrainMaxPathKmDefault is map.dhm.profile.maxPathKm's default.
+	terrainMaxPathKmDefault = 80
 )
 
 // terrainPointKey is the antennaHeightsM key of a free map point.
@@ -186,7 +188,7 @@ func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface
 	num, integer := k.num, k.integer
 	return terrainSettings{
 		// The planner's rasters are at most dhm.MaxRasterSpanM (80 km).
-		maxPathM: 1000 * num("maxPathKm", pc.MaxPathKm, 80, 0, dhm.MaxRasterSpanM/1000, true),
+		maxPathM: 1000 * num("maxPathKm", pc.MaxPathKm, terrainMaxPathKmDefault, 0, dhm.MaxRasterSpanM/1000, true),
 		plan: dhm.PlanOptions{
 			MaxSamples: integer("maxSamples", pc.MaxSamples, 3200, 16, 3200),
 			ChunkM:     1000 * num("chunkKm", pc.ChunkKm, 2.5, 0, dhm.MaxRasterSpanM/1000, false),
@@ -1388,13 +1390,20 @@ func clearanceOf(a dhm.Assessment) TerrainClearance {
 // each came from: the request, the operator's config, or a default.
 func (p *terrainProfiler) linkParams(tq terrainQuery) (freq float64, freqSource string, k float64, kSource string) {
 	freq, freqSource = p.frequency(tq.freq)
+	k, kSource = p.kFactor(tq.k)
+	return freq, freqSource, k, kSource
+}
+
+// kFactor resolves the k-factor: the request, the operator's config, or
+// the standard atmosphere.
+func (p *terrainProfiler) kFactor(req *float64) (float64, string) {
 	switch {
-	case tq.k != nil:
-		return freq, freqSource, *tq.k, "request"
+	case req != nil:
+		return *req, "request"
 	case p.radio.k != 0:
-		return freq, freqSource, p.radio.k, "config"
+		return p.radio.k, "config"
 	}
-	return freq, freqSource, dhm.DefaultKFactor, "default"
+	return dhm.DefaultKFactor, "default"
 }
 
 // antenna is the antenna height above ground for an endpoint, most
