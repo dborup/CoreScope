@@ -1,6 +1,10 @@
 package heritage
 
-import "math"
+import (
+	"math"
+
+	"github.com/meshcore-analyzer/dhm"
+)
 
 // Result is the zone Nearest picked for a point.
 type Result struct {
@@ -20,13 +24,14 @@ type Result struct {
 // the zones in.
 //
 // The work is one pass over every edge: O(vertices), at most MaxVertices
-// per page.
+// per page. The point-in-polygon and edge-distance maths itself is
+// dhm.Locate, shared with the other polygon features (#730 M1a).
 func Nearest(zones []Zone, e, n, radiusM float64) Result {
 	var best Result
 	bestKey := math.Inf(-1) // depth inside (positive) or −distance outside
 	for i := range zones {
 		z := &zones[i]
-		inside, edge := z.locate(e, n)
+		inside, edge := dhm.Locate(z.Polygons, e, n)
 		if !inside && edge > radiusM {
 			continue
 		}
@@ -45,54 +50,6 @@ func Nearest(zones []Zone, e, n, radiusM float64) Result {
 		}
 	}
 	return best
-}
-
-// locate reports whether (e, n) lies inside z (inside any polygon's outer
-// ring and none of its holes, even-odd) and the distance to z's nearest
-// edge.
-func (z *Zone) locate(e, n float64) (inside bool, edge float64) {
-	edge = math.Inf(1)
-	for _, poly := range z.Polygons {
-		in := false
-		for ri, ring := range poly {
-			c, d := ringLocate(ring, e, n)
-			edge = math.Min(edge, d)
-			if ri == 0 {
-				in = c
-			} else if c {
-				in = false // in a hole
-			}
-		}
-		inside = inside || in
-	}
-	return inside, edge
-}
-
-// ringLocate is the crossing-number test and the distance to the nearest
-// segment of one ring; the ring is closed implicitly.
-func ringLocate(ring [][2]float64, e, n float64) (inside bool, dist float64) {
-	dist2 := math.Inf(1)
-	j := len(ring) - 1
-	for i := range ring {
-		a, b := ring[j], ring[i]
-		if (b[1] > n) != (a[1] > n) && e < (a[0]-b[0])*(n-b[1])/(a[1]-b[1])+b[0] {
-			inside = !inside
-		}
-		dist2 = math.Min(dist2, segDist2(a, b, e, n))
-		j = i
-	}
-	return inside, math.Sqrt(dist2)
-}
-
-// segDist2 is the squared distance from (e, n) to the segment ab.
-func segDist2(a, b [2]float64, e, n float64) float64 {
-	dx, dy := b[0]-a[0], b[1]-a[1]
-	t := 0.0
-	if l2 := dx*dx + dy*dy; l2 > 0 {
-		t = math.Max(0, math.Min(1, ((e-a[0])*dx+(n-a[1])*dy)/l2))
-	}
-	px, py := a[0]+t*dx-e, a[1]+t*dy-n
-	return px*px + py*py
 }
 
 // lessID orders system numbers numerically when both are digit strings of

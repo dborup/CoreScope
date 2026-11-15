@@ -21,13 +21,16 @@
 //     internal/dhm: no redirects, a timeout, a bounded body, and failures
 //     reduced to a dhm.FetchError category (client.go).
 //   - Parse: a strict reader of the GeoJSON FeatureCollection into Zones,
-//     keeping only the dataset fields the server reports (parse.go).
-//   - Nearest: point-in-polygon and edge distance in EPSG:25832 metres,
-//     picking the zone that holds the point or the nearest one within a
-//     radius (nearest.go).
+//     keeping only the dataset fields the server reports (parse.go). The
+//     geometry itself is read by dhm.PolygonReader.
+//   - Nearest: which zone a point belongs to — the one that holds it, or
+//     else the nearest one within a radius — over dhm.Locate's
+//     point-in-polygon and edge distance in EPSG:25832 metres (nearest.go).
 //
-// Coordinates are projected with the internal/dhm UTM 32N code, so there
-// is one implementation of EPSG:25832 in the repository. The route, cache,
+// Coordinates are projected with the internal/dhm UTM 32N code, and the
+// polygon reading and maths are internal/dhm's too (polygon.go, #730 M1a),
+// so there is one implementation of EPSG:25832 in the repository and one of
+// the geometry it carries. The route, cache,
 // coalescing and rate limits live in cmd/server (heritage_query.go).
 package heritage
 
