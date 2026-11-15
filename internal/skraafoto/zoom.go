@@ -102,11 +102,15 @@ func (f ZoomFrame) InPreview(b CropBox) (Pixel, Pixel) {
 	return Pixel{X: float64(b.X) * sx, Y: float64(b.Y) * sy}, Pixel{X: float64(b.X+b.W) * sx, Y: float64(b.Y+b.H) * sy}
 }
 
+// tileSpan is the tile columns x0..x1 and rows y0..y1 (inclusive) under b.
+func (f ZoomFrame) tileSpan(b CropBox) (x0, x1, y0, y1 int) {
+	return b.X / f.TileWidth, (b.X + b.W - 1) / f.TileWidth, b.Y / f.TileHeight, (b.Y + b.H - 1) / f.TileHeight
+}
+
 // tilesIn is the number of tiles under b.
 func (f ZoomFrame) tilesIn(b CropBox) int {
-	across := (b.X+b.W-1)/f.TileWidth - b.X/f.TileWidth + 1
-	down := (b.Y+b.H-1)/f.TileHeight - b.Y/f.TileHeight + 1
-	return across * down
+	x0, x1, y0, y1 := f.tileSpan(b)
+	return (x1 - x0 + 1) * (y1 - y0 + 1)
 }
 
 // maxTiles is the most tiles any box of f can touch.
@@ -177,9 +181,10 @@ func (c *CDN) Crop(ctx context.Context, z *Zoom, b CropBox) ([]byte, error) {
 		return nil, dhm.ErrBadRequest
 	}
 	l := z.level
+	x0, x1, y0, y1 := z.Frame.tileSpan(b)
 	var tiles []int
-	for ty := b.Y / l.TileHeight; ty <= (b.Y+b.H-1)/l.TileHeight; ty++ {
-		for tx := b.X / l.TileWidth; tx <= (b.X+b.W-1)/l.TileWidth; tx++ {
+	for ty := y0; ty <= y1; ty++ {
+		for tx := x0; tx <= x1; tx++ {
 			tiles = append(tiles, ty*l.TilesAcross()+tx)
 		}
 	}
