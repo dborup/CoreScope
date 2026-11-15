@@ -33,6 +33,7 @@ COPY internal/mastedb/ ../../internal/mastedb/
 COPY internal/profilecard/ ../../internal/profilecard/
 COPY internal/copdem/ ../../internal/copdem/
 COPY internal/heritage/ ../../internal/heritage/
+COPY internal/buildings/ ../../internal/buildings/
 RUN go mod download
 COPY cmd/server/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \

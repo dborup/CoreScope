@@ -13,7 +13,8 @@ type Class byte
 
 const (
 	// Unclassified: not elevated, or no usable footprints for its segment
-	// (not fetched, failed, truncated, over the work cap), or off the track.
+	// (not fetched, failed, truncated, too many skipped, over the work
+	// cap), or off the track.
 	Unclassified Class = 0
 	// Building: at least MinBuildingFraction of the window lies inside a
 	// footprint.
@@ -76,10 +77,11 @@ func (s Samples) valid() bool {
 		s.StepM > 0 && !math.IsInf(s.StepM, 1)
 }
 
-// elevated reports whether sample i stands more than t above the terrain;
+// Elevated reports whether sample i's surface stands more than
+// thresholdM above the terrain, the samples Needed and Classify look at;
 // NaN in either model is not elevated.
-func (s Samples) elevated(i int, t float64) bool {
-	return float64(s.DSM[i])-float64(s.DTM[i]) > t
+func (s Samples) Elevated(i int, thresholdM float64) bool {
+	return float64(s.DSM[i])-float64(s.DTM[i]) > thresholdM
 }
 
 // Needed reports, per segment of c, whether any of its samples is
@@ -91,7 +93,7 @@ func (c Corridor) Needed(s Samples, o Options) ([]bool, error) {
 	}
 	need := make([]bool, c.segs)
 	for i := range s.E {
-		if !s.elevated(i, o.ThresholdM) {
+		if !s.Elevated(i, o.ThresholdM) {
 			continue
 		}
 		if k := c.segmentOf(c.track(s.E[i], s.N[i])); k >= 0 {
@@ -123,7 +125,7 @@ func Classify(c Corridor, s Samples, pages []*Page, o Options) ([]Class, error) 
 	built := make([]bool, c.segs)
 	out := make([]Class, len(s.E))
 	for i := range out {
-		if !s.elevated(i, o.ThresholdM) {
+		if !s.Elevated(i, o.ThresholdM) {
 			continue
 		}
 		sv, tv := c.track(s.E[i], s.N[i])
@@ -133,7 +135,7 @@ func Classify(c Corridor, s Samples, pages []*Page, o Options) ([]Class, error) 
 		}
 		if !built[k] {
 			built[k] = true
-			if p := pages[k]; p != nil && !p.Truncated {
+			if p := pages[k]; p != nil && p.usable() {
 				idx[k] = c.index(k, p, h)
 			}
 		}

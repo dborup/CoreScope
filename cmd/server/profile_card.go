@@ -347,7 +347,7 @@ func (p *terrainProfiler) cardElevation(r *http.Request, req terrainRequest) (te
 	}
 	key := p.elevationKey(req)
 	if data, ok := p.cache.Get(key, p.now()); ok {
-		e, err := decodeTerrainElevation(data, n, both)
+		e, err := decodeTerrainElevation(data, n, both, p.classifies(both))
 		return e, cardReady(e, err), nil
 	}
 	c := p.card
@@ -368,7 +368,7 @@ func (p *terrainProfiler) cardElevation(r *http.Request, req terrainRequest) (te
 	}
 	switch {
 	case err == nil:
-		e, derr := decodeTerrainElevation(data, n, both)
+		e, derr := decodeTerrainElevation(data, n, both, p.classifies(both))
 		return e, cardReady(e, derr), nil
 	case isTerrainBusy(err):
 		return none, false, err
@@ -515,7 +515,7 @@ func (p *terrainProfiler) cachedResponse(req terrainRequest) (TerrainProfileResp
 			return TerrainProfileResponse{}, false
 		}
 		var err error
-		if e, err = decodeTerrainElevation(data, n, both); !cardReady(e, err) {
+		if e, err = decodeTerrainElevation(data, n, both, p.classifies(both)); !cardReady(e, err) {
 			return TerrainProfileResponse{}, false
 		}
 	}

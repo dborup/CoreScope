@@ -47,7 +47,13 @@ func (c *Cache[K]) Get(k K, now time.Time) ([]byte, bool) {
 	return e.data, true
 }
 
-func (c *Cache[K]) Put(k K, data []byte, now time.Time) {
+// Put stores data under k for the cache's TTL.
+func (c *Cache[K]) Put(k K, data []byte, now time.Time) { c.PutFor(k, data, now, c.ttl) }
+
+// PutFor stores data under k for ttl, or for the cache's TTL if that is
+// shorter: an entry that should be retried sooner, such as a profile whose
+// building lookup failed (#730 M2).
+func (c *Cache[K]) PutFor(k K, data []byte, now time.Time, ttl time.Duration) {
 	if len(data) > c.maxBytes {
 		return
 	}
@@ -56,7 +62,7 @@ func (c *Cache[K]) Put(k K, data []byte, now time.Time) {
 	if el, ok := c.items[k]; ok {
 		c.removeLocked(el)
 	}
-	c.items[k] = c.order.PushFront(&cacheEntry[K]{key: k, data: data, expires: now.Add(c.ttl)})
+	c.items[k] = c.order.PushFront(&cacheEntry[K]{key: k, data: data, expires: now.Add(min(ttl, c.ttl))})
 	c.bytes += len(data)
 	for c.order.Len() > 0 && (c.order.Len() > c.maxEntries || c.bytes > c.maxBytes) {
 		c.removeLocked(c.order.Back())

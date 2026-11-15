@@ -50,6 +50,10 @@ package main
 //     partial with no verdict, as before. Its DHM part is cached as
 //     usual; a cache hit tries only the fill again. A path with no DHM
 //     sample still makes no upstream call at all.
+//   - With map.dhm.profile.buildings.enabled (off by default), the DSM's
+//     elevated samples are told apart as buildings or trees/other from
+//     INSPIRE building footprints, inside the same fetch, slot and charge
+//     (terrain_buildings.go, #730 M2). Off, the answer is unchanged.
 //
 // The endpoint reads node positions from the in-memory node snapshot and
 // observer radios through a read-only query; it writes nothing.
@@ -73,6 +77,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/meshcore-analyzer/buildings"
 	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dhm"
 	"github.com/meshcore-analyzer/profilecard"
@@ -150,6 +155,8 @@ type terrainSettings struct {
 	card cardSettings
 	// fill is map.dhm.profile.foreignFill (#738).
 	fill foreignFillSettings
+	// buildings is map.dhm.profile.buildings.enabled (#730 M2).
+	buildings bool
 }
 
 // foreignFillSettings are map.dhm.profile.foreignFill, resolved and
@@ -211,6 +218,9 @@ func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface
 			blockCacheBytes: integer("foreignFill.blockCacheMB", pc.ForeignFill.BlockCacheMB, 32, 1, 256) << 20,
 			timeout:         time.Duration(integer("foreignFill.timeoutMs", pc.ForeignFill.TimeoutMs, 10000, 500, 10000)) * time.Millisecond,
 		},
+		// Off unless the operator opts in (#730 M2): it asks a second
+		// service, so its traffic stays the operator's choice.
+		buildings: pc.Buildings.Enabled,
 	}
 }
 
@@ -301,6 +311,11 @@ type terrainProfiler struct {
 	logFailure func(what string, err error)
 	observers  func() ([]Observer, error)
 
+	// buildings tells buildings from trees (#730 M2); nil while
+	// map.dhm.profile.buildings is off. buildingsDeadline bounds its phase.
+	buildings         terrainBuildingSource
+	buildingsDeadline time.Duration
+
 	freqMu  sync.Mutex
 	freqAt  time.Time
 	freqVal float64
@@ -319,20 +334,30 @@ type terrainProfilerDeps struct {
 	// theme is the operator's theme sections for the share card's
 	// palette (cardThemeSections); nil means the shipped palette.
 	theme func() (light, dark map[string]string)
+
+	// buildings replaces the INSPIRE source built from the settings
+	// (tests); it is used only while the classification is enabled.
+	buildings terrainBuildingSource
 }
 
 // terrainCacheMaxBytes is the cache's byte bound: one entry holds n DTM + n
-// DSM float32 plus a 5-byte header, n at most maxSamples. dhm.Cache evicts
-// on entry count OR total bytes; by construction every entry here is at
-// most 1/cacheEntries of this bound, so the byte condition can never fire
-// before the entry count does (#689 review N3). It is kept anyway,
+// DSM float32 plus a 5-byte header, n at most maxSamples, and with the
+// building classification (#730 M2) a 2-byte state and one class byte
+// per sample. dhm.Cache evicts on entry count OR total bytes; by
+// construction every entry here is at most 1/cacheEntries of this bound,
+// so the byte condition can never fire before the entry count does (#689
+// review N3). It is kept anyway,
 // deliberately redundant, as defense-in-depth against a future change
 // decoupling entry size from maxSamples, and because dhm.Cache is shared
 // with the DHM tile cache (dhm_proxy.go), where variable tile sizes make
 // the byte bound load-bearing — the two call sites should stay consistent.
 // At the documented maxima (cacheEntries 4096, maxSamples 3200) this is
-// ~105 MB; see config.example.json's _comment_cacheEntries.
-func terrainCacheMaxBytes(cacheEntries, maxSamples int) int {
+// ~105 MB, ~118 MB classified; see config.example.json's
+// _comment_cacheEntries.
+func terrainCacheMaxBytes(cacheEntries, maxSamples int, classified bool) int {
+	if classified {
+		return cacheEntries * (5 + 8*maxSamples + 2 + maxSamples)
+	}
 	return cacheEntries * (5 + 8*maxSamples)
 }
 
@@ -348,7 +373,14 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 		d.observers = func() ([]Observer, error) { return nil, nil }
 	}
 	set := resolveTerrainSettings(pc, d.logf)
-	maxBytes := terrainCacheMaxBytes(set.cacheEntries, set.plan.MaxSamples)
+	maxBytes := terrainCacheMaxBytes(set.cacheEntries, set.plan.MaxSamples, set.buildings)
+	var bsrc terrainBuildingSource
+	if set.buildings {
+		bsrc = d.buildings
+		if bsrc == nil {
+			bsrc = newTerrainBuildingSource(set, buildings.DefaultBaseURL)
+		}
+	}
 	var fill terrainFiller
 	if set.fill.enabled {
 		fill = d.fill
@@ -371,6 +403,9 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 		logf:       d.logf,
 		logFailure: d.logFailure,
 		observers:  d.observers,
+
+		buildings:         bsrc,
+		buildingsDeadline: terrainBuildingsDeadline,
 	}
 	if set.share.enabled {
 		p.card = newProfileCards(set, d.theme, d.logf)
@@ -518,6 +553,7 @@ type (
 	TerrainVerdict         = profilecard.TerrainVerdict
 	TerrainClearance       = profilecard.TerrainClearance
 	TerrainSurfaceInfo     = profilecard.TerrainSurfaceInfo
+	TerrainClassification  = profilecard.TerrainClassification
 )
 
 // terrainMaxFillRanges bounds Coverage.Fill.
@@ -637,9 +673,14 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 		if tq.both {
 			elev.dsm = nanSlice(n)
 		}
+		if p.classifies(tq.both) {
+			elev.classes = unclassified(n)
+		}
 	} else {
 		key := p.elevationKey(req)
 		data, hit := p.cache.Get(key, p.now())
+		// An entry of another format (#730 M2) is fetched afresh, not served.
+		hit = hit && terrainEntryOK(data, n, tq.both, p.classifies(tq.both))
 		state = "hit"
 		if !hit {
 			state = "miss"
@@ -655,7 +696,7 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if elev, err = decodeTerrainElevation(data, n, tq.both); err != nil {
+		if elev, err = decodeTerrainElevation(data, n, tq.both, p.classifies(tq.both)); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
 		}
@@ -677,10 +718,16 @@ func (p *terrainProfiler) elevationCall(key terrainKey, plan *dhm.Plan, both boo
 		if err != nil {
 			return nil, err
 		}
+		if p.classifies(both) {
+			if e.classes, err = p.classifyBuildings(ctx, plan, e); err != nil {
+				return nil, err
+			}
+		}
 		// A profile left partial by a failed fill is kept too: the DHM
-		// part is good, and a hit retries only the fill (#738).
+		// part is good, and a hit retries only the fill (#738). One whose
+		// building lookup failed is kept briefly (#730).
 		enc := e.encode()
-		p.cache.Put(key, enc, p.now())
+		p.cache.PutFor(key, enc, p.now(), e.classes.ttl(p.set.cacheTTL))
 		return enc, nil
 	}
 }
@@ -773,7 +820,14 @@ type terrainElevation struct {
 	dtm, dsm   []float32
 	fill       int
 	fillFailed bool
+	// classes is the building classification (#730 M2), nil when there
+	// is none.
+	classes *terrainClasses
 }
+
+// classifies reports whether a profile of this model is classified: the
+// classification is on, and there is a surface to classify.
+func (p *terrainProfiler) classifies(both bool) bool { return p.buildings != nil && both }
 
 // The foreign fill levels of a terrainElevation.
 const (
@@ -895,7 +949,7 @@ func (p *terrainProfiler) retryFill(r *http.Request, key terrainKey, plan *dhm.P
 	data, _, err := p.flight.Do(r.Context(), key.String()+"|fill", p.deadline, func(ctx context.Context) ([]byte, error) {
 		// The fill writes into its own copy: this caller may leave, and
 		// serve e, while the retry still runs for the others.
-		f := terrainElevation{dtm: slices.Clone(e.dtm), dsm: e.dsm}
+		f := terrainElevation{dtm: slices.Clone(e.dtm), dsm: e.dsm, classes: e.classes}
 		p.applyFill(ctx, &f, plan, p.startFill(ctx, plan))
 		enc := f.encode()
 		if !f.fillFailed {
@@ -906,7 +960,7 @@ func (p *terrainProfiler) retryFill(r *http.Request, key terrainKey, plan *dhm.P
 	if err != nil {
 		return e
 	}
-	f, err := decodeTerrainElevation(data, len(e.dtm), e.dsm != nil)
+	f, err := decodeTerrainElevation(data, len(e.dtm), e.dsm != nil, e.classes != nil)
 	if err != nil {
 		return e
 	}
@@ -925,10 +979,19 @@ func (p *terrainProfiler) noteFillFailure(err error) {
 }
 
 // encode is n, a flags byte (bit 0: a DSM; bits 1–2: the fill level;
-// bit 3: the fill failed), then the float32s little-endian.
+// bit 3: the fill failed; bit 4: the building classification, #730 M2),
+// then the float32s little-endian, and then the classification
+// (terrainClasses.appendTo).
 func (e terrainElevation) encode() []byte {
 	n := len(e.dtm)
-	out := make([]byte, 5, 5+8*n)
+	size := 5 + 4*n
+	if e.dsm != nil {
+		size += 4 * n
+	}
+	if e.classes != nil {
+		size += 2 + n
+	}
+	out := make([]byte, 5, size)
 	binary.LittleEndian.PutUint32(out, uint32(n))
 	if e.dsm != nil {
 		out[4] = 1
@@ -937,23 +1000,31 @@ func (e terrainElevation) encode() []byte {
 	if e.fillFailed {
 		out[4] |= 1 << 3
 	}
+	if e.classes != nil {
+		out[4] |= terrainEntryClassified
+	}
 	for _, s := range [][]float32{e.dtm, e.dsm} {
 		for _, v := range s {
 			out = binary.LittleEndian.AppendUint32(out, math.Float32bits(v))
 		}
 	}
+	if e.classes != nil {
+		out = e.classes.appendTo(out)
+	}
 	return out
 }
 
-func decodeTerrainElevation(b []byte, n int, both bool) (terrainElevation, error) {
+func decodeTerrainElevation(b []byte, n int, both, classified bool) (terrainElevation, error) {
 	models := 1
 	if both {
 		models = 2
 	}
+	if !terrainEntryOK(b, n, both, classified) || int(binary.LittleEndian.Uint32(b)) != n {
+		return terrainElevation{}, errTerrainEntry
+	}
 	level, failed := int(b[4]>>1&3), b[4]&(1<<3) != 0
-	if len(b) != 5+4*n*models || int(binary.LittleEndian.Uint32(b)) != n || (b[4]&1 == 1) != both ||
-		b[4]>>4 != 0 || level > fillOverview || (failed && level != fillNone) {
-		return terrainElevation{}, errors.New("terrain cache entry does not match its key")
+	if b[4]>>5 != 0 || level > fillOverview || (failed && level != fillNone) {
+		return terrainElevation{}, errTerrainEntry
 	}
 	read := func(off int) []float32 {
 		out := make([]float32, n)
@@ -965,6 +1036,12 @@ func decodeTerrainElevation(b []byte, n int, both bool) (terrainElevation, error
 	e := terrainElevation{dtm: read(5), fill: level, fillFailed: failed}
 	if both {
 		e.dsm = read(5 + 4*n)
+	}
+	if classified {
+		var err error
+		if e.classes, err = decodeTerrainClasses(b[5+4*n*models:], n); err != nil {
+			return terrainElevation{}, err
+		}
 	}
 	return e, nil
 }
@@ -1069,6 +1146,15 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 		}
 		resp.Verdict.Surface = surfaceInfo(surface)
 		keep = append(keep, surface.WorstIndex)
+		if e.classes != nil {
+			resp.Verdict.Surface.Cause = e.classes.surfaceCause(link.Obstructions(e.dsm, surface), e)
+		}
+	}
+	if e.classes != nil {
+		resp.Classification = e.classes.response()
+		if e.classes.used() {
+			resp.Attribution = buildings.AttributionDerived
+		}
 	}
 
 	if resp.Coverage.State != "none" {
@@ -1088,6 +1174,9 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 			s := TerrainSample{D: round2(float64(i) * plan.StepM), DTM: optional(e.dtm[i])}
 			if e.dsm != nil {
 				s.DSM = optional(e.dsm[i])
+			}
+			if e.classes != nil {
+				s.Cls = e.classes.sampleClass(i)
 			}
 			resp.Samples[j] = s
 		}

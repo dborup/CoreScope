@@ -79,7 +79,7 @@ func BenchmarkTerrainProfileFill80kmCached(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		e, err := decodeTerrainElevation(enc, len(plan.E), true)
+		e, err := decodeTerrainElevation(enc, len(plan.E), true, false)
 		if err != nil {
 			b.Fatal(err)
 		}
