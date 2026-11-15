@@ -69,3 +69,54 @@ func TestTiledGeoTIFFFitsTolerance795(t *testing.T) {
 		t.Error("a box 0.4 pixel wider or shorter fits")
 	}
 }
+
+// Past half a pixel outside the raster, or at NaN, Locate gives no block:
+// nothing is clamped onto the edge from farther out. smallCOG's raster is
+// 11.995–12.395° E, 55.8825–56.0025° N, at both levels.
+func TestTiledLevelLocateOutsideRaster795(t *testing.T) {
+	tt, b := parseCOG(t, smallCOG())
+	for li := range tt.Levels {
+		l := &tt.Levels[li]
+		px, py := l.Georef.PixelE, l.Georef.PixelN
+		west, north := l.Georef.OriginE, l.Georef.OriginN
+		east, south := west+float64(l.Width)*px, north-float64(l.Height)*py
+		midE, midN := (west+east)/2, (south+north)/2
+		for _, c := range []struct {
+			name     string
+			lon, lat float64
+			ok       bool
+		}{
+			{"0.4 pixel west", west - 0.4*px, midN, true},
+			{"0.4 pixel east", east + 0.4*px, midN, true},
+			{"0.4 pixel north", midE, north + 0.4*py, true},
+			{"0.4 pixel south", midE, south - 0.4*py, true},
+			{"0.4 pixel past the south-east corner", east + 0.4*px, south - 0.4*py, true},
+			{"0.6 pixel west", west - 0.6*px, midN, false},
+			{"0.6 pixel east", east + 0.6*px, midN, false},
+			{"0.6 pixel north", midE, north + 0.6*py, false},
+			{"0.6 pixel south", midE, south - 0.6*py, false},
+			{"far south-east", 20, 50, false},
+			{"far north-west", 0, 70, false},
+			{"NaN longitude", math.NaN(), midN, false},
+			{"NaN latitude", midE, math.NaN(), false},
+			{"infinite", math.Inf(1), math.Inf(-1), false},
+		} {
+			blk, lon, lat, ok := l.Locate(c.lon, c.lat)
+			if ok != c.ok {
+				t.Errorf("level %d, %s: ok %v, want %v", li, c.name, ok, c.ok)
+				continue
+			}
+			if !ok {
+				continue
+			}
+			off, n := l.BlockRange(blk)
+			g, err := tt.DecodeBlock(li, blk, b[off:off+n], nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, sampled := g.Sample(lon, lat); !sampled {
+				t.Errorf("level %d, %s: held point (%v, %v) does not sample in block %d", li, c.name, lon, lat, blk)
+			}
+		}
+	}
+}

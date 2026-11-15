@@ -238,21 +238,28 @@ func (l *TiledLevel) blockGrid(i int) Grid {
 }
 
 // Locate returns the block whose pixels hold (lon, lat) — the pixel whose
-// cell contains it, the point first clamped into the raster — and the
-// point clamped into that block's extent, where its Grid always samples.
-// So past the outermost pixel centres the edge pixels are held, as
-// Grid.Sample holds them, and sampling never needs two blocks: within half
-// a pixel of an internal block edge the block's own edge pixel is held
-// instead of interpolating across (one pixel, about 30 m, every 1024 on
-// GLO-30). NaN is treated as the west or north edge.
-func (l *TiledLevel) Locate(lon, lat float64) (block int, blon, blat float64) {
+// cell contains it — and the point clamped into that block's extent,
+// where its Grid always samples. ok is false for a point more than half a
+// pixel outside the raster, or NaN: it has no value here, and is never
+// clamped onto the edge (#795). Within that half pixel the edge pixel is
+// held, as Grid.Sample holds it past the outermost pixel centres: a
+// GLO-30 tile's raster is its 1° square shifted half a pixel north-west
+// (Fits), so the square's south and east strips are outside it. Sampling
+// never needs two blocks: within half a pixel of an internal block edge
+// the block's own edge pixel is held instead of interpolating across (one
+// pixel, about 30 m, every 1024 on GLO-30).
+func (l *TiledLevel) Locate(lon, lat float64) (block int, blon, blat float64, ok bool) {
 	g := l.Georef
-	col := clampIndex((lon-g.OriginE)/g.PixelE, l.Width)
-	row := clampIndex((g.OriginN-lat)/g.PixelN, l.Height)
+	x, y := (lon-g.OriginE)/g.PixelE, (g.OriginN-lat)/g.PixelN
+	if !(x >= -edgeTolerance && x <= float64(l.Width)+edgeTolerance &&
+		y >= -edgeTolerance && y <= float64(l.Height)+edgeTolerance) {
+		return 0, 0, 0, false
+	}
+	col, row := clampIndex(x, l.Width), clampIndex(y, l.Height)
 	block = (row/l.TileHeight)*l.BlocksAcross() + col/l.TileWidth
 	bg := l.blockGrid(block)
-	x := bg.Extent()
-	return block, clampTo(lon, x[0], x[2]), clampTo(lat, x[1], x[3])
+	e := bg.Extent()
+	return block, clampTo(lon, e[0], e[2]), clampTo(lat, e[1], e[3]), true
 }
 
 // clampIndex is floor(v) clamped to [0, n−1]; NaN is 0.

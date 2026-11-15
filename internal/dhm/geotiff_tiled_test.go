@@ -122,7 +122,8 @@ func TestDecodeBlockValuesAndSampling(t *testing.T) {
 
 // Locate picks the block that holds the pixel nearest a point and clamps
 // the point into it, so a point between two blocks, or in the half pixel
-// outside the outermost pixel centres, still samples.
+// outside the outermost pixel centres, still samples. Farther out it has
+// no block (TestTiledLevelLocateOutsideRaster795).
 func TestTiledLevelLocate(t *testing.T) {
 	tt, b := parseCOG(t, smallCOG())
 	l := &tt.Levels[0]
@@ -135,12 +136,11 @@ func TestTiledLevelLocate(t *testing.T) {
 		{"inside block 4", 12 + 0.01*20.3, 56 - 0.005*17.6, 4},
 		{"west of the column 15/16 cell edge", 12 + 0.01*15.4, 56 - 0.005*3, 0},
 		{"east of it", 12 + 0.01*15.6, 56 - 0.005*3, 1},
-		{"west of the outer edge", 11.9, 56, 0},
+		{"west of the outer edge, within half a pixel", 12 - 0.01*0.9, 56, 0},
 		{"south-east, past the last centre", 12 + 0.01*39.9, 56 - 0.005*23.9, 5},
-		{"far outside", 20, 50, 5},
 	} {
-		blk, lon, lat := l.Locate(c.lon, c.lat)
-		if blk != c.wantBlock {
+		blk, lon, lat, ok := l.Locate(c.lon, c.lat)
+		if !ok || blk != c.wantBlock {
 			t.Errorf("%s: block %d, want %d", c.name, blk, c.wantBlock)
 			continue
 		}
@@ -191,7 +191,7 @@ func TestParseTiledGeoTIFFRealGLO30Header(t *testing.T) {
 	}
 	// Copenhagen City Hall, 55.6761° N 12.5683° E, is in block 4 (column
 	// 1364 of 2400, row 1166 of 3600 → block column 1, block row 1).
-	if blk, _, _ := l0.Locate(12.5683, 55.6761); blk != 1*3+1 {
+	if blk, _, _, ok := l0.Locate(12.5683, 55.6761); !ok || blk != 1*3+1 {
 		t.Fatalf("Copenhagen in block %d, want 4", blk)
 	}
 	// The strip decoder still refuses it: tiled, and not EPSG:25832.
@@ -503,7 +503,10 @@ func FuzzParseTiledGeoTIFF(f *testing.F) {
 				}
 				x := l.Georef
 				for _, p := range [][2]float64{{x.OriginE, x.OriginN}, {x.OriginE + 1e6, x.OriginN - 1e6}, {math.NaN(), 0}} {
-					blk, lon, lat := l.Locate(p[0], p[1])
+					blk, lon, lat, ok := l.Locate(p[0], p[1])
+					if !ok {
+						continue
+					}
 					if blk < 0 || blk >= l.NumBlocks() {
 						t.Fatalf("Locate(%v) = block %d of %d", p, blk, l.NumBlocks())
 					}
