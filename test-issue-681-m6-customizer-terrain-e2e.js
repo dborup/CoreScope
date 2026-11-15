@@ -11,7 +11,7 @@
  *
  * Asserts:
  *   1. the Display tab carries the five antenna-height defaults and the
- *      elevation-model select, and the Theme tab the six chart colours in
+ *      elevation-model select, and the Theme tab the eight chart colours in
  *      both light and dark;
  *   2. a changed antenna default is actually sent and changes the rendered
  *      profile, while an operator-set height is left alone;
@@ -55,8 +55,9 @@ const PAIR_LINK = 'profile=' + PK_A + ',' + PK_B;
 
 const HEIGHT_FIELDS = ['heightRepeater', 'heightRoom', 'heightCompanion', 'heightSensor', 'heightPoint'];
 const CHART_VARS = ['--terrain-fill', '--terrain-clutter', '--los-line',
-  '--fresnel-100', '--fresnel-60', '--profile-blocked'];
-const CHART_KEYS = ['terrainFill', 'terrainClutter', 'losLine', 'fresnel100', 'fresnel60', 'profileBlocked'];
+  '--fresnel-100', '--fresnel-60', '--profile-blocked', '--terrain-building', '--terrain-vegetation'];
+const CHART_KEYS = ['terrainFill', 'terrainClutter', 'losLine', 'fresnel100', 'fresnel60', 'profileBlocked',
+  'terrainBuilding', 'terrainVegetation'];
 
 let passed = 0, failed = 0;
 async function step(name, fn) {
@@ -261,7 +262,7 @@ function profileFor(q, opts) {
   for (const theme of ['light', 'dark']) {
     const { ctx, page } = await newCtx({ theme });
     await gotoMap(page);
-    await step('the Theme tab carries the six chart colours in ' + theme, async () => {
+    await step('the Theme tab carries the eight chart colours in ' + theme, async () => {
       await openCustomizer(page, 'theme');
       const section = theme === 'dark' ? 'themeDark' : 'theme';
       const rows = await page.evaluate((s) => Array.from(
@@ -270,7 +271,7 @@ function profileFor(q, opts) {
       CHART_KEYS.forEach((k) => {
         assert(rows.indexOf(section + '.' + k) >= 0, 'no ' + section + '.' + k + ' row');
       });
-      assert(rows.length === 6, 'the group has ' + rows.length + ' rows');
+      assert(rows.length === CHART_KEYS.length, 'the group has ' + rows.length + ' rows');
     });
     await ctx.close();
   }
@@ -713,7 +714,7 @@ function profileFor(q, opts) {
       await s.page.screenshot({ path: path.join(SHOT_DIR, `681-m6-profile-after-${theme}.png`) });
       await s.ctx.close();
 
-      // The six colour rows.
+      // The eight colour rows.
       s = await newCtx({ theme });
       await gotoMap(s.page);
       await openCustomizer(s.page, 'theme');

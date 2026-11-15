@@ -439,18 +439,23 @@ console.log('\n=== #730 M3 colours ===');
 
 const CSS = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
 
+// Every block the selector opens, joined (style.css has two :root blocks).
 function blockOf(selectorRe) {
-  const m = CSS.match(selectorRe);
-  assert.ok(m, 'no block ' + selectorRe);
-  let i = CSS.indexOf('{', m.index) + 1, depth = 1;
-  const start = i;
-  while (depth && i < CSS.length) { if (CSS[i] === '{') depth++; else if (CSS[i] === '}') depth--; i++; }
-  return CSS.slice(start, i - 1);
+  const out = [];
+  let m;
+  while ((m = selectorRe.exec(CSS))) {
+    let i = CSS.indexOf('{', m.index) + 1, depth = 1;
+    const start = i;
+    while (depth && i < CSS.length) { if (CSS[i] === '{') depth++; else if (CSS[i] === '}') depth--; i++; }
+    out.push(CSS.slice(start, i - 1));
+  }
+  assert.ok(out.length, 'no block ' + selectorRe);
+  return out.join('\n');
 }
 const BLOCKS = {
-  light: blockOf(/^:root\s*\{/m),
-  darkMedia: blockOf(/^\s*:root:not\(\[data-theme="light"\]\)\s*\{/m),
-  dark: blockOf(/^\[data-theme="dark"\]\s*\{/m),
+  light: blockOf(/^:root\s*\{/mg),
+  darkMedia: blockOf(/^\s*:root:not\(\[data-theme="light"\]\)\s*\{/mg),
+  dark: blockOf(/^\[data-theme="dark"\]\s*\{/mg),
 };
 function varIn(block, name) {
   const m = block.match(new RegExp('^\\s*' + name.replace(/-/g, '\\-') + ':\\s*([^;]+);', 'm'));
