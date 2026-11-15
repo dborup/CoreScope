@@ -21,7 +21,8 @@
  *      reachable switch;
  *   4. the phone flow at 375x560 (touch): the section is reachable by
  *      scrolling the customizer, the switch row is at least 48px tall, a tap
- *      toggles it, and nothing overflows sideways;
+ *      toggles it, and nothing overflows sideways; at 375x560 and 360x740
+ *      the customizer ends above the bottom nav, so its last line shows;
  *   5. axe (contrast, labels) on the Display panel in light and dark.
  *
  * Usage:
@@ -356,6 +357,33 @@ const PROFILE_LINK = `#/map?profile=${A0},${B0}&model=dtm&ha=12&hb=4`;
       await page.waitForTimeout(300);
       await page.screenshot({ path: path.join(SHOT_DIR, '727-m4-share-customizer-375x560.jpg'), type: 'jpeg', quality: 70 });
     }
+    await ctx.close();
+  }
+
+  // The customizer used to end 12px above the screen's bottom edge, under
+  // the 56px bottom nav (z-index 1200), so on a phone the last lines of
+  // every tab, this section's palette line among them, could not be seen.
+  for (const vp of [{ w: 375, h: 560 }, { w: 360, h: 740 }]) {
+    const { ctx, page } = await newCtx({ viewport: { width: vp.w, height: vp.h }, touch: true });
+    await gotoMap(page);
+    await openDisplay(page, true);
+    await step(`${vp.w}x${vp.h}: the customizer ends above the bottom nav, its last line in sight`, async () => {
+      const got = await page.evaluate(() => {
+        const o = document.querySelector('.cust-overlay');
+        const nav = document.querySelector('[data-bottom-nav]');
+        const body = o.querySelector('.cust-body');
+        body.scrollTop = body.scrollHeight;
+        const lines = o.querySelectorAll('.cust-panel[data-panel="display"] p');
+        const last = lines[lines.length - 1];
+        const r = last.getBoundingClientRect();
+        const hit = document.elementFromPoint(r.x + 10, r.bottom - 2);
+        return { overlayBottom: o.getBoundingClientRect().bottom, navTop: nav ? nav.getBoundingClientRect().top : null,
+          text: last.textContent.slice(0, 30), hit: hit ? (hit.className || hit.tagName) : null, ok: !!hit && (hit === last || last.contains(hit)) };
+      });
+      assert(got.navTop !== null, 'no bottom nav at this width');
+      assert(got.overlayBottom <= got.navTop, `overlay ends at ${got.overlayBottom}px, under the nav at ${got.navTop}px`);
+      assert(got.ok, `the last line ("${got.text}…") is covered by ${got.hit}`);
+    });
     await ctx.close();
   }
 

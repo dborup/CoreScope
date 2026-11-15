@@ -1394,7 +1394,9 @@
     if (_styleEl) return;
     _styleEl = document.createElement('style');
     _styleEl.textContent = [
-      '.cust-overlay{position:fixed;top:56px;right:12px;z-index:1050;width:480px;height:calc(100vh - 68px);background:var(--card-bg);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.3);display:flex;flex-direction:column;resize:both;min-width:320px;min-height:300px;overflow:hidden}',
+      // #727 M4 — end above the phone bottom nav (bottom-nav.css's
+      // --bottom-nav-reserve: 0px on desktop), which sits over it at z-index 1200.
+      '.cust-overlay{position:fixed;top:56px;right:12px;z-index:1050;width:480px;height:calc(100vh - 68px - var(--bottom-nav-reserve, 0px));background:var(--card-bg);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.3);display:flex;flex-direction:column;resize:both;min-width:320px;min-height:300px;overflow:hidden}',
       '.cust-overlay.hidden{display:none}',
       '.cust-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);cursor:move;user-select:none;flex-shrink:0}',
       '.cust-header h2{margin:0;font-size:15px}',
