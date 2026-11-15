@@ -1472,6 +1472,24 @@
     firmware: 'MeshCore firmware default'
   };
 
+  /* #790: what the panel waits for, else null. While an end is still to be
+   * picked — A, B, or the new position of a Move A / Move B (#721) — the
+   * panel is a compact bar (title, this step, Cancel, Close), so on a
+   * phone the map above it stays free to tap. With both ends set and no
+   * move pending it is the full panel. */
+  var PHASE_STATUS = {
+    'pick-a': 'Pick the first point on the map.',
+    'pick-b': 'Pick the second point on the map.',
+    'move-a': 'Pick the new position for A on the map.',
+    'move-b': 'Pick the new position for B on the map.'
+  };
+  function compactPhase(st, moving) {
+    if (!st || !st.a) return 'pick-a';
+    if (!st.b) return 'pick-b';
+    if (moving === 'a' || moving === 'b') return 'move-' + moving;
+    return null;
+  }
+
   /* create builds the tool. The host owns picking and the map; this owns the
    * panel, the request and the deep link. Nothing runs until open(). */
   function create(opts) {
@@ -1496,6 +1514,9 @@
     var open = false, seq = 0, debounceTimer = null, panel = null, nodes = { a: null, b: null };
     // The end whose Move button is armed ('a' | 'b'), else null (#721).
     var moving = null;
+    /* #790: the phase syncCompact last drew (compactPhase), and whether the
+     * viewer folded the finished profile down to its head (the ▾/▴ toggle). */
+    var lastPhase = null, folded = false;
     // Where each height in `state` came from on this side of the wire:
     // 'yours' (typed, or remembered in localStorage), 'link', 'theme' (the
     // customizer's default for this kind of endpoint), or null.
@@ -1596,10 +1617,40 @@
       panel.setAttribute('data-testid', 'tp-panel');
 
       var head = el('header', 'tp-head');
-      head.appendChild(el('h3', 'tp-title', 'Path profile'));
+      /* #790 F4: on a finished profile the title is the ▾/▴ fold toggle
+       * (a disclosure button inside the heading), so the title row spends
+       * no extra 48 px on it — the 640 px landscape row has no room left
+       * for one (#784). In the compact bar the title is plain text. */
+      var title = el('h3', 'tp-title');
+      ui.titleText = el('span', '', 'Path profile');
+      title.appendChild(ui.titleText);
+      ui.fold = el('button', 'tp-fold', 'Path profile');
+      ui.fold.type = 'button';
+      // #796 N2: not the same name as the map's "Path profile" toggle.
+      ui.fold.setAttribute('aria-label', 'Path profile details');
+      ui.fold.hidden = true;
+      ui.fold.setAttribute('aria-expanded', 'true');
+      ui.fold.setAttribute('data-testid', 'tp-fold');
+      ui.foldGlyph = el('span', 'tp-fold-glyph', '\u25BE');
+      ui.foldGlyph.setAttribute('aria-hidden', 'true');
+      ui.fold.appendChild(ui.foldGlyph);
+      ui.fold.addEventListener('click', function () {
+        folded = !folded;
+        syncCompact();
+      });
+      title.appendChild(ui.fold);
+      head.appendChild(title);
+      /* #796 F5: the chips have a row of their own inside the title row. It
+       * takes the space between the title and Copy/Close and wraps inside
+       * itself, so no chip combination (or font) can push Close onto a
+       * second line and the chart under the bottom navigation. */
+      var chips = el('div', 'tp-chips');
+      head.appendChild(chips);
       ui.chip = el('span', 'tp-chip');
       ui.chip.setAttribute('data-testid', 'tp-verdict');
-      head.appendChild(ui.chip);
+      // #790: an empty chip is a grey pill that reads as a drag handle.
+      ui.chip.hidden = true;
+      chips.appendChild(ui.chip);
       /* #729: the surface (buildings and trees) verdict, when it is worse
        * than the terrain one. It rides beside the verdict rather than under
        * the chart because "Clear" beside an obvious building is read in the
@@ -1611,11 +1662,11 @@
        * on a plain span is not reliably announced, so it is text. */
       ui.surfaceSep = el('span', 'sr-only', '. ');
       ui.surfaceSep.hidden = true;
-      head.appendChild(ui.surfaceSep);
+      chips.appendChild(ui.surfaceSep);
       ui.surface = el('span', 'tp-chip tp-chip-surface');
       ui.surface.setAttribute('data-testid', 'tp-surface-chip');
       ui.surface.hidden = true;
-      head.appendChild(ui.surface);
+      chips.appendChild(ui.surface);
       /* Plan §3.2: the verdict must read "assumed heights" until the viewer
        * has confirmed both ends. A 10 m error in an assumed antenna height
        * swamps the 0.05 m DHM accuracy and can flip the verdict outright,
@@ -1626,7 +1677,20 @@
       ui.assumed.setAttribute('data-testid', 'tp-assumed-chip');
       ui.assumed.title = 'At least one antenna height is a default, not a measured value. Set both heights to confirm them.';
       ui.assumed.hidden = true;
-      head.appendChild(ui.assumed);
+      chips.appendChild(ui.assumed);
+      /* #790: Cancel, shown only in the compact bar. During a Move it is
+       * the Escape of #721 (the end stays); while picking it resets the
+       * profile, exactly as Close does, on the same page. */
+      ui.cancel = el('button', 'tp-cancel', 'Cancel');
+      ui.cancel.type = 'button';
+      ui.cancel.hidden = true;
+      ui.cancel.setAttribute('data-testid', 'tp-cancel');
+      // Focus goes back to the Move button in syncCompact, for this click
+      // and for Escape alike (#790 F1).
+      ui.cancel.addEventListener('click', function () {
+        if (moving) api.cancelMove(); else api.close();
+      });
+      head.appendChild(ui.cancel);
       ui.copy = el('button', 'tp-close tp-copy');
       ui.copy.type = 'button';
       ui.copy.disabled = true;
@@ -1647,6 +1711,13 @@
       close.addEventListener('click', function () { api.close(); });
       head.appendChild(close);
       panel.appendChild(head);
+      // #790: the compact bar's one line — what to do next. Outside the
+      // body, so collapsing the body can never hide it.
+      ui.pickStatus = el('p', 'tp-pick-status');
+      ui.pickStatus.setAttribute('role', 'status');
+      ui.pickStatus.setAttribute('data-testid', 'tp-pick-status');
+      ui.pickStatus.hidden = true;
+      panel.appendChild(ui.pickStatus);
       ui.copyStatus = el('p', 'tp-copy-status');
       ui.copyStatus.setAttribute('role', 'status');
       ui.copyStatus.setAttribute('data-testid', 'tp-copy-status');
@@ -1654,6 +1725,7 @@
 
       var body = el('div', 'tp-body');
       body.setAttribute('data-testid', 'tp-body');
+      ui.body = body;
       ui.chart = el('div', 'tp-chart');
       ui.chart.setAttribute('data-testid', 'tp-chart');
       body.appendChild(ui.chart);
@@ -1916,6 +1988,48 @@
         b.setAttribute('aria-pressed', moving === pair[0] ? 'true' : 'false');
       });
       if (ui.swap) ui.swap.disabled = !both;
+      syncCompact();
+    }
+
+    /* syncCompact shows the full panel or the compact bar for the phase
+     * (#790). Only visibility changes: the chart, the cursor (#781) and
+     * every control stay built, so a cancelled Move comes back as it was. */
+    function syncCompact() {
+      if (!panel) return;
+      var phase = compactPhase(state, moving);
+      var compact = phase !== null;
+      var shut = compact || folded;
+      var active = doc.activeElement;
+      // Focus inside the body would be stranded once it is hidden.
+      var stranded = shut && active && ui.body.contains && ui.body.contains(active);
+      /* F1: a Move that ends (Cancel, Escape, a pick) hides Cancel; if it
+       * held focus, focus goes back to the Move button the move began at
+       * instead of falling to <body>. */
+      var back = null;
+      if (!compact && active && active === ui.cancel && (lastPhase === 'move-a' || lastPhase === 'move-b')) {
+        back = (lastPhase === 'move-a' ? ui.endA : ui.endB).move;
+      }
+      lastPhase = phase;
+      panel.classList.toggle('tp-compact', compact);
+      panel.classList.toggle('tp-folded', !compact && folded);
+      panel.setAttribute('data-phase', phase || 'ready');
+      ui.body.hidden = shut;
+      ui.copy.hidden = compact;
+      ui.cancel.hidden = !compact;
+      /* Folded, a finished profile keeps its head: the title, the verdict
+       * chips and the verdict as the status line; a real button, not a
+       * drag gesture. */
+      ui.fold.hidden = compact;
+      ui.titleText.hidden = !compact;
+      ui.fold.setAttribute('aria-expanded', folded ? 'false' : 'true');
+      ui.fold.title = folded ? 'Expand the path profile' : 'Collapse the path profile';
+      ui.foldGlyph.textContent = folded ? '\u25B4' : '\u25BE';
+      ui.pickStatus.hidden = !shut;
+      // Folded, the status line carries the verdict the body would show.
+      ui.pickStatus.textContent = compact ? PHASE_STATUS[phase] : (folded ? (ui.chip.title || '') : '');
+      if (compact && stranded && ui.cancel.focus) ui.cancel.focus();
+      else if (stranded && ui.fold.focus) ui.fold.focus();
+      else if (back && back.focus) back.focus();
     }
 
     /* endpointsChanged is the shared tail of a move and a swap: the panel
@@ -1949,8 +2063,11 @@
       if (!ui.chip) return;
       ui.chip.className = 'tp-chip tp-chip-' + chip.tone;
       ui.chip.textContent = chip.label;
+      ui.chip.hidden = !chip.label;
       ui.chip.setAttribute('data-state', chip.state);
       ui.chip.title = chip.detail;
+      // A folded panel shows the verdict as its status line (#790 F4).
+      if (folded) syncCompact();
     }
 
     /* setSurfaceChip shows the second chip and its explanatory line, or
@@ -2350,6 +2467,9 @@
       open: function () {
         if (open) return;
         open = true;
+        // A new profile opens unfolded (#790 F4).
+        folded = false;
+        lastPhase = null;
         if (!panel) mount.appendChild(buildPanel());
         panel.classList.add('is-open');
         renderNames();
@@ -2387,6 +2507,8 @@
     FILL_OVERVIEW_M: FILL_OVERVIEW_M,
     ASSUMED_LABEL: ASSUMED_LABEL,
     ENDPOINT: ENDPOINT,
+    // #790: the compact bar's phase, read by the unit tests.
+    compactPhase: compactPhase,
     HASH_PARAM: HASH_PARAM,
     MAX_HEIGHT_M: MAX_HEIGHT_M,
     parseState: parseState,
