@@ -1563,6 +1563,24 @@
       if (ui.surfaceNote) ui.surfaceNote.hidden = !(show && surf.note);
     }
 
+    function writeHash() {
+      if (!syncHash) return;
+      try {
+        var loc = global.location;
+        var next = profileURL(loc, loc.hash, open ? hashParams(state) : {}, false);
+        global.history.replaceState(global.history.state, '', next);
+      } catch (_) { /* a hash we cannot write is not worth breaking the tool for */ }
+    }
+
+    function onCopy() {
+      var url = shareURL(state, global.location, opts.shareRoute === true);
+      if (!url) return;
+      copyLink(url, opts.copyText || global.copyToClipboard).then(function (ok) {
+        if (!ui.copyStatus) return;
+        ui.copyStatus.textContent = ok ? 'Link copied' : 'Could not copy the link. It is in the address bar.';
+      });
+    }
+
     /* setHeritage shows a heritageNote result, or takes the chip and its
      * note away together (null). */
     function setHeritage(note) {
@@ -1608,24 +1626,6 @@
       Promise.all([heritageAnswer(data.a), heritageAnswer(data.b)]).then(function (r) {
         if (mine !== seq || !open) return;
         setHeritage(heritageNote({ a: r[0], b: r[1] }, opts.heritage));
-      });
-    }
-
-    function writeHash() {
-      if (!syncHash) return;
-      try {
-        var loc = global.location;
-        var next = profileURL(loc, loc.hash, open ? hashParams(state) : {}, false);
-        global.history.replaceState(global.history.state, '', next);
-      } catch (_) { /* a hash we cannot write is not worth breaking the tool for */ }
-    }
-
-    function onCopy() {
-      var url = shareURL(state, global.location, opts.shareRoute === true);
-      if (!url) return;
-      copyLink(url, opts.copyText || global.copyToClipboard).then(function (ok) {
-        if (!ui.copyStatus) return;
-        ui.copyStatus.textContent = ok ? 'Link copied' : 'Could not copy the link. It is in the address bar.';
       });
     }
 
