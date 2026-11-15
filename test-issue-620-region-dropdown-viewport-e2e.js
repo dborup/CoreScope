@@ -10,6 +10,9 @@
 // Usage: BASE_URL=http://localhost:13581 node test-issue-620-region-dropdown-viewport-e2e.js
 'use strict';
 const { chromium } = require('playwright');
+// The fixture is freshened once per shard: pin the packets window so the
+// rows do not depend on when this suite runs in it (#787).
+const { pinPacketsTimeWindow } = require('./tests/e2e-packets-window');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const REGIONS = {
@@ -35,6 +38,7 @@ const ONLY = process.env.ONLY_PAGES ? process.env.ONLY_PAGES.split(',') : null;
 let passed = 0, failed = 0;
 async function newCtx(browser, w, h) {
   const ctx = await browser.newContext({ viewport: { width: w, height: h } });
+  await pinPacketsTimeWindow(ctx);
   await ctx.route((u) => u.pathname === '/api/config/regions', (r) =>
     r.fulfill({ contentType: 'application/json', body: JSON.stringify(REGIONS) }));
   await ctx.route((u) => u.pathname === '/api/config/regions/groups', (r) =>
@@ -45,10 +49,11 @@ async function step(name, fn) {
   try { await fn(); passed++; console.log('  ✓ ' + name); }
   catch (e) { failed++; console.error('  ✗ ' + name + ': ' + e.message); }
 }
-// Settled = the region filter is rendered and, on Packets, the list has rows.
+// Settled = the region filter is rendered and, on Packets, the list has rows:
+// packet rows, as an empty list also has one row, "No packets found" (#787).
 async function settle(page, route, sel) {
   await page.locator(sel + ' .region-quick-pick').first().waitFor({ state: 'attached' });
-  if (route === '#/packets') await page.locator('#pktBody tr').first().waitFor({ state: 'attached' });
+  if (route === '#/packets') await page.locator('#pktBody tr[data-hash]').first().waitFor({ state: 'attached' });
 }
 function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
@@ -82,6 +87,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     for (const [route, sel] of PAGES) {
       if (ONLY && !ONLY.includes(route)) continue;
       const ctx = await browser.newContext({ viewport: { width: w, height: h } });
+      await pinPacketsTimeWindow(ctx);
       await ctx.route((u) => u.pathname === '/api/config/regions', (r) =>
         r.fulfill({ contentType: 'application/json', body: JSON.stringify(REGIONS) }));
       await ctx.route((u) => u.pathname === '/api/config/regions/groups', (r) =>
