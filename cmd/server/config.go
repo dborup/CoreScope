@@ -1155,6 +1155,74 @@ var gatedTileProviders = []gatedTileProvider{
 		warning: "the Dataforsyningen styles are opt-in (#741) and need map.tiles.providers.dataforsyningen.enabled set to true and a non-empty map.tiles.providers.dataforsyningen.token: browsers will skip it and show the fallback base map."},
 }
 
+// on reports whether block switches g on, read as map-tile-providers.js
+// reads it: exact-case keys, enabled the JSON boolean true, and with
+// needsToken a string token that is not blank.
+func (g gatedTileProvider) on(block map[string]interface{}) bool {
+	enabled, _ := block["enabled"].(bool)
+	token, _ := block["token"].(string)
+	return enabled && (!g.needsToken || strings.TrimSpace(token) != "")
+}
+
+// dropUngatedTileTokens keeps a gated provider's token out of
+// /api/config/client unless the browser would use it. The Dataforsyningen
+// base-map token (#741) is client-visible on purpose, but only while
+// map.tiles.providers.dataforsyningen is switched on: an operator who
+// answers misuse with enabled false must stop publishing it. In map.tiles
+// and the legacy top-level tiles, every token key of any spelling in a
+// block named like the provider is deleted, unless it is the exact-case
+// token of the exact-case block and that block is on. A providers member,
+// a provider block or a map.tiles that is not an object holds no gate the
+// browser can read, so it is deleted whole. A non-blank value dropped is
+// logged by key, never by value. Runs once, at load.
+func (c *Config) dropUngatedTileTokens() {
+	var dropped []string
+	if t, ok := c.Map["tiles"]; ok && jsonObjectAt(t) == nil {
+		delete(c.Map, "tiles")
+		dropped = append(dropped, "map.tiles")
+	}
+	dropUngatedTokensIn(jsonObjectAt(c.Map, "tiles"), "map.tiles", &dropped)
+	dropUngatedTokensIn(c.Tiles, "tiles", &dropped)
+	for _, p := range dropped {
+		log.Printf("[config] %s was removed from the client config: the Dataforsyningen base-map token is shipped to browsers only while map.tiles.providers.dataforsyningen.enabled is true and its token is non-empty", p)
+	}
+}
+
+func dropUngatedTokensIn(tiles map[string]interface{}, path string, dropped *[]string) {
+	if tiles == nil {
+		return
+	}
+	if p, ok := tiles["providers"]; ok && jsonObjectAt(p) == nil {
+		delete(tiles, "providers")
+		*dropped = append(*dropped, path+".providers")
+		return
+	}
+	providers := jsonObjectAt(tiles, "providers")
+	for k, v := range providers {
+		for _, g := range gatedTileProviders {
+			if !g.needsToken || !strings.EqualFold(k, g.key) {
+				continue
+			}
+			block := jsonObjectAt(v)
+			if block == nil {
+				delete(providers, k)
+				*dropped = append(*dropped, path+".providers."+k)
+				continue
+			}
+			keep := k == g.key && g.on(block)
+			for bk, bv := range block {
+				if !strings.EqualFold(bk, "token") || (keep && bk == "token") {
+					continue
+				}
+				delete(block, bk)
+				if str, isStr := bv.(string); !isStr || strings.TrimSpace(str) != "" {
+					*dropped = append(*dropped, path+".providers."+k+"."+bk)
+				}
+			}
+		}
+	}
+}
+
 // warnGatedTileDefaults logs when map.tiles.darkDefault or lightDefault
 // names a style of a gated provider that is not switched on: an Esri style
 // while map.tiles.providers.esri.enabled is not true (#728), or a
@@ -1163,21 +1231,18 @@ var gatedTileProviders = []gatedTileProvider{
 // operator who upgraded with Esri Dark Gray as the dark default should find
 // out from the server log, not from a changed map. It runs after
 // migrateDeprecatedConfig, so a legacy top-level mapDarkTileProvider is
-// checked too. map.tiles is passed to the browser as-is; the server only
-// looks, and reads the keys exactly as map-tile-providers.js does:
-// exact-case keys (encoding/json would match them case-insensitively),
-// only the JSON boolean true enables a provider, and a default that is not
-// a string is ignored without hiding the other one.
+// checked too. It only looks (dropUngatedTileTokens edits, later), and
+// reads the keys exactly as map-tile-providers.js does: exact-case keys
+// (encoding/json would match them case-insensitively), only the JSON
+// boolean true enables a provider, and a default that is not a string is
+// ignored without hiding the other one.
 func (c *Config) warnGatedTileDefaults(logf func(string, ...interface{})) {
 	if c == nil {
 		return
 	}
 	tiles := jsonObjectAt(c.Map, "tiles")
 	for _, g := range gatedTileProviders {
-		block := jsonObjectAt(tiles, "providers", g.key)
-		enabled, _ := block["enabled"].(bool)
-		token, _ := block["token"].(string)
-		if enabled && (!g.needsToken || strings.TrimSpace(token) != "") {
+		if g.on(jsonObjectAt(tiles, "providers", g.key)) {
 			continue
 		}
 		for _, key := range []string{"darkDefault", "lightDefault"} {

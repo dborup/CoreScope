@@ -299,10 +299,11 @@ func (c *Config) extractDHMConfig() {
 
 // extractTypedMapBlocks lifts every typed block out of the client-visible
 // Map: map.dhm (#680), map.heritage (#723), map.masts (#724) and
-// map.skraafoto (#737).
+// map.skraafoto (#737), and drops the tokens the client must not get (#741).
 func (c *Config) extractTypedMapBlocks() {
 	c.extractDHMConfig()
 	c.dropDHMTokenFromTiles()
+	c.dropUngatedTileTokens()
 	c.extractHeritageConfig()
 	c.extractMastsConfig()
 	c.extractSkraafotoConfig()
@@ -310,8 +311,9 @@ func (c *Config) extractTypedMapBlocks() {
 
 // dropDHMTokenFromTiles keeps the DHM token out of the tile config, which
 // /api/config/client ships verbatim (map.tiles, and the legacy top-level
-// tiles). The Dataforsyningen base maps (#741) take a token of their own,
-// map.tiles.providers.dataforsyningen.token, deliberately client-visible;
+// tiles and mapDarkTileProvider). The Dataforsyningen base maps (#741)
+// take a token of their own, map.tiles.providers.dataforsyningen.token,
+// client-visible while that provider is on (dropUngatedTileTokens);
 // it comes from the same Dataforsyningen account as map.dhm.token, so the
 // likeliest leak is the DHM token pasted there as well. Every string value
 // in those blocks that contains the DHM token is deleted (an array element
@@ -326,6 +328,10 @@ func (c *Config) dropDHMTokenFromTiles() {
 	var dropped []string
 	dropString(c.Map["tiles"], token, "map.tiles", &dropped)
 	dropString(c.Tiles, token, "tiles", &dropped)
+	if strings.Contains(c.MapDarkTileProvider, token) {
+		c.MapDarkTileProvider = ""
+		dropped = append(dropped, "mapDarkTileProvider")
+	}
 	for _, p := range dropped {
 		log.Printf("[dhm] config %s holds the map.dhm.token value and was removed from the client config: map.dhm.token is server-only, so the Dataforsyningen base maps need a token of their own in map.tiles.providers.dataforsyningen.token", p)
 	}

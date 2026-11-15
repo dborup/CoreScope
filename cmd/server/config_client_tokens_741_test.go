@@ -56,21 +56,34 @@ func TestClientConfigTokenSeparation741(t *testing.T) {
 		// Case variants of map.dhm are removed, not shipped (liftMapBlock).
 		{"map.DHM case variant", `"DHM": {"enabled": true, "token": "` + dhmTestToken + `"}, "tiles": {"providers": {` + base + `}}`, "", true},
 		{"map.Dhm case variant next to map.dhm", dhmBlock + `, "Dhm": {"token": "` + dhmTestToken + `"}, "tiles": {"providers": {` + base + `}}`, "", true},
-		// A case variant of the provider block is shipped as it is (the
-		// browser ignores it), and it still never carries the DHM token.
-		{"providers.Dataforsyningen case variant", dhmBlock + `, "tiles": {"providers": {"Dataforsyningen": {"enabled": true, "token": "` + baseMapTestToken + `"}}}`, "", true},
-		{"dataforsyningen.Token case variant", dhmBlock + `, "tiles": {"providers": {"dataforsyningen": {"enabled": true, "Token": "` + baseMapTestToken + `"}}}`, "", true},
-		{"DATAFORSYNINGEN.TOKEN case variant", dhmBlock + `, "tiles": {"providers": {"DATAFORSYNINGEN": {"ENABLED": true, "TOKEN": "` + baseMapTestToken + `"}}}`, "", true},
-		// Malformed blocks.
+		// The base-map token reaches the browser only while the browser
+		// would use it: enabled is the JSON true and the token is non-blank,
+		// both under exact-case keys, as map-tile-providers.js reads them.
+		{"gate off: enabled false", `"tiles": {"providers": {"dataforsyningen": {"enabled": false, "token": "` + baseMapTestToken + `"}}}`, "", false},
+		{"gate off: enabled is the string true", `"tiles": {"providers": {"dataforsyningen": {"enabled": "true", "token": "` + baseMapTestToken + `"}}}`, "", false},
+		{"gate off: enabled is 1", `"tiles": {"providers": {"dataforsyningen": {"enabled": 1, "token": "` + baseMapTestToken + `"}}}`, "", false},
+		{"gate off: enabled missing", `"tiles": {"providers": {"dataforsyningen": {"token": "` + baseMapTestToken + `"}}}`, "", false},
+		{"gate off: token is not a string", `"tiles": {"providers": {"dataforsyningen": {"enabled": true, "token": ["` + baseMapTestToken + `"]}}}`, "", false},
+		// A case variant of the provider block, or of its keys, is not read
+		// by the browser, so the gate is off and its token stays home.
+		{"providers.Dataforsyningen case variant", dhmBlock + `, "tiles": {"providers": {"Dataforsyningen": {"enabled": true, "token": "` + baseMapTestToken + `"}}}`, "", false},
+		{"dataforsyningen.Token case variant", dhmBlock + `, "tiles": {"providers": {"dataforsyningen": {"enabled": true, "Token": "` + baseMapTestToken + `"}}}`, "", false},
+		{"dataforsyningen.Enabled case variant", dhmBlock + `, "tiles": {"providers": {"dataforsyningen": {"Enabled": true, "token": "` + baseMapTestToken + `"}}}`, "", false},
+		{"DATAFORSYNINGEN.TOKEN case variant", dhmBlock + `, "tiles": {"providers": {"DATAFORSYNINGEN": {"ENABLED": true, "TOKEN": "` + baseMapTestToken + `"}}}`, "", false},
+		// Malformed map.dhm blocks leave the base-map gate on.
 		{"map.dhm is the token string itself", `"dhm": "` + dhmTestToken + `", "tiles": {"providers": {` + base + `}}`, "", true},
 		{"map.dhm is an array", `"dhm": ["` + dhmTestToken + `"], "tiles": {"providers": {` + base + `}}`, "", true},
 		{"map.dhm is a number", `"dhm": 5, "tiles": {"providers": {` + base + `}}`, "", true},
-		{"providers is not an object", dhmBlock + `, "tiles": {"providers": "` + baseMapTestToken + `"}`, "", true},
-		{"providers.dataforsyningen is not an object", dhmBlock + `, "tiles": {"providers": {"dataforsyningen": "` + baseMapTestToken + `"}}`, "", true},
-		{"tiles is not an object", dhmBlock + `, "tiles": "` + baseMapTestToken + `"`, "", true},
+		// Malformed tile blocks: the browser reads no gate from them.
+		{"providers is not an object", dhmBlock + `, "tiles": {"providers": "` + baseMapTestToken + `"}`, "", false},
+		{"providers.dataforsyningen is not an object", dhmBlock + `, "tiles": {"providers": {"dataforsyningen": "` + baseMapTestToken + `"}}`, "", false},
+		{"tiles is not an object", dhmBlock + `, "tiles": "` + baseMapTestToken + `"`, "", false},
 		// The base-map token in the legacy top-level tiles block reaches the
-		// client both as itself and through the map.tiles migration.
+		// client both as itself and through the map.tiles migration, and
+		// only with the gate on.
 		{"legacy top-level tiles block", dhmBlock, `"tiles": {"providers": {` + base + `}}`, true},
+		{"legacy top-level tiles block, gate off", dhmBlock, `"tiles": {"providers": {"dataforsyningen": {"enabled": false, "token": "` + baseMapTestToken + `"}}}`, false},
+		{"legacy top-level tiles block, gate off, not migrated", dhmBlock + `, "tiles": {"providers": {"osm": {"enabled": false}}}`, `"tiles": {"providers": {"dataforsyningen": {"token": "` + baseMapTestToken + `"}}}`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,6 +157,10 @@ func TestClientConfigDropsReusedDHMToken741(t *testing.T) {
 		// migrated into it and is shipped on its own.
 		{"in a legacy top-level block that is not migrated",
 			`{"map": {` + dhmBlock + `, "tiles": {"providers": {"osm": {"enabled": false}}}}, "tiles": {"providers": {"dataforsyningen": {"token": "` + dhmTestToken + `"}}}}`},
+		// The legacy top-level mapDarkTileProvider is shipped on its own as
+		// well as migrated into map.tiles.darkDefault.
+		{"in the legacy top-level mapDarkTileProvider",
+			`{"map": {` + dhmBlock + `}, "mapDarkTileProvider": "` + dhmTestToken + `"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -193,5 +210,47 @@ func TestClientConfigReusedDHMTokenIsLogged741(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "map.dhm.token") {
 		t.Fatalf("logged a reuse with two different tokens:\n%s", buf.String())
+	}
+}
+
+// With the gate on, only the exact-case block keeps its token: a case
+// variant next to it is dropped, and the on block is shipped untouched.
+func TestClientConfigShipsOnlyTheGatedBaseMapToken741(t *testing.T) {
+	const variantToken = "basemap-741-case-variant"
+	body, _ := clientConfigFor(t, `{"map": {"tiles": {"providers": {
+		"dataforsyningen": {"enabled": true, "token": "`+baseMapTestToken+`"},
+		"Dataforsyningen": {"enabled": true, "token": "`+variantToken+`"}}}}}`)
+	if !strings.Contains(body, `"dataforsyningen":{"enabled":true,"token":"`+baseMapTestToken+`"}`) {
+		t.Fatalf("the gated block is not shipped as configured: %s", body)
+	}
+	if strings.Contains(body, variantToken) {
+		t.Fatalf("a case-variant block's token is shipped: %s", body)
+	}
+}
+
+// Dropping a gated-off token is logged by key, never by value, and the
+// shipped example (enabled false, token "") drops nothing worth a line.
+func TestClientConfigUngatedBaseMapTokenIsLogged741(t *testing.T) {
+	load := func(doc string) string {
+		dir := t.TempDir()
+		writeConfigFile(t, dir, "config.json", doc)
+		var buf bytes.Buffer
+		log.SetOutput(&buf)
+		_, err := LoadConfig(dir)
+		log.SetOutput(os.Stderr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	out := load(`{"map": {"tiles": {"providers": {"dataforsyningen": {"enabled": false, "token": "` + baseMapTestToken + `"}}}}}`)
+	if !strings.Contains(out, "map.tiles.providers.dataforsyningen.token") {
+		t.Fatalf("the drop is not logged with the key it removed:\n%s", out)
+	}
+	if strings.Contains(out, baseMapTestToken) {
+		t.Fatalf("the log line prints the token:\n%s", out)
+	}
+	if out := load(`{"map": {"tiles": {"providers": {"dataforsyningen": {"enabled": false, "token": ""}}}}}`); strings.Contains(out, "dataforsyningen") {
+		t.Fatalf("the shipped example logs a drop:\n%s", out)
 	}
 }
