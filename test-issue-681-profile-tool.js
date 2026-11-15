@@ -1267,6 +1267,17 @@ test('a junk model in the link falls back to the customizer default', () => {
   assert.strictEqual(TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=dsm', { model: 'dtm' }).model, 'dtm');
 });
 
+test('a junk model in the link is not a stated model (#765)', () => {
+  // Only a model the tool knows is a decision: a junk value must not pin
+  // the default it fell back to against a later customizer change.
+  ['dsm', '', 'DTM', 'both '].forEach((m) => {
+    const st = TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=' + encodeURIComponent(m));
+    assert.strictEqual(st.modelExplicit, false, 'model=' + JSON.stringify(m) + ' counted as stated');
+  });
+  assert.strictEqual(TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=dtm').modelExplicit, true);
+  assert.strictEqual(TP.parseState('profile=' + PK_A + ',' + PK_B).modelExplicit, false);
+});
+
 test('the link leaves the model out only for a "both" nobody stated', () => {
   const both = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: 'both' };
   const dtm = Object.assign({}, both, { model: 'dtm' });
