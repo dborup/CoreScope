@@ -69,11 +69,9 @@
 
     var map = L.map('areaNodesMapContainer', { zoomControl: true, attributionControl: false });
     activeMap = map;
-    if (typeof window._applyTilesToNodeMap === 'function') {
-      window._applyTilesToNodeMap(map);
-    } else {
-      L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
-    }
+    // nodes.js always loads first. No uncredited OSM fallback (#764): without
+    // the helper the inset draws no tiles rather than tiles with no credit.
+    if (typeof window._applyTilesToNodeMap === 'function') window._applyTilesToNodeMap(map);
 
     var accent = cssVar('--accent');
     var outline = cssVar('--surface-0');

@@ -2930,6 +2930,31 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 .mc-masts-popup .mc-masts-popup-hint { font-size: 12px; margin: 6px 0; padding-left: 6px; border-left: 3px solid var(--mast-interference); }
 .mc-masts-popup .mc-masts-popup-note { font-size: 11px; color: var(--text-muted); margin: 6px 0 0; }
 
+/* #723 M2 heritage popup */
+/* Click-for-info on the protected ancient monuments overlay
+   (heritage-info.js). Colours follow the theme through the variables. */
+.mc-heritage-popup .leaflet-popup-content { margin: 10px 14px; min-width: 180px; }
+.mc-heritage-info { color: var(--text); line-height: 1.35; }
+.mc-heritage-title { font-weight: 600; font-size: 14px; margin: 0 24px 6px 0; overflow-wrap: anywhere; }
+.mc-heritage-fields {
+  display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0;
+}
+.mc-heritage-fields dt { color: var(--text-muted); }
+.mc-heritage-fields dd { margin: 0; overflow-wrap: anywhere; }
+.mc-heritage-msg { margin-right: 18px; }
+.mc-heritage-note { margin-top: 6px; color: var(--text-muted); font-style: italic; }
+.mc-heritage-credit { margin-top: 8px; font-size: 11px; color: var(--text-muted); }
+/* Leaflet styles the button as .leaflet-container a.leaflet-popup-close-button,
+   so these need the same specificity plus the popup class to win. */
+.leaflet-container .mc-heritage-popup a.leaflet-popup-close-button { color: var(--text-muted); }
+@media (pointer: coarse) {
+  .leaflet-container .mc-heritage-popup a.leaflet-popup-close-button {
+    width: 44px; height: 44px; line-height: 44px; font-size: 24px;
+  }
+  .mc-heritage-title, .mc-heritage-msg { margin-right: 40px; }
+}
+/* end #723 M2 heritage popup */
+
 /* ---- Leaflet overrides for theme ---- */
 .leaflet-control-zoom a {
   background: color-mix(in srgb, var(--surface-1) 92%, transparent) !important;
