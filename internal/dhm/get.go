@@ -28,12 +28,23 @@ func NewNoRedirectClient(timeout time.Duration) *http.Client {
 // "transport", "status 500", "unexpected content type", "oversize
 // response", ...): never a URL, never upstream text.
 func GetBody(ctx context.Context, hc *http.Client, target, accept string, contentTypes []string, maxBody int) ([]byte, error) {
+	h := http.Header{}
+	if accept != "" {
+		h.Set("Accept", accept)
+	}
+	return GetBodyWithHeader(ctx, hc, target, h, contentTypes, maxBody)
+}
+
+// GetBodyWithHeader is GetBody sending exactly the headers in header: the
+// Skråfoto STAC client (#737) sends its token header through it. Its
+// errors are GetBody's, so they never hold a header value either.
+func GetBodyWithHeader(ctx context.Context, hc *http.Client, target string, header http.Header, contentTypes []string, maxBody int) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, FetchError{"request"}
 	}
-	if accept != "" {
-		req.Header.Set("Accept", accept)
+	for k, vs := range header {
+		req.Header[k] = append([]string(nil), vs...)
 	}
 	resp, err := hc.Do(req)
 	if err != nil {

@@ -1685,6 +1685,11 @@ type ClientConfigResponse struct {
 	// Masts offers the #724 antenna sites layer (GET /api/masts). Omitted
 	// unless map.masts.enabled is true.
 	Masts *MastsClientConfig `json:"masts,omitempty"`
+
+	// Skraafoto offers the #737 oblique aerial photos (search and
+	// preview). Omitted unless map.skraafoto.enabled and map.dhm has a
+	// token; it never carries the token.
+	Skraafoto *SkraafotoClientConfig `json:"skraafoto,omitempty"`
 }
 
 // PrivacyClientConfig is the privacy block of /api/config/client. It carries

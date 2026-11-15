@@ -109,6 +109,9 @@ type Server struct {
 	// heritage is the #723 M2 click-for-info query; nil unless
 	// map.heritage is enabled.
 	heritage *heritageQuery
+	// skraafoto is the #737 oblique photo search and preview; nil unless
+	// map.skraafoto is enabled and map.dhm has a token.
+	skraafoto *skraafotoProxy
 
 	// Cached /api/analytics/wardriving response — per-window, recomputed at most once every 30s
 	wardrivingStatsMu       sync.Mutex
@@ -241,6 +244,7 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 	}
 	s.terrain = newTerrainProfilerFromConfig(cfg, s.dhm, db)
 	s.heritage = newHeritageQueryFromConfig(cfg)
+	s.skraafoto = newSkraafotoProxyFromConfig(cfg)
 	return s
 }
 
@@ -347,6 +351,8 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc(cardRoute, s.handleTerrainProfileCard).Methods("GET")
 	r.HandleFunc("/api/masts", s.handleMasts).Methods("GET")
 	r.HandleFunc("/api/terrain/heritage", s.handleHeritageInfo).Methods("GET")
+	r.HandleFunc("/api/skraafoto/search", s.handleSkraafotoSearch).Methods("GET")
+	r.HandleFunc("/api/skraafoto/preview/{collection}/{item}", s.handleSkraafotoPreview).Methods("GET")
 	r.HandleFunc("/api/config/geo-filter", s.handleConfigGeoFilter).Methods("GET")
 	r.HandleFunc("/api/config/areas", s.handleConfigAreas).Methods("GET")
 	r.HandleFunc("/api/config/areas/polygons", s.handleConfigAreasPolygons).Methods("GET")
@@ -656,6 +662,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		DHM:                 s.dhmClientConfig(),
 		Heritage:            s.heritageClientConfig(),
 		Masts:               s.mastsClientConfig(),
+		Skraafoto:           s.skraafotoClientConfig(),
 	})
 }
 

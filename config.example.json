@@ -214,6 +214,20 @@
       "hintStrongM": 100,
       "_comment_hintStrongM": "#724 M5 — within this many metres the hint says the transmitter may be on the same building or mast (0 = no strong tier, up to hintDistanceM). A value past hintDistanceM warns and uses the default."
     },
+    "skraafoto": {
+      "_comment": "#737 — optional Skråfoto: the oblique aerial photos of Denmark from Klimadatastyrelsen (north, east, south, west and straight down), credited 'Klimadatastyrelsen, Skråfotos, CC BY 4.0'. With enabled true this server answers GET /api/skraafoto/search?lat=&lon=[&year=] (the photos of a point, newest year by default, 2017 not offered) and GET /api/skraafoto/preview/{collection}/{item} (one photo as a JPEG of at most 1024 px). The search needs a Dataforsyningen token: it uses map.dhm.token, which stays on the server (a token alone does not switch this on, and map.dhm.enabled is not needed). The previews are read from the agency's image CDN, which needs no token and is never sent one; only one small overview of each photo is read, by range requests. Off unless enabled is true; when off, or without a map.dhm.token, both endpoints return 404 and nothing is contacted. All values are bounded; an out-of-range value logs a warning and uses the default shown here.",
+      "enabled": false,
+      "searchRateLimitPerMin": 30,
+      "_comment_searchRateLimitPerMin": "Uncached searches one client address may make per minute (0-6000, 0 = off); beyond it 429 with Retry-After. Cached answers are not counted. Needs webSocket.trustedProxies behind a reverse proxy, like the other per-client limits.",
+      "previewRateLimitPerMin": 120,
+      "_comment_previewRateLimitPerMin": "Uncached previews one client address may fetch per minute (0-6000, 0 = off); a click shows up to five.",
+      "dailyCap": 2000,
+      "_comment_dailyCap": "Uncached searches and previews per UTC day, server-wide (0-1000000, 0 = off), so many clients together cannot exhaust the shared token; beyond it 503 with Retry-After until 00:00 UTC, cached photos are still served, and one line a minute is logged.",
+      "maxInFlight": 8,
+      "_comment_maxInFlight": "Distinct uncached searches and previews being fetched at once, server-wide (1-16); beyond it 503 with Retry-After: 5, not charged to the client or the daily budget.",
+      "cacheMB": 64,
+      "_comment_cacheMB": "Memory for cached previews (1-512 MB), some 50-150 KB each, kept 7 days. Searches are cached 24 hours on top of this, within 16 MB."
+    },
     "tiles": {
       "_comment_defaults": "#332 — the built-in defaults are 'osm-dark' / 'osm-standard' (keyless OpenStreetMap, tiles to zoom 18). Set darkDefault/lightDefault to any enabled style id to override; they take priority over the built-in fallback. A default whose provider is not enabled (opentopomap, usgs and esri are opt-in) is skipped, as if it were not set. Carto is NOT the default any more: since August 2026 keyless Carto raster tiles come back HTTP 200 with 'API KEY REQUIRED' stamped into the PNG, and CoreScope has no Carto basemap-key plumbing.",
       "_comment_legacy": "Legacy raw tile-URL overrides — \"tiles.dark\" / \"tiles.light\" at the top level, or \"darkUrl\" / \"lightUrl\" here — are still honoured: they apply when no provider was chosen in the browser and no darkDefault/lightDefault is set, i.e. precedence is browser choice > darkDefault/lightDefault > raw URL > built-in fallback. A raw URL carries no vendor metadata, so such a map shows the generic \"\u00a9 OpenStreetMap contributors\" credit (no vendor-specific or licence attribution), is never CSS-inverted in dark mode, and is capped at zoom 18 like the built-in OpenStreetMap default. Prefer darkDefault/lightDefault with a registered style id when you need the correct credit, licence link or a different zoom ceiling.",

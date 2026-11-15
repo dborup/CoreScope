@@ -34,6 +34,7 @@ COPY internal/profilecard/ ../../internal/profilecard/
 COPY internal/copdem/ ../../internal/copdem/
 COPY internal/heritage/ ../../internal/heritage/
 COPY internal/buildings/ ../../internal/buildings/
+COPY internal/skraafoto/ ../../internal/skraafoto/
 RUN go mod download
 COPY cmd/server/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
