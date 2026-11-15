@@ -86,3 +86,34 @@ func TestHeaderGeoreferenceMustFitTile795(t *testing.T) {
 		}
 	}
 }
+
+// Below the georeference check, sampling never clamps far: a candidate
+// more than half a pixel outside a level's raster is given no block and
+// keeps no value, whatever header it is matched with. Before, it was
+// clamped to the raster's edge pixel and sampled.
+func TestFillNeverSamplesOutsideRaster795(t *testing.T) {
+	b := newBucket(t)
+	// N55E012's raster, wrongly matched with a candidate on N55E013.
+	b.Put(cph.Path(), smallTile(cph))
+	c := newTestClient(t, b)
+	ctx := context.Background()
+	h, err := c.header(ctx, cph)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := []float32{float32(math.NaN())}
+	pts := []fillPoint{{i: 0, lat: 55.6, lon: 13.3, tile: 0}}
+	tiles, hs := []Tile{cph}, []header{h}
+	for level := range h.tiff.Levels {
+		cost, groups := levelCost(level, pts, tiles, hs)
+		if len(groups) != 0 || cost != h.calls {
+			t.Errorf("level %d: %d blocks for an out-of-raster candidate, cost %d", level, len(groups), cost)
+		}
+		if err := c.sample(ctx, level, groups, pts, tiles, hs, values); err != nil {
+			t.Fatal(err)
+		}
+		if !math.IsNaN(float64(values[0])) {
+			t.Fatalf("level %d: out-of-raster candidate sampled as %v", level, values[0])
+		}
+	}
+}
