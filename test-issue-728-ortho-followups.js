@@ -118,5 +118,19 @@ test('F5 the class the rule matches is the one the ortho pane gets', () => {
   assert.ok(map.getPane('mcOrthoPane').classes.includes('mc-ortho-pane'));
 });
 
+console.log('\n── #728 F6: Esri member upscales at z20 ──');
+
+test('F6 Esri member: maxNativeZoom 19, maxZoom from the ortho config', () => {
+  for (const z of [20, 18]) {
+    const ctx = makeSandbox({ dhm: dhmBlock(z), mapCfg: ESRI_ON });
+    const { map } = buildWithAuto(ctx);
+    const group = map._controls[map._controls.length - 1].base[ORTHO_ID];
+    const esri = Array.from(group.members).find(l => l._url === ESRI_URL);
+    assert.ok(esri);
+    assert.strictEqual(esri.options.maxNativeZoom, 19);
+    assert.strictEqual(esri.options.maxZoom, z);
+  }
+});
+
 console.log(`\n#728 follow-ups: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

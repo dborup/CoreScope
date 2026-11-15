@@ -851,7 +851,14 @@
     retryPlaceholderTiles(map, ortho);
     var esri = _hasId('esri-imagery') ? REGISTRY['esri-imagery'] : null;
     if (!esri) return ortho;
-    var under = L.tileLayer(esri.url(), { attribution: esri.attribution, maxZoom: esri.maxZoom });
+    // maxNativeZoom keeps Esri to the levels it has (19 here); above it Leaflet
+    // upscales z19 tiles, up to the ortho layer's maxZoom, instead of a blank
+    // map at z20 outside Denmark.
+    var under = L.tileLayer(esri.url(), {
+      attribution: esri.attribution,
+      maxNativeZoom: esri.maxZoom,
+      maxZoom: cfg.maxZoom
+    });
     return L.layerGroup([under, ortho]);
   }
 
