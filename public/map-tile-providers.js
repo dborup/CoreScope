@@ -358,8 +358,11 @@
 
   // A path on this server: not protocol-relative ("//host"), and not
   // "/\host", which browsers read the same way.
+  // A same-origin absolute path: "/" and then neither "/" nor "\\" (protocol-
+  // relative) nor an ASCII control or space. The URL parser strips tab, LF and
+  // CR, so "/\t/host" would otherwise resolve to a foreign host (#777 review).
   function _isSameOriginPath(u) {
-    return typeof u === 'string' && u.charAt(0) === '/' && u.charAt(1) !== '/' && u.charAt(1) !== '\\';
+    return typeof u === 'string' && /^\/[^\/\\\x00-\x20]/.test(u);
   }
 
   function getTerrainConfig() {
