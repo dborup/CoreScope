@@ -252,8 +252,9 @@ func TestLocateUnclosedRing(t *testing.T) {
 // documented half-open consequence, not luck: the same point gives the same
 // answer for every rotation of the ring.
 func TestLocateTieBreaks(t *testing.T) {
-	// A chevron: the point (526050, 6179050) is level with the two upper
-	// vertices and with the notch vertex between them.
+	// A chevron: a square with a V notched into its top edge, so northing
+	// 6179050 is level with both upper vertices and the ray through it meets
+	// a vertex, two sloped edges and a vertical edge.
 	ring := [][2]float64{
 		{526000, 6179000}, {526100, 6179000}, {526100, 6179050},
 		{526050, 6179020}, {526000, 6179050},
