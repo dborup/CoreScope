@@ -1843,7 +1843,7 @@
       else if (tileLayer.options) tileLayer.options.attribution = r.attribution;
       if (dark && r.refUrl) {
         if (!_liveDarkRefLayer) {
-          _liveDarkRefLayer = L.tileLayer(r.refUrl, { maxZoom: 19, attribution: r.attribution }).addTo(liveAutoLayerGroup);
+          _liveDarkRefLayer = window.MC_createBaseLayer({ url: r.refUrl, attribution: r.attribution }, { maxZoom: 19 }).addTo(liveAutoLayerGroup);
         } else {
           _liveDarkRefLayer.setUrl(r.refUrl);
           if (!liveAutoLayerGroup.hasLayer(_liveDarkRefLayer)) _liveDarkRefLayer.addTo(liveAutoLayerGroup);
@@ -1860,9 +1860,10 @@
       }
     }
     const _liveInitTile = _liveResolveTile(isDark);
-    let tileLayer = L.tileLayer(_liveInitTile.url, { maxZoom: 19, attribution: _liveInitTile.attribution }).addTo(liveAutoLayerGroup);
+    // #741 M1a — same shared factory as the Map page.
+    let tileLayer = window.MC_createBaseLayer(_liveInitTile, { maxZoom: 19 }).addTo(liveAutoLayerGroup);
     if (isDark && _liveInitTile.refUrl) {
-      _liveDarkRefLayer = L.tileLayer(_liveInitTile.refUrl, { maxZoom: 19, attribution: _liveInitTile.attribution }).addTo(liveAutoLayerGroup);
+      _liveDarkRefLayer = window.MC_createBaseLayer({ url: _liveInitTile.refUrl, attribution: _liveInitTile.attribution }, { maxZoom: 19 }).addTo(liveAutoLayerGroup);
     }
     if (typeof window.MC_applyTileFilter === 'function') window.MC_applyTileFilter();
   

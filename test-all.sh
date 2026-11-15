@@ -142,6 +142,7 @@ run test-issue-724-masts-layer.js
 run test-issue-724-masts-hint.js
 run test-issue-724-m5-masts-customizer.js
 run test-issue-723-heritage-info.js
+run test-issue-723-profile-warning.js
 run test-issue-681-profile-tool.js
 run test-issue-681-m5-node-entry.js
 run test-issue-681-m6-customizer-terrain.js
@@ -157,6 +158,7 @@ run test-packets-window-pinned.js
 run test-issue-733-dhm-credit.js
 run test-issue-738-foreign-fill-ui.js
 run test-issue-752-inset-attribution.js
+run test-issue-741-base-layer-factory.js
 run test-issue-764-no-osm-fallback.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js
