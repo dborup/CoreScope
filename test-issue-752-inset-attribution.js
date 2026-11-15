@@ -304,7 +304,9 @@ test('I4 home.js: the My-Mesh minimap (#756) is routed through the helper', () =
   // MC_ensureAttribution adds no credit of its own — Leaflet's own control
   // reads getAttribution() from each layer already on the map, so the tile
   // layer itself must carry the OSM credit text.
-  assert.ok(/L\.tileLayer\([^)]*attribution\s*:\s*['"]© OpenStreetMap contributors['"]/s.test(src),
+  // #741 M1a routed every base layer through MC_createBaseLayer; either
+  // form must still carry the credit text.
+  assert.ok(/(?:L\.tileLayer|MC_createBaseLayer)\([^)]*attribution\s*:\s*['"]© OpenStreetMap contributors['"]/s.test(src),
     'home.js: the OSM tile layer carries no attribution text for the control to show');
 });
 

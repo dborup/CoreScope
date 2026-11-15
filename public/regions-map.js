@@ -257,7 +257,14 @@
       if (tileLayer) map.removeLayer(tileLayer);
       const theme = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
       const tile = typeof root.MC_getTileSpec === 'function' ? root.MC_getTileSpec(theme) : null;
-      tileLayer = L.tileLayer(tile && tile.url ? tile.url : 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      // #741 M1a — the spec goes to the registry's shared factory whole,
+      // so a WMS provider works here too; the literals stay the fallback
+      // for a registry that has not loaded.
+      tileLayer = root.MC_createBaseLayer(tile && tile.url ? tile : {
+        url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        attribution: '© OpenStreetMap contributors',
+        maxZoom: 19,
+      }, {
         maxZoom: tile && tile.maxZoom ? tile.maxZoom : 19,
         attribution: tile && tile.attribution ? tile.attribution : '© OpenStreetMap contributors',
       }).addTo(map);

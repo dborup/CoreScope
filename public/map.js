@@ -394,7 +394,7 @@
       // Esri reference (labels) overlay: add when needed, remove otherwise.
       if (dark && r.refUrl) {
         if (!_darkRefLayer) {
-          _darkRefLayer = L.tileLayer(r.refUrl, { maxZoom: 19, attribution: r.attribution }).addTo(autoLayerGroup);
+          _darkRefLayer = window.MC_createBaseLayer({ url: r.refUrl, attribution: r.attribution }, { maxZoom: 19 }).addTo(autoLayerGroup);
         } else {
           _darkRefLayer.setUrl(r.refUrl);
           if (!autoLayerGroup.hasLayer(_darkRefLayer)) _darkRefLayer.addTo(autoLayerGroup);
@@ -410,12 +410,11 @@
       }
     }
     const _initTile = _resolveTileUrl(isDark);
-    const tileLayer = L.tileLayer(_initTile.url, {
-      attribution: _initTile.attribution,
-      maxZoom: 19,
-    }).addTo(autoLayerGroup);
+    // #741 M1a — every base map goes through the registry's one factory,
+    // so a provider spec may be a tile template or a WMS layer.
+    const tileLayer = window.MC_createBaseLayer(_initTile, { maxZoom: 19 }).addTo(autoLayerGroup);
     if (isDark && _initTile.refUrl) {
-      _darkRefLayer = L.tileLayer(_initTile.refUrl, { maxZoom: 19, attribution: _initTile.attribution }).addTo(autoLayerGroup);
+      _darkRefLayer = window.MC_createBaseLayer({ url: _initTile.refUrl, attribution: _initTile.attribution }, { maxZoom: 19 }).addTo(autoLayerGroup);
     }
     if (typeof window.MC_applyTileFilter === 'function') window.MC_applyTileFilter();
     

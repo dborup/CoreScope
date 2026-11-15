@@ -130,10 +130,13 @@
     var tileUrl = (window.getTileUrl && window.getTileUrl()) || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
     var provider = window.getActiveTileProvider && window.getActiveTileProvider();
     var attribution = (provider && provider.attribution) || '© OpenStreetMap contributors';
-    var layer = L.tileLayer(tileUrl, { maxZoom: 18, attribution: attribution }).addTo(map);
+    // #741 M1a — the registry's shared base-layer factory, so an inset
+    // renders a WMS provider too. The 18 here is this helper's own
+    // historical ceiling, kept as is (map.js/live.js use 19).
+    var layer = window.MC_createBaseLayer({ url: tileUrl, attribution: attribution }, { maxZoom: 18 }).addTo(map);
     // Esri 2-layer provider: add the labels reference overlay too
     if (provider && provider.refUrl) {
-      try { L.tileLayer(provider.refUrl, { maxZoom: 18 }).addTo(map); } catch (_e) {}
+      try { window.MC_createBaseLayer({ url: provider.refUrl }, { maxZoom: 18 }).addTo(map); } catch (_e) {}
     }
     // Apply invert CSS filter to the tile pane if the provider needs it
     try {

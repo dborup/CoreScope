@@ -2173,7 +2173,7 @@
 
     _gfModalMap = L.map(mapDiv, { zoomControl: true });
     var _cv2Tile = _cv2PreviewTile();
-    L.tileLayer(_cv2Tile.url, {
+    window.MC_createBaseLayer(_cv2Tile, {
       attribution: _cv2Tile.attribution, maxZoom: _cv2Tile.maxZoom
     }).addTo(_gfModalMap);
 
@@ -2383,7 +2383,7 @@
 
     _gfMap = L.map(mapEl, { zoomControl: false, dragging: false, scrollWheelZoom: false, doubleClickZoom: false, touchZoom: false });
     var _cv2Tile = _cv2PreviewTile();
-    L.tileLayer(_cv2Tile.url, {
+    window.MC_createBaseLayer(_cv2Tile, {
       attribution: _cv2Tile.attribution, maxZoom: _cv2Tile.maxZoom
     }).addTo(_gfMap);
 

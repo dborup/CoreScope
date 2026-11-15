@@ -324,6 +324,71 @@
     };
   }
 
+  /* #741 M1a — createBaseLayer(spec, opts): the ONE place a provider spec
+   * becomes a Leaflet base layer, so a style can be a tile template or a
+   * WMS layer without every map growing a branch of its own. Before this,
+   * ten call sites did `L.tileLayer(spec.url, …)` themselves, and a WMS
+   * base map (the only Leaflet-compatible route to the Danish base maps —
+   * neither Skaermkortet nor Natur- og Friluftskort has a Web Mercator
+   * WMTS) could not be expressed at all.
+   *
+   * `spec` is a getTileSpec() result or a BASE_STYLES entry, carrying one
+   * of two shapes:
+   *   - `url` — a tile URL template, or a function returning one (the
+   *     BASE_STYLES entries are lazy) → L.tileLayer;
+   *   - `wms` — { url, layers, … } → L.tileLayer.wms.
+   * `attribution` and `maxZoom` are taken from the spec when it has them.
+   *
+   * `opts` are the Leaflet options the call site passes and they win over
+   * everything derived from the spec, so routing a call site through this
+   * builds exactly the layer it built inline before — including the two
+   * different hard-coded zoom ceilings (18 in nodes.js, 19 in
+   * map.js/live.js). That inconsistency is deliberately carried over, not
+   * silently "fixed" here; it is its own change.
+   *
+   * Only keys the spec or the caller really carry are set, so a site that
+   * passed no maxZoom (the home minimap) keeps Leaflet's own default
+   * instead of one invented here. For the WMS branch that is a hard
+   * requirement rather than tidiness: Leaflet turns every option it does
+   * not recognise into a WMS request parameter, so only WMS_SPEC_KEYS may
+   * ever reach it — the same discipline _createOverlayLayer follows for
+   * the overlays.
+   */
+  var WMS_SPEC_KEYS = ['layers', 'styles', 'format', 'transparent', 'version',
+                       'crs', 'tileSize', 'minZoom', 'maxZoom', 'bounds'];
+
+  function _withOpts(o, opts) {
+    if (opts) {
+      for (var k in opts) {
+        if (Object.prototype.hasOwnProperty.call(opts, k)) o[k] = opts[k];
+      }
+    }
+    return o;
+  }
+
+  function createBaseLayer(spec, opts) {
+    var s = spec || {};
+    var o = {};
+    if (s.attribution !== undefined) o.attribution = s.attribution;
+    if (s.maxZoom !== undefined) o.maxZoom = s.maxZoom;
+    if (s.wms) {
+      var w = s.wms;
+      o.styles = '';
+      o.format = 'image/png';
+      o.transparent = false;
+      o.version = '1.3.0';
+      o.crs = L.CRS.EPSG3857;
+      o.tileSize = 256;
+      for (var i = 0; i < WMS_SPEC_KEYS.length; i++) {
+        var k = WMS_SPEC_KEYS[i];
+        if (w[k] === undefined) continue;
+        o[k] = (k === 'bounds') ? L.latLngBounds(w[k]) : w[k];
+      }
+      return L.tileLayer.wms(typeof w.url === 'function' ? w.url() : w.url, _withOpts(o, opts));
+    }
+    return L.tileLayer(typeof s.url === 'function' ? s.url() : s.url, _withOpts(o, opts));
+  }
+
   /* Optional map overlays: #680 DHM terrain hillshade, #723 protected
    * ancient monuments, #724 antenna sites (all Denmark only).
    *
@@ -685,6 +750,8 @@
   window.MC_setServerDefaultLightTileProvider = setServerDefaultLight;
   window.MC_applyTileFilter             = applyTileFilter;
   window.MC_getTileSpec                 = getTileSpec;
+  // #741 M1a — every base map, on every page, is built here.
+  window.MC_createBaseLayer             = createBaseLayer;
   window.MC_getTerrainConfig            = getTerrainConfig;
   window.MC_getHeritageConfig           = getHeritageConfig;
   window.MC_getMastsConfig              = getMastsConfig;
@@ -771,8 +838,10 @@
 
       function _makeLayer(id) {
         var p   = REGISTRY[id];
-        var url = typeof p.url === 'function' ? p.url() : p.url;
-        var layer = L.tileLayer(url, { attribution: p.attribution || '', maxZoom: p.maxZoom || 19 });
+        // #741 M1a — through the shared factory, so a WMS style is a
+        // selectable base map here too. The options stay the ones this
+        // control always built.
+        var layer = createBaseLayer(p, { attribution: p.attribution || '', maxZoom: p.maxZoom || 19 });
         
         // Every explicit layer enforces its own filter and locks the pane
         layer.on('add', function () {
