@@ -28,7 +28,8 @@ type FetcherOptions struct {
 	Concurrency int
 	// Timeout bounds one shared call, whoever waits on it; 0 is none.
 	Timeout time.Duration
-	Now     func() time.Time
+	// Now is the cache's clock; nil is time.Now.
+	Now func() time.Time
 }
 
 // DefaultFetcherOptions: a profile has at most 9 segments, so 16 calls in
@@ -63,8 +64,11 @@ type Fetcher struct {
 }
 
 // NewFetcher returns a Fetcher over src with o's bounds; a Concurrency
-// under 1 is 1.
+// under 1 is 1, and a nil Now is time.Now.
 func NewFetcher(src SegmentSource, o FetcherOptions) *Fetcher {
+	if o.Now == nil {
+		o.Now = time.Now
+	}
 	return &Fetcher{
 		src:     src,
 		cache:   dhm.NewCache[segmentKey](o.CacheEntries, o.CacheBytes, o.CacheTTL),
