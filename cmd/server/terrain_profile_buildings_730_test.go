@@ -674,6 +674,11 @@ func TestTerrainBuildings_EntryFormat(t *testing.T) {
 		"bad truncated flag":                {withByte(enc, 5+8*n+1, 2), true, true},
 		"bad class":                         {withByte(enc, 5+8*n+2+1, 'x'), true, true},
 		"short":                             {enc[:len(enc)-1], true, true},
+		// #786 review F3: the flag bits above the classification's are
+		// unknown, so an entry with one set is refused, never misread.
+		"flag bit 5": {withByte(enc, 4, enc[4]|1<<5), true, true},
+		"flag bit 6": {withByte(enc, 4, enc[4]|1<<6), true, true},
+		"flag bit 7": {withByte(enc, 4, enc[4]|1<<7), true, true},
 	} {
 		if _, err := decodeTerrainElevation(c.b, n, c.both, c.classified); err == nil {
 			t.Errorf("%s: accepted", name)
