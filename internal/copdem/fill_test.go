@@ -529,3 +529,35 @@ func TestFillOutsideRegionIsUnknown(t *testing.T) {
 		}
 	}
 }
+
+// all returns the first error and cancels the siblings still running,
+// as Fill's doc says; the caller's context is left alone (#773 review
+// finding 4a).
+func TestAllCancelsSiblingsOnFirstError(t *testing.T) {
+	parent, stop := context.WithCancel(context.Background())
+	defer stop()
+	boom := errors.New("boom")
+	sibling := make(chan error, 1)
+	start := time.Now()
+	err := all(parent, 2, func(ctx context.Context, k int) error {
+		if k == 0 {
+			return boom
+		}
+		select {
+		case <-ctx.Done():
+			sibling <- ctx.Err()
+		case <-time.After(5 * time.Second):
+			sibling <- nil
+		}
+		return ctx.Err()
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("all returned %v, want the first error", err)
+	}
+	if got := <-sibling; !errors.Is(got, context.Canceled) || time.Since(start) > 2*time.Second {
+		t.Fatalf("sibling saw %v after %v: not cancelled by the first error", got, time.Since(start))
+	}
+	if parent.Err() != nil {
+		t.Fatal("all cancelled the caller's context")
+	}
+}

@@ -326,6 +326,9 @@ func tiledMalformed() map[string]dhmtest.COGOptions {
 		"rotated":                 at(0, dhmtest.DoublesEntry(34264, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)),
 		"full level is a subfile": at(0, dhmtest.LongsEntry(254, 1)),
 		"overview of wrong width": at(1, dhmtest.ShortsEntry(256, 21)),
+		// 13 rows still fit the overview's one block row, so only the
+		// height check catches it (#773 review finding 4c).
+		"overview of wrong height": at(1, dhmtest.ShortsEntry(257, 13)),
 		"overview 16-bit":         at(1, dhmtest.ShortsEntry(258, 16)),
 		"overview LZW":            at(1, dhmtest.ShortsEntry(259, 5)),
 		"overview too few blocks": at(1, dhmtest.LongsEntry(324, 100)),

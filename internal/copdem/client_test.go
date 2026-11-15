@@ -295,10 +295,7 @@ func TestClientNeverFollowsRedirect(t *testing.T) {
 // A header whose IFDs continue past the first 16 KiB is read once more,
 // up to 64 KiB; one that needs more is an error.
 func TestClientExtendsHeaderOnce(t *testing.T) {
-	// 1024² in 16-pixel blocks: 4096 blocks, 32 KiB of block tables.
-	o := dhmtest.COGOptions{Width: 1024, Height: 1024, Tile: 16, Lon0: 12, Lat0: 56, PixelLon: 1.0 / 1024, PixelLat: 1.0 / 1024,
-		Value: func(lon, lat float64) float32 { return 7 }, Uncompressed: true}
-	file := dhmtest.COG(o)
+	file := longHeaderTile()
 	b := newBucket(t)
 	b.Put(cph.Path(), file)
 	c := newTestClient(t, b)
@@ -337,6 +334,42 @@ func TestClientExtendsHeaderOnce(t *testing.T) {
 	}
 	if b2.Requests.Load() != 2 {
 		t.Fatalf("%d requests, want 2 (one extension, no more)", b2.Requests.Load())
+	}
+}
+
+// longHeaderTile is 1024² in 16-pixel blocks: 4096 blocks, 32 KiB of
+// block tables, so its header needs the extension read.
+func longHeaderTile() []byte {
+	return dhmtest.COG(dhmtest.COGOptions{Width: 1024, Height: 1024, Tile: 16, Lon0: 12, Lat0: 56, PixelLon: 1.0 / 1024, PixelLat: 1.0 / 1024,
+		Value: func(lon, lat float64) float32 { return 7 }, Uncompressed: true})
+}
+
+// The extension read is tied to the object the first read saw: a second
+// range that reports another object length is refused, never stitched
+// onto the first (#773 review finding 4b).
+func TestClientHeaderExtensionKeepsObjectSize(t *testing.T) {
+	file := longHeaderTile()
+	b := newBucket(t)
+	b.Put(cph.Path(), file)
+	var n atomic.Int64
+	b.Hook = func(w http.ResponseWriter, r *http.Request) bool {
+		if n.Add(1) != 2 {
+			return false
+		}
+		var from, to int64
+		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &from, &to); err != nil {
+			t.Errorf("Range %q: %v", r.Header.Get("Range"), err)
+		}
+		// The right bytes, but of an object one byte longer.
+		copdemtest.WriteRange(w, file[from:to+1], from, int64(len(file))+1)
+		return true
+	}
+	c := newTestClient(t, b)
+	if _, err := c.header(context.Background(), cph); failure(err) != "bad content range" {
+		t.Fatalf("extension of another object: %v", err)
+	}
+	if n.Load() != 2 || c.headers.Len() != 0 {
+		t.Fatalf("%d requests, %d cached headers", n.Load(), c.headers.Len())
 	}
 }
 
