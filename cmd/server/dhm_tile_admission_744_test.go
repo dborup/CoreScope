@@ -198,7 +198,7 @@ func TestDHMTileAdmission744_CancellationRemovesQueuedWork(t *testing.T) {
 	close(release)
 	time.Sleep(50 * time.Millisecond)
 	for i := 0; i < n; i++ {
-		k, err := dhm.ParseTileRequest(aarhusTile(i))
+		_, k, err := dhm.ParseTileRequest(aarhusTile(i))
 		if err != nil {
 			t.Fatal(err)
 		}
