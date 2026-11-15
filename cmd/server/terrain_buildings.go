@@ -23,15 +23,17 @@ package main
 //   - A failure never fails the profile: the classification is
 //     "unavailable" (or "partial" when only some segments failed), the
 //     answer is 200, and the failure is logged by category. Such a profile
-//     is cached like any other, marked degraded, and a hit on it retries
-//     the building phase alone on the cached rasters (retryBuildings, as
-//     #773 retries the foreign fill), so a failing footprint service
-//     never makes DHM fetch a raster twice (#786 review F2). The retries
-//     are spaced (terrainRetryGate): at most one per cached profile per
-//     terrainBuildingsRetryEvery, the failed lookup counting as the
-//     first, so during an outage a hit is a plain hit (#797 review
-//     finding 2). A deterministic answer (nothing elevated, a truncated
-//     segment) is not degraded and is never retried.
+//     is marked degraded and cached for terrainBuildingsRetryTTL only
+//     (terrainClasses.ttl), so the whole profile is fetched again at most
+//     once per that time. Within it, a hit retries the building phase
+//     alone on the cached rasters (retryBuildings, as #773 retries the
+//     foreign fill), so a recovered footprint service is noticed without
+//     DHM fetching a raster twice (#786 review F2). The retries are spaced
+//     (terrainRetryGate): at most one per cached profile per
+//     terrainBuildingsRetryEvery, the failed lookup counting as the first,
+//     so during an outage a hit is a plain hit (#797 review finding 2).
+//     A deterministic answer (nothing elevated, a truncated segment) is
+//     not degraded, is cached like any profile and is never retried.
 //   - The classes are one byte per sample in the profile's cache entry,
 //     behind a flag bit, so an entry of another format is rejected and
 //     fetched again rather than misread.
@@ -53,16 +55,25 @@ import (
 	"github.com/meshcore-analyzer/dhm"
 )
 
-// terrainBuildingsDeadline bounds the building phase of one profile
-// fetch, or of its retry (#730 research §6).
-const terrainBuildingsDeadline = 5 * time.Second
-
-// terrainBuildingsRetryEvery spaces the building retries of one cached
-// degraded profile: M2's 10-minute cadence for a failed lookup, kept on
-// the cached rasters. Hardcoded for now; like the other buildings knobs it
-// belongs under map.dhm.profile.buildings.* and later in the customizer
-// (AGENTS.md rule 8).
-const terrainBuildingsRetryEvery = 10 * time.Minute
+const (
+	// terrainBuildingsDeadline bounds the building phase of one profile
+	// fetch, or of its retry (#730 research §6).
+	terrainBuildingsDeadline = 5 * time.Second
+	// terrainBuildingsRetryTTL is how long a profile whose building lookup
+	// failed is reused before a request fetches it again, rasters and all
+	// (#730 M2).
+	terrainBuildingsRetryTTL = 10 * time.Minute
+	// terrainBuildingsRetryEvery spaces the building retries of one cached
+	// degraded profile within its terrainBuildingsRetryTTL (#797): at most
+	// four retries on the cached rasters before the entry runs out. It must
+	// be shorter than terrainBuildingsRetryTTL, or no retry would ever be
+	// due while the entry lives.
+	//
+	// Both are hardcoded for now; like the other buildings knobs they
+	// belong under map.dhm.profile.buildings.* and later in the customizer
+	// (AGENTS.md rule 8).
+	terrainBuildingsRetryEvery = 2 * time.Minute
+)
 
 // terrainBuildingsMaxSegments is the most segments one profile's corridor
 // has: 80.2 km in 10 km segments.
@@ -104,25 +115,13 @@ var terrainClassStates = map[byte]string{
 // terrainClasses is the classification of one profile: its state, whether
 // a segment had more buildings than one page holds, and one
 // buildings.Class per sample. degraded says a segment's lookup failed, so
-// a hit on the cached profile retries the building phase
-// (retryBuildings).
+// the profile is kept for terrainBuildingsRetryTTL only and a hit on it
+// within that time retries the building phase (retryBuildings).
 type terrainClasses struct {
 	state     byte
 	truncated bool
 	cls       []buildings.Class
 	degraded  bool
-}
-
-// TerrainClassification is the response's `classification` (#730 M2),
-// present while map.dhm.profile.buildings is on and the model is both.
-// State is full (every sample whose surface stands more than 2.5 m above
-// the terrain is a building or trees/other), partial (some are not
-// classified) or unavailable (none could be; the lookup failed, or the
-// profile is not fully covered). Truncated says a segment had more
-// buildings than one page holds, so its samples are not classified.
-type TerrainClassification struct {
-	State     string `json:"state"`
-	Truncated bool   `json:"truncated"`
 }
 
 // The causes of verdict.surface.cause.
@@ -238,6 +237,15 @@ func buildingsFailure(err error) error {
 	return err
 }
 
+// ttl is how long the profile is cached: briefly when its building
+// lookup failed, else the profile's TTL.
+func (c *terrainClasses) ttl(profileTTL time.Duration) time.Duration {
+	if c != nil && c.degraded && terrainBuildingsRetryTTL < profileTTL {
+		return terrainBuildingsRetryTTL
+	}
+	return profileTTL
+}
+
 // retryBuildings runs the building phase again for a cached profile whose
 // lookup failed (#786 review F2). The rasters come from the cache, so a
 // failing footprint service never makes DHM fetch them twice, and the
@@ -246,10 +254,12 @@ func buildingsFailure(err error) error {
 // gate says one is due (#797 review finding 2); otherwise, and for every
 // hit that arrives while one runs, e is served at once, uncharged and
 // without a slot. Like a miss, the retry itself is charged to the client
-// and holds a profile admission slot; refused, it is not made and the
-// next hit may try. A classification that is no longer degraded replaces
-// the cache entry; whatever stops the retry, the cached profile e is
-// served as it is.
+// and takes a slot of the profile admission (p.admit, through
+// DoAdmitted); refused by either, it is not made, the charge is given
+// back and the next hit may try. A classification that is no longer
+// degraded replaces the cache entry for the profile's full TTL; one that
+// failed again leaves the entry, and its short TTL, as they are. Whatever
+// stops the retry, the cached profile e is served as it is.
 func (p *terrainProfiler) retryBuildings(r *http.Request, key terrainKey, plan *dhm.Plan, e terrainElevation) terrainElevation {
 	k := key.String()
 	if !p.buildingsRetry.claim(k, p.now()) {
@@ -259,13 +269,7 @@ func (p *terrainProfiler) retryBuildings(r *http.Request, key terrainKey, plan *
 		p.buildingsRetry.release(k)
 		return e
 	}
-	data, _, err := p.flight.Do(r.Context(), k+"|buildings", p.deadline, func(ctx context.Context) ([]byte, error) {
-		select {
-		case p.admit <- struct{}{}:
-			defer func() { <-p.admit }()
-		default:
-			return nil, errTerrainBusy
-		}
+	data, _, err := p.flight.DoAdmitted(r.Context(), k+"|buildings", p.deadline, p.admit, func(ctx context.Context) ([]byte, error) {
 		f := e
 		var err error
 		if f.classes, err = p.classifyBuildings(ctx, plan, e); err != nil {
@@ -276,13 +280,14 @@ func (p *terrainProfiler) retryBuildings(r *http.Request, key terrainKey, plan *
 			// Failed again: the next try is a cadence from now.
 			p.buildingsRetry.hold(k, p.now())
 		} else {
-			p.cache.Put(key, enc, p.now())
+			p.cache.PutFor(key, enc, p.now(), f.classes.ttl(p.set.cacheTTL))
 			p.buildingsRetry.release(k)
 		}
 		return enc, nil
 	})
-	if errors.Is(err, errTerrainBusy) {
-		// No upstream work was done: give the charge and the turn back.
+	if isTerrainBusy(err) {
+		// Refused by the admission (dhm.ErrAdmissionFull): no upstream
+		// work was done, so give the charge and the turn back.
 		p.limiter.refund(r)
 		p.buildingsRetry.release(k)
 	}

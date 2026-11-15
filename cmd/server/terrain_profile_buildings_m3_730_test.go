@@ -62,12 +62,12 @@ func TestTerrainBuildings_ProfileDeadlineDuringBuildingPhase(t *testing.T) {
 }
 
 // TestTerrainBuildings_FailedLookupRetriesOnlyTheBuildings (#786 review
-// F2): a profile whose footprint lookup failed is cached for the
-// profile's TTL like any other, and a hit on it once the retry cadence
-// has passed (#797) asks the footprint service again, on the cached
-// rasters: no raster is fetched twice, however long the service stays
-// down or the profile is asked for. The first classified answer replaces
-// the entry, and later hits ask nothing.
+// F2): a profile whose footprint lookup failed is cached for
+// terrainBuildingsRetryTTL, and a hit on it once the retry cadence has
+// passed (#797) asks the footprint service again, on the cached rasters:
+// within that time no raster is fetched twice, however often the profile
+// is asked for. The first classified answer replaces the entry, for the
+// profile's full TTL, and later hits ask nothing.
 func TestTerrainBuildings_FailedLookupRetriesOnlyTheBuildings(t *testing.T) {
 	ogc := newStubOGC(t, dokk1Footprint)
 	var failing atomic.Bool
@@ -201,7 +201,7 @@ func TestTerrainBuildings_RetryIsBudgeted(t *testing.T) {
 		}
 		other := make(chan int, 1)
 		go func() { other <- env.get(pathQuery(forestA, forestB)).Code }() // charge 2, holds the slot
-		waitUntil(t, "another profile in the slot", func() bool { return len(env.p.admit) == 1 })
+		waitUntil(t, "another profile in the slot", func() bool { return env.p.admit.InUse() == 1 })
 		w := env.get(q) // charge 3, refused by the admission and given back
 		resp := decodeProfile(t, w)
 		wantClassification(t, resp, "unavailable", false)
@@ -224,25 +224,54 @@ func TestTerrainBuildings_RetryIsBudgeted(t *testing.T) {
 	})
 }
 
-// TestTerrainBuildings_RetryKeepsTheProfileTTL: a retry that fails again
-// does not store the profile anew, so the rasters still expire on the
-// profile's TTL from the miss that fetched them, however often the
-// degraded profile is asked for.
-func TestTerrainBuildings_RetryKeepsTheProfileTTL(t *testing.T) {
+// TestTerrainBuildings_DegradedProfileKeepsTheShortTTL (#797 merge with
+// #759): a degraded profile is cached for terrainBuildingsRetryTTL from
+// the miss that fetched it, as master's elevationCall stores it, and a
+// retry that fails again does not store it anew, so it does not outlive
+// that. The next request is a full miss, rasters and all. A classified
+// answer, from a miss or a retry, keeps the profile's TTL.
+func TestTerrainBuildings_DegradedProfileKeepsTheShortTTL(t *testing.T) {
 	ogc := newStubOGC(t, dokk1Footprint)
-	ogc.answer = func([4]float64) (int, []byte, bool) { return 503, nil, true }
+	var failing atomic.Bool
+	failing.Store(true)
+	ogc.answer = func([4]float64) (int, []byte, bool) { return 503, nil, failing.Load() }
 	env := newBuildingsEnv(t, dokk1Ground, dokk1Surface, ogc, dhm.ProfileConfig{})
 	start := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
 	now := start
 	env.p.now = func() time.Time { return now }
 	q := pathQuery(dokk1A, dokk1B)
+	ttl, every := terrainBuildingsRetryTTL, terrainBuildingsRetryEvery
+	if env.p.set.cacheTTL <= ttl {
+		t.Fatalf("profile TTL %v, want longer than %v", env.p.set.cacheTTL, ttl)
+	}
 	for _, c := range []struct {
-		at    time.Duration
-		cache string
-	}{{0, "miss"}, {env.p.set.cacheTTL - time.Minute, "hit"}, {env.p.set.cacheTTL + time.Second, "miss"}} {
+		at           time.Duration
+		cache, state string
+		calls        int32
+		rasters      int64
+		up           bool
+	}{
+		{0, "miss", "unavailable", 1, 2, false},
+		// A due retry that fails again leaves the entry as it was.
+		{ttl - time.Second, "hit", "unavailable", 2, 2, false},
+		{ttl, "miss", "unavailable", 3, 4, false},
+		// Back up: a due hit classifies, and that answer keeps the
+		// profile's TTL.
+		{ttl + every, "hit", "full", 4, 4, true},
+		{ttl + every + env.p.set.cacheTTL - time.Second, "hit", "full", 4, 4, true},
+		// Its rasters run out; the footprints come from the Fetcher's
+		// page cache.
+		{ttl + every + env.p.set.cacheTTL, "miss", "full", 4, 6, true},
+	} {
+		failing.Store(!c.up)
 		now = start.Add(c.at)
-		if w := env.get(q); w.Code != 200 || w.Header().Get("X-CoreScope-Cache") != c.cache {
-			t.Fatalf("at +%v: %d %q, want %s", c.at, w.Code, w.Header().Get("X-CoreScope-Cache"), c.cache)
+		w := env.get(q)
+		resp := decodeProfile(t, w)
+		if w.Code != 200 || w.Header().Get("X-CoreScope-Cache") != c.cache || resp.Classification == nil || resp.Classification.State != c.state {
+			t.Fatalf("at +%v: %d %q, classification %+v; want %s, %s", c.at, w.Code, w.Header().Get("X-CoreScope-Cache"), resp.Classification, c.cache, c.state)
+		}
+		if n, r := ogc.calls.Load(), env.src.calls.Load(); n != c.calls || r != c.rasters {
+			t.Fatalf("at +%v: %d corridor calls and %d rasters, want %d and %d", c.at, n, r, c.calls, c.rasters)
 		}
 	}
 }

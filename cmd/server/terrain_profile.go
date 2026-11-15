@@ -80,6 +80,7 @@ import (
 	"github.com/meshcore-analyzer/buildings"
 	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dhm"
+	"github.com/meshcore-analyzer/profilecard"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -150,6 +151,8 @@ type terrainSettings struct {
 	maxInFlight     int
 	// share is map.dhm.profile.share (#727), see share_profile.go.
 	share shareSettings
+	// card is map.dhm.profile.card (#727 M3), see profile_card.go.
+	card cardSettings
 	// fill is map.dhm.profile.foreignFill (#738).
 	fill foreignFillSettings
 	// buildings is map.dhm.profile.buildings.enabled (#730 M2).
@@ -168,9 +171,8 @@ type foreignFillSettings struct {
 type shareSettings struct {
 	enabled bool
 	// upstreamPerMin is the server-wide budget of upstream profile
-	// fetches that sharing may cause. In #727 M1 the /p route makes no
-	// upstream call at all, which is within any value of it; the budget
-	// is enforced once a share request may fetch (#727 M3).
+	// fetches that sharing may cause: the share card spends it on an
+	// elevation cache miss (profile_card.go). /p itself never fetches.
 	upstreamPerMin int
 }
 
@@ -203,6 +205,11 @@ func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface
 		share: shareSettings{
 			enabled:        pc.Share.Enabled,
 			upstreamPerMin: integer("share.upstreamPerMin", pc.Share.UpstreamPerMin, 2, 0, shareUpstreamPerMinMax),
+		},
+		card: cardSettings{
+			dark:         cardTheme(pc.Card.Theme, logf),
+			names:        pc.Card.Names == nil || *pc.Card.Names,
+			cacheEntries: integer("card.cacheEntries", pc.Card.CacheEntries, cardCacheEntriesDefault, 1, cardCacheEntriesMax),
 		},
 		// Off unless the operator opts in (#738 decision 3): it sends
 		// requests to a third party.
@@ -293,9 +300,11 @@ type terrainProfiler struct {
 	cache      *dhm.Cache[terrainKey]
 	flight     dhm.Flight[[]byte]
 	limiter    *ipRateLimiter // nil: no per-client limit
-	admit      chan struct{}  // one token per profile fetch in flight (maxInFlight)
+	admit      *dhm.Admission // one slot per profile fetch in flight (maxInFlight)
 	refused    atomic.Int64   // admission refusals (503) since start
 	refuseLog  logThrottle    // the refusal report, once per terrainRefusalLogEvery
+	// card is the share card (#727 M3); nil unless sharing is enabled.
+	card       *profileCards
 	deadline   time.Duration
 	now        func() time.Time
 	logf       func(string, ...interface{})
@@ -324,6 +333,9 @@ type terrainProfilerDeps struct {
 	logFailure func(what string, err error)
 	observers  func() ([]Observer, error)
 	trusted    []*net.IPNet
+	// theme is the operator's theme sections for the share card's
+	// palette (cardThemeSections); nil means the shipped palette.
+	theme func() (light, dark map[string]string)
 
 	// buildings replaces the INSPIRE source built from the settings
 	// (tests); it is used only while the classification is enabled.
@@ -380,14 +392,14 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 			fill = copdem.NewClient(fillOptions(set))
 		}
 	}
-	return &terrainProfiler{
+	p := &terrainProfiler{
 		src:        d.src,
 		fill:       fill,
 		set:        set,
 		radio:      resolveTerrainRadio(rc, d.logf),
 		cache:      dhm.NewCache[terrainKey](set.cacheEntries, maxBytes, set.cacheTTL),
 		limiter:    newIPRateLimiter("dhm", "map.dhm.profile.rateLimitPerMin", set.rateLimitPerMin, d.trusted, d.logf),
-		admit:      make(chan struct{}, set.maxInFlight),
+		admit:      dhm.NewAdmission(set.maxInFlight),
 		deadline:   terrainDeadline,
 		now:        time.Now,
 		logf:       d.logf,
@@ -398,6 +410,10 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 		buildingsDeadline: terrainBuildingsDeadline,
 		buildingsRetry:    newTerrainRetryGate(terrainBuildingsRetryEvery, set.cacheEntries),
 	}
+	if set.share.enabled {
+		p.card = newProfileCards(set, d.theme, d.logf)
+	}
+	return p
 }
 
 // newTerrainProfilerFromConfig offers the profile only when the DHM client
@@ -414,6 +430,12 @@ func newTerrainProfilerFromConfig(cfg *Config, proxy *dhmProxy, db *DB) *terrain
 	}
 	if db != nil {
 		d.observers = db.GetObservers
+	}
+	// The card's palette is read once, like the og: tags (og_meta.go):
+	// a theme.json change takes effect at the next start, and the
+	// palette fingerprint in the card key and in v makes it visible.
+	d.theme = func() (map[string]string, map[string]string) {
+		return cardThemeSections(cfg, LoadTheme("."))
 	}
 	return newTerrainProfiler(cfg.DHM.Profile, cfg.Radio, d)
 }
@@ -519,133 +541,26 @@ func parseTerrainRef(s string) (terrainRef, error) {
 
 // ── Response ───────────────────────────────────────────────────────────────
 
-// TerrainProfileResponse is the body of GET /api/terrain/profile.
-type TerrainProfileResponse struct {
-	A           TerrainEndpoint `json:"a"`
-	B           TerrainEndpoint `json:"b"`
-	DistanceM   float64         `json:"distanceM"`
-	StepM       float64         `json:"stepM"`
-	SampleCount int             `json:"sampleCount"` // computed; samples holds at most 1024 of them
-	Model       string          `json:"model"`       // "dtm" or "both"
-	Coverage    TerrainCoverage `json:"coverage"`
-	Samples     []TerrainSample `json:"samples"`
-	Physics     TerrainPhysics  `json:"physics"`
-	Verdict     TerrainVerdict  `json:"verdict"`
-	Attribution string          `json:"attribution"`
-	// AttributionFill is the Copernicus DEM credit (licence Art. 6(b),
-	// #738), present exactly when Coverage.Mixed.
-	AttributionFill string `json:"attributionFill,omitempty"`
-	// Classification is the building classification of the surface (#730
-	// M2), present while map.dhm.profile.buildings is on and the model is
-	// both. Attribution then also credits the footprints when any sample
-	// was classified with them.
-	Classification *TerrainClassification `json:"classification,omitempty"`
-}
-
-// TerrainEndpoint is one end of the path, snapped to 5 decimals.
-type TerrainEndpoint struct {
-	Lat           float64  `json:"lat"`
-	Lon           float64  `json:"lon"`
-	Kind          string   `json:"kind"` // "node" or "point"
-	Role          string   `json:"role,omitempty"`
-	GroundM       *float64 `json:"groundM"` // DTM; null outside coverage
-	AntennaM      float64  `json:"antennaM"`
-	AntennaSource string   `json:"antennaSource"` // request, operator-node, operator-role, role-default, point-default
-	Assumed       bool     `json:"assumed"`       // the height is a default, not a known value
-}
-
-type TerrainCoverage struct {
-	State     string   `json:"state"` // full, partial, none
-	Pct       float64  `json:"pct"`
-	FirstGapM *float64 `json:"firstGapM"` // distance of the first sample without data
-	// Mixed is true when samples DHM does not cover were filled from
-	// Copernicus DEM GLO-30 (#738); Fill then lists where. The DTM is
-	// then coarser outside Denmark and surface-influenced there, and the
-	// surface verdict is unknown. Omitted when false, so a profile
-	// without the fill is byte-identical to one from before it (#773).
-	Mixed bool               `json:"mixed,omitempty"`
-	Fill  []TerrainFillRange `json:"fill,omitempty"`
-}
-
-// TerrainFillRange is a stretch of the path whose DTM came from the
-// foreign fill (#738): the samples from FromM to ToM, inclusive. With
-// more than terrainMaxFillRanges stretches the nearest are merged, so a
-// range may then include a few DHM samples.
-type TerrainFillRange struct {
-	FromM  float64 `json:"fromM"`
-	ToM    float64 `json:"toM"`
-	Source string  `json:"source"` // copdem.Source: Copernicus DEM GLO-30, a surface model
-	// ResolutionM is nominal: 30, or 60 on the ½ overview (#738
-	// decision 7).
-	ResolutionM int `json:"resolutionM"`
-}
+// The body of GET /api/terrain/profile is internal/profilecard's
+// TerrainProfileResponse: the share-card renderer takes the response as it
+// is served (#727 M3), so the types live there and are aliased here. The
+// field-by-field documentation is in internal/profilecard/types.go;
+// profilecard_shape_test.go still pins the JSON shape.
+type (
+	TerrainProfileResponse = profilecard.TerrainProfileResponse
+	TerrainEndpoint        = profilecard.TerrainEndpoint
+	TerrainCoverage        = profilecard.TerrainCoverage
+	TerrainFillRange       = profilecard.TerrainFillRange
+	TerrainSample          = profilecard.TerrainSample
+	TerrainPhysics         = profilecard.TerrainPhysics
+	TerrainVerdict         = profilecard.TerrainVerdict
+	TerrainClearance       = profilecard.TerrainClearance
+	TerrainSurfaceInfo     = profilecard.TerrainSurfaceInfo
+	TerrainClassification  = profilecard.TerrainClassification
+)
 
 // terrainMaxFillRanges bounds Coverage.Fill.
 const terrainMaxFillRanges = 64
-
-// TerrainSample is one point along the path; null/absent where there is
-// no elevation data.
-type TerrainSample struct {
-	D   float64  `json:"d"`
-	DTM *float64 `json:"dtm"`
-	DSM *float64 `json:"dsm,omitempty"`
-	// Cls is what stands above the terrain here (#730 M2): "b" a building,
-	// "v" trees or other; absent where the surface is not more than 2.5 m
-	// above the terrain, or the sample is not classified.
-	Cls string `json:"cls,omitempty"`
-}
-
-type TerrainPhysics struct {
-	FreqMHz    float64 `json:"freqMHz"`
-	FreqSource string  `json:"freqSource"` // request, config, observers, firmware
-	LambdaM    float64 `json:"lambdaM"`
-	K          float64 `json:"k"`
-	KSource    string  `json:"kSource"` // request, config, default
-	F1MaxM     float64 `json:"f1MaxM"`  // first Fresnel radius at mid-path
-}
-
-type TerrainVerdict struct {
-	State     string  `json:"state"` // clear, fresnel100, fresnel60, blocked, unknown
-	Model     string  `json:"model"` // always "dtm": the terrain model decides
-	Criterion float64 `json:"criterion"`
-	TerrainClearance
-	// Surface is the same assessment against the DSM (trees, buildings),
-	// for information; present with model=both.
-	Surface *TerrainSurfaceInfo `json:"surface,omitempty"`
-}
-
-// TerrainClearance is the worst point of an assessment; null without a
-// verdict. WorstF1Fraction is also null when the worst point is a surface
-// above an antenna: the zone has no radius at an endpoint (#745).
-type TerrainClearance struct {
-	WorstClearanceM *float64 `json:"worstClearanceM"`
-	WorstAtM        *float64 `json:"worstAtM"`
-	WorstF1Fraction *float64 `json:"worstF1Fraction"`
-}
-
-// TerrainSurfaceInfo is forced to "unknown" with null clearance numbers
-// whenever Coverage.State is not "full", even though it is assessed
-// against the DSM, not the deciding DTM: the two models can have
-// different coverage, and a partial profile must never report a
-// confident verdict on either (#689 review N1).
-//
-// Reason is "antennaBelowSurface" when the surface is above the antenna
-// at an endpoint (#745): the state is then blocked, and Endpoint is "A",
-// "B" or "both". The worst point stays the worst interior obstruction (by
-// F1 ratio, as everywhere) when there is one. Both are absent otherwise.
-//
-// Cause (#730 M2, with the building classification) is what stands where
-// the surface verdict is decided: "building" when a building does,
-// "vegetation" when only trees or other things do, "unknown" when any of
-// it is not classified. It is absent without the classification, for a
-// clear or unknown surface, and where the terrain alone decides.
-type TerrainSurfaceInfo struct {
-	State string `json:"state"`
-	TerrainClearance
-	Reason   string `json:"reason,omitempty"`
-	Endpoint string `json:"endpoint,omitempty"`
-	Cause    string `json:"cause,omitempty"`
-}
 
 const terrainReasonAntennaBelowSurface = "antennaBelowSurface"
 
@@ -691,6 +606,11 @@ type terrainRequest struct {
 	ka, kb [2]int64   // the snapped endpoints of the cache key
 	a, b   dhm.LatLon // the same, as coordinates
 	plan   dhm.Plan
+}
+
+// elevationKey is the elevation cache key of a resolved request.
+func (p *terrainProfiler) elevationKey(req terrainRequest) terrainKey {
+	return terrainKey{A: req.ka, B: req.kb, Both: req.q.both, Samples: len(req.plan.E), StepCm: int64(math.Round(req.plan.StepM * 100)), Fill: p.fill != nil}
 }
 
 // terrainRequestError is a refusal: its status and a fixed message that
@@ -760,7 +680,7 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 			elev.classes = unclassified(n)
 		}
 	} else {
-		key := terrainKey{A: req.ka, B: req.kb, Both: tq.both, Samples: n, StepCm: int64(math.Round(plan.StepM * 100)), Fill: p.fill != nil}
+		key := p.elevationKey(req)
 		data, hit := p.cache.Get(key, p.now())
 		// An entry of another format (#730 M2) is fetched afresh, not served.
 		hit = hit && terrainEntryOK(data, n, tq.both, p.classifies(tq.both))
@@ -771,36 +691,9 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 				writeRateLimited(w, retry)
 				return
 			}
-			data, _, err = p.flight.Do(r.Context(), key.String(), p.deadline, func(ctx context.Context) ([]byte, error) {
-				// Admission is per fetch, not per request: callers that
-				// join a running fetch add no work and are not counted.
-				select {
-				case p.admit <- struct{}{}:
-					defer func() { <-p.admit }()
-				default:
-					return nil, errTerrainBusy
-				}
-				e, err := p.fetch(ctx, &plan, tq.both)
-				if err != nil {
-					return nil, err
-				}
-				if p.classifies(tq.both) {
-					if e.classes, err = p.classifyBuildings(ctx, &plan, e); err != nil {
-						return nil, err
-					}
-					if e.classes.degraded {
-						// The lookup was just tried: a hit retries it
-						// only once the cadence has passed.
-						p.buildingsRetry.hold(key.String(), p.now())
-					}
-				}
-				// A profile left partial by a failed fill, or degraded by a
-				// failed building lookup, is kept too: the DHM part is
-				// good, and a hit retries only the fill or the buildings.
-				enc := e.encode()
-				p.cache.Put(key, enc, p.now())
-				return enc, nil
-			})
+			// Admission is per fetch, not per request: callers that join
+			// a running fetch add no work and take no slot.
+			data, _, err = p.flight.DoAdmitted(r.Context(), key.String(), p.deadline, p.admit, p.elevationCall(key, &plan, tq.both))
 			if err != nil {
 				p.writeFetchError(w, r, err)
 				return
@@ -821,6 +714,43 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, p.buildResponse(tq, req.ends, req.a, req.b, &plan, elev))
 }
 
+// elevationCall is the body of one shared elevation fetch: both models,
+// encoded and cached. Every route that fetches elevations runs it through
+// p.flight under p.admit, so a card and a panel asking for the same path
+// share one fetch and one maxInFlight budget.
+func (p *terrainProfiler) elevationCall(key terrainKey, plan *dhm.Plan, both bool) func(context.Context) ([]byte, error) {
+	return func(ctx context.Context) ([]byte, error) {
+		e, err := p.fetch(ctx, plan, both)
+		if err != nil {
+			return nil, err
+		}
+		if p.classifies(both) {
+			if e.classes, err = p.classifyBuildings(ctx, plan, e); err != nil {
+				return nil, err
+			}
+			if e.classes.degraded {
+				// The lookup was just tried, from whichever route: a hit
+				// retries it only once the cadence has passed (#797).
+				p.buildingsRetry.hold(key.String(), p.now())
+			} else {
+				p.buildingsRetry.release(key.String())
+			}
+		}
+		// A profile left partial by a failed fill is kept too: the DHM
+		// part is good, and a hit retries only the fill (#738). One whose
+		// building lookup failed is kept briefly (#730), and a hit within
+		// that time retries only the buildings, as the gate allows.
+		enc := e.encode()
+		p.cache.PutFor(key, enc, p.now(), e.classes.ttl(p.set.cacheTTL))
+		return enc, nil
+	}
+}
+
+// isTerrainBusy reports an admission refusal: no slot, no upstream work.
+func isTerrainBusy(err error) bool {
+	return errors.Is(err, errTerrainBusy) || errors.Is(err, dhm.ErrAdmissionFull)
+}
+
 // writeFetchError maps a failed fetch: a client that left gets nothing,
 // a timeout is 504, anything else upstream is 502. Neither carries
 // upstream text; the log line carries the category only.
@@ -828,7 +758,7 @@ func (p *terrainProfiler) writeFetchError(w http.ResponseWriter, r *http.Request
 	if r.Context().Err() != nil {
 		return
 	}
-	if errors.Is(err, errTerrainBusy) {
+	if isTerrainBusy(err) {
 		// A refusal did no upstream work: give the per-IP charge back, so
 		// a client that retries as told never reaches 429 through 503s.
 		p.limiter.refund(r)
@@ -851,12 +781,11 @@ func (p *terrainProfiler) writeFetchError(w http.ResponseWriter, r *http.Request
 // terrainRefusalLogEvery: the first at once, then the number since the last
 // report. Neither the token nor any URL is involved.
 func (p *terrainProfiler) noteRefusal() {
-	total := p.refused.Add(1)
-	n, ok := p.refuseLog.note(p.now(), total, terrainRefusalLogEvery)
+	n, ok := p.refuseLog.note(p.now(), p.refused.Add(1), terrainRefusalLogEvery)
 	if !ok {
 		return
 	}
-	p.logf("[dhm] terrain profile admission: refused %d request(s) since the last report because map.dhm.profile.maxInFlight (%d) fetches are running; raise it if this persists", n, cap(p.admit))
+	p.logf("[dhm] terrain profile admission: refused %d request(s) since the last report because map.dhm.profile.maxInFlight (%d) fetches are running; raise it if this persists", n, p.admit.Cap())
 }
 
 // resolveTerrainEnd resolves a public key to a positioned, visible node,
@@ -1207,14 +1136,8 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 	}
 
 	// Physics.
-	ph := TerrainPhysics{K: dhm.DefaultKFactor, KSource: "default"}
-	ph.FreqMHz, ph.FreqSource = p.frequency(tq.freq)
-	switch {
-	case tq.k != nil:
-		ph.K, ph.KSource = *tq.k, "request"
-	case p.radio.k != 0:
-		ph.K, ph.KSource = p.radio.k, "config"
-	}
+	var ph TerrainPhysics
+	ph.FreqMHz, ph.FreqSource, ph.K, ph.KSource = p.linkParams(tq)
 	lambda := dhm.Wavelength(ph.FreqMHz)
 	ph.LambdaM = math.Round(lambda*1e6) / 1e6
 	ph.F1MaxM = round2(dhm.FresnelRadius(lambda, plan.DistanceM/2, plan.DistanceM/2))
@@ -1404,6 +1327,19 @@ func clearanceOf(a dhm.Assessment) TerrainClearance {
 		out.WorstF1Fraction = &f
 	}
 	return out
+}
+
+// linkParams resolves the request's frequency and k-factor, with where
+// each came from: the request, the operator's config, or a default.
+func (p *terrainProfiler) linkParams(tq terrainQuery) (freq float64, freqSource string, k float64, kSource string) {
+	freq, freqSource = p.frequency(tq.freq)
+	switch {
+	case tq.k != nil:
+		return freq, freqSource, *tq.k, "request"
+	case p.radio.k != 0:
+		return freq, freqSource, p.radio.k, "config"
+	}
+	return freq, freqSource, dhm.DefaultKFactor, "default"
 }
 
 // antenna is the antenna height above ground for an endpoint, most

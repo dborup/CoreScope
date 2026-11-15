@@ -108,6 +108,18 @@
       "measurementNote": "New suite; #727 M1 shareable /p links for the Map Path profile with an intercepted dhm client-config block (profile: true, share on or off) and a stubbed /api/terrain/profile: /p?profile=... lands on #/map with the panel open and one request carrying only the allow-listed keys, one document request and app.js loaded once with every asset below 400, Back leaves /p behind, the copy button hands out a /p link with dhm.share (and that link reopens the profile) and the #/map link without it, the raw /p HTML for a crawler User-Agent has the handoff script and filled OG tags, /p/ is a 301 to /p, and the same landing at 360x740. About 15s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681/#721 DHM suites."
     },
     {
+      "file": "test-issue-727-share-preview.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "CORESCOPE_SERVER_BIN": "./corescope-server",
+        "CORESCOPE_MIGRATE_BIN": "./corescope-migrate"
+      },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #727 M3 share card end to end on its own Go server (ports from 13900, a migrated copy of the fixture, sharing on, a dummy DHM token and share.upstreamPerMin 0, so nothing reaches the elevation service): /p for a crawler User-Agent points og:image/twitter:image at a 1200x630 /api/terrain/profile.png with v, alt text and the verdict word; the card is a PNG of 1200x630 by its IHDR, miss then hit with the same bytes, immutable; ha changes the URL and the bytes; a Danish path with no budget is a degraded card (max-age=60) whose bytes still follow ha; an unknown node is 404 on both; Chromium decodes the card at 1440 and 360 px, in the dark and the light card theme, which differ. Runs twice (dark and light). About 6s locally; no CI duration measured yet. Assigned to shard 3 next to the other suites that start their own server (#315)."
+    },
+    {
       "file": "test-issue-746-profile-ui-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

@@ -82,9 +82,10 @@ func BenchmarkTerrainProfileP50(b *testing.B) {
 	// #730 M3 (#786 review F2): with the footprint service down, a hit on
 	// the degraded profile retries the building phase alone, on the
 	// cached rasters, at most once per terrainBuildingsRetryEvery (#797).
-	// Before M3 such a profile was a plain hit for 10 minutes and then a
-	// full miss (on/miss), rasters included. on/hit-degraded is a hit
-	// inside the cadence, on/hit-degraded-due one with a retry due.
+	// Before M3 such a profile was a plain hit for terrainBuildingsRetryTTL
+	// and then a full miss (on/miss), rasters included; it still is once
+	// that TTL has run out. on/hit-degraded is a hit inside the cadence,
+	// on/hit-degraded-due one with a retry due.
 	degraded := func(b *testing.B, every time.Duration, wantCalls func(n int32) bool) {
 		env := benchBuildingsEnv(b, dhm.ProfileConfig{})
 		env.ogc.answer = func([4]float64) (int, []byte, bool) { return 503, nil, true }

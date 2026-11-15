@@ -2,7 +2,8 @@ package main
 
 // #797 review findings 2 and 5 — the building retry of a degraded
 // profile is spaced: at most one per cached profile per
-// terrainBuildingsRetryEvery, the failed miss counting as the first, and
+// terrainBuildingsRetryEvery, within the degraded entry's
+// terrainBuildingsRetryTTL, the failed miss counting as the first, and
 // concurrent hits share it. A hit with no retry due is a plain hit: no
 // wait, no admission slot and no per-client charge. Like the M2 and M3
 // suites, every test runs the real buildings.Client and Fetcher against
@@ -92,7 +93,7 @@ func TestTerrainBuildings_HitDuringOutageIsFree(t *testing.T) {
 	if n := ogc.calls.Load(); n != calls {
 		t.Fatalf("%d corridor calls after the hits, want the miss's %d", n, calls)
 	}
-	if n := len(env.p.admit); n != 0 {
+	if n := env.p.admit.InUse(); n != 0 {
 		t.Fatalf("%d admission slots held after the hits, want 0", n)
 	}
 	// Charge 2: the hits charged nothing, so this miss is admitted.
@@ -224,6 +225,76 @@ func TestTerrainBuildings_RefusedRetryGivesTheTurnBack(t *testing.T) {
 	}
 }
 
+// TestTerrainBuildings_AdmissionRefusedRetryRefundsAndReleases (#797
+// merge with #759): a due retry that master's dhm.Admission refuses —
+// every maxInFlight slot taken, so DoAdmitted returns
+// dhm.ErrAdmissionFull — does no upstream work. It gives the client's
+// charge back and releases the profile's retry hold, so the same client's
+// next hit retries at once, without a cadence's wait and within the same
+// budget.
+func TestTerrainBuildings_AdmissionRefusedRetryRefundsAndReleases(t *testing.T) {
+	ogc := newStubOGC(t, dokk1Footprint)
+	var failing atomic.Bool
+	failing.Store(true)
+	ogc.answer = func([4]float64) (int, []byte, bool) { return 503, nil, failing.Load() }
+	env := newBuildingsEnv(t, dokk1Ground, dokk1Surface, ogc, dhm.ProfileConfig{MaxInFlight: intp(1), RateLimitPerMin: intp(2)})
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	env.p.now = func() time.Time { return now }
+	q := pathQuery(dokk1A, dokk1B)
+
+	wantClassification(t, decodeProfile(t, env.get(q)), "unavailable", false) // charge 1
+	if n := env.p.buildingsRetry.len(); n != 1 {
+		t.Fatalf("%d profiles held after the degraded miss, want 1", n)
+	}
+	failing.Store(false)
+	now = now.Add(terrainBuildingsRetryEvery) // due
+
+	// Another call holds the one admission slot, as a running profile
+	// fetch of another path would.
+	var other dhm.Flight[int]
+	block, started := make(chan struct{}), make(chan struct{})
+	held := make(chan error, 1)
+	go func() {
+		_, _, err := other.DoAdmitted(context.Background(), "other", 0, env.p.admit, func(context.Context) (int, error) {
+			close(started)
+			<-block
+			return 0, nil
+		})
+		held <- err
+	}()
+	<-started
+	if n := env.p.admit.InUse(); n != 1 {
+		t.Fatalf("%d admission slots in use, want 1", n)
+	}
+
+	w := env.get(q) // charge 2: refused by the admission, then refunded
+	if w.Code != 200 || w.Header().Get("X-CoreScope-Cache") != "hit" {
+		t.Fatalf("refused retry: %d %q, want the cached profile", w.Code, w.Header().Get("X-CoreScope-Cache"))
+	}
+	wantClassification(t, decodeProfile(t, w), "unavailable", false)
+	if n := ogc.calls.Load(); n != 1 {
+		t.Fatalf("%d corridor calls, want 1: the retry ran without a slot", n)
+	}
+	if n := env.p.buildingsRetry.len(); n != 0 {
+		t.Fatalf("%d profiles held after the refusal, want 0: the turn was not given back", n)
+	}
+
+	close(block)
+	if err := <-held; err != nil {
+		t.Fatal(err)
+	}
+	// Same client, same moment: the refund left the charge, and the
+	// release the turn, so the retry runs and classifies.
+	w = env.get(q)
+	wantClassification(t, decodeProfile(t, w), "full", false)
+	if n := ogc.calls.Load(); n != 2 {
+		t.Fatalf("%d corridor calls, want 2: the retry after the refusal", n)
+	}
+	if n := env.p.admit.InUse(); n != 0 {
+		t.Fatalf("%d admission slots in use after the retry, want 0", n)
+	}
+}
+
 // cachedProfile is the profile entry the cache holds for q, decoded.
 func cachedProfile(t *testing.T, env *buildingsEnv, q string) terrainElevation {
 	t.Helper()
@@ -277,7 +348,8 @@ func TestTerrainRetryGate_Bounded(t *testing.T) {
 	if !g.claim("c", t0.Add(time.Minute)) {
 		t.Fatal("c refused after its release")
 	}
-	if terrainBuildingsRetryEvery != 10*time.Minute {
-		t.Fatalf("cadence %v, want M2's 10 minutes", terrainBuildingsRetryEvery)
+	// A retry is due within a degraded entry's lifetime, or never.
+	if terrainBuildingsRetryEvery >= terrainBuildingsRetryTTL {
+		t.Fatalf("cadence %v, want shorter than the degraded TTL %v", terrainBuildingsRetryEvery, terrainBuildingsRetryTTL)
 	}
 }

@@ -437,7 +437,7 @@ func TestTerrainFill_ClientGoneCancelsFill(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the handler did not return after the client left")
 	}
-	waitUntil(t, "profile admission free", func() bool { return len(env.p.admit) == 0 && env.p.flight.Pending() == 0 })
+	waitUntil(t, "profile admission free", func() bool { return env.p.admit.InUse() == 0 && env.p.flight.Pending() == 0 })
 	if strings.Contains(env.logs.String(), "foreign fill failed") {
 		t.Fatalf("a client leaving was logged as a fill failure: %q", env.logs.String())
 	}
