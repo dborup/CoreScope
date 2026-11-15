@@ -157,7 +157,7 @@ func build(s spec) TerrainProfileResponse {
 	}
 	resp := TerrainProfileResponse{
 		DistanceM: round2(s.distM), StepM: round2(step), SampleCount: n,
-		Model: "dtm", Attribution: dhm.Attribution, Samples: []TerrainSample{},
+		Model: "dtm", Attribution: dhm.AttributionDerived, Samples: []TerrainSample{},
 	}
 	if dsm != nil {
 		resp.Model = "both"
@@ -290,4 +290,14 @@ func fxShort() TerrainProfileResponse {
 func fxLong() TerrainProfileResponse {
 	return build(spec{distM: 80000, n: 3200, terrain: []float64{40, 70, 95, 60, 30, 18, 45, 110, 84, 52, 23, 61},
 		surface: []float64{40, 82, 104, 71, 33, 25, 58, 121, 90, 60, 27, 61}, antA: 40, antB: 35, freqMHz: 869.618})
+}
+
+// fxMixed is fxClear with its middle filled from Copernicus DEM (#738):
+// the server sets Coverage.Mixed, the fill stretches and AttributionFill.
+func fxMixed() TerrainProfileResponse {
+	r := fxClear()
+	r.Coverage.Mixed = true
+	r.Coverage.Fill = []TerrainFillRange{{FromM: 4000, ToM: 7000, Source: "copdem-glo30", ResolutionM: 30}}
+	r.AttributionFill = "produced using Copernicus WorldDEM-30 (long Art. 6(b) notice)"
+	return r
 }

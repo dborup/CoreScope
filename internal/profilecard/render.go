@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dhm"
 )
 
@@ -46,6 +47,12 @@ const (
 	footerRule      = 540
 	summaryBaseline = 574
 	creditBaseline  = 604
+
+	// A mixed card (#738) has two credit lines: the footer moves up so
+	// the Copernicus line takes creditBaseline and the DHM line sits
+	// above it, at the same 18 px size.
+	mixedSummaryBaseline = 564
+	mixedCreditBaseline  = 584
 )
 
 // Options are the operator's display choices. The zero value is the
@@ -55,7 +62,15 @@ type Options struct {
 	HideNames bool
 	// Site is the host shown after the credit, e.g. "meshview.dk".
 	Site string
+	// Pending draws the card for a profile whose elevations are not
+	// available yet (the server's degraded card, #727 M3): endpoints,
+	// distance and heights, no verdict, and pendingMessage in the plot.
+	// resp's samples and verdict are ignored.
+	Pending bool
 }
+
+// pendingMessage is the plot text of a Pending card.
+const pendingMessage = "The terrain profile is not ready yet. Open the link to measure it."
 
 // textRun is one string the card drew, kept so tests can assert words
 // rather than pixels. Y is the baseline; W the drawn width.
@@ -65,6 +80,21 @@ type textRun struct {
 	Bold       bool
 	X, Y, W    int
 }
+
+// Credit is the DHM credit every card draws: the derived credit (#733),
+// because a card is computed from DHM data rather than shown as served,
+// and it is the credit of the profile it pictures.
+const Credit = dhm.AttributionDerived
+
+// FillCredit is the Copernicus DEM credit a mixed card (resp.Coverage.Mixed,
+// #738) draws under Credit: the profile UI's short line (#779's
+// copdem.Credit), built from the copdem parts master has, without its
+// trailing "(Copernicus DEM licence)" mark. That mark is a link in the UI;
+// a picture cannot link, and with it the line does not fit the card at the
+// credit size. The long Art. 6(b) notice (copdem.AttributionDerived) stays
+// one step away, on the page the card links to.
+const FillCredit = "Outside Denmark: produced using " + copdem.DatasetName +
+	", provided under COPERNICUS by the European Union and ESA"
 
 // Render draws the card for resp and returns it as a PNG. names are the
 // display names of endpoints A and B ("" when unknown); the caller is
@@ -106,10 +136,13 @@ func render(resp TerrainProfileResponse, names [2]string, pal Palette, opt Optio
 	draw.Draw(img, img.Rect, image.NewUniform(opaque(pal.Background)), image.Point{}, draw.Src)
 	r := &renderer{cv: canvas{img}, fs: fs, pal: pal}
 
+	if opt.Pending {
+		resp = pendingResponse(resp)
+	}
 	main := verdictChip(resp)
 	surf, showSurf := surfaceChip(resp)
 	r.header(resp, names, opt, main, surf, showSurf)
-	g, drawn := geometry(resp)
+	g, drawn := geometry(resp) // a pending response has no samples: not drawn
 	if drawn {
 		r.plot(resp, g)
 	} else {
@@ -117,6 +150,43 @@ func render(resp TerrainProfileResponse, names [2]string, pal Palette, opt Optio
 	}
 	r.footer(resp, main, opt, drawn)
 	return img, r.runs, nil
+}
+
+// AltText is the card's text alternative (og:image:alt): the Go twin of
+// public/terrain-profile.js chartTitle, with the card's own endpoint labels
+// and chips, so it says what the picture shows.
+func AltText(resp TerrainProfileResponse, names [2]string, opt Options) string {
+	fs, err := loadFonts()
+	if err != nil {
+		return ""
+	}
+	if opt.Pending {
+		resp = pendingResponse(resp)
+	}
+	main := verdictChip(resp)
+	a := fs.endpointLabel(resp.A, names[0], 0, opt.HideNames)
+	b := fs.endpointLabel(resp.B, names[1], 1, opt.HideNames)
+	txt := "Terrain profile from " + a + " to " + b + ", " + fmtMetres(resp.DistanceM) + ". " + main.label + ". " + main.detail
+	wc, okC := value(resp.Verdict.WorstClearanceM)
+	at, okA := value(resp.Verdict.WorstAtM)
+	if main.state != "unknown" && okC && okA {
+		txt += " Worst clearance " + fmtMetres(wc) + " at " + fmtMetres(at) + " along the path."
+	}
+	if surf, show := surfaceChip(resp); show {
+		txt += " " + surf.label + "."
+	}
+	return txt
+}
+
+// pendingResponse is resp without anything measured: no samples, no
+// verdict, no ground heights. What is left (endpoints, distance, radio,
+// antenna heights) needs no elevation.
+func pendingResponse(resp TerrainProfileResponse) TerrainProfileResponse {
+	resp.Samples = nil
+	resp.Verdict = TerrainVerdict{State: "unknown", Model: resp.Verdict.Model, Criterion: resp.Verdict.Criterion}
+	resp.Coverage = TerrainCoverage{State: "pending"}
+	resp.A.GroundM, resp.B.GroundM = nil, nil
+	return resp
 }
 
 // text draws s and records it. It returns the drawn width.
@@ -166,6 +236,23 @@ func surfaceRank(state string) (int, bool) {
 
 type chip struct{ state, label, tone, detail string }
 
+// Verdict is the main (terrain) verdict as the card states it: Word is the
+// panel's word ("Clear", "Usable", "Marginal", "Blocked", or "No verdict"
+// when Known is false) and Detail its sentence. The badge shows Word,
+// prefixed "Terrain: " when the surface model is drawn too; the server
+// puts the same Word in og:title, so a preview never disagrees with its
+// card.
+type Verdict struct {
+	Word, Detail string
+	Known        bool
+}
+
+// MainVerdict is the verdict the card's badge shows for resp.
+func MainVerdict(resp TerrainProfileResponse) Verdict {
+	c := mainChip(resp)
+	return Verdict{Word: c.word, Detail: c.detail, Known: c.state != "unknown"}
+}
+
 // covered mirrors the panel: a path with a hole in it was never measured
 // end to end, so no verdict on it is shown, whatever the response says.
 func covered(resp TerrainProfileResponse) bool {
@@ -173,12 +260,20 @@ func covered(resp TerrainProfileResponse) bool {
 }
 
 func verdictChip(resp TerrainProfileResponse) chip {
+	c := mainChip(resp)
+	label := c.word
+	if c.state != "unknown" && resp.Model == "both" {
+		label = "Terrain: " + label
+	}
+	return chip{c.state, label, c.tone, c.detail}
+}
+
+// mainChipWords is the main verdict before the badge's model prefix.
+type mainChipWords struct{ state, word, tone, detail string }
+
+func mainChip(resp TerrainProfileResponse) mainChipWords {
 	if w, ok := verdictWords(resp.Verdict.State); ok && covered(resp) {
-		label := w.label
-		if resp.Model == "both" {
-			label = "Terrain: " + label
-		}
-		return chip{resp.Verdict.State, label, w.tone, w.detail}
+		return mainChipWords{resp.Verdict.State, w.label, w.tone, w.detail}
 	}
 	detail := "No elevation data for this path, so there is no clearance verdict."
 	switch resp.Coverage.State {
@@ -186,8 +281,10 @@ func verdictChip(resp TerrainProfileResponse) chip {
 		detail = "No verdict, path leaves Denmark. The profile covers " + fmtNum(jsRound(resp.Coverage.Pct, 1)) + " % of the path."
 	case "none":
 		detail = "Terrain data is available for Denmark only. This path lies outside coverage."
+	case "pending":
+		detail = pendingMessage
 	}
-	return chip{"unknown", "No verdict", "unknown", detail}
+	return mainChipWords{"unknown", "No verdict", "unknown", detail}
 }
 
 // surfaceChip is the second chip, shown only when buildings and trees are
@@ -250,6 +347,9 @@ func (r *renderer) header(resp TerrainProfileResponse, names [2]string, opt Opti
 	pillColor := opaque(r.toneColor(main.tone))
 	r.cv.pill(badge, pillColor)
 	r.text("badge", main.label, badge.Min.X+18, 58, badgeSize, true, opaque(readableOn(pillColor, r.pal.Text, r.pal.Background)))
+	// The title row has only the badge to its right; the surface chip sits
+	// on the subtitle's row and bounds the subtitle alone (#755 review).
+	titleW := badge.Min.X - safeMargin - textX
 	textRight := badge.Min.X
 	if showSurf {
 		cw := r.fs.measure(surf.label, chipSize, false) + 24
@@ -265,7 +365,7 @@ func (r *renderer) header(resp TerrainProfileResponse, names [2]string, opt Opti
 	r.cv.fillRect(image.Rect(safeMargin, 30, safeMargin+6, 92), opaque(r.pal.LosLine))
 	a := r.fs.endpointLabel(resp.A, names[0], 0, opt.HideNames)
 	b := r.fs.endpointLabel(resp.B, names[1], 1, opt.HideNames)
-	size, title := r.fitTitle(a, b, maxW)
+	size, title := r.fitTitle(a, b, titleW)
 	r.text("title", title, textX, 70, size, true, opaque(r.pal.Text))
 
 	parts := []string{"Path profile"}
@@ -683,16 +783,24 @@ func (r *renderer) footer(resp TerrainProfileResponse, main chip, opt Options, p
 	} else {
 		parts = append(parts, "terrain only")
 	}
+	summaryY, creditY := summaryBaseline, creditBaseline
+	if resp.Coverage.Mixed {
+		summaryY, creditY = mixedSummaryBaseline, mixedCreditBaseline
+	}
 	summary := r.fs.fit(strings.Join(parts, " · "), summarySize, false, right-safeMargin)
-	r.text("summary", summary, safeMargin, summaryBaseline, summarySize, false, opaque(r.pal.Text))
+	r.text("summary", summary, safeMargin, summaryY, summarySize, false, opaque(r.pal.Text))
 
-	// The credit is never shortened and never left out (CC BY 4.0).
+	// The credits are never shortened and never left out (CC BY 4.0 for
+	// DHM, the Copernicus DEM licence for the fill).
 	muted := opaque(r.pal.TextMuted)
-	w := r.text("attribution", dhm.Attribution, safeMargin, creditBaseline, attributionSize, false, muted)
+	w := r.text("attribution", Credit, safeMargin, creditY, attributionSize, false, muted)
+	if resp.Coverage.Mixed {
+		r.text("attributionFill", FillCredit, safeMargin, creditBaseline, attributionSize, false, muted)
+	}
 	if site := sanitize(opt.Site); site != "" {
 		site = r.fs.fit(site, attributionSize, false, right-(safeMargin+w+32))
 		if site != "" {
-			r.text("site", site, right-r.fs.measure(site, attributionSize, false), creditBaseline, attributionSize, false, muted)
+			r.text("site", site, right-r.fs.measure(site, attributionSize, false), creditY, attributionSize, false, muted)
 		}
 	}
 }
