@@ -120,7 +120,7 @@ test('searchURL: five decimals, year only when it is one the viewer offers', () 
 
 test('previewURL: only the server\'s own preview path of the photo', () => {
   eq(SF.previewURL(photo('north')), '/api/skraafoto/preview/skraafotos2025/2025_83_36_1_0020_00003045');
-  const bad = ['https://cdn.dataforsyningen.dk/skraafoto_server/x.tif', '//evil.example/api/skraafoto/preview/a/b',
+  const bad = ['https://skraafoto-cdn.dataforsyningen.dk/skraafoto_server/x.tif', '//evil.example/api/skraafoto/preview/a/b',
     '/api/skraafoto/preview/skraafotos2025/../../config', '/api/skraafoto/preview/skraafotos2025/2025_1?token=x',
     '/api/skraafoto/preview/other/2025_1', 'javascript:alert(1)', '', null, 42];
   bad.forEach((u) => eq(SF.previewURL(Object.assign(photo('north'), { previewUrl: u })), null, String(u)));
