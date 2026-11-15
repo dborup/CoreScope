@@ -70,7 +70,7 @@ func TestClassifyDokk1(t *testing.T) {
 	buildings := 0
 	for i, cl := range got {
 		switch {
-		case !s.elevated(i, DefaultOptions().ThresholdM) && cl != Unclassified:
+		case !s.Elevated(i, DefaultOptions().ThresholdM) && cl != Unclassified:
 			t.Errorf("sample %d at ground level classified %q", i, cl)
 		case cl == Vegetation:
 			t.Errorf("sample %d inside Dokk1 read as vegetation", i)

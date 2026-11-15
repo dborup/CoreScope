@@ -32,6 +32,8 @@
 //   - Fetcher: the Client behind a bounded per-segment cache (dhm.Cache),
 //     coalescing (dhm.Flight), an in-flight bound (dhm.Admission) and an
 //     upstream concurrency limit (fetcher.go).
+//   - AttributionDerived: the CC BY 4.0 credit of a profile classified
+//     with the footprints, built from DHM's own (credit.go).
 //
 // The polygon reading and the point-in-polygon maths are internal/dhm's
 // (polygon.go), shared with internal/heritage.
