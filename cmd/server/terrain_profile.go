@@ -786,11 +786,11 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 						return nil, err
 					}
 				}
-				// A profile left partial by a failed fill is kept too:
-				// the DHM part is good, and a hit retries only the fill.
-				// One whose building lookup failed is kept briefly (#730).
+				// A profile left partial by a failed fill, or degraded by a
+				// failed building lookup, is kept too: the DHM part is
+				// good, and a hit retries only the fill or the buildings.
 				enc := e.encode()
-				p.cache.PutFor(key, enc, p.now(), e.classes.ttl(p.set.cacheTTL))
+				p.cache.Put(key, enc, p.now())
 				return enc, nil
 			})
 			if err != nil {
@@ -804,6 +804,9 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 		}
 		if hit && elev.fillFailed {
 			elev = p.retryFill(r, key, &plan, elev)
+		}
+		if hit && elev.classes != nil && elev.classes.degraded {
+			elev = p.retryBuildings(r, key, &plan, elev)
 		}
 	}
 	w.Header().Set("X-CoreScope-Cache", state)

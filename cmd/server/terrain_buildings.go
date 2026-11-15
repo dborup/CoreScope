@@ -23,9 +23,12 @@ package main
 //   - A failure never fails the profile: the classification is
 //     "unavailable" (or "partial" when only some segments failed), the
 //     answer is 200, and the failure is logged by category. Such a profile
-//     is cached for terrainBuildingsRetryTTL only, so the lookup is retried
-//     soon after; a deterministic answer (nothing elevated, a truncated
-//     segment) is cached like any profile.
+//     is cached like any other, marked degraded, and a hit on it retries
+//     the building phase alone on the cached rasters (retryBuildings, as
+//     #773 retries the foreign fill), so a failing footprint service
+//     never makes DHM fetch a raster twice (#786 review F2). A
+//     deterministic answer (nothing elevated, a truncated segment) is not
+//     degraded and is never retried.
 //   - The classes are one byte per sample in the profile's cache entry,
 //     behind a flag bit, so an entry of another format is rejected and
 //     fetched again rather than misread.
@@ -39,6 +42,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"net/http"
 	"sync"
 	"time"
 
@@ -46,14 +50,9 @@ import (
 	"github.com/meshcore-analyzer/dhm"
 )
 
-const (
-	// terrainBuildingsDeadline bounds the building phase of one profile
-	// fetch (#730 research §6).
-	terrainBuildingsDeadline = 5 * time.Second
-	// terrainBuildingsRetryTTL is how long a profile whose building lookup
-	// failed is reused before a request fetches it again.
-	terrainBuildingsRetryTTL = 10 * time.Minute
-)
+// terrainBuildingsDeadline bounds the building phase of one profile
+// fetch, or of its retry (#730 research §6).
+const terrainBuildingsDeadline = 5 * time.Second
 
 // terrainBuildingsMaxSegments is the most segments one profile's corridor
 // has: 80.2 km in 10 km segments.
@@ -94,8 +93,9 @@ var terrainClassStates = map[byte]string{
 
 // terrainClasses is the classification of one profile: its state, whether
 // a segment had more buildings than one page holds, and one
-// buildings.Class per sample. degraded (never cached) says a segment's
-// lookup failed, so the profile is kept for terrainBuildingsRetryTTL only.
+// buildings.Class per sample. degraded says a segment's lookup failed, so
+// a hit on the cached profile retries the building phase
+// (retryBuildings).
 type terrainClasses struct {
 	state     byte
 	truncated bool
@@ -228,13 +228,49 @@ func buildingsFailure(err error) error {
 	return err
 }
 
-// ttl is how long the profile is cached: briefly when its building
-// lookup failed, else the profile's TTL.
-func (c *terrainClasses) ttl(profileTTL time.Duration) time.Duration {
-	if c != nil && c.degraded && terrainBuildingsRetryTTL < profileTTL {
-		return terrainBuildingsRetryTTL
+// retryBuildings runs the building phase again for a cached profile whose
+// lookup failed (#786 review F2). The rasters come from the cache, so a
+// failing footprint service never makes DHM fetch them twice, and the
+// Fetcher's cache holds the pages of the segments that did answer, so
+// only the failed ones are asked again. Like a miss, the retry is charged
+// to the client and holds a profile admission slot, and concurrent
+// callers share it; refused, it is not made. A classification that is no
+// longer degraded replaces the cache entry; whatever stops the retry, the
+// cached profile e is served as it is.
+func (p *terrainProfiler) retryBuildings(r *http.Request, key terrainKey, plan *dhm.Plan, e terrainElevation) terrainElevation {
+	if ok, _ := p.limiter.allow(r); !ok {
+		return e
 	}
-	return profileTTL
+	data, _, err := p.flight.Do(r.Context(), key.String()+"|buildings", p.deadline, func(ctx context.Context) ([]byte, error) {
+		select {
+		case p.admit <- struct{}{}:
+			defer func() { <-p.admit }()
+		default:
+			return nil, errTerrainBusy
+		}
+		f := e
+		var err error
+		if f.classes, err = p.classifyBuildings(ctx, plan, e); err != nil {
+			return nil, err
+		}
+		enc := f.encode()
+		if !f.classes.degraded {
+			p.cache.Put(key, enc, p.now())
+		}
+		return enc, nil
+	})
+	if errors.Is(err, errTerrainBusy) {
+		// No upstream work was done: give the charge back.
+		p.limiter.refund(r)
+	}
+	if err != nil {
+		return e
+	}
+	f, err := decodeTerrainElevation(data, len(e.dtm), true, true)
+	if err != nil {
+		return e
+	}
+	return f
 }
 
 // used reports whether any sample was classified, i.e. whether footprints
@@ -296,11 +332,16 @@ func (c *terrainClasses) sampleClass(i int) string {
 // The cache entry (terrainElevation.encode): byte 4 holds flags, bit 0 a
 // DSM and bits 1-3 the foreign fill (#738); terrainEntryClassified (bit 4)
 // marks a classified entry, whose elevations are followed by the state,
-// the truncated flag and one class byte per sample. Before #730 M2 bit 4
-// had to be 0, so an older reader refuses a classified entry too.
+// a flags byte (terrainClassTruncated, terrainClassDegraded) and one
+// class byte per sample. Before #730 M2 bit 4 had to be 0, so an older
+// reader refuses a classified entry too, and before #730 M3 the flags
+// byte was 0 or 1, so an M2 reader refuses a degraded one.
 const (
 	terrainEntryClassified byte = 1 << 4
 	terrainEntryHeader          = 5
+
+	terrainClassTruncated byte = 1 << 0
+	terrainClassDegraded  byte = 1 << 1
 )
 
 // terrainEntryOK checks an entry's DSM and classification flags and its
@@ -324,11 +365,14 @@ func terrainEntryOK(b []byte, n int, both, classified bool) bool {
 
 // appendTo writes c after an entry's elevations.
 func (c *terrainClasses) appendTo(out []byte) []byte {
-	truncated := byte(0)
+	flags := byte(0)
 	if c.truncated {
-		truncated = 1
+		flags |= terrainClassTruncated
 	}
-	out = append(out, c.state, truncated)
+	if c.degraded {
+		flags |= terrainClassDegraded
+	}
+	out = append(out, c.state, flags)
 	for _, cl := range c.cls {
 		out = append(out, byte(cl))
 	}
@@ -339,10 +383,11 @@ var errTerrainEntry = errors.New("terrain cache entry does not match its key")
 
 // decodeTerrainClasses reads the trailer appendTo wrote for n samples.
 func decodeTerrainClasses(b []byte, n int) (*terrainClasses, error) {
-	if len(b) != 2+n || terrainClassStates[b[0]] == "" || b[1] > 1 {
+	if len(b) != 2+n || terrainClassStates[b[0]] == "" || b[1]&^(terrainClassTruncated|terrainClassDegraded) != 0 {
 		return nil, errTerrainEntry
 	}
-	c := &terrainClasses{state: b[0], truncated: b[1] == 1, cls: make([]buildings.Class, n)}
+	c := &terrainClasses{state: b[0], truncated: b[1]&terrainClassTruncated != 0,
+		degraded: b[1]&terrainClassDegraded != 0, cls: make([]buildings.Class, n)}
 	for i, v := range b[2:] {
 		switch cl := buildings.Class(v); cl {
 		case buildings.Unclassified, buildings.Building, buildings.Vegetation:

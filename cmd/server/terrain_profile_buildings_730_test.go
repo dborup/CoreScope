@@ -623,6 +623,13 @@ func TestTerrainBuildings_EntryFormat(t *testing.T) {
 		string(classBytes(c.cls)) != string(classBytes(e.classes.cls)) || got.dsm[2] != 30 || !math.IsNaN(float64(got.dtm[3])) {
 		t.Fatalf("round trip: %+v, classes %+v", got, *c)
 	}
+	// A degraded classification (#730 M3) round-trips, so a hit can
+	// retry it.
+	e.classes.degraded = true
+	if got, err := decodeTerrainElevation(e.encode(), n, true, true); err != nil || !got.classes.degraded || !got.classes.truncated {
+		t.Fatalf("degraded round trip: %+v, %v", got.classes, err)
+	}
+	e.classes.degraded = false
 	legacy := terrainElevation{dtm: e.dtm, dsm: e.dsm}.encode()
 	for name, c := range map[string]struct {
 		b                []byte
@@ -633,7 +640,7 @@ func TestTerrainBuildings_EntryFormat(t *testing.T) {
 		"dtm entry, classified profiler":    {terrainElevation{dtm: e.dtm}.encode(), true, true},
 		"wrong format byte":                 {withByte(enc, 4, 1), true, true},
 		"bad state":                         {withByte(enc, 5+8*n, 9), true, true},
-		"bad truncated flag":                {withByte(enc, 5+8*n+1, 2), true, true},
+		"bad flags":                         {withByte(enc, 5+8*n+1, 4), true, true},
 		"bad class":                         {withByte(enc, 5+8*n+2+1, 'x'), true, true},
 		"short":                             {enc[:len(enc)-1], true, true},
 		// #786 review F3: the flag bits above the classification's are

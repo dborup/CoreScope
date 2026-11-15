@@ -118,6 +118,7 @@ func TestTerrainBuildings_RetryAsksOnlyTheFailedSegment(t *testing.T) {
 	if n := ogc.calls.Load(); n != 2 {
 		t.Fatalf("%d corridor calls on the miss, want 2", n)
 	}
+	rasters := env.src.calls.Load()
 	failing.Store(false)
 	w := env.get(q)
 	resp = decodeProfile(t, w)
@@ -126,8 +127,8 @@ func TestTerrainBuildings_RetryAsksOnlyTheFailedSegment(t *testing.T) {
 	}
 	wantClassification(t, resp, "full", false)
 	wantCause(t, resp, "vegetation")
-	if n, r := ogc.calls.Load(), env.src.calls.Load(); n != 3 || r != 2 {
-		t.Fatalf("%d corridor calls and %d rasters, want 3 (the failed segment again) and 2", n, r)
+	if n, r := ogc.calls.Load(), env.src.calls.Load(); n != 3 || r != rasters {
+		t.Fatalf("%d corridor calls and %d rasters, want 3 (the failed segment again) and the miss's %d", n, r, rasters)
 	}
 	var lines []string
 	for _, r := range ogc.requests()[2:] {
@@ -207,4 +208,27 @@ func TestTerrainBuildings_RetryIsBudgeted(t *testing.T) {
 			t.Fatalf("%d corridor calls, want the retry", n)
 		}
 	})
+}
+
+// TestTerrainBuildings_RetryKeepsTheProfileTTL: a retry that fails again
+// does not store the profile anew, so the rasters still expire on the
+// profile's TTL from the miss that fetched them, however often the
+// degraded profile is asked for.
+func TestTerrainBuildings_RetryKeepsTheProfileTTL(t *testing.T) {
+	ogc := newStubOGC(t, dokk1Footprint)
+	ogc.answer = func([4]float64) (int, []byte, bool) { return 503, nil, true }
+	env := newBuildingsEnv(t, dokk1Ground, dokk1Surface, ogc, dhm.ProfileConfig{})
+	start := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	now := start
+	env.p.now = func() time.Time { return now }
+	q := pathQuery(dokk1A, dokk1B)
+	for _, c := range []struct {
+		at    time.Duration
+		cache string
+	}{{0, "miss"}, {env.p.set.cacheTTL - time.Minute, "hit"}, {env.p.set.cacheTTL + time.Second, "miss"}} {
+		now = start.Add(c.at)
+		if w := env.get(q); w.Code != 200 || w.Header().Get("X-CoreScope-Cache") != c.cache {
+			t.Fatalf("at +%v: %d %q, want %s", c.at, w.Code, w.Header().Get("X-CoreScope-Cache"), c.cache)
+		}
+	}
 }
