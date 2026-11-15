@@ -21,14 +21,15 @@ const DefaultBaseURL = "https://api.dataforsyningen.dk/ogcapi/features/building_
 const CRS = "http://www.opengis.net/def/crs/EPSG/0/25832"
 
 // fixedQuery is every query parameter but the filter: GeoJSON, EPSG:25832
-// in and out, CQL2 text, at most MaxFeatures footprints. The values hold
-// only characters that need no escaping in a query string, "+" written
-// as %2B (TestSegmentURLDecodesToTheFixedQuery).
-const fixedQuery = "f=application/geo%2Bjson" +
+// in and out, CQL2 text, at most MaxFeatures footprints. The limit is
+// written from MaxFeatures, so the two cannot drift apart (#776 review
+// N2). The values hold only characters that need no escaping in a query
+// string, "+" written as %2B (TestSegmentURLDecodesToTheFixedQuery).
+var fixedQuery = "f=application/geo%2Bjson" +
 	"&crs=" + CRS +
 	"&filter-lang=cql2-text" +
 	"&filter-crs=" + CRS +
-	"&limit=1000" // MaxFeatures; TestSegmentURLDecodesToTheFixedQuery pins the two together
+	"&limit=" + strconv.Itoa(MaxFeatures)
 
 // acceptedContentTypes: the service answers f=application/geo+json with
 // application/json (#730 research). An OGC exception in XML or an HTML
