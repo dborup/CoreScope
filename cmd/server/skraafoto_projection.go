@@ -138,10 +138,12 @@ func skraafotoPixel(p skraafoto.Pixel) SkraafotoPixel {
 
 // skraafotoGround is the terrain under the point and the path's ends,
 // NaN where it is not known; final is false when DHM was refused or
-// failed, so an answer built on it is not cached.
+// failed, so an answer built on it is not cached. asked is true when a
+// height was fetched from DHM rather than the cache.
 type skraafotoGround struct {
 	pt, a, b float64
 	final    bool
+	asked    bool
 }
 
 // ground is the terrain at the snapped points, from the cache or DHM,
@@ -149,9 +151,9 @@ type skraafotoGround struct {
 // unknown, finally. A request that fetches is charged once to the
 // profile's per-IP budget, as a profile miss is; refused, its heights are
 // unknown this once. A request whose every fetch was refused by admission
-// gets its charge back.
-func (p *skraafotoProxy) ground(r *http.Request, t *terrainProfiler, pts [][2]int64) ([]float64, bool) {
-	hs := make([]float64, len(pts))
+// gets its charge back. asked is whether DHM was asked.
+func (p *skraafotoProxy) ground(r *http.Request, t *terrainProfiler, pts [][2]int64) (hs []float64, final, asked bool) {
+	hs = make([]float64, len(pts))
 	miss := map[skraafotoGroundKey][]int{}
 	for i, k := range pts {
 		hs[i] = math.NaN()
@@ -162,10 +164,10 @@ func (p *skraafotoProxy) ground(r *http.Request, t *terrainProfiler, pts [][2]in
 		miss[skraafotoGroundKey(k)] = append(miss[skraafotoGroundKey(k)], i)
 	}
 	if len(miss) == 0 || t == nil {
-		return hs, true
+		return hs, true, false
 	}
 	if ok, _ := t.limiter.allow(r); !ok {
-		return hs, false
+		return hs, false, false
 	}
 	var (
 		wg           sync.WaitGroup
@@ -197,7 +199,7 @@ func (p *skraafotoProxy) ground(r *http.Request, t *terrainProfiler, pts [][2]in
 		t.limiter.refund(r)
 		t.noteRefusal()
 	}
-	return hs, failed == 0
+	return hs, failed == 0, true
 }
 
 // skraafotoGroundFor is the terrain for an answer.
@@ -206,8 +208,8 @@ func (s *Server) skraafotoGroundFor(r *http.Request, k skraafotoAnswerKey) skraa
 	if k.hasPath {
 		pts = append(pts, [2]int64{k.path[0], k.path[1]}, [2]int64{k.path[2], k.path[3]})
 	}
-	hs, final := s.skraafoto.ground(r, s.terrain, pts)
-	g := skraafotoGround{pt: hs[0], a: math.NaN(), b: math.NaN(), final: final}
+	hs, final, asked := s.skraafoto.ground(r, s.terrain, pts)
+	g := skraafotoGround{pt: hs[0], a: math.NaN(), b: math.NaN(), final: final, asked: asked}
 	if k.hasPath {
 		g.a, g.b = hs[1], hs[2]
 	}

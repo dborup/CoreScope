@@ -147,14 +147,16 @@ func (s *STAC) Years(ctx context.Context) ([]int, error) {
 // Search returns the photos of year's collection that contain the
 // EPSG:25832 point (e, n) and face d, at most SearchLimit, nearest the
 // footprint centroid first: the one query shape the server sends.
-func (s *STAC) Search(ctx context.Context, year, e, n int, d Direction) ([]Item, error) {
+// skipped is how many candidates after the first were left out
+// (ParseSearch).
+func (s *STAC) Search(ctx context.Context, year, e, n int, d Direction) (items []Item, skipped int, err error) {
 	path, q, err := searchRequest(year, e, n, d)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	body, err := s.get(ctx, path, q, maxItemsBody)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	return ParseSearch(body, year, d)
 }

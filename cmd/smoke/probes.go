@@ -202,7 +202,7 @@ func buildProbes(s settings) []probe {
 		then: func(r *reply) {
 			// ParseSearch returns the candidates nearest the footprint
 			// centroid first (#737 M3a); the first with a CDN path is read.
-			if items, err := skraafoto.ParseSearch(r.body, s.year, skraafoto.North); err == nil {
+			if items, _, err := skraafoto.ParseSearch(r.body, s.year, skraafoto.North); err == nil {
 				for _, item := range items {
 					if item.Path != "" {
 						cdnPath = item.Path
