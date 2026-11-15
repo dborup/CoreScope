@@ -121,6 +121,16 @@ type ProfileConfig struct {
 	MaxInFlight       *int     `json:"maxInFlight"`
 	// Share is the /p share route with per-profile link previews (#727).
 	Share ShareConfig `json:"share"`
+	// Buildings tells buildings from trees in the surface (#730).
+	Buildings BuildingsConfig `json:"buildings"`
+}
+
+// BuildingsConfig is config.json `map.dhm.profile.buildings` (#730 M2).
+// Off unless Enabled: the classification asks a second service
+// (internal/buildings), without the token. Its limits are fixed in code
+// for now.
+type BuildingsConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 // ShareConfig is config.json `map.dhm.profile.share` (#727). Off unless

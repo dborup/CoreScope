@@ -31,6 +31,7 @@ COPY internal/channelregistry/ ../../internal/channelregistry/
 COPY internal/dhm/ ../../internal/dhm/
 COPY internal/mastedb/ ../../internal/mastedb/
 COPY internal/heritage/ ../../internal/heritage/
+COPY internal/buildings/ ../../internal/buildings/
 RUN go mod download
 COPY cmd/server/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \

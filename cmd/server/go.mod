@@ -84,3 +84,7 @@ replace github.com/meshcore-analyzer/mastedb => ../../internal/mastedb
 require github.com/meshcore-analyzer/heritage v0.0.0
 
 replace github.com/meshcore-analyzer/heritage => ../../internal/heritage
+
+require github.com/meshcore-analyzer/buildings v0.0.0
+
+replace github.com/meshcore-analyzer/buildings => ../../internal/buildings

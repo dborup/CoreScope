@@ -14,8 +14,9 @@ type SegmentSource interface {
 }
 
 // FetcherOptions are the Fetcher's bounds. They are hard-coded defaults
-// for now; config and the customizer come with the server (#730 M2,
-// AGENTS.md rule 8).
+// for now (the terrain profile only scales MaxInFlight to its own
+// admission, #730 M2); config and the customizer come later (AGENTS.md
+// rule 8).
 type FetcherOptions struct {
 	CacheEntries int           // pages kept
 	CacheBytes   int           // their total encoded size

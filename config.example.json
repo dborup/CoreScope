@@ -141,7 +141,7 @@
         "chunkKm": 2.5,
         "_comment_chunkKm": "Path length per upstream raster. WCS rasters are axis-aligned, so smaller chunks fetch fewer pixels for a diagonal path; a profile never uses more than 16 rasters per elevation model (32 with both DTM and DSM). 0 = one raster per model below about 79 km; every raster edge must stay inside the 80 km WCS span, so a path at the 80 km maximum splits into 2. Cheaper in requests but coarser (about 39 m per pixel at 20 km, 156 m at 80 km).",
         "cacheEntries": 256,
-        "_comment_cacheEntries": "Profiles kept in memory (1-4096), about 25 KB each at most (model=both, maxSamples=3200): about 105 MB worst case at the documented maxima of both settings. Antenna heights, k and frequency are computed per request, so changing them is a cache hit.",
+        "_comment_cacheEntries": "Profiles kept in memory (1-4096), about 25 KB each at most (model=both, maxSamples=3200): about 105 MB worst case at the documented maxima of both settings, about 118 MB with buildings.enabled (one more byte per sample). Antenna heights, k and frequency are computed per request, so changing them is a cache hit.",
         "cacheTTLHours": 24,
         "_comment_cacheTTLHours": "How long a cached profile is reused (up to 168). DHM is re-flown every few years.",
         "upstreamTimeoutMs": 10000,
@@ -155,6 +155,10 @@
           "enabled": false,
           "upstreamPerMin": 2,
           "_comment_upstreamPerMin": "#727 shareUpstreamPerMin - the server-wide number of upstream profile fetches per minute that shared links may cause, 0-60 (0 = sharing never goes upstream). The current /p page makes no upstream call at all, so this is an upper bound that is not yet reached; it starts to matter when previews gain the verdict and the chart image (#727 M3)."
+        },
+        "buildings": {
+          "_comment": "#730 - tell buildings from trees in the surface model (DSM). With enabled true, where the surface stands more than 2.5 m above the terrain on a model=both profile, the server asks Dataforsyningen's INSPIRE - Bygninger OGC API (no token; credited 'INSPIRE - Bygninger (GeoDanmark, @geodanmark)', CC BY 4.0) for the building footprints within 15 m of the path, one request per 10 km of path that has such samples, and the answer says per sample whether it is a building or trees/other, and what blocks the surface verdict. This runs inside the same profile fetch: no extra per-client charge, the same maxInFlight slot, at most 4 footprint requests at once server-wide and 5 s per profile, and a cached profile asks nothing. If the service fails, the profile is still answered, marked unclassified, and kept for 10 minutes instead of cacheTTLHours. Off by default; the radius, threshold and limits are fixed in code for now.",
+          "enabled": false
         }
       }
     },

@@ -105,19 +105,25 @@ func terrainGoldenAnswers(t *testing.T, newEnv func(src *fakeElevation) *terrain
 	return out
 }
 
-func readTerrainGolden(t *testing.T, got map[string]terrainGoldenCase) map[string]terrainGoldenCase {
+// writeTerrainGolden rewrites the golden from got, with
+// TERRAIN_730_WRITE_GOLDEN=1 only.
+func writeTerrainGolden(t *testing.T, got map[string]terrainGoldenCase) {
 	t.Helper()
-	path := filepath.Join("testdata", terrain730Golden)
-	if os.Getenv("TERRAIN_730_WRITE_GOLDEN") == "1" {
-		b, err := json.MarshalIndent(got, "", "  ")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if os.Getenv("TERRAIN_730_WRITE_GOLDEN") != "1" {
+		return
 	}
-	b, err := os.ReadFile(path)
+	b, err := json.MarshalIndent(got, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("testdata", terrain730Golden), append(b, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readTerrainGolden(t *testing.T) map[string]terrainGoldenCase {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", terrain730Golden))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,10 +160,11 @@ func TestTerrainProfileGolden_BuildingsOff(t *testing.T) {
 	got := terrainGoldenAnswers(t, func(src *fakeElevation) *terrainEnv {
 		return newTerrainEnv(t, src, dhm.ProfileConfig{}, nil)
 	})
-	compareTerrainGolden(t, got, readTerrainGolden(t, got))
+	writeTerrainGolden(t, got)
+	want := readTerrainGolden(t)
+	compareTerrainGolden(t, got, want)
 	// The golden is not vacuous: the surface sees Dokk1 and the trees
 	// through the line of sight, the terrain does not.
-	want := readTerrainGolden(t, got)
 	for _, k := range []string{"dokk1/0", "forest/0"} {
 		var resp TerrainProfileResponse
 		if err := json.Unmarshal([]byte(want[k].Body), &resp); err != nil {

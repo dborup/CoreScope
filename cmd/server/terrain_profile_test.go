@@ -100,19 +100,24 @@ type terrainEnv struct {
 	logs   *dhmLogSink
 }
 
-// newTerrainEnv is a test server with the profile enabled on src.
-func newTerrainEnv(t *testing.T, src dhm.ElevationSource, pc dhm.ProfileConfig, radio *RadioConfig) *terrainEnv {
+// newTerrainEnv is a test server with the profile enabled on src; mods
+// adjust the profiler's dependencies first.
+func newTerrainEnv(t *testing.T, src dhm.ElevationSource, pc dhm.ProfileConfig, radio *RadioConfig, mods ...func(*terrainProfilerDeps)) *terrainEnv {
 	t.Helper()
 	srv, router := setupTestServer(t)
 	logs := &dhmLogSink{}
 	pc.Enabled = true
 	srv.cfg.Radio = radio
-	srv.terrain = newTerrainProfiler(pc, radio, terrainProfilerDeps{
+	deps := terrainProfilerDeps{
 		src:        src,
 		logf:       logs.logf,
 		logFailure: func(what string, err error) { logs.logf("[dhm] upstream %s failed (%s)", what, dhm.FailureReason(err)) },
 		observers:  func() ([]Observer, error) { return nil, nil },
-	})
+	}
+	for _, m := range mods {
+		m(&deps)
+	}
+	srv.terrain = newTerrainProfiler(pc, radio, deps)
 	if srv.terrain == nil {
 		t.Fatal("newTerrainProfiler returned nil for an enabled profile")
 	}
@@ -403,10 +408,17 @@ func TestTerrainProfile_CacheFootprintAtMaxima(t *testing.T) {
 	if set.cacheEntries != 4096 || set.plan.MaxSamples != 3200 {
 		t.Fatalf("resolved maxima %d/%d, want 4096/3200", set.cacheEntries, set.plan.MaxSamples)
 	}
-	maxBytes := terrainCacheMaxBytes(set.cacheEntries, set.plan.MaxSamples)
-	const documentedMB = 105_000_000 // config.example.json _comment_cacheEntries
-	if maxBytes > documentedMB || float64(documentedMB-maxBytes) > 2_000_000 {
-		t.Fatalf("worst case %d bytes (%.1f MB) no longer matches the documented ~105 MB", maxBytes, float64(maxBytes)/1e6)
+	// config.example.json _comment_cacheEntries: ~105 MB, and ~118 MB with
+	// the building classification's class byte per sample (#730 M2).
+	for _, c := range []struct {
+		classified bool
+		documented int
+	}{{false, 105_000_000}, {true, 118_000_000}} {
+		maxBytes := terrainCacheMaxBytes(set.cacheEntries, set.plan.MaxSamples, c.classified)
+		if maxBytes > c.documented || float64(c.documented-maxBytes) > 2_000_000 {
+			t.Fatalf("classified %v: worst case %d bytes (%.1f MB) no longer matches the documented ~%d MB",
+				c.classified, maxBytes, float64(maxBytes)/1e6, c.documented/1_000_000)
+		}
 	}
 }
 
