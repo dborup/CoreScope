@@ -368,10 +368,11 @@
       // Preferred path: the registry's single resolver. It picks the
       // provider for this theme and invokes lazy `url` functions, so url
       // AND attribution always come from the configured provider.
+      // #741 M1b: a WMS style has no url, only its `wms` descriptor.
       if (typeof window.MC_getTileSpec === 'function') {
         const s = window.MC_getTileSpec(dark ? 'dark' : 'light');
-        if (s && s.url) {
-          return { url: s.url, attribution: s.attribution || '© OpenStreetMap contributors', refUrl: s.refUrl || null };
+        if (s && (s.url || s.wms)) {
+          return { url: s.url, wms: s.wms || null, attribution: s.attribution || '© OpenStreetMap contributors', refUrl: s.refUrl || null };
         }
       }
       // Legacy/partial registry: accessors without getTileSpec.
@@ -389,7 +390,9 @@
     
     function _syncDarkTiles(dark) {
       const r = _resolveTileUrl(dark);
-      tileLayer.setUrl(r.url);
+      // #741 M1b — a template changes in place; to or from a WMS style the
+      // registry swaps the layer inside the Auto group.
+      tileLayer = window.MC_syncBaseLayer(autoLayerGroup, tileLayer, r, { maxZoom: 19 });
       if (tileLayer.options) tileLayer.options.attribution = r.attribution;
       // Esri reference (labels) overlay: add when needed, remove otherwise.
       if (dark && r.refUrl) {
@@ -410,12 +413,10 @@
       }
     }
     const _initTile = _resolveTileUrl(isDark);
-    // #741 M1a — every base map goes through the registry's one factory,
-    // which builds a tile layer or a WMS layer from the spec it is given.
-    // What arrives here is always a tile template today: _resolveTileUrl()
-    // rebuilds the spec from `url`/`refUrl` and drops a `wms` descriptor,
-    // so reaching the WMS branch from this page is M1b's job.
-    const tileLayer = window.MC_createBaseLayer(_initTile, { maxZoom: 19 }).addTo(autoLayerGroup);
+    // #741 — every base map goes through the registry's one factory, which
+    // builds a tile layer or a WMS layer from the spec it is given;
+    // _resolveTileUrl() carries the style's `wms` descriptor (M1b).
+    let tileLayer = window.MC_createBaseLayer(_initTile, { maxZoom: 19 }).addTo(autoLayerGroup);
     if (isDark && _initTile.refUrl) {
       _darkRefLayer = window.MC_createBaseLayer({ url: _initTile.refUrl, attribution: _initTile.attribution }, { maxZoom: 19 }).addTo(autoLayerGroup);
     }

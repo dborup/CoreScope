@@ -134,7 +134,12 @@ function makeLeaflet() {
     latLngBounds: (b) => ({ _bounds: b }),
     // _isValidTile is Leaflet's GridLayer bounds check, which the #728 ortho
     // layer extends; here every tile is valid.
-    tileLayer: (url, opts) => evented({ _url: url, options: opts || {}, kind: 'tile', _isValidTile: () => true, getTileSize: () => ({ x: 256, y: 256 }) }),
+    // setUrl as Leaflet's TileLayer.setUrl: the same layer, a new template.
+    tileLayer: (url, opts) => {
+      const l = evented({ _url: url, options: opts || {}, kind: 'tile', _isValidTile: () => true, getTileSize: () => ({ x: 256, y: 256 }) });
+      l.setUrl = (u) => { l._url = u; return l; };
+      return l;
+    },
     control: {
       layers: (base, overlays, opts) => {
         const overlayLabels = Object.keys(overlays || {}).map(name => {

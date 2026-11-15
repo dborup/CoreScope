@@ -462,9 +462,43 @@
         if (w[k] === undefined) continue;
         o[k] = (k === 'bounds') ? L.latLngBounds(w[k]) : w[k];
       }
-      return L.tileLayer.wms(typeof w.url === 'function' ? w.url() : w.url, _withOpts(o, opts));
+      var url = typeof w.url === 'function' ? w.url() : w.url;
+      var layer = L.tileLayer.wms(url, _withOpts(o, opts));
+      layer._mcWmsKey = _wmsKey(w, url);
+      return layer;
     }
     return L.tileLayer(typeof s.url === 'function' ? s.url() : s.url, _withOpts(o, opts));
+  }
+
+  // What makes two WMS descriptors the same layer: the resolved URL (so the
+  // token too) and every option the factory passes on.
+  function _wmsKey(w, url) {
+    var o = {};
+    for (var i = 0; i < WMS_SPEC_KEYS.length; i++) {
+      if (w[WMS_SPEC_KEYS[i]] !== undefined) o[WMS_SPEC_KEYS[i]] = w[WMS_SPEC_KEYS[i]];
+    }
+    return url + ' ' + JSON.stringify(o);
+  }
+
+  /* #741 M1b — syncBaseLayer(group, layer, spec, opts): keeps the base
+   * layer in `group` (Map's and Live's Auto group) showing `spec`, and
+   * returns the layer that does. A tile template changes in place with
+   * setUrl, exactly as before. A WMS style cannot be a template swap: to or
+   * from one, or to another WMS, the layer is rebuilt by the factory and
+   * replaces the old one in the group. The same WMS again (a theme switch
+   * between styles of one layer) keeps the layer, so no tile is fetched
+   * twice. O(1) per theme or provider change. */
+  function syncBaseLayer(group, layer, spec, opts) {
+    var w = spec && spec.wms;
+    var key = w ? _wmsKey(w, typeof w.url === 'function' ? w.url() : w.url) : null;
+    if (layer && (layer._mcWmsKey || null) === key) {
+      if (!key) layer.setUrl(spec.url);
+      return layer;
+    }
+    var next = createBaseLayer(spec, opts);
+    if (layer) group.removeLayer(layer);
+    group.addLayer(next);
+    return next;
   }
 
   /* Optional map overlays: #680 DHM terrain hillshade, #723 protected
@@ -1039,6 +1073,7 @@
   window.MC_getTileSpec                 = getTileSpec;
   // #741 M1a — every base map, on every page, is built here.
   window.MC_createBaseLayer             = createBaseLayer;
+  window.MC_syncBaseLayer               = syncBaseLayer;
   window.MC_getTerrainConfig            = getTerrainConfig;
   window.MC_getHeritageConfig           = getHeritageConfig;
   window.MC_getMastsConfig              = getMastsConfig;

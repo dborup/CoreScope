@@ -1816,10 +1816,11 @@
       // Preferred path: the registry's single resolver. It picks the
       // provider for this theme and invokes lazy `url` functions, so url
       // AND attribution always come from the configured provider.
+      // #741 M1b: a WMS style has no url, only its `wms` descriptor.
       if (typeof window.MC_getTileSpec === 'function') {
         const s = window.MC_getTileSpec(dark ? 'dark' : 'light');
-        if (s && s.url) {
-          return { url: s.url, attribution: s.attribution || '© OpenStreetMap contributors', refUrl: s.refUrl || null };
+        if (s && (s.url || s.wms)) {
+          return { url: s.url, wms: s.wms || null, attribution: s.attribution || '© OpenStreetMap contributors', refUrl: s.refUrl || null };
         }
       }
       // Legacy/partial registry: accessors without getTileSpec.
@@ -1837,7 +1838,8 @@
 
     function _liveSyncDarkTiles(dark) {
       const r = _liveResolveTile(dark);
-      tileLayer.setUrl(r.url);
+      // #741 M1b — in place for a template, a swapped layer to or from WMS.
+      tileLayer = window.MC_syncBaseLayer(liveAutoLayerGroup, tileLayer, r, { maxZoom: 19 });
       // The registry swaps the credit in Live's attribution control too.
       if (typeof window.MC_setLayerAttribution === 'function') window.MC_setLayerAttribution(map, tileLayer, r.attribution);
       else if (tileLayer.options) tileLayer.options.attribution = r.attribution;

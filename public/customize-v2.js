@@ -2202,6 +2202,8 @@
     var spec = (typeof window.MC_getTileSpec === 'function') ? window.MC_getTileSpec('light') : null;
     return {
       url: (spec && spec.url) || window.TILE_LIGHT,
+      // #741 M1b — a WMS light style is built from its descriptor.
+      wms: (spec && spec.wms) || null,
       attribution: (spec && spec.attribution) || '© OpenStreetMap contributors',
       maxZoom: (spec && spec.maxZoom) || 19
     };
