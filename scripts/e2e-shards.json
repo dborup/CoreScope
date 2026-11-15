@@ -144,6 +144,14 @@
       "measurementNote": "New suite; #781 Map Path profile hover cursor with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile: hovering the chart shows the dashed line at the sample under the pointer, the readout (distance, terrain, surface, clearance) and one dot on the drawn path at that fraction from A to B within 1.5 px; moving keeps the same dot; leaving hides all three; arrow keys step one sample and Shift ten with a polite readout; a touch drag at 360x740 moves the dot and it stays after the lift; 500 synthetic moves in one task cost one update and no chart rebuild, and spread over frames at most one per frame; Close and three Map visits leave no cursor listener, line or dot. About 40s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681/#721/#727/#746 DHM suites."
     },
     {
+      "file": "test-issue-794-half-profile-saved-view-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #794 a half-profile link from node detail keeps the viewer's saved Map view, with an intercepted dhm client-config block (profile: true) and /api/terrain/profile answered 503 (B is never picked): from a stored view near A (an animated pan) and far from it (an instant reset), at 1440x900 and on a 375x560 touch phone, entering through the node-detail action leaves localStorage map-view untouched once the pan to A has ended, a plain #/map and a reload open the stored view, and a pan by hand (mouse drag, or a one-finger CDP touch drag) on the half-profile page is saved. About 15s locally; no CI duration measured yet. Assigned to shard 1 next to the other #681/#746/#781 profile suites."
+    },
+    {
       "file": "test-issue-730-buildings-ui-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },
