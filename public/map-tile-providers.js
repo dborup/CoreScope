@@ -338,6 +338,9 @@
    *     BASE_STYLES entries are lazy) → L.tileLayer;
    *   - `wms` — { url, layers, … } → L.tileLayer.wms.
    * `attribution` and `maxZoom` are taken from the spec when it has them.
+   * A `wms.maxZoom` overrides a spec-level one — the WMS layer's own
+   * ceiling is the more specific of the two — and the call site's `opts`
+   * still win over both.
    *
    * `opts` are the Leaflet options the call site passes and they win over
    * everything derived from the spec, so routing a call site through this
@@ -896,7 +899,11 @@
       pane.style.pointerEvents = 'none';
       pane.classList.add('mc-ortho-pane');
     }
-    var ortho = L.tileLayer(cfg.url, {
+    // #741 M1a — the ortho layer is a base map like any other, so it is
+    // built by the one factory too. Its spec carries the URL only: the
+    // credit is assembled here (buildCredit) and every other option is
+    // this layer's own, so they travel as the call site's `opts`.
+    var ortho = createBaseLayer({ url: cfg.url }, {
       pane: ORTHO_PANE,
       minZoom: cfg.minZoom,
       maxZoom: cfg.maxZoom,
@@ -914,7 +921,10 @@
     retryPlaceholderTiles(map, ortho);
     var esri = _hasId('esri-imagery') ? REGISTRY['esri-imagery'] : null;
     if (!esri) return ortho;
-    var under = L.tileLayer(esri.url(), { attribution: esri.attribution, maxZoom: esri.maxZoom });
+    // The layer under it is a plain registry style, which is exactly what
+    // the factory is for: it resolves the lazy url() and carries the
+    // style's own credit and ceiling.
+    var under = createBaseLayer(esri);
     return L.layerGroup([under, ortho]);
   }
 

@@ -411,7 +411,10 @@
     }
     const _initTile = _resolveTileUrl(isDark);
     // #741 M1a — every base map goes through the registry's one factory,
-    // so a provider spec may be a tile template or a WMS layer.
+    // which builds a tile layer or a WMS layer from the spec it is given.
+    // What arrives here is always a tile template today: _resolveTileUrl()
+    // rebuilds the spec from `url`/`refUrl` and drops a `wms` descriptor,
+    // so reaching the WMS branch from this page is M1b's job.
     const tileLayer = window.MC_createBaseLayer(_initTile, { maxZoom: 19 }).addTo(autoLayerGroup);
     if (isDark && _initTile.refUrl) {
       _darkRefLayer = window.MC_createBaseLayer({ url: _initTile.refUrl, attribution: _initTile.attribution }, { maxZoom: 19 }).addTo(autoLayerGroup);

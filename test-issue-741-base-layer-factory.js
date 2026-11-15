@@ -29,7 +29,8 @@
  *   F5  Wiring: every converted call site calls the factory, and none of
  *       them calls L.tileLayer / L.tileLayer.wms directly any more. The
  *       only direct calls left under public/ are the factory's own (plus
- *       the overlay builder, which is not a base map).
+ *       the overlay builder, which is not a base map) and the two marked
+ *       no-registry fallbacks, which must sit behind a guard (see F9).
  *   F6  No behaviour change, proven by running the PRODUCTION call sites
  *       (map.js initial + theme sync, live.js initial + theme sync,
  *       nodes.js inset helper, regions map, both customizer previews, the
@@ -40,6 +41,14 @@
  *   F7  The registry's own invariants are untouched: the invert filter,
  *       the Esri gate, the attribution registry and the legacy-URL branch
  *       resolve exactly as before.
+ *   F8  How far a WMS spec actually gets today: the layer control hands
+ *       the factory a registry entry whole and reaches the WMS branch;
+ *       getTileSpec() still drops the descriptor, so no page can. Carrying
+ *       it through the per-page resolvers is M1b — these cases are the
+ *       tripwire, and no page comment may claim otherwise.
+ *   F9  A page whose registry never loaded still draws its own OSM (or
+ *       getTileUrl()) tiles: the factory lives in map-tile-providers.js,
+ *       so the two sites that worked without it keep a guarded fallback.
  *
  * Runs via: node test-issue-741-base-layer-factory.js (pure vm sandbox,
  * no jsdom, no Playwright, no network).
@@ -191,6 +200,35 @@ test('F3 an unknown field on the spec never reaches Leaflet (it would become a W
   }
 });
 
+/* Both of these branches were untested at the first review (#778 finding 3).
+ * The lazy url is the shape M1b needs — every BASE_STYLES entry resolves its
+ * url through a function — and the two maxZoom sources need a stated winner,
+ * because a WMS layer's own ceiling is more specific than the style's. */
+test('F3 a function-valued wms.url is invoked, like a lazy tile url', () => {
+  const ctx = makeSandbox({ mapCfg: ALL_ON });
+  let calls = 0;
+  const layer = factory(ctx)({
+    wms: { url: () => { calls++; return STUB_WMS.url; }, layers: 'a' },
+    attribution: STUB_CREDIT,
+  });
+  assert.strictEqual(layer.kind, 'wms');
+  assert.strictEqual(layer._url, STUB_WMS.url, 'never hand Leaflet a function');
+  assert.strictEqual(calls, 1, 'resolved once per layer, not per tile');
+  assert.ok(!('url' in layer.options), 'the url must not also become a WMS parameter');
+});
+
+test('F3 wms.maxZoom beats the spec, and the call site beats both', () => {
+  const ctx = makeSandbox({ mapCfg: ALL_ON });
+  const spec = { wms: { url: STUB_WMS.url, layers: 'a', maxZoom: 15 }, attribution: STUB_CREDIT, maxZoom: 19 };
+  sameOptions(factory(ctx)(spec).options.maxZoom, 15,
+    'the WMS layer\'s own ceiling is the specific one');
+  sameOptions(factory(ctx)(spec, { maxZoom: 12 }).options.maxZoom, 12,
+    'opts still win, as everywhere else (F4)');
+  const noWmsZoom = { wms: { url: STUB_WMS.url, layers: 'a' }, maxZoom: 19 };
+  sameOptions(factory(ctx)(noWmsZoom).options.maxZoom, 19,
+    'without one of its own the WMS layer keeps the style\'s ceiling');
+});
+
 test('F3 the descriptor can override every default', () => {
   const ctx = makeSandbox({ mapCfg: ALL_ON });
   const crs = { code: 'EPSG:25832' };
@@ -243,20 +281,34 @@ test('F4 a lazy function-valued url is invoked', () => {
 // ── F5: wiring ────────────────────────────────────────────────────────────
 console.log('\n── #741 F5: every base-map call site goes through the factory ──');
 
-// The ten call sites §6.3 of the research lists, by the file that owns them.
+// The ten call sites §6.3 of the research lists, by the file that owns them,
+// plus #777's two ortho layers inside the registry (#778 review finding 1).
 const CALL_SITE_FILES = {
   'map.js': 3, 'live.js': 3, 'nodes.js': 2, 'regions-map.js': 1,
-  'customize-v2.js': 2, 'home.js': 1, 'map-tile-providers.js': 2,
+  'customize-v2.js': 2, 'home.js': 1, 'map-tile-providers.js': 3,
 };
+
+// nodes.js routes both of its inset layers through one local wrapper nested
+// in _applyTilesToNodeMap, which guards on the factory being loaded at all
+// (#778 finding 4), so that name counts as a factory call too.
+const BUILDER_CALL = /(?:createBaseLayer|baseLayer)\s*\(/g;
 
 for (const file of Object.keys(CALL_SITE_FILES)) {
   test('F5 ' + file + ' builds its base layer through MC_createBaseLayer', () => {
     const src = read(file);
-    const n = (src.match(/createBaseLayer\s*\(/g) || []).length;
+    const n = (src.match(BUILDER_CALL) || []).length;
     assert.ok(n >= CALL_SITE_FILES[file],
       'expected at least ' + CALL_SITE_FILES[file] + ' factory call(s), found ' + n);
   });
 }
+
+test('F5 nodes.js routes both inset layers through its one guarded wrapper', () => {
+  const fn = extractFn('nodes.js', '_applyTilesToNodeMap');
+  assert.strictEqual((fn.match(/\bbaseLayer\s*\(/g) || []).length, 2,
+    'the base layer and the reference overlay, both through the wrapper');
+  assert.strictEqual((fn.match(/MC_createBaseLayer\b/g) || []).length, 2,
+    'and the wrapper is the only place that names the factory (guard + call)');
+});
 
 // Code lines only: the factory's own doc comment names L.tileLayer.
 const isComment = (line) => /^\s*(\/\/|\*|\/\*)/.test(line);
@@ -268,13 +320,43 @@ function directCalls(file) {
   return out;
 }
 
+/* A page may keep exactly one direct L.tileLayer: the branch that runs when
+ * map-tile-providers.js has not loaded at all, where there is no factory to
+ * call and the page's own literals are all it has (#778 review finding 4).
+ * It must carry the marker below, and the marker only counts when the line
+ * above it guards on MC_createBaseLayer, so an unguarded direct call cannot
+ * be marked quiet. */
+const FALLBACK_MARK = '// #741 no-registry fallback';
+const NO_REGISTRY_FALLBACK = { 'nodes.js': 1, 'regions-map.js': 1 };
+
 test('F5 no page builds a base layer with L.tileLayer directly any more', () => {
   const offenders = [];
+  const marked = {};
   for (const file of Object.keys(CALL_SITE_FILES)) {
     if (file === 'map-tile-providers.js') continue; // the factory and the overlays live there
-    for (const hit of directCalls(file)) offenders.push(file + ':' + hit);
+    for (const hit of directCalls(file)) {
+      if (hit.indexOf(FALLBACK_MARK) >= 0) { marked[file] = (marked[file] || 0) + 1; continue; }
+      offenders.push(file + ':' + hit);
+    }
   }
   assert.deepStrictEqual(offenders, [], 'these call sites bypass the factory:\n' + offenders.join('\n'));
+  assert.deepStrictEqual(marked, NO_REGISTRY_FALLBACK,
+    'exactly the two documented no-registry fallbacks, no more');
+});
+
+test('F5 a marked no-registry fallback really is guarded on the factory', () => {
+  for (const file of Object.keys(NO_REGISTRY_FALLBACK)) {
+    const lines = read(file).split('\n');
+    let found = 0;
+    lines.forEach((line, i) => {
+      if (line.indexOf(FALLBACK_MARK) < 0) return;
+      found++;
+      const near = lines.slice(Math.max(0, i - 4), i + 1).join('\n');
+      assert.ok(/typeof\s+(?:root|window)\.MC_createBaseLayer\s*===\s*'function'/.test(near),
+        file + ':' + (i + 1) + ' the fallback must sit behind a factory-loaded guard');
+    });
+    assert.strictEqual(found, NO_REGISTRY_FALLBACK[file], file + ': one marked fallback');
+  }
 });
 
 test('F5 inside the registry, L.tileLayer is called only by the factory and the overlay builder', () => {
@@ -450,7 +532,7 @@ for (const site of SITES) {
     if (site.winLocals) Object.assign(ctx.window, site.winLocals());
     Object.assign(ctx, site.locals(ctx));
     let code = '';
-    if (site.fn) code += extractFn(site.file, site.fn) + '\n';
+    for (const fn of [].concat(site.fn || [])) code += extractFn(site.file, fn) + '\n';
     if (site.from) code += extract(site.file, site.from, site.to, site.nth) + '\n';
     if (site.call) code += site.call + '\n';
     vm.runInContext(code, ctx, { filename: site.file });
@@ -459,6 +541,73 @@ for (const site of SITES) {
     for (const l of ctx.__layers) assert.strictEqual(l.kind, 'tile', 'today every base map is a tile layer');
   });
 }
+
+// #777 landed the "Aerial (Denmark)" base entry after this branch's CI ran,
+// with two more direct L.tileLayer calls (#778 review finding 1). Both are
+// base maps, so both go through the factory; these two cases pin the
+// routing and the options, not just F5's count.
+const ORTHO_BLOCK = {
+  url: '/api/map/dhm/ortho/{z}/{x}/{y}', minZoom: 7, maxZoom: 20,
+  bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
+  attribution: 'Indeholder data fra GeoDanmark, Ortofoto for\u00e5r, CC BY 4.0',
+  datasetName: 'Ortofoto for\u00e5r', datasetUrl: 'https://dataforsyningen.dk/data/981',
+  licenseName: 'CC BY 4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
+};
+const DHM_WITH_ORTHO = {
+  enabled: true, url: '/api/map/dhm/wms', layer: 'dhm_terraen_skyggekort',
+  minZoom: 7, maxZoom: 19, bounds: ORTHO_BLOCK.bounds,
+  attribution: 'Indeholder data fra Klimadatastyrelsen, Danmarks H\u00f8jdemodel, CC BY 4.0',
+  datasetName: 'Danmarks H\u00f8jdemodel', datasetUrl: 'https://dataforsyningen.dk/data/930',
+  licenseName: 'CC BY 4.0', licenseUrl: 'https://creativecommons.org/licenses/by/4.0/',
+  ortho: ORTHO_BLOCK,
+};
+
+function orthoGroup() {
+  const ctx = makeSandbox({ mapCfg: ALL_ON, dhm: DHM_WITH_ORTHO });
+  const { ctl } = buildControl(ctx, true);
+  const entry = ctl.base['dhm-ortho'];
+  assert.ok(entry, 'precondition: #728 offers the Aerial (Denmark) entry');
+  // L.layerGroup keeps its members in a Set, in the order they were given.
+  const members = entry.members ? Array.from(entry.members) : [];
+  return { ctx, entry, members };
+}
+
+test('F6 the #728 ortho base layer is built by the factory, with its own pane, bounds and credit', () => {
+  const body = extractFn('map-tile-providers.js', '_createOrthoLayer');
+  assert.ok(!/\bL\.tileLayer\s*\(/.test(body),
+    '_createOrthoLayer must not build a base layer itself');
+  assert.strictEqual((body.match(/createBaseLayer\s*\(/g) || []).length, 2,
+    'both the ortho layer and the layer under it go through the factory');
+
+  const { ctx, entry, members } = orthoGroup();
+  const ortho = entry.kind === 'layerGroup' ? members[members.length - 1] : entry;
+  const credit = ctx.window.MC_buildCredit(ORTHO_BLOCK.attribution, ctx.window.MC_creditLinks(ORTHO_BLOCK));
+  assert.strictEqual(ortho.kind, 'tile');
+  assert.strictEqual(ortho._url, ORTHO_BLOCK.url);
+  sameOptions(Object.keys(ortho.options).sort(),
+    ['attribution', 'bounds', 'className', 'maxZoom', 'minZoom', 'pane'],
+    'the factory invents no option for the ortho layer');
+  assert.strictEqual(ortho.options.pane, 'mcOrthoPane');
+  assert.strictEqual(ortho.options.className, 'mc-ortho-tiles');
+  assert.strictEqual(ortho.options.minZoom, ORTHO_BLOCK.minZoom);
+  assert.strictEqual(ortho.options.maxZoom, ORTHO_BLOCK.maxZoom);
+  assert.strictEqual(ortho.options.attribution, credit);
+  sameOptions(ortho.options.bounds._bounds, ORTHO_BLOCK.bounds, 'bounds stay an L.latLngBounds');
+  assert.strictEqual(typeof ortho._isValidTile, 'function',
+    'the foreign-mask wrap still has a GridLayer to extend');
+});
+
+test('F6 the Esri layer under the ortho layer is the registry style, built by the factory', () => {
+  const { ctx, entry, members } = orthoGroup();
+  assert.strictEqual(entry.kind, 'layerGroup', 'Esri is on, so the entry is a group');
+  assert.strictEqual(members.length, 2, 'Esri under the ortho layer, in that order');
+  const esri = ctx.window.MC_TILE_PROVIDERS['esri-imagery'];
+  const under = members[0];
+  assert.strictEqual(under.kind, 'tile');
+  assert.strictEqual(under._url, esri.url(), 'the style\'s lazy url is resolved by the factory');
+  sameOptions(under.options, { attribution: esri.attribution, maxZoom: esri.maxZoom },
+    'exactly the options the direct call built before #778');
+});
 
 test('F6 the layer control offers every style with its own credit and ceiling', () => {
   const ctx = makeSandbox({ mapCfg: ALL_ON });
@@ -552,6 +701,108 @@ test('F7 the credit builder and the compact class are untouched', () => {
     ]),
     'Stub Agency, <a href="https://example.com/d" target="_blank" rel="noopener noreferrer">Stub Dataset</a>, ' +
     '<a href="https://example.com/l" target="_blank" rel="license">CC BY 4.0</a>');
+});
+
+// ── F8: how far a WMS spec actually gets today ────────────────────────────
+console.log('\n── #741 F8: a WMS spec reaches the factory from the layer control only ──');
+
+/* The first review of #778 found three comments claiming an inset, the
+ * regions map and the Map page already render a WMS provider. They do not:
+ * only the layer control hands the factory a registry entry whole. Every
+ * other path rebuilds the spec from `url`/`refUrl` and drops `wms`, so
+ * carrying it through getTileSpec() and the per-page resolvers is M1b.
+ * These two cases pin that, so M1b fails here and has to update the
+ * comments with the code. */
+const STUB_WMS_STYLE = {
+  id: 'stub-wms', provider: 'osm', label: 'Stub WMS', type: 'light', invertFilter: null,
+  wms: { url: 'https://wms.example.invalid/stub', layers: 'stub_layer', maxZoom: 19 },
+  attribution: STUB_CREDIT,
+};
+
+// Injects the stub style into the live REGISTRY object and makes it active.
+function withStubWms() {
+  const ctx = makeSandbox({ mapCfg: ALL_ON });
+  ctx.window.MC_TILE_PROVIDERS['stub-wms'] = STUB_WMS_STYLE;
+  assert.strictEqual(ctx.window.MC_setLightTileProvider('stub-wms'), true, 'the stub style is selectable');
+  return ctx;
+}
+
+test('F8 getTileSpec() drops the wms descriptor — the page resolvers are M1b', () => {
+  const ctx = withStubWms();
+  const spec = ctx.window.MC_getTileSpec('light');
+  assert.ok(spec, 'the active style still resolves to a spec');
+  assert.ok(!spec.wms, 'M1b: getTileSpec() must learn to carry the descriptor');
+  assert.ok(!spec.url, 'a WMS style has no tile template, so today the pages get nothing');
+});
+
+test('F8 the layer control is the one site that hands the factory a wms spec', () => {
+  const ctx = withStubWms();
+  const { ctl } = buildControl(ctx, true);
+  const layer = ctl.base['stub-wms'];
+  assert.ok(layer, 'the control offers every registry style (F6)');
+  assert.strictEqual(layer.kind, 'wms', 'from here the factory does reach its WMS branch');
+  assert.strictEqual(layer._url, STUB_WMS_STYLE.wms.url);
+});
+
+test('F8 no page comment claims a WMS provider renders there today', () => {
+  // Contiguous // blocks, flattened to one line each.
+  for (const file of ['map.js', 'live.js', 'nodes.js', 'regions-map.js', 'home.js', 'customize-v2.js']) {
+    const blocks = [];
+    let cur = null;
+    for (const line of read(file).split('\n')) {
+      const m = line.match(/^\s*\/\/ ?(.*)$/);
+      if (m) { cur = cur ? cur + ' ' + m[1] : m[1]; continue; }
+      if (cur) { blocks.push(cur); cur = null; }
+    }
+    if (cur) blocks.push(cur);
+    for (const b of blocks) {
+      if (!/\bWMS\b/i.test(b)) continue;
+      assert.ok(/M1b/.test(b),
+        file + ': a comment that names WMS must say the pages cannot reach it yet ' +
+        '(M1b), not that it already works:\n    ' + b);
+    }
+  }
+});
+
+// ── F9: the fallback without the registry ─────────────────────────────────
+console.log('\n── #741 F9: a page whose registry never loaded still draws tiles ──');
+
+/* map-tile-providers.js owns the factory, so a page that loads without it
+ * has no factory to call. index.html loads the registry first, so this
+ * cannot happen in production — but before this refactor both of these
+ * sites drew OSM from their own literals, and an unguarded call turned that
+ * into a TypeError (#778 review finding 4). */
+test('F9 the regions map still draws OSM with no registry at all', () => {
+  const ctx = siteCtx(null);
+  for (const k of ['MC_createBaseLayer', 'MC_getTileSpec']) { delete ctx.window[k]; delete ctx[k]; }
+  Object.assign(ctx, { root: ctx.window, map: makeMap(), tileLayer: null });
+  vm.runInContext(extract('regions-map.js',
+    "const theme = document.documentElement.getAttribute('data-theme')",
+    "map.getPane('tilePane').style.filter = tile && tile.invertFilter ? tile.invertFilter : '';"),
+    ctx, { filename: 'regions-map.js' });
+  const got = ctx.__layers.map(l => ({ url: l._url, options: l.options }));
+  sameOptions(got, [{
+    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    options: { maxZoom: 19, attribution: OSM_CREDIT },
+  }], 'exactly the layer this site built before the factory existed');
+});
+
+test('F9 the nodes inset still draws getTileUrl()\'s tiles with no registry at all', () => {
+  const ctx = siteCtx(null);
+  delete ctx.window.MC_createBaseLayer; delete ctx.MC_createBaseLayer;
+  Object.assign(ctx.window, {
+    getTileUrl: () => SPEC.url,
+    getActiveTileProvider: () => ({ attribution: SPEC.attribution, refUrl: SPEC_REF.refUrl, invertFilter: null }),
+  });
+  ctx.__insetMap = makeMap();
+  vm.runInContext(
+    extractFn('nodes.js', '_applyTilesToNodeMap') + '\n_applyTilesToNodeMap(__insetMap);\n',
+    ctx, { filename: 'nodes.js' });
+  const got = ctx.__layers.map(l => ({ url: l._url, options: l.options }));
+  sameOptions(got, [
+    { url: SPEC.url, options: { maxZoom: 18, attribution: SPEC.attribution } },
+    { url: SPEC_REF.refUrl, options: { maxZoom: 18 } },
+  ], 'both inset layers, exactly as the factory builds them');
 });
 
 console.log('\n═══════════════════════════════════════');
