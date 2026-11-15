@@ -67,9 +67,9 @@ func surfaceWindow(e, n, r float64) (RasterRequest, bool) {
 // SurfaceAt measures the surface above the ground within radiusM metres of
 // at: one DSM and one DTM raster from src, fetched concurrently (src is the
 // shared Client, which bounds the upstream concurrency). The caller
-// coalesces and admits calls (cmd/server); perCall bounds each raster
-// (0: no own limit). A point DHM does not cover is ErrNotCovered with no
-// call; a radius outside (0, MaxSurfaceRadiusM] is ErrBadRequest.
+// coalesces and admits calls and bounds them through ctx (cmd/server).
+// A point DHM does not cover is ErrNotCovered with no call; a radius
+// outside (0, MaxSurfaceRadiusM] is ErrBadRequest.
 func SurfaceAt(ctx context.Context, src ElevationSource, at LatLon, radiusM float64) (Surface, error) {
 	if !(radiusM > 0 && radiusM <= MaxSurfaceRadiusM) {
 		return Surface{}, ErrBadRequest

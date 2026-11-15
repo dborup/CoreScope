@@ -26,9 +26,13 @@ import (
 // kept per node in a bounded LRU keyed by the public key and the position
 // rounded to 5 decimals, so a node that moves misses the cache and is
 // measured again. A cache hit is O(1); a miss costs one DSM and one DTM
-// raster of about 52 × 52 px, coalesced (Flight) and admitted like a
-// profile fetch. Hidden nodes never get here: resolveTerrainEnd refuses
-// them before any coordinate is read (#743).
+// raster of about 52 × 52 px, coalesced (Flight), admitted like a
+// profile fetch, and charged to the client's per-IP limit like an
+// elevation miss (one charge per request). Only the profile route
+// measures; the share card and /p read the cache alone (cachedEstimates),
+// so all three draw the same height once it is known. Hidden nodes never
+// get here: resolveTerrainEnd refuses them before any coordinate is read
+// (#743).
 
 const (
 	// terrainEstimateEntries bounds the estimate cache: about the node
@@ -110,6 +114,41 @@ func (p *terrainProfiler) wantsEstimate(e terrainEnd, override *float64) bool {
 	return true
 }
 
+// estimateKey is e's estimate cache key: its public key and its position
+// snapped like the profile cache key.
+func estimateKey(e terrainEnd) terrainEstimateKey {
+	return terrainEstimateKey{pubkey: e.pubkey, lat: terrainSnapCoord(e.pt.Lat), lon: terrainSnapCoord(e.pt.Lon)}
+}
+
+// cachedSurface is the surface under node e from the caches alone, never
+// upstream. known is false when a profile would measure it: neither an
+// estimate nor a recent failure is remembered.
+func (p *terrainProfiler) cachedSurface(e terrainEnd) (s *float64, known bool) {
+	key, now := estimateKey(e), p.now()
+	if b, ok := p.estimate.cache.Get(key, now); ok {
+		return decodeSurface(b), true
+	}
+	_, failed := p.estimate.failed.Get(key, now)
+	return nil, failed
+}
+
+// cachedEstimates sets surfaceM on the endpoints that want an estimate
+// and have one cached, and reports whether any of them still has to be
+// measured. It never calls upstream, so the share card and /p, which
+// must not, see the same estimate as the panel once it has been measured
+// (#789 review); without one their role height stands.
+func (p *terrainProfiler) cachedEstimates(ends *[2]terrainEnd, overrides [2]*float64) (pending bool) {
+	for i := range ends {
+		if !p.wantsEstimate(ends[i], overrides[i]) {
+			continue
+		}
+		s, known := p.cachedSurface(ends[i])
+		ends[i].surfaceM = s
+		pending = pending || !known
+	}
+	return pending
+}
+
 // estimateEnds sets surfaceM on the endpoints that want an estimate,
 // measuring the ones not cached, concurrently. A failure leaves the
 // endpoint without one: its role height stands.
@@ -132,14 +171,10 @@ func (p *terrainProfiler) estimateEnds(ctx context.Context, ends *[2]terrainEnd,
 // nil when there is none (not covered, too little data, or the
 // measurement failed or was refused).
 func (p *terrainProfiler) surfaceFor(ctx context.Context, e terrainEnd) *float64 {
-	key := terrainEstimateKey{pubkey: e.pubkey, lat: terrainSnapCoord(e.pt.Lat), lon: terrainSnapCoord(e.pt.Lon)}
-	now := p.now()
-	if b, ok := p.estimate.cache.Get(key, now); ok {
-		return decodeSurface(b)
+	if s, known := p.cachedSurface(e); known {
+		return s
 	}
-	if _, ok := p.estimate.failed.Get(key, now); ok {
-		return nil
-	}
+	key := estimateKey(e)
 	at := dhm.LatLon{Lat: float64(key.lat) / terrainSnap, Lon: float64(key.lon) / terrainSnap}
 	// Admitted like a profile fetch: a refusal (dhm.ErrAdmissionFull) did
 	// no upstream work, so nothing is remembered and the next profile

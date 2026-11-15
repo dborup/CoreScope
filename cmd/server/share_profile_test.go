@@ -49,11 +49,16 @@ func newShareEnv(t *testing.T, share bool, brand map[string]string) *shareEnv {
 	return newShareEnvWith(t, dhm.ProfileConfig{Share: dhm.ShareConfig{Enabled: share}}, brand)
 }
 
-// newShareEnvWith is newShareEnv with the whole profile config.
-func newShareEnvWith(t *testing.T, pc dhm.ProfileConfig, brand map[string]string) *shareEnv {
+// newShareEnvWith is newShareEnv with the whole profile config, and the
+// profiler's dependencies edited by edit, if any (#789: the surface).
+func newShareEnvWith(t *testing.T, pc dhm.ProfileConfig, brand map[string]string, edit ...func(*terrainProfilerDeps)) *shareEnv {
 	t.Helper()
 	src := newFakeElevation(t, flatElev(10))
-	env := newTerrainEnv(t, src, pc, nil)
+	var ed func(*terrainProfilerDeps)
+	if len(edit) > 0 {
+		ed = edit[0]
+	}
+	env := newTerrainEnvWith(t, src, pc, nil, ed)
 	doc := newIndexDoc(sharePublicDir, newOGMeta(brandPick(brand), sharePublicDir, nil))
 	router := mux.NewRouter()
 	env.srv.RegisterRoutes(router)

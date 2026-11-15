@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +15,7 @@ import (
 	"time"
 
 	"github.com/meshcore-analyzer/dhm"
+	"github.com/meshcore-analyzer/profilecard"
 )
 
 // #789 M1 — the antenna height estimated from the surface model: the
@@ -26,6 +30,7 @@ type surfaceFake struct {
 	surfaceM float32
 	err      error
 	delay    time.Duration
+	holes    int // DSM pixels i with i%10 < holes have no data
 	calls    atomic.Int64
 	reqs     []dhm.RasterRequest
 }
@@ -34,7 +39,7 @@ func (f *surfaceFake) FetchRaster(ctx context.Context, r dhm.RasterRequest) (dhm
 	f.calls.Add(1)
 	f.mu.Lock()
 	f.reqs = append(f.reqs, r)
-	h, err, delay := f.surfaceM, f.err, f.delay
+	h, err, delay, holes := f.surfaceM, f.err, f.delay, f.holes
 	f.mu.Unlock()
 	if delay > 0 {
 		select {
@@ -55,6 +60,9 @@ func (f *surfaceFake) FetchRaster(ctx context.Context, r dhm.RasterRequest) (dhm
 			PixelE: (r.BBox[2] - r.BBox[0]) / float64(r.Width), PixelN: (r.BBox[3] - r.BBox[1]) / float64(r.Height)}}
 	for i := range g.Values {
 		g.Values[i] = v
+		if r.Model == dhm.ModelSurface && i%10 < holes {
+			g.Values[i] = float32(math.NaN())
+		}
 	}
 	return g, nil
 }
@@ -477,4 +485,205 @@ func BenchmarkAntennaEstimate789_Miss(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// ── Review fixes (#791) ───────────────────────────────────────────────────
+
+// The coverage gate: a window with too little data in both models gives
+// no estimate (and that answer is cached); one just above the gate does.
+func TestAntennaEstimate789_CoverageGate(t *testing.T) {
+	at := dhm.LatLon{Lat: est789Lat, Lon: est789Lon}
+	for _, tc := range []struct {
+		name  string
+		holes int
+		h     float64
+		src   string
+	}{
+		// Coverage about 0.49 and 0.59: either side of the 0.5 gate.
+		{"just under the gate keeps the default", 2, 10, "role-default"},
+		{"just over the gate estimates", 1, 22, "dsm-estimate"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Precondition: the fake lands on the side of the gate the case
+			// is about.
+			s, err := dhm.SurfaceAt(context.Background(), &surfaceFake{surfaceM: 20, holes: tc.holes}, at, terrainEstimateRadiusM)
+			if err != nil || (s.Coverage >= terrainEstimateMinCoverage) != (tc.src == "dsm-estimate") || s.P90M != 20 {
+				t.Fatalf("precondition: coverage %v p90 %v err %v", s.Coverage, s.P90M, err)
+			}
+			env := newEst789Env(t, &surfaceFake{surfaceM: 20, holes: tc.holes}, nil)
+			pk := pk789("a")
+			env.addNode(t, pk, "Roof repeater", "repeater", est789Lat, est789Lon)
+			for i := 0; i < 2; i++ {
+				if a := env.endA(t, pk); a.AntennaM != tc.h || a.AntennaSource != tc.src {
+					t.Fatalf("request %d: %+v, want %v %s", i, a, tc.h, tc.src)
+				}
+			}
+			if n := env.surface.calls.Load(); n != 2 {
+				t.Fatalf("%d rasters, want 2: the answer is cached either way", n)
+			}
+		})
+	}
+}
+
+// A measurement every caller left is not a failure of upstream: it is not
+// backed off, and the next profile measures again.
+func TestAntennaEstimate789_CancelNotBackedOff(t *testing.T) {
+	env := newEst789Env(t, &surfaceFake{surfaceM: 20, delay: time.Minute}, nil)
+	pk := pk789("a")
+	env.addNode(t, pk, "Roof repeater", "repeater", est789Lat, est789Lon)
+	end, ok := env.srv.resolveTerrainEnd(context.Background(), terrainRef{pubkey: pk})
+	if !ok {
+		t.Fatal("node not resolved")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan *float64, 1)
+	go func() { done <- env.p.surfaceFor(ctx, end) }()
+	waitUntil(t, "the measurement to start", func() bool { return env.surface.calls.Load() == 2 })
+	cancel()
+	if s := <-done; s != nil {
+		t.Fatalf("surface %v from a cancelled measurement", *s)
+	}
+	waitUntil(t, "the measurement to end", func() bool { return env.p.estimate.flight.Pending() == 0 })
+	if env.p.estimate.failed.Len() != 0 || env.p.estimate.cache.Len() != 0 {
+		t.Fatal("a cancelled measurement was remembered")
+	}
+	env.surface.mu.Lock()
+	env.surface.delay = 0
+	env.surface.mu.Unlock()
+	if a := env.endA(t, pk); a.AntennaSource != "dsm-estimate" || a.AntennaM != 22 {
+		t.Fatalf("after the cancel %+v, want the estimate", a)
+	}
+}
+
+// An estimate miss is charged to the per-IP limit, once per request, like
+// an elevation miss; a refused estimate keeps the role height and is not
+// remembered. A request whose elevations and estimate are both cached is
+// not charged.
+func TestAntennaEstimate789_PerIPCharge(t *testing.T) {
+	surface := &surfaceFake{surfaceM: 20}
+	env := newTerrainEnvWith(t, newFakeElevation(t, flatElev(30)), dhm.ProfileConfig{RateLimitPerMin: intp(2)}, nil,
+		func(d *terrainProfilerDeps) { d.surface = surface })
+	pk := pk789("a")
+	if _, err := env.srv.db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
+		VALUES (?, 'Roof repeater', 'repeater', ?, ?, datetime('now'), datetime('now'), 1)`, pk, est789Lat, est789Lon); err != nil {
+		t.Fatal(err)
+	}
+	env.srv.store.InvalidateNodeCache()
+	client := func(r *http.Request) { r.RemoteAddr = "198.51.100.9:1000" }
+	b := offsetPt(est789Lat, est789Lon, 3000, 0)
+	get := func(extra ...string) *httptest.ResponseRecorder { return env.get(pathQuery(pk, b, extra...), client) }
+
+	// 1: the elevations miss, no estimate wanted (a request height).
+	if a := decodeProfile(t, get("ha=5")).A; a.AntennaSource != "request" {
+		t.Fatalf("request 1: %+v", a)
+	}
+	// 2: the elevations hit, the estimate misses: the second charge.
+	if a := decodeProfile(t, get()).A; a.AntennaSource != "dsm-estimate" {
+		t.Fatalf("request 2: %+v", a)
+	}
+	// 3: everything cached: free, though the budget is spent.
+	for i := 0; i < 3; i++ {
+		if a := decodeProfile(t, get()).A; a.AntennaSource != "dsm-estimate" {
+			t.Fatalf("cached request %d: %+v", i, a)
+		}
+	}
+	if n := surface.calls.Load(); n != 2 {
+		t.Fatalf("%d rasters, want 2", n)
+	}
+	// 4: the estimate forgotten, the budget spent: no measurement, the role
+	// height, and nothing remembered.
+	env.p.estimate = newTerrainEstimator(surface)
+	w := get()
+	if a := decodeProfile(t, w).A; a.AntennaSource != "role-default" || a.AntennaM != 10 {
+		t.Fatalf("refused estimate: %+v", a)
+	}
+	if n := surface.calls.Load(); n != 2 || env.p.estimate.cache.Len() != 0 || env.p.estimate.failed.Len() != 0 {
+		t.Fatalf("a refused estimate measured (%d rasters) or was remembered", n)
+	}
+	// An elevation miss over budget is still 429.
+	if w := env.get(pathQuery(pk, offsetPt(est789Lat, est789Lon, 4000, 0)), client); w.Code != http.StatusTooManyRequests {
+		t.Fatalf("elevation miss over budget: %d", w.Code)
+	}
+}
+
+// The panel, the share card and /p show the same antenna for a roof
+// repeater: height, source and verdict. The card and /p read the estimate
+// from its cache only; before the panel has measured it, they keep the
+// role height, and none of them calls upstream for it.
+func TestAntennaEstimate789_CardAndShareAgreeWithPanel(t *testing.T) {
+	surface := &surfaceFake{surfaceM: 20}
+	env := newShareEnvWith(t, dhm.ProfileConfig{Share: dhm.ShareConfig{Enabled: true}, RateLimitPerMin: intp(0)}, nil,
+		func(d *terrainProfilerDeps) { d.surface = surface })
+	// A ridge halfway that blocks the line from a 10 m antenna but not
+	// from a 22 m one, so the verdict depends on the estimate.
+	e0, _ := dhm.ToUTM32(est789Lat, est789Lon)
+	env.src.elev = func(e, n float64) float32 {
+		if d := e - e0; d > 1400 && d < 1600 {
+			return 19
+		}
+		return 10
+	}
+	pk := pk789("a")
+	env.addNode(t, pk, "Roof repeater", "repeater", est789Lat, est789Lon)
+	b := offsetPt(est789Lat, est789Lon, 3000, 0)
+	target := shareQ(pk, b)
+	var drawn TerrainProfileResponse
+	env.p.card.render = func(resp profilecard.TerrainProfileResponse, names [2]string, pal profilecard.Palette, opt profilecard.Options) ([]byte, error) {
+		drawn = resp
+		return profilecard.Render(resp, names, pal, opt)
+	}
+	cardURL := func() string {
+		img, _ := url.Parse(mustMeta(t, env.share(target).Body.String(), "og:image"))
+		return img.RawQuery
+	}
+
+	// Before the panel: the role height everywhere, no measurement.
+	before := cardURL()
+	wantCard(t, env.card(before), "miss")
+	if drawn.A.AntennaSource != "role-default" || drawn.A.AntennaM != 10 {
+		t.Fatalf("card before the estimate: %+v", drawn.A)
+	}
+	if n := surface.calls.Load(); n != 0 {
+		t.Fatalf("%d surface rasters from the card and /p, want 0", n)
+	}
+	fallback := profilecard.MainVerdict(drawn)
+
+	// The panel measures.
+	panel := decodeProfile(t, env.get(pathQuery(pk, b)))
+	if panel.A.AntennaSource != "dsm-estimate" || panel.A.AntennaM != 22 || !panel.A.Assumed {
+		t.Fatalf("panel %+v", panel.A)
+	}
+	pv := profilecard.MainVerdict(panel)
+	if pv.Word == fallback.Word {
+		t.Fatalf("precondition: the verdict %q does not depend on the estimate", pv.Word)
+	}
+
+	// The card and /p now agree with the panel, under a new v.
+	after := cardURL()
+	if after == before {
+		t.Fatal("the card's v did not change with the estimate")
+	}
+	wantCard(t, env.card(after), "miss")
+	if !sameEnd789(drawn.A, panel.A) || profilecard.MainVerdict(drawn) != pv {
+		t.Fatalf("card %+v %+v, panel %+v %+v", drawn.A, profilecard.MainVerdict(drawn), panel.A, pv)
+	}
+	share := env.cachedResponse(t, target)
+	if !sameEnd789(share.A, panel.A) || profilecard.MainVerdict(share) != pv {
+		t.Fatalf("/p %+v, panel %+v", share.A, panel.A)
+	}
+	if got := titleOf(t, env.share(target).Body.String()); !strings.HasSuffix(got, " · "+pv.Word) {
+		t.Fatalf("/p title %q, want the panel's verdict %q", got, pv.Word)
+	}
+	if n := surface.calls.Load(); n != 2 {
+		t.Fatalf("%d surface rasters, want the panel's 2 only", n)
+	}
+}
+
+// sameEnd789 compares two endpoints by value, the ground included.
+func sameEnd789(a, b TerrainEndpoint) bool {
+	if (a.GroundM == nil) != (b.GroundM == nil) || (a.GroundM != nil && *a.GroundM != *b.GroundM) {
+		return false
+	}
+	a.GroundM, b.GroundM = nil, nil
+	return a == b
 }

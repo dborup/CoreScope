@@ -611,10 +611,13 @@ type terrainEnd struct {
 // (resolveTerrainRequest), whichever route the query came in on.
 type terrainRequest struct {
 	q      terrainQuery
-	ends   [2]terrainEnd
-	ka, kb [2]int64   // the snapped endpoints of the cache key
-	a, b   dhm.LatLon // the same, as coordinates
+	ends   [2]terrainEnd // surfaceM set from the estimate cache (#789)
+	ka, kb [2]int64      // the snapped endpoints of the cache key
+	a, b   dhm.LatLon    // the same, as coordinates
 	plan   dhm.Plan
+	// estimatePending: an endpoint's antenna estimate is neither cached
+	// nor backed off, so the profile route would measure it.
+	estimatePending bool
 }
 
 // elevationKey is the elevation cache key of a resolved request.
@@ -643,6 +646,9 @@ func (s *Server) resolveTerrainRequest(ctx context.Context, p *terrainProfiler, 
 		}
 		req.ends[i] = e
 	}
+	// The antenna estimate, from its cache only (#789): every route then
+	// draws the same heights; only the profile route measures a miss.
+	req.estimatePending = p.cachedEstimates(&req.ends, [2]*float64{tq.ha, tq.hb})
 	req.ka = [2]int64{terrainSnapCoord(req.ends[0].pt.Lat), terrainSnapCoord(req.ends[0].pt.Lon)}
 	req.kb = [2]int64{terrainSnapCoord(req.ends[1].pt.Lat), terrainSnapCoord(req.ends[1].pt.Lon)}
 	req.a = dhm.LatLon{Lat: float64(req.ka[0]) / terrainSnap, Lon: float64(req.ka[1]) / terrainSnap}
@@ -677,8 +683,49 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 	plan := req.plan
 	n := len(plan.E)
 
-	var elev terrainElevation
+	var (
+		elev terrainElevation
+		key  terrainKey
+		data []byte
+		hit  bool
+	)
 	state := "none"
+	if plan.Calls() > 0 {
+		key = p.elevationKey(req)
+		data, hit = p.cache.Get(key, p.now())
+		// An entry of another format (#730 M2) is fetched afresh, not served.
+		hit = hit && terrainEntryOK(data, n, tq.both, p.classifies(tq.both))
+		state = "hit"
+		if !hit {
+			state = "miss"
+		}
+	}
+	// One per-IP charge for a request that does any upstream work: the
+	// elevations, or an antenna estimate not cached (#789 review). A
+	// refused estimate is skipped, not refused: the role height stands
+	// for this response and nothing is remembered.
+	measure := req.estimatePending
+	if state == "miss" || measure {
+		if ok, retry := p.limiter.allow(r); !ok {
+			if state == "miss" {
+				writeRateLimited(w, retry)
+				return
+			}
+			measure = false
+		}
+	}
+	ends := req.ends
+	overrides := [2]*float64{tq.ha, tq.hb}
+	// The estimate is measured beside the elevations, on a copy of the
+	// ends, so an early return leaves nothing writing to them.
+	var estimated chan [2]terrainEnd
+	if measure {
+		estimated = make(chan [2]terrainEnd, 1)
+		go func(e [2]terrainEnd) {
+			p.estimateEnds(r.Context(), &e, overrides)
+			estimated <- e
+		}(ends)
+	}
 	if plan.Calls() == 0 {
 		// Nothing of the path is inside DHM: no upstream call, no charge.
 		elev = terrainElevation{dtm: nanSlice(n)}
@@ -689,17 +736,8 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 			elev.classes = unclassified(n)
 		}
 	} else {
-		key := p.elevationKey(req)
-		data, hit := p.cache.Get(key, p.now())
-		// An entry of another format (#730 M2) is fetched afresh, not served.
-		hit = hit && terrainEntryOK(data, n, tq.both, p.classifies(tq.both))
-		state = "hit"
+		var err error
 		if !hit {
-			state = "miss"
-			if ok, retry := p.limiter.allow(r); !ok {
-				writeRateLimited(w, retry)
-				return
-			}
 			// Admission is per fetch, not per request: callers that join
 			// a running fetch add no work and take no slot.
 			data, _, err = p.flight.DoAdmitted(r.Context(), key.String(), p.deadline, p.admit, p.elevationCall(key, &plan, tq.both))
@@ -716,9 +754,10 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 			elev = p.retryFill(r, key, &plan, elev)
 		}
 	}
+	if estimated != nil {
+		ends = <-estimated
+	}
 	w.Header().Set("X-CoreScope-Cache", state)
-	ends := req.ends
-	p.estimateEnds(r.Context(), &ends, [2]*float64{tq.ha, tq.hb})
 	writeJSON(w, p.buildResponse(tq, ends, req.a, req.b, &plan, elev))
 }
 
