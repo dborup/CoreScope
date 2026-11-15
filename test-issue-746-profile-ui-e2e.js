@@ -23,6 +23,9 @@
  *      deep link (desktop) and a /p handoff (360x740 phone) put both ends
  *      inside the map and above the panel; a pan or a Move afterwards is
  *      not undone by a second fit; without a profile the stored view stays.
+ *   6. #765 §1 — the fit is never saved as the viewer's view: after a link
+ *      the stored view is unchanged and a plain #/map opens it again, while
+ *      the viewer's own pan is still saved.
  *
  * Usage:
  *   BASE_URL=http://localhost:13581 node test-issue-746-profile-ui-e2e.js
@@ -324,6 +327,11 @@ function hashParams(hash) {
       assert(Math.hypot(panned.a.x - before.a.x, panned.a.y - before.a.y) > 60, 'setup: the pan did not move the map');
       assert(Math.abs(after.a.x - panned.a.x) <= 1 && Math.abs(after.a.y - panned.a.y) <= 1,
         'the map moved after the pan: ' + JSON.stringify({ before: before.a, panned: panned.a, after: after.a }));
+      // #765 §1: only the fit is kept out of the stored view; the viewer's
+      // own pan is saved as always.
+      const saved = await page.evaluate(() => ({ s: JSON.parse(localStorage.getItem('map-view')), c: window.__mc_map.getCenter(), z: window.__mc_map.getZoom() }));
+      assert(Math.abs(saved.s.lat - saved.c.lat) < 1e-9 && Math.abs(saved.s.lng - saved.c.lng) < 1e-9 && saved.s.zoom === saved.z,
+        'the pan was not saved: ' + JSON.stringify(saved));
     });
     await step('fit: a Move afterwards is not followed by a second fit', async () => {
       const before = await endsInView(page);
@@ -338,6 +346,40 @@ function hashParams(hash) {
       assert(rec.profile.length === n + 1, 'the move was not measured');
       assert(Math.abs(after.b.x - before.b.x) <= 1 && Math.abs(after.b.y - before.b.y) <= 1,
         'the map moved after Move A: ' + JSON.stringify({ before: before.b, after: after.b }));
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
+    });
+    await ctx.close();
+  }
+
+  /* storedView is the viewer's saved Map view, as map.js writes it. */
+  async function storedView(page) {
+    return JSON.parse(await page.evaluate(() => localStorage.getItem('map-view')));
+  }
+  const isElsewhere = (v) => !!v && Math.abs(v.lat - 56.08) < 1e-6 && Math.abs(v.lng - 9.62) < 1e-6 && v.zoom === 12;
+
+  // #765 §1: the fit is the link's view, not the viewer's, so it is never
+  // saved. The init script seeds the stored view on every page load, so
+  // the plain Map page is reached by a hash change, not a reload.
+  {
+    const { ctx, page, rec } = await newCtx({ storage: ELSEWHERE });
+    await step('fit (#765): the profile fit is not saved over the stored view', async () => {
+      await page.goto(`${BASE}/#/map?profile=${P1}&ha=19&hb=19`, { waitUntil: 'domcontentloaded' });
+      await waitForRequestFor(page, rec, P1);
+      await page.waitForTimeout(400);
+      assert((await endsInView(page)).ok, 'setup: the link was not fitted');
+      const v = await storedView(page);
+      assert(isElsewhere(v), 'the fit overwrote the stored view: ' + JSON.stringify(v));
+    });
+    await step('fit (#765): a plain #/map afterwards opens the stored view', async () => {
+      await page.evaluate(() => { window.__mc_map.__before765 = true; });
+      await page.evaluate(() => { location.hash = '#/map'; });
+      await page.waitForFunction(() => window.__mc_map && !window.__mc_map.__before765
+        && document.querySelector('#leaflet-map[data-loaded="true"]'), null, { timeout: 30000 });
+      const view = await page.evaluate(() => {
+        const c = window.__mc_map.getCenter();
+        return { lat: c.lat, lng: c.lng, zoom: window.__mc_map.getZoom() };
+      });
+      assert(isElsewhere(view), 'the Map page opened at ' + JSON.stringify(view));
       assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     });
     await ctx.close();
