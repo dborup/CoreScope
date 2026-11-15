@@ -1390,9 +1390,12 @@ atest('an operator height is never overruled by the customizer', async () => {
   }
 });
 
-// #789 M1: the surface-model estimate is evidence about this node, not a
-// class-wide default, so a customizer role height does not replace it.
-atest('a surface-model estimate is never overruled by the customizer', async () => {
+// #789 M1: the server floors the estimate at the role height that would
+// otherwise apply (max(role, surface + 2)). The client mirrors that floor
+// for the viewer's customizer role height: a higher customizer height wins
+// (a mast the surface model cannot see), a lower one never replaces the
+// estimate.
+atest('a customizer role height above the estimate replaces it', async () => {
   const live = loadLive();
   live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: 25 }) };
   const f = deferredFetch();
@@ -1402,10 +1405,30 @@ atest('a surface-model estimate is never overruled by the customizer', async () 
   data.a.antennaM = 22;
   f.calls[0].settle.resolve(data);
   await sleep(0);
-  eq(askedHeights(f.calls[f.calls.length - 1]), { ha: null, hb: '25' }, 'the estimate was replaced by a customizer default');
+  eq(askedHeights(f.calls[f.calls.length - 1]), { ha: '25', hb: '25' }, 'a lower estimate overruled the customizer height');
+  const second = defaultsAnswer();
+  second.a = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 25, antennaSource: 'request', assumed: false };
+  second.b = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 25, antennaSource: 'request', assumed: false };
+  f.calls[f.calls.length - 1].settle.resolve(second);
+  await sleep(0);
+  assert.strictEqual(live.dom.find('tp-hsrc-a').textContent, 'default');
+  assert.strictEqual(live.dom.find('tp-h-a').value, '25');
+});
+
+atest('a customizer role height below the estimate never replaces it', async () => {
+  const live = loadLive();
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: 20 }) };
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  const data = defaultsAnswer();
+  data.a.antennaSource = 'dsm-estimate';
+  data.a.antennaM = 22;
+  f.calls[0].settle.resolve(data);
+  await sleep(0);
+  eq(askedHeights(f.calls[f.calls.length - 1]), { ha: null, hb: '20' }, 'the estimate was lowered by a customizer default');
   const second = defaultsAnswer();
   second.a = data.a;
-  second.b = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 25, antennaSource: 'request', assumed: false };
+  second.b = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 20, antennaSource: 'request', assumed: false };
   f.calls[f.calls.length - 1].settle.resolve(second);
   await sleep(0);
   assert.strictEqual(live.dom.find('tp-hsrc-a').textContent, 'estimate');

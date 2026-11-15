@@ -83,6 +83,11 @@
   /* The antenna sources the server reports when it had nothing but its own
    * built-in default — the only ones a customizer default may replace. */
   var PROMOTABLE_SOURCES = { 'role-default': true, 'point-default': true };
+  /* #789 M1: the server floors its surface-model estimate at the role
+   * height that would otherwise apply, max(role, surface + 2). The
+   * customizer role height is this viewer's role height, so it gets the
+   * same floor: it replaces an estimate only when it is higher. */
+  var FLOORED_SOURCES = { 'dsm-estimate': true };
 
   function validModel(m) { return m === 'dtm' || m === 'both'; }
 
@@ -1487,13 +1492,16 @@
      * kind, role, antennaM and antennaSource — and reports whether anything
      * moved. An operator value, a remembered height and a link are all more
      * specific and are left alone; a customizer value equal to the server's
-     * own is not worth sending. */
+     * own is not worth sending. A surface-model estimate is replaced only by
+     * a higher customizer value (FLOORED_SOURCES). */
     function adoptThemeDefault(side, end, defs) {
       if (!end || themeH[side] !== null) return false;
       if ((side === 'a' ? state.ha : state.hb) !== null) return false;
-      if (!PROMOTABLE_SOURCES[end.antennaSource]) return false;
+      var floored = FLOORED_SOURCES[end.antennaSource];
+      if (!PROMOTABLE_SOURCES[end.antennaSource] && !floored) return false;
       var h = themeHeight(end, defs);
       if (h === null || h === clampHeight(end.antennaM)) return false;
+      if (floored && !(h > clampHeight(end.antennaM))) return false;
       themeH[side] = h;
       origin[side] = 'theme';
       return true;

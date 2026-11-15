@@ -131,6 +131,22 @@ func TestSurfaceAt789_WindowRadius(t *testing.T) {
 	approx(t, "spread", s.SpreadM, 18, 1e-3)
 }
 
+// The estimate is the 90th percentile, not a higher one: a spire on the
+// roof covering about 7 % of the window (between the top 5 % and the top
+// 10 %) shows in max and in a 95th percentile, but not in p90.
+func TestSurfaceAt789_P90NotP95(t *testing.T) {
+	spire := func(de, dn float64) float32 {
+		if de*de+dn*dn < 2.7*2.7 {
+			return 30
+		}
+		return 12
+	}
+	src := &fieldSource{dsm: aboveGround(10, aarhus, spire), dtm: flat(10)}
+	s := surfaceAt(t, src, aarhus, 10)
+	approx(t, "max", s.MaxM, 30, 1e-3)
+	approx(t, "p90", s.P90M, 12, 1e-3)
+}
+
 // Cells where either model has no data are ignored, and counted in the
 // coverage; DSM just below DTM is noise, not a negative height.
 func TestSurfaceAt789_NoDataAndNegative(t *testing.T) {

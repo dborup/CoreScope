@@ -706,9 +706,11 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 	// One per-IP charge for a request that does any upstream work: the
 	// elevations, or an antenna estimate not cached (#789 review). A
 	// refused estimate is skipped, not refused: the role height stands
-	// for this response and nothing is remembered.
+	// for this response and nothing is remembered. With no part of the
+	// path inside DHM, neither endpoint is, and SurfaceAt answers
+	// ErrNotCovered without a call: measured, cached, not charged.
 	measure := req.estimatePending
-	if state == "miss" || measure {
+	if state == "miss" || (measure && plan.Calls() > 0) {
 		if ok, retry := p.limiter.allow(r); !ok {
 			if state == "miss" {
 				writeRateLimited(w, retry)

@@ -606,6 +606,37 @@ func TestAntennaEstimate789_PerIPCharge(t *testing.T) {
 	}
 }
 
+// A path wholly outside DHM makes no upstream call, so it is not charged,
+// even with an estimate not yet cached: SurfaceAt refuses an endpoint
+// outside DHM without a call, and that answer is cached all the same.
+func TestAntennaEstimate789_UncoveredNotCharged(t *testing.T) {
+	surface := &surfaceFake{surfaceM: 20}
+	env := newTerrainEnvWith(t, newFakeElevation(t, flatElev(30)), dhm.ProfileConfig{RateLimitPerMin: intp(1)}, nil,
+		func(d *terrainProfilerDeps) { d.surface = surface })
+	foreign, home := pk789("a"), pk789("b")
+	for _, n := range []struct {
+		pk, name string
+		lat, lon float64
+	}{{foreign, "Malmö repeater", 55.605, 13.0038}, {home, "Roof repeater", est789Lat, est789Lon}} {
+		if _, err := env.srv.db.conn.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
+			VALUES (?, ?, 'repeater', ?, ?, datetime('now'), datetime('now'), 1)`, n.pk, n.name, n.lat, n.lon); err != nil {
+			t.Fatal(err)
+		}
+	}
+	env.srv.store.InvalidateNodeCache()
+	client := func(r *http.Request) { r.RemoteAddr = "198.51.100.10:1000" }
+	if a := decodeProfile(t, env.get(pathQuery(foreign, offsetPt(55.605, 13.0038, -3000, 0)), client)).A; a.AntennaSource != "role-default" {
+		t.Fatalf("foreign node %+v, want the role default", a)
+	}
+	if n := surface.calls.Load(); n != 0 || env.p.estimate.cache.Len() != 1 {
+		t.Fatalf("%d rasters and %d cached estimates, want 0 and 1", n, env.p.estimate.cache.Len())
+	}
+	// The one token of the budget is still there for a path inside DHM.
+	if w := env.get(pathQuery(home, offsetPt(est789Lat, est789Lon, 3000, 0)), client); w.Code != http.StatusOK {
+		t.Fatalf("first covered request: %d, want 200 (the uncovered one was charged)", w.Code)
+	}
+}
+
 // The panel, the share card and /p show the same antenna for a roof
 // repeater: height, source and verdict. The card and /p read the estimate
 // from its cache only; before the panel has measured it, they keep the
