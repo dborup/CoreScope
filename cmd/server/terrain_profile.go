@@ -301,6 +301,7 @@ type terrainProfiler struct {
 	logf       func(string, ...interface{})
 	logFailure func(what string, err error)
 	observers  func() ([]Observer, error)
+	estimate   terrainEstimator // #789: the antenna estimate from the surface model
 
 	// buildings tells buildings from trees (#730 M2); nil while
 	// map.dhm.profile.buildings is off. buildingsDeadline bounds its phase.
@@ -326,6 +327,9 @@ type terrainProfilerDeps struct {
 	// buildings replaces the INSPIRE source built from the settings
 	// (tests); it is used only while the classification is enabled.
 	buildings terrainBuildingSource
+	// surface measures the antenna estimate's window (#789); nil: no
+	// estimate.
+	surface dhm.ElevationSource
 }
 
 // terrainCacheMaxBytes is the cache's byte bound: one entry holds n DTM + n
@@ -394,6 +398,7 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 
 		buildings:         bsrc,
 		buildingsDeadline: terrainBuildingsDeadline,
+		estimate:          newTerrainEstimator(d.surface),
 	}
 }
 
@@ -404,10 +409,14 @@ func newTerrainProfilerFromConfig(cfg *Config, proxy *dhmProxy, db *DB) *terrain
 	if cfg == nil || proxy == nil || proxy.client == nil {
 		return nil
 	}
+	src := dhm.NewWCSSource(proxy.client)
 	d := terrainProfilerDeps{
-		src:        dhm.NewWCSSource(proxy.client),
+		src:        src,
 		logFailure: proxy.client.LogFailure,
 		trusted:    parseCIDRListQuiet(cfg.WSTrustedProxies()),
+		// #789: the same client, so the same token, concurrency limit
+		// and coalescing.
+		surface: src,
 	}
 	if db != nil {
 		d.observers = db.GetObservers
@@ -547,7 +556,7 @@ type TerrainEndpoint struct {
 	Role          string   `json:"role,omitempty"`
 	GroundM       *float64 `json:"groundM"` // DTM; null outside coverage
 	AntennaM      float64  `json:"antennaM"`
-	AntennaSource string   `json:"antennaSource"` // request, operator-node, operator-role, role-default, point-default
+	AntennaSource string   `json:"antennaSource"` // request, operator-node, dsm-estimate, operator-role, role-default, point-default
 	Assumed       bool     `json:"assumed"`       // the height is a default, not a known value
 }
 
@@ -677,6 +686,9 @@ type terrainEnd struct {
 	// is only ever set for a node that passed the visibility gate in
 	// resolveTerrainEnd; the JSON response never carries it.
 	name string
+	// surfaceM is the surface above the ground at the node (#789), set by
+	// estimateEnds; nil when not measured or unknown.
+	surfaceM *float64
 }
 
 // terrainRequest is a validated, resolved profile request: everything a
@@ -807,7 +819,9 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("X-CoreScope-Cache", state)
-	writeJSON(w, p.buildResponse(tq, req.ends, req.a, req.b, &plan, elev))
+	ends := req.ends
+	p.estimateEnds(r.Context(), &ends, [2]*float64{tq.ha, tq.hb})
+	writeJSON(w, p.buildResponse(tq, ends, req.a, req.b, &plan, elev))
 }
 
 // writeFetchError maps a failed fetch: a client that left gets nothing,
@@ -1396,8 +1410,11 @@ func clearanceOf(a dhm.Assessment) TerrainClearance {
 }
 
 // antenna is the antenna height above ground for an endpoint, most
-// specific first: the request, the operator's per-node value, the
-// operator's role value, the built-in role default.
+// specific first: the request, the operator's per-node value, (#789 M2:
+// the owner's proven value), the estimate from the surface model, the
+// operator's role value, the built-in role default. The estimate applies
+// only where it is above the role height it would replace (#789 research
+// §3: masts are invisible in the DSM), so it never lowers one.
 func (p *terrainProfiler) antenna(e terrainEnd, override *float64) (h float64, source string, assumed bool) {
 	if override != nil {
 		return *override, "request", false
@@ -1407,6 +1424,19 @@ func (p *terrainProfiler) antenna(e terrainEnd, override *float64) (h float64, s
 			return v, "operator-node", false
 		}
 	}
+	// #789 M2: the owner-submitted, proven height goes here.
+	h, source, assumed = p.roleAntenna(e)
+	if e.surfaceM != nil && e.kind == "node" && terrainEstimateRoles[e.role] {
+		if est := estimatedAntennaM(*e.surfaceM); est > h {
+			return est, "dsm-estimate", true
+		}
+	}
+	return h, source, assumed
+}
+
+// roleAntenna is the operator's role value, or else the built-in default,
+// for e's kind of endpoint.
+func (p *terrainProfiler) roleAntenna(e terrainEnd) (h float64, source string, assumed bool) {
 	key, def := terrainPointKey, "point-default"
 	if e.kind == "node" {
 		key, def = e.role, "role-default"

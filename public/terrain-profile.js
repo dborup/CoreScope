@@ -1072,6 +1072,9 @@
   var SOURCE_LABELS = {
     request: 'from this link',
     'operator-node': 'set by the operator for this node',
+    /* #789 M1 — the server's estimate: the surface (roof, treetop) around
+     * a repeater or room plus 2 m, never below the role default. */
+    'dsm-estimate': 'estimated from surface model',
     'operator-role': 'operator default for the role',
     'role-default': 'role default for this node type',
     'point-default': 'default for a map point'
@@ -1108,6 +1111,7 @@
   var HEIGHT_BADGES = {
     default: { label: 'default', title: 'A built-in default for this kind of endpoint, not a measured height.' },
     operator: { label: 'operator', title: 'Set by the operator of this instance (radio.antennaHeightsM).' },
+    estimate: { label: 'estimate', title: 'Estimated from the surface model: the roof or treetop around the node plus 2 m, never below the role default. A mast does not show in the surface model.' },
     yours: { label: 'yours', title: 'Your own height for this endpoint, remembered in this browser.' },
     link: { label: 'link', title: 'Taken from the link you opened.' },
     /* #681 M6 — the customizer's default for this kind of endpoint. Still a
@@ -1119,7 +1123,8 @@
     'role-default': 'default',
     'point-default': 'default',
     'operator-node': 'operator',
-    'operator-role': 'operator'
+    'operator-role': 'operator',
+    'dsm-estimate': 'estimate'
   };
 
   function heightBadge(source, origin) {

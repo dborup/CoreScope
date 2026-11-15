@@ -1390,6 +1390,28 @@ atest('an operator height is never overruled by the customizer', async () => {
   }
 });
 
+// #789 M1: the surface-model estimate is evidence about this node, not a
+// class-wide default, so a customizer role height does not replace it.
+atest('a surface-model estimate is never overruled by the customizer', async () => {
+  const live = loadLive();
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: 25 }) };
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  const data = defaultsAnswer();
+  data.a.antennaSource = 'dsm-estimate';
+  data.a.antennaM = 22;
+  f.calls[0].settle.resolve(data);
+  await sleep(0);
+  eq(askedHeights(f.calls[f.calls.length - 1]), { ha: null, hb: '25' }, 'the estimate was replaced by a customizer default');
+  const second = defaultsAnswer();
+  second.a = data.a;
+  second.b = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 25, antennaSource: 'request', assumed: false };
+  f.calls[f.calls.length - 1].settle.resolve(second);
+  await sleep(0);
+  assert.strictEqual(live.dom.find('tp-hsrc-a').textContent, 'estimate');
+  assert.strictEqual(live.dom.find('tp-h-a').value, '22');
+});
+
 atest('a remembered height outranks the customizer default', async () => {
   const live = loadLive();
   live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: 25 }) };

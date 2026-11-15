@@ -6615,6 +6615,7 @@ body.embed #app.app-fixed {
 .tp-hbadge[hidden] { display: none; }
 .tp-hbadge-default { border-style: dashed; border-color: var(--warning); color: var(--text); }
 .tp-hbadge-operator { border-color: var(--accent, var(--link-color)); color: var(--text); }
+.tp-hbadge-estimate { border-style: dashed; border-color: var(--accent, var(--link-color)); color: var(--text); }
 .tp-hbadge-yours { border-color: var(--success); color: var(--text); }
 .tp-hbadge-link { border-color: var(--border); color: var(--text); }
 
