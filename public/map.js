@@ -3230,13 +3230,29 @@
    * move with exactly one moveend: inside the call when it does not
    * animate (or the jump is too far to animate), or when the animation
    * ends — a drag or map.remove() stops it early, and that still fires
-   * moveend. So the guard is released by that moveend, not when the call
-   * returns: an animated pan to A would otherwise be saved after all.
-   * The save handler was registered first, so it still sees the guard. */
+   * moveend. So an animated pan releases the guard on its own moveend, not
+   * when the call returns: it would otherwise be saved after all.
+   *
+   * Only that moveend (#817). Another can come first: setView stops a
+   * running animation (drag inertia) with a moveend inside the call, and
+   * an invalidateSize() mid-pan fires one while the pan still runs. So the
+   * listener goes on after the call, and a moveend while the pan animation
+   * is still in progress is not the pan's. Leaflet clears _inProgress
+   * before the pan's own moveend. The save handler was registered first,
+   * so it still sees the guard. */
   function profileLinkMove(move) {
     profileFitting = true;
-    map.once('moveend', function () { profileFitting = false; });
     move();
+    if (!profilePanAnimating()) { profileFitting = false; return; }
+    map.on('moveend', function release() {
+      if (profilePanAnimating()) return;
+      map.off('moveend', release);
+      profileFitting = false;
+    });
+  }
+
+  function profilePanAnimating() {
+    return !!(map && map._panAnim && map._panAnim._inProgress);
   }
 
   function destroyProfileTool() {
