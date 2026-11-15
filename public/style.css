@@ -194,6 +194,12 @@
   --fresnel-100: #6d28d9;                        /* first Fresnel zone */
   --fresnel-60: #a78bfa;                         /* the 60 % criterion */
   --profile-blocked: #b91c1c;                    /* terrain in the way */
+  /* #730 M3 — the surface band by class: inside a building footprint, and
+     trees/other. Each is >= 3:1 against the panel and against the other
+     (test-issue-730-buildings-ui.js measures it). Dark values live in
+     BOTH dark blocks below. */
+  --terrain-building: #5e1f0c;
+  --terrain-vegetation: #5a9466;
   /* #781 — the profile's hover cursor: the chart's dashed line and the
      map's dot. Dark values live in BOTH dark blocks below. */
   --tp-cursor: #334155;
@@ -446,6 +452,9 @@
     --fresnel-100: #c4b5fd;
     --fresnel-60: #8b5cf6;
     --profile-blocked: #f87171;
+    /* #730 M3 — the surface band by class. */
+    --terrain-building: #fed7aa;
+    --terrain-vegetation: #358a52;
     /* #781 — the profile's hover cursor. */
     --tp-cursor: #e2e8f0;
     --tp-cursor-dot: #f87171;
@@ -522,6 +531,9 @@
   --fresnel-100: #c4b5fd;
   --fresnel-60: #8b5cf6;
   --profile-blocked: #f87171;
+  /* #730 M3 — the surface band by class (mirror of the @media block). */
+  --terrain-building: #fed7aa;
+  --terrain-vegetation: #358a52;
   /* #781 — the profile's hover cursor (mirror of the @media block). */
   --tp-cursor: #e2e8f0;
   --tp-cursor-dot: #f87171;
@@ -6538,6 +6550,12 @@ body.embed #app.app-fixed {
    holds to 4.5:1 in both themes; only the wrapping differs, because
    "Buildings/trees: Blocked" is the longest chip in the row. */
 .tp-chip-surface { white-space: normal; }
+/* #730 M3 — "Through trees" and its kin: trees mostly attenuate, so the
+   chip is a milder caveat than a building's. The warn border keeps it a
+   caveat; the text is the plain text colour, and the border dashed, so it
+   reads quieter without colour alone. Never the ok or bad pair: it is
+   not a second verdict (#729). */
+.tp-chip-mild { border-color: var(--warning); border-style: dashed; color: var(--text); }
 /* #724 M4 — the interference hint: a cellular transmitter in the 700/800/900
    MHz bands near an end. The antenna-site layer's interference colour, so
    the chip and the map ring read as one thing; the strong tier (within
@@ -6579,6 +6597,30 @@ body.embed #app.app-fixed {
   color: var(--text-muted);
 }
 .tp-surface-note[hidden] { display: none; }
+/* #730 M3 — the band's legend under the chart, and the muted note of a
+   partial classification. */
+.tp-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 12px;
+  margin: 2px 0 0;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text-muted);
+}
+.tp-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.tp-swatch { display: inline-block; width: 12px; height: 8px; border-radius: 2px; }
+.tp-swatch-b { background: var(--terrain-building); }
+.tp-swatch-v { background: var(--terrain-vegetation); }
+.tp-swatch-none { background: var(--terrain-clutter); }
+.tp-class-note {
+  margin: 2px 0 0;
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+  color: var(--text-muted);
+  font-style: italic;
+}
+.tp-class-note[hidden] { display: none; }
 
 /* #681 M5 — copy link sits left of close; the pair shares the auto margin. */
 .tp-copy { margin-left: auto; }

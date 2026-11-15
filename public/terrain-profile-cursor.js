@@ -2,7 +2,8 @@
  *
  * Pointing at the profile chart draws a dashed vertical line and a small
  * readout at that distance (distance from A, terrain, surface where the
- * profile has it, clearance under the line of sight), and tells the host
+ * profile has it, with its class where the profile tells buildings from
+ * trees (#730 M3), clearance under the line of sight), and tells the host
  * which fraction of the path that is, so the Map page can put a dot on its
  * profile line at the same point.
  *
@@ -90,7 +91,9 @@
 
     out.lines.push(fmtDistance(out.distanceM) + ' from A');
     out.lines.push(out.terrainM === null ? 'Terrain: no data' : 'Terrain ' + out.terrainM.toFixed(1) + ' m');
-    if (both) out.lines.push(out.surfaceM === null ? 'Surface: no data' : 'Surface ' + out.surfaceM.toFixed(1) + ' m');
+    // #730 M3: the class at the sample, in terrain-profile.js's words.
+    var cls = both && g.surfaceClass ? g.surfaceClass[i] : null;
+    if (both) out.lines.push(out.surfaceM === null ? 'Surface: no data' : 'Surface ' + out.surfaceM.toFixed(1) + ' m' + (cls ? ' (' + cls + ')' : ''));
     var c = out.clearanceM === null ? 'Clearance: unknown' : 'Clearance ' + signed(out.clearanceM) + ' m';
     if (out.clearanceM !== null && out.surfaceClearanceM !== null) c += ' (surface ' + signed(out.surfaceClearanceM) + ' m)';
     out.lines.push(c);

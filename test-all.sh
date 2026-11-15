@@ -157,6 +157,7 @@ run test-issue-728-ortho-followups.js
 run test-packets-window-pinned.js
 run test-issue-733-dhm-credit.js
 run test-issue-738-foreign-fill-ui.js
+run test-issue-730-buildings-ui.js
 run test-issue-752-inset-attribution.js
 run test-issue-741-base-layer-factory.js
 run test-issue-741-skaermkort.js

@@ -354,7 +354,9 @@ function liveCredits(map) {
 
 /* public/terrain-profile.js with the credit walker it uses, in a vm
  * sandbox on the element model above, in page order (#733, #738). */
-function loadTerrainProfile() {
+// extra: more public/ files to load after terrain-profile.js, such as
+// terrain-profile-cursor.js (#730 M3).
+function loadTerrainProfile(extra) {
   const doc = {
     createElement: makeElement, createTextNode: makeTextNode,
     addEventListener() {}, body: { appendChild() {} },
@@ -377,7 +379,7 @@ function loadTerrainProfile() {
   };
   ctx.localStorage = storage;
   vm.createContext(ctx);
-  for (const f of ['map-tile-providers.js', 'antenna-height.js', 'terrain-profile.js']) {
+  for (const f of ['map-tile-providers.js', 'antenna-height.js', 'terrain-profile.js'].concat(extra || [])) {
     vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8'), ctx);
   }
   if (!ctx.window.TerrainProfile) throw new Error('terrain-profile.js must define window.TerrainProfile');

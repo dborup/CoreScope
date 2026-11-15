@@ -59,6 +59,8 @@
     terrainFill: '--terrain-fill', terrainClutter: '--terrain-clutter',
     losLine: '--los-line', fresnel100: '--fresnel-100',
     fresnel60: '--fresnel-60', profileBlocked: '--profile-blocked',
+    // #730 M3 — the surface band by class.
+    terrainBuilding: '--terrain-building', terrainVegetation: '--terrain-vegetation',
     // #724 M3 — the antenna sites map layer (canvas markers + popup).
     mastSite: '--mast-site', mastInterference: '--mast-interference',
     font: '--font', mono: '--mono'
@@ -67,7 +69,8 @@
   // #681 M6 — the terrain keys are themeable but no PRESET defines them,
   // so they must stay out of preset detection: an operator who recolours
   // the profile chart has not stopped using the preset they picked.
-  var TERRAIN_COLOR_KEYS = ['terrainFill', 'terrainClutter', 'losLine', 'fresnel100', 'fresnel60', 'profileBlocked'];
+  var TERRAIN_COLOR_KEYS = ['terrainFill', 'terrainClutter', 'losLine', 'fresnel100', 'fresnel60', 'profileBlocked',
+    'terrainBuilding', 'terrainVegetation'];
   // #724 M3 — likewise outside preset detection: no preset defines them.
   var MASTS_COLOR_KEYS = ['mastSite', 'mastInterference'];
 
@@ -335,6 +338,7 @@
     terrainFill: 'Terrain (DTM)', terrainClutter: 'Trees & Buildings (DSM)',
     losLine: 'Line of Sight', fresnel100: 'Fresnel Zone', fresnel60: 'Fresnel 60 %',
     profileBlocked: 'Obstruction',
+    terrainBuilding: 'Buildings (DSM)', terrainVegetation: 'Trees/other (DSM)',
     mastSite: 'Antenna Site', mastInterference: 'Interference Ring',
     font: 'Body Font', mono: 'Mono Font'
   };
@@ -360,6 +364,8 @@
     fresnel100: 'Path profile: the outline of the first Fresnel zone',
     fresnel60: 'Path profile: the 60 % criterion a link has to clear',
     profileBlocked: 'Path profile: where terrain rises into the zone',
+    terrainBuilding: 'Path profile: the surface inside a building footprint, where buildings are told from trees',
+    terrainVegetation: 'Path profile: the raised surface with no building footprint — trees or other',
     mastSite: 'Map: every Mastedatabasen antenna site (mast, tower or rooftop)',
     mastInterference: 'Map: the ring around sites with a 700/800/900 MHz transmitter',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
@@ -1531,7 +1537,7 @@
       parseInt(hex.slice(5, 7), 16) + ', ' + a + ')';
   }
 
-  /* #681 M6 — what a theme key resolves to on the page right now. The six
+  /* #681 M6 — what a theme key resolves to on the page right now. The
    * chart colours have no server default by design (they are chart ink, not
    * page chrome), and a row with no value renders a black swatch and an
    * empty hex — showing a colour the chart is not using. style.css holds
