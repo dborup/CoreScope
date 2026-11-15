@@ -22,7 +22,7 @@ import (
 const (
 	// STACHost and CDNHost are the hosts the Transport serves.
 	STACHost = "api.dataforsyningen.dk"
-	CDNHost  = "cdn.dataforsyningen.dk"
+	CDNHost  = "skraafoto-cdn.dataforsyningen.dk"
 	// STACPrefix is the API root's path.
 	STACPrefix = "/rest/skraafoto_api/v2"
 	// Token is the only token the fake STAC accepts: a sentinel that

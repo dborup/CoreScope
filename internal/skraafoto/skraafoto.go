@@ -44,7 +44,7 @@ const (
 	stacBase = "https://" + STACHost + "/rest/skraafoto_api/v2"
 
 	// CDNHost is the image CDN's host, fixed in code; CDNBase is its root.
-	CDNHost = "cdn.dataforsyningen.dk"
+	CDNHost = "skraafoto-cdn.dataforsyningen.dk"
 	CDNBase = "https://" + CDNHost
 
 	// viewerURL is the official viewer, the "full resolution" link (#737
