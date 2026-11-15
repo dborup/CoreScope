@@ -586,8 +586,8 @@
    *   - contours is a toggle of its own, ?contours=1, above the hillshade
    *     and from the server's minZoom, so no tile is asked for below it.
    *   - #792: elevation (colour by height) is a toggle of its own,
-   *     ?elevation=1, listed under the hillshade and drawn under it (pane
-   *     245), so the hillshade shades the colours. The server renders it
+   *     ?elevation=1, listed under the contours and drawn under the
+   *     hillshade (pane 245), so the hillshade shades the colours. The server renders it
    *     from z9 to its maxZoom (13); above that the page upscales the z13
    *     tiles (maxNativeZoom) up to the block's maxZoom, with no further
    *     request. Its entry carries its own credit (the derived one, "data
@@ -703,6 +703,22 @@
     return box;
   }
 
+  /* #792 (#831 F1) — the legend of this control build shows only while the
+   * elevation layer is on the map: hidden now if it is off, then shown and
+   * hidden with each toggle. One listener per map; each control build
+   * replaces the legend it updates. */
+  function _followElevationLegend(map, legend) {
+    var on = function () { return !!(map._mcElevationLayer && map.hasLayer(map._mcElevationLayer)); };
+    legend.hidden = !on();
+    map._mcElevationLegend = legend;
+    if (map._mcElevationLegendWired) return;
+    map._mcElevationLegendWired = true;
+    map.on('overlayadd overlayremove', function (e) {
+      if (!e.layer || e.layer !== map._mcElevationLayer || !map._mcElevationLegend) return;
+      map._mcElevationLegend.hidden = e.type === 'overlayremove';
+    });
+  }
+
   /* #734 (customizer, AGENTS rule 8) — this viewer's DHM overlay defaults,
    * the customizer section `dhmOverlays` on window.SITE_CONFIG
    * (public/customize-v2.js). The server's map.dhm config stays server-only
@@ -778,7 +794,7 @@
 
   // The DHM ids the server offers, in the control's order.
   function offeredDHMOverlays() {
-    return ['terrain', 'surface', 'elevation', 'contours'].filter(function (id) { return !!getDHMOverlayConfig(id); });
+    return ['terrain', 'surface', 'contours', 'elevation'].filter(function (id) { return !!getDHMOverlayConfig(id); });
   }
 
   function getHeritageConfig() {
@@ -878,9 +894,23 @@
       layers: function (cfg) { return cfg.layers; }
     },
     {
+      // #734 M2: contour lines, drawn as served (opacity 1) between the
+      // hillshade (250) and the monuments (260).
+      id: 'dhm-contours', storageKey: 'mc-contours-dhm', hashParam: 'contours', layerProp: '_mcContourLayer',
+      pane: 'mcContourPane', paneZ: 255, paneClass: 'mc-contour-pane', className: 'mc-contour-tiles', opacity: 1,
+      retryPlaceholders: true,
+      customDefault: function () { return dhmOverlaySettings().contours; },
+      config: function () { return getDHMOverlayConfig('contours'); },
+      label: function (cfg) { return cfg.label; },
+      layers: function (cfg) { return cfg.layers; }
+    },
+    {
       // #792: colour by elevation, rendered by the server. Listed under the
-      // hillshade and drawn under it (245 < 250), outside the dark-theme
-      // filters: the colours are shown as served, at this viewer's opacity.
+      // contour lines (#831 F1: on a 375x560 phone a row above them pushed
+      // them out of the visible list) but drawn under the hillshade (245 <
+      // 250), outside the dark-theme filters: the colours are shown as
+      // served, at this viewer's opacity. Its legend shows only while it
+      // is on, so the off row costs one line.
       id: 'dhm-elevation', storageKey: 'mc-elevation-dhm', hashParam: 'elevation', layerProp: '_mcElevationLayer',
       pane: 'mcElevationPane', paneZ: 245, paneClass: 'mc-elevation-pane', className: 'mc-elevation-tiles',
       opacity: function () { return dhmOverlaySettings().elevationOpacity / 100; },
@@ -891,19 +921,11 @@
       layers: function (cfg) { return cfg.layers; },
       decorate: function (map, cfg, labelEl) {
         var doc = labelEl.ownerDocument || document;
-        if (labelEl.parentNode) labelEl.parentNode.insertBefore(buildElevationLegend(doc, cfg.legendM), labelEl.nextSibling);
+        if (!labelEl.parentNode) return;
+        var legend = buildElevationLegend(doc, cfg.legendM);
+        _followElevationLegend(map, legend);
+        labelEl.parentNode.insertBefore(legend, labelEl.nextSibling);
       }
-    },
-    {
-      // #734 M2: contour lines, drawn as served (opacity 1) between the
-      // hillshade (250) and the monuments (260).
-      id: 'dhm-contours', storageKey: 'mc-contours-dhm', hashParam: 'contours', layerProp: '_mcContourLayer',
-      pane: 'mcContourPane', paneZ: 255, paneClass: 'mc-contour-pane', className: 'mc-contour-tiles', opacity: 1,
-      retryPlaceholders: true,
-      customDefault: function () { return dhmOverlaySettings().contours; },
-      config: function () { return getDHMOverlayConfig('contours'); },
-      label: function (cfg) { return cfg.label; },
-      layers: function (cfg) { return cfg.layers; }
     },
     {
       // Protection-zone polygons under the monument points. The WMS draws

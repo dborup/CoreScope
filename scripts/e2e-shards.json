@@ -7,7 +7,7 @@
       "env": { "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; #792 colour-by-elevation DHM overlay with an intercepted dhm client-config block (dhm.overlays with the elevation entry), every elevation tile the proxy-rendered fixture test-fixtures/dhm-elevation-792.png and stubbed third-party tiles: a phone at 375x560 from a cold start turns it on by a real tap under the hillshade pair (z12 tiles, ?elevation=1, stored), sees the legend (bar from the --dhm-elevation-* variables, 0/50/100/175 m) and the derived credit, taps + twice to z14 with no tile asked above z13, keeps it over a reload and taps it off; the customizer opacity reaches the layer live; ?elevation=0 beats storage; no toggle without the entry. About 25s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+      "measurementNote": "New suite; #792 colour-by-elevation DHM overlay with an intercepted dhm client-config block (dhm.overlays with the elevation entry), every elevation tile the proxy-rendered fixture test-fixtures/dhm-elevation-792.png and stubbed third-party tiles: a phone at 375x560 from a cold start turns it on by a real tap under the contours (z12 tiles, ?elevation=1, stored), sees the legend only while it is on (bar from the --dhm-elevation-* variables, 0/50/100/175 m) and the derived credit, taps + twice to z14 with no tile asked above z13, keeps it over a reload and taps it off; #831 F1: at z14 from a cold start, \"Contour lines\" is tapped without scrolling the layer list, with elevation off and on; the customizer opacity reaches the layer live; ?elevation=0 beats storage; no toggle without the entry. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
     },
     {
       "file": "test-issue-734-customizer-overlays-e2e.js",
@@ -15,7 +15,7 @@
       "env": { "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; #734 customizer (AGENTS rule 8) DHM overlay defaults with an intercepted dhm client-config block (dhm.overlays), a stubbed /api/map/dhm/wms and stubbed third-party tiles: a phone at 375x560 from a cold start sets the default hillshade, contours on and the contour min-zoom by real taps in the Display tab (48px, on screen, uncovered, no sideways overflow) and the open map's contour label follows at once; the next map starts with them, asks no contour tile below the min-zoom and does after one + tap, and the link carries neither default; a link wins over them; the export carries the section; no section without the dhm block. About 25s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+      "measurementNote": "New suite; #734 customizer (AGENTS rule 8) DHM overlay defaults with an intercepted dhm client-config block (dhm.overlays), a stubbed /api/map/dhm/wms and stubbed third-party tiles: a phone at 375x560 from a cold start sets the default hillshade, contours on and the contour min-zoom by real taps in the Display tab (48px, on screen, uncovered, no sideways overflow) and the open map's contour label follows at once; the next map starts with them, asks no contour tile below the min-zoom and does after one + tap, and the link carries neither default; a link wins over them; the export carries the section; no section without the dhm block. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
     },
     {
       "file": "test-issue-807-map-hash-size-unknown-e2e.js",
@@ -87,7 +87,7 @@
       "env": { "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; #738 M2 mixed-resolution note and Copernicus credit in the Map Path profile panel, with an intercepted dhm client-config block (profile: true plus the fill credit parts) and a stubbed /api/terrain/profile: Sonderborg to Flensburg shows the mixed note (30 m, and 60 m with the 1/2 overview) and the short Copernicus credit with the dataset and licence linked, target=_blank and rel=noopener, the full Art. 6(b) line folded until Full credit is opened, in light and dark; Aarhus to Silkeborg shows neither, and switching to it takes both away; at 360x740 both links and Full credit are at least 44px and hit by themselves; no request reaches AWS, Copernicus or Dataforsyningen. About 25s locally; no CI duration measured yet. Assigned to shard 2, next to the #733 credit suite."
+      "measurementNote": "New suite; #738 M2 mixed-resolution note and Copernicus credit in the Map Path profile panel, with an intercepted dhm client-config block (profile: true plus the fill credit parts) and a stubbed /api/terrain/profile: Sonderborg to Flensburg shows the mixed note (30 m, and 60 m with the 1/2 overview) and the short Copernicus credit with the dataset and licence linked, target=_blank and rel=noopener, the full Art. 6(b) line folded until Full credit is opened, in light and dark; Aarhus to Silkeborg shows neither, and switching to it takes both away; at 360x740 both links and Full credit are at least 44px and hit by themselves; no request reaches AWS, Copernicus or Dataforsyningen. About 35s locally; no CI duration measured yet. Assigned to shard 2, next to the #733 credit suite."
     },
     {
       "file": "test-issue-752-inset-attribution-e2e.js",
@@ -261,7 +261,7 @@
       "env": { "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; #724 M4 interference hint in the Map Path profile with intercepted dhm and masts client-config blocks, a stubbed /api/terrain/profile and a stubbed /api/masts with fixed synthetic sites (neither the proxy's upstream, Mastedatabasen nor DHM is ever contacted): an end 320 m from an 800 MHz site shows the chip in the title row and its note, hostile stub text inert, and with both overlays off only the end cells are asked for, each once; dark-theme chip colour; 40 m from a 900 MHz site is the strong tier; an 1800 MHz site, an 800 MHz site 520 m away and a band-less GSM-R site give no hint; without the masts block no chip and no request; at 375 px the chip stays inside the panel; leaving the Map page with a path open three times leaves no theme-refresh listener or data-theme observer behind (#768 review 1). About 25s locally; no CI duration measured yet. Assigned to shard 1 next to the #724 M3 suite."
+      "measurementNote": "New suite; #724 M4 interference hint in the Map Path profile with intercepted dhm and masts client-config blocks, a stubbed /api/terrain/profile and a stubbed /api/masts with fixed synthetic sites (neither the proxy's upstream, Mastedatabasen nor DHM is ever contacted): an end 320 m from an 800 MHz site shows the chip in the title row and its note, hostile stub text inert, and with both overlays off only the end cells are asked for, each once; dark-theme chip colour; 40 m from a 900 MHz site is the strong tier; an 1800 MHz site, an 800 MHz site 520 m away and a band-less GSM-R site give no hint; without the masts block no chip and no request; at 375 px the chip stays inside the panel; leaving the Map page with a path open three times leaves no theme-refresh listener or data-theme observer behind (#768 review 1). About 35s locally; no CI duration measured yet. Assigned to shard 1 next to the #724 M3 suite."
     },
     {
       "file": "test-issue-724-m5-masts-customizer-e2e.js",
@@ -2642,7 +2642,7 @@
       },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; route-aware tab titles (#563) on Live, Channels, Analytics, node Reach/Analytics, delayed customised theme and a late node response. About 25s locally; no CI duration measured yet. Assigned to shard 1, the shard with the fewest suites."
+      "measurementNote": "New suite; route-aware tab titles (#563) on Live, Channels, Analytics, node Reach/Analytics, delayed customised theme and a late node response. About 35s locally; no CI duration measured yet. Assigned to shard 1, the shard with the fewest suites."
     },
     {
       "file": "test-e2e-532-route-hop-count.js",

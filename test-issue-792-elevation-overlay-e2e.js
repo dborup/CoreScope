@@ -10,14 +10,20 @@
  *
  * Asserts:
  *   1. a phone at 375x560, cold start (no storage), real taps: the toggle
- *      is listed under the hillshade pair; one tap turns it on, asks for
- *      layers=elevation tiles at the view's zoom, writes ?elevation=1 and
- *      remembers it; the legend sits under the toggle with its bar drawn
- *      from the CSS variables and its metres, inside the screen; the credit
+ *      is listed under the contours; its legend is hidden while it is off;
+ *      one tap turns it on, asks for layers=elevation tiles at the view's
+ *      zoom, writes ?elevation=1 and remembers it; the legend then sits
+ *      under the toggle with its bar drawn from the CSS variables and its
+ *      metres, inside the screen; the credit
  *      says "data bearbejdet"; nothing overflows sideways;
  *   2. two taps on + (z12 → z14): no elevation tile above z13 is asked
  *      for, and the z13 tiles stay on screen (upscaled);
- *   3. a reload keeps it on; a tap turns it off and drops the parameter;
+ *   3. a reload keeps it on; a tap turns it off, hides the legend and
+ *      drops the parameter;
+ *   3b. #831 F1 — 375x560, cold start (no storage), taps only, zoomed to
+ *      z14 with +: "Contour lines" is inside the layer list's visible box
+ *      without scrolling it, and one tap turns it on, both with elevation
+ *      off and with it on (its legend showing);
  *   4. the customizer's opacity reaches the layer; ?elevation=0 wins over
  *      the stored choice;
  *   5. no elevation toggle without the entry (a server before #792);
@@ -160,6 +166,15 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       };
     }, SEL);
   }
+  // Whether the legend under the toggle is hidden (null: no legend).
+  async function legendHidden(page) {
+    return page.evaluate((SEL) => {
+      const label = document.querySelector(SEL);
+      const box = label && label.nextElementSibling;
+      if (!box || !box.classList.contains('mc-elev-legend')) return null;
+      return box.hidden && getComputedStyle(box).display === 'none';
+    }, SEL);
+  }
   async function waitMap(page) {
     await page.waitForSelector('.leaflet-control-layers-overlays label[data-overlay-id="dhm-terrain"]', { state: 'attached', timeout: 20000 });
     await page.waitForFunction(() => window._customizerV2 && window._customizerV2.initDone, null, { timeout: 15000 });
@@ -210,7 +225,8 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         await waitMap(page);
         await dismissTips(page);
         let s = await state(page);
-        assert(s.ids.join(',') === 'dhm-terrain,dhm-surface,dhm-elevation,dhm-contours', 'order ' + s.ids.join(','));
+        assert(s.ids.join(',') === 'dhm-terrain,dhm-surface,dhm-contours,dhm-elevation', 'order ' + s.ids.join(','));
+        assert(await legendHidden(page) === true, 'the legend shows while the overlay is off');
         assert(s.label === 'Colour by elevation (DHM, zoom 9+)', s.label);
         assert(s.checked === false, 'on before any tap');
         assert(elevationTiles(rec).length === 0, 'asked for elevation tiles while off');
@@ -249,6 +265,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
           };
         }, SEL);
         assert(legend, 'no legend under the toggle');
+        assert(await legendHidden(page) === false, 'the legend is hidden while the overlay is on');
         assert(legend.text.join('|') === '0|50|100|175 m', 'legend ' + legend.text.join('|'));
         assert(legend.first === '#4a8c5c' && legend.last === '#f2eee9', 'variables ' + legend.first + ' ' + legend.last);
         // The bar is the variables resolved: rgb(74, 140, 92) … rgb(242, 238, 233).
@@ -291,6 +308,81 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         assert(s.checked === false, 'still on after a tap');
         assert(!/elevation=/.test(s.hash), 'hash ' + s.hash);
         assert(s.stored === '0', 'stored ' + s.stored);
+        assert(await legendHidden(page) === true, 'the legend stays after the overlay went off');
+        assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
+      });
+    } finally { await ctx.close(); }
+  }
+
+  // ── 3b. #831 F1: "Contour lines" stays tappable on a 375x560 phone ──────
+  {
+    const vp = { width: 375, height: 560 };
+    const { ctx, page, rec } = await newCtx({ phone: true, viewport: vp });
+    const CONTOURS = '.leaflet-control-layers-overlays label[data-overlay-id="dhm-contours"]';
+    // A tap on the contours toggle where a finger would, WITHOUT scrolling
+    // the layer list: the label must be inside the list's visible box (so
+    // not under its scrolled-off bottom edge), inside the screen and the
+    // element at the tap point.
+    async function tapContoursUnscrolled() {
+      await openLayers(page);
+      const hit = await page.evaluate((sel) => {
+        const l = document.querySelector(sel);
+        const list = document.querySelector('.leaflet-control-layers-list');
+        if (!l || !list) return null;
+        const r = l.getBoundingClientRect(), b = list.getBoundingClientRect();
+        const x = r.x + Math.min(r.width / 2, 60), y = r.y + r.height / 2;
+        const h = document.elementFromPoint(x, y);
+        return {
+          x, y, scrollTop: list.scrollTop, hit: !!h && l.contains(h),
+          r: { top: r.top, bottom: r.bottom }, list: { top: b.top, bottom: b.bottom },
+        };
+      }, CONTOURS);
+      assert(hit, 'no contours toggle or layer list');
+      assert(hit.scrollTop === 0, 'the list was scrolled: ' + hit.scrollTop);
+      assert(hit.r.top >= hit.list.top && hit.r.bottom <= hit.list.bottom + 0.5,
+        'contours outside the visible list: ' + JSON.stringify(hit.r) + ' in ' + JSON.stringify(hit.list));
+      assert(hit.r.bottom <= vp.height, 'contours below the screen: ' + JSON.stringify(hit.r));
+      assert(hit.hit, 'the tap point is not on the contours toggle');
+      await page.touchscreen.tap(hit.x, hit.y);
+      await page.waitForTimeout(900);
+    }
+    const contoursChecked = () => page.$eval(CONTOURS + ' input', i => i.checked);
+    const isExpanded = () => page.$eval('.leaflet-control-layers', el => el.classList.contains('leaflet-control-layers-expanded'));
+    try {
+      await step('375x560 cold start at z14: contours tappable without scrolling, elevation off and on (#831 F1)', async () => {
+        await page.goto(`${BASE}/#/map`, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('.leaflet-control-layers', { timeout: 20000 });
+        await page.waitForTimeout(1200);
+        await dismissTips(page);
+        await page.goto(`${BASE}/#/map?lat=${AARHUS.lat}&lon=${AARHUS.lon}&zoom=11`, { waitUntil: 'domcontentloaded' });
+        await waitMap(page);
+        await dismissTips(page);
+        for (let i = 0; i < 3; i++) { await page.tap('.leaflet-control-zoom-in'); await page.waitForTimeout(800); }
+        let s = await state(page);
+        assert(s.zoom === 14, 'zoom after three taps: ' + s.zoom);
+
+        // Elevation off: one tap on contours turns it on.
+        await tapContoursUnscrolled();
+        assert(await contoursChecked() === true, 'contours not on after a tap (elevation off)');
+        s = await state(page);
+        assert(s.checked === false, 'elevation on');
+        // Contours off again, then elevation on (its legend showing).
+        if (!(await isExpanded())) await openLayers(page);
+        await tapContoursUnscrolled();
+        assert(await contoursChecked() === false, 'contours still on after a second tap');
+        if (!(await isExpanded())) await openLayers(page);
+        await tapToggle(page, vp);
+        s = await state(page);
+        assert(s.checked === true, 'elevation not on after a tap');
+        assert(await legendHidden(page) === false, 'no legend with elevation on');
+        // Then contours from the list as it now stands (elevation's tap
+        // may have scrolled it; its row is the last of the DHM ones).
+        if (!(await isExpanded())) await openLayers(page);
+        await page.evaluate(() => { const l = document.querySelector('.leaflet-control-layers-list'); return l && l.scrollTop; });
+        await tapContoursUnscrolled();
+        assert(await contoursChecked() === true, 'contours not on after a tap (elevation on)');
+        s = await state(page);
+        assert(s.checked === true, 'the contours tap turned elevation off');
         assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
       });
     } finally { await ctx.close(); }

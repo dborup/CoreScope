@@ -69,10 +69,11 @@ console.log('\n=== #792 colour-by-elevation overlay ===');
 
 // ── 1. Offered ──────────────────────────────────────────────────────────────
 
-test('offered under the hillshade pair, above the contours', () => {
-  const { ctl } = setup();
+test('offered under the contours (#831 F1: they stay where #734 put them)', () => {
+  const { ctl, D } = setup();
   assert.deepStrictEqual(ctl.overlayLabels.map(l => l.attrs['data-overlay-id']),
-    ['dhm-terrain', 'dhm-surface', 'dhm-elevation', 'dhm-contours']);
+    ['dhm-terrain', 'dhm-surface', 'dhm-contours', 'dhm-elevation']);
+  assert.deepStrictEqual(Array.from(D.offered()), ['terrain', 'surface', 'contours', 'elevation']);
   assert(layer(ctl), 'no "' + LABEL + '" in ' + Object.keys(ctl.overlays));
 });
 
@@ -231,9 +232,16 @@ test('the legend sits under the toggle (decorate), and the CSS defines every var
   ctx.window.MC_createLayerControl(map, { _auto: true }, 'topleft');
   const legend = parent.children[1];
   assert(legend && legend.className === 'mc-elev-legend', 'no legend after the label');
+  // #831 F1: shown only while the layer is on, following each toggle.
+  assert.strictEqual(legend.hidden, true, 'the legend shows while the layer is off');
+  map.addLayer(map._mcElevationLayer);
+  assert.strictEqual(legend.hidden, false, 'the legend stays hidden while the layer is on');
+  map.removeLayer(map._mcElevationLayer);
+  assert.strictEqual(legend.hidden, true, 'the legend stays after the layer went off');
   const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
   const root = css.slice(css.indexOf(':root {'), css.length);
   LEGEND_M.forEach(m => assert(new RegExp('--dhm-elevation-' + m + ':\\s*#[0-9a-f]{6};').test(root), 'no --dhm-elevation-' + m));
+  assert(/\.mc-elev-legend\[hidden\]\s*\{\s*display:\s*none;?\s*\}/.test(css), 'no .mc-elev-legend[hidden] rule');
   for (const cls of ['.mc-elev-legend-bar', '.mc-elev-legend-scale']) {
     const rule = css.slice(css.indexOf(cls + ' {'), css.indexOf('}', css.indexOf(cls + ' {')));
     assert(rule && !/#[0-9a-f]{3,8}\b/i.test(rule), cls + ' hardcodes a colour');
