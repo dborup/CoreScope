@@ -134,6 +134,21 @@ func parseOverlayID(layers string) (Overlay, bool) {
 // raster (#792) instead of fetching them from a WMS.
 func (o Overlay) Rendered() bool { return o.Service == WCSService }
 
+// Covers reports whether tile k can hold any of o's data: it meets the
+// DHM coverage and, for a rendered overlay (#792), the WCS RasterExtent
+// too. A tile it does not cover is transparent with no upstream call, so
+// the proxy serves it as "outside", uncharged and uncached (#831 F7).
+func (o Overlay) Covers(k TileKey) bool {
+	if !k.IntersectsCoverage() {
+		return false
+	}
+	if o.Rendered() {
+		_, ok := ElevationRaster(k)
+		return ok
+	}
+	return true
+}
+
 // Resolve returns o as the server fetches it: the terrain id is the
 // configured hillshade chain (map.dhm.layer, #687), every other id itself.
 func (o Overlay) Resolve(terrain Hillshade) Overlay {

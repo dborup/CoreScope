@@ -694,7 +694,7 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, dhm.ErrBadRequest.Error())
 		return
 	}
-	if !key.IntersectsCoverage() {
+	if !overlay.Covers(key) {
 		writeDHMTile(w, dhmTransparentPNG, dhmBrowserMaxAge, "outside")
 		return
 	}
