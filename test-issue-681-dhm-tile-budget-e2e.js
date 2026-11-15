@@ -37,8 +37,9 @@ const { chromium } = require('playwright');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13700';
 const DHM_PATH = '/api/map/dhm/wms';
-// Must match dhmTileRateLimitDefault in cmd/server/dhm_proxy.go.
-const TILE_BUDGET_PER_MIN = 1200;
+// Must match dhmTileRateLimitDefault in cmd/server/dhm_proxy.go (#734 M2
+// raised it for two overlays; test-issue-734-dhm-overlay-budget-e2e.js).
+const TILE_BUDGET_PER_MIN = 2400;
 const DHM_BLOCK = {
   enabled: true, url: DHM_PATH, layer: 'dhm_terraen_skyggekort',
   minZoom: 7, maxZoom: 19, bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
