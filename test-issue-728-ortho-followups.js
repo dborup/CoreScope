@@ -68,5 +68,24 @@ test('F3 the retry code says a cached `outside` tile is not refetched (HTTP cach
   assert.ok(/HTTP cache/.test(doc) && /max-age/.test(doc) && /one day/.test(doc), 'the note does not name the cache and its max-age');
 });
 
+console.log('\n── #728 F4: restore puts Auto off ──');
+
+test('F4 a stored Aerial pick: Auto starts on the map and is off after the restore', () => {
+  for (const mapCfg of [undefined, ESRI_ON]) {
+    const ctx = makeSandbox({ dhm: dhmBlock(20), mapCfg, storage: { 'mc-ortho-base': '1' } });
+    const { map, auto } = buildWithAuto(ctx);
+    const entry = map._controls[map._controls.length - 1].base[ORTHO_ID];
+    assert.ok(map.hasLayer(entry), 'the Aerial entry is on');
+    assert.ok(!map.hasLayer(auto), 'the Auto group is still on the map after the restore');
+  }
+});
+
+test('F4 without a stored pick Auto stays on the map (the check above is not vacuous)', () => {
+  const ctx = makeSandbox({ dhm: dhmBlock(20) });
+  const { map, auto } = buildWithAuto(ctx);
+  assert.ok(map.hasLayer(auto));
+  assert.ok(!map.hasLayer(map._controls[map._controls.length - 1].base[ORTHO_ID]));
+});
+
 console.log(`\n#728 follow-ups: ${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
