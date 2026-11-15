@@ -35,8 +35,9 @@ var ErrGeometry = errors.New("dhm: unexpected polygon geometry")
 // vertex budget is shared across them: a response cannot evade the cap by
 // spreading its vertices over many features.
 //
-// The zero reader accepts no coordinate at all (an empty window) and no
-// vertex, so both fields must be set.
+// The zero reader refuses every geometry: its window is the single point
+// (0, 0), which no EPSG:25832 position in Denmark reaches, and its budget is
+// zero vertices. Both fields must be set.
 type PolygonReader struct {
 	// Window is the plausible coordinate box, minE, minN, maxE, maxN in
 	// EPSG:25832 metres. A position outside it means the service answered in
