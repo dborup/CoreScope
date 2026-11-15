@@ -87,12 +87,13 @@ type feature struct {
 
 // Parse reads the OGC API Features GeoJSON of one segment's request.
 // Anything off-shape is an error: another document (an OGC API exception
-// is JSON too), trailing data, a missing features array, more than
-// MaxFeatures features, a numberMatched or numberReturned that is not a
-// count or disagrees with the page, a member of features that is not a
-// Feature, a position outside coordWindow, or more than MaxVertices
-// vertices. A feature without a usable footprint is skipped and counted
-// instead, and costs no vertex budget.
+// is JSON too), trailing data, a missing features array, a numberMatched
+// or numberReturned that is not a count or disagrees with the page, a
+// member of features that is not a Feature, a position outside
+// coordWindow, or more than MaxVertices vertices. More than MaxFeatures
+// features is a Truncated page without footprints. A feature without a
+// usable footprint is skipped and counted instead, and costs no vertex
+// budget.
 func Parse(body []byte) (Page, error) { return parse(body, MaxVertices) }
 
 func parse(body []byte, maxVertices int) (Page, error) {
@@ -104,7 +105,7 @@ func parse(body []byte, maxVertices int) (Page, error) {
 	if _, err := dec.Token(); err != io.EOF {
 		return Page{}, errShape
 	}
-	if doc.Type != "FeatureCollection" || doc.Features == nil || len(*doc.Features) > MaxFeatures {
+	if doc.Type != "FeatureCollection" || doc.Features == nil {
 		return Page{}, errShape
 	}
 	features := *doc.Features
@@ -114,6 +115,12 @@ func parse(body []byte, maxVertices int) (Page, error) {
 	}
 	if returned, ok, err := count(doc.NumberReturned); err != nil || ok && returned != len(features) {
 		return Page{}, errShape
+	}
+	if len(features) > MaxFeatures {
+		// More buildings than the limit asked for: the corridor holds more
+		// than one page, so the segment stays unclassified, as for any
+		// truncated page (#776 review N4), and its footprints are not read.
+		return Page{Truncated: true}, nil
 	}
 	page := Page{Footprints: make([]dhm.MultiPolygon, 0, len(features))}
 	page.Truncated = matched > len(features) || !hasMatched && len(features) >= MaxFeatures
