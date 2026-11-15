@@ -560,7 +560,7 @@ function profileFor(q, opts) {
           return { w: Math.round(r.width), h: Math.round(r.height) };
         });
       });
-      assert(sizes.length === 6, 'found ' + sizes.length + ' swatches');
+      assert(sizes.length === CHART_KEYS.length, 'found ' + sizes.length + ' swatches');
       sizes.forEach((s, i) => {
         assert(s.w >= 48 && s.h >= 48, 'swatch ' + i + ' is ' + s.w + 'x' + s.h);
       });
