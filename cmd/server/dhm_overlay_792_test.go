@@ -406,3 +406,45 @@ func TestDHM792_E2ETileFixtureIsARenderedTile(t *testing.T) {
 		}
 	}
 }
+
+// #831 F7: an elevation tile that meets the DHM coverage but misses the
+// WCS raster extent is "outside": transparent, no upstream call, not
+// charged to the client's budget and not cached as a miss.
+func TestDHM792_OffExtentTileIsOutside(t *testing.T) {
+	var off dhm.TileKey
+	found := false
+	for x := 0; x < 1<<9 && !found; x++ {
+		for y := 0; y < 1<<9; y++ {
+			k := dhm.TileKey{Z: 9, X: x, Y: y}
+			if _, ok := dhm.ElevationRaster(k); k.IntersectsCoverage() && !ok {
+				off, found = k, true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no z9 tile meets the coverage but misses the raster extent")
+	}
+	up := newWCSUpstream(t, 40, nil)
+	logs := &dhmLogSink{}
+	p := newElevationProxy(t, up, logs, func(o *dhmProxyOptions) { o.rateLimitPerMin = 1 })
+	q := leafletQuery(off.Z, off.X, off.Y)
+	q.Set("layers", "elevation")
+	for i := 0; i < 3; i++ {
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, overlayRequest(q, "203.0.113.9:1"))
+		assertTile(t, "off extent", w, dhmTransparentPNG, "outside", ccTile)
+	}
+	if up.hits.Load() != 0 {
+		t.Errorf("%d upstream calls", up.hits.Load())
+	}
+	if _, ok := p.cache.Get(dhmCacheKey{Product: dhmProductElevation, Tile: off}, p.now()); ok {
+		t.Error("cached")
+	}
+	// The one-tile budget is still whole: a real miss is served.
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, overlayRequest(overlayTile("elevation", 12, 0), "203.0.113.9:1"))
+	if w.Code != 200 || w.Header().Get("X-CoreScope-Tile") != "miss" {
+		t.Fatalf("a miss after off-extent tiles: %d %s", w.Code, w.Header().Get("X-CoreScope-Tile"))
+	}
+}

@@ -82,7 +82,15 @@ func (g *Grid) cell(col, row int) (float64, bool) {
 // a GeoTIFF without georeferencing. Between
 // the outermost pixel centres and the extent edge the edge pixels are held
 // constant.
-func (g *Grid) Sample(e, n float64) (float64, bool) {
+func (g *Grid) Sample(e, n float64) (float64, bool) { return g.sample(e, n, false) }
+
+// sampleLand is Sample with a cell of exactly 0 m treated as a gap too:
+// the WCS's fill on the sea and on foreign land (#692). The elevation
+// colours (#792) use it, so a coast's sea-side pixels are not tinted by
+// the land next to them (#831 F4).
+func (g *Grid) sampleLand(e, n float64) (float64, bool) { return g.sample(e, n, true) }
+
+func (g *Grid) sample(e, n float64, zeroIsGap bool) (float64, bool) {
 	if g.Width < 1 || g.Height < 1 || len(g.Values) != g.Width*g.Height || !g.Georef.valid() {
 		return 0, false
 	}
@@ -111,7 +119,7 @@ func (g *Grid) Sample(e, n float64) (float64, bool) {
 			continue
 		}
 		v, ok := g.cell(p.col, p.row)
-		if !ok {
+		if !ok || (zeroIsGap && v == 0) {
 			return 0, false
 		}
 		sum += p.w * v

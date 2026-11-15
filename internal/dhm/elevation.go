@@ -30,7 +30,10 @@ import (
 //     sampled bilinearly into the 256 output pixels: a quarter of the WCS
 //     bytes of 256, and a 1 m colour step does not need more.
 //   - Transparent: nodata, NaN, ±Inf, and exactly 0 m, which is what the
-//     WCS answers on the sea and on foreign land (#692). Land below sea
+//     WCS answers on the sea and on foreign land (#692). A pixel whose
+//     bilinear sample weighs a 0 m cell is transparent too (#831 F4), so
+//     a coast is not fringed with the land's colour on the sea side; the
+//     land's edge loses at most half a raster cell. Land below sea
 //     level (Lammefjord) is coloured as 0 m. Lakes are coloured at their
 //     surface height: the DTM has no water mask.
 //   - The tile is derived from DHM, so its credit carries "data
@@ -47,8 +50,9 @@ const (
 
 	// elevationCell is the edge, in output pixels, of the lattice the tile
 	// is projected on: EPSG:25832 is computed at its corners and
-	// interpolated inside, where the projection is linear to well under a
-	// millimetre at z9.
+	// interpolated inside. The interpolation is off by at most ~0.2 m at
+	// z9 and under a millimetre at z13, against an output pixel of 171 m
+	// and 11 m (TestElevation792_LatticeAccuracy).
 	elevationCell = 16
 )
 
@@ -123,6 +127,19 @@ func tileLattice(k TileKey) (e, n []float64) {
 	return e, n
 }
 
+// latticePoint is the EPSG:25832 position of output pixel (x, y)'s centre,
+// interpolated in the lattice e, n of tileLattice.
+func latticePoint(e, n []float64, x, y int) (pe, pn float64) {
+	const side = TileSize/elevationCell + 1
+	cj, fy := y/elevationCell, (float64(y%elevationCell)+0.5)/elevationCell
+	ci, fx := x/elevationCell, (float64(x%elevationCell)+0.5)/elevationCell
+	i00 := cj*side + ci
+	i01, i10, i11 := i00+1, i00+side, i00+side+1
+	pe = (e[i00]*(1-fx)+e[i01]*fx)*(1-fy) + (e[i10]*(1-fx)+e[i11]*fx)*fy
+	pn = (n[i00]*(1-fx)+n[i01]*fx)*(1-fy) + (n[i10]*(1-fx)+n[i11]*fx)*fy
+	return pe, pn
+}
+
 // ElevationRaster is the WCS request that renders tile k: the DTM over
 // the tile's EPSG:25832 bbox in whole metres, clipped to RasterExtent, at
 // ElevationRasterSize pixels across the whole tile. ok is false when the
@@ -157,22 +174,16 @@ func rasterPixels(span, px float64) int {
 }
 
 // RenderElevationTile colours g over tile k: each output pixel centre is
-// placed in EPSG:25832, sampled bilinearly (a pixel next to nodata or off
-// the grid is transparent) and mapped through the ramp. The work is pure
-// and deterministic.
+// placed in EPSG:25832, sampled bilinearly (a pixel next to nodata, the
+// 0 m sea fill or off the grid is transparent) and mapped through the
+// ramp. The work is pure and deterministic.
 func RenderElevationTile(g *Grid, k TileKey) ([]byte, error) {
-	const side = TileSize/elevationCell + 1
 	e, n := tileLattice(k)
 	img := image.NewPaletted(image.Rect(0, 0, TileSize, TileSize), elevationPalette)
 	for y := 0; y < TileSize; y++ {
-		cj, fy := y/elevationCell, (float64(y%elevationCell)+0.5)/elevationCell
 		for x := 0; x < TileSize; x++ {
-			ci, fx := x/elevationCell, (float64(x%elevationCell)+0.5)/elevationCell
-			i00 := cj*side + ci
-			i01, i10, i11 := i00+1, i00+side, i00+side+1
-			pe := (e[i00]*(1-fx)+e[i01]*fx)*(1-fy) + (e[i10]*(1-fx)+e[i11]*fx)*fy
-			pn := (n[i00]*(1-fx)+n[i01]*fx)*(1-fy) + (n[i10]*(1-fx)+n[i11]*fx)*fy
-			if h, ok := g.Sample(pe, pn); ok {
+			pe, pn := latticePoint(e, n, x, y)
+			if h, ok := g.sampleLand(pe, pn); ok {
 				img.Pix[y*img.Stride+x] = elevationIndex(h)
 			}
 		}

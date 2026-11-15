@@ -158,8 +158,10 @@ func renderElev(t *testing.T, k TileKey, f func(col, row int) float32, noData *f
 
 // Golden tiles from synthetic grids: flat land is one colour, the sea
 // fill and nodata are transparent everywhere, the extremes clamp, and a
-// west–east slope runs through the ramp in order. The hashes are of the
-// decoded pixels; the spot checks say what they mean.
+// west–east slope runs through the ramp in order. Every case carries the
+// hash of its decoded pixels; the spot checks say what they mean. Since
+// #831 F4 a pixel weighing a 0 m cell is transparent, so the slope's 0 m
+// west column and the half-sea case's coast are clear on the sea side.
 func TestElevation792_RenderGolden(t *testing.T) {
 	nd := float32(-9999)
 	type spot struct {
@@ -174,25 +176,25 @@ func TestElevation792_RenderGolden(t *testing.T) {
 		hash  string
 	}{
 		{"flat 40 m", func(int, int) float32 { return 40 }, nil,
-			[]spot{{0, 0, elevationPalette[elevationIndex(40)].(color.NRGBA)}, {255, 255, elevationPalette[elevationIndex(40)].(color.NRGBA)}}, ""},
+			[]spot{{0, 0, elevationPalette[elevationIndex(40)].(color.NRGBA)}, {255, 255, elevationPalette[elevationIndex(40)].(color.NRGBA)}}, "6df1e9edc40f8249"},
 		{"sea fill", func(int, int) float32 { return 0 }, nil,
-			[]spot{{0, 0, color.NRGBA{}}, {128, 128, color.NRGBA{}}}, ""},
+			[]spot{{0, 0, color.NRGBA{}}, {128, 128, color.NRGBA{}}}, "8a39d2abd3999ab7"},
 		{"nodata", func(int, int) float32 { return nd }, &nd,
-			[]spot{{0, 0, color.NRGBA{}}, {200, 17, color.NRGBA{}}}, ""},
+			[]spot{{0, 0, color.NRGBA{}}, {200, 17, color.NRGBA{}}}, "8a39d2abd3999ab7"},
 		{"NaN", func(int, int) float32 { return float32(math.NaN()) }, nil,
-			[]spot{{5, 5, color.NRGBA{}}}, ""},
+			[]spot{{5, 5, color.NRGBA{}}}, "8a39d2abd3999ab7"},
 		{"extreme high", func(int, int) float32 { return 3.0e38 }, nil,
-			[]spot{{0, 0, color.NRGBA{0xf2, 0xee, 0xe9, 255}}}, ""},
+			[]spot{{0, 0, color.NRGBA{0xf2, 0xee, 0xe9, 255}}}, "3dda33cc1d973441"},
 		{"extreme low", func(int, int) float32 { return -3.0e38 }, nil,
-			[]spot{{0, 0, color.NRGBA{0x4a, 0x8c, 0x5c, 255}}}, ""},
+			[]spot{{0, 0, color.NRGBA{0x4a, 0x8c, 0x5c, 255}}}, "c44a814c5340f7ab"},
 		{"slope 0-200 m west to east", func(col, _ int) float32 { return float32(col) * 200 / 127 }, nil,
-			[]spot{{255, 128, color.NRGBA{0xf2, 0xee, 0xe9, 255}}}, "6f05659dcc0555e1"},
+			[]spot{{255, 128, color.NRGBA{0xf2, 0xee, 0xe9, 255}}}, "371aeccf43789561"},
 		{"west half sea, east half 60 m", func(col, _ int) float32 {
 			if col < 64 {
 				return 0
 			}
 			return 60
-		}, nil, []spot{{2, 128, color.NRGBA{}}, {253, 128, elevationPalette[elevationIndex(60)].(color.NRGBA)}}, "5d7f358ca7884e8e"},
+		}, nil, []spot{{2, 128, color.NRGBA{}}, {253, 128, elevationPalette[elevationIndex(60)].(color.NRGBA)}}, "2681b4766de686eb"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -202,10 +204,8 @@ func TestElevation792_RenderGolden(t *testing.T) {
 					t.Errorf("pixel (%d,%d) = %v, want %v", s.x, s.y, got, s.want)
 				}
 			}
-			if c.hash != "" {
-				if got := pixelHash(img); got != c.hash {
-					t.Errorf("pixel hash %s, want %s", got, c.hash)
-				}
+			if got := pixelHash(img); got != c.hash {
+				t.Errorf("pixel hash %s, want %s", got, c.hash)
 			}
 		})
 	}
@@ -620,4 +620,100 @@ func TestElevation792_CPUWithinBudget(t *testing.T) {
 		t.Logf("%v per tile, over the %v target (limit %v)", best, target, limit)
 	}
 	t.Logf("per tile: %v (target %v, limit %v)", best, target, limit)
+}
+
+// #831 F4: the 0 m sea fill does not tint a coast. On a half-sea,
+// half-land (3 m) raster, no output pixel whose centre lies in a sea cell
+// is coloured, at z9 and z13; the land side stays coloured a cell in.
+func TestElevation792_CoastHasNoSeaFringe(t *testing.T) {
+	for _, k := range []TileKey{elevTileZ9, elevTileZ13} {
+		r, ok := ElevationRaster(k)
+		if !ok {
+			t.Fatalf("%v: no raster", k)
+		}
+		half := r.Width / 2
+		img := renderElev(t, k, func(col, _ int) float32 {
+			if col < half {
+				return 0
+			}
+			return 3
+		}, nil)
+		g := elevGrid(r, r.Width, r.Height, func(int, int) float32 { return 0 })
+		coast := g.Georef.OriginE + float64(half)*g.Georef.PixelE
+		e, n := tileLattice(k)
+		fringe, land := 0, 0
+		for y := 0; y < TileSize; y++ {
+			for x := 0; x < TileSize; x++ {
+				pe, _ := latticePoint(e, n, x, y)
+				on := img.ColorIndexAt(x, y) != 0
+				if pe < coast && on {
+					fringe++
+				}
+				if pe > coast+1.5*g.Georef.PixelE && on {
+					land++
+				}
+			}
+		}
+		if fringe != 0 {
+			t.Errorf("z%d: %d coloured pixels on the sea side", k.Z, fringe)
+		}
+		if land == 0 {
+			t.Errorf("z%d: no coloured land a cell in from the coast", k.Z)
+		}
+	}
+}
+
+// #831 F5: the lattice's interpolated position of every output pixel is
+// within 0.5 m of the projection itself at z9 (measured ~0.19 m) and 1 cm
+// at z13, so a coarser lattice is caught.
+func TestElevation792_LatticeAccuracy(t *testing.T) {
+	for _, c := range []struct {
+		k   TileKey
+		tol float64
+	}{{elevTileZ9, 0.5}, {elevTileZ13, 0.01}} {
+		e, n := tileLattice(c.k)
+		b := c.k.BBox()
+		span := b[2] - b[0]
+		worst := 0.0
+		for y := 0; y < TileSize; y++ {
+			for x := 0; x < TileSize; x++ {
+				pe, pn := latticePoint(e, n, x, y)
+				lon, lat := mercatorToLonLat(b[0]+span*(float64(x)+0.5)/TileSize, b[3]-span*(float64(y)+0.5)/TileSize)
+				te, tn := ToUTM32(lat, lon)
+				worst = math.Max(worst, math.Hypot(pe-te, pn-tn))
+			}
+		}
+		if worst > c.tol {
+			t.Errorf("z%d: worst lattice error %.4f m, want <= %g m", c.k.Z, worst, c.tol)
+		}
+	}
+}
+
+// #831 F7: a tile that meets the DHM coverage but misses the WCS
+// RasterExtent is not covered by the elevation overlay (the proxy serves
+// it as "outside"); the WMS overlays still cover it.
+func TestElevation792_CoversNeedsTheRasterExtent(t *testing.T) {
+	var off *TileKey
+	n := 1 << ElevationMinZoom
+	for x := 0; x < n && off == nil; x++ {
+		for y := 0; y < n; y++ {
+			k := TileKey{Z: ElevationMinZoom, X: x, Y: y}
+			if _, ok := ElevationRaster(k); k.IntersectsCoverage() && !ok {
+				off = &k
+				break
+			}
+		}
+	}
+	if off == nil {
+		t.Fatal("no z9 tile meets the coverage but misses the raster extent")
+	}
+	if overlayElevation.Covers(*off) {
+		t.Errorf("%v: covered by elevation", *off)
+	}
+	if !overlayTerrain.Covers(*off) {
+		t.Errorf("%v: not covered by the terrain hillshade", *off)
+	}
+	if !overlayElevation.Covers(elevTileZ9) || overlayElevation.Covers(TileKey{Z: 9, X: 100, Y: 160}) {
+		t.Error("Covers is wrong inside Denmark or far outside it")
+	}
 }
