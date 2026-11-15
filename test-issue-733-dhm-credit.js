@@ -357,6 +357,16 @@ test('the map credit and the footer are one walk: same text, same links', () => 
     anchors(html).map(a => [a.text, a.attrs.href, a.attrs.rel, a.attrs.target]));
 });
 
+test('marks are consumed in text order: a list out of order links only the later mark', () => {
+  // The contract _overlayCredit documents: each mark is looked for after
+  // the previous anchor, so a list must follow the text.
+  const p = makeElement('p');
+  const links = TP_WIN.MC_creditLinks(DHM_BLOCK).slice().reverse();
+  assert.strictEqual(TP_WIN.MC_appendCredit(p, GO_ATTRIBUTION, links), 1);
+  assert.deepStrictEqual(anchors(p.innerHTML).map(a => a.text), [GO.LicenseName], p.innerHTML);
+  assert.strictEqual(p.textContent, GO_ATTRIBUTION);
+});
+
 test('terrain-profile.js keeps no walker and no credit string of its own', () => {
   const src = fs.readFileSync(path.join(__dirname, 'public', 'terrain-profile.js'), 'utf8');
   assert.strictEqual(/function appendCredit\b/.test(src), false, 'a second credit walker is back');

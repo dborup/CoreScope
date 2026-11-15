@@ -522,7 +522,14 @@
   /* The credit links an overlay's config offers. An overlay whose owner's
    * terms ask for no link (the #723 monuments: free use under the agency's
    * own rules, textual data CC0) carries none of these fields and keeps its
-   * plain credit. `key` names each link for a caller that decorates it. */
+   * plain credit. `key` names each link for a caller that decorates it.
+   *
+   * Ordering contract (#765): appendCredit consumes the marks in text
+   * order. Each mark is looked for only in the text after the previous
+   * anchor, so this list must follow the order the marks occur in the
+   * credit — the dataset before the licence, as in "…, Danmarks
+   * Højdemodel, CC BY 4.0". A mark listed after one that follows it in the
+   * text is not found and stays plain text, silently. */
   function creditLinks(cfg) {
     return [
       { key: 'dataset', mark: cfg.datasetName, href: cfg.datasetUrl, rel: 'noopener noreferrer' },
@@ -530,6 +537,7 @@
     ];
   }
 
+  // The marks are consumed in text order: see the ordering contract above.
   function _overlayCredit(cfg) {
     return buildCredit(cfg.attribution, creditLinks(cfg));
   }
