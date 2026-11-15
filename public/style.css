@@ -6600,25 +6600,27 @@ body.embed #app.app-fixed {
 .tp-copy[hidden] { display: none; }
 .tp-panel.tp-compact .tp-chip,
 .tp-panel.tp-compact .tp-head::after { display: none; }
-/* #790 F4: the ▾/▴ fold toggle of a finished profile, beside copy/close.
-   Folded, the body goes and the head keeps the title, the chips and the
-   verdict as the status line. */
+/* #790 F4: the title of a finished profile is the ▾/▴ fold toggle. It
+   looks like the title, is 48 px tall, and costs the title row only the
+   glyph. Folded, the body goes and the head keeps the title, the chips
+   and the verdict as the status line. */
 .tp-fold {
-  margin-left: auto;
-  min-width: 48px;
-  min-height: 48px;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  gap: 6px;
+  min-width: 48px;
+  min-height: 48px;
+  margin: 0;
+  padding: 0 4px;
   background: none;
   border: none;
   border-radius: 4px;
-  color: var(--text);
-  font-size: 18px;
+  color: inherit;
+  font: inherit;
   cursor: pointer;
 }
 .tp-fold[hidden] { display: none; }
-.tp-fold + .tp-copy { margin-left: 0; }
+.tp-fold-glyph { font-size: 14px; }
 .tp-fold:hover { background: var(--row-hover); }
 .tp-fold:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
 .tp-pick-status {

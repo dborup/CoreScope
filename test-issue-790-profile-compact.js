@@ -353,6 +353,7 @@ function foldView(env) {
     shown: !!(fold && !fold.hidden),
     expanded: fold && fold.getAttribute('aria-expanded'),
     glyph: fold && fold.children[0] && fold.children[0].textContent,
+    name: fold && fold.textContent,
     folded: env.dom.find('tp-panel').classList.contains('tp-folded'),
     bodyHidden: env.dom.find('tp-body').hidden,
     chipHidden: env.dom.find('tp-verdict').hidden,
@@ -368,6 +369,9 @@ test('the toggle is not in the compact bar', () => {
   const { tool } = openTool(env);
   tool.setEndpoint('a', NODE_A);
   assert.strictEqual(foldView(env).shown, false, 'the fold toggle is shown while picking');
+  const plain = env.dom.find('tp-fold').parentNode.children[0];
+  assert.strictEqual(plain.hidden, false, 'the compact bar has no title');
+  assert.strictEqual(plain.textContent, 'Path profile');
 });
 
 atest('fold: the head keeps title, verdict chip and the verdict as status; unfold restores the panel', async () => {
@@ -382,7 +386,10 @@ atest('fold: the head keeps title, verdict chip and the verdict as status; unfol
   assert.strictEqual(v.glyph, '\u25BE');
   const fold = env.dom.find('tp-fold');
   assert.strictEqual(fold.tagName, 'BUTTON', 'the toggle is not a button');
-  assert.ok(fold.getAttribute('aria-label'), 'the toggle has no accessible name');
+  // The title is the toggle: its text is its name, no second title shown.
+  assert.strictEqual(v.name, 'Path profile', 'the toggle is not the title: ' + v.name);
+  assert.strictEqual(fold.getAttribute('aria-label'), null, 'an aria-label would hide the title text');
+  assert.strictEqual(fold.parentNode.children[0].hidden, true, 'the plain title shows beside the toggle: the title reads twice');
   const calls = fetchJSON.calls.length;
   fold.fire('click');
   v = foldView(env);

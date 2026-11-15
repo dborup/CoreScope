@@ -1380,7 +1380,27 @@
       panel.setAttribute('data-testid', 'tp-panel');
 
       var head = el('header', 'tp-head');
-      head.appendChild(el('h3', 'tp-title', 'Path profile'));
+      /* #790 F4: on a finished profile the title is the ▾/▴ fold toggle
+       * (a disclosure button inside the heading), so the title row spends
+       * no extra 48 px on it — the 640 px landscape row has no room left
+       * for one (#784). In the compact bar the title is plain text. */
+      var title = el('h3', 'tp-title');
+      ui.titleText = el('span', '', 'Path profile');
+      title.appendChild(ui.titleText);
+      ui.fold = el('button', 'tp-fold', 'Path profile');
+      ui.fold.type = 'button';
+      ui.fold.hidden = true;
+      ui.fold.setAttribute('aria-expanded', 'true');
+      ui.fold.setAttribute('data-testid', 'tp-fold');
+      ui.foldGlyph = el('span', 'tp-fold-glyph', '\u25BE');
+      ui.foldGlyph.setAttribute('aria-hidden', 'true');
+      ui.fold.appendChild(ui.foldGlyph);
+      ui.fold.addEventListener('click', function () {
+        folded = !folded;
+        syncCompact();
+      });
+      title.appendChild(ui.fold);
+      head.appendChild(title);
       ui.chip = el('span', 'tp-chip');
       ui.chip.setAttribute('data-testid', 'tp-verdict');
       // #790: an empty chip is a grey pill that reads as a drag handle.
@@ -1426,23 +1446,6 @@
         if (moving) api.cancelMove(); else api.close();
       });
       head.appendChild(ui.cancel);
-      /* #790 F4: fold a finished profile down to its head — the title, the
-       * verdict chips and the verdict as a status line — so a small phone
-       * gets its map back; unfold brings the panel back as it was. A real
-       * button, not a drag gesture. Hidden in the compact bar. */
-      ui.fold = el('button', 'tp-fold');
-      ui.fold.type = 'button';
-      ui.fold.setAttribute('aria-label', 'Path profile details');
-      ui.fold.setAttribute('aria-expanded', 'true');
-      ui.fold.setAttribute('data-testid', 'tp-fold');
-      ui.foldGlyph = el('span', '', '\u25BE');
-      ui.foldGlyph.setAttribute('aria-hidden', 'true');
-      ui.fold.appendChild(ui.foldGlyph);
-      ui.fold.addEventListener('click', function () {
-        folded = !folded;
-        syncCompact();
-      });
-      head.appendChild(ui.fold);
       ui.copy = el('button', 'tp-close tp-copy');
       ui.copy.type = 'button';
       ui.copy.disabled = true;
@@ -1696,7 +1699,11 @@
       ui.body.hidden = shut;
       ui.copy.hidden = compact;
       ui.cancel.hidden = !compact;
+      /* Folded, a finished profile keeps its head: the title, the verdict
+       * chips and the verdict as the status line; a real button, not a
+       * drag gesture. */
       ui.fold.hidden = compact;
+      ui.titleText.hidden = !compact;
       ui.fold.setAttribute('aria-expanded', folded ? 'false' : 'true');
       ui.fold.title = folded ? 'Expand the path profile' : 'Collapse the path profile';
       ui.foldGlyph.textContent = folded ? '\u25B4' : '\u25BE';
@@ -1999,9 +2006,6 @@
       state.model = themeDefaults().model;
       state.modelExplicit = false;
       moving = null;
-      // The next profile opens unfolded (#790 F4).
-      folded = false;
-      lastPhase = null;
       themeH.a = null;
       themeH.b = null;
       setHeritage(null);
@@ -2125,6 +2129,9 @@
       open: function () {
         if (open) return;
         open = true;
+        // A new profile opens unfolded (#790 F4).
+        folded = false;
+        lastPhase = null;
         if (!panel) mount.appendChild(buildPanel());
         panel.classList.add('is-open');
         renderNames();

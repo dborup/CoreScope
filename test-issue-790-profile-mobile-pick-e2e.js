@@ -195,7 +195,8 @@ const PHONE_VIEW = { lat: 37.5, lon: -122.85, zoom: 10 };
         cancel: shown(cancel) ? box(cancel) : null,
         close: shown(close) ? box(close) : null,
         copy: shown(q('[data-testid="tp-copy-link"]')),
-        fold: shown(fold) ? Object.assign(box(fold), { tag: fold.tagName, expanded: fold.getAttribute('aria-expanded'), glyph: fold.textContent }) : null,
+        titleText: panel ? panel.querySelector('.tp-title').innerText.replace(/\s+/g, '') .replace('Pathprofile', 'Path profile') : null,
+        fold: shown(fold) ? Object.assign(box(fold), { tag: fold.tagName, expanded: fold.getAttribute('aria-expanded'), glyph: fold.querySelector('[aria-hidden]').textContent, name: fold.textContent.replace(/[▾▴]/g, '').trim(), inTitle: !!fold.closest('h3.tp-title') }) : null,
         body: shown(q('[data-testid="tp-body"]')),
         chart: shown(q('[data-testid="tp-chart"] svg.tp-svg')),
         chips: chips.map(c => c.textContent),
@@ -343,6 +344,8 @@ const PHONE_VIEW = { lat: 37.5, lon: -122.85, zoom: 10 };
       assert(v.fold.tag === 'BUTTON', 'the toggle is a ' + v.fold.tag + ', not a button');
       assert(v.fold.w >= 48 && v.fold.h >= 48, 'the toggle is under 48px: ' + JSON.stringify(v.fold));
       assert(v.fold.expanded === 'true' && v.fold.glyph === '▾', 'expanded toggle: ' + JSON.stringify(v.fold));
+      assert(v.fold.inTitle && v.fold.name === 'Path profile', 'the toggle is not the title: ' + JSON.stringify(v.fold));
+      assert(v.titleText === 'Path profile▾', 'the title row reads ' + JSON.stringify(v.titleText));
       await page.tap('[data-testid="tp-fold"]');
       await page.waitForTimeout(250);
       v = await panelView(page);
