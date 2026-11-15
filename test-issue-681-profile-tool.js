@@ -1695,6 +1695,37 @@ atest('a model picked with the buttons rides the hash, even when it is the stand
   assert.strictEqual(hashParamsOf(live.win.location).get('model'), 'both', 'a chosen "both" left the hash: ' + live.win.location.hash);
 });
 
+/* #765 §6: a stated model belongs to the profile that stated it. After a
+ * Close the next path is the viewer's own, so its link does not carry the
+ * old link's model, and a customizer change moves it again. */
+atest('a Close forgets that the model was stated (#765)', async () => {
+  const live = loadRouted('#/map');
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'both' }) };
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B + '&model=both', live.TP.themeDefaults()));
+  assert.strictEqual(tool.getState().modelExplicit, true, 'setup: the link did not state its model');
+  live.dom.find('tp-close').fire('click');
+  assert.strictEqual(tool.getState().modelExplicit, false, 'the stated model outlived the Close');
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_B });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_A });
+  assert.strictEqual(hashParamsOf(live.win.location).get('model'), null,
+    'the next profile carries the closed link\'s model: ' + live.win.location.hash);
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'dtm' }) };
+  tool.defaultsChangedForTests();
+  assert.strictEqual(tool.getState().model, 'dtm', 'the closed link\'s model still pins the next profile');
+});
+
+atest('a model picked with the buttons is forgotten by a Close too (#765)', async () => {
+  const live = loadRouted('#/map');
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ model: 'dtm' }) };
+  const tool = live.TP.create({ mount: live.dom.body, fetchJSON: deferredFetch() });
+  tool.setState(live.TP.parseState('profile=' + PK_A + ',' + PK_B, live.TP.themeDefaults()));
+  live.dom.find('tp-model-both').fire('click');
+  assert.strictEqual(tool.getState().modelExplicit, true, 'setup: the pick was not stated');
+  tool.close();
+  assert.strictEqual(tool.getState().modelExplicit, false, 'the pick outlived the Close');
+});
+
 // ── #746 §3: a height edit invalidates the answer in flight at once ────────
 
 console.log('\n=== #746: no stale answer while a height edit waits for its debounce ===');
