@@ -4,7 +4,7 @@
  *
  * Coverage:
  *   - localStorage keys: cs-theme-overrides, meshcore-cb-preset,
- *     channels-show-encrypted, mc-dark-tile-provider
+ *     channels-show-encrypted, mc-dark-tile-provider, mc-light-tile-provider (#741)
  *   - body attribute: data-cb-preset
  *   - body.style: --mc-role-{role}, --mc-role-{role}-text
  *   - root.style: --mc-role-{role}, --mc-role-{role}-text, --node-{role},
@@ -196,6 +196,13 @@ test('clears mc-dark-tile-provider localStorage key', () => {
   env.localStorage.setItem('mc-dark-tile-provider', 'voyager-inverted');
   env.api.resetAll();
   assert.strictEqual(env.localStorage.getItem('mc-dark-tile-provider'), null);
+});
+
+test('clears mc-light-tile-provider localStorage key (#741)', () => {
+  const env = loadCustomizer();
+  env.localStorage.setItem('mc-light-tile-provider', 'dataforsyningen-skaermkort-graa');
+  env.api.resetAll();
+  assert.strictEqual(env.localStorage.getItem('mc-light-tile-provider'), null);
 });
 
 test('removes data-cb-preset body attribute', () => {

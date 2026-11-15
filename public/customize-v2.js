@@ -3230,6 +3230,18 @@
     _updateSaveStatus(_saveStatus);
   }
 
+  // #741 — the base-map lists come from the tile registry, which is rebuilt
+  // when /api/config/client lands. On a cold start (a slow phone) the panel
+  // can already be open by then, listing only the providers known at parse
+  // time; re-render it once so the operator's gated styles (Dataforsyningen,
+  // Esri, ...) appear, or vanish, in place. A closed panel re-renders on open.
+  try {
+    window.addEventListener('mc-tile-provider-changed', function (e) {
+      if (!(e && e.detail && e.detail.fromConfig)) return;
+      if (_panelEl && !_panelEl.classList.contains('hidden')) _refreshPanel();
+    });
+  } catch (_e) { /* no window events (tests) */ }
+
   // ── Initialization (runs immediately on script load) ──
 
   // 1. Migration check
@@ -3344,7 +3356,8 @@
       'channels-show-encrypted',   // #1454 encrypted-channel toggle
       'meshcore-hide-1byte-hops',  // #1633 hide 1-byte path hops toggle (pre-#674)
       'meshcore-1byte-hops-mode',  // #674 1-byte path hops: show/mark/hide
-      'mc-dark-tile-provider'      // #1430 dark-tile provider pick
+      'mc-dark-tile-provider',     // #1430 dark-tile provider pick
+      'mc-light-tile-provider'     // light-tile provider pick (#741)
     ];
     for (var i = 0; i < CUSTOMIZER_LS_KEYS.length; i++) {
       try { localStorage.removeItem(CUSTOMIZER_LS_KEYS[i]); } catch (_e) { /* ignore */ }
@@ -3415,15 +3428,19 @@
     //    default. Re-applying the effective active id achieves that
     //    without forcing a particular value (it falls through to the
     //    server default / DEFAULT_ID inside getActiveId()).
-    try {
-      if (typeof window !== 'undefined' &&
-          typeof window.MC_setDarkTileProvider === 'function' &&
-          typeof window.MC_getDarkTileProvider === 'function') {
-        window.MC_setDarkTileProvider(window.MC_getDarkTileProvider());
-        // Re-clear so we don't re-persist the just-re-applied value.
-        try { localStorage.removeItem('mc-dark-tile-provider'); } catch (_e) {}
-      }
-    } catch (_e) { /* ignore */ }
+    //    #741 — the light pick (e.g. a Dataforsyningen base map) gets the
+    //    same treatment as the dark one.
+    [['Dark', 'mc-dark-tile-provider'], ['Light', 'mc-light-tile-provider']].forEach(function (t) {
+      try {
+        var set = (typeof window !== 'undefined') && window['MC_set' + t[0] + 'TileProvider'];
+        var get = (typeof window !== 'undefined') && window['MC_get' + t[0] + 'TileProvider'];
+        if (typeof set === 'function' && typeof get === 'function') {
+          set(get());
+          // Re-clear so we don't re-persist the just-re-applied value.
+          try { localStorage.removeItem(t[1]); } catch (_e) {}
+        }
+      } catch (_e) { /* ignore */ }
+    });
 
     // 6. Encrypted-channel toggle — removing the LS key (step 1) fixes
     //    persistence, but channels.js subscribes to
@@ -3493,6 +3510,8 @@
     MASTS_SETTING_KEYS: MASTS_SETTING_KEYS,
     isValidMastsSetting: isValidMastsSetting,
     mastsSettings: mastsSettings,
-    renderMastsSettings: _renderMastsSettings
+    renderMastsSettings: _renderMastsSettings,
+    // #741 — exposed for tests; see test-issue-741-customizer-base-maps.js.
+    renderTileProviderSelector: _renderTileProviderSelector
   };
 })();
