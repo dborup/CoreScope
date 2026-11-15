@@ -6,6 +6,8 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -746,5 +748,46 @@ func TestTerrainFill_SurfaceUnknownWhenMixed(t *testing.T) {
 	e.fill = fillNone
 	if r := p.buildResponse(terrainQuery{both: true}, ends, pa, pb, &plan, e); r.Coverage.Mixed || r.Verdict.Surface.State == "unknown" {
 		t.Fatalf("not mixed: coverage %+v, surface %+v", r.Coverage, r.Verdict.Surface)
+	}
+}
+
+// #738 decision 2: the Copernicus liability notice (licence Art. 6(c))
+// is in the README and in the config docs, verbatim, beside both
+// credits; and the example config documents the fill, off, at the
+// defaults (TestTerrainProfile_ExampleConfigMatchesDefaults compares the
+// values).
+func TestTerrainFill_LicenceNoticeDocumented(t *testing.T) {
+	for _, c := range []struct {
+		file  string
+		texts []string
+	}{
+		{"README.md", []string{copdem.LiabilityNotice, copdem.AttributionDerived, dhm.Attribution, "map.dhm.profile.foreignFill.enabled"}},
+		{"config.example.json", []string{copdem.LiabilityNotice, copdem.Host}},
+	} {
+		b, err := os.ReadFile(filepath.Join("..", "..", c.file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, s := range c.texts {
+			if !strings.Contains(string(b), s) {
+				t.Errorf("%s does not contain %q", c.file, s)
+			}
+		}
+	}
+	dir := t.TempDir()
+	data, err := os.ReadFile(filepath.Join("..", "..", "config.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ff := cfg.DHM.Profile.ForeignFill
+	if ff.Enabled || ff.BlockCacheMB == nil || ff.TimeoutMs == nil {
+		t.Fatalf("example map.dhm.profile.foreignFill %+v: must be documented and off", ff)
 	}
 }
