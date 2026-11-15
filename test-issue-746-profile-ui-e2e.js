@@ -173,23 +173,38 @@ function hashParams(hash) {
   const lastAsked = (rec) => rec.profile[rec.profile.length - 1].searchParams;
 
   // ── 1. §1: teardown leaves the destination hash alone ─────────────────
+  // Each step opens its own context and history, so none of them depends
+  // on another having passed (#765 §7).
+  const SECOND = `#/map?profile=${P2}&model=dtm&ha=12`;
+
+  /* openTwoLinks opens the P1 link, then switches to the second link on
+   * the Map page, and waits until each one has been measured. */
+  async function openTwoLinks(page, rec) {
+    await page.goto(`${BASE}/#/map?profile=${P1}&ha=19&hb=19`, { waitUntil: 'domcontentloaded' });
+    await waitForRequestFor(page, rec, P1);
+    await page.evaluate((h) => { location.hash = h; }, SECOND);
+    await waitForRequestFor(page, rec, P2);
+  }
+
   {
     const { ctx, page, rec } = await newCtx();
     await step('§1: a second profile link on the Map page opens that profile', async () => {
-      await page.goto(`${BASE}/#/map?profile=${P1}&ha=19&hb=19`, { waitUntil: 'domcontentloaded' });
-      await waitForRequestFor(page, rec, P1);
-      const next = `#/map?profile=${P2}&model=dtm&ha=12`;
-      await page.evaluate((h) => { location.hash = h; }, next);
-      await waitForRequestFor(page, rec, P2);
+      await openTwoLinks(page, rec);
       const hp = hashParams(await page.evaluate(() => location.hash));
       assert(hp.get('profile') === P2, 'the destination profile left the hash: ' + hp.toString());
       assert(hp.get('model') === 'dtm' && hp.get('ha') === '12', 'the destination controls left the hash: ' + hp.toString());
       const q = lastAsked(rec);
       assert(q.get('model') === 'dtm' && q.get('ha') === '12', 'measured with ' + q.toString());
     });
+    await ctx.close();
+  }
+
+  {
+    const { ctx, page, rec } = await newCtx();
     await step('§1: Back returns to the first profile, still open', async () => {
-      await page.goBack({ waitUntil: 'domcontentloaded' });
+      await openTwoLinks(page, rec);
       const before = rec.profile.length;
+      await page.goBack({ waitUntil: 'domcontentloaded' });
       const t0 = Date.now();
       while (rec.profile.length === before && Date.now() - t0 < 10000) await page.waitForTimeout(100);
       await waitForRequestFor(page, rec, P1);
@@ -197,8 +212,15 @@ function hashParams(hash) {
       assert(hp.get('profile') === P1 && hp.get('ha') === '19', 'Back lost the first profile: ' + hp.toString());
       const q = lastAsked(rec);
       assert(q.get('a') + ',' + q.get('b') === P1 && q.get('ha') === '19', 'Back measured ' + q.toString());
+      assert(rec.consoleErrors.length === 0, 'console errors: ' + rec.consoleErrors.join(' | '));
     });
+    await ctx.close();
+  }
+
+  {
+    const { ctx, page, rec } = await newCtx();
     await step('§1: the Close button still clears the profile from the hash', async () => {
+      await openTwoLinks(page, rec);
       await page.click('[data-testid="tp-close"]');
       const hp = hashParams(await page.evaluate(() => location.hash));
       assert(hp.get('profile') === null && hp.get('ha') === null, 'Close left ' + hp.toString());
