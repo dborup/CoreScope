@@ -144,17 +144,25 @@ var errNoLevel = dhm.FetchError{Reason: "no preview level"}
 // preview bounds, and be at most twice the preview, so a scaled preview
 // never reads more than four times its pixels.
 func previewLevel(t *dhm.TiledImage) (*dhm.ImageLevel, error) {
-	best := 0
-	for i := range t.Levels {
-		if max(t.Levels[i].Width, t.Levels[i].Height) >= PreviewMaxPx {
-			best = i
-		}
-	}
-	l := &t.Levels[best]
+	l := &t.Levels[previewLevelIndex(len(t.Levels), func(i int) (int, int) { return t.Levels[i].Width, t.Levels[i].Height })]
 	if max(l.Width, l.Height) > 2*PreviewMaxPx || l.NumTiles() > MaxPreviewTiles || l.Width*l.Height > MaxPreviewPixels {
 		return nil, errNoLevel
 	}
 	return l, nil
+}
+
+// previewLevelIndex is the level a preview is cut from, of n levels
+// largest first whose sizes size gives: the smallest whose long edge is
+// at least PreviewMaxPx, or the first when none is. PreviewFrame shares
+// it, so a projected point is where Preview puts the pixel.
+func previewLevelIndex(n int, size func(i int) (w, h int)) int {
+	best := 0
+	for i := 0; i < n; i++ {
+		if w, h := size(i); max(w, h) >= PreviewMaxPx {
+			best = i
+		}
+	}
+	return best
 }
 
 // span is one range read covering tiles.

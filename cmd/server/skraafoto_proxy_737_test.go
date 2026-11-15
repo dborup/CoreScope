@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,7 +236,8 @@ func TestSkraafoto737_SearchFiveDirections(t *testing.T) {
 		want := SkraafotoPhoto{ID: id, Collection: "skraafotos2025", Direction: d, Datetime: "2025-05-07T10:21:33Z",
 			ViewerURL:  "https://skraafoto.dataforsyningen.dk/?item=" + id,
 			PreviewURL: "/api/skraafoto/preview/skraafotos2025/" + id}
-		if ph != want {
+		// The fake's photos carry no camera model: no M3a fields.
+		if !reflect.DeepEqual(ph, want) {
 			t.Fatalf("photo %d: %+v\nwant %+v", i, ph, want)
 		}
 	}

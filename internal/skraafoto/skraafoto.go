@@ -7,7 +7,8 @@
 //     the operator's Dataforsyningen token, the one map.dhm uses, sent in
 //     the `token` header and nowhere else. One query shape only: the
 //     items of one collection that contain one EPSG:25832 point and face
-//     one direction, limit 1, as the official viewer asks.
+//     one direction, as the official viewer asks (limit SearchLimit, not
+//     its 1: the server picks the best-centred, #737 M3a).
 //   - The image CDN (CDN, cdn.go) holds each photo as a Cloud-Optimized
 //     GeoTIFF of about 322 MB. It needs no token, and is never sent one:
 //     CDN has no token to send. A preview reads the file's IFDs with one
