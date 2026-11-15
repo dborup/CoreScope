@@ -27,6 +27,8 @@
    * kept here. footerCredit below builds it. */
   // The footer's own test ids for the two links creditLinks names.
   var CREDIT_TESTIDS = { dataset: 'tp-credit-dataset', license: 'tp-credit-link' };
+  // #738 M2: the same two links in the Copernicus credit of a mixed profile.
+  var FILL_CREDIT_TESTIDS = { dataset: 'tp-credit-fill-dataset', license: 'tp-credit-fill-license' };
   var ASSUMED_LABEL = 'assumed heights';
   var ENDPOINT = '/api/terrain/profile';
   var HASH_PARAM = 'profile';
@@ -523,6 +525,39 @@
    * so the only ones whose chart may carry intrusion bands. */
   var INTRUDING_VERDICTS = { fresnel60: true, blocked: true };
 
+  /* #738 M2 — with map.dhm.profile.foreignFill on, the samples DHM does
+   * not cover are filled from Copernicus DEM GLO-30 and the response marks
+   * the profile mixed (coverage.mixed, coverage.fill[].resolutionM). The
+   * verdict then rests on a coarser, surface-influenced model outside
+   * Denmark, and there is no surface model there at all, so the panel says
+   * both. The fill's nominal resolution is 30 m, or this on the ½ overview
+   * (cmd/server fillResolutionM[fillOverview]; #738 decision 7). */
+  var FILL_OVERVIEW_M = 60;
+
+  function isMixed(data) { return !!(data && data.coverage && data.coverage.mixed === true); }
+
+  // The coarsest resolution the fill ranges report, or null without a
+  // usable one: only a positive finite number is a resolution.
+  function fillResolution(cov) {
+    var best = null;
+    (Array.isArray(cov.fill) ? cov.fill : []).forEach(function (r) {
+      var m = r && typeof r.resolutionM === 'number' ? r.resolutionM : NaN;
+      if (isFinite(m) && m > 0 && (best === null || m > best)) best = m;
+    });
+    return best;
+  }
+
+  /* mixedNote is the note a mixed profile carries, or null for any other
+   * profile — a failed fill included: that one is partial, with no fill
+   * fields, and keeps the partial detail of verdictChip. */
+  function mixedNote(data) {
+    if (!isMixed(data)) return null;
+    var res = fillResolution(data.coverage);
+    var model = res === null ? 'Copernicus, coarser'
+      : 'Copernicus ' + Math.round(res) + ' m' + (res >= FILL_OVERVIEW_M ? ' (½ overview)' : '');
+    return 'Mixed: outside Denmark ' + model + ', surface-influenced; surface unknown there.';
+  }
+
   function fmtPct(v) {
     var n = Number(v);
     return isFinite(n) ? String(round(n, 1)) : '0';
@@ -831,6 +866,8 @@
   function chartTitle(data, chip, names, surf) {
     var a = names.nameA || 'A', b = names.nameB || 'B';
     var txt = 'Terrain profile from ' + a + ' to ' + b + ', ' + fmtMetres(data.distanceM) + '. ' + chip.label + '. ' + chip.detail;
+    var note = mixedNote(data);
+    if (note) txt += ' ' + note;
     var worst = data.verdict && data.verdict.worstClearanceM;
     if (worst !== null && worst !== undefined && isFinite(Number(worst))) {
       txt += ' Worst clearance ' + fmtMetres(worst) + ' at ' + fmtMetres(data.verdict.worstAtM) + ' along the path.';
@@ -969,15 +1006,56 @@
   function footerCredit(parent, cfg) {
     cfg = cfg || {};
     var text = typeof cfg.attributionDerived === 'string' && cfg.attributionDerived ? cfg.attributionDerived : cfg.attribution;
-    text = typeof text === 'string' ? text : '';
+    linkedCredit(parent, typeof text === 'string' ? text : '', cfg, CREDIT_TESTIDS);
+    return parent;
+  }
+
+  /* linkedCredit appends `text` to `parent` with cfg's dataset and licence
+   * marks as links, through the one credit walker, each anchor in the
+   * panel's link style with its test id from `testids`; without the walker
+   * the text is still shown, plain. */
+  function linkedCredit(parent, text, cfg, testids) {
     if (typeof global.MC_appendCredit !== 'function' || typeof global.MC_creditLinks !== 'function') {
       parent.textContent = text;
-      return parent;
+      return;
     }
     global.MC_appendCredit(parent, text, global.MC_creditLinks(cfg), function (a, link) {
       a.className = 'tp-credit-link';
-      if (CREDIT_TESTIDS[link.key]) a.setAttribute('data-testid', CREDIT_TESTIDS[link.key]);
+      if (testids[link.key]) a.setAttribute('data-testid', testids[link.key]);
     });
+  }
+
+  /* fillCredit fills `parent` with the Copernicus DEM credit of a mixed
+   * profile and hides it for any other (#738 M2, decision 2). The short
+   * line is the server's dhm.fill block (internal/copdem Credit), its
+   * dataset and licence marks linked as in the DHM footer; the full Art.
+   * 6(b) line is the response's own attributionFill, one click away in a
+   * disclosure rather than inline. A mixed profile without the block
+   * still shows the full line: the credit is a licence obligation. */
+  function fillCredit(parent, cfg, data) {
+    parent.textContent = '';
+    parent.hidden = !isMixed(data);
+    if (parent.hidden) return parent;
+    cfg = cfg || {};
+    var full = typeof data.attributionFill === 'string' ? data.attributionFill : '';
+    var short = typeof cfg.credit === 'string' ? cfg.credit : '';
+    var line = el('p', 'tp-credit-line');
+    line.setAttribute('data-testid', 'tp-credit-fill-line');
+    parent.appendChild(line);
+    if (!short) {
+      line.textContent = full;
+      return parent;
+    }
+    linkedCredit(line, short, cfg, FILL_CREDIT_TESTIDS);
+    if (full) {
+      var more = el('details', 'tp-credit-full');
+      more.setAttribute('data-testid', 'tp-credit-fill-full');
+      more.appendChild(el('summary', 'tp-credit-more', 'Full credit'));
+      var text = el('p', 'tp-credit-line', full);
+      text.setAttribute('data-testid', 'tp-credit-fill-text');
+      more.appendChild(text);
+      parent.appendChild(more);
+    }
     return parent;
   }
 
@@ -1245,10 +1323,20 @@
       ui.credit = el('p', 'tp-credit-line');
       footerCredit(ui.credit, opts.dhm);
       body.appendChild(ui.credit);
+      // #738 M2: the Copernicus credit, only while the profile is mixed.
+      ui.fillCredit = el('div', 'tp-credit-fill');
+      ui.fillCredit.setAttribute('data-testid', 'tp-credit-fill');
+      ui.fillCredit.hidden = true;
+      body.appendChild(ui.fillCredit);
 
       ui.detail = el('p', 'tp-detail');
       ui.detail.setAttribute('data-testid', 'tp-detail');
       body.appendChild(ui.detail);
+      // #738 M2: what a mixed profile's verdict rests on outside Denmark.
+      ui.mixedNote = el('p', 'tp-mixed-note');
+      ui.mixedNote.setAttribute('data-testid', 'tp-mixed-note');
+      ui.mixedNote.hidden = true;
+      body.appendChild(ui.mixedNote);
 
       /* #729: what a surface verdict actually means for a radio link. It
        * only appears with the chip it explains, so a profile where the two
@@ -1411,6 +1499,7 @@
       setStatus('Measuring the terrain along the path…', 'tp-loading');
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
       setSurfaceChip(null);
+      setMixed(null);
       if (ui.assumed) ui.assumed.hidden = true;
       scheduleRequest();
       if (opts.onEndpointsChange) opts.onEndpointsChange();
@@ -1447,6 +1536,17 @@
       }
       if (ui.surfaceSep) ui.surfaceSep.hidden = !show;
       if (ui.surfaceNote) ui.surfaceNote.hidden = !(show && surf.note);
+    }
+
+    /* setMixed shows the mixed-resolution note and the Copernicus credit
+     * for data, or takes both away (data null: no profile on screen). */
+    function setMixed(data) {
+      var note = mixedNote(data);
+      if (ui.mixedNote) {
+        ui.mixedNote.hidden = !note;
+        ui.mixedNote.textContent = note || '';
+      }
+      if (ui.fillCredit) fillCredit(ui.fillCredit, opts.dhm && opts.dhm.fill, data);
     }
 
     function writeHash() {
@@ -1505,6 +1605,7 @@
       var chip = verdictChip(data);
       setChip(chip);
       setSurfaceChip(surfaceChip(data));
+      setMixed(data);
       var names = { nameA: nodes.a && nodes.a.name, nameB: nodes.b && nodes.b.name };
       var drawn = !!(data.samples && data.samples.length);
       /* The credit is a licence obligation, so it is one HTML line under
@@ -1563,6 +1664,7 @@
       setStatus('Measuring the terrain along the path…', 'tp-loading');
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
       setSurfaceChip(null);
+      setMixed(null);
       if (ui.assumed) ui.assumed.hidden = true;
       presetPointDefaults();
       return fetchJSON(requestURL(effectiveState())).then(function (data) {
@@ -1579,6 +1681,7 @@
         if (mine !== seq || !open) return;
         setChip({ state: 'error', tone: 'unknown', label: 'No profile', detail: String(err && err.message || err) });
         setSurfaceChip(null);
+        setMixed(null);
         if (ui.assumed) ui.assumed.hidden = true;
         setStatus(String((err && err.message) || 'Could not load the terrain profile.'), 'tp-error');
         ui.detail.textContent = 'Could not load the terrain profile.';
@@ -1753,6 +1856,9 @@
 
   global.TerrainProfile = {
     footerCredit: footerCredit,
+    fillCredit: fillCredit,
+    mixedNote: mixedNote,
+    FILL_OVERVIEW_M: FILL_OVERVIEW_M,
     ASSUMED_LABEL: ASSUMED_LABEL,
     ENDPOINT: ENDPOINT,
     HASH_PARAM: HASH_PARAM,
