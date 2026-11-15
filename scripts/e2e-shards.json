@@ -200,6 +200,14 @@
       "measurementNote": "New suite; #794 a half-profile link from node detail keeps the viewer's saved Map view, with an intercepted dhm client-config block (profile: true) and /api/terrain/profile answered 503 (B is never picked): from a stored view near A (an animated pan) and far from it (an instant reset), at 1440x900 and on a 375x560 touch phone, entering through the node-detail action leaves localStorage map-view untouched once the pan to A has ended, a plain #/map and a reload open the stored view, and a pan by hand (mouse drag, or a one-finger CDP touch drag) on the half-profile page is saved. About 15s locally; no CI duration measured yet. Assigned to shard 1 next to the other #681/#746/#781 profile suites."
     },
     {
+      "file": "test-issue-817-half-profile-guard-moveend-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #817 the half-profile guard is released only by the moveend of the guarded pan to A, with the #794 harness (intercepted dhm client-config block, /api/terrain/profile answered 503): at 1440x900 and on a 375x560 touch phone, entering through the node-detail action with a foreign moveend fired mid-pan, an invalidateSize() after a container resize mid-pan, or an animated pan still running when panTo is called (stored view near and far), proves the trigger fired, leaves localStorage map-view untouched once the pan has ended, and a pan by hand right after is saved. About 20s locally; no CI duration measured yet. Assigned to shard 1 next to the #794 suite."
+    },
+    {
       "file": "test-issue-730-buildings-ui-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },
