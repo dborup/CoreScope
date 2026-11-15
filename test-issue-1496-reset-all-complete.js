@@ -13,6 +13,7 @@
  *   - #681 M6: the `terrain` override section, and the six path-profile
  *     chart vars (--terrain-fill, --terrain-clutter, --los-line,
  *     --fresnel-100, --fresnel-60, --profile-blocked)
+ *   - #723 M4: the `heritage` override section
  *   - #734: the `dhmOverlays` section (the DHM overlay defaults), back to
  *     the built-ins with dhm-defaults-changed after the pipeline re-runs
  *
@@ -281,6 +282,25 @@ test('clears the terrain override section with cs-theme-overrides', () => {
   }));
   env.api.resetAll();
   assert.strictEqual(env.localStorage.getItem('cs-theme-overrides'), null);
+});
+
+// #723 M4 — the ancient monuments settings live in the same store.
+test('clears the heritage override section with cs-theme-overrides', () => {
+  const env = loadCustomizer();
+  env.localStorage.setItem('cs-theme-overrides', JSON.stringify({
+    heritage: { enabled: true, opacityPct: 40, profileWarning: false, warnDistanceM: 30 },
+  }));
+  env.api.resetAll();
+  assert.strictEqual(env.localStorage.getItem('cs-theme-overrides'), null);
+});
+
+test('does NOT clear the viewer’s own on/off of the monuments overlay', () => {
+  // mc-heritage is the map's remembered toggle (like ?heritage=1 in a
+  // link), the viewer's own choice on the map, not a customizer value.
+  const env = loadCustomizer();
+  env.localStorage.setItem('mc-heritage', '1');
+  env.api.resetAll();
+  assert.strictEqual(env.localStorage.getItem('mc-heritage'), '1');
 });
 
 test('clears the path-profile chart vars from root.style', () => {
