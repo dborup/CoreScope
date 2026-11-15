@@ -608,6 +608,49 @@
     return c;
   }
 
+  /* #723 M4 — the monuments settings this viewer may change in the
+   * customizer (public/customize-v2.js, section `heritage`), and the one
+   * rule for them, shared by the overlay below, the Path profile warning
+   * (public/terrain-profile.js) and the customizer itself:
+   *   - enabled: whether the overlay starts on (M1: off until chosen);
+   *   - opacityPct: the overlay's opacity in percent (M1: 85);
+   *   - profileWarning: whether the profile looks up and shows the
+   *     monument warning at all (M3: on);
+   *   - warnDistanceM: list an end outside a zone only up to this many
+   *     metres from it; null (the default) lists everything the server
+   *     reports, which is at most map.heritage.radiusM. An end inside a
+   *     zone is always listed. The server never reports past its radius,
+   *     and that is bounded by internal/heritage MaxMarginM (250), so the
+   *     viewer's value can only narrow the warning.
+   * The server's own map.heritage values (radius, cache, rate limits) decide
+   * what goes upstream and stay server-only (as #681 M6 and #727 M4). */
+  var HERITAGE_SETTING_KEYS = ['enabled', 'opacityPct', 'profileWarning', 'warnDistanceM'];
+  var HERITAGE_DEFAULTS = { enabled: false, opacityPct: 85, profileWarning: true, warnDistanceM: null };
+  var HERITAGE_LIMITS = { opacityPct: [10, 100], warnDistanceM: [0, 250] };
+
+  /** Whether `v` is a usable value of monuments setting `key`. */
+  function validHeritageSetting(key, v) {
+    if (key === 'enabled' || key === 'profileWarning') return typeof v === 'boolean';
+    var b = Object.prototype.hasOwnProperty.call(HERITAGE_LIMITS, key) ? HERITAGE_LIMITS[key] : null;
+    return !!b && typeof v === 'number' && Math.floor(v) === v && v >= b[0] && v <= b[1];
+  }
+
+  /** The effective monuments settings: `section` (default: the live
+   *  window.SITE_CONFIG.heritage) over the defaults, valid values only. */
+  function heritageSettings(section) {
+    var src = section;
+    if (src === undefined) {
+      try { src = window.SITE_CONFIG && window.SITE_CONFIG.heritage; } catch (_) { src = null; }
+    }
+    var out = {};
+    for (var i = 0; i < HERITAGE_SETTING_KEYS.length; i++) {
+      var k = HERITAGE_SETTING_KEYS[i];
+      out[k] = src && typeof src === 'object' && Object.prototype.hasOwnProperty.call(src, k) &&
+        validHeritageSetting(k, src[k]) ? src[k] : HERITAGE_DEFAULTS[k];
+    }
+    return out;
+  }
+
   // #724 — the masts block as cmd/server/masts_proxy.go sends it: a
   // same-origin path, integer zoom gate and cell size, the four-index cell
   // extent and an https source link. Needs public/masts-layer.js.
@@ -622,9 +665,11 @@
     return c;
   }
 
-  // #723 — opacity (and whether an overlay starts on) is hard-coded here;
-  // exposing them in the customizer is tracked as #723 M4. The antenna
-  // sites' default comes from the customizer (#724 M5).
+  // The DHM overlays' opacity is fixed here. The monuments' default and
+  // opacity come from the customizer (#723 M4), and so does the antenna
+  // sites' default (#724 M5). An entry's `opacity` may be a function, read
+  // whenever the layer is added; with `settingsEvent` the layer also
+  // follows that window event while it is on the map.
   var OVERLAYS = [
     {
       id: TERRAIN_ID, storageKey: 'mc-terrain-dhm', hashParam: 'terrain', layerProp: '_mcTerrainLayer',
@@ -660,7 +705,10 @@
       // Protection-zone polygons under the monument points. The WMS draws
       // nothing further out than minZoom, so the label says where it starts.
       id: HERITAGE_ID, storageKey: 'mc-heritage', hashParam: 'heritage', layerProp: '_mcHeritageLayer',
-      pane: 'mcHeritagePane', paneZ: 260, paneClass: 'mc-heritage-pane', className: 'mc-heritage-tiles', opacity: 0.85,
+      pane: 'mcHeritagePane', paneZ: 260, paneClass: 'mc-heritage-pane', className: 'mc-heritage-tiles',
+      defaultOn: function () { return heritageSettings().enabled; },
+      opacity: function () { return heritageSettings().opacityPct / 100; },
+      settingsEvent: 'heritage-defaults-changed',
       config: getHeritageConfig,
       label: function (cfg) { return 'Protected ancient monuments (zoom ' + cfg.minZoom + '+)'; },
       layers: function (cfg) { return cfg.layers; }
@@ -669,7 +717,7 @@
       // #724 option A: every site, honestly labelled, on when offered
       // unless this viewer turned the default off in the customizer.
       id: 'masts-sites', storageKey: 'mc-masts', hashParam: 'masts', layerProp: '_mcMastsSitesLayer',
-      defaultOn: function () { return window.MastsLayer.settings(getMastsConfig()).enabled; },
+      defaultOn: function () { return window.MastsLayer.settings(getMastsConfig()).enabled; }, offInHash: true,
       config: getMastsConfig,
       label: function () { return window.MastsLayer.SITE_LABEL; },
       create: function (map, cfg) { return window.MastsLayer.layer(map, cfg, 'sites'); }
@@ -756,6 +804,15 @@
     }
   }
 
+  /* Whether turning o off writes =0 into the hash rather than dropping the
+   * parameter: an overlay that is on by default, now (a function default
+   * is asked each time, #723 M4), or one marked offInHash, whose "off" is
+   * written either way (the antenna sites, #724 M5). */
+  function _offInHash(o) {
+    if (o.offInHash) return true;
+    return typeof o.defaultOn === 'function' ? !!o.defaultOn() : !!o.defaultOn;
+  }
+
   // replaceState, so the SPA router does not re-run on the hash rewrite.
   function _saveOverlayPref(o, on) {
     if (!on && o.group) {
@@ -768,7 +825,7 @@
     try {
       var h = _hashParts();
       if (on) h.params.set(o.hashParam, _onValues(o)[0]);
-      else if (o.defaultOn) h.params.set(o.hashParam, '0');
+      else if (_offInHash(o)) h.params.set(o.hashParam, '0');
       else h.params.delete(o.hashParam);
       var qs = h.params.toString();
       // An empty hash gets a bare '#', so the parameter never lands in the
@@ -934,7 +991,7 @@
       version: '1.3.0',
       crs: L.CRS.EPSG3857,
       tileSize: 256,
-      opacity: o.opacity,
+      opacity: _overlayOpacity(o),
       pane: o.pane,
       minZoom: cfg.minZoom,
       maxZoom: cfg.maxZoom,
@@ -942,7 +999,24 @@
       attribution: _overlayCredit(cfg),
       className: o.className
     });
+    if (o.settingsEvent) _followSettings(layer, o);
     return o.retryPlaceholders ? retryPlaceholderTiles(map, layer) : layer;
+  }
+
+  function _overlayOpacity(o) { return typeof o.opacity === 'function' ? o.opacity() : o.opacity; }
+
+  /* #723 M4 — a layer whose opacity the customizer sets reads it each time
+   * it is added and follows o.settingsEvent while it is on the map; the
+   * listener goes with the layer, so a page left behind keeps none. */
+  function _followSettings(layer, o) {
+    var sync = function () { layer.setOpacity(_overlayOpacity(o)); };
+    layer.on('add', function () {
+      sync();
+      try { window.addEventListener(o.settingsEvent, sync); } catch (_) {}
+    });
+    layer.on('remove', function () {
+      try { if (window.removeEventListener) window.removeEventListener(o.settingsEvent, sync); } catch (_) {}
+    });
   }
 
   // The class the compact (inset) credit is styled by; public/style.css
@@ -1237,6 +1311,11 @@
   window.MC_getTerrainConfig            = getTerrainConfig;
   window.MC_getHeritageConfig           = getHeritageConfig;
   window.MC_getMastsConfig              = getMastsConfig;
+  // #723 M4 — the monuments settings rule (keys, defaults, bounds).
+  window.MC_HERITAGE_SETTINGS           = {
+    KEYS: HERITAGE_SETTING_KEYS, DEFAULTS: HERITAGE_DEFAULTS, LIMITS: HERITAGE_LIMITS,
+    valid: validHeritageSetting, resolve: heritageSettings
+  };
   window.MC_getOrthoConfig              = getOrthoConfig;
   window.MC_ORTHO_BASE_ID               = ORTHO_ID;
   window.MC_resolveOverlayOn            = resolveOverlayOn;

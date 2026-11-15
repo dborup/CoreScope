@@ -144,6 +144,7 @@ run test-issue-724-masts-hint.js
 run test-issue-724-m5-masts-customizer.js
 run test-issue-723-heritage-info.js
 run test-issue-723-profile-warning.js
+run test-issue-723-m4-heritage-customizer.js
 run test-issue-681-profile-tool.js
 run test-issue-681-m5-node-entry.js
 run test-issue-681-m6-customizer-terrain.js
