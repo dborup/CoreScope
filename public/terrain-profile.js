@@ -1769,6 +1769,8 @@
     offered: offered,
     nodeEntryHash: nodeEntryHash,
     nodeEntryAction: nodeEntryAction,
+    // #772 F4: the fit margin, read back by tests instead of copied in.
+    FIT_MARGIN_PX: FIT_MARGIN_PX,
     heightBadge: heightBadge,
     copyLink: copyLink,
     serializeState: serializeState,
