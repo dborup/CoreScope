@@ -355,7 +355,9 @@ function hashParams(hash) {
   async function storedView(page) {
     return JSON.parse(await page.evaluate(() => localStorage.getItem('map-view')));
   }
-  const isElsewhere = (v) => !!v && Math.abs(v.lat - 56.08) < 1e-6 && Math.abs(v.lng - 9.62) < 1e-6 && v.zoom === 12;
+  // A live center comes back through Leaflet's pixel rounding, so it is
+  // compared to about 100 m; the fitted path is 37 km away.
+  const isElsewhere = (v) => !!v && Math.abs(v.lat - 56.08) < 1e-3 && Math.abs(v.lng - 9.62) < 1e-3 && v.zoom === 12;
 
   // #765 §1: the fit is the link's view, not the viewer's, so it is never
   // saved. The init script seeds the stored view on every page load, so
