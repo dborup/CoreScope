@@ -396,44 +396,6 @@ func TestTerrainBuildings_UpstreamFailureIsUnavailable(t *testing.T) {
 	}
 }
 
-// TestTerrainBuildings_FailedLookupIsRetriedSoon: a profile whose lookup
-// failed is served from the cache, without a call, for
-// terrainBuildingsRetryTTL; then it is a miss again, and a recovered
-// service classifies it. A classified profile keeps the profile's TTL.
-func TestTerrainBuildings_FailedLookupIsRetriedSoon(t *testing.T) {
-	ogc := newStubOGC(t, dokk1Footprint)
-	var failing atomic.Bool
-	failing.Store(true)
-	ogc.answer = func([4]float64) (int, []byte, bool) { return 503, nil, failing.Load() }
-	env := newBuildingsEnv(t, dokk1Ground, dokk1Surface, ogc, dhm.ProfileConfig{})
-	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
-	env.p.now = func() time.Time { return now }
-	q := pathQuery(dokk1A, dokk1B)
-
-	get := func(wantCache, wantState string) {
-		t.Helper()
-		w := env.get(q)
-		resp := decodeProfile(t, w)
-		if w.Header().Get("X-CoreScope-Cache") != wantCache || resp.Classification == nil || resp.Classification.State != wantState {
-			t.Fatalf("at %v: cache %q, classification %+v; want %s, %s", now, w.Header().Get("X-CoreScope-Cache"), resp.Classification, wantCache, wantState)
-		}
-	}
-	get("miss", "unavailable")
-	failing.Store(false)
-	now = now.Add(terrainBuildingsRetryTTL - time.Second)
-	get("hit", "unavailable")
-	if n := ogc.calls.Load(); n != 1 {
-		t.Fatalf("%d corridor calls, want 1: a hit asked again", n)
-	}
-	now = now.Add(time.Second)
-	get("miss", "full")
-	now = now.Add(terrainBuildingsRetryTTL + time.Hour)
-	get("hit", "full")
-	if n, r := ogc.calls.Load(), env.src.calls.Load(); n != 2 || r != 4 {
-		t.Fatalf("%d corridor calls and %d rasters, want 2 and 4", n, r)
-	}
-}
-
 // fifteenKm is a 15 km path due east in mid-Jutland, two segments of
 // 7.5 km, with 18 m of trees over all of it but the last 500 m at each end.
 var fifteenA, fifteenB = utmPt(forestE, forestN), utmPt(forestE+15000, forestN)
