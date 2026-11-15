@@ -36,6 +36,7 @@ const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
 const { loadTerrainProfile } = require('./tests/map-overlay-sandbox');
+const { fakeDom } = require('./tests/skraafoto-fake-dom');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -318,46 +319,6 @@ test('chartIndexAt: a click x on the plot is the #781 nearest sample', () => {
 });
 
 // ── 9. Object URLs of the open viewer (#818) ────────────────────────────────
-
-/* A small DOM for open(): elements with listeners, attributes (src
- * mirrored), children and focus, all recorded so a test can find them by
- * data-testid and click them. */
-function fakeDom() {
-  const all = [];
-  function element(tag) {
-    const e = {
-      tagName: String(tag).toUpperCase(), attrs: {}, children: [], listeners: {}, parentNode: null, style: {},
-      hidden: false, disabled: false, value: '', className: '', _text: '',
-      classList: { _c: new Set(), add(c) { this._c.add(c); }, remove(c) { this._c.delete(c); },
-        toggle(c, on) { if (on) this._c.add(c); else this._c.delete(c); }, contains(c) { return this._c.has(c); } },
-      setAttribute(k, v) { e.attrs[k] = String(v); },
-      getAttribute(k) { return Object.prototype.hasOwnProperty.call(e.attrs, k) ? e.attrs[k] : null; },
-      removeAttribute(k) { delete e.attrs[k]; },
-      appendChild(c) { e.children.push(c); c.parentNode = e; return c; },
-      removeChild(c) { e.children = e.children.filter((x) => x !== c); c.parentNode = null; return c; },
-      addEventListener(t, f) { (e.listeners[t] = e.listeners[t] || []).push(f); },
-      fire(t) { (e.listeners[t] || []).forEach((f) => f({ target: e, preventDefault() {}, stopImmediatePropagation() {} })); },
-      focus() { doc.activeElement = e; },
-      contains(x) { for (let n = x; n; n = n.parentNode) if (n === e) return true; return false; },
-      querySelectorAll() { return []; },
-    };
-    Object.defineProperty(e, 'textContent', {
-      get() { return e._text + e.children.map((c) => c.textContent).join(''); },
-      set(v) { e._text = v == null ? '' : String(v); e.children = []; },
-    });
-    Object.defineProperty(e, 'innerHTML', { set(v) { e._text = String(v); } });
-    Object.defineProperty(e, 'src', { get() { return e.getAttribute('src') || ''; }, set(v) { e.setAttribute('src', v); } });
-    all.push(e);
-    return e;
-  }
-  const doc = {
-    createElement: element, activeElement: null,
-    addEventListener() {}, removeEventListener() {},
-    querySelector: () => null,
-  };
-  doc.body = element('body');
-  return { doc, byTid: (t) => all.find((e) => e.getAttribute('data-testid') === t) };
-}
 
 /* The search and preview endpoints, as the M1 proxy answers. A preview
  * is held while svc.hold is set, until svc.release() lets the oldest go. */
