@@ -166,7 +166,13 @@ function makeLeaflet() {
   // input.layerId (#734 M2 maps an input back to its overlay by it).
   let lastId = 0;
   L.stamp = (o) => o._leaflet_id || (o._leaflet_id = ++lastId);
-  L.tileLayer.wms = (url, opts) => evented({ _url: url, options: opts || {}, kind: 'wms', getTileSize: () => ({ x: 256, y: 256 }) });
+  // setOpacity as Leaflet's GridLayer.setOpacity (#723 M4 follows the
+  // customizer's opacity live).
+  L.tileLayer.wms = (url, opts) => {
+    const l = evented({ _url: url, options: opts || {}, kind: 'wms', getTileSize: () => ({ x: 256, y: 256 }) });
+    l.setOpacity = (o) => { l.options.opacity = o; return l; };
+    return l;
+  };
   // #724 — what public/masts-layer.js builds: layer groups of canvas
   // circle markers. A group on a map puts its members on that map.
   L.canvas = (opts) => ({ kind: 'canvas', options: opts || {} });
@@ -309,6 +315,7 @@ function makeSandbox(opts) {
   };
   ctx.window = {
     addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
+    removeEventListener: (type, fn) => { listeners[type] = (listeners[type] || []).filter(f => f !== fn); },
     dispatchEvent: (ev) => { (listeners[ev.type] || []).slice().forEach(fn => fn(ev)); return true; },
     matchMedia: () => ({ matches: false }),
     localStorage: ctx.localStorage,

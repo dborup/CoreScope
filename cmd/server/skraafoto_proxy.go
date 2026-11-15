@@ -362,6 +362,9 @@ type SkraafotoClientConfig struct {
 	// Note is the line shown with the photos (#737 Q10).
 	Note   string          `json:"note"`
 	Credit SkraafotoCredit `json:"credit"`
+	// Bounds is where the node action is offered (#818): dhm.Coverage,
+	// the box around the Denmark the search covers (dhm.Covers).
+	Bounds [2][2]float64 `json:"bounds"` // [[south, west], [north, east]]
 }
 
 func (s *Server) skraafotoClientConfig() *SkraafotoClientConfig {
@@ -371,6 +374,7 @@ func (s *Server) skraafotoClientConfig() *SkraafotoClientConfig {
 	return &SkraafotoClientConfig{
 		Enabled: true, SearchURL: skraafotoSearchRoute, PreviewURL: skraafotoPreviewRoute,
 		MaxPx: skraafoto.PreviewMaxPx, Note: skraafoto.PrivacyNote, Credit: skraafotoCredit(),
+		Bounds: dhmCoverageBounds(),
 	}
 }
 

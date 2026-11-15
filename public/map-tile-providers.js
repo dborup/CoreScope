@@ -558,7 +558,10 @@
    *     ?heard= (#660). An overlay is off until chosen, except one marked
    *     defaultOn, whose "off" is then written to the hash as =0. defaultOn
    *     may be a function: the antenna sites' default is the customizer's
-   *     (#724 M5), and their "off" is written as =0 either way.
+   *     (#724 M5), and their "off" is written as =0 either way. The DHM
+   *     overlays have a customDefault instead (#734, the customizer's
+   *     dhmOverlays): used only when neither the hash nor storage says, and
+   *     their "off" is written as =0 only while that default is on.
    *   - A map without an attribution control (Live) gets one for its
    *     lifetime (_ensureAttribution), because the base map's credit and
    *     every overlay's credit are required.
@@ -624,10 +627,78 @@
         layers: id, minZoom: e.minZoom, maxZoom: e.maxZoom,
         datasetName: e.datasetName, datasetUrl: e.datasetUrl
       });
+      if (id === 'contours') cfg.minZoom = _contourMinZoom(e, _dhmSection());
       cfg.label = DHM_OVERLAY_LABELS[id](cfg);
       return cfg;
     }
     return null;
+  }
+
+  /* #734 (customizer, AGENTS rule 8) — this viewer's DHM overlay defaults,
+   * the customizer section `dhmOverlays` on window.SITE_CONFIG
+   * (public/customize-v2.js). The server's map.dhm config stays server-only
+   * (#681 M6): only the zoom range of an offered overlay is read here.
+   *   - hillshade: which hillshade a map starts with when neither the link
+   *     nor the layer control says (off, terrain or surface);
+   *   - contours: whether the contour lines start on;
+   *   - contourMinZoom: the first zoom the contours draw at, inside the
+   *     server's range (it can only be raised to at most the maximum).
+   * Built-ins: off, off and the server's minZoom, so a viewer who sets
+   * nothing sees exactly M2. The precedence is that of #724 M5: the link,
+   * then the choice this browser remembers, then this default. #792 (M3)
+   * adds its elevation-colour opacity to these keys. */
+  var DHM_SETTING_KEYS = ['hillshade', 'contours', 'contourMinZoom'];
+  var DHM_HILLSHADE_VALUES = ['off', 'terrain', 'surface'];
+
+  function validDHMSetting(key, v) {
+    if (key === 'hillshade') return DHM_HILLSHADE_VALUES.indexOf(v) >= 0;
+    if (key === 'contours') return typeof v === 'boolean';
+    if (key === 'contourMinZoom') return _isZoom(v) && v <= 19;
+    return false;
+  }
+
+  function _dhmSection() {
+    try {
+      var s = window.SITE_CONFIG && window.SITE_CONFIG.dhmOverlays;
+      return s && typeof s === 'object' ? s : {};
+    } catch (_) { return {}; }
+  }
+
+  // The contour minZoom: the section's, inside the server entry's range.
+  function _contourMinZoom(e, section) {
+    var z = section && validDHMSetting('contourMinZoom', section.contourMinZoom) ? section.contourMinZoom : e.minZoom;
+    return Math.max(e.minZoom, Math.min(e.maxZoom, z));
+  }
+
+  // The server's contour zoom range [min, max], or null while not offered.
+  function dhmContourZoomRange() {
+    var c = getTerrainConfig();
+    if (!c || !Array.isArray(c.overlays) || !getDHMOverlayConfig('contours')) return null;
+    for (var i = 0; i < c.overlays.length; i++) {
+      var e = c.overlays[i];
+      if (e && e.id === 'contours') return [e.minZoom, e.maxZoom];
+    }
+    return null;
+  }
+
+  /** The effective DHM overlay defaults: `section` (default: the live
+   *  SITE_CONFIG.dhmOverlays) over the built-ins. contourMinZoom is null
+   *  while the server offers no contours. */
+  function dhmOverlaySettings(section) {
+    if (section === undefined) section = _dhmSection();
+    var src = section && typeof section === 'object' ? section : {};
+    var range = dhmContourZoomRange();
+    var out = {
+      hillshade: validDHMSetting('hillshade', src.hillshade) ? src.hillshade : 'off',
+      contours: validDHMSetting('contours', src.contours) ? src.contours : false,
+      contourMinZoom: range ? _contourMinZoom({ minZoom: range[0], maxZoom: range[1] }, src) : null
+    };
+    return out;
+  }
+
+  // The DHM ids the server offers, in the control's order.
+  function offeredDHMOverlays() {
+    return ['terrain', 'surface', 'contours'].filter(function (id) { return !!getDHMOverlayConfig(id); });
   }
 
   function getHeritageConfig() {
@@ -636,6 +707,49 @@
     if (typeof c.layers !== 'string' || !c.layers || !_isZoom(c.minZoom) || !_isZoom(c.maxZoom)) return null;
     if (!Array.isArray(c.bounds) || c.bounds.length !== 2) return null;
     return c;
+  }
+
+  /* #723 M4 — the monuments settings this viewer may change in the
+   * customizer (public/customize-v2.js, section `heritage`), and the one
+   * rule for them, shared by the overlay below, the Path profile warning
+   * (public/terrain-profile.js) and the customizer itself:
+   *   - enabled: whether the overlay starts on (M1: off until chosen);
+   *   - opacityPct: the overlay's opacity in percent (M1: 85);
+   *   - profileWarning: whether the profile looks up and shows the
+   *     monument warning at all (M3: on);
+   *   - warnDistanceM: list an end outside a zone only up to this many
+   *     metres from it; null (the default) lists everything the server
+   *     reports, which is at most map.heritage.radiusM. An end inside a
+   *     zone is always listed. The server never reports past its radius,
+   *     and that is bounded by internal/heritage MaxMarginM (250), so the
+   *     viewer's value can only narrow the warning.
+   * The server's own map.heritage values (radius, cache, rate limits) decide
+   * what goes upstream and stay server-only (as #681 M6 and #727 M4). */
+  var HERITAGE_SETTING_KEYS = ['enabled', 'opacityPct', 'profileWarning', 'warnDistanceM'];
+  var HERITAGE_DEFAULTS = { enabled: false, opacityPct: 85, profileWarning: true, warnDistanceM: null };
+  var HERITAGE_LIMITS = { opacityPct: [10, 100], warnDistanceM: [0, 250] };
+
+  /** Whether `v` is a usable value of monuments setting `key`. */
+  function validHeritageSetting(key, v) {
+    if (key === 'enabled' || key === 'profileWarning') return typeof v === 'boolean';
+    var b = Object.prototype.hasOwnProperty.call(HERITAGE_LIMITS, key) ? HERITAGE_LIMITS[key] : null;
+    return !!b && typeof v === 'number' && Math.floor(v) === v && v >= b[0] && v <= b[1];
+  }
+
+  /** The effective monuments settings: `section` (default: the live
+   *  window.SITE_CONFIG.heritage) over the defaults, valid values only. */
+  function heritageSettings(section) {
+    var src = section;
+    if (src === undefined) {
+      try { src = window.SITE_CONFIG && window.SITE_CONFIG.heritage; } catch (_) { src = null; }
+    }
+    var out = {};
+    for (var i = 0; i < HERITAGE_SETTING_KEYS.length; i++) {
+      var k = HERITAGE_SETTING_KEYS[i];
+      out[k] = src && typeof src === 'object' && Object.prototype.hasOwnProperty.call(src, k) &&
+        validHeritageSetting(k, src[k]) ? src[k] : HERITAGE_DEFAULTS[k];
+    }
+    return out;
   }
 
   // #724 — the masts block as cmd/server/masts_proxy.go sends it: a
@@ -652,15 +766,20 @@
     return c;
   }
 
-  // #723 — opacity (and whether an overlay starts on) is hard-coded here;
-  // exposing them in the customizer is tracked as #723 M4. The antenna
-  // sites' default comes from the customizer (#724 M5).
+  // The DHM overlays' opacity is fixed here. Their defaults and the
+  // contour min-zoom come from the customizer (#734), as do the
+  // monuments' default and opacity (#723 M4) and the antenna sites'
+  // default (#724 M5). An entry's `opacity` may be a function, read
+  // whenever the layer is added; with `settingsEvent` the layer also
+  // follows that window event while it is on the map.
   var OVERLAYS = [
     {
       id: TERRAIN_ID, storageKey: 'mc-terrain-dhm', hashParam: 'terrain', layerProp: '_mcTerrainLayer',
       group: 'dhm-hillshade', onValues: ['1', 'terrain'],
       pane: 'mcTerrainPane', paneZ: 250, paneClass: 'mc-terrain-pane', className: 'mc-terrain-tiles', opacity: 0.65,
       retryPlaceholders: true, // #728 N3: a DHM proxy tile
+      // #734: this viewer's customizer default (dhmOverlaySettings).
+      customDefault: function () { return dhmOverlaySettings().hillshade === 'terrain'; },
       config: function () { return getDHMOverlayConfig('terrain'); },
       label: function (cfg) { return cfg.label; },
       layers: function (cfg) { return cfg.layers; }
@@ -672,6 +791,7 @@
       group: 'dhm-hillshade', onValues: ['surface'],
       pane: 'mcTerrainPane', paneZ: 250, paneClass: 'mc-terrain-pane', className: 'mc-surface-tiles', opacity: 0.65,
       retryPlaceholders: true,
+      customDefault: function () { return dhmOverlaySettings().hillshade === 'surface'; },
       config: function () { return getDHMOverlayConfig('surface'); },
       label: function (cfg) { return cfg.label; },
       layers: function (cfg) { return cfg.layers; }
@@ -682,6 +802,7 @@
       id: 'dhm-contours', storageKey: 'mc-contours-dhm', hashParam: 'contours', layerProp: '_mcContourLayer',
       pane: 'mcContourPane', paneZ: 255, paneClass: 'mc-contour-pane', className: 'mc-contour-tiles', opacity: 1,
       retryPlaceholders: true,
+      customDefault: function () { return dhmOverlaySettings().contours; },
       config: function () { return getDHMOverlayConfig('contours'); },
       label: function (cfg) { return cfg.label; },
       layers: function (cfg) { return cfg.layers; }
@@ -690,7 +811,10 @@
       // Protection-zone polygons under the monument points. The WMS draws
       // nothing further out than minZoom, so the label says where it starts.
       id: HERITAGE_ID, storageKey: 'mc-heritage', hashParam: 'heritage', layerProp: '_mcHeritageLayer',
-      pane: 'mcHeritagePane', paneZ: 260, paneClass: 'mc-heritage-pane', className: 'mc-heritage-tiles', opacity: 0.85,
+      pane: 'mcHeritagePane', paneZ: 260, paneClass: 'mc-heritage-pane', className: 'mc-heritage-tiles',
+      defaultOn: function () { return heritageSettings().enabled; },
+      opacity: function () { return heritageSettings().opacityPct / 100; },
+      settingsEvent: 'heritage-defaults-changed',
       config: getHeritageConfig,
       label: function (cfg) { return 'Protected ancient monuments (zoom ' + cfg.minZoom + '+)'; },
       layers: function (cfg) { return cfg.layers; }
@@ -699,7 +823,7 @@
       // #724 option A: every site, honestly labelled, on when offered
       // unless this viewer turned the default off in the customizer.
       id: 'masts-sites', storageKey: 'mc-masts', hashParam: 'masts', layerProp: '_mcMastsSitesLayer',
-      defaultOn: function () { return window.MastsLayer.settings(getMastsConfig()).enabled; },
+      defaultOn: function () { return window.MastsLayer.settings(getMastsConfig()).enabled; }, offInHash: true,
       config: getMastsConfig,
       label: function () { return window.MastsLayer.SITE_LABEL; },
       create: function (map, cfg) { return window.MastsLayer.layer(map, cfg, 'sites'); }
@@ -729,6 +853,14 @@
   }
 
   function _onValues(o) { return o.onValues || ['1']; }
+
+  // Whether o starts on when neither the link nor storage says: its fixed
+  // (or #724 M5 function) defaultOn, else its #734 customizer default.
+  function _defaultOn(o) {
+    if (typeof o.defaultOn === 'function') return !!o.defaultOn();
+    if (o.defaultOn) return true;
+    return !!(o.customDefault && o.customDefault());
+  }
 
   // o and the overlays sharing its hash parameter (o may be outside
   // OVERLAYS, like the ortho pick).
@@ -768,8 +900,7 @@
 
   function _readOverlayPref(o) {
     var p = _rawOverlayPref(o), known = _knownValues(o);
-    var on = resolveOverlayOn(p.hv, p.stored, typeof o.defaultOn === 'function' ? o.defaultOn() : o.defaultOn,
-      _onValues(o), known);
+    var on = resolveOverlayOn(p.hv, p.stored, _defaultOn(o), _onValues(o), known);
     if (known.indexOf(p.hv) >= 0) {
       try { if (window.localStorage) window.localStorage.setItem(o.storageKey, _canonicalValue(o, p.hv)); } catch (_) {}
     }
@@ -786,6 +917,17 @@
     }
   }
 
+  /* Whether turning o off writes =0 into the hash rather than dropping the
+   * parameter: an overlay that is on by default, now (a function default
+   * is asked each time, #723 M4), one marked offInHash, whose "off" is
+   * written either way (the antenna sites, #724 M5), or one sharing its
+   * parameter with an overlay whose #734 customizer default is on. */
+  function _offInHash(o) {
+    if (o.offInHash) return true;
+    if (typeof o.defaultOn === 'function' ? o.defaultOn() : o.defaultOn) return true;
+    return _paramOverlays(o).some(function (m) { return m.customDefault && m.customDefault(); });
+  }
+
   // replaceState, so the SPA router does not re-run on the hash rewrite.
   function _saveOverlayPref(o, on) {
     if (!on && o.group) {
@@ -798,7 +940,7 @@
     try {
       var h = _hashParts();
       if (on) h.params.set(o.hashParam, _onValues(o)[0]);
-      else if (o.defaultOn) h.params.set(o.hashParam, '0');
+      else if (_offInHash(o)) h.params.set(o.hashParam, '0');
       else h.params.delete(o.hashParam);
       var qs = h.params.toString();
       // An empty hash gets a bare '#', so the parameter never lands in the
@@ -965,7 +1107,7 @@
       version: '1.3.0',
       crs: L.CRS.EPSG3857,
       tileSize: 256,
-      opacity: o.opacity,
+      opacity: _overlayOpacity(o),
       pane: o.pane,
       minZoom: cfg.minZoom,
       maxZoom: cfg.maxZoom,
@@ -973,7 +1115,24 @@
       attribution: _overlayCredit(cfg),
       className: o.className
     });
+    if (o.settingsEvent) _followSettings(layer, o);
     return o.retryPlaceholders ? retryPlaceholderTiles(map, layer) : layer;
+  }
+
+  function _overlayOpacity(o) { return typeof o.opacity === 'function' ? o.opacity() : o.opacity; }
+
+  /* #723 M4 — a layer whose opacity the customizer sets reads it each time
+   * it is added and follows o.settingsEvent while it is on the map; the
+   * listener goes with the layer, so a page left behind keeps none. */
+  function _followSettings(layer, o) {
+    var sync = function () { layer.setOpacity(_overlayOpacity(o)); };
+    layer.on('add', function () {
+      sync();
+      try { window.addEventListener(o.settingsEvent, sync); } catch (_) {}
+    });
+    layer.on('remove', function () {
+      try { if (window.removeEventListener) window.removeEventListener(o.settingsEvent, sync); } catch (_) {}
+    });
   }
 
   // The class the compact (inset) credit is styled by; public/style.css
@@ -1093,6 +1252,7 @@
       var cfg = o.config();
       if (cfg) {
         if (!map[o.layerProp]) map[o.layerProp] = _createOverlayLayer(map, o, cfg);
+        else _syncOverlayZoom(map[o.layerProp], o, cfg);
         _wireOverlay(map, o);
         overlays[o.label(cfg)] = map[o.layerProp];
         ids.push(o.id);
@@ -1102,6 +1262,17 @@
       }
     });
     return ids;
+  }
+
+  /* #734 — a kept tile layer takes a new minZoom (the customizer's contour
+   * min-zoom) in place: the same layer, so the viewer's on/off stays, and
+   * GridLayer's _resetView re-checks the zoom range of the current view. */
+  function _syncOverlayZoom(layer, o, cfg) {
+    if (o.create || !layer || !layer.options || layer.options.minZoom === cfg.minZoom) return;
+    layer.options.minZoom = cfg.minZoom;
+    if (layer._map && typeof layer._resetView === 'function') {
+      try { layer._resetView(); } catch (_) {}
+    }
   }
 
   // An overlay's own addition to its label in the control (the antenna
@@ -1268,11 +1439,25 @@
   window.MC_getTerrainConfig            = getTerrainConfig;
   window.MC_getHeritageConfig           = getHeritageConfig;
   window.MC_getMastsConfig              = getMastsConfig;
+  // #723 M4 — the monuments settings rule (keys, defaults, bounds).
+  window.MC_HERITAGE_SETTINGS           = {
+    KEYS: HERITAGE_SETTING_KEYS, DEFAULTS: HERITAGE_DEFAULTS, LIMITS: HERITAGE_LIMITS,
+    valid: validHeritageSetting, resolve: heritageSettings
+  };
   window.MC_getOrthoConfig              = getOrthoConfig;
   window.MC_ORTHO_BASE_ID               = ORTHO_ID;
   window.MC_resolveOverlayOn            = resolveOverlayOn;
   window.MC_uncheckGroupSiblings        = _uncheckGroupSiblings;
   window.MC_forgetOverlayPref           = forgetOverlayPref;
+  // #734 — the DHM overlay defaults' one rule, shared with the customizer.
+  window.MC_DHMOverlays = {
+    SETTING_KEYS: DHM_SETTING_KEYS,
+    HILLSHADE_VALUES: DHM_HILLSHADE_VALUES,
+    validSetting: validDHMSetting,
+    settings: dhmOverlaySettings,
+    contourZoomRange: dhmContourZoomRange,
+    offered: offeredDHMOverlays
+  };
   window.MC_setLayerAttribution         = setLayerAttribution;
   window.MC_CREDIT_COMPACT_CLASS        = CREDIT_COMPACT_CLASS;
   // #733 — exposed so a caller (and the unit tests) build an overlay credit
@@ -1512,6 +1697,17 @@
     // Re-build when server config arrives async so newly-enabled providers appear
     window.addEventListener('mc-tile-provider-changed', function (e) {
       if (e && e.detail && e.detail.fromConfig) _buildControl();
+    });
+
+    // #734 — the customizer moved a DHM overlay default: rebuild, so the
+    // contour label and minZoom follow at once. The on/off defaults apply
+    // to the next map; layers and choices survive the rebuild. A removed
+    // map stops listening.
+    var onDHMDefaults = function () { if (!map._mcGone) _buildControl(); };
+    window.addEventListener('dhm-defaults-changed', onDHMDefaults);
+    map.on('unload', function () {
+      map._mcGone = true;
+      try { if (window.removeEventListener) window.removeEventListener('dhm-defaults-changed', onDHMDefaults); } catch (_) {}
     });
 
     // When the site theme flips, update the Auto tile via the existing _syncDarkTiles

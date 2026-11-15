@@ -145,6 +145,7 @@ run test-issue-724-masts-hint.js
 run test-issue-724-m5-masts-customizer.js
 run test-issue-723-heritage-info.js
 run test-issue-723-profile-warning.js
+run test-issue-723-m4-heritage-customizer.js
 run test-issue-681-profile-tool.js
 run test-issue-681-m5-node-entry.js
 run test-issue-681-m6-customizer-terrain.js
@@ -162,6 +163,7 @@ run test-issue-728-ortho-followups.js
 run test-packets-window-pinned.js
 run test-issue-733-dhm-credit.js
 run test-issue-734-dhm-overlays.js
+run test-issue-734-customizer-overlays.js
 run test-issue-738-foreign-fill-ui.js
 run test-issue-730-buildings-ui.js
 run test-issue-752-inset-attribution.js
