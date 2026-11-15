@@ -195,6 +195,71 @@ test('cellsNear lists the neighbour cell of a site at 500.4 m across a cell edge
   assert(checked > 300, 'only ' + checked + ' cases inside the extent');
 });
 
+test('cellsNear at the worst-case scale point: the east edge of the extent (#768 delta review 1)', () => {
+  // The UTM stretch is largest furthest from the central meridian (9° E),
+  // i.e. at the east edge of the extent, and along grid east (true bearing
+  // ~95°, the meridian convergence). There a 500.49 m spherical offset —
+  // still a 500 m hint — is 503.06-503.15 m of easting, so a site just
+  // across the cell edge needs a pad over 3 m: CELL_PAD_M 1 or 3 miss it.
+  const ML = ctx0.window.MastsLayer;
+  const D = Math.PI / 180, M = 500.49, s = MASTS.cellSizeM, x = MASTS.cellExtent;
+  const edge = x[2] * s;            // the west edge of the east-most cell
+  const dest = (ll, brg) => {
+    const d = M / R, p = ll[0] * D, l = ll[1] * D;
+    const p2 = Math.asin(Math.sin(p) * Math.cos(d) + Math.cos(p) * Math.sin(d) * Math.cos(brg));
+    return [p2 / D, (l + Math.atan2(Math.sin(brg) * Math.sin(d) * Math.cos(p), Math.cos(d) - Math.sin(p) * Math.sin(p2))) / D];
+  };
+  const eOf = (ll) => ML.toUTM32(ll[0], ll[1]).e;
+  let checked = 0, worst = 0;
+  for (const lat of [54.6, 55.2, 56.0, 56.8, 57.4]) {
+    for (const sign of [1, -1]) {
+      // The bearing with the most easting per metre at this edge.
+      const at = [lat, 15.6];
+      for (let it = 0; it < 8; it++) { const h = 1e-5; at[1] += (edge - eOf(at)) / ((eOf([lat, at[1] + h]) - eOf(at)) / h); }
+      let brg = 0, most = 0;
+      for (let b = (sign > 0 ? 80 : 260); b <= (sign > 0 ? 110 : 290); b += 0.05) {
+        const de = Math.abs(eOf(dest(at, b * D)) - eOf(at));
+        if (de > most) { most = de; brg = b * D; }
+      }
+      worst = Math.max(worst, most);
+      // Put the end so the site lands 1 cm across the edge, into the next cell.
+      const end = [lat, at[1]];
+      const target = edge + sign * 0.01;
+      for (let it = 0; it < 8; it++) {
+        const h = 1e-6, f = (ll) => eOf(dest(ll, brg));
+        end[1] += (target - f(end)) / ((f([lat, end[1] + h]) - f(end)) / h);
+      }
+      const sitePos = dest(end, brg);
+      const p = ML.toUTM32(sitePos[0], sitePos[1]);
+      const cell = Math.floor(p.e / s) + ',' + Math.floor(p.n / s);
+      assert.strictEqual(Math.floor(p.e / s), sign > 0 ? x[2] : x[2] - 1, 'site not across the edge');
+      const near = H.nearestFor(end[0], end[1], [site(sitePos, LTE800)]);
+      assert(near && near.distanceM === 500, 'not a 500 m hint: ' + JSON.stringify(near));
+      const keys = H.cellsNear(end[0], end[1], MASTS);
+      assert(keys.includes(cell), 'cell ' + cell + ' of a site ' + (Math.abs(p.e - eOf(end))).toFixed(3) + ' m of easting away (lat ' + lat + ') not listed: ' + keys);
+      assert(keys.length <= 4, keys.length + ' cells');
+      checked++;
+    }
+  }
+  assert.strictEqual(checked, 10);
+  assert(worst > 503.05, 'the probe is not at the worst case: ' + worst.toFixed(3) + ' m');
+});
+
+test('pin() keeps at most PIN_CELL_CAP cells, the first ones (#768 delta review 2)', async () => {
+  const h = heldHarness({ z: 9, b: { south: 55.5, west: 9.5, north: 56.8, east: 11.0 } });
+  const ML = h.ctx.window.MastsLayer;
+  const ctl = ML.controller(h.map, MASTS);
+  const keys = [];
+  for (let i = 0; i < ML.PIN_CELL_CAP + 5; i++) keys.push((300 + i) + ',3100');
+  ctl.pin(keys, null);
+  assert.strictEqual(ctl.stats().wanted, ML.PIN_CELL_CAP, 'wanted ' + ctl.stats().wanted);
+  for (let round = 0; round < 6; round++) {
+    h.calls.filter((c) => !c.done).forEach((c) => { c.done = true; h.ok(c); });
+    await h.run();
+  }
+  assert.deepStrictEqual(h.calls.map((c) => c.key), keys.slice(0, ML.PIN_CELL_CAP), 'fetched ' + h.calls.map((c) => c.key));
+});
+
 // ── 4. Wording ──────────────────────────────────────────────────────────────
 
 const LEGAL = /\b(legal|illegal|unlawful|law|prohibited|forbidden|violat\w*|must not|not allowed|licen[cs]e|permit)\b/i;

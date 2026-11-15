@@ -343,7 +343,9 @@
    *     hash (?terrain=1, ?heritage=1, ?masts=0, ?mastsInt=1). A =1 / =0 in
    *     the hash wins over the stored choice and is saved, like Live's
    *     ?heard= (#660). An overlay is off until chosen, except one marked
-   *     defaultOn, whose "off" is then written to the hash as =0.
+   *     defaultOn, whose "off" is then written to the hash as =0. defaultOn
+   *     may be a function: the antenna sites' default is the customizer's
+   *     (#724 M5), and their "off" is written as =0 either way.
    *   - A map without an attribution control (Live) gets one for its
    *     lifetime (_ensureAttribution), because the base map's credit and
    *     every overlay's credit are required.
@@ -396,8 +398,8 @@
   }
 
   // #723 — opacity (and whether an overlay starts on) is hard-coded here;
-  // exposing them in the customizer is tracked as #723 M4 (and #724 M5 for
-  // the antenna sites).
+  // exposing them in the customizer is tracked as #723 M4. The antenna
+  // sites' default comes from the customizer (#724 M5).
   var OVERLAYS = [
     {
       id: TERRAIN_ID, storageKey: 'mc-terrain-dhm', hashParam: 'terrain', layerProp: '_mcTerrainLayer',
@@ -417,8 +419,10 @@
       layers: function (cfg) { return cfg.layers; }
     },
     {
-      // #724 option A: every site, honestly labelled, on when offered.
-      id: 'masts-sites', storageKey: 'mc-masts', hashParam: 'masts', layerProp: '_mcMastsSitesLayer', defaultOn: true,
+      // #724 option A: every site, honestly labelled, on when offered
+      // unless this viewer turned the default off in the customizer.
+      id: 'masts-sites', storageKey: 'mc-masts', hashParam: 'masts', layerProp: '_mcMastsSitesLayer',
+      defaultOn: function () { return window.MastsLayer.settings(getMastsConfig()).enabled; },
       config: getMastsConfig,
       label: function () { return window.MastsLayer.SITE_LABEL; },
       create: function (map, cfg) { return window.MastsLayer.layer(map, cfg, 'sites'); }
@@ -452,11 +456,21 @@
     var hv = null, stored = null;
     try { hv = _hashParts().params.get(o.hashParam); } catch (_) {}
     try { stored = window.localStorage && window.localStorage.getItem(o.storageKey); } catch (_) {}
-    var on = resolveOverlayOn(hv, stored, o.defaultOn);
+    var on = resolveOverlayOn(hv, stored, typeof o.defaultOn === 'function' ? o.defaultOn() : o.defaultOn);
     if (hv === '1' || hv === '0') {
       try { if (window.localStorage) window.localStorage.setItem(o.storageKey, on ? '1' : '0'); } catch (_) {}
     }
     return on;
+  }
+
+  /* Forgets this viewer's remembered on/off of one overlay, so its default
+   * applies again on the next map: the customizer calls it when it changes
+   * that default (#724 M5). A hash =1/=0 still wins. */
+  function forgetOverlayPref(id) {
+    for (var i = 0; i < OVERLAYS.length; i++) {
+      if (OVERLAYS[i].id !== id) continue;
+      try { if (window.localStorage) window.localStorage.removeItem(OVERLAYS[i].storageKey); } catch (_) {}
+    }
   }
 
   // replaceState, so the SPA router does not re-run on the hash rewrite.
@@ -872,6 +886,7 @@
   window.MC_getOrthoConfig              = getOrthoConfig;
   window.MC_ORTHO_BASE_ID               = ORTHO_ID;
   window.MC_resolveOverlayOn            = resolveOverlayOn;
+  window.MC_forgetOverlayPref           = forgetOverlayPref;
   window.MC_setLayerAttribution         = setLayerAttribution;
   window.MC_CREDIT_COMPACT_CLASS        = CREDIT_COMPACT_CLASS;
   // #733 — exposed so a caller (and the unit tests) build an overlay credit

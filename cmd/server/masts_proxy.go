@@ -59,8 +59,23 @@ const (
 	mastsClientPath = "/api/masts"
 	// mastsMinZoom is the plan's zoom gate: a desktop viewport at z13 is
 	// about 70 cells. The browser enforces it (M3); the client config
-	// carries it so the browser does not hard-code it.
-	mastsMinZoom = 13
+	// carries it so the browser does not hard-code it. It is also the
+	// lowest map.masts.minZoom: the browser's view cap is paced against
+	// the per-IP budget at this zoom (#758 review F2), so an operator may
+	// only raise it, up to mastsMinZoomMax (#724 M5).
+	mastsMinZoom    = 13
+	mastsMinZoomMax = 18
+	// mastsHintDistanceDefault and mastsHintStrongDefault are the profile
+	// hint's distance and strong tier (#724 owner decision 2), carried in
+	// the client block as map.masts.hintDistanceM / hintStrongM (#724 M5).
+	// The distance stays within half a 2 km cell less the browser's 10 m
+	// pad (public/masts-hint.js CELL_PAD_M), so each end of a profile pins
+	// at most four cells (public/masts-layer.js PIN_CELL_CAP). The strong
+	// tier is 0 (off) up to the distance.
+	mastsHintDistanceDefault = 500
+	mastsHintDistanceMin     = 100
+	mastsHintDistanceMax     = 990
+	mastsHintStrongDefault   = 100
 	// mastsCacheTTL: 7 days, short against the quarterly upstream updates.
 	mastsCacheTTL = 7 * 24 * time.Hour
 	// mastsBrowserMaxAge is how long a browser may reuse a cell.
@@ -116,6 +131,12 @@ type MastsConfig struct {
 	CellRateLimitPerMin *int `json:"cellRateLimitPerMin,omitempty"`
 	// MaxInFlight bounds the distinct cell fetches admitted server-wide.
 	MaxInFlight *int `json:"maxInFlight,omitempty"`
+	// MinZoom, HintDistanceM and HintStrongM are the operator's values of
+	// the browser settings the customizer exposes (#724 M5); nil is the
+	// default. See resolveMastsClientSettings.
+	MinZoom       *int `json:"minZoom,omitempty"`
+	HintDistanceM *int `json:"hintDistanceM,omitempty"`
+	HintStrongM   *int `json:"hintStrongM,omitempty"`
 }
 
 // MastsClientConfig is the `masts` block of /api/config/client. Present
@@ -132,6 +153,10 @@ type MastsClientConfig struct {
 	// (mastedb.Cell.Valid), so the browser never asks for a cell the
 	// server would refuse.
 	CellExtent [4]int `json:"cellExtent"`
+	// HintDistanceM and HintStrongM are the profile hint's distance and
+	// strong tier in metres (#724 M5), the customizer's starting point.
+	HintDistanceM int `json:"hintDistanceM"`
+	HintStrongM   int `json:"hintStrongM"`
 }
 
 // MastsCellResponse is the body of GET /api/masts.
@@ -176,6 +201,32 @@ func mastsMaxInFlight(c MastsConfig, logf func(string, ...interface{})) int {
 	return mastsMaxInFlightDefault
 }
 
+// mastsClientSettings are the browser-side values of map.masts, resolved
+// and bounded: the zoom gate and the profile hint's two distances.
+type mastsClientSettings struct {
+	minZoom       int
+	hintDistanceM int
+	hintStrongM   int
+}
+
+func defaultMastsClientSettings() mastsClientSettings {
+	return mastsClientSettings{minZoom: mastsMinZoom, hintDistanceM: mastsHintDistanceDefault, hintStrongM: mastsHintStrongDefault}
+}
+
+// resolveMastsClientSettings applies the defaults and bounds, like
+// map.dhm.profile.rateLimitPerMin: an out-of-range value warns and takes
+// the default. A strong tier past the (resolved) distance is out of range
+// too; the default strong tier is within every allowed distance.
+func resolveMastsClientSettings(c MastsConfig, logf func(string, ...interface{})) mastsClientSettings {
+	k := configKnobs{tag: "[masts]", block: "map.masts", logf: logf}
+	s := mastsClientSettings{
+		minZoom:       k.integer("minZoom", c.MinZoom, mastsMinZoom, mastsMinZoom, mastsMinZoomMax),
+		hintDistanceM: k.integer("hintDistanceM", c.HintDistanceM, mastsHintDistanceDefault, mastsHintDistanceMin, mastsHintDistanceMax),
+	}
+	s.hintStrongM = k.integer("hintStrongM", c.HintStrongM, mastsHintStrongDefault, 0, s.hintDistanceM)
+	return s
+}
+
 // ── Proxy ──────────────────────────────────────────────────────────────────
 
 type mastsProxyOptions struct {
@@ -185,6 +236,7 @@ type mastsProxyOptions struct {
 	cacheTTL        time.Duration
 	rateLimitPerMin int // 0: off
 	maxInFlight     int
+	view            mastsClientSettings
 	trustedProxies  []*net.IPNet
 	logf            func(string, ...interface{})
 	now             func() time.Time
@@ -202,6 +254,7 @@ func defaultMastsProxyOptions() mastsProxyOptions {
 		cacheTTL:        mastsCacheTTL,
 		rateLimitPerMin: mastsCellRateLimitDefault,
 		maxInFlight:     mastsMaxInFlightDefault,
+		view:            defaultMastsClientSettings(),
 		logf:            log.Printf,
 		now:             time.Now,
 	}
@@ -215,6 +268,7 @@ type mastsProxy struct {
 	admit    *dhm.Admission // admitted fetches (maxInFlight)
 	upstream chan struct{}  // one token per open upstream request
 	deadline time.Duration
+	view     mastsClientSettings
 	now      func() time.Time
 	logf     func(string, ...interface{})
 
@@ -244,6 +298,7 @@ func newMastsProxy(cfg MastsConfig, opts mastsProxyOptions) *mastsProxy {
 		admit:    dhm.NewAdmission(opts.maxInFlight),
 		upstream: make(chan struct{}, mastsUpstreamSlots),
 		deadline: mastsDeadline,
+		view:     opts.view,
 		now:      opts.now,
 		logf:     opts.logf,
 	}
@@ -256,6 +311,7 @@ func newMastsProxyFromConfig(cfg *Config) *mastsProxy {
 	opts := defaultMastsProxyOptions()
 	opts.rateLimitPerMin = mastsCellRateLimit(cfg.Masts, opts.logf)
 	opts.maxInFlight = mastsMaxInFlight(cfg.Masts, opts.logf)
+	opts.view = resolveMastsClientSettings(cfg.Masts, opts.logf)
 	opts.trustedProxies = parseCIDRListQuiet(cfg.WSTrustedProxies())
 	return newMastsProxy(cfg.Masts, opts)
 }
@@ -388,13 +444,15 @@ func (s *Server) mastsClientConfig() *MastsClientConfig {
 		return nil
 	}
 	return &MastsClientConfig{
-		Enabled:     true,
-		URL:         mastsClientPath,
-		MinZoom:     mastsMinZoom,
-		CellSizeM:   mastedb.CellSizeM,
-		Attribution: mastedb.Attribution,
-		SourceURL:   mastedb.SourceURL,
-		CellExtent:  [4]int{mastedb.MinCellE, mastedb.MinCellN, mastedb.MaxCellE, mastedb.MaxCellN},
+		Enabled:       true,
+		URL:           mastsClientPath,
+		MinZoom:       s.masts.view.minZoom,
+		CellSizeM:     mastedb.CellSizeM,
+		Attribution:   mastedb.Attribution,
+		SourceURL:     mastedb.SourceURL,
+		CellExtent:    [4]int{mastedb.MinCellE, mastedb.MinCellN, mastedb.MaxCellE, mastedb.MaxCellN},
+		HintDistanceM: s.masts.view.hintDistanceM,
+		HintStrongM:   s.masts.view.hintStrongM,
 	}
 }
 
