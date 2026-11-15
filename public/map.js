@@ -2821,6 +2821,9 @@
       dhm: window.MC_DHM_CFG,
       // #723 M3: the monuments block; with it, each end is looked up.
       heritage: window.MC_getHeritageConfig ? window.MC_getHeritageConfig() : null,
+      // #737 M2: the oblique photos block; with it, A, B and a chart point
+      // offer the photo viewer.
+      skraafoto: window.MC_SKRAAFOTO_CFG || null,
       onMoveStart: function (side) { profileArmFor(side, true); },
       onMoveCancel: profileDisarm,
       onEndpointsChange: profileDrawLine,
