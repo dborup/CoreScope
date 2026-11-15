@@ -103,18 +103,6 @@ type terrainClasses struct {
 	degraded  bool
 }
 
-// TerrainClassification is the response's `classification` (#730 M2),
-// present while map.dhm.profile.buildings is on and the model is both.
-// State is full (every sample whose surface stands more than 2.5 m above
-// the terrain is a building or trees/other), partial (some are not
-// classified) or unavailable (none could be; the lookup failed, or the
-// profile is not fully covered). Truncated says a segment had more
-// buildings than one page holds, so its samples are not classified.
-type TerrainClassification struct {
-	State     string `json:"state"`
-	Truncated bool   `json:"truncated"`
-}
-
 // The causes of verdict.surface.cause.
 const (
 	terrainCauseBuilding   = "building"

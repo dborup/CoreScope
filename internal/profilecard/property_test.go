@@ -11,8 +11,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/meshcore-analyzer/dhm"
 )
 
 // nasty is a list of responses no well-behaved server sends, but which the
@@ -108,7 +106,7 @@ func checkCard(t *testing.T, label string, b []byte, runs []textRun) {
 	}
 	attributed := false
 	for _, r := range runs {
-		if r.Role == "attribution" && r.Text == dhm.Attribution && r.Size == attributionSize {
+		if r.Role == "attribution" && r.Text == Credit && r.Size == attributionSize {
 			attributed = true
 		}
 		// Safe area: nothing within safeMargin px of an edge.
@@ -250,16 +248,29 @@ func TestRenderTimeIndependentOfSampleCount(t *testing.T) {
 		return best
 	}
 	fastest(small) // warm up
-	s, l := fastest(small), fastest(large)
-	t.Logf("draw: 1024 samples %v, 3200 samples %v", s, l)
+	// The median round of geometryRounds, as TestGeometryLinearInSamples
+	// does, so one burst of load on a shared runner cannot fail it (#759
+	// review finding 4).
+	type round struct{ s, l time.Duration }
+	rounds := make([]round, geometryRounds)
+	for i := range rounds {
+		rounds[i] = round{fastest(small), fastest(large)}
+	}
+	over := func(r round) time.Duration { return r.l - (r.s*3/2 + time.Millisecond) }
+	sort.Slice(rounds, func(i, j int) bool { return over(rounds[i]) < over(rounds[j]) })
+	s, l := rounds[len(rounds)/2].s, rounds[len(rounds)/2].l
+	t.Logf("draw: 1024 samples %v, 3200 samples %v (median of %d rounds)", s, l, len(rounds))
 	if l > s*3/2+time.Millisecond {
 		t.Errorf("3200 samples took %v against %v for 1024: the renderer is doing work per sample", l, s)
 	}
 }
 
-// Every case renders inside the per-card budget the plan pins (25 ms,
-// draw and PNG encode). Skipped under -race, which slows everything ~10×
-// and is not what production runs.
+// Every case renders inside the per-card budget. The plan's target is
+// 25 ms (draw and PNG encode); the test fails at budgetLimit, twice that,
+// so a loaded shared CI runner cannot fail it while a renderer that does
+// real extra work still does (#759 review finding 4). A case over the
+// target but under the limit is logged, not failed. Skipped under -race,
+// which slows everything ~10× and is not what production runs.
 func TestRenderWithinBudget(t *testing.T) {
 	if raceEnabled {
 		t.Skip("timing is meaningless under -race")
@@ -267,7 +278,7 @@ func TestRenderWithinBudget(t *testing.T) {
 	var times []time.Duration
 	for _, c := range goldenCases() {
 		best := time.Duration(math.MaxInt64)
-		for i := 0; i < 5; i++ {
+		for i := 0; i < 7; i++ {
 			start := time.Now()
 			if _, err := Render(c.resp, c.names, DefaultPalette(true), c.opt); err != nil {
 				t.Fatal(err)
@@ -277,12 +288,28 @@ func TestRenderWithinBudget(t *testing.T) {
 			}
 		}
 		times = append(times, best)
-		if best > budget {
-			t.Errorf("%s: %v per card, budget %v", c.name, best, budget)
+		switch {
+		case best > budgetLimit:
+			t.Errorf("%s: %v per card, limit %v (target %v)", c.name, best, budgetLimit, budgetTarget)
+		case best > budgetTarget:
+			t.Logf("%s: %v per card, over the %v target (limit %v)", c.name, best, budgetTarget, budgetLimit)
 		}
 	}
 	sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
-	t.Logf("per card: fastest %v, slowest %v", times[0], times[len(times)-1])
+	t.Logf("per card: fastest %v, slowest %v (target %v, limit %v)", times[0], times[len(times)-1], budgetTarget, budgetLimit)
 }
 
-const budget = 25 * time.Millisecond
+// budgetTarget is the plan's per-card budget; budgetLimit is what the
+// test enforces: twice the target, the headroom a shared runner needs.
+const (
+	budgetTarget = 25 * time.Millisecond
+	budgetLimit  = 2 * budgetTarget
+)
+
+// #759 review finding 4: the enforced bound keeps 2× headroom over the
+// plan's 25 ms target, which stays what the logs measure against.
+func TestRenderBudgetHasHeadroom(t *testing.T) {
+	if budgetTarget != 25*time.Millisecond || budgetLimit != 2*budgetTarget {
+		t.Fatalf("target %v, limit %v; want 25ms and twice that", budgetTarget, budgetLimit)
+	}
+}

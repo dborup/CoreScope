@@ -254,32 +254,54 @@ type ogPage struct {
 	// from parsed, validated values only, never from the raw request; with
 	// the request origin it becomes og:url.
 	Path string
+	// Image is the share card's path and query ("/api/terrain/profile.png?…",
+	// #727 M3), built like Path; "" keeps the site image. ImageAlt is its
+	// text alternative.
+	Image    string
+	ImageAlt string
 }
+
+// The share card's size (internal/profilecard), stated in og:image:width
+// and og:image:height instead of the site image's probed size.
+const ogCardWidth, ogCardHeight = 1200, 630
 
 // Rune limits of the per-profile tags (#727 plan §1.3).
 const (
 	ogTitleMaxRunes       = 90
 	ogDescriptionMaxRunes = 200
+	ogImageAltMaxRunes    = 300
 )
 
 // renderProfile fills a per-profile document: doc is index.html with only
 // __BUST__ substituted, so every OG placeholder is still in place. One
 // strings.Replacer pass fills all of them; substituted values are never
 // scanned again, so a value that happens to contain a placeholder stays
-// text. The image stays the site card until #727 M3. og:url (re-added for
+// text. With pg.Image and a usable origin, og:image and twitter:image are
+// the share card, with its size and alt text (#727 M3); otherwise the site
+// image as on every other page. og:url (re-added for
 // /p only, owner decision 5; #1890 keeps it off every other page) and
 // robots noindex (owner decision 8) ride __OG_PAGE_META__.
 func (o *ogMeta) renderProfile(doc string, r *http.Request, pg ogPage) []byte {
 	meta := `<meta name="robots" content="noindex">`
-	if origin := o.origin(r); origin != "" {
+	origin := o.origin(r)
+	if origin != "" {
 		meta = `<meta property="og:url" content="` + html.EscapeString(origin+pg.Path) + `">` + "\n  " + meta
+	}
+	image, dims := o.imageFor(r), o.dims
+	if origin != "" && pg.Image != "" {
+		image = html.EscapeString(origin + pg.Image)
+		alt := ogText(pg.ImageAlt, ogImageAltMaxRunes)
+		dims = fmt.Sprintf(`<meta property="og:image:width" content="%d">`+"\n  "+`<meta property="og:image:height" content="%d">`, ogCardWidth, ogCardHeight)
+		if alt != "" {
+			dims += "\n  " + `<meta property="og:image:alt" content="` + alt + `">` + "\n  " + `<meta name="twitter:image:alt" content="` + alt + `">`
+		}
 	}
 	return []byte(strings.NewReplacer(
 		"__OG_TITLE__", ogText(pg.Title, ogTitleMaxRunes),
 		"__OG_SITE_NAME__", o.siteName,
 		"__OG_DESCRIPTION__", ogText(pg.Description, ogDescriptionMaxRunes),
-		"__OG_IMAGE__", o.imageFor(r),
-		"__OG_IMAGE_DIMS__", o.dims,
+		"__OG_IMAGE__", image,
+		"__OG_IMAGE_DIMS__", dims,
 		"__OG_PAGE_META__", meta,
 	).Replace(doc))
 }
@@ -323,6 +345,14 @@ func ogClip(s string, maxRunes int) string {
 	}
 	rs := []rune(out)[:maxRunes-1]
 	return strings.TrimRight(string(rs), " ") + "…"
+}
+
+// publicHost is the host of the configured public base URL, or "".
+func (o *ogMeta) publicHost() string {
+	if u, err := url.Parse(o.publicBase); err == nil {
+		return u.Host
+	}
+	return ""
 }
 
 // render returns the final document for one request.

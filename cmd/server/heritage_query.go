@@ -32,7 +32,7 @@ package main
 //     back (#696/#707).
 //   - Upstream failures are 502, timeouts 504, never with upstream text,
 //     and logged by category at most once a minute. Failures are not
-//     cached.
+//     cached, and every refusal (429, 502, 503, 504) is no-store.
 //
 // The register is free to use under the agency's terms, which forbid
 // harvesting it; the fixed cells, the per-IP budget and the global bound
@@ -314,8 +314,11 @@ func (rateLimited) Error() string { return "rate limit exceeded" }
 
 // writeFetchError maps a failed lookup: a client that left gets nothing,
 // the per-IP budget 429, a full gate 503 (charge refunded), a timeout 504,
-// anything else upstream 502. None carries upstream text.
+// anything else upstream 502. None carries upstream text, and none may be
+// stored, whatever middleware the route sits behind (#723 M3, as
+// masts_proxy.go).
 func (q *heritageQuery) writeFetchError(w http.ResponseWriter, r *http.Request, err error) {
+	w.Header().Set("Cache-Control", "no-store")
 	var rl rateLimited
 	switch {
 	case errors.As(err, &rl):

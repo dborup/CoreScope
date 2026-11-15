@@ -14,6 +14,9 @@
  */
 'use strict';
 const { chromium } = require('playwright');
+// The fixture is freshened once per shard: pin the packets window so the
+// rows do not depend on when this suite runs in it (#787).
+const { pinPacketsTimeWindow } = require('./tests/e2e-packets-window');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 
@@ -56,16 +59,7 @@ const PAGES = [
   // ---- Narrow viewport: slide-over MUST appear ----
   for (const p of PAGES) {
     const ctx = await browser.newContext({ viewport: { width: 800, height: 800 } });
-    if (p.name === 'packets') {
-      // The CI fixture is static: timestamps are freshened once before the
-      // server starts. The packets page defaults to a 15-min window, so rows
-      // vanish ~15 min into the job; 180 is the largest window packets.js
-      // keeps at <=1024px (larger values reset to 15). The e2e job's
-      // timeout-minutes keeps the run inside that window.
-      await ctx.addInitScript(() => {
-        try { localStorage.setItem('meshcore-time-window', '180'); } catch (_) {}
-      });
-    }
+    await pinPacketsTimeWindow(ctx);
     const page = await ctx.newPage();
     page.setDefaultTimeout(8000);
     page.on('pageerror', (e) => console.error('[pageerror]', e.message));
@@ -307,6 +301,7 @@ const PAGES = [
   // ============================================================
   {
     const ctx = await browser.newContext({ viewport: { width: 800, height: 800 } });
+    await pinPacketsTimeWindow(ctx);
     const page = await ctx.newPage();
     page.setDefaultTimeout(8000);
 
@@ -384,6 +379,7 @@ const PAGES = [
   // ============================================================
   {
     const ctx = await browser.newContext({ viewport: { width: 800, height: 800 } });
+    await pinPacketsTimeWindow(ctx);
     const page = await ctx.newPage();
     page.setDefaultTimeout(8000);
     await page.goto(BASE + '/#/nodes', { waitUntil: 'domcontentloaded' });
@@ -579,6 +575,7 @@ const PAGES = [
   // ============================================================
   {
     const ctx = await browser.newContext({ viewport: { width: 800, height: 800 } });
+    await pinPacketsTimeWindow(ctx);
     const page = await ctx.newPage();
     page.setDefaultTimeout(8000);
     await page.goto(BASE + '/#/nodes', { waitUntil: 'domcontentloaded' });
@@ -644,6 +641,7 @@ const PAGES = [
   // ============================================================
   {
     const ctx = await browser.newContext({ viewport: { width: 800, height: 800 } });
+    await pinPacketsTimeWindow(ctx);
     const page = await ctx.newPage();
     page.setDefaultTimeout(8000);
     await page.goto(BASE + '/#/nodes', { waitUntil: 'domcontentloaded' });
@@ -707,15 +705,18 @@ const PAGES = [
   // ---- Wide viewport: slide-over MUST NOT appear (regression guard) ----
   {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    await pinPacketsTimeWindow(ctx);
     const page = await ctx.newPage();
     page.setDefaultTimeout(8000);
 
     await step('wide@1440 packets: row click does NOT open slide-over', async () => {
       await page.goto(BASE + '/#/packets', { waitUntil: 'domcontentloaded' });
       await page.waitForSelector('#pktTable', { timeout: 8000 });
-      await page.waitForFunction(() => document.querySelectorAll('#pktTable tbody tr').length > 0, null, { timeout: 8000 });
+      // A packet row: an empty window still has one row, "No packets found",
+      // and clicking it opens nothing whatever the viewport (#787).
+      await page.waitForSelector('#pktTable tbody tr[data-hash]', { timeout: 8000 });
       await page.evaluate(() => {
-        const r = document.querySelector('#pktTable tbody tr');
+        const r = document.querySelector('#pktTable tbody tr[data-hash]');
         if (r) r.click();
       });
       await page.waitForTimeout(300);
