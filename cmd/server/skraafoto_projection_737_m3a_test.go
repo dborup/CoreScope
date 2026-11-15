@@ -62,7 +62,7 @@ func skraafotoFixtureFeatures(t testing.TB) map[string][]string {
 // skraafotoFixtureCamera is the camera of a raw fixture item.
 func skraafotoFixtureCamera(t testing.TB, raw, dir string) *skraafoto.Camera {
 	t.Helper()
-	items, err := skraafoto.ParseSearch([]byte(`{"features":[`+raw+`]}`), 2025, skraafoto.Direction(dir))
+	items, _, err := skraafoto.ParseSearch([]byte(`{"features":[`+raw+`]}`), 2025, skraafoto.Direction(dir))
 	if err != nil || len(items) != 1 || items[0].Camera == nil {
 		t.Fatalf("%s: %v %v", dir, items, err)
 	}
@@ -147,9 +147,15 @@ func TestSkraafoto737M3a_PointAtDHMHeight(t *testing.T) {
 	}
 	// A point two metres away, in the same 10 m search cell: its own
 	// answer and height, the cell's photos.
-	resp2 := decodeSkraafotoSearch(t, e.search("lat=56.15372&lon=10.21395"))
+	// DHM was asked for it, so it is a miss although the photos were
+	// cached (#827 review finding 8).
+	w2 := e.search("lat=56.15372&lon=10.21395")
+	resp2 := decodeSkraafotoSearch(t, w2)
 	if s, _ := e.upstream(); s != s0 || elev.calls.Load() != 2 {
 		t.Fatalf("%d STAC, %d DHM calls", s-s0, elev.calls.Load())
+	}
+	if c := w2.Header().Get("X-CoreScope-Cache"); c != "miss" {
+		t.Fatalf("a height fetched from DHM: cache %q", c)
 	}
 	// The nadir photo is turned half round (κ ≈ −180°: its top-left
 	// corner is the footprint's south-east one), so north is down.
@@ -277,6 +283,31 @@ func TestSkraafoto737M3a_DHMUnavailableNotCached(t *testing.T) {
 		// allows the retry.
 		if ph := decodeSkraafotoSearch(t, e.search(skraafotoDokk1)).Photos[0]; ph.Approx || elev.calls.Load() != 1 {
 			t.Fatalf("retry: %+v, %d DHM calls", ph, elev.calls.Load())
+		}
+	})
+	// Only some of the heights refused (here B is answered, the point and
+	// A are refused as admission refuses them): DHM did work for the
+	// request, so its charge stays (#827 review finding 5).
+	t.Run("partial admission", func(t *testing.T) {
+		elev := newFakeElevation(t, flatElev(3))
+		bE, _ := dhm.ToUTM32(56.15370, 10.21230)
+		elev.hook = func(_ context.Context, r dhm.RasterRequest) error {
+			if math.Abs((r.BBox[0]+r.BBox[2])/2-bE) > 10 {
+				return dhm.ErrAdmissionFull
+			}
+			return nil
+		}
+		e := newSkraafotoM3aEnv(t, elev, dhm.ProfileConfig{RateLimitPerMin: intp(1)})
+		ph := decodeSkraafotoSearch(t, e.search(skraafotoDokk1+"&path=56.15370,10.21560,56.15370,10.21230")).Photos[0]
+		if !ph.Approx || elev.calls.Load() != 3 || strings.Contains(e.logs.String(), "admission") {
+			t.Fatalf("partly refused: %+v, %d DHM calls, logs %q", ph, elev.calls.Load(), e.logs.String())
+		}
+		if _, ok := e.p.grounds.Get(skraafotoGroundKey(snapLatLon(dhm.LatLon{Lat: 56.15370, Lon: 10.21230})), e.clock.now()); !ok {
+			t.Fatal("the height DHM gave was not kept")
+		}
+		// The one-a-minute budget is spent: the next point is not asked.
+		if ph := decodeSkraafotoSearch(t, e.search("lat=56.15390&lon=10.21395")).Photos[0]; !ph.Approx || elev.calls.Load() != 3 {
+			t.Fatalf("after a partial refusal: %+v, %d DHM calls: its charge was given back", ph, elev.calls.Load())
 		}
 	})
 }
@@ -416,6 +447,119 @@ func TestSkraafoto737M3a_PathInFrame(t *testing.T) {
 	}
 }
 
+// Each end of the line of sight stands on its own terrain, not the
+// point's, and the ends are not swapped: the point, A (100 m east) and B
+// (100 m west) are on ground 3, 20 and 40 m high (#827 review finding
+// 4). Changing only an antenna height asks no upstream again: hit.
+func TestSkraafoto737M3a_PathEndsAtTheirOwnTerrain(t *testing.T) {
+	const aLat, aLon, bLat, bLon = 56.15370, 10.21560, 56.15370, 10.21230
+	pe, pn := dhm.ToUTM32(skraafotoDokk1Lat, skraafotoDokk1Lon)
+	ae, an := dhm.ToUTM32(aLat, aLon)
+	be, bn := dhm.ToUTM32(bLat, bLon)
+	elev := newFakeElevation(t, func(e, _ float64) float32 {
+		switch {
+		case e > pe+50:
+			return 20
+		case e < pe-50:
+			return 40
+		}
+		return 3
+	})
+	e := newSkraafotoM3aEnv(t, elev, dhm.ProfileConfig{})
+	const path = "&path=56.15370,10.21560,56.15370,10.21230"
+	w := e.search(skraafotoDokk1 + path + "&ha=10&hb=5")
+	resp := decodeSkraafotoSearch(t, w)
+	if c := w.Header().Get("X-CoreScope-Cache"); c != "miss" || elev.calls.Load() != 3 {
+		t.Fatalf("cache %q, %d DHM calls", c, elev.calls.Load())
+	}
+	feats := skraafotoFixtureFeatures(t)
+	for _, ph := range resp.Photos {
+		c := skraafotoFixtureCamera(t, feats[ph.Direction][0], ph.Direction)
+		pt, _ := c.At(skraafoto.Ground{E: pe, N: pn, H: 3})
+		a, okA := c.At(skraafoto.Ground{E: ae, N: an, H: 20 + 10})
+		b, okB := c.At(skraafoto.Ground{E: be, N: bn, H: 40 + 5})
+		if !okA || !okB || !c.Frame().Contains(a) || !c.Frame().Contains(b) {
+			t.Fatalf("%s: the fixture does not see both ends: %+v %+v", ph.Direction, a, b)
+		}
+		if ph.Approx || ph.Point == nil || !nearPx(*ph.Point, pt, 0.06) || len(ph.Path) != skraafotoPathPoints {
+			t.Fatalf("%s: %+v, point want %+v", ph.Direction, ph, pt)
+		}
+		// Both ends in frame: the path runs from A to B.
+		if first, last := ph.Path[0], ph.Path[len(ph.Path)-1]; !nearPx(first, a, 0.06) || !nearPx(last, b, 0.06) {
+			t.Fatalf("%s: path %+v … %+v, want A %+v … B %+v", ph.Direction, first, last, a, b)
+		}
+		// At the point's height A would be elsewhere: the test tells
+		// the heights apart.
+		if wrong, _ := c.At(skraafoto.Ground{E: ae, N: an, H: 3 + 10}); nearPx(ph.Path[0], wrong, 0.2) {
+			t.Fatalf("%s: A at the point's height is indistinguishable", ph.Direction)
+		}
+	}
+	w = e.search(skraafotoDokk1 + path + "&ha=30&hb=5")
+	if c := w.Header().Get("X-CoreScope-Cache"); w.Code != 200 || c != "hit" || elev.calls.Load() != 3 {
+		t.Fatalf("another antenna height: %d %q, %d DHM calls", w.Code, c, elev.calls.Load())
+	}
+}
+
+// One unusable candidate after a direction's first leaves the search
+// standing: it is left out and logged by count at most once a minute.
+// An unusable first candidate still fails the search (#827 review
+// finding 6).
+func TestSkraafoto737M3a_BadLaterCandidateSkipped(t *testing.T) {
+	feats := skraafotoFixtureFeatures(t)
+	bad := strings.Replace(feats["east"][0], `"direction": "east"`, `"direction": "west"`, 1)
+	if bad == feats["east"][0] {
+		t.Fatal("the mutation did not apply")
+	}
+	e := newSkraafotoM3aEnv(t, nil, dhm.ProfileConfig{})
+	e.up.Features["east"] = []string{feats["east"][0], bad}
+	resp := decodeSkraafotoSearch(t, e.search(skraafotoDokk1))
+	if ph := photoByDirection(t, resp, "east"); ph.Point == nil || len(resp.Photos) != 4 {
+		t.Fatalf("%+v", resp.Photos)
+	}
+	const line = "left out 1 search candidate(s)"
+	if n := strings.Count(e.logs.String(), line); n != 1 {
+		t.Fatalf("%d log lines: %q", n, e.logs.String())
+	}
+	// Another cell within the minute: counted, not logged; after it, the
+	// count since the last line.
+	decodeSkraafotoSearch(t, e.search("lat=56.15470&lon=10.21395"))
+	e.clock.add(time.Minute)
+	decodeSkraafotoSearch(t, e.search("lat=56.15570&lon=10.21395"))
+	if logs := e.logs.String(); strings.Count(logs, line) != 1 || !strings.Contains(logs, "left out 2 search candidate(s)") {
+		t.Fatalf("logs %q", logs)
+	}
+	e.up.Features["east"] = []string{bad, feats["east"][0]}
+	if w := e.search("lat=56.15670&lon=10.21395"); w.Code != 502 {
+		t.Fatalf("a bad first candidate: %d", w.Code)
+	}
+}
+
+// The search cache's capacity in Server's constants: a cell of five
+// directions of five candidates fits about 1000 times in
+// skraafotoSearchBytes, an answer 2800 times or more (#827 review
+// finding 7).
+func TestSkraafoto737M3a_CacheEntrySizes(t *testing.T) {
+	cands := skraafotoBenchCandidates(t)
+	cell := len(mustMarshal(cands))
+	sq, err := parseSkraafotoSearch(skraafotoDokk1 + "&path=56.15370,10.21395,56.15370,10.16500&ha=10&hb=20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{}
+	k, _ := s.skraafotoAnswerKey(sq, skraafotoSearchKey{})
+	g := skraafotoGround{pt: 3, a: 3, b: 3, final: true}
+	withPath := len(mustMarshal(buildSkraafotoAnswer(cands, k, g, s.skraafotoLineFor(k, sq))))
+	k.hasPath = false
+	plain := len(mustMarshal(buildSkraafotoAnswer(cands, k, g, nil)))
+	t.Logf("cell %d B, answer %d B, with a line of sight %d B", cell, plain, withPath)
+	if cell > 16<<10 || skraafotoSearchBytes/cell < 1000 {
+		t.Errorf("a cell is %d B: the search cache holds %d, not about 1000", cell, skraafotoSearchBytes/cell)
+	}
+	if withPath > 6<<10 || plain > 2560 || skraafotoSearchBytes/withPath < 2800 {
+		t.Errorf("answers are %d and %d B", plain, withPath)
+	}
+}
+
 // The path keys are the profile's grammar, bounded like its paths, each
 // at most once, ha and hb only with a path. A refusal costs nothing.
 func TestSkraafoto737M3a_QueryAllowList(t *testing.T) {
@@ -509,23 +653,7 @@ func FuzzParseSkraafotoSearch(f *testing.F) {
 // of sight scanned and sampled in each photo. It runs once per uncached
 // answer, never on a hot path.
 func BenchmarkSkraafotoAnswer(b *testing.B) {
-	feats := skraafotoFixtureFeatures(b)
-	cands := skraafotoCandidates{Collection: "skraafotos2025", Year: 2025, Years: []int{2025}}
-	for _, d := range skraafoto.Directions {
-		raw := feats[string(d)]
-		if len(raw) == 0 {
-			raw = feats["north"]
-		}
-		var items []skraafoto.Item
-		for len(items) < skraafoto.SearchLimit {
-			parsed, err := skraafoto.ParseSearch([]byte(`{"features":[`+raw[0]+`]}`), 2025, skraafoto.Direction(strings.Replace(string(d), "west", "north", 1)))
-			if err != nil {
-				b.Fatal(err)
-			}
-			items = append(items, parsed...)
-		}
-		cands.Photos = append(cands.Photos, items)
-	}
+	cands := skraafotoBenchCandidates(b)
 	sq, err := parseSkraafotoSearch(skraafotoDokk1 + "&path=56.15370,10.21395,56.15370,10.16500&ha=10&hb=20")
 	if err != nil {
 		b.Fatal(err)
@@ -542,4 +670,28 @@ func BenchmarkSkraafotoAnswer(b *testing.B) {
 			b.Fatalf("%d photos", len(resp.Photos))
 		}
 	}
+}
+
+// skraafotoBenchCandidates is a full cell: five directions of
+// skraafoto.SearchLimit fixture photos each (west is north's).
+func skraafotoBenchCandidates(tb testing.TB) skraafotoCandidates {
+	tb.Helper()
+	feats := skraafotoFixtureFeatures(tb)
+	cands := skraafotoCandidates{Collection: "skraafotos2025", Year: 2025, Years: []int{2025}}
+	for _, d := range skraafoto.Directions {
+		raw := feats[string(d)]
+		if len(raw) == 0 {
+			raw = feats["north"]
+		}
+		var items []skraafoto.Item
+		for len(items) < skraafoto.SearchLimit {
+			parsed, _, err := skraafoto.ParseSearch([]byte(`{"features":[`+raw[0]+`]}`), 2025, skraafoto.Direction(strings.Replace(string(d), "west", "north", 1)))
+			if err != nil {
+				tb.Fatal(err)
+			}
+			items = append(items, parsed...)
+		}
+		cands.Photos = append(cands.Photos, items)
+	}
+	return cands
 }

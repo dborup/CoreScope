@@ -88,9 +88,23 @@ const (
 	skraafotoBusyRetry   = 5 * time.Second
 	skraafotoLogEvery    = time.Minute
 
+	// skraafotoSearchEntries and skraafotoSearchBytes bound the search
+	// cache, and the answer cache likewise. Since M3a a search cell
+	// keeps up to skraafoto.SearchLimit candidates per direction, each
+	// with its camera: about 16 KiB for five directions of five (pinned
+	// by TestSkraafoto737M3a_CacheEntrySizes), so the bytes, not the
+	// entries, bound the search cache at about 1000 cells, against 4096
+	// with one photo per direction. That is still more distinct 10 m
+	// cells than a day of clicks on a community map; the budget is kept
+	// rather than quadrupled. An answer is about 2.4 KiB, or 6 KiB with
+	// a line of sight, so the answer cache holds 2800–4096.
 	skraafotoSearchEntries = 4096
 	skraafotoSearchBytes   = 16 << 20
-	skraafotoPhotoEntries  = 16384
+	// skraafotoPhotoEntries bounds where each photo is on the CDN: a
+	// cold search adds up to 25, so it covers the last 650 or so cells'
+	// candidates. A preview of a photo it has dropped costs one STAC
+	// item lookup.
+	skraafotoPhotoEntries = 16384
 )
 
 // SkraafotoConfig is config.json `map.skraafoto` (#737), lifted out of Map
@@ -231,11 +245,11 @@ type skraafotoProxy struct {
 	daily                         *dailyBudget   // nil: no daily cap
 	admit                         *dhm.Admission
 
-	refused, failures  atomic.Int64
-	refuseLog, failLog logThrottle
-	capLog             logThrottle
-	now                func() time.Time
-	logf               func(string, ...interface{})
+	refused, failures, skips    atomic.Int64
+	refuseLog, failLog, skipLog logThrottle
+	capLog                      logThrottle
+	now                         func() time.Time
+	logf                        func(string, ...interface{})
 }
 
 func newSkraafotoProxy(set skraafotoSettings, d skraafotoDeps) *skraafotoProxy {
@@ -522,6 +536,10 @@ func (s *Server) handleSkraafotoSearch(w http.ResponseWriter, r *http.Request) {
 	if g.final {
 		p.answers.Put(ak, data, p.now())
 	}
+	// hit only when no upstream, STAC or DHM, was asked for this answer.
+	if g.asked {
+		state = "miss"
+	}
 	writeSkraafotoJSON(w, data, state)
 }
 
@@ -640,7 +658,8 @@ var errSkraafotoYear = errors.New("unknown year")
 // search runs a cold search: the year list, then one STAC search per
 // direction, concurrently (the client bounds them), cached as the
 // candidates every answer of the cell is built from. Any failure fails
-// it.
+// it; a candidate after a direction's first that STAC returned unusable
+// is only left out, and logged by count at most once a minute.
 func (p *skraafotoProxy) search(ctx context.Context, key skraafotoSearchKey) ([]byte, error) {
 	years, err := p.yearList(ctx)
 	if err != nil {
@@ -655,12 +674,13 @@ func (p *skraafotoProxy) search(ctx context.Context, key skraafotoSearchKey) ([]
 	cands := skraafotoCandidates{Collection: skraafoto.Collection(year), Year: year, Years: years,
 		Photos: make([][]skraafoto.Item, len(skraafoto.Directions))}
 	errs := make([]error, len(skraafoto.Directions))
+	skipped := make([]int, len(skraafoto.Directions))
 	var wg sync.WaitGroup
 	for i, d := range skraafoto.Directions {
 		wg.Add(1)
 		go func(i int, d skraafoto.Direction) {
 			defer wg.Done()
-			cands.Photos[i], errs[i] = p.stac.Search(ctx, year, key.e, key.n, d)
+			cands.Photos[i], skipped[i], errs[i] = p.stac.Search(ctx, year, key.e, key.n, d)
 		}(i, d)
 	}
 	wg.Wait()
@@ -670,6 +690,11 @@ func (p *skraafotoProxy) search(ctx context.Context, key skraafotoSearchKey) ([]
 		}
 	}
 	now := p.now()
+	if n := sumInts(skipped); n > 0 {
+		if n, ok := p.skipLog.note(now, p.skips.Add(int64(n)), skraafotoLogEvery); ok {
+			p.logf("[skraafoto] left out %d search candidate(s) since the last report: malformed, or not a photo of the collection and direction asked for", n)
+		}
+	}
 	for _, items := range cands.Photos {
 		for _, it := range items {
 			if it.Path != "" {
@@ -767,6 +792,14 @@ func (p *skraafotoProxy) writeFetchError(w http.ResponseWriter, r *http.Request,
 func collectionYear(c string) int {
 	y, _ := skraafoto.CollectionYear(c)
 	return y
+}
+
+func sumInts(xs []int) int {
+	n := 0
+	for _, x := range xs {
+		n += x
+	}
+	return n
 }
 
 func containsInt(xs []int, v int) bool {

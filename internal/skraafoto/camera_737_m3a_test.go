@@ -54,7 +54,7 @@ func fixtureFeatures(t testing.TB) map[Direction]string {
 
 func fixtureItem(t testing.TB, d Direction) Item {
 	t.Helper()
-	items, err := ParseSearch([]byte(`{"type":"FeatureCollection","features":[`+fixtureFeatures(t)[d]+`]}`), 2025, d)
+	items, _, err := ParseSearch([]byte(`{"type":"FeatureCollection","features":[`+fixtureFeatures(t)[d]+`]}`), 2025, d)
 	if err != nil || len(items) != 1 {
 		t.Fatalf("%s: %v %v", d, items, err)
 	}
@@ -97,34 +97,63 @@ func TestCamera737_FootprintCornersProjectToImageCorners(t *testing.T) {
 	const cornerTolPx = 10 // achieved: 9.3 px (south), at 0.1 m GSD about 1 m
 	worst := 0.0
 	for _, d := range fixtureDirections {
-		c := fixtureItem(t, d).Camera
-		cols, rows := float64(c.Cols), float64(c.Rows)
-		imageCorners := [][2]float64{{0, 0}, {cols, 0}, {cols, rows}, {0, rows}}
-		used := map[int]bool{}
-		for _, fc := range fixtureCorners(t, d) {
-			best, bestK := math.Inf(1), -1
-			for h := -2.0; h <= 40; h += 0.1 {
-				col, row, ok := c.Project(fc[0], fc[1], h)
-				if !ok {
-					continue
-				}
-				for k, ic := range imageCorners {
-					if dist := math.Hypot(col-ic[0], row-ic[1]); dist < best {
-						best, bestK = dist, k
-					}
-				}
+		misses, used := cornerMisses(t, fixtureItem(t, d).Camera, d, -2, 40)
+		for i, m := range misses {
+			if m > cornerTolPx {
+				t.Errorf("%s: footprint corner %d is %.1f px from the nearest image corner", d, i, m)
 			}
-			if best > cornerTolPx {
-				t.Errorf("%s: footprint corner %.0f,%.0f is %.1f px from the nearest image corner", d, fc[0], fc[1], best)
-			}
-			used[bestK] = true
-			worst = math.Max(worst, best)
+			worst = math.Max(worst, m)
 		}
 		if len(used) != 4 {
 			t.Errorf("%s: the footprint corners reach image corners %v", d, used)
 		}
 	}
 	t.Logf("worst corner residual %.2f px at full resolution", worst)
+}
+
+// cornerMisses is, for each footprint corner of photo d, how far camera
+// c puts it from the nearest image corner at its best height in lo…hi
+// metres, in full-resolution pixels, and which image corners they reach.
+func cornerMisses(t *testing.T, c *Camera, d Direction, lo, hi float64) ([]float64, map[int]bool) {
+	cols, rows := float64(c.Cols), float64(c.Rows)
+	imageCorners := [][2]float64{{0, 0}, {cols, 0}, {cols, rows}, {0, rows}}
+	used := map[int]bool{}
+	var misses []float64
+	for _, fc := range fixtureCorners(t, d) {
+		best, bestK := math.Inf(1), -1
+		for h := lo; h <= hi; h += 0.1 {
+			col, row, ok := c.Project(fc[0], fc[1], h)
+			if !ok {
+				continue
+			}
+			for k, ic := range imageCorners {
+				if dist := math.Hypot(col-ic[0], row-ic[1]); dist < best {
+					best, bestK = dist, k
+				}
+			}
+		}
+		used[bestK] = true
+		misses = append(misses, best)
+	}
+	return misses, used
+}
+
+// The principal point's sign, as Camera's doc gives it: subtracting the
+// east photo's y₀ instead misses a corner by 3377 px over −2…40 m and
+// 3230 px over −10…60 m (#827 review finding 9).
+func TestCamera737_PrincipalPointSignMiss(t *testing.T) {
+	c := *fixtureItem(t, East).Camera
+	c.PrincipalMM[1] = -c.PrincipalMM[1]
+	for _, r := range []struct{ lo, hi, want float64 }{{-2, 40, 3377}, {-10, 60, 3230}} {
+		misses, _ := cornerMisses(t, &c, East, r.lo, r.hi)
+		worst := 0.0
+		for _, m := range misses {
+			worst = math.Max(worst, m)
+		}
+		if math.Abs(worst-r.want) > 1 {
+			t.Errorf("%g…%g m: worst miss %.1f px, the doc says %g", r.lo, r.hi, worst, r.want)
+		}
+	}
 }
 
 // A camera does not mirror: the footprint ring seen in the image (rows
@@ -272,7 +301,7 @@ func TestCamera737_GroundFromFootprint(t *testing.T) {
 	props := strings.Replace(string(f["properties"]), "http://www.opengis.net/def/crs/OGC/1.3/CRS84", "http://www.opengis.net/def/crs/EPSG/0/25832", 1)
 	f["properties"] = json.RawMessage(props)
 	b, _ := json.Marshal(f)
-	items, err := ParseSearch([]byte(`{"features":[`+string(b)+`]}`), 2025, East)
+	items, _, err := ParseSearch([]byte(`{"features":[`+string(b)+`]}`), 2025, East)
 	if err != nil || items[0].Camera == nil || !items[0].Camera.GroundOK || math.Abs(items[0].Camera.GroundM-want) > 1e-3 {
 		t.Fatalf("EPSG:25832 footprint: %+v %v, want %.3f", items, err, want)
 	}
@@ -280,7 +309,7 @@ func TestCamera737_GroundFromFootprint(t *testing.T) {
 	props = strings.Replace(props, `"crs"`, `"crs_unused"`, 1)
 	f["properties"] = json.RawMessage(props)
 	b, _ = json.Marshal(f)
-	items, err = ParseSearch([]byte(`{"features":[`+string(b)+`]}`), 2025, East)
+	items, _, err = ParseSearch([]byte(`{"features":[`+string(b)+`]}`), 2025, East)
 	if err != nil || !items[0].Camera.GroundOK || math.Abs(items[0].Camera.GroundM-want) > 1e-3 {
 		t.Fatalf("footprint without crs: %+v %v", items, err)
 	}
@@ -315,7 +344,7 @@ func TestCamera737_InvalidCameraDropped(t *testing.T) {
 		if body == raw {
 			t.Fatalf("%s: the mutation did not apply", name)
 		}
-		items, err := ParseSearch([]byte(`{"features":[`+body+`]}`), 2025, North)
+		items, _, err := ParseSearch([]byte(`{"features":[`+body+`]}`), 2025, North)
 		if err != nil || len(items) != 1 {
 			t.Errorf("%s: the photo itself was refused: %v", name, err)
 			continue
@@ -326,7 +355,7 @@ func TestCamera737_InvalidCameraDropped(t *testing.T) {
 	}
 	// A footprint that is not a polygon only loses the footprint height.
 	body := strings.Replace(raw, `"type": "Polygon"`, `"type": "MultiPolygon"`, 1)
-	items, err := ParseSearch([]byte(`{"features":[`+body+`]}`), 2025, North)
+	items, _, err := ParseSearch([]byte(`{"features":[`+body+`]}`), 2025, North)
 	if err != nil || items[0].Camera == nil || items[0].Camera.GroundOK {
 		t.Fatalf("multipolygon footprint: %+v %v", items, err)
 	}

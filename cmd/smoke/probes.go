@@ -200,8 +200,15 @@ func buildProbes(s settings) []probe {
 		status: http.StatusOK,
 		check:  checkFeatures,
 		then: func(r *reply) {
-			if items, err := skraafoto.ParseSearch(r.body, s.year, skraafoto.North); err == nil && len(items) > 0 && items[0].Path != "" {
-				cdnPath = items[0].Path
+			// ParseSearch returns the candidates nearest the footprint
+			// centroid first (#737 M3a); the first with a CDN path is read.
+			if items, _, err := skraafoto.ParseSearch(r.body, s.year, skraafoto.North); err == nil {
+				for _, item := range items {
+					if item.Path != "" {
+						cdnPath = item.Path
+						break
+					}
+				}
 			}
 		},
 	})

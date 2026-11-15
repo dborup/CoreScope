@@ -41,8 +41,10 @@ type stacCollections struct {
 	} `json:"collections"`
 }
 
+// stacFeatureCollection keeps each feature raw, so that one a search
+// cannot read costs only that candidate (ParseSearch).
 type stacFeatureCollection struct {
-	Features *[]stacFeature `json:"features"`
+	Features *[]json.RawMessage `json:"features"`
 }
 
 type stacFeature struct {
@@ -110,28 +112,48 @@ func ParseCollections(body []byte) ([]int, error) {
 // d, in the API's order, at most SearchLimit; none is an empty list. Each
 // must be what was asked for: its collection, its direction, an id of
 // that year, a datetime. An asset that is not on the CDN leaves Path
-// empty.
-func ParseSearch(body []byte, year int, d Direction) ([]Item, error) {
+// empty. A first photo that is not what was asked for fails the search,
+// as before M3a; a later one is only a candidate the server would have
+// picked among (#737 M3a), so it is left out and counted in skipped.
+func ParseSearch(body []byte, year int, d Direction) (items []Item, skipped int, err error) {
 	var fc stacFeatureCollection
 	if err := json.Unmarshal(body, &fc); err != nil || fc.Features == nil {
-		return nil, errBadJSON
+		return nil, 0, errBadJSON
 	}
 	fs := *fc.Features
 	if len(fs) > SearchLimit {
 		fs = fs[:SearchLimit]
 	}
-	items := make([]Item, 0, len(fs))
-	for i := range fs {
-		it, err := fs[i].item(Collection(year))
+	items = make([]Item, 0, len(fs))
+	for i, raw := range fs {
+		it, err := searchItem(raw, year, d)
 		if err != nil {
-			return nil, err
-		}
-		if it.Direction != d {
-			return nil, errBadJSON
+			if i == 0 {
+				return nil, 0, err
+			}
+			skipped++
+			continue
 		}
 		items = append(items, it)
 	}
-	return items, nil
+	return items, skipped, nil
+}
+
+// searchItem validates one feature of a search: a photo of year's
+// collection facing d.
+func searchItem(raw json.RawMessage, year int, d Direction) (Item, error) {
+	var f stacFeature
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return Item{}, errBadJSON
+	}
+	it, err := f.item(Collection(year))
+	if err != nil {
+		return Item{}, err
+	}
+	if it.Direction != d {
+		return Item{}, errBadJSON
+	}
+	return it, nil
 }
 
 // ParseItem returns photo id of collection c from an item body. A photo

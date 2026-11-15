@@ -15,7 +15,7 @@ func TestSearchURLIsWhatSearchSends(t *testing.T) {
 	u := skraafototest.New()
 	defer u.Close()
 	s := NewSTAC(skraafototest.Token, Options{Transport: u.Transport()})
-	if _, err := s.Search(context.Background(), 2025, 724700, 6175800, North); err != nil {
+	if _, _, err := s.Search(context.Background(), 2025, 724700, 6175800, North); err != nil {
 		t.Fatal(err)
 	}
 	want, err := SearchURL(2025, 724700, 6175800, North)
