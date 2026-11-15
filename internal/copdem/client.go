@@ -5,10 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"regexp"
-	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -231,22 +228,20 @@ func (c *Client) block(ctx context.Context, t Tile, h header, level, i int) ([]b
 	return raw, nil
 }
 
-// contentRangeRe is the one Content-Range shape accepted: a single
-// satisfied range of a known length.
-var contentRangeRe = regexp.MustCompile(`^bytes ([0-9]{1,15})-([0-9]{1,15})/([0-9]{1,15})$`)
-
-// rangeGet reads bytes [from, to] of path. The answer must be a 206 whose
-// Content-Range starts at from and ends at to, or at the object's last
-// byte when it is shorter; size, when known (> 0), must be the object's
-// length; and the body must be exactly that range, at most maxBody bytes.
-// It returns the body and the object's length. Every failure is a
-// dhm.FetchError with a fixed reason, or the allow-list's refusal: this
-// is the one place a request is made, and checkPath comes first.
+// rangeGet reads bytes [from, to] of path through dhm.RangeRead: a 206
+// whose Content-Range starts at from and ends at to, or at the object's
+// last byte when it is shorter; size, when known (> 0), must be the
+// object's length; and the body must be exactly that range, at most
+// maxBody bytes. It returns the body and the object's length. Every
+// failure is a dhm.FetchError with a fixed reason, or the allow-list's
+// refusal: this is the one place a request is made, and checkPath comes
+// first.
 func (c *Client) rangeGet(work context.Context, path string, from, to, size int64, maxBody int) ([]byte, int64, error) {
 	if err := checkPath(path); err != nil {
 		return nil, 0, err
 	}
-	if from < 0 || to < from || to-from+1 > int64(maxBody) {
+	r := dhm.Range{From: from, To: to, Size: size, MaxBody: maxBody}
+	if !r.Valid() {
 		return nil, 0, dhm.ErrBadRequest
 	}
 	select {
@@ -257,41 +252,5 @@ func (c *Client) rangeGet(work context.Context, path string, from, to, size int6
 	}
 	ctx, cancel := context.WithTimeout(work, c.opts.Timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+path, nil)
-	if err != nil {
-		return nil, 0, dhm.FetchError{Reason: "request"}
-	}
-	req.Header.Set("Range", "bytes="+strconv.FormatInt(from, 10)+"-"+strconv.FormatInt(to, 10))
-	c.requests.Add(1)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, 0, dhm.TransportFailure(ctx, err)
-	}
-	// Closed unread on every refusal: a body that is not the range asked
-	// for is never downloaded.
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusPartialContent {
-		return nil, 0, dhm.FetchError{Reason: "status " + strconv.Itoa(resp.StatusCode)}
-	}
-	m := contentRangeRe.FindStringSubmatch(resp.Header.Get("Content-Range"))
-	if m == nil {
-		return nil, 0, dhm.FetchError{Reason: "bad content range"}
-	}
-	a, _ := strconv.ParseInt(m[1], 10, 64)
-	b, _ := strconv.ParseInt(m[2], 10, 64)
-	total, _ := strconv.ParseInt(m[3], 10, 64)
-	if a != from || b < a || b >= total || (b != to && !(b == total-1 && to > b)) || (size > 0 && total != size) {
-		return nil, 0, dhm.FetchError{Reason: "bad content range"}
-	}
-	n := b - a + 1
-	// One byte more than the range shows a longer body; nothing past it
-	// is read, whatever Content-Length says.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, n+1))
-	if err != nil {
-		return nil, 0, dhm.TransportFailure(ctx, err)
-	}
-	if int64(len(body)) != n {
-		return nil, 0, dhm.FetchError{Reason: "bad content length"}
-	}
-	return body, total, nil
+	return dhm.RangeRead(ctx, c.http, baseURL+path, r, &c.requests)
 }
