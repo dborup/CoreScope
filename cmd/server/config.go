@@ -1122,6 +1122,20 @@ func (c *Config) migrateDeprecatedConfig() {
 	}
 }
 
+// jsonObjectAt follows path through nested JSON objects as encoding/json
+// decodes them into interface{}, by exact-case key, and returns the object
+// at its end. Anything that is not an object on the way, or at the end,
+// gives a nil map, which reads as empty.
+func jsonObjectAt(v interface{}, path ...string) (m map[string]interface{}) {
+	for i := 0; ; i++ {
+		m, _ = v.(map[string]interface{})
+		if i == len(path) {
+			return m
+		}
+		v = m[path[i]]
+	}
+}
+
 // warnGatedTileDefaults logs when map.tiles.darkDefault or lightDefault
 // names an Esri style while map.tiles.providers.esri.enabled is not true.
 // Since #728 every esri-* style is opt-in, and the browser then skips that

@@ -66,6 +66,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -300,8 +301,57 @@ func (c *Config) extractDHMConfig() {
 // Map: map.dhm (#680), map.heritage (#723) and map.masts (#724).
 func (c *Config) extractTypedMapBlocks() {
 	c.extractDHMConfig()
+	c.dropDHMTokenFromTiles()
 	c.extractHeritageConfig()
 	c.extractMastsConfig()
+}
+
+// dropDHMTokenFromTiles keeps the DHM token out of the tile config, which
+// /api/config/client ships verbatim (map.tiles, and the legacy top-level
+// tiles). The Dataforsyningen base maps (#741) take a token of their own,
+// map.tiles.providers.dataforsyningen.token, deliberately client-visible;
+// it comes from the same Dataforsyningen account as map.dhm.token, so the
+// likeliest leak is the DHM token pasted there as well. Every string value
+// in those blocks that contains the DHM token is deleted (an array element
+// is blanked), wherever and however its key is spelled, and the key is
+// logged, never the value. The DHM proxy keeps its token. Runs once, at
+// load, on a config of a few kilobytes.
+func (c *Config) dropDHMTokenFromTiles() {
+	token := strings.TrimSpace(c.DHM.Token)
+	if token == "" {
+		return
+	}
+	var dropped []string
+	dropString(c.Map["tiles"], token, "map.tiles", &dropped)
+	dropString(c.Tiles, token, "tiles", &dropped)
+	for _, p := range dropped {
+		log.Printf("[dhm] config %s holds the map.dhm.token value and was removed from the client config: map.dhm.token is server-only, so the Dataforsyningen base maps need a token of their own in map.tiles.providers.dataforsyningen.token", p)
+	}
+}
+
+// dropString deletes from a decoded JSON value every string that contains
+// s, appending the path of each to dropped.
+func dropString(v interface{}, s, path string, dropped *[]string) {
+	if m := jsonObjectAt(v); m != nil {
+		for k, e := range m {
+			if str, ok := e.(string); ok && strings.Contains(str, s) {
+				delete(m, k)
+				*dropped = append(*dropped, path+"."+k)
+				continue
+			}
+			dropString(e, s, path+"."+k, dropped)
+		}
+		return
+	}
+	a, _ := v.([]interface{})
+	for i, e := range a {
+		if str, ok := e.(string); ok && strings.Contains(str, s) {
+			a[i] = ""
+			*dropped = append(*dropped, path+"["+strconv.Itoa(i)+"]")
+			continue
+		}
+		dropString(e, s, path+"["+strconv.Itoa(i)+"]", dropped)
+	}
 }
 
 // ── Proxy ──────────────────────────────────────────────────────────────────
