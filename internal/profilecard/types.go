@@ -45,8 +45,8 @@ type TerrainCoverage struct {
 	Pct       float64  `json:"pct"`
 	FirstGapM *float64 `json:"firstGapM"`
 	// Mixed: samples DHM does not cover were filled from Copernicus DEM
-	// GLO-30, along the stretches in Fill (#738).
-	Mixed bool               `json:"mixed"`
+	// GLO-30, along the stretches in Fill (#738). Absent when false.
+	Mixed bool               `json:"mixed,omitempty"`
 	Fill  []TerrainFillRange `json:"fill,omitempty"`
 }
 

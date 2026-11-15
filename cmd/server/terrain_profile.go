@@ -518,8 +518,9 @@ type TerrainCoverage struct {
 	// Mixed is true when samples DHM does not cover were filled from
 	// Copernicus DEM GLO-30 (#738); Fill then lists where. The DTM is
 	// then coarser outside Denmark and surface-influenced there, and the
-	// surface verdict is unknown.
-	Mixed bool               `json:"mixed"`
+	// surface verdict is unknown. Omitted when false, so a profile
+	// without the fill is byte-identical to one from before it (#773).
+	Mixed bool               `json:"mixed,omitempty"`
 	Fill  []TerrainFillRange `json:"fill,omitempty"`
 }
 
