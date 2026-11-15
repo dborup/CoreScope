@@ -433,6 +433,11 @@ func (s *Server) handleSkraafotoPreview(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, errSkraafotoRequest.Error())
 		return
 	}
+	// As in search: a collection off the cached year list costs nothing.
+	if years, ok := p.cachedYears(); ok && !containsInt(years, collectionYear(key.collection)) {
+		writeError(w, http.StatusBadRequest, errSkraafotoRequest.Error())
+		return
+	}
 	if data, ok := p.previews.Get(key, p.now()); ok {
 		writeSkraafotoJPEG(w, data, "hit")
 		return
@@ -574,12 +579,23 @@ func (p *skraafotoProxy) search(ctx context.Context, key skraafotoSearchKey) ([]
 }
 
 // preview runs a cold preview: where the photo is (cached by a search,
-// or one STAC lookup), then its preview from the CDN.
+// or one STAC lookup of a collection on the year list), then its preview
+// from the CDN.
 func (p *skraafotoProxy) preview(ctx context.Context, key skraafotoPhotoKey) ([]byte, error) {
 	var path string
 	if b, ok := p.paths.Get(key, p.now()); ok {
 		path = string(b)
 	} else {
+		// The list, not only the name pattern, gates the token: a
+		// previews-only client would otherwise never fill the cache the
+		// handler checks.
+		years, err := p.yearList(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !containsInt(years, collectionYear(key.collection)) {
+			return nil, errSkraafotoYear
+		}
 		it, err := p.stac.Item(ctx, key.collection, key.id)
 		if err != nil {
 			return nil, err
@@ -635,6 +651,12 @@ func (p *skraafotoProxy) writeFetchError(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	writeError(w, http.StatusBadGateway, "skraafoto "+what+" unavailable")
+}
+
+// collectionYear is the year of a collection ValidItem accepted.
+func collectionYear(c string) int {
+	y, _ := skraafoto.CollectionYear(c)
+	return y
 }
 
 func containsInt(xs []int, v int) bool {

@@ -47,8 +47,15 @@ func decodeTile(l *dhm.ImageLevel, raw []byte) (image.Image, error) {
 		s = append(s, t[2:len(t)-2]...)
 	}
 	s = append(s, raw[2:]...)
+	// The frame must be the tile, checked before Decode: image/jpeg
+	// allocates the whole frame its SOF declares, up to 65535² from a
+	// few hundred bytes, and cmykToRGB indexes a full tile. Go refuses a
+	// second SOF, so Decode's bounds are these.
+	if cfg, err := jpeg.DecodeConfig(bytes.NewReader(s)); err != nil || cfg.Width != l.TileWidth || cfg.Height != l.TileHeight {
+		return nil, errBadTile
+	}
 	img, err := jpeg.Decode(bytes.NewReader(s))
-	if err != nil || img.Bounds() != image.Rect(0, 0, l.TileWidth, l.TileHeight) {
+	if err != nil {
 		return nil, errBadTile
 	}
 	if m, ok := img.(*image.CMYK); ok {

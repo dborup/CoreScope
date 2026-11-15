@@ -337,8 +337,11 @@ func TestSkraafoto737_PreviewDeepLink(t *testing.T) {
 	if w := e.preview("skraafotos2023", id); w.Code != 200 {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
+	// The year list (the collection must be on it), the item, two CDN
+	// reads.
 	log := e.up.Log()
-	if len(log) != 3 || log[0].Host != skraafoto.STACHost || log[0].Path != "/rest/skraafoto_api/v2/collections/skraafotos2023/items/"+id {
+	if len(log) != 4 || log[0].Host != skraafoto.STACHost || log[0].Path != "/rest/skraafoto_api/v2/collections" ||
+		log[1].Path != "/rest/skraafoto_api/v2/collections/skraafotos2023/items/"+id {
 		t.Fatalf("%+v", log)
 	}
 	if w := e.preview("skraafotos2023", "2023_83_36_9_0020_00003045"); w.Code != 404 || !strings.Contains(w.Body.String(), "photo not found") {
@@ -365,6 +368,36 @@ func TestSkraafoto737_PreviewPathAllowList(t *testing.T) {
 	}
 	if s, c := e.upstream(); s != 0 || c != 0 {
 		t.Fatal("a refused preview went upstream")
+	}
+}
+
+// A preview's collection must be on the year list, not only match the
+// name pattern (#800 F2): off the cached list it is the fixed 400 with no
+// upstream call and no charge; with nothing cached the cold preview
+// fetches the list once and stops there, never looking up the item.
+func TestSkraafoto737_PreviewCollectionOnYearList(t *testing.T) {
+	e := newSkraafotoEnv(t, SkraafotoConfig{})
+	if w := e.preview("skraafotos2031", "2031_83_36_1_0020_00003045"); w.Code != 400 {
+		t.Fatalf("uncached list: %d %.100q", w.Code, w.Body.String())
+	}
+	log := e.up.Log()
+	if len(log) != 1 || log[0].Path != "/rest/skraafoto_api/v2/collections" {
+		t.Fatalf("uncached list: %+v", log)
+	}
+	used := e.p.daily.usedNow(e.clock.now())
+	for i := 0; i < 5; i++ {
+		if w := e.preview("skraafotos2027", fmt.Sprintf("2027_83_36_1_0020_0000304%d", i)); w.Code != 400 {
+			t.Fatalf("cached list: %d %.100q", w.Code, w.Body.String())
+		}
+	}
+	if s, c := e.upstream(); s != 1 || c != 0 {
+		t.Fatalf("%d STAC, %d CDN requests", s, c)
+	}
+	if u := e.p.daily.usedNow(e.clock.now()); u != used {
+		t.Fatalf("daily budget %d → %d for refused previews", used, u)
+	}
+	if w := e.preview("skraafotos2025", skraafototest.ItemID("skraafotos2025", "north")); w.Code != 200 {
+		t.Fatalf("listed collection: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -526,16 +559,27 @@ func (l *ipRateLimiter) chargedFor(t *testing.T, ip string) bool {
 	return ok
 }
 
+// skraafotoGate is a gate a fake upstream waits on, and its opener; the
+// test's cleanup opens it too, so a failed assert before open never leaves
+// a handler blocked until the go test timeout (#800 F5).
+func skraafotoGate(t *testing.T) (<-chan struct{}, func()) {
+	gate := make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(open)
+	return gate, open
+}
+
 func TestSkraafoto737_AdmissionFullRefunds(t *testing.T) {
 	e := newSkraafotoEnv(t, SkraafotoConfig{MaxInFlight: intPtr(1), DailyCap: intPtr(10)})
-	gate := make(chan struct{})
+	gate, open := skraafotoGate(t)
 	var held atomic.Int32
 	e.up.STACHook = func(w http.ResponseWriter, r *http.Request) bool {
 		held.Add(1)
 		<-gate
 		return false
 	}
-	done := make(chan *httptest.ResponseRecorder)
+	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() { done <- e.search(skraafotoAarhus, skraafotoFrom("198.51.100.1")) }()
 	skraafotoWait(t, func() bool { return held.Load() > 0 })
 	w := e.search("lat=55.6761&lon=12.5683", skraafotoFrom("198.51.100.2"))
@@ -548,7 +592,7 @@ func TestSkraafoto737_AdmissionFullRefunds(t *testing.T) {
 	if used := e.p.daily.usedNow(e.clock.now()); used != 1 {
 		t.Fatalf("daily budget %d after a refusal, want 1", used)
 	}
-	close(gate)
+	open()
 	if w := <-done; w.Code != 200 {
 		t.Fatalf("admitted search: %d", w.Code)
 	}
@@ -556,7 +600,7 @@ func TestSkraafoto737_AdmissionFullRefunds(t *testing.T) {
 
 func TestSkraafoto737_CoalescesPreviews(t *testing.T) {
 	e := newSkraafotoEnv(t, SkraafotoConfig{DailyCap: intPtr(10)})
-	gate := make(chan struct{})
+	gate, open := skraafotoGate(t)
 	var held atomic.Int32
 	e.up.CDNHook = func(w http.ResponseWriter, r *http.Request) bool {
 		if held.Add(1) == 1 {
@@ -575,15 +619,16 @@ func TestSkraafoto737_CoalescesPreviews(t *testing.T) {
 		}(i)
 	}
 	skraafotoWait(t, func() bool { return held.Load() > 0 && e.p.flight.Pending() == 4 })
-	close(gate)
+	open()
 	wg.Wait()
 	for i, c := range codes {
 		if c != 200 {
 			t.Fatalf("caller %d: %d", i, c)
 		}
 	}
-	// One lookup, one header read, one tile read; one day's unit.
-	if s, c := e.upstream(); s != 1 || c != 2 {
+	// The year list and one lookup, one header read, one tile read; one
+	// day's unit.
+	if s, c := e.upstream(); s != 2 || c != 2 {
 		t.Fatalf("%d STAC, %d CDN requests", s, c)
 	}
 	if used := e.p.daily.usedNow(e.clock.now()); used != 1 {
