@@ -682,8 +682,8 @@
    * ancient monuments register through the server
    * (GET /api/terrain/heritage, cmd/server/heritage_query.go). An end
    * inside a protection zone, or within the server's radius of one, gets a
-   * warn-tone chip beside the verdict and a note under the detail line.
-   * Both are advisory. The verdict is the server's and stays as it is.
+   * warn-tone chip and a note under the detail line. Both are advisory.
+   * The verdict is the server's and stays as it is.
    *
    * The wording is neutral on purpose. No public source we could read
    * says, for this exact layer, that it is the statutory 100 m
@@ -1386,18 +1386,6 @@
       ui.assumed.title = 'At least one antenna height is a default, not a measured value. Set both heights to confirm them.';
       ui.assumed.hidden = true;
       head.appendChild(ui.assumed);
-      /* #723 M3: a protected ancient monument at an end, beside the
-       * verdict and never part of it. It is short, so in a short landscape
-       * panel the title row does not grow and push the chart down; what it
-       * means is in the note under the detail line. A hidden stop keeps a
-       * screen reader from running it into the chip before it. */
-      ui.heritageSep = el('span', 'sr-only', '. ');
-      ui.heritageSep.hidden = true;
-      head.appendChild(ui.heritageSep);
-      ui.heritage = el('span', 'tp-chip tp-chip-warn tp-chip-heritage');
-      ui.heritage.setAttribute('data-testid', 'tp-heritage-chip');
-      ui.heritage.hidden = true;
-      head.appendChild(ui.heritage);
       ui.copy = el('button', 'tp-close tp-copy');
       ui.copy.type = 'button';
       ui.copy.disabled = true;
@@ -1458,8 +1446,16 @@
       ui.surfaceNote.hidden = true;
       body.appendChild(ui.surfaceNote);
 
-      // #723 M3: the monument chip's note — the warning, each end's zone
-      // type and distance, and the register's credit.
+      /* #723 M3: a protected ancient monument at an end — a chip, then
+       * its note: the warning, each end's zone type and distance, and the
+       * register's credit. Not in the title row: with the surface chip and
+       * "assumed heights" there, one more chip wrapped Copy and Close onto
+       * a second row and pushed the chart off a short landscape screen
+       * (#784 review). Under the chart it moves nothing. */
+      ui.heritage = el('span', 'tp-chip tp-chip-warn tp-chip-heritage');
+      ui.heritage.setAttribute('data-testid', 'tp-heritage-chip');
+      ui.heritage.hidden = true;
+      body.appendChild(ui.heritage);
       ui.heritageNote = el('p', 'tp-heritage-note');
       ui.heritageNote.setAttribute('data-testid', 'tp-heritage-note');
       ui.heritageNote.hidden = true;
@@ -1692,7 +1688,7 @@
     function setHeritage(note) {
       if (!ui.heritage) return;
       var show = !!note;
-      ui.heritageSep.hidden = ui.heritage.hidden = ui.heritageNote.hidden = !show;
+      ui.heritage.hidden = ui.heritageNote.hidden = !show;
       ui.heritage.textContent = show ? note.label : '';
       ui.heritage.title = show ? note.text : '';
       ui.heritage.setAttribute('data-lead', show ? note.lead : '');

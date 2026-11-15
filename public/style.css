@@ -6554,11 +6554,11 @@ body.embed #app.app-fixed {
 }
 .tp-mast-note[hidden] { display: none; }
 /* #723 M3 — a protected ancient monument at an end. The chip takes the
-   warn tone from .tp-chip-warn and stays on one line, so in a short
-   landscape panel it does not grow the title row and push the chart down;
-   the note under the detail line carries the wording, the type and the
-   distance. */
-.tp-chip-heritage { white-space: nowrap; }
+   warn tone from .tp-chip-warn and sits under the detail line, above the
+   note that carries the wording, the type and the distance; it is kept out
+   of the title row so it can never wrap Copy/Close and push the chart
+   down in a short landscape panel. */
+.tp-chip-heritage { margin-top: 4px; white-space: nowrap; }
 .tp-heritage-note {
   margin: 2px 0 0;
   padding-left: 6px;
