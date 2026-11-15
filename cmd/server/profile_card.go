@@ -261,14 +261,23 @@ func parseCardQuery(q url.Values) (terrainQuery, error) {
 	return parseTerrainQuery(api)
 }
 
+// cardKey is the card's identity for a resolved request, so only for
+// ends that passed the visibility gate.
+func (p *terrainProfiler) cardKey(req terrainRequest) cardKey {
+	return cardKey{terrainKey: p.elevationKey(req), Inputs: p.cardInputs(req, cardNames(req))}
+}
+
 // cardPath is the card's path and query for a resolved request, built
-// from parsed values only. v changes when the renderer, the palette, the
-// display options or the readiness of the profile change, none of which
-// the rest of the URL says: a crawler that cached the degraded card sees
-// a new URL once the profile is measured.
+// from parsed values only. v is a short hash of the card key and the
+// readiness of the profile: it changes whenever the card would be drawn
+// differently under the same query (the renderer, palette and options,
+// a node's name, position, antenna or the radio), so the immutable URL
+// never serves a crawler stale bytes, and a crawler that cached the
+// degraded card sees a new URL once the profile is measured. The key's
+// inputs are hashed, so v carries no name or position.
 func (p *terrainProfiler) cardPath(req terrainRequest, ready bool) string {
 	q := "a=" + shareRefParam(req.q.a) + "&b=" + shareRefParam(req.q.b) + physicsQuery(req.q)
-	v := ogContentHashHex([]byte(fmt.Sprintf("%s|%s|%+v|%s|%t", cardRendererVersion, p.card.palFP, p.card.options(), q, ready)))
+	v := ogContentHashHex([]byte(fmt.Sprintf("%s|%t", p.cardKey(req), ready)))
 	return cardRoute + "?" + q + "&v=" + v
 }
 
@@ -291,7 +300,7 @@ func (s *Server) handleTerrainProfileCard(w http.ResponseWriter, r *http.Request
 	}
 	c := p.card
 	names := cardNames(req)
-	key := cardKey{terrainKey: p.elevationKey(req), Inputs: p.cardInputs(req, names)}
+	key := p.cardKey(req)
 	if b, ok := c.cache.Get(key, p.now()); ok {
 		writeCard(w, b, "hit")
 		return

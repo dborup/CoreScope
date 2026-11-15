@@ -365,3 +365,129 @@ func TestProfileCard_FailedFillIsNotAComplete(t *testing.T) {
 		t.Fatal("the complete card of a mixed profile was not drawn as mixed")
 	}
 }
+
+// ── Codex review round 4, finding 3 ────────────────────────────────────────
+//
+// og:image's v names the card as drawn: the same resolved render identity
+// as the card key, so a change that draws new bytes under an unchanged /p
+// query also changes the immutable URL a crawler caches.
+
+// cardImageAfter is /p's og:image for target once the card at the same
+// query has been drawn complete, so v is the ready one.
+func cardImageAfter(t *testing.T, env *shareEnv, target, cardQuery string) (string, []byte) {
+	t.Helper()
+	png := wantCard(t, env.card(cardQuery), "miss")
+	return mustMeta(t, env.share(target).Body.String(), "og:image"), png
+}
+
+func TestCodexR4CardURLChangesWithRenderedName(t *testing.T) {
+	env := newCardEnv(t, dhm.ProfileConfig{})
+	q, target := pathQuery(shareKeyA, shareKeyB), shareQ(shareKeyA, shareKeyB)
+	url1, before := cardImageAfter(t, env, target, q)
+	if _, err := env.srv.db.conn.Exec(`UPDATE nodes SET name = ? WHERE public_key = ?`, "Renamed Fixture", shareKeyA); err != nil {
+		t.Fatal(err)
+	}
+	env.srv.store.InvalidateNodeCache()
+	url2, after := cardImageAfter(t, env, target, q)
+	if bytes.Equal(before, after) {
+		t.Fatal("precondition: the rename did not change the card")
+	}
+	if url1 == url2 {
+		t.Fatal("the card changed after a rename, but its immutable og:image URL did not")
+	}
+	for _, name := range []string{"Renamed", "Fixture", "S%C3%B8by", "Søby"} {
+		if strings.Contains(url2, name) {
+			t.Fatalf("og:image %q carries a node name", url2)
+		}
+	}
+	// Nothing changed: the same card keeps the same URL.
+	if url3 := mustMeta(t, env.share(target).Body.String(), "og:image"); url3 != url2 {
+		t.Fatalf("v moved without a change: %q then %q", url2, url3)
+	}
+}
+
+// A role change moves the assumed antenna height, which the card draws.
+func TestProfileCard_URLChangesWithResolvedAntenna(t *testing.T) {
+	env := newCardEnv(t, dhm.ProfileConfig{})
+	q, target := pathQuery(shareKeyA, shareKeyB), shareQ(shareKeyA, shareKeyB)
+	url1, before := cardImageAfter(t, env, target, q)
+	if _, err := env.srv.db.conn.Exec(`UPDATE nodes SET role = ? WHERE public_key = ?`, "companion", shareKeyA); err != nil {
+		t.Fatal(err)
+	}
+	env.srv.store.InvalidateNodeCache()
+	url2, after := cardImageAfter(t, env, target, q)
+	if bytes.Equal(before, after) {
+		t.Fatal("precondition: the antenna change did not change the card")
+	}
+	if url1 == url2 {
+		t.Fatal("the card's antenna changed, but its og:image URL did not")
+	}
+}
+
+// A node that moves keeps its key, so the /p query is the same; the card's
+// path is not.
+func TestProfileCard_URLChangesWithResolvedPosition(t *testing.T) {
+	env := newCardEnv(t, dhm.ProfileConfig{})
+	q, target := pathQuery(shareKeyA, shareKeyB), shareQ(shareKeyA, shareKeyB)
+	url1, before := cardImageAfter(t, env, target, q)
+	if _, err := env.srv.db.conn.Exec(`UPDATE nodes SET lat = ? WHERE public_key = ?`, 56.12, shareKeyA); err != nil {
+		t.Fatal(err)
+	}
+	env.srv.store.InvalidateNodeCache()
+	url2, after := cardImageAfter(t, env, target, q)
+	if bytes.Equal(before, after) {
+		t.Fatal("precondition: the move did not change the card")
+	}
+	if url1 == url2 {
+		t.Fatal("the node moved, but the card's og:image URL did not change")
+	}
+}
+
+// v is computed after the visibility gate: a node renamed into a hidden
+// prefix gives a 404 /p with no card URL, not a v derived from its name.
+func TestShareProfile_HiddenRenameGivesNoCardURL(t *testing.T) {
+	env := newCardEnv(t, dhm.ProfileConfig{})
+	env.srv.cfg.SetHiddenNamePrefixes([]string{"private"})
+	if _, err := env.srv.db.conn.Exec(`UPDATE nodes SET name = ? WHERE public_key = ?`, "private-mast", shareKeyA); err != nil {
+		t.Fatal(err)
+	}
+	env.srv.store.InvalidateNodeCache()
+	w := env.share(shareQ(shareKeyA, shareKeyB))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("/p for a hidden end: %d", w.Code)
+	}
+	if body := w.Body.String(); strings.Contains(body, "profile.png") || strings.Contains(body, "&v=") || strings.Contains(body, "private-mast") {
+		t.Fatal("a hidden end's card URL or name reached the page")
+	}
+	wantCardError(t, env.card(pathQuery(shareKeyA, shareKeyB)), http.StatusNotFound, "node not found")
+}
+
+// The radio frequency can come from the observers, which change under an
+// unchanged query; the card's Fresnel zone, and so its URL, follow them.
+func TestProfileCard_URLChangesWithResolvedRadio(t *testing.T) {
+	env := newCardEnv(t, dhm.ProfileConfig{})
+	var mu sync.Mutex
+	freq := "869.618"
+	env.p.observers = func() ([]Observer, error) {
+		mu.Lock()
+		r := freq
+		mu.Unlock()
+		seen := time.Now().UTC().Format(time.RFC3339)
+		return []Observer{{Radio: &r, LastSeen: &seen}}, nil
+	}
+	q, target := pathQuery(shareKeyA, shareKeyB), shareQ(shareKeyA, shareKeyB)
+	url1, before := cardImageAfter(t, env, target, q)
+	mu.Lock()
+	freq = "433.5"
+	mu.Unlock()
+	env.p.freqMu.Lock()
+	env.p.freqAt = time.Time{} // past terrainObserverFreqTTL
+	env.p.freqMu.Unlock()
+	url2, after := cardImageAfter(t, env, target, q)
+	if bytes.Equal(before, after) {
+		t.Fatal("precondition: the observers' frequency did not change the card")
+	}
+	if url1 == url2 {
+		t.Fatal("the card's radio changed, but its og:image URL did not")
+	}
+}
