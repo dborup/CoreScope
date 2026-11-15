@@ -71,9 +71,9 @@ func NewClient(opts ClientOptions) (*Client, error) {
 	return &Client{opts: opts, http: dhm.NewNoRedirectClient(opts.Timeout)}, nil
 }
 
-// cellURL is the GetFeature URL for a valid cell. Nothing but the cell's
-// integer bbox varies.
-func (c *Client) cellURL(cell Cell) string {
+// CellURL is the GetFeature URL for a valid cell. Nothing but the cell's
+// integer bbox varies. The live smoke check (#803) sends it too.
+func (c *Client) CellURL(cell Cell) string {
 	b := cell.QueryBox(c.opts.MarginM)
 	return c.opts.BaseURL + "?" + fixedQuery + "&bbox=" +
 		strconv.Itoa(b[0]) + "," + strconv.Itoa(b[1]) + "," +
@@ -88,7 +88,7 @@ func (c *Client) FetchCell(ctx context.Context, cell Cell) (Page, error) {
 	if !cell.Valid() {
 		return Page{}, ErrBadCell
 	}
-	body, err := dhm.GetBody(ctx, c.http, c.cellURL(cell), "application/json", acceptedContentTypes, c.opts.MaxBodyBytes)
+	body, err := dhm.GetBody(ctx, c.http, c.CellURL(cell), "application/json", acceptedContentTypes, c.opts.MaxBodyBytes)
 	if err != nil {
 		return Page{}, err
 	}
