@@ -453,7 +453,7 @@
       var w = s.wms;
       o.styles = '';
       o.format = 'image/png';
-      o.transparent = false;
+      o.transparent = 'FALSE';
       o.version = '1.3.0';
       o.crs = L.CRS.EPSG3857;
       o.tileSize = 256;
@@ -462,6 +462,12 @@
         if (w[k] === undefined) continue;
         o[k] = (k === 'bounds') ? L.latLngBounds(w[k]) : w[k];
       }
+      // WMS 1.3.0 (OGC 06-042 §7.3.3.9) spells TRANSPARENT as TRUE or
+      // FALSE, and Dataforsyningen enforces it: Leaflet's boolean is sent
+      // as "false", which the Skærmkort service answers with a
+      // ServiceException ("TRANSPARENT must be either TRUE or FALSE")
+      // instead of a tile. Always send the uppercase string.
+      if (typeof o.transparent === 'boolean') o.transparent = o.transparent ? 'TRUE' : 'FALSE';
       var url = typeof w.url === 'function' ? w.url() : w.url;
       var layer = L.tileLayer.wms(url, _withOpts(o, opts));
       layer._mcWmsKey = _wmsKey(w, url);
