@@ -339,9 +339,9 @@ type terrainProfilerDeps struct {
 // decoupling entry size from maxSamples, and because dhm.Cache is shared
 // with the DHM tile cache (dhm_proxy.go), where variable tile sizes make
 // the byte bound load-bearing — the two call sites should stay consistent.
-// At the documented maxima (cacheEntries 4096, maxSamples 3200) this is
-// ~105 MB, ~118 MB classified; see config.example.json's
-// _comment_cacheEntries.
+// At the documented maxima (cacheEntries 4096, maxSamples 3200) one entry
+// is 25.6 KB, 28.8 KB classified, and this is ~105 MB, ~118 MB
+// classified; see config.example.json's _comment_cacheEntries.
 func terrainCacheMaxBytes(cacheEntries, maxSamples int, classified bool) int {
 	if classified {
 		return cacheEntries * (5 + 8*maxSamples + 2 + maxSamples)
