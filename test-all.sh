@@ -153,6 +153,7 @@ run test-issue-728-ortho-base.js
 run test-issue-728-dhm-tile-retry.js
 run test-packets-window-pinned.js
 run test-issue-733-dhm-credit.js
+run test-issue-738-foreign-fill-ui.js
 run test-issue-752-inset-attribution.js
 run test-issue-764-no-osm-fallback.js
 run test-issue-1438-marker-css-vars.js

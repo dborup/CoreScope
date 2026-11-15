@@ -24,11 +24,10 @@
  * Runs via: node test-issue-733-dhm-credit.js
  */
 'use strict';
-const vm = require('vm');
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { makeSandbox, buildControl, makeElement, makeTextNode, liveCredits } = require('./tests/map-overlay-sandbox');
+const { makeSandbox, buildControl, makeElement, liveCredits, loadTerrainProfile } = require('./tests/map-overlay-sandbox');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -220,40 +219,8 @@ test('#723 monuments: no link fields, so the courtesy credit stays plain', () =>
 
 // ── The profile footer ─────────────────────────────────────────────────────
 
-/* #765: the footer is built from the server's dhm block through the one
- * credit walker in map-tile-providers.js, so both files run in the same
- * sandbox, in page order. */
-function loadTP() {
-  const doc = {
-    createElement: makeElement, createTextNode: makeTextNode,
-    addEventListener() {}, body: { appendChild() {} },
-    documentElement: { getAttribute: () => 'light' },
-    querySelector: () => null, querySelectorAll: () => [],
-  };
-  const storage = { getItem: () => null, setItem() {}, removeItem() {} };
-  const win = {
-    addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
-    matchMedia: () => ({ matches: false }),
-    innerWidth: 1280, innerHeight: 800, document: doc, localStorage: storage,
-  };
-  const ctx = {
-    window: win, document: doc, console, Math, Date, JSON, Array, Object, String, Number,
-    RegExp, Error, TypeError, Boolean, isNaN, isFinite, parseInt, parseFloat,
-    URLSearchParams, Map, Set, Promise, encodeURIComponent, decodeURIComponent,
-    setTimeout: () => 0, clearTimeout: () => {},
-    location: { hash: '#/map', pathname: '/', search: '' }, history: { state: null, replaceState() {} },
-    CustomEvent: function (type, init) { this.type = type; this.detail = (init && init.detail) || null; },
-  };
-  ctx.localStorage = storage;
-  vm.createContext(ctx);
-  for (const f of ['map-tile-providers.js', 'antenna-height.js', 'terrain-profile.js']) {
-    vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', f), 'utf8'), ctx);
-  }
-  assert.ok(ctx.window.TerrainProfile, 'terrain-profile.js must define window.TerrainProfile');
-  return { TP: ctx.window.TerrainProfile, win };
-}
-
-const { TP, win: TP_WIN } = loadTP();
+// #738: one loader for terrain-profile.js, shared with test-issue-738-foreign-fill-ui.js.
+const { TP, win: TP_WIN } = loadTerrainProfile();
 
 // The dhm block with the derived credit cmd/server sends since #765.
 const PROFILE_BLOCK = Object.assign({}, DHM_BLOCK, { profile: true, attributionDerived: GO_ATTRIBUTION_DERIVED });

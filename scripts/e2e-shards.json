@@ -34,6 +34,14 @@
       "measurementNote": "New suite; #733 DHM credit compliance with an intercepted map.dhm client-config block (credit link fields + profile: true), a stubbed /api/map/dhm/wms tile and a stubbed /api/terrain/profile: on Map and Live the hillshade credit names Klimadatastyrelsen, links the Danmarks Hojdemodel dataset and the CC BY 4.0 licence with target=_blank and rel=noopener, renders exactly the server's plain credit text, is visible and uncovered, and goes away with the overlay; a pre-#733 block without the link fields still shows the plain credit with no links; the profile chart footer carries the same two links plus the 'data bearbejdet' derived note, exactly once; and at 360x740 that footer stays inside the panel and the viewport, legible and uncovered, with both links at least 44px and hit by themselves. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds, next to the #728 credit suite."
     },
     {
+      "file": "test-issue-738-foreign-fill-ui-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #738 M2 mixed-resolution note and Copernicus credit in the Map Path profile panel, with an intercepted dhm client-config block (profile: true plus the fill credit parts) and a stubbed /api/terrain/profile: Sonderborg to Flensburg shows the mixed note (30 m, and 60 m with the 1/2 overview) and the short Copernicus credit with the dataset and licence linked, target=_blank and rel=noopener, the full Art. 6(b) line folded until Full credit is opened, in light and dark; Aarhus to Silkeborg shows neither, and switching to it takes both away; at 360x740 both links and Full credit are at least 44px and hit by themselves; no request reaches AWS, Copernicus or Dataforsyningen. About 25s locally; no CI duration measured yet. Assigned to shard 2, next to the #733 credit suite."
+    },
+    {
       "file": "test-issue-752-inset-attribution-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
