@@ -148,6 +148,7 @@ run test-issue-681-m5-node-entry.js
 run test-issue-681-m6-customizer-terrain.js
 run test-issue-721-move-endpoints.js
 run test-issue-727-share-link.js
+run test-issue-727-m4-share-customizer.js
 run test-issue-781-profile-cursor.js
 run test-issue-390-legacy-tile-followups.js
 run test-issue-728-esri-imagery.js
@@ -158,6 +159,7 @@ run test-packets-window-pinned.js
 run test-issue-733-dhm-credit.js
 run test-issue-734-dhm-overlays.js
 run test-issue-738-foreign-fill-ui.js
+run test-issue-730-buildings-ui.js
 run test-issue-752-inset-attribution.js
 run test-issue-741-base-layer-factory.js
 run test-issue-764-no-osm-fallback.js

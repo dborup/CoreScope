@@ -23,7 +23,11 @@ package main
 //     nothing from the request is echoed, and a browser still lands on the
 //     map, where the panel explains the problem.
 //   - No upstream call, no per-client charge: the page needs only the
-//     in-memory node snapshot. The verdict and the chart image are #727 M3.
+//     in-memory node snapshot and the elevation cache. When the profile is
+//     cached and has a verdict, the title gains the card's verdict word
+//     (#727 M3); a path with none (outside DHM) keeps a plain title.
+//   - og:image is the share card (profile_card.go), 1200×630, with its
+//     text alternative; its v changes once the profile is cached.
 //   - Every request-derived value reaches the document through ogText
 //     (og_meta.go); og:url is rebuilt from the parsed values, never copied
 //     from the raw query.
@@ -41,6 +45,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/meshcore-analyzer/dhm"
+	"github.com/meshcore-analyzer/profilecard"
 )
 
 // sharePath is the share route. It must stay a single path segment with no
@@ -75,6 +80,11 @@ func isShareTrackingParam(k string) bool {
 // registerShareRoutes adds /p and the /p/ redirect. newHTTPRouter calls it
 // before the SPA catch-all, which would otherwise answer both.
 func (s *Server) registerShareRoutes(router *mux.Router, doc *indexDoc) {
+	if p := s.terrain; p != nil && p.card != nil {
+		// The card's host line: the configured public base only, never a
+		// request's Host, so one card serves every viewer.
+		p.card.site = doc.og.publicHost()
+	}
 	router.HandleFunc(sharePath, s.handleShareProfile(doc)).Methods("GET", "HEAD")
 	router.HandleFunc(sharePath+"/", handleShareSlash).Methods("GET", "HEAD")
 }
@@ -170,9 +180,10 @@ func splitProfilePair(raw string) ([2]string, bool) {
 	return out, n == 2
 }
 
-// sharePage is the preview text for one resolved request. It reads only
-// the request and the operator's radio config: no elevation, so no
-// upstream call. The verdict joins the title in #727 M3.
+// sharePage is the preview text for one resolved request. It reads the
+// request, the operator's radio config and the elevation cache, never
+// upstream: a cached profile with a verdict adds the verdict word to the
+// title, the same word the card's badge shows (profilecard.MainVerdict).
 func (p *terrainProfiler) sharePage(req terrainRequest) ogPage {
 	overrides := [2]*float64{req.q.ha, req.q.hb}
 	pts := [2]dhm.LatLon{req.a, req.b}
@@ -194,11 +205,29 @@ func (p *terrainProfiler) sharePage(req terrainRequest) ogPage {
 		// this could mislead, so the caveat is never dropped.
 		desc += " · antenna heights assumed"
 	}
-	return ogPage{
+	pg := ogPage{
 		Title:       "Path profile: " + fmtMetres(round2(req.plan.DistanceM)),
 		Description: desc,
 		Path:        sharePath + "?" + shareQuery(req.q),
 	}
+	if p.card == nil {
+		return pg
+	}
+	resp, ready := p.cachedResponse(req)
+	opt := p.card.options()
+	if ready {
+		// A path with no verdict (outside DHM, or not covered end to end)
+		// keeps the title plain (#727 plan); the card's badge still says so.
+		if v := profilecard.MainVerdict(resp); v.Known {
+			pg.Title += " · " + v.Word
+		}
+	} else {
+		resp = p.pendingResponse(req)
+		opt.Pending = true
+	}
+	pg.Image = p.cardPath(req, ready)
+	pg.ImageAlt = profilecard.AltText(resp, cardNames(req), opt)
+	return pg
 }
 
 // shareEndLabel is public/terrain-profile.js endpointLabel: a node's name,
@@ -218,8 +247,13 @@ func shareEndLabel(e terrainEnd, pt dhm.LatLon) string {
 // from validated values only. The model is always stated, so the page
 // means what the sharer saw whatever the reader's own default model is.
 func shareQuery(tq terrainQuery) string {
+	return "profile=" + shareRefParam(tq.a) + "," + shareRefParam(tq.b) + physicsQuery(tq)
+}
+
+// physicsQuery is the canonical rest of a parsed query, after the
+// endpoints: the model, always stated, then the numbers that were given.
+func physicsQuery(tq terrainQuery) string {
 	var b strings.Builder
-	b.WriteString("profile=" + shareRefParam(tq.a) + "," + shareRefParam(tq.b))
 	if tq.both {
 		b.WriteString("&model=both")
 	} else {

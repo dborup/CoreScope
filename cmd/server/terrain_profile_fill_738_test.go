@@ -437,7 +437,7 @@ func TestTerrainFill_ClientGoneCancelsFill(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the handler did not return after the client left")
 	}
-	waitUntil(t, "profile admission free", func() bool { return len(env.p.admit) == 0 && env.p.flight.Pending() == 0 })
+	waitUntil(t, "profile admission free", func() bool { return env.p.admit.InUse() == 0 && env.p.flight.Pending() == 0 })
 	if strings.Contains(env.logs.String(), "foreign fill failed") {
 		t.Fatalf("a client leaving was logged as a fill failure: %q", env.logs.String())
 	}
@@ -654,9 +654,10 @@ func TestTerrainElevationEncodesFill(t *testing.T) {
 		t.Fatalf("failed fill: %+v %v", got, err)
 	}
 	enc := terrainElevation{dtm: []float32{1, 2, 3}}.encode()
-	// 6: fill level 3; 10, 12: a failed fill with a fill level; 0x10, 0x80:
-	// unknown bits.
-	for _, flag := range []byte{6, 10, 12, 0x10, 0x80} {
+	// 6: fill level 3; 10, 12: a failed fill with a fill level; 0x10: the
+	// classification (#730 M2), which this entry does not carry; 0x20,
+	// 0x40, 0x80: unknown bits (#786 review F3).
+	for _, flag := range []byte{6, 10, 12, 0x10, 0x20, 0x40, 0x80} {
 		bad := append([]byte{}, enc...)
 		bad[4] = flag
 		if _, err := decodeTerrainElevation(bad, 3, false, false); err == nil {

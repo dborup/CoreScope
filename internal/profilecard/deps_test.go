@@ -29,7 +29,7 @@ func TestDependencyPin(t *testing.T) {
 	}
 	allowed := map[string]bool{
 		"golang.org/x/image": true, "golang.org/x/text": true, "golang.org/x/sync": true,
-		"github.com/meshcore-analyzer/dhm": true,
+		"github.com/meshcore-analyzer/dhm": true, "github.com/meshcore-analyzer/copdem": true,
 	}
 	req := regexp.MustCompile(`(?m)^\s*(?:require\s+)?([a-z0-9.\-]+\.[a-z]{2,}/[^\s]+) v[0-9]`)
 	for _, m := range req.FindAllStringSubmatch(mod, -1) {

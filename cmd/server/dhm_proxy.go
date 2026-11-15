@@ -69,6 +69,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/meshcore-analyzer/buildings"
 	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dhm"
 )
@@ -108,6 +109,10 @@ type DHMClientConfig struct {
 	// enabled is set. Without it the copy button hands out the plain
 	// #/map?profile= link, exactly as before.
 	Share bool `json:"share"`
+	// Card is the share card's look as the operator set it (#727 M4),
+	// so the customizer can say what a shared link's preview shows; a
+	// viewer's own settings never reach the card. Present only with Share.
+	Card *DHMCardClientConfig `json:"card,omitempty"`
 	// PointAntenna is how the profile resolves a free map point's antenna
 	// height when the request names none (#746): radio.antennaHeightsM.point,
 	// else the built-in default. A point has no per-node key, so this is the
@@ -141,6 +146,36 @@ type DHMClientConfig struct {
 	// Fill is the foreign fill's credit (#738 M2), present only while the
 	// profile is served with map.dhm.profile.foreignFill.enabled.
 	Fill *DHMFillClientConfig `json:"fill,omitempty"`
+	// Buildings is the building footprints' credit (#730 M3), present
+	// only while the profile is served with map.dhm.profile.buildings.
+	// enabled.
+	Buildings *DHMBuildingsClientConfig `json:"buildings,omitempty"`
+}
+
+// DHMBuildingsClientConfig is the credit of a profile classified with
+// the INSPIRE – Bygninger footprints (#730 M3), in parts, from
+// internal/buildings: the profile footer shows Credit (the response's
+// attribution then says the same) with the DHM dataset, the footprints'
+// dataset, their source (linked to GeoDanmark's terms, which ask for it)
+// and the licence as links, through the same walker as the DHM credit,
+// so the page keeps no copy of it. The DHM dataset and the licence are
+// the dhm block's own fields. The @geodanmark handle stays text.
+type DHMBuildingsClientConfig struct {
+	Credit      string `json:"credit"`
+	DatasetName string `json:"datasetName"`
+	DatasetURL  string `json:"datasetUrl"`
+	SourceName  string `json:"sourceName"`
+	SourceURL   string `json:"sourceUrl"`
+}
+
+func buildingsClientConfig() *DHMBuildingsClientConfig {
+	return &DHMBuildingsClientConfig{
+		Credit:      buildings.AttributionDerived,
+		DatasetName: buildings.DatasetName,
+		DatasetURL:  buildings.DatasetURL,
+		SourceName:  buildings.Source,
+		SourceURL:   buildings.SourceTermsURL,
+	}
 }
 
 // DHMFillClientConfig is the Copernicus DEM credit of a mixed profile
@@ -233,6 +268,22 @@ func dhmOrthoClientConfig(mask *dhm.TileMask) *DHMOrthoClientConfig {
 	}
 }
 
+// DHMCardClientConfig is the client config's dhm.card (#727 M4): the two
+// display choices of map.dhm.profile.card, resolved. Nothing else of the
+// card block (its cache size) reaches the browser.
+type DHMCardClientConfig struct {
+	Theme string `json:"theme"` // "dark" or "light"
+	Names bool   `json:"names"` // node names on the card
+}
+
+func cardClientConfig(set cardSettings) *DHMCardClientConfig {
+	theme := "light"
+	if set.dark {
+		theme = "dark"
+	}
+	return &DHMCardClientConfig{Theme: theme, Names: set.names}
+}
+
 // DHMPointAntenna is a free point's antenna height without a request
 // height, and its source: "operator-role" or "point-default", as in a
 // profile response's antennaSource.
@@ -296,11 +347,13 @@ func (c *Config) extractDHMConfig() {
 }
 
 // extractTypedMapBlocks lifts every typed block out of the client-visible
-// Map: map.dhm (#680), map.heritage (#723) and map.masts (#724).
+// Map: map.dhm (#680), map.heritage (#723), map.masts (#724) and
+// map.skraafoto (#737).
 func (c *Config) extractTypedMapBlocks() {
 	c.extractDHMConfig()
 	c.extractHeritageConfig()
 	c.extractMastsConfig()
+	c.extractSkraafotoConfig()
 }
 
 // ── Proxy ──────────────────────────────────────────────────────────────────
@@ -719,6 +772,9 @@ func (s *Server) dhmClientConfig() *DHMClientConfig {
 	c := dhmClientConfig()
 	c.Profile = s.terrain != nil
 	c.Share = s.terrain != nil && s.terrain.set.share.enabled
+	if c.Share {
+		c.Card = cardClientConfig(s.terrain.set.card)
+	}
 	if s.terrain != nil {
 		h, src, _ := s.terrain.antenna(terrainEnd{kind: "point"}, nil)
 		c.PointAntenna = &DHMPointAntenna{M: h, Source: src}
@@ -734,6 +790,9 @@ func (s *Server) dhmClientConfig() *DHMClientConfig {
 			LicenseName: copdem.LicenseName,
 			LicenseURL:  copdem.LicenseURL,
 		}
+	}
+	if s.terrain != nil && s.terrain.buildings != nil {
+		c.Buildings = buildingsClientConfig()
 	}
 	return c
 }

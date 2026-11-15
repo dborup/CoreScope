@@ -21,13 +21,16 @@ const DefaultBaseURL = "https://api.dataforsyningen.dk/ogcapi/features/building_
 const CRS = "http://www.opengis.net/def/crs/EPSG/0/25832"
 
 // fixedQuery is every query parameter but the filter: GeoJSON, EPSG:25832
-// in and out, CQL2 text, at most MaxFeatures footprints. The limit is
+// in and out, ECQL text, at most MaxFeatures footprints. The service is a
+// GeoServer: its cql2-text parser has no DWITHIN ("Function not found",
+// HTTP 400, seen on staging 2026-11-15), while ecql-text accepts
+// DWITHIN(geometry, LINESTRING(...), r, meters) with the same filter-crs. The limit is
 // written from MaxFeatures, so the two cannot drift apart (#776 review
 // N2). The values hold only characters that need no escaping in a query
 // string, "+" written as %2B (TestSegmentURLDecodesToTheFixedQuery).
 var fixedQuery = "f=application/geo%2Bjson" +
 	"&crs=" + CRS +
-	"&filter-lang=cql2-text" +
+	"&filter-lang=ecql-text" +
 	"&filter-crs=" + CRS +
 	"&limit=" + strconv.Itoa(MaxFeatures)
 

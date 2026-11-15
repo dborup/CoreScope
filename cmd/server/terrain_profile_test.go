@@ -426,6 +426,30 @@ func TestTerrainProfile_CacheFootprintAtMaxima(t *testing.T) {
 				c.classified, maxBytes, float64(maxBytes)/1e6, c.documented/1_000_000)
 		}
 	}
+	// #786 review F5: the note's size of one entry is the formula's, to
+	// a tenth of a KB, classified or not.
+	data, err := os.ReadFile(filepath.Join("..", "..", "config.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ex struct {
+		Map struct {
+			DHM struct {
+				Profile struct {
+					Note string `json:"_comment_cacheEntries"`
+				} `json:"profile"`
+			} `json:"dhm"`
+		} `json:"map"`
+	}
+	if err := json.Unmarshal(data, &ex); err != nil {
+		t.Fatal(err)
+	}
+	for _, classified := range []bool{false, true} {
+		kb := fmt.Sprintf("%.1f KB", float64(terrainCacheMaxBytes(1, set.plan.MaxSamples, classified))/1000)
+		if !strings.Contains(ex.Map.DHM.Profile.Note, kb) {
+			t.Errorf("classified %v: _comment_cacheEntries %q does not give one entry as %s", classified, ex.Map.DHM.Profile.Note, kb)
+		}
+	}
 }
 
 func TestTerrainProfile_SingleflightCollapses20Requests(t *testing.T) {
@@ -1645,7 +1669,7 @@ func TestTerrainProfile_ConfigLoadsAndStaysServerSide(t *testing.T) {
 		t.Fatalf("radio config %+v", cfg.Radio)
 	}
 	srv := NewServer(setupTestDB(t), cfg, NewHub())
-	if srv.terrain == nil || srv.dhm == nil || srv.terrain.set.maxPathM != 40000 || cap(srv.terrain.admit) != 2 {
+	if srv.terrain == nil || srv.dhm == nil || srv.terrain.set.maxPathM != 40000 || srv.terrain.admit.Cap() != 2 {
 		t.Fatal("profile not wired from config")
 	}
 	if srv.dhm.limiter == nil || srv.terrain.limiter == nil {
@@ -1734,10 +1758,9 @@ func TestTerrainProfile_OpenAPI(t *testing.T) {
 
 // fillAdmission occupies every admission slot, so the next uncached
 // profile is refused with 503 without any upstream call or goroutine.
-func fillAdmission(env *terrainEnv) {
-	for i := 0; i < cap(env.p.admit); i++ {
-		env.p.admit <- struct{}{}
-	}
+// The returned func frees them.
+func fillAdmission(env *terrainEnv) (release func()) {
+	return fillSlots(env.p.admit)
 }
 
 func busyQuery(i int) string {
@@ -1766,7 +1789,7 @@ func TestTerrainProfile_MaxInFlightClampIsPinned(t *testing.T) {
 func TestTerrainProfile_AdmissionRefusalDoesNotChargePerIP(t *testing.T) {
 	src := newFakeElevation(t, flatElev(0))
 	env := newTerrainEnv(t, src, dhm.ProfileConfig{}, nil)
-	fillAdmission(env)
+	release := fillAdmission(env)
 	client := func(r *http.Request) { r.RemoteAddr = "198.51.100.7:1000" }
 	for i := 0; i < 40; i++ {
 		w := env.get(busyQuery(0), client)
@@ -1775,9 +1798,7 @@ func TestTerrainProfile_AdmissionRefusalDoesNotChargePerIP(t *testing.T) {
 			t.Fatalf("Retry-After %q", w.Header().Get("Retry-After"))
 		}
 	}
-	for len(env.p.admit) > 0 {
-		<-env.p.admit
-	}
+	release()
 	// The budget is intact: the full 10 admitted fetches still succeed.
 	for i := 0; i < 10; i++ {
 		decodeProfile(t, env.get(busyQuery(i), client))
@@ -1794,7 +1815,7 @@ func TestTerrainProfile_AdmissionRefusalsAreObservable(t *testing.T) {
 	env := newTerrainEnv(t, src, dhm.ProfileConfig{RateLimitPerMin: intp(0)}, nil)
 	clock := time.Unix(1_700_000_000, 0)
 	env.p.now = func() time.Time { return clock }
-	fillAdmission(env)
+	defer fillAdmission(env)()
 	for i := 0; i < 30; i++ {
 		wantError(t, env.get(busyQuery(i)), http.StatusServiceUnavailable, "terrain profiles busy")
 	}
@@ -1861,17 +1882,20 @@ func TestTerrainProfile_UpstreamFailuresStayCharged(t *testing.T) {
 func TestTerrainProfile_AdmissionLogNamesConfiguredMaxInFlight(t *testing.T) {
 	src := newFakeElevation(t, flatElev(0))
 	env := newTerrainEnv(t, src, dhm.ProfileConfig{RateLimitPerMin: intp(0), MaxInFlight: intp(7)}, nil)
-	if cap(env.p.admit) != 7 {
-		t.Fatalf("admit capacity %d, want 7", cap(env.p.admit))
+	if env.p.admit.Cap() != 7 {
+		t.Fatalf("admit capacity %d, want 7", env.p.admit.Cap())
 	}
-	fillAdmission(env)
+	defer fillAdmission(env)()
 	wantError(t, env.get(busyQuery(0)), http.StatusServiceUnavailable, "terrain profiles busy")
 	if !strings.Contains(env.logs.String(), "maxInFlight (7) fetches") {
 		t.Fatalf("log line does not carry the configured value 7: %q", env.logs.String())
 	}
 }
 
-// #707 nit 4: the leader is refused, so its joiners are refused with it.
+// #707 nit 4: the 503 text must not claim more than sharing gives. Since
+// #744 (DoAdmitted) a refused call is never registered, so the old "refused
+// with it" wording is gone too; TestTerrainProfile_OpenAPI503MatchesAdmission
+// pins the current text (#759 review finding 9).
 func TestTerrainProfile_OpenAPI503DoesNotOverstateSharing(t *testing.T) {
 	_, router := setupTestServer(t)
 	spec := buildOpenAPISpec(router, "test")
@@ -1879,8 +1903,5 @@ func TestTerrainProfile_OpenAPI503DoesNotOverstateSharing(t *testing.T) {
 	text := string(raw)
 	if strings.Contains(text, "share it and are not refused") {
 		t.Fatal("503 text still claims joiners are never refused")
-	}
-	if !strings.Contains(text, "refused with it") {
-		t.Fatal("503 text must say joiners of a refused fetch are refused with it")
 	}
 }

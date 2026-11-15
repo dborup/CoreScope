@@ -17,9 +17,15 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/meshcore-analyzer/dhm"
+	"github.com/meshcore-analyzer/profilecard"
 )
 
 // #727 M1 — the /p share route and its per-profile Open Graph tags.
+
+// shareExtraMetas is how many more <meta> tags /p has than the site
+// document: og:url and robots (M1), og:image:alt and twitter:image:alt
+// (M3; the card's width and height replace the site image's).
+const shareExtraMetas = 4
 
 const sharePublicDir = "../../public"
 
@@ -40,8 +46,20 @@ type shareEnv struct {
 // RegisterRoutes, then /p, then the SPA catch-all.
 func newShareEnv(t *testing.T, share bool, brand map[string]string) *shareEnv {
 	t.Helper()
+	return newShareEnvWith(t, dhm.ProfileConfig{Share: dhm.ShareConfig{Enabled: share}}, brand)
+}
+
+// newShareEnvWith is newShareEnv with the whole profile config.
+func newShareEnvWith(t *testing.T, pc dhm.ProfileConfig, brand map[string]string) *shareEnv {
+	t.Helper()
 	src := newFakeElevation(t, flatElev(10))
-	env := newTerrainEnv(t, src, dhm.ProfileConfig{Share: dhm.ShareConfig{Enabled: share}}, nil)
+	return shareEnvAround(t, src, newTerrainEnv(t, src, pc, nil), brand)
+}
+
+// shareEnvAround puts the share routes and the SPA in front of env, whose
+// profiler reads src, and adds the two named fixture nodes.
+func shareEnvAround(t *testing.T, src *fakeElevation, env *terrainEnv, brand map[string]string) *shareEnv {
+	t.Helper()
 	doc := newIndexDoc(sharePublicDir, newOGMeta(brandPick(brand), sharePublicDir, nil))
 	router := mux.NewRouter()
 	env.srv.RegisterRoutes(router)
@@ -323,18 +341,18 @@ func TestShareProfile_TagsForTwoNodes(t *testing.T) {
 	if got := mustMeta(t, body, "robots"); got != "noindex" {
 		t.Fatalf("robots %q", got)
 	}
-	// The image is still the site card until #727 M3.
+	// The image is the share card (#727 M3; TestShareProfile_ImageIsTheCard).
 	img := mustMeta(t, body, "og:image")
-	if !strings.HasPrefix(img, "http://example.test/og-image.png?v=") || mustMeta(t, body, "twitter:image") != img {
+	if !strings.HasPrefix(img, "http://example.test/api/terrain/profile.png?a="+shareKeyA+"&b="+shareKeyB+"&model=both&v=") || mustMeta(t, body, "twitter:image") != img {
 		t.Fatalf("og:image %q", img)
 	}
 	if strings.Contains(body, "__OG_") || strings.Contains(body, "__BUST__") {
 		t.Fatal("unfilled placeholder")
 	}
-	// The page is the site shell plus exactly two tags.
+	// The page is the site shell plus exactly the share tags.
 	site := env.siteDocument(t)
-	if strings.Count(body, "<meta") != strings.Count(site, "<meta")+2 || strings.Count(body, "<script") != strings.Count(site, "<script") {
-		t.Fatal("the per-profile document is not the site shell plus og:url and robots")
+	if strings.Count(body, "<meta") != strings.Count(site, "<meta")+shareExtraMetas || strings.Count(body, "<script") != strings.Count(site, "<script") {
+		t.Fatal("the per-profile document is not the site shell plus og:url, robots and the card's alt tags")
 	}
 	if _, ok := metaContent(site, "og:url"); ok {
 		t.Fatal("og:url on a non-share page (#1890)")
@@ -345,12 +363,14 @@ func TestShareProfile_TagsForTwoNodes(t *testing.T) {
 }
 
 // The title states the distance exactly as the panel does for the same
-// query: fmtMetres over the JSON endpoint's distanceM.
+// query: fmtMetres over the JSON endpoint's distanceM. Measuring it cached
+// the profile, so the card's verdict word follows (#727 M3).
 func TestShareProfile_DistanceMatchesTheProfile(t *testing.T) {
 	env := newShareEnv(t, true, nil)
 	b := offsetPt(56.1, 10.1, 3456, 2100)
 	resp := decodeProfile(t, env.get(pathQuery(shareKeyA, b)))
-	if got, want := titleOf(t, env.share(shareQ(shareKeyA, b)).Body.String()), "Path profile: "+fmtMetres(resp.DistanceM); got != want || !strings.HasSuffix(got, " m") {
+	want := "Path profile: " + fmtMetres(resp.DistanceM) + " · " + profilecard.MainVerdict(resp).Word
+	if got := titleOf(t, env.share(shareQ(shareKeyA, b)).Body.String()); got != want || !strings.Contains(got, " m · ") {
 		t.Fatalf("title %q, want %q", got, want)
 	}
 }
@@ -437,7 +457,7 @@ func TestShareProfile_HostileNamesAreInert(t *testing.T) {
 		if utf8.RuneCountInString(desc) > ogDescriptionMaxRunes {
 			t.Errorf("%q: description is %d runes", tc.name, utf8.RuneCountInString(desc))
 		}
-		if strings.Count(body, "<script") != strings.Count(site, "<script") || strings.Count(body, "<meta") != strings.Count(site, "<meta")+2 ||
+		if strings.Count(body, "<script") != strings.Count(site, "<script") || strings.Count(body, "<meta") != strings.Count(site, "<meta")+shareExtraMetas ||
 			strings.Count(body, "<title>") != 1 || strings.Contains(body, "onerror=alert") && !strings.Contains(body, "&#34; onerror=alert(1) x=&#34;") {
 			t.Errorf("%q changed the document's markup", tc.name)
 		}

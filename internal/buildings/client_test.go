@@ -76,7 +76,7 @@ func TestSegmentURLGolden(t *testing.T) {
 	const want = "https://api.dataforsyningen.dk/ogcapi/features/building_inspire/collections/building/items" +
 		"?f=application/geo%2Bjson" +
 		"&crs=http://www.opengis.net/def/crs/EPSG/0/25832" +
-		"&filter-lang=cql2-text" +
+		"&filter-lang=ecql-text" +
 		"&filter-crs=http://www.opengis.net/def/crs/EPSG/0/25832" +
 		"&limit=1000" +
 		"&filter=DWITHIN%28geometry%2CLINESTRING%28575432.4%206223834.6%2C574523.2%206224094.6%29%2C15%2Cmeters%29"
@@ -108,7 +108,7 @@ func TestSegmentURLDecodesToTheFixedQuery(t *testing.T) {
 			t.Fatalf("%d keys: %v", len(q), q)
 		}
 		for k, v := range map[string]string{
-			"f": "application/geo+json", "crs": CRS, "filter-lang": "cql2-text", "filter-crs": CRS,
+			"f": "application/geo+json", "crs": CRS, "filter-lang": "ecql-text", "filter-crs": CRS,
 			"limit": "1000",
 			"filter": "DWITHIN(geometry,LINESTRING(" + fmtDM(seg.Line[0]) + " " + fmtDM(seg.Line[1]) + "," +
 				fmtDM(seg.Line[2]) + " " + fmtDM(seg.Line[3]) + ")," + strconv.Itoa(seg.RadiusM) + ",meters)",
