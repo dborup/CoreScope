@@ -152,16 +152,16 @@ function extractTileAttach(relPath, mapVar) {
   const src = fs.readFileSync(path.join(__dirname, relPath), 'utf8');
   const anchor = '.addTo(' + mapVar + ');';
   // `.addTo(_gfMap);` also appears on markers/polygons, so find the
-  // L.tileLayer( call whose own .addTo() is the one we want.
-  let from = 0, callStart = -1, end = -1;
-  for (;;) {
-    const i = src.indexOf('L.tileLayer(', from);
-    if (i === -1) break;
-    const j = src.indexOf(anchor, i);
-    if (j !== -1 && j - i < 400) { callStart = i; end = j + anchor.length; break; }
-    from = i + 1;
+  // tile-layer call whose own .addTo() is the one we want. #741 M1a
+  // routes every base layer through the registry's MC_createBaseLayer, so
+  // either spelling is the call site.
+  const CALLS = /(?:L\.tileLayer|MC_createBaseLayer)\(/g;
+  let callStart = -1, end = -1, m;
+  while ((m = CALLS.exec(src)) !== null) {
+    const j = src.indexOf(anchor, m.index);
+    if (j !== -1 && j - m.index < 400) { callStart = m.index; end = j + anchor.length; break; }
   }
-  if (callStart === -1) throw new Error('no L.tileLayer(...)' + anchor + ' in ' + relPath);
+  if (callStart === -1) throw new Error('no tile-layer call before ' + anchor + ' in ' + relPath);
   // Include the statements between the enclosing `L.map(` call and the tile
   // layer — that is where the call site resolves its provider spec.
   const blockStart = src.lastIndexOf('L.map(', callStart);
@@ -429,6 +429,10 @@ test('M4 _cv2PreviewTile() falls back to the non-CARTO TILE_LIGHT when no regist
 for (const [label, mapVar] of [['geo-filter tab', '_gfMap'], ['geo-filter modal', '_gfModalMap']]) {
   test('M4 ' + label + ' preview map attaches the configured light provider', () => {
     const ctx = makeSandbox({ theme: 'light' });
+    // #741 M1a — the call site builds its layer through the registry's
+    // factory, so the real registry is loaded and the spy replaces the
+    // Leaflet the factory itself reaches for.
+    loadInto(ctx, path.join('public', 'map-tile-providers.js'));
     const spy = makeTileLayerSpy();
     ctx.L = spy.L;
     ctx.window.TILE_LIGHT = 'https://fallback.example/{z}/{x}/{y}.png';

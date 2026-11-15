@@ -127,13 +127,34 @@
   // the provider's invert CSS filter to the tile pane when needed.
   function _applyTilesToNodeMap(map) {
     if (!map) return;
+    /* #741 M1a — one place where this page turns a spec into a base layer,
+     * for the inset and its reference overlay alike. It stays nested: both
+     * callers are right here, and the suites that drive this helper extract
+     * it by name (#332 M7, #390 P1, #752 I1, #1470).
+     * index.html loads map-tile-providers.js before nodes.js, so the
+     * factory is the production path; the direct L.tileLayer keeps the OSM
+     * fallback drawing on a page that has getTileUrl() (roles.js) but no
+     * registry at all, which is what this helper did before the factory
+     * existed (#778 review finding 4). The credit and the ceiling travel in
+     * `opts`, not on the spec, so that fallback is one Leaflet call and not
+     * a second copy of the factory's spec-merging rules. */
+    var baseLayer = function (spec, opts) {
+      if (typeof window.MC_createBaseLayer === 'function') return window.MC_createBaseLayer(spec, opts);
+      return L.tileLayer(spec.url, opts); // #741 no-registry fallback
+    };
     var tileUrl = (window.getTileUrl && window.getTileUrl()) || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
     var provider = window.getActiveTileProvider && window.getActiveTileProvider();
     var attribution = (provider && provider.attribution) || '© OpenStreetMap contributors';
-    var layer = L.tileLayer(tileUrl, { maxZoom: 18, attribution: attribution }).addTo(map);
+    // #741 M1a — the registry's shared base-layer factory builds the inset's
+    // base map. A WMS provider does not reach it from here yet: getTileUrl()
+    // and getActiveTileProvider() (roles.js) hand over a URL template and a
+    // credit, and nothing rebuilds a `wms` descriptor, so carrying one
+    // through the per-page resolvers is M1b's job. The 18 here is this
+    // helper's own historical ceiling, kept as is (map.js/live.js use 19).
+    var layer = baseLayer({ url: tileUrl }, { maxZoom: 18, attribution: attribution }).addTo(map);
     // Esri 2-layer provider: add the labels reference overlay too
     if (provider && provider.refUrl) {
-      try { L.tileLayer(provider.refUrl, { maxZoom: 18 }).addTo(map); } catch (_e) {}
+      try { baseLayer({ url: provider.refUrl }, { maxZoom: 18 }).addTo(map); } catch (_e) {}
     }
     // Apply invert CSS filter to the tile pane if the provider needs it
     try {
