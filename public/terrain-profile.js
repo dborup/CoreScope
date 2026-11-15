@@ -116,13 +116,16 @@
 
   /* themeDefaults resolves the customizer's terrain section. Pass the raw
    * section to resolve a specific one; omit it to read the live config.
-   * Junk is not a default: an unusable value falls through to the server. */
+   * Junk is not a default: an unusable value falls through to the server.
+   * shareLinks is the viewer's preview-link switch (#727 M4): only an
+   * explicit false turns it off. */
   function themeDefaults(section) {
     var src = (section === undefined)
       ? (global.SITE_CONFIG && global.SITE_CONFIG.terrain)
       : section;
-    var out = { model: DEFAULT_MODEL, heights: {} };
+    var out = { model: DEFAULT_MODEL, heights: {}, shareLinks: true };
     if (!src || typeof src !== 'object') return out;
+    if (src.shareLinks === false) out.shareLinks = false;
     if (validModel(src.model)) out.model = src.model;
     Object.keys(THEME_HEIGHT_KEYS).forEach(function (role) {
       var h = themeHeightOf(src[THEME_HEIGHT_KEYS[role]]);
@@ -1879,8 +1882,10 @@
       } catch (_) { /* a hash we cannot write is not worth breaking the tool for */ }
     }
 
+    /* The /p link needs the server's route (opts.shareRoute) and the
+     * viewer's customizer switch, read now so a change needs no reload. */
     function onCopy() {
-      var url = shareURL(state, global.location, opts.shareRoute === true);
+      var url = shareURL(state, global.location, opts.shareRoute === true && themeDefaults().shareLinks);
       if (!url) return;
       copyLink(url, opts.copyText || global.copyToClipboard).then(function (ok) {
         if (!ui.copyStatus) return;

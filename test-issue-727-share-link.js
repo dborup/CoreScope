@@ -14,7 +14,9 @@
  *   3. shareURL with the route on (a /p link) and off (the #/map link,
  *      unchanged), the round trip back through parseState, and that no
  *      customizer default rides either;
- *   4. the copy button hands out whichever link the host's shareRoute says;
+ *   4. the copy button hands out whichever link the host's shareRoute says,
+ *      and (M4) the viewer's customizer switch terrain.shareLinks, read at
+ *      copy time, can turn the /p link off but never on;
  *   5. the index.html handoff: /p moves to #/map with an allow-list, no
  *      reload, no history entry, before any asset loads; tracking keys
  *      (the fixture's `queries` table) never reach the hash, and a path
@@ -97,7 +99,7 @@ function load() {
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync('public/antenna-height.js', 'utf8'), ctx);
   vm.runInContext(fs.readFileSync('public/terrain-profile.js', 'utf8'), ctx);
-  return { TP: ctx.window.TerrainProfile, dom };
+  return { TP: ctx.window.TerrainProfile, dom, win };
 }
 
 const { TP } = load();
@@ -184,8 +186,9 @@ test('null until both ends are picked, route or not', () => {
 
 console.log('\n=== #727: the copy button ===');
 
-function copiedWith(extra) {
-  const { TP: T, dom } = load();
+function copiedWith(extra, terrain) {
+  const { TP: T, dom, win } = load();
+  if (terrain !== undefined) win.SITE_CONFIG = { terrain };
   const copied = [];
   const tool = T.create(Object.assign({
     mount: dom.body, syncHash: false,
@@ -207,6 +210,50 @@ atest('shareRoute: true copies the /p link', async () => {
 atest('without shareRoute the copy button keeps the #/map link', async () => {
   const copied = await copiedWith({});
   eq(copied, ['http://localhost:13700/#/map?profile=' + PK_A + '%2C56.16290%2C10.20390']);
+});
+
+// #727 M4: the customizer's terrain.shareLinks is the viewer's switch.
+// It can turn the preview link off, never on without the server's route.
+
+const P_LINK = 'http://localhost:13700/p?profile=' + PK_A + '%2C56.16290%2C10.20390';
+const MAP_LINK = 'http://localhost:13700/#/map?profile=' + PK_A + '%2C56.16290%2C10.20390';
+
+test('themeDefaults: shareLinks is on unless the section says false', () => {
+  assert.strictEqual(TP.themeDefaults(null).shareLinks, true);
+  assert.strictEqual(TP.themeDefaults({}).shareLinks, true);
+  assert.strictEqual(TP.themeDefaults({ shareLinks: true }).shareLinks, true);
+  assert.strictEqual(TP.themeDefaults({ shareLinks: false }).shareLinks, false);
+  ['false', 0, '', 'no', {}].forEach((v) => {
+    assert.strictEqual(TP.themeDefaults({ shareLinks: v }).shareLinks, true, 'junk ' + JSON.stringify(v) + ' turned it off');
+  });
+});
+
+atest('M4: shareLinks false copies the #/map link although the server shares', async () => {
+  eq(await copiedWith({ shareRoute: true }, { shareLinks: false }), [MAP_LINK]);
+  eq(await copiedWith({ shareRoute: true }, { shareLinks: true }), [P_LINK]);
+});
+
+atest('M4: shareLinks cannot make a /p link the server does not serve', async () => {
+  eq(await copiedWith({}, { shareLinks: true }), [MAP_LINK]);
+});
+
+atest('M4: the switch is read at copy time, without a reload', async () => {
+  const { TP: T, dom, win } = load();
+  const copied = [];
+  const tool = T.create({
+    mount: dom.body, syncHash: false, shareRoute: true,
+    fetchJSON: () => new Promise(() => {}),
+    resolveNode: (pk) => ({ name: pk.slice(0, 4), lat: 56, lon: 10, role: 'repeater' }),
+    copyText: (t, ok) => { copied.push(t); ok(); },
+  });
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  tool.setEndpoint('b', { kind: 'point', lat: 56.1629, lon: 10.2039 });
+  dom.find('tp-copy-link').fire('click');
+  await sleep(0);
+  win.SITE_CONFIG = { terrain: { shareLinks: false } };
+  dom.find('tp-copy-link').fire('click');
+  await sleep(0);
+  eq(copied, [P_LINK, MAP_LINK]);
 });
 
 test('map.js passes the server flag through shareOffered', () => {
