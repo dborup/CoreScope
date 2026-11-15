@@ -136,6 +136,14 @@
       "measurementNote": "New suite; #781 Map Path profile hover cursor with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile: hovering the chart shows the dashed line at the sample under the pointer, the readout (distance, terrain, surface, clearance) and one dot on the drawn path at that fraction from A to B within 1.5 px; moving keeps the same dot; leaving hides all three; arrow keys step one sample and Shift ten with a polite readout; a touch drag at 360x740 moves the dot and it stays after the lift; 500 synthetic moves in one task cost one update and no chart rebuild, and spread over frames at most one per frame; Close and three Map visits leave no cursor listener, line or dot. About 40s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681/#721/#727/#746 DHM suites."
     },
     {
+      "file": "test-issue-730-buildings-ui-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #730 M3 buildings versus trees in the Map Path profile with an intercepted dhm client-config block (profile: true plus dhm.buildings, the footprints' credit parts) and a stubbed /api/terrain/profile in M2's classified shape: in light and dark, a Dokk1-like path shows 'Buildings: Blocked', the roof in --terrain-building, the legend, '(building)' in the hover readout and the footprints' credit with four links; a forest path shows 'Trees/other: Marginal' and the canopy in --terrain-vegetation; a partial classification keeps the generic chip with the muted note and a third legend item, an unavailable one shows neither and the DHM credit; axe is clean on the panel; at 740x360 touch the chart and chips stay in view and the four credit links are 44px targets hit by themselves; nothing is asked of the DHM, INSPIRE or GeoDanmark hosts. About 12s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681/#746/#781 DHM suites."
+    },
+    {
       "file": "test-issue-723-heritage-overlay-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

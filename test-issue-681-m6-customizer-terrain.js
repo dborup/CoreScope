@@ -148,18 +148,20 @@ test('the built-in defaults are the server’s own role heights', () => {
   assert.strictEqual(ctx.window.MCAntennaHeight.MAX_M, 100);
 });
 
-test('the six chart colours map onto the documented CSS variables', () => {
+test('the eight chart colours map onto the documented CSS variables', () => {
   const { api } = load();
   const want = {
     terrainFill: '--terrain-fill', terrainClutter: '--terrain-clutter',
     losLine: '--los-line', fresnel100: '--fresnel-100',
     fresnel60: '--fresnel-60', profileBlocked: '--profile-blocked',
+    // #730 M3 — the surface band by class.
+    terrainBuilding: '--terrain-building', terrainVegetation: '--terrain-vegetation',
   };
   Object.keys(want).forEach((k) => {
     assert.strictEqual(api.THEME_CSS_MAP[k], want[k], k + ' is not mapped to ' + want[k]);
     assert.ok(api.TERRAIN_COLOR_KEYS.indexOf(k) >= 0, k + ' missing from TERRAIN_COLOR_KEYS');
   });
-  assert.strictEqual(api.TERRAIN_COLOR_KEYS.length, 6);
+  assert.strictEqual(api.TERRAIN_COLOR_KEYS.length, 8);
 });
 
 test('the chart colours live in the theme sections, light and dark apart', () => {

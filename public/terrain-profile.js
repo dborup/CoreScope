@@ -27,8 +27,10 @@
   /* #765 — the chart footer's CC BY 4.0 credit comes from the server's dhm
    * block (cmd/server/dhm_proxy.go, from internal/dhm): no credit string is
    * kept here. footerCredit below builds it. */
-  // The footer's own test ids for the two links creditLinks names.
-  var CREDIT_TESTIDS = { dataset: 'tp-credit-dataset', license: 'tp-credit-link' };
+  // The footer's own test ids for the two links creditLinks names, and
+  // for the footprints' two in a classified profile's credit (#730 M3).
+  var CREDIT_TESTIDS = { dataset: 'tp-credit-dataset', license: 'tp-credit-link',
+    buildingsDataset: 'tp-credit-buildings-dataset', buildingsSource: 'tp-credit-buildings-source' };
   // #738 M2: the same two links in the Copernicus credit of a mixed profile.
   var FILL_CREDIT_TESTIDS = { dataset: 'tp-credit-fill-dataset', license: 'tp-credit-fill-license' };
   var ASSUMED_LABEL = 'assumed heights';
@@ -523,6 +525,44 @@
   var REASON_ANTENNA_BELOW = 'antennaBelowSurface';
   var BELOW_AT = { A: 'A', B: 'B', both: 'A and B' };
 
+  /* #730 M3 — buildings versus trees. With map.dhm.profile.buildings on,
+   * the server tells the elevated surface samples of a model=both profile
+   * DHM covers end to end apart (cmd/server/terrain_buildings.go):
+   * classification.state (full, partial or unavailable), samples[].cls
+   * ("b": inside a building footprint, "v": trees or other) and
+   * verdict.surface.cause, read at the samples that decide the surface
+   * verdict. The band is coloured by class wherever a sample has one, and
+   * the chip names the cause on a full or a partial classification: the
+   * server says "building" only where a classified building obstructs,
+   * and "vegetation" only when every obstructing raised sample is
+   * classified trees/other, so its cause is exact on a partial one too
+   * (#797 review finding 4); anything else keeps the generic chip. A
+   * building caveats in the warn tone, trees in a milder one: they mostly
+   * attenuate. A partial or unavailable classification says so in a
+   * muted note. The verdicts never change (#681 owner decision 6). */
+  var CLASS_STATES = { full: true, partial: true, unavailable: true };
+  var CLASSES = {
+    b: { legend: 'Building', readout: 'building', fill: 'var(--terrain-building)' },
+    v: { legend: 'Trees/other', readout: 'trees/other', fill: 'var(--terrain-vegetation)' }
+  };
+  /* The chip by cause (#730 research §6): "Blocked by building" and
+   * "Through trees" when the surface blocks, else the surface's own word
+   * with what stands there. Never a second verdict: each label names the
+   * surface state and no other, and the tone stays a caveat. */
+  var CAUSES = {
+    building: { blocked: 'Blocked by building', suffix: ' — building', tone: 'warn',
+      detail: 'Where it does, a building footprint stands: it is a building.' },
+    vegetation: { blocked: 'Through trees', suffix: ' — through trees', tone: 'mild',
+      detail: 'Where it does, no building footprint stands: it is trees or other.' }
+  };
+  var CLASS_NOTES = {
+    partial: 'Buildings could not be told apart from trees on part of this path.',
+    unavailable: 'Buildings could not be told apart from trees on this path.'
+  };
+  // The legend's word for the clutter colour on a partial classification.
+  var CLASS_NONE_LEGEND = 'Not told apart';
+  var CLASS_TITLE = 'In the surface band, buildings are told apart from trees and other objects by building footprints.';
+
   /* The verdict states that assert terrain inside the criterion zone, and
    * so the only ones whose chart may carry intrusion bands. */
   var INTRUDING_VERDICTS = { fresnel60: true, blocked: true };
@@ -616,6 +656,38 @@
     return s.state;
   }
 
+  /* classificationState is the classification the panel may speak of:
+   * full, partial or unavailable, or null with none — "Terrain only", a
+   * profile with a gap (the server never classifies one, and this file
+   * holds the same line, see covered()) or a state it does not know. */
+  function classificationState(data) {
+    var c = data && data.model === 'both' && covered(data) ? data.classification : null;
+    return c && Object.prototype.hasOwnProperty.call(CLASS_STATES, c.state) ? c.state : null;
+  }
+
+  // A sample's class, "b" or "v", or null for anything else.
+  function sampleClass(s) {
+    var c = s && s.cls;
+    return c === 'b' || c === 'v' ? c : null;
+  }
+
+  // The cause the chip may name: on a full or partial classification.
+  function surfaceCause(data) {
+    var cs = classificationState(data);
+    if (cs !== 'full' && cs !== 'partial') return null;
+    var c = data.verdict.surface.cause;
+    return c === 'building' || c === 'vegetation' ? c : null;
+  }
+
+  /* classNote is the muted note of a partial or unavailable
+   * classification, else null. Unavailable means the lookup failed: say
+   * that nothing was told apart rather than nothing at all (#797 review
+   * finding 1). */
+  function classNote(data) {
+    var cs = classificationState(data);
+    return Object.prototype.hasOwnProperty.call(CLASS_NOTES, cs) ? CLASS_NOTES[cs] : null;
+  }
+
   /* surfaceChip maps verdict.surface to the second chip. It returns null
    * when there is no surface to speak of at all — "Terrain only", or a
    * response without the block — and otherwise a chip whose `show` says
@@ -635,14 +707,18 @@
     var show = !!known
       && Object.prototype.hasOwnProperty.call(SURFACE_RANK, terrain.state)
       && SURFACE_RANK[state] < SURFACE_RANK[terrain.state];
+    // #730 M3: what stands there, when the classification says.
+    var cause = known ? surfaceCause(data) : null;
+    var c = cause ? CAUSES[cause] : null;
     return {
       state: state,
-      label: SURFACE_PREFIX + (known ? known.label : 'No verdict'),
+      label: c ? (state === 'blocked' ? c.blocked : known.label + c.suffix)
+        : SURFACE_PREFIX + (known ? known.label : 'No verdict'),
       // Never a second verdict: the surface informs, so it caveats in the
-      // warn tone whatever state it is in, rather than going red beside a
-      // terrain chip that is green.
-      tone: 'warn',
-      detail: known ? known.surface : SURFACE_UNKNOWN_DETAIL,
+      // warn tone (trees in the milder one) whatever state it is in,
+      // rather than going red beside a terrain chip that is green.
+      tone: c ? c.tone : 'warn',
+      detail: known ? known.surface + (c ? ' ' + c.detail : '') : SURFACE_UNKNOWN_DETAIL,
       note: true,
       show: show
     };
@@ -806,6 +882,51 @@
     return out;
   }
 
+  /* bandRuns splits each clutter segment (both edges present, two samples
+   * or more) into runs of one class, cls[i] or null for none (#730 M3),
+   * each a polygon from the surface down to the terrain. Where a class
+   * meets a sample without one, the class claims the slope between them:
+   * that sample stands below the classification's threshold (or, on a
+   * partial classification, was not classified), so the drawn slope is
+   * the classified object's edge, not something else. Two classes meet
+   * halfway between their samples. Either way the runs tile the band
+   * exactly, and a run left with no width is not drawn. Without classes a
+   * segment is one run: the very polygon drawn before. x, sY and tY are
+   * the rounded plot coordinates. */
+  function bandRuns(segments, cls, x, sY, tY) {
+    // A boundary is a position along the samples: i (on sample i) or
+    // i + 0.5 (halfway to the next).
+    function at(a, f) { return f % 1 ? r2((a[f - 0.5] + a[f + 0.5]) / 2) : a[f]; }
+    function point(a, f) { return at(x, f) + ',' + at(a, f); }
+    var out = [];
+    segments.forEach(function (seg) {
+      if (seg.to === seg.from) return;
+      var runs = [], run = null, i;
+      for (i = seg.from; i <= seg.to; i++) {
+        var c = cls ? cls[i] : null;
+        if (run && run.cls === c) run.to = i;
+        else { run = { from: i, to: i, cls: c }; runs.push(run); }
+      }
+      // edge[k] is where run k ends and run k + 1 begins.
+      var edges = [];
+      for (var k = 0; k + 1 < runs.length; k++) {
+        var l = runs[k], r = runs[k + 1];
+        edges.push(l.cls === null ? l.to : r.cls === null ? r.from : l.to + 0.5);
+      }
+      runs.forEach(function (r, k) {
+        var lo = k ? edges[k - 1] : seg.from, hi = k < edges.length ? edges[k] : seg.to;
+        if (hi <= lo) return;
+        var top = [point(sY, lo)], down = [point(tY, hi)];
+        for (var j = Math.floor(lo) + 1; j < hi; j++) top.push(point(sY, j));
+        top.push(point(sY, hi));
+        for (j = Math.ceil(hi) - 1; j > lo; j--) down.push(point(tY, j));
+        down.push(point(tY, lo));
+        out.push({ from: r.from, to: r.to, cls: r.cls, points: top.join(' ') + ' ' + down.join(' ') });
+      });
+    });
+    return out;
+  }
+
   /* chartGeometry turns one /api/terrain/profile response into plot
    * coordinates. Elevations are drawn with the earth bulge added, which is
    * how the server assesses them, so what the eye reads off the chart and
@@ -874,6 +995,10 @@
      * missing one. */
     var surfaceSegments = both ? runsWhere(n, function (j) { return surface[j] !== null; }) : [];
     var clutterSegments = both ? runsWhere(n, function (j) { return surface[j] !== null && terrain[j] !== null; }) : [];
+    // #730 M3: the classes, when there is a classification with any.
+    var cstate = classificationState(data);
+    var cls = cstate === 'full' || cstate === 'partial' ? samples.map(sampleClass) : null;
+    if (cls && !cls.some(function (c) { return c !== null; })) cls = null;
 
     /* Intrusion runs: where the clearance below the line of sight is under
      * the server's criterion fraction of the Fresnel radius.
@@ -902,15 +1027,18 @@
       if (cur) intrusions.push(cur);
     }
 
+    var xR = xs.map(r2);
+    var terrainY = terrain.map(function (v) { return v === null ? null : yOf(v); });
+    var surfaceY = surface ? surface.map(function (v) { return v === null ? null : yOf(v); }) : null;
     return {
       view: { w: VIEW.w, h: VIEW.h },
       plot: plot,
       domain: { dMax: D, zMin: zMin, zMax: zMax },
       d: d,
-      x: xs.map(r2),
+      x: xR,
       terrainZ: terrain.map(function (v) { return v === null ? null : r2(v); }),
-      terrainY: terrain.map(function (v) { return v === null ? null : yOf(v); }),
-      surfaceY: surface ? surface.map(function (v) { return v === null ? null : yOf(v); }) : null,
+      terrainY: terrainY,
+      surfaceY: surfaceY,
       // #781: metres for the hover readout's clearance, bulge included
       // like terrainZ.
       surfaceZ: surface ? surface.map(function (v) { return v === null ? null : r2(v); }) : null,
@@ -925,6 +1053,10 @@
       segments: segments,
       surfaceSegments: surfaceSegments,
       clutterSegments: clutterSegments,
+      // #730 M3: the clutter band in runs of one class, and the hover
+      // readout's word for each sample's class (null: none).
+      bands: bandRuns(clutterSegments, cls, xR, surfaceY, terrainY),
+      surfaceClass: cls ? cls.map(function (c) { return c ? CLASSES[c].readout : null; }) : null,
       gaps: gaps,
       intrusions: intrusions,
       criterion: criterion
@@ -963,7 +1095,7 @@
   /* chartTitle is the words a screen reader gets instead of the picture.
    * Both verdicts belong in it (#729): the hatched surface band is the one
    * part of this chart that carries no text at all. */
-  function chartTitle(data, chip, names, surf) {
+  function chartTitle(data, chip, names, surf, classified) {
     var a = names.nameA || 'A', b = names.nameB || 'B';
     var txt = 'Terrain profile from ' + a + ' to ' + b + ', ' + fmtMetres(data.distanceM) + '. ' + chip.label + '. ' + chip.detail;
     var note = mixedNote(data);
@@ -973,6 +1105,10 @@
       txt += ' Worst clearance ' + fmtMetres(worst) + ' at ' + fmtMetres(data.verdict.worstAtM) + ' along the path.';
     }
     if (surf && surf.show) txt += ' ' + surf.label + '. ' + surf.detail + (surf.note ? ' ' + SURFACE_NOTE : '');
+    // The note rides with the classified band; an unavailable
+    // classification draws none, and its note is the panel's own line.
+    var cn = classNote(data);
+    if (classified) txt += ' ' + CLASS_TITLE + (cn ? ' ' + cn : '');
     return txt;
   }
 
@@ -1005,7 +1141,8 @@
     // Sink: a quoted SVG attribute. Both pieces are this file's own fixed
     // strings, but they go through esc() like every other interpolation.
     out.push('<svg viewBox="0 0 ' + VIEW.w + ' ' + VIEW.h + '" class="tp-svg" preserveAspectRatio="none" role="img" aria-label="' + esc(chartLabel(chip, surf)) + '">');
-    out.push('<title>' + esc(chartTitle(data, chip, names, surf)) + '</title>');
+    var classified = g.bands.some(function (b) { return b.cls !== null; });
+    out.push('<title>' + esc(chartTitle(data, chip, names, surf, classified)) + '</title>');
 
     // Horizontal grid + elevation ticks.
     for (var t = 0; t <= 4; t++) {
@@ -1023,13 +1160,12 @@
     });
 
     // 2. DSM: the clutter band between terrain and surface, plus its line,
-    //    each split on its own gaps.
-    g.clutterSegments.forEach(function (seg) {
-      if (seg.to === seg.from) return;
-      var down = [];
-      for (var i = seg.to; i >= seg.from; i--) down.push(g.x[i] + ',' + g.terrainY[i]);
-      out.push('<polygon points="' + polyline(g.x, g.surfaceY, seg.from, seg.to) + ' ' + down.join(' ')
-        + '" fill="var(--terrain-clutter)" stroke="none"/>');
+    //    each split on its own gaps; the band in runs of one class (#730
+    //    M3), a run without one in the clutter colour as before.
+    g.bands.forEach(function (b) {
+      out.push(b.cls
+        ? '<polygon class="tp-band tp-band-' + b.cls + '" points="' + b.points + '" fill="' + CLASSES[b.cls].fill + '" stroke="none"/>'
+        : '<polygon points="' + b.points + '" fill="var(--terrain-clutter)" stroke="none"/>');
     });
     g.surfaceSegments.forEach(function (seg) {
       if (seg.to === seg.from) return;
@@ -1042,9 +1178,12 @@
     out.push('<polyline points="' + polyline(g.x, g.f1TopY, 0, g.x.length - 1) + '" fill="none" stroke="var(--fresnel-100)" stroke-width="1.2"/>');
     out.push('<polyline points="' + polyline(g.x, g.f1BotY, 0, g.x.length - 1) + '" fill="none" stroke="var(--fresnel-100)" stroke-width="1.2"/>');
 
-    // 5. Line of sight.
-    out.push('<line x1="' + g.x[0] + '" y1="' + g.losY[0] + '" x2="' + g.x[g.x.length - 1] + '" y2="' + g.losY[g.losY.length - 1]
-      + '" stroke="var(--los-line)" stroke-width="1.6"/>');
+    // 5. Line of sight. Over a classified band, which is solid, it is
+    //    cased in the panel colour: on the building or the trees colour
+    //    alone it is under 2:1 (#730 M3).
+    var losPts = 'x1="' + g.x[0] + '" y1="' + g.losY[0] + '" x2="' + g.x[g.x.length - 1] + '" y2="' + g.losY[g.losY.length - 1] + '"';
+    if (classified) out.push('<line class="tp-los-casing" ' + losPts + ' stroke="var(--card-bg)" stroke-width="4"/>');
+    out.push('<line ' + losPts + ' stroke="var(--los-line)" stroke-width="1.6"/>');
 
     // 6. Intrusion markers: a band on the baseline per obstructed stretch,
     //    and a ring on the worst sample the server reported.
@@ -1081,6 +1220,19 @@
     out.push('</svg>');
     out.push(labels.join(''));
     out.push('</div>');
+    // #730 M3: the band's colours in words, never colour alone. Outside
+    // .tp-plot, whose span children are the positioned chart labels.
+    // On a partial classification the clutter colour that is left may be
+    // either, and says so.
+    if (classified) {
+      var items = [['b', CLASSES.b.legend], ['v', CLASSES.v.legend]];
+      if (classificationState(data) === 'partial') items.push(['none', CLASS_NONE_LEGEND]);
+      out.push('<div class="tp-legend" data-testid="tp-legend">');
+      items.forEach(function (it) {
+        out.push('<span class="tp-legend-item"><span class="tp-swatch tp-swatch-' + it[0] + '" aria-hidden="true"></span>' + esc(it[1]) + '</span>');
+      });
+      out.push('</div>');
+    }
     return out.join('');
   }
 
@@ -1103,23 +1255,54 @@
    * plain one, which still names the owner and the licence, and without the
    * walker (map-tile-providers.js did not load) the credit is still shown,
    * as plain text. */
-  function footerCredit(parent, cfg) {
+  /* #730 M3: a profile classified with the building footprints says so in
+   * its attribution, which is then the server's dhm.buildings credit
+   * (internal/buildings AttributionDerived). The footer shows that line
+   * instead, with the footprints' dataset and source linked between the
+   * DHM dataset and the licence, in the order they stand in the text (the
+   * walker's ordering contract). Without the block nothing here names the
+   * footprints. The footer is rebuilt for every answer. */
+  function footerCredit(parent, cfg, data) {
     cfg = cfg || {};
+    parent.textContent = '';
+    var b = cfg.buildings;
+    if (b && typeof b.credit === 'string' && b.credit && data && data.attribution === b.credit) {
+      linkedCredit(parent, b.credit, buildingsCreditLinks(cfg, b), CREDIT_TESTIDS);
+      return parent;
+    }
     var text = typeof cfg.attributionDerived === 'string' && cfg.attributionDerived ? cfg.attributionDerived : cfg.attribution;
-    linkedCredit(parent, typeof text === 'string' ? text : '', cfg, CREDIT_TESTIDS);
+    linkedCredit(parent, typeof text === 'string' ? text : '', creditLinksOf(cfg), CREDIT_TESTIDS);
     return parent;
   }
 
-  /* linkedCredit appends `text` to `parent` with cfg's dataset and licence
-   * marks as links, through the one credit walker, each anchor in the
+  // The dataset and licence links of a credit block, or null without the
+  // walker (map-tile-providers.js did not load).
+  function creditLinksOf(cfg) {
+    return typeof global.MC_creditLinks === 'function' ? global.MC_creditLinks(cfg) : null;
+  }
+
+  // The four links of the footprints' credit, in text order.
+  function buildingsCreditLinks(cfg, b) {
+    var dhm = creditLinksOf(cfg);
+    if (!dhm) return null;
+    var by = {};
+    dhm.forEach(function (l) { by[l.key] = l; });
+    return [by.dataset,
+      { key: 'buildingsDataset', mark: b.datasetName, href: b.datasetUrl, rel: 'noopener noreferrer' },
+      { key: 'buildingsSource', mark: b.sourceName, href: b.sourceUrl, rel: 'noopener noreferrer' },
+      by.license];
+  }
+
+  /* linkedCredit appends `text` to `parent` with `links` (creditLinks
+   * entries) as anchors, through the one credit walker, each anchor in the
    * panel's link style with its test id from `testids`; without the walker
    * the text is still shown, plain. */
-  function linkedCredit(parent, text, cfg, testids) {
-    if (typeof global.MC_appendCredit !== 'function' || typeof global.MC_creditLinks !== 'function') {
+  function linkedCredit(parent, text, links, testids) {
+    if (typeof global.MC_appendCredit !== 'function' || !links) {
       parent.textContent = text;
       return;
     }
-    global.MC_appendCredit(parent, text, global.MC_creditLinks(cfg), function (a, link) {
+    global.MC_appendCredit(parent, text, links, function (a, link) {
       a.className = 'tp-credit-link';
       if (testids[link.key]) a.setAttribute('data-testid', testids[link.key]);
     });
@@ -1146,7 +1329,7 @@
       line.textContent = full;
       return parent;
     }
-    linkedCredit(line, short, cfg, FILL_CREDIT_TESTIDS);
+    linkedCredit(line, short, creditLinksOf(cfg), FILL_CREDIT_TESTIDS);
     if (full) {
       var more = el('details', 'tp-credit-full');
       more.setAttribute('data-testid', 'tp-credit-fill-full');
@@ -1449,6 +1632,11 @@
       ui.surfaceNote.setAttribute('data-testid', 'tp-surface-note');
       ui.surfaceNote.hidden = true;
       body.appendChild(ui.surfaceNote);
+      // #730 M3: a partial or unavailable classification says so, muted.
+      ui.classNote = el('p', 'tp-class-note');
+      ui.classNote.setAttribute('data-testid', 'tp-class-note');
+      ui.classNote.hidden = true;
+      body.appendChild(ui.classNote);
 
       /* #723 M3: a protected ancient monument at an end — a chip, then
        * its note: the warning, each end's zone type and distance, and the
@@ -1620,6 +1808,7 @@
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
       setSurfaceChip(null);
       setMixed(null);
+      setClassified(null);
       if (ui.assumed) ui.assumed.hidden = true;
       scheduleRequest();
       if (opts.onEndpointsChange) opts.onEndpointsChange();
@@ -1667,6 +1856,18 @@
         ui.mixedNote.textContent = note || '';
       }
       if (ui.fillCredit) fillCredit(ui.fillCredit, opts.dhm && opts.dhm.fill, data);
+    }
+
+    /* setClassified shows the classification's note and the credit for
+     * data, or takes the note away and puts the DHM credit back (data
+     * null: no profile on screen). */
+    function setClassified(data) {
+      var note = classNote(data);
+      if (ui.classNote) {
+        ui.classNote.hidden = !note;
+        ui.classNote.textContent = note || '';
+      }
+      if (ui.credit) footerCredit(ui.credit, opts.dhm, data);
     }
 
     function writeHash() {
@@ -1796,6 +1997,7 @@
       setChip(chip);
       setSurfaceChip(surfaceChip(data));
       setMixed(data);
+      setClassified(data);
       var names = { nameA: nodes.a && nodes.a.name, nameB: nodes.b && nodes.b.name };
       var drawn = !!(data.samples && data.samples.length);
       /* The credit is a licence obligation, so it is one HTML line under
@@ -1858,6 +2060,7 @@
       setChip({ state: 'pending', tone: 'unknown', label: '…', detail: 'Waiting for the terrain profile.' });
       setSurfaceChip(null);
       setMixed(null);
+      setClassified(null);
       if (ui.assumed) ui.assumed.hidden = true;
       presetPointDefaults();
       return fetchJSON(requestURL(effectiveState())).then(function (data) {
@@ -1876,6 +2079,7 @@
         setChip({ state: 'error', tone: 'unknown', label: 'No profile', detail: String(err && err.message || err) });
         setSurfaceChip(null);
         setMixed(null);
+        setClassified(null);
         if (ui.assumed) ui.assumed.hidden = true;
         setStatus(String((err && err.message) || 'Could not load the terrain profile.'), 'tp-error');
         ui.detail.textContent = 'Could not load the terrain profile.';
@@ -2089,6 +2293,8 @@
     HERITAGE_WARNING: HERITAGE_WARNING,
     heritageNote: heritageNote,
     SURFACE_NOTE: SURFACE_NOTE,
+    classNote: classNote,
+    CLASS_PARTIAL_NOTE: CLASS_NOTES.partial,
     chartGeometry: chartGeometry,
     buildChart: buildChart,
     create: create,

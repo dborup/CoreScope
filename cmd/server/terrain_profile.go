@@ -315,6 +315,8 @@ type terrainProfiler struct {
 	// map.dhm.profile.buildings is off. buildingsDeadline bounds its phase.
 	buildings         terrainBuildingSource
 	buildingsDeadline time.Duration
+	// buildingsRetry spaces the retries of degraded profiles (#797).
+	buildingsRetry *terrainRetryGate
 
 	freqMu  sync.Mutex
 	freqAt  time.Time
@@ -351,9 +353,9 @@ type terrainProfilerDeps struct {
 // decoupling entry size from maxSamples, and because dhm.Cache is shared
 // with the DHM tile cache (dhm_proxy.go), where variable tile sizes make
 // the byte bound load-bearing — the two call sites should stay consistent.
-// At the documented maxima (cacheEntries 4096, maxSamples 3200) this is
-// ~105 MB, ~118 MB classified; see config.example.json's
-// _comment_cacheEntries.
+// At the documented maxima (cacheEntries 4096, maxSamples 3200) one entry
+// is 25.6 KB, 28.8 KB classified, and this is ~105 MB, ~118 MB
+// classified; see config.example.json's _comment_cacheEntries.
 func terrainCacheMaxBytes(cacheEntries, maxSamples int, classified bool) int {
 	if classified {
 		return cacheEntries * (5 + 8*maxSamples + 2 + maxSamples)
@@ -406,6 +408,7 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 
 		buildings:         bsrc,
 		buildingsDeadline: terrainBuildingsDeadline,
+		buildingsRetry:    newTerrainRetryGate(terrainBuildingsRetryEvery, set.cacheEntries),
 	}
 	if set.share.enabled {
 		p.card = newProfileCards(set, d.theme, d.logf)
@@ -703,6 +706,9 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 		if hit && elev.fillFailed {
 			elev = p.retryFill(r, key, &plan, elev)
 		}
+		if hit && elev.classes != nil && elev.classes.degraded {
+			elev = p.retryBuildings(r, key, &plan, elev)
+		}
 	}
 	w.Header().Set("X-CoreScope-Cache", state)
 	writeJSON(w, p.buildResponse(tq, req.ends, req.a, req.b, &plan, elev))
@@ -722,10 +728,18 @@ func (p *terrainProfiler) elevationCall(key terrainKey, plan *dhm.Plan, both boo
 			if e.classes, err = p.classifyBuildings(ctx, plan, e); err != nil {
 				return nil, err
 			}
+			if e.classes.degraded {
+				// The lookup was just tried, from whichever route: a hit
+				// retries it only once the cadence has passed (#797).
+				p.buildingsRetry.hold(key.String(), p.now())
+			} else {
+				p.buildingsRetry.release(key.String())
+			}
 		}
 		// A profile left partial by a failed fill is kept too: the DHM
 		// part is good, and a hit retries only the fill (#738). One whose
-		// building lookup failed is kept briefly (#730).
+		// building lookup failed is kept briefly (#730), and a hit within
+		// that time retries only the buildings, as the gate allows.
 		enc := e.encode()
 		p.cache.PutFor(key, enc, p.now(), e.classes.ttl(p.set.cacheTTL))
 		return enc, nil
