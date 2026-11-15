@@ -6864,7 +6864,21 @@ body.embed #app.app-fixed {
   color: var(--text);
   font-size: var(--fs-sm);
 }
-.sf-close:focus-visible, .sf-dir:focus-visible, .sf-year:focus-visible, .sf-full:focus-visible, .sf-credit a:focus-visible {
+.sf-zoom {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold, 600);
+  cursor: pointer;
+}
+.sf-zoom[aria-pressed="true"] { background: var(--selected-bg); border-color: var(--accent); }
+.sf-zoom:disabled { opacity: 0.45; cursor: default; }
+.sf-close:focus-visible, .sf-dir:focus-visible, .sf-year:focus-visible, .sf-zoom:focus-visible, .sf-full:focus-visible, .sf-credit a:focus-visible {
   outline: 2px solid var(--accent, var(--link-color));
   outline-offset: 2px;
 }
@@ -6887,6 +6901,17 @@ body.embed #app.app-fixed {
   .sf-controls { padding: 4px 14px; }
 }
 .sf-img[hidden], .sf-status[hidden], .sf-full[hidden] { display: none; }
+/* #737 M3c: the marks layer covers the image element exactly and, with
+   xMidYMid meet, letterboxes as its object-fit: contain does, so the
+   crosshair and the line stay on the photo through any resize. */
+.sf-frame { position: relative; width: 100%; }
+.sf-marks { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: hidden; }
+.sf-marks[hidden] { display: none; }
+.sf-marks line, .sf-marks polyline { fill: none; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+.sf-cross-halo, .sf-los-halo { stroke: var(--card-bg); stroke-width: 5; opacity: 0.85; }
+.sf-cross-line { stroke: var(--danger); stroke-width: 2.5; }
+.sf-cross-approx .sf-cross-line { stroke-dasharray: 3 3; }
+.sf-los { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 8 5; }
 .sf-status { margin: 0; padding: 24px 16px; text-align: center; font-size: var(--fs-sm); color: var(--text-muted); }
 .sf-dialog[data-state="error"] .sf-status { color: var(--danger); }
 .sf-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 12px; margin: 4px 14px 0; font-size: var(--fs-sm); }

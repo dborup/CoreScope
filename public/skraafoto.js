@@ -29,8 +29,28 @@
  * the page keeps there, written with replaceState, removed on close; a
  * cold load or a hash change that carries it opens the viewer there.
  *
- * Everything shown is built with createElement + textContent; nothing
- * from the server or a node passes through an HTML string.
+ * #737 M3c, the marks: an SVG layer over the photo, in the photo's own
+ * pixels (viewBox) and scaled with it (xMidYMid meet, the image's
+ * object-fit: contain), so it stays on the point through resizes and
+ * rotations:
+ *   - a crosshair at the search's `point` (M3a, preview pixels), only when
+ *     `inFrame`, dashed when `approx` (a footprint height, not DHM);
+ *   - opened from a Path profile, the line of sight A→B (the search is
+ *     asked for the profile's `path`, `ha` and `hb`; the answer's `path`);
+ *   - "Zoom in" / "Zoom out", a button with aria-pressed: the M3b crop
+ *     around the point (preview ?zoom=1&x=&y=), fetched on the first click
+ *     only, kept like a preview; the crosshair then sits at the crop's
+ *     X-CoreScope-Skraafoto-Marker, the line is moved into the crop by
+ *     X-CoreScope-Skraafoto-Crop. Another direction or year turns it off;
+ *   - from a profile the first photo is the oblique most perpendicular to
+ *     A–B, which sees the line from the side; otherwise north, as before;
+ *   - the layer's aria-label says where the point is and that a line is
+ *     drawn (markText).
+ * Later (customizer, AGENTS rule 8): the default direction and zoom.
+ *
+ * Everything shown is built with createElement(NS) + textContent and
+ * setAttribute; nothing from the server or a node passes through an HTML
+ * string.
  *
  * Exposes window.Skraafoto. */
 (function (global) {
@@ -94,11 +114,19 @@
     return typeof y === 'number' && y % 1 === 0 && y >= MIN_YEAR && y <= MAX_YEAR;
   }
 
-  function searchURL(cfg, lat, lon, year) {
+  /* searchURL is the search at a point and year; with line (sightLine)
+   * the line of sight is asked for too: path=latA,lonA,latB,lonB, and ha
+   * and hb when known (#737 M3a). */
+  function searchURL(cfg, lat, lon, year, line) {
     var p = point(lat, lon);
     if (!p || !offered(cfg)) return null;
     var u = cfg.searchUrl + '?lat=' + p.lat.toFixed(5) + '&lon=' + p.lon.toFixed(5);
-    return validYear(year) ? u + '&year=' + year : u;
+    if (validYear(year)) u += '&year=' + year;
+    if (!line) return u;
+    u += '&path=' + [line.a.lat, line.a.lon, line.b.lat, line.b.lon].map(function (v) { return v.toFixed(5); }).join(',');
+    if (line.ha !== null) u += '&ha=' + line.ha;
+    if (line.hb !== null) u += '&hb=' + line.hb;
+    return u;
   }
 
   function previewURL(photo) {
@@ -209,6 +237,162 @@
     ];
   }
 
+  // ── Marks (#737 M3c) ───────────────────────────────────────────────────────
+
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  // The search's oblique directions and the bearing each looks along.
+  var VIEW_BEARING = { north: 0, east: 90, south: 180, west: 270 };
+  // cmd/server/skraafoto_zoom.go: x and y at most skraafoto.PreviewMaxPx.
+  var ZOOM_MAX_PX = 1024;
+  var MARKER_HEADER = 'X-CoreScope-Skraafoto-Marker';
+  var CROP_HEADER = 'X-CoreScope-Skraafoto-Crop';
+  // The M3b headers: plain non-negative decimals, as the server writes them.
+  var HEADER_NUM_RE = /^[0-9]{1,5}(\.[0-9]{1,6})?$/;
+  // The crosshair, in screen pixels: arm length and the gap at its centre.
+  var CROSS_ARM_PX = 14;
+  var CROSS_GAP_PX = 4;
+
+  function num(v) { return typeof v === 'number' && isFinite(v); }
+  function xy(p) { return p && num(p.x) && num(p.y) ? { x: p.x, y: p.y } : null; }
+  function size(s) {
+    var w = s && (s.width !== undefined ? s.width : s.w), h = s && (s.height !== undefined ? s.height : s.h);
+    return num(w) && num(h) && w > 0 && h > 0 ? { width: w, height: h } : null;
+  }
+  function round2(v) { var r = Math.round(v * 100) / 100; return r === 0 ? 0 : r; }
+
+  /* displayMap is how a photo of size space is shown in a box of size box
+   * under object-fit: contain, the image's CSS, and so also under the SVG
+   * layer's xMidYMid meet: one scale, centred, letterboxed along one axis.
+   * Display pixels are relative to the box's top-left corner. */
+  function displayMap(space, box) {
+    var s = size(space), b = size(box);
+    if (!s || !b) return null;
+    var k = Math.min(b.width / s.width, b.height / s.height);
+    return { scale: k, x: (b.width - s.width * k) / 2, y: (b.height - s.height * k) / 2 };
+  }
+
+  function toDisplay(p, m) {
+    return p && m ? { x: m.x + p.x * m.scale, y: m.y + p.y * m.scale } : null;
+  }
+
+  function headerNums(v, n) {
+    if (typeof v !== 'string') return null;
+    var f = v.split(',');
+    if (f.length !== n) return null;
+    for (var i = 0; i < n; i++) if (!HEADER_NUM_RE.test(f[i])) return null;
+    return f.map(Number);
+  }
+
+  /* parseMarker reads X-CoreScope-Skraafoto-Marker: the point in crop pixels. */
+  function parseMarker(v) {
+    var f = headerNums(v, 2);
+    return f ? { x: f[0], y: f[1] } : null;
+  }
+
+  /* parseCropBox reads X-CoreScope-Skraafoto-Crop: the crop's box in
+   * preview pixels, x0,y0,x1,y1, of some size. */
+  function parseCropBox(v) {
+    var f = headerNums(v, 4);
+    return f && f[2] > f[0] && f[3] > f[1] ? { x0: f[0], y0: f[1], x1: f[2], y1: f[3] } : null;
+  }
+
+  /* toCrop moves preview pixel p into a crop: { box, width, height }, the
+   * box in preview pixels and the crop's own size. */
+  function toCrop(p, crop) {
+    var q = xy(p), b = crop && crop.box, s = size(crop);
+    if (!q || !b || !s) return null;
+    return { x: (q.x - b.x0) * s.width / (b.x1 - b.x0), y: (q.y - b.y0) * s.height / (b.y1 - b.y0) };
+  }
+
+  function pathOf(path) {
+    if (!Array.isArray(path) || path.length < 2) return null;
+    var out = [];
+    for (var i = 0; i < path.length; i++) {
+      var q = xy(path[i]);
+      if (!q) return null;
+      out.push(q);
+    }
+    return out;
+  }
+
+  /* marks is what to draw on photo p: { width, height } is the space (the
+   * preview's frame, or zoomed the crop's size), point the crosshair
+   * (null: none), path the line of sight (null: none). crop, when zoomed:
+   * { box, width, height, marker }, from the M3b headers. null when the
+   * photo has no camera model (no frame). */
+  function marks(p, crop) {
+    var frame = size(p && p.frame);
+    if (!frame) return null;
+    var line = pathOf(p.path);
+    var approx = p.approx === true;
+    if (crop) {
+      var cs = size(crop);
+      if (!cs) return null;
+      var mk = xy(crop.marker);
+      if (mk && (mk.x < 0 || mk.y < 0 || mk.x > cs.width || mk.y > cs.height)) mk = null;
+      var moved = line && crop.box ? line.map(function (q) { return toCrop(q, crop); }) : null;
+      return { width: cs.width, height: cs.height, point: mk, path: moved, approx: approx };
+    }
+    return { width: frame.width, height: frame.height, point: p.inFrame === true ? xy(p.point) : null, path: line, approx: approx };
+  }
+
+  /* zoomURL is the M3b crop around photo p's point, or null when there is
+   * no point in frame to zoom on. */
+  function zoomURL(p) {
+    var u = previewURL(p), q = p && p.inFrame === true ? xy(p.point) : null;
+    if (!u || !q) return null;
+    var x = round2(q.x), y = round2(q.y);
+    if (x < 0 || y < 0 || x > ZOOM_MAX_PX || y > ZOOM_MAX_PX) return null;
+    return u + '?zoom=1&x=' + x + '&y=' + y;
+  }
+
+  /* sightLine is a profile's line A→B as the search takes it: two points,
+   * and the antenna heights when they are in the server's 0–100 m range
+   * (otherwise the server's default height). null without two points. */
+  function sightLine(l) {
+    var a = l && l.a && point(l.a.lat, l.a.lon), b = l && l.b && point(l.b.lat, l.b.lon);
+    if (!a || !b) return null;
+    function h(v) { return num(v) && v >= 0 && v <= 100 ? round2(v) : null; }
+    return { a: a, b: b, ha: h(l.ha), hb: h(l.hb) };
+  }
+
+  /* perpendicularDirection is the oblique photo among photos that looks
+   * most nearly at right angles to the line A→B, so the line runs across
+   * it: by ground bearing (longitude shrunk by cos latitude), the first in
+   * DIRECTIONS order on a tie. null without a line or an oblique photo. */
+  function perpendicularDirection(l, photos) {
+    var s = sightLine(l);
+    if (!s) return null;
+    var k = Math.cos((s.a.lat + s.b.lat) / 2 * Math.PI / 180);
+    var dx = (s.b.lon - s.a.lon) * k, dy = s.b.lat - s.a.lat;
+    if (dx === 0 && dy === 0) return null;
+    var bearing = Math.atan2(dx, dy);
+    var best = null, score = -1;
+    orderPhotos(photos).forEach(function (p) {
+      if (!(p.direction in VIEW_BEARING)) return;
+      var v = Math.abs(Math.sin(VIEW_BEARING[p.direction] * Math.PI / 180 - bearing));
+      if (v > score + 1e-9) { score = v; best = p.direction; }
+    });
+    return best;
+  }
+
+  /* placeWords names where p lies in a frame of w × h, on a 3 × 3 grid. */
+  function placeWords(p, w, h) {
+    var col = p.x < w / 3 ? 'left' : p.x > w * 2 / 3 ? 'right' : 'centre';
+    var row = p.y < h / 3 ? 'top' : p.y > h * 2 / 3 ? 'bottom' : 'centre';
+    if (row === 'centre') return col === 'centre' ? 'centre' : 'centre-' + col;
+    return row + '-' + col;
+  }
+
+  /* markText is the marks' text equivalent. */
+  function markText(m) {
+    if (!m) return '';
+    var t = m.point
+      ? 'Point marked at the ' + placeWords(m.point, m.width, m.height) + (m.approx ? ', position approximate.' : '.')
+      : 'The point is outside this photo.';
+    return m.path ? t + ' Line of sight from A to B drawn on the photo.' : t;
+  }
+
   // ── DOM ────────────────────────────────────────────────────────────────────
 
   function el(tag, cls, text) {
@@ -232,8 +416,9 @@
   var current = null; // the open viewer, if any
 
   /* open shows the viewer at a point. o: { lat, lon, label, opener, cfg,
-   * year, dir, fetch }. cfg defaults to the server's block; fetch is a
-   * seam for tests. Returns the viewer, or null when not offered. */
+   * year, dir, line, fetch }. cfg defaults to the server's block; line is
+   * a Path profile's A→B (sightLine), drawn on the photo; fetch is a seam
+   * for tests. Returns the viewer, or null when not offered. */
   function open(o) {
     o = o || {};
     var cfg = o.cfg || global.MC_SKRAAFOTO_CFG;
@@ -247,9 +432,13 @@
     // its card twice), replacing the opener: then its successor, the
     // element with the same test id, gets the focus back.
     var openerId = opener && opener.getAttribute ? opener.getAttribute('data-testid') : null;
-    var state = { year: validYear(o.year) ? o.year : 0, dir: DIRECTIONS.indexOf(o.dir) >= 0 ? o.dir : 'north', resp: null, photos: [] };
+    var line = sightLine(o.line);
+    var state = { year: validYear(o.year) ? o.year : 0, dir: DIRECTIONS.indexOf(o.dir) >= 0 ? o.dir : 'north', resp: null, photos: [], zoom: false };
+    // From a profile, the first answer picks the side view of the line,
+    // unless a direction was asked for (a deep link).
+    var autoDir = !!line && DIRECTIONS.indexOf(o.dir) < 0;
     var seq = 0, pseq = 0, previewAbort = null, searchAbort = null;
-    var kept = []; // [{ url, objectURL }], newest last
+    var kept = []; // [{ url, objectURL, crop }], newest last; crop: a zoom's headers
     var shown = null; // the object URL that is the image's source
     var ui = {};
     var gone = false;
@@ -312,6 +501,19 @@
     });
     yearWrap.appendChild(ui.year);
     controls.appendChild(yearWrap);
+    ui.zoom = el('button', 'sf-zoom', 'Zoom in');
+    ui.zoom.type = 'button';
+    ui.zoom.setAttribute('aria-pressed', 'false');
+    ui.zoom.setAttribute('data-testid', 'sf-zoom');
+    ui.zoom.title = 'A closer view around the point';
+    ui.zoom.disabled = true;
+    ui.zoom.addEventListener('click', function () {
+      if (ui.zoom.disabled) return;
+      state.zoom = !state.zoom;
+      syncZoom();
+      show();
+    });
+    controls.appendChild(ui.zoom);
     dialog.appendChild(controls);
 
     var stage = el('div', 'sf-stage');
@@ -320,7 +522,18 @@
     ui.img.setAttribute('data-testid', 'sf-img');
     ui.img.alt = '';
     ui.img.hidden = true;
-    stage.appendChild(ui.img);
+    // The image and its marks share one box: the SVG layer covers the
+    // image element and letterboxes as it does.
+    var frame = el('div', 'sf-frame');
+    frame.appendChild(ui.img);
+    ui.marks = doc.createElementNS(SVG_NS, 'svg');
+    ui.marks.setAttribute('class', 'sf-marks');
+    ui.marks.setAttribute('data-testid', 'sf-marks');
+    ui.marks.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    ui.marks.setAttribute('focusable', 'false');
+    ui.marks.hidden = true;
+    frame.appendChild(ui.marks);
+    stage.appendChild(frame);
     ui.status = el('p', 'sf-status');
     ui.status.setAttribute('role', 'status');
     ui.status.setAttribute('data-testid', 'sf-status');
@@ -395,7 +608,83 @@
       });
       ui.year.value = String(state.year);
       ui.year.disabled = years.length < 2;
+      syncZoom();
     }
+
+    /* syncZoom: the toggle is offered for a photo with its point in
+     * frame, pressed while the crop is (or is being) shown. */
+    function syncZoom() {
+      var can = !!zoomURL(photoOf(state.dir));
+      if (!can) state.zoom = false;
+      ui.zoom.disabled = !can;
+      ui.zoom.setAttribute('aria-pressed', state.zoom ? 'true' : 'false');
+      ui.zoom.textContent = state.zoom ? 'Zoom out' : 'Zoom in';
+    }
+
+    function svg(tag, cls, parent) {
+      var e = doc.createElementNS(SVG_NS, tag);
+      if (cls) e.setAttribute('class', cls);
+      parent.appendChild(e);
+      return e;
+    }
+
+    var drawn = null; // { p, crop }: the marks on screen, redrawn on resize
+
+    /* drawMarks puts photo p's marks over the image: the crosshair and the
+     * line, in the image's own pixels. Called once the image has loaded,
+     * and again when it is resized (the crosshair keeps its screen size). */
+    function drawMarks(p, crop) {
+      drawn = { p: p, crop: crop };
+      var c = crop ? { box: crop.box, marker: crop.marker, width: ui.img.naturalWidth, height: ui.img.naturalHeight } : null;
+      var m = marks(p, c);
+      var g = ui.marks;
+      g.textContent = '';
+      if (!m) { g.hidden = true; g.removeAttribute('role'); g.removeAttribute('aria-label'); return; }
+      g.setAttribute('viewBox', '0 0 ' + m.width + ' ' + m.height);
+      g.setAttribute('role', 'img');
+      g.setAttribute('aria-label', markText(m));
+      var dm = displayMap(m, { width: ui.img.clientWidth, height: ui.img.clientHeight });
+      var unit = dm && dm.scale > 0 ? 1 / dm.scale : m.width / 400;
+      if (m.path) {
+        var pts = m.path.map(function (q) { return round2(q.x) + ',' + round2(q.y); }).join(' ');
+        svg('polyline', 'sf-los-halo', g).setAttribute('points', pts);
+        var los = svg('polyline', 'sf-los', g);
+        los.setAttribute('points', pts);
+        los.setAttribute('data-testid', 'sf-los');
+      }
+      if (m.point) {
+        var x = round2(m.point.x), y = round2(m.point.y);
+        var cross = svg('g', 'sf-cross' + (m.approx ? ' sf-cross-approx' : ''), g);
+        cross.setAttribute('data-testid', 'sf-cross');
+        cross.setAttribute('data-x', String(x));
+        cross.setAttribute('data-y', String(y));
+        cross.setAttribute('transform', 'translate(' + x + ' ' + y + ')');
+        var arm = round2(CROSS_ARM_PX * unit), gap = round2(CROSS_GAP_PX * unit);
+        ['sf-cross-halo', 'sf-cross-line'].forEach(function (cls) {
+          [[gap, 0, arm, 0], [-gap, 0, -arm, 0], [0, gap, 0, arm], [0, -gap, 0, -arm]].forEach(function (l) {
+            var e = svg('line', cls, cross);
+            e.setAttribute('x1', String(l[0]));
+            e.setAttribute('y1', String(l[1]));
+            e.setAttribute('x2', String(l[2]));
+            e.setAttribute('y2', String(l[3]));
+          });
+        });
+      }
+      g.hidden = false;
+    }
+
+    function hideMarks() {
+      drawn = null;
+      ui.marks.hidden = true;
+    }
+
+    // The crosshair is sized in screen pixels: redrawn when the image is
+    // resized (a window resize, a phone rotated). Coalesced by the
+    // observer, one redraw per frame at most.
+    var resizer = typeof global.ResizeObserver === 'function'
+      ? new global.ResizeObserver(function () { if (drawn && !gone && !ui.img.hidden) drawMarks(drawn.p, drawn.crop); })
+      : null;
+    if (resizer) resizer.observe(ui.img);
 
     function retryAfter(r) {
       var v = r && r.headers && r.headers.get ? Number(r.headers.get('Retry-After')) : 0;
@@ -412,7 +701,9 @@
       ui.full.hidden = true;
       ui.date.textContent = '';
       setState('loading', 'Looking up photos…');
-      var url = searchURL(cfg, at.lat, at.lon, state.year);
+      hideMarks();
+      state.zoom = false;
+      var url = searchURL(cfg, at.lat, at.lon, state.year, line);
       fetcher(url, searchAbort ? { signal: searchAbort.signal } : undefined).then(function (r) {
         if (!r.ok) {
           var err = new Error('status ' + r.status);
@@ -433,6 +724,8 @@
           writeHash();
           return;
         }
+        if (autoDir) state.dir = perpendicularDirection(line, state.photos) || state.dir;
+        autoDir = false;
         state.dir = pickDirection(state.photos, state.dir);
         syncControls();
         writeHash();
@@ -450,8 +743,8 @@
       return null;
     }
 
-    function keptURL(u) {
-      for (var i = 0; i < kept.length; i++) if (kept[i].url === u) return kept[i].objectURL;
+    function keptOf(u) {
+      for (var i = 0; i < kept.length; i++) if (kept[i].url === u) return kept[i];
       return null;
     }
 
@@ -463,8 +756,8 @@
     /* keep holds a fetched photo for the dialog. A copy pushed out is
      * revoked, unless it is the image's source: display() revokes that
      * one when the next photo replaces it, close() when the dialog goes. */
-    function keep(u, objectURL) {
-      kept.push({ url: u, objectURL: objectURL });
+    function keep(u, objectURL, crop) {
+      kept.push({ url: u, objectURL: objectURL, crop: crop || null });
       while (kept.length > MAX_KEPT) {
         var old = kept.shift();
         if (old.objectURL !== shown) revoke(old.objectURL);
@@ -475,10 +768,11 @@
       try { global.URL.revokeObjectURL(u); } catch (_) {}
     }
 
-    function display(objectURL, p) {
-      ui.img.alt = 'Oblique aerial photo, ' + DIR_TEXT[p.direction].toLowerCase() + (photoDate(p.datetime) ? ', ' + photoDate(p.datetime) : '');
-      ui.img.onload = function () { if (!gone) { ui.img.hidden = false; setState('ready', ''); } };
-      ui.img.onerror = function () { if (!gone) { ui.img.hidden = true; setState('error', errorText(0)); } };
+    function display(objectURL, p, crop) {
+      ui.img.alt = 'Oblique aerial photo, ' + DIR_TEXT[p.direction].toLowerCase() + (photoDate(p.datetime) ? ', ' + photoDate(p.datetime) : '')
+        + (crop ? ', zoomed in around the point' : '');
+      ui.img.onload = function () { if (!gone) { ui.img.hidden = false; setState('ready', ''); drawMarks(p, crop); } };
+      ui.img.onerror = function () { if (!gone) { ui.img.hidden = true; hideMarks(); setState('error', errorText(0)); } };
       var was = shown;
       shown = objectURL;
       ui.img.src = objectURL;
@@ -486,7 +780,8 @@
     }
 
     /* show puts the chosen direction's photo up: the one preview it
-     * needs, fetched now, or the copy this dialog already holds. */
+     * needs, or zoomed its crop, fetched now, or the copy this dialog
+     * already holds. */
     function show() {
       var p = photoOf(state.dir);
       if (!p) return;
@@ -499,11 +794,14 @@
       ui.full.hidden = !link;
       if (link) ui.full.setAttribute('href', link); else ui.full.removeAttribute('href');
       ui.img.hidden = true;
-      var u = previewURL(p);
+      hideMarks();
+      var zoomed = state.zoom;
+      var u = zoomed ? zoomURL(p) : previewURL(p);
       if (!u) { setState('error', 'No preview of this photo here; open it in full resolution.'); return; }
-      var have = keptURL(u);
-      if (have) { setState('loading', 'Loading photo…'); display(have, p); return; }
-      setState('loading', 'Loading photo…');
+      var have = keptOf(u);
+      if (have) { setState('loading', zoomed ? 'Zooming in…' : 'Loading photo…'); display(have.objectURL, p, have.crop); return; }
+      setState('loading', zoomed ? 'Zooming in…' : 'Loading photo…');
+      var crop = null;
       previewAbort = typeof AbortController === 'function' ? new AbortController() : null;
       fetcher(u, previewAbort ? { signal: previewAbort.signal } : undefined).then(function (r) {
         if (!r.ok) {
@@ -512,13 +810,17 @@
           err.retry = retryAfter(r);
           throw err;
         }
+        if (zoomed) {
+          var h = r.headers && r.headers.get ? r.headers : { get: function () { return null; } };
+          crop = { marker: parseMarker(h.get(MARKER_HEADER)), box: parseCropBox(h.get(CROP_HEADER)) };
+        }
         return r.blob();
       }).then(function (blob) {
         if (gone) return;
         var objectURL = global.URL.createObjectURL(blob);
-        keep(u, objectURL);
+        keep(u, objectURL, crop);
         if (mine !== pseq) return;
-        display(objectURL, p);
+        display(objectURL, p, crop);
       }).catch(function (err) {
         if (mine !== pseq || gone || (err && err.name === 'AbortError')) return;
         setState('error', errorText(err && err.status ? err.status : 0, err && err.retry));
@@ -529,6 +831,7 @@
       if (d === state.dir && dialog.getAttribute('data-state') !== 'error') return;
       if (!photoOf(d)) return;
       state.dir = d;
+      state.zoom = false;
       syncControls();
       writeHash();
       show();
@@ -572,6 +875,8 @@
         if (previewAbort) previewAbort.abort();
         if (searchAbort) searchAbort.abort();
         doc.removeEventListener('keydown', onKey, true);
+        if (resizer) resizer.disconnect();
+        drawn = null;
         if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
         ui.img.removeAttribute('src');
         if (shown && !isKept(shown)) revoke(shown);
@@ -597,7 +902,8 @@
   }
 
   /* actionButton is an "Oblique photo" button; getPoint() is asked at
-   * click time for { lat, lon, label } (null: nothing to show). */
+   * click time for { lat, lon, label, line } (null: nothing to show; line,
+   * from a profile, the A→B drawn on the photo). */
   function actionButton(o) {
     var b = el('button', o.cls || 'btn-primary');
     b.type = 'button';
@@ -608,7 +914,7 @@
     b.addEventListener('click', function () {
       var p = o.getPoint ? o.getPoint() : null;
       if (!p) return;
-      open({ lat: p.lat, lon: p.lon, label: p.label, opener: b, cfg: o.cfg });
+      open({ lat: p.lat, lon: p.lon, label: p.label, line: p.line, opener: b, cfg: o.cfg });
     });
     return b;
   }
@@ -664,6 +970,17 @@
     withParam: withParam,
     linkFromHash: linkFromHash,
     creditLinks: creditLinks,
+    displayMap: displayMap,
+    toDisplay: toDisplay,
+    parseMarker: parseMarker,
+    parseCropBox: parseCropBox,
+    toCrop: toCrop,
+    marks: marks,
+    zoomURL: zoomURL,
+    sightLine: sightLine,
+    perpendicularDirection: perpendicularDirection,
+    placeWords: placeWords,
+    markText: markText,
     open: open,
     actionButton: actionButton,
     nodeAction: nodeAction,
