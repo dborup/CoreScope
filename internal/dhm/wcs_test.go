@@ -200,7 +200,7 @@ func TestWCSRasterRequestBounds(t *testing.T) {
 // unknown coverage, wrong CRS or format, a bbox outside DK, an oversize
 // raster, or a caller-supplied token key.
 func TestClientGetWCSOnlyAllowListedShape(t *testing.T) {
-	valid := func() url.Values { return someRaster().coverageQuery() }
+	valid := func() url.Values { return someRaster().CoverageQuery() }
 	u := tiffUpstream(t)
 	c := newTestClient(t, u, &logSink{})
 	if _, err := c.Get(WCSService, valid(), "image/tiff"); err != nil {
@@ -412,7 +412,7 @@ func TestBodyCapIsPerService(t *testing.T) {
 func TestCoverageQueryRoundTrip(t *testing.T) {
 	r := someRaster()
 	r.Model = ModelSurface
-	got, err := parseCoverageQuery(r.coverageQuery())
+	got, err := parseCoverageQuery(r.CoverageQuery())
 	if err != nil || got != r {
 		t.Fatalf("round trip: %+v %v, want %+v", got, err, r)
 	}

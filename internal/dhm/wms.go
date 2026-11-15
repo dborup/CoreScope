@@ -156,7 +156,7 @@ func (k TileKey) IntersectsCoverage() bool {
 
 // upstreamQuery is the terrain hillshade's GetMap query for the tile,
 // rebuilt from the validated key: nothing is copied from the browser's
-// query string. overlayQuery sets another overlay's layer and style.
+// query string. OverlayQuery sets another overlay's layer and style.
 func (k TileKey) upstreamQuery() url.Values {
 	b := k.BBox()
 	q := url.Values{}

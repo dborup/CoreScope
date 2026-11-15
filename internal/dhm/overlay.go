@@ -135,16 +135,16 @@ func (o Overlay) Resolve(terrain Hillshade) Overlay {
 	return o
 }
 
-// overlayQuery is the tile's GetMap query for overlay o: #680's upstream
-// query with o's layer and style.
-func (k TileKey) overlayQuery(o Overlay) url.Values {
+// OverlayQuery is the tile's GetMap query for overlay o: #680's upstream
+// query with o's layer and style. The live smoke check (#803) sends it too.
+func (k TileKey) OverlayQuery(o Overlay) url.Values {
 	q := k.upstreamQuery()
 	q.Set("layers", o.Layer)
 	q.Set("styles", o.Style)
 	return q
 }
 
-// overlayQueryCheck accepts q only if it is exactly the overlayQuery of one
+// overlayQueryCheck accepts q only if it is exactly the OverlayQuery of one
 // of service's overlays, for the tile its bbox names, at a zoom inside that
 // overlay's range. So Client.Get cannot send any other request to service:
 // no other layer, style, format, zoom or parameter. A service has at most
@@ -169,7 +169,7 @@ func overlayQueryCheck(service string) func(url.Values) error {
 		if err != nil {
 			return err
 		}
-		if k.Z < o.MinZoom || k.Z > o.MaxZoom || q.Encode() != k.overlayQuery(o).Encode() {
+		if k.Z < o.MinZoom || k.Z > o.MaxZoom || q.Encode() != k.OverlayQuery(o).Encode() {
 			return ErrBadRequest
 		}
 		return nil
@@ -183,7 +183,7 @@ func overlayQueryCheck(service string) func(url.Values) error {
 // (#695). o is not trusted: the service's check refuses any overlay that
 // is not in the table.
 func (c *Client) FetchOverlayAdmitted(ctx context.Context, adm *Admission, o Overlay, k TileKey) ([]byte, error) {
-	data, err := c.get(ctx, adm, o.Service, k.overlayQuery(o), []string{"image/png"})
+	data, err := c.get(ctx, adm, o.Service, k.OverlayQuery(o), []string{"image/png"})
 	if err != nil {
 		return nil, err
 	}

@@ -14,9 +14,6 @@ import (
 )
 
 const (
-	// tokenHeader is the header Dataforsyningen reads the token from, as
-	// internal/dhm sends it.
-	tokenHeader = "token"
 	// epsg25832 is the CRS of the search point and of the answer, as the
 	// official viewer asks (src/modules/api.js).
 	epsg25832 = "http://www.opengis.net/def/crs/EPSG/0/25832"
@@ -114,12 +111,11 @@ func (s *STAC) Requests() int64 { return s.lim.sent.Load() }
 // get fetches path (below the v2 root) with query q, if any. path is
 // built by the callers from validated parts only.
 func (s *STAC) get(ctx context.Context, path string, q url.Values, maxBody int) ([]byte, error) {
-	target := stacBase + path
-	if len(q) > 0 {
-		target += "?" + q.Encode()
-	}
+	target := stacURL(path, q)
 	h := http.Header{}
-	h.Set(tokenHeader, s.token)
+	// The header Dataforsyningen reads the token from, as internal/dhm
+	// sends it.
+	h.Set(dhm.TokenHeader, s.token)
 	h.Set("Accept", strings.Join(stacTypes, ", "))
 	var body []byte
 	err := s.lim.do(ctx, func(ctx context.Context) error {
@@ -129,6 +125,14 @@ func (s *STAC) get(ctx context.Context, path string, q url.Values, maxBody int) 
 		return err
 	})
 	return body, err
+}
+
+// stacURL is the URL of path (below the v2 root) with query q, if any.
+func stacURL(path string, q url.Values) string {
+	if len(q) > 0 {
+		return stacBase + path + "?" + q.Encode()
+	}
+	return stacBase + path
 }
 
 // Years are the collections offered, newest first (ParseCollections).
@@ -144,8 +148,32 @@ func (s *STAC) Years(ctx context.Context) ([]int, error) {
 // EPSG:25832 point (e, n) and face d, at most SearchLimit, nearest the
 // footprint centroid first: the one query shape the server sends.
 func (s *STAC) Search(ctx context.Context, year, e, n int, d Direction) ([]Item, error) {
+	path, q, err := searchRequest(year, e, n, d)
+	if err != nil {
+		return nil, err
+	}
+	body, err := s.get(ctx, path, q, maxItemsBody)
+	if err != nil {
+		return nil, err
+	}
+	return ParseSearch(body, year, d)
+}
+
+// SearchURL is the URL Search sends for the same arguments, without the
+// token, which travels in a header: the live smoke check (#803) sends it.
+func SearchURL(year, e, n int, d Direction) (string, error) {
+	path, q, err := searchRequest(year, e, n, d)
+	if err != nil {
+		return "", err
+	}
+	return stacURL(path, q), nil
+}
+
+// searchRequest is the path and query of Search, or ErrBadRequest for a
+// year or direction it does not offer.
+func searchRequest(year, e, n int, d Direction) (string, url.Values, error) {
 	if _, ok := CollectionYear(Collection(year)); !ok || !d.Valid() {
-		return nil, dhm.ErrBadRequest
+		return "", nil, dhm.ErrBadRequest
 	}
 	// Every value is an integer or a constant: no caller text reaches it.
 	filter := fmt.Sprintf(`{"and":[{"contains":[{"property":"geometry"},{"type":"Point","coordinates":[%d,%d]}]},`+
@@ -154,11 +182,7 @@ func (s *STAC) Search(ctx context.Context, year, e, n int, d Direction) ([]Item,
 		"limit": {strconv.Itoa(SearchLimit)}, "filter": {filter}, "filter-lang": {"cql-json"},
 		"filter-crs": {epsg25832}, "crs": {epsg25832},
 	}
-	body, err := s.get(ctx, "/collections/"+Collection(year)+"/items", q, maxItemsBody)
-	if err != nil {
-		return nil, err
-	}
-	return ParseSearch(body, year, d)
+	return "/collections/" + Collection(year) + "/items", q, nil
 }
 
 // Item looks up photo id of collection c, for a preview of a photo no
