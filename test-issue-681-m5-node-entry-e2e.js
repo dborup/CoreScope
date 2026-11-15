@@ -67,11 +67,16 @@ async function step(name, fn) {
 }
 function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
-function profileAnswer(q) {
+function profileAnswer(q, o) {
   const D = 9000;
   const end = (p, h) => {
     const node = /^[0-9a-f]{64}$/.test(p || '');
     const asked = q.get(h);
+    // #789 M1: the server's surface-model estimate for a repeater.
+    if (node && asked === null && o && o.estimate) {
+      return { lat: 37.6, lon: -122.1, kind: 'node', role: 'repeater', groundM: 40,
+        antennaM: 22, antennaSource: 'dsm-estimate', assumed: true };
+    }
     return {
       lat: 37.6, lon: -122.1, kind: node ? 'node' : 'point', role: node ? 'repeater' : undefined,
       groundM: 40,
@@ -121,7 +126,7 @@ function profileAnswer(q) {
     await ctx.route(url => new URL(url).pathname === PROFILE_PATH, async (route) => {
       const u = new URL(route.request().url());
       rec.profile.push(u);
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profileAnswer(u.searchParams)) });
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profileAnswer(u.searchParams, o)) });
     });
     await ctx.route(/^https?:\/\/(?!localhost|127\.0\.0\.1)/i, (route) =>
       route.fulfill({ status: 200, contentType: 'image/png', body: PNG_1X1 }));
@@ -374,6 +379,38 @@ function profileAnswer(q) {
 
   // ── 4. 360 px portrait, touch ─────────────────────────────────────────────
   await roundTrip('360px touch', { viewport: { width: 360, height: 740 }, touch: true, shot: '360' });
+
+  // ── 3b. #789 M1: a surface-model estimate ─────────────────────────────────
+  {
+    const { ctx, page, rec } = await newCtx({ estimate: true });
+    await page.goto(`${BASE}/#/map?profile=${PK}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
+    await page.waitForSelector(PANEL + '.is-open', { timeout: 15000 });
+    await page.waitForTimeout(500);
+    await pickPoint(page, false);
+    await page.waitForSelector('[data-testid="tp-chart"] svg.tp-svg', { timeout: 10000 });
+    await step('#789: an estimated height reads "estimate" with its source label', async () => {
+      const got = await page.evaluate(() => {
+        const b = document.querySelector('[data-testid="tp-hsrc-a"]');
+        return {
+          badge: b && !b.hidden ? b.getAttribute('data-source') + ':' + b.textContent : null,
+          title: b ? b.title : '',
+          source: (document.querySelector('[data-testid="tp-assumed-a"]') || {}).textContent,
+          value: (document.querySelector('[data-testid="tp-h-a"]') || {}).value,
+        };
+      });
+      assert(got.badge === 'estimate:estimate', 'badge = ' + got.badge);
+      assert(/surface model/.test(got.title), 'title = ' + got.title);
+      assert(got.source === 'Assumed \u2014 estimated from surface model', 'source = ' + got.source);
+      assert(got.value === '22', 'height = ' + got.value);
+      assert(rec.profile.every(u => !u.searchParams.has('ha')), 'the estimate was sent back as a request height');
+    });
+    if (SHOT_DIR) {
+      await page.$eval('[data-testid="tp-assumed-a"]', e => e.scrollIntoView({ block: 'center' }));
+      await page.screenshot({ path: path.join(SHOT_DIR, '789-m1-estimate.png') });
+    }
+    await ctx.close();
+  }
 
   // ── 1b. The side pane ─────────────────────────────────────────────────────
   {

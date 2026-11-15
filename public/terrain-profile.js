@@ -83,6 +83,11 @@
   /* The antenna sources the server reports when it had nothing but its own
    * built-in default — the only ones a customizer default may replace. */
   var PROMOTABLE_SOURCES = { 'role-default': true, 'point-default': true };
+  /* #789 M1: the server floors its surface-model estimate at the role
+   * height that would otherwise apply, max(role, surface + 2). The
+   * customizer role height is this viewer's role height, so it gets the
+   * same floor: it replaces an estimate only when it is higher. */
+  var FLOORED_SOURCES = { 'dsm-estimate': true };
 
   function validModel(m) { return m === 'dtm' || m === 'both'; }
 
@@ -1354,6 +1359,9 @@
   var SOURCE_LABELS = {
     request: 'from this link',
     'operator-node': 'set by the operator for this node',
+    /* #789 M1 — the server's estimate: the surface (roof, treetop) around
+     * a repeater or room plus 2 m, never below the role default. */
+    'dsm-estimate': 'estimated from surface model',
     'operator-role': 'operator default for the role',
     'role-default': 'role default for this node type',
     'point-default': 'default for a map point'
@@ -1390,6 +1398,7 @@
   var HEIGHT_BADGES = {
     default: { label: 'default', title: 'A built-in default for this kind of endpoint, not a measured height.' },
     operator: { label: 'operator', title: 'Set by the operator of this instance (radio.antennaHeightsM).' },
+    estimate: { label: 'estimate', title: 'Estimated from the surface model: the roof or treetop around the node plus 2 m, never below the role default. A mast does not show in the surface model.' },
     yours: { label: 'yours', title: 'Your own height for this endpoint, remembered in this browser.' },
     link: { label: 'link', title: 'Taken from the link you opened.' },
     /* #681 M6 — the customizer's default for this kind of endpoint. Still a
@@ -1401,7 +1410,8 @@
     'role-default': 'default',
     'point-default': 'default',
     'operator-node': 'operator',
-    'operator-role': 'operator'
+    'operator-role': 'operator',
+    'dsm-estimate': 'estimate'
   };
 
   function heightBadge(source, origin) {
@@ -1485,13 +1495,16 @@
      * kind, role, antennaM and antennaSource — and reports whether anything
      * moved. An operator value, a remembered height and a link are all more
      * specific and are left alone; a customizer value equal to the server's
-     * own is not worth sending. */
+     * own is not worth sending. A surface-model estimate is replaced only by
+     * a higher customizer value (FLOORED_SOURCES). */
     function adoptThemeDefault(side, end, defs) {
       if (!end || themeH[side] !== null) return false;
       if ((side === 'a' ? state.ha : state.hb) !== null) return false;
-      if (!PROMOTABLE_SOURCES[end.antennaSource]) return false;
+      var floored = FLOORED_SOURCES[end.antennaSource];
+      if (!PROMOTABLE_SOURCES[end.antennaSource] && !floored) return false;
       var h = themeHeight(end, defs);
       if (h === null || h === clampHeight(end.antennaM)) return false;
+      if (floored && !(h > clampHeight(end.antennaM))) return false;
       themeH[side] = h;
       origin[side] = 'theme';
       return true;

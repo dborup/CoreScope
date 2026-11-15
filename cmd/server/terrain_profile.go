@@ -310,6 +310,7 @@ type terrainProfiler struct {
 	logf       func(string, ...interface{})
 	logFailure func(what string, err error)
 	observers  func() ([]Observer, error)
+	estimate   terrainEstimator // #789: the antenna estimate from the surface model
 
 	// buildings tells buildings from trees (#730 M2); nil while
 	// map.dhm.profile.buildings is off. buildingsDeadline bounds its phase.
@@ -340,6 +341,9 @@ type terrainProfilerDeps struct {
 	// buildings replaces the INSPIRE source built from the settings
 	// (tests); it is used only while the classification is enabled.
 	buildings terrainBuildingSource
+	// surface measures the antenna estimate's window (#789); nil: no
+	// estimate.
+	surface dhm.ElevationSource
 }
 
 // terrainCacheMaxBytes is the cache's byte bound: one entry holds n DTM + n
@@ -409,6 +413,7 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 		buildings:         bsrc,
 		buildingsDeadline: terrainBuildingsDeadline,
 		buildingsRetry:    newTerrainRetryGate(terrainBuildingsRetryEvery, set.cacheEntries),
+		estimate:          newTerrainEstimator(d.surface),
 	}
 	if set.share.enabled {
 		p.card = newProfileCards(set, d.theme, d.logf)
@@ -423,10 +428,14 @@ func newTerrainProfilerFromConfig(cfg *Config, proxy *dhmProxy, db *DB) *terrain
 	if cfg == nil || proxy == nil || proxy.client == nil {
 		return nil
 	}
+	src := dhm.NewWCSSource(proxy.client)
 	d := terrainProfilerDeps{
-		src:        dhm.NewWCSSource(proxy.client),
+		src:        src,
 		logFailure: proxy.client.LogFailure,
 		trusted:    parseCIDRListQuiet(cfg.WSTrustedProxies()),
+		// #789: the same client, so the same token, concurrency limit
+		// and coalescing.
+		surface: src,
 	}
 	if db != nil {
 		d.observers = db.GetObservers
@@ -595,6 +604,9 @@ type terrainEnd struct {
 	// is only ever set for a node that passed the visibility gate in
 	// resolveTerrainEnd; the JSON response never carries it.
 	name string
+	// surfaceM is the surface above the ground at the node (#789), set by
+	// estimateEnds; nil when not measured or unknown.
+	surfaceM *float64
 }
 
 // terrainRequest is a validated, resolved profile request: everything a
@@ -602,10 +614,13 @@ type terrainEnd struct {
 // (resolveTerrainRequest), whichever route the query came in on.
 type terrainRequest struct {
 	q      terrainQuery
-	ends   [2]terrainEnd
-	ka, kb [2]int64   // the snapped endpoints of the cache key
-	a, b   dhm.LatLon // the same, as coordinates
+	ends   [2]terrainEnd // surfaceM set from the estimate cache (#789)
+	ka, kb [2]int64      // the snapped endpoints of the cache key
+	a, b   dhm.LatLon    // the same, as coordinates
 	plan   dhm.Plan
+	// estimatePending: an endpoint's antenna estimate is neither cached
+	// nor backed off, so the profile route would measure it.
+	estimatePending bool
 }
 
 // elevationKey is the elevation cache key of a resolved request.
@@ -634,6 +649,9 @@ func (s *Server) resolveTerrainRequest(ctx context.Context, p *terrainProfiler, 
 		}
 		req.ends[i] = e
 	}
+	// The antenna estimate, from its cache only (#789): every route then
+	// draws the same heights; only the profile route measures a miss.
+	req.estimatePending = p.cachedEstimates(&req.ends, [2]*float64{tq.ha, tq.hb})
 	req.ka = [2]int64{terrainSnapCoord(req.ends[0].pt.Lat), terrainSnapCoord(req.ends[0].pt.Lon)}
 	req.kb = [2]int64{terrainSnapCoord(req.ends[1].pt.Lat), terrainSnapCoord(req.ends[1].pt.Lon)}
 	req.a = dhm.LatLon{Lat: float64(req.ka[0]) / terrainSnap, Lon: float64(req.ka[1]) / terrainSnap}
@@ -668,8 +686,51 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 	plan := req.plan
 	n := len(plan.E)
 
-	var elev terrainElevation
+	var (
+		elev terrainElevation
+		key  terrainKey
+		data []byte
+		hit  bool
+	)
 	state := "none"
+	if plan.Calls() > 0 {
+		key = p.elevationKey(req)
+		data, hit = p.cache.Get(key, p.now())
+		// An entry of another format (#730 M2) is fetched afresh, not served.
+		hit = hit && terrainEntryOK(data, n, tq.both, p.classifies(tq.both))
+		state = "hit"
+		if !hit {
+			state = "miss"
+		}
+	}
+	// One per-IP charge for a request that does any upstream work: the
+	// elevations, or an antenna estimate not cached (#789 review). A
+	// refused estimate is skipped, not refused: the role height stands
+	// for this response and nothing is remembered. With no part of the
+	// path inside DHM, neither endpoint is, and SurfaceAt answers
+	// ErrNotCovered without a call: measured, cached, not charged.
+	measure := req.estimatePending
+	if state == "miss" || (measure && plan.Calls() > 0) {
+		if ok, retry := p.limiter.allow(r); !ok {
+			if state == "miss" {
+				writeRateLimited(w, retry)
+				return
+			}
+			measure = false
+		}
+	}
+	ends := req.ends
+	overrides := [2]*float64{tq.ha, tq.hb}
+	// The estimate is measured beside the elevations, on a copy of the
+	// ends, so an early return leaves nothing writing to them.
+	var estimated chan [2]terrainEnd
+	if measure {
+		estimated = make(chan [2]terrainEnd, 1)
+		go func(e [2]terrainEnd) {
+			p.estimateEnds(r.Context(), &e, overrides)
+			estimated <- e
+		}(ends)
+	}
 	if plan.Calls() == 0 {
 		// Nothing of the path is inside DHM: no upstream call, no charge.
 		elev = terrainElevation{dtm: nanSlice(n)}
@@ -680,17 +741,8 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 			elev.classes = unclassified(n)
 		}
 	} else {
-		key := p.elevationKey(req)
-		data, hit := p.cache.Get(key, p.now())
-		// An entry of another format (#730 M2) is fetched afresh, not served.
-		hit = hit && terrainEntryOK(data, n, tq.both, p.classifies(tq.both))
-		state = "hit"
+		var err error
 		if !hit {
-			state = "miss"
-			if ok, retry := p.limiter.allow(r); !ok {
-				writeRateLimited(w, retry)
-				return
-			}
 			// Admission is per fetch, not per request: callers that join
 			// a running fetch add no work and take no slot.
 			data, _, err = p.flight.DoAdmitted(r.Context(), key.String(), p.deadline, p.admit, p.elevationCall(key, &plan, tq.both))
@@ -710,8 +762,11 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 			elev = p.retryBuildings(r, key, &plan, elev)
 		}
 	}
+	if estimated != nil {
+		ends = <-estimated
+	}
 	w.Header().Set("X-CoreScope-Cache", state)
-	writeJSON(w, p.buildResponse(tq, req.ends, req.a, req.b, &plan, elev))
+	writeJSON(w, p.buildResponse(tq, ends, req.a, req.b, &plan, elev))
 }
 
 // elevationCall is the body of one shared elevation fetch: both models,
@@ -1343,8 +1398,11 @@ func (p *terrainProfiler) linkParams(tq terrainQuery) (freq float64, freqSource 
 }
 
 // antenna is the antenna height above ground for an endpoint, most
-// specific first: the request, the operator's per-node value, the
-// operator's role value, the built-in role default.
+// specific first: the request, the operator's per-node value, (#789 M2:
+// the owner's proven value), the estimate from the surface model, the
+// operator's role value, the built-in role default. The estimate applies
+// only where it is above the role height it would replace (#789 research
+// §3: masts are invisible in the DSM), so it never lowers one.
 func (p *terrainProfiler) antenna(e terrainEnd, override *float64) (h float64, source string, assumed bool) {
 	if override != nil {
 		return *override, "request", false
@@ -1354,6 +1412,19 @@ func (p *terrainProfiler) antenna(e terrainEnd, override *float64) (h float64, s
 			return v, "operator-node", false
 		}
 	}
+	// #789 M2: the owner-submitted, proven height goes here.
+	h, source, assumed = p.roleAntenna(e)
+	if e.surfaceM != nil && e.kind == "node" && terrainEstimateRoles[e.role] {
+		if est := estimatedAntennaM(*e.surfaceM); est > h {
+			return est, "dsm-estimate", true
+		}
+	}
+	return h, source, assumed
+}
+
+// roleAntenna is the operator's role value, or else the built-in default,
+// for e's kind of endpoint.
+func (p *terrainProfiler) roleAntenna(e terrainEnd) (h float64, source string, assumed bool) {
 	key, def := terrainPointKey, "point-default"
 	if e.kind == "node" {
 		key, def = e.role, "role-default"
