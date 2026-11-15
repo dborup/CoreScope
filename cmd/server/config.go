@@ -1136,33 +1136,50 @@ func jsonObjectAt(v interface{}, path ...string) (m map[string]interface{}) {
 	}
 }
 
+// gatedTileProvider is an opt-in tile provider as map-tile-providers.js
+// gates it: its styles share an id prefix, and the provider block must
+// have enabled === true, and with needsToken a non-blank string token.
+type gatedTileProvider struct {
+	key, prefix, warning string
+	needsToken           bool
+}
+
+var gatedTileProviders = []gatedTileProvider{
+	{key: "esri", prefix: "esri-",
+		warning: "Esri styles are opt-in since #728 and map.tiles.providers.esri.enabled is not true: browsers will skip it and show the fallback base map. Set map.tiles.providers.esri.enabled to true to keep it."},
+	{key: "dataforsyningen", prefix: "dataforsyningen-", needsToken: true,
+		warning: "the Dataforsyningen styles are opt-in (#741) and need map.tiles.providers.dataforsyningen.enabled set to true and a non-empty map.tiles.providers.dataforsyningen.token: browsers will skip it and show the fallback base map."},
+}
+
 // warnGatedTileDefaults logs when map.tiles.darkDefault or lightDefault
-// names an Esri style while map.tiles.providers.esri.enabled is not true.
-// Since #728 every esri-* style is opt-in, and the browser then skips that
-// default and shows the fallback base map; an operator who upgraded with
-// Esri Dark Gray as the dark default should find out from the server log,
-// not from a changed map. It runs after migrateDeprecatedConfig, so a
-// legacy top-level mapDarkTileProvider is checked too. map.tiles is passed
-// to the browser as-is; the server only looks, and reads the keys exactly
-// as map-tile-providers.js does: exact-case keys (encoding/json would match
-// them case-insensitively), only the JSON boolean true enables Esri, and a
-// default that is not a string is ignored without hiding the other one.
+// names a style of a gated provider that is not switched on: an Esri style
+// while map.tiles.providers.esri.enabled is not true (#728), or a
+// Dataforsyningen style without enabled true and a token (#741). The
+// browser then skips that default and shows the fallback base map; an
+// operator who upgraded with Esri Dark Gray as the dark default should find
+// out from the server log, not from a changed map. It runs after
+// migrateDeprecatedConfig, so a legacy top-level mapDarkTileProvider is
+// checked too. map.tiles is passed to the browser as-is; the server only
+// looks, and reads the keys exactly as map-tile-providers.js does:
+// exact-case keys (encoding/json would match them case-insensitively),
+// only the JSON boolean true enables a provider, and a default that is not
+// a string is ignored without hiding the other one.
 func (c *Config) warnGatedTileDefaults(logf func(string, ...interface{})) {
 	if c == nil {
 		return
 	}
-	tiles, ok := c.Map["tiles"].(map[string]interface{})
-	if !ok {
-		return
-	}
-	providers, _ := tiles["providers"].(map[string]interface{})
-	esri, _ := providers["esri"].(map[string]interface{})
-	if enabled, _ := esri["enabled"].(bool); enabled {
-		return
-	}
-	for _, key := range []string{"darkDefault", "lightDefault"} {
-		if id, _ := tiles[key].(string); strings.HasPrefix(id, "esri-") {
-			logf("[config] map.tiles.%s is %q, but Esri styles are opt-in since #728 and map.tiles.providers.esri.enabled is not true: browsers will skip it and show the fallback base map. Set map.tiles.providers.esri.enabled to true to keep it.", key, id)
+	tiles := jsonObjectAt(c.Map, "tiles")
+	for _, g := range gatedTileProviders {
+		block := jsonObjectAt(tiles, "providers", g.key)
+		enabled, _ := block["enabled"].(bool)
+		token, _ := block["token"].(string)
+		if enabled && (!g.needsToken || strings.TrimSpace(token) != "") {
+			continue
+		}
+		for _, key := range []string{"darkDefault", "lightDefault"} {
+			if id, _ := tiles[key].(string); strings.HasPrefix(id, g.prefix) {
+				logf("[config] map.tiles.%s is %q, but "+g.warning, key, id)
+			}
 		}
 	}
 }
