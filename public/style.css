@@ -453,8 +453,8 @@
     --fresnel-60: #8b5cf6;
     --profile-blocked: #f87171;
     /* #730 M3 — the surface band by class. */
-    --terrain-building: #fed7aa;
-    --terrain-vegetation: #358a52;
+    --terrain-building: #e6cdb0;
+    --terrain-vegetation: #337f4c;
     /* #781 — the profile's hover cursor. */
     --tp-cursor: #e2e8f0;
     --tp-cursor-dot: #f87171;
@@ -532,8 +532,8 @@
   --fresnel-60: #8b5cf6;
   --profile-blocked: #f87171;
   /* #730 M3 — the surface band by class (mirror of the @media block). */
-  --terrain-building: #fed7aa;
-  --terrain-vegetation: #358a52;
+  --terrain-building: #e6cdb0;
+  --terrain-vegetation: #337f4c;
   /* #781 — the profile's hover cursor (mirror of the @media block). */
   --tp-cursor: #e2e8f0;
   --tp-cursor-dot: #f87171;
