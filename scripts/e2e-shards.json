@@ -108,6 +108,14 @@
       "measurementNote": "New suite; #727 M1 shareable /p links for the Map Path profile with an intercepted dhm client-config block (profile: true, share on or off) and a stubbed /api/terrain/profile: /p?profile=... lands on #/map with the panel open and one request carrying only the allow-listed keys, one document request and app.js loaded once with every asset below 400, Back leaves /p behind, the copy button hands out a /p link with dhm.share (and that link reopens the profile) and the #/map link without it, the raw /p HTML for a crawler User-Agent has the handoff script and filled OG tags, /p/ is a 301 to /p, and the same landing at 360x740. About 15s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681/#721 DHM suites."
     },
     {
+      "file": "test-issue-727-m4-share-customizer-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #727 M4 share previews in the customizer's Terrain Profile section with an intercepted dhm client-config block (profile, share and dhm.card) and a stubbed /api/terrain/profile: the switch (on by default), the operator's card theme and names (dark/shown and light/hidden) and the one palette line; off is stored as terrain.shareLinks false, survives a reload and makes Copy link hand out the #/map link, on again clears the override and hands out the /p link, all without re-measuring the open profile; resetAll restores it; no switch without dhm.share and none reachable with the Display tab disabled; the phone flow at 375x560 through the bottom nav's More sheet (48px row, a tap toggles and stores, no sideways overflow); axe in light and dark. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other #681/#727 DHM suites."
+    },
+    {
       "file": "test-issue-727-share-preview.js",
       "shard": 3,
       "env": {
