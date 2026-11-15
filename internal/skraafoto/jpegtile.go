@@ -95,11 +95,11 @@ func adobeTransform(b []byte) (byte, bool) {
 }
 
 // cmykToRGB draws the RGB of an Adobe-inverted 4-component tile onto
-// canvas in r, which starts at the tile's origin; the fourth band is
+// canvas in r, which starts at sp in the tile; the fourth band is
 // dropped.
-func cmykToRGB(canvas *image.RGBA, r image.Rectangle, m *image.CMYK) {
+func cmykToRGB(canvas *image.RGBA, r image.Rectangle, m *image.CMYK, sp image.Point) {
 	for y := r.Min.Y; y < r.Max.Y; y++ {
-		src := m.Pix[(y-r.Min.Y)*m.Stride:]
+		src := m.Pix[m.PixOffset(sp.X, sp.Y+y-r.Min.Y):]
 		dst := canvas.Pix[canvas.PixOffset(r.Min.X, y):]
 		for x := 0; x < r.Dx(); x++ {
 			dst[4*x] = 255 - src[4*x]

@@ -14,21 +14,23 @@ package main
 //   - GET /api/skraafoto/preview/{collection}/{item}: one photo as a JPEG
 //     of at most 1024 px on the long edge, cut from one overview of its
 //     COG on the CDN by range reads. The CDN needs no token and is never
-//     sent one.
+//     sent one. With ?zoom=1&x=&y= it is a crop of the same size around
+//     a point of the preview from a finer overview (#737 M3b,
+//     skraafoto_zoom.go).
 //
 // Properties, each pinned by skraafoto_proxy_737_test.go:
 //   - lat, lon, year, path, ha and hb only, plain decimals, each at most
 //     once, ha and hb only with a path; a preview path is a collection
-//     and a photo id of that year, with no query string. Anything else is
-//     one fixed 400, before any upstream call. Nothing from the request
-//     is echoed.
+//     and a photo id of that year, with no query string but a zoom's.
+//     Anything else is one fixed 400, before any upstream call. Nothing
+//     from the request is echoed.
 //   - A point outside Denmark (dhm.Covers) is answered empty without an
 //     upstream call or a charge.
 //   - Bounded caches: the year list and searches (24 h, the search point
 //     snapped to 10 m), answers (24 h, keyed by the point, the path and
 //     the antenna heights at about a metre), terrain heights (7 d), where
-//     each photo is (7 d), and previews within cacheMB (7 d). Only
-//     successes are cached.
+//     each photo is (7 d), how each photo zooms (7 d), and previews and
+//     crops together within cacheMB (7 d). Only successes are cached.
 //   - Identical concurrent requests share one upstream call (dhm.Flight);
 //     it stops once every requester has gone.
 //   - Fair use of the operator's token: a cache miss is charged to the
@@ -235,7 +237,8 @@ type skraafotoProxy struct {
 	answers  *dhm.Cache[skraafotoAnswerKey] // search responses, JSON
 	grounds  *dhm.Cache[skraafotoGroundKey] // terrain heights (encodeGround)
 	paths    *dhm.Cache[skraafotoPhotoKey]  // where a photo is on the CDN
-	previews *dhm.Cache[skraafotoPhotoKey]  // preview JPEGs
+	zooms    *dhm.Cache[skraafotoPhotoKey]  // how a photo zooms (skraafoto.ZoomFrame), JSON
+	previews *dhm.Cache[skraafotoImageKey]  // preview JPEGs and crops (encodeSkraafotoCrop)
 	flight   dhm.Flight[[]byte]
 
 	searchLimiter, previewLimiter *ipRateLimiter // nil: no per-client limit
@@ -267,7 +270,8 @@ func newSkraafotoProxy(set skraafotoSettings, d skraafotoDeps) *skraafotoProxy {
 		answers:  dhm.NewCache[skraafotoAnswerKey](skraafotoAnswerEntries, skraafotoSearchBytes, skraafotoSearchTTL),
 		grounds:  dhm.NewCache[skraafotoGroundKey](skraafotoGroundEntries, skraafotoGroundEntries*4, skraafotoGroundTTL),
 		paths:    dhm.NewCache[skraafotoPhotoKey](skraafotoPhotoEntries, skraafotoPhotoEntries*160, skraafotoPhotoTTL),
-		previews: dhm.NewCache[skraafotoPhotoKey](set.cacheBytes/(16<<10), set.cacheBytes, skraafotoPhotoTTL),
+		zooms:    dhm.NewCache[skraafotoPhotoKey](skraafotoPhotoEntries, skraafotoPhotoEntries*160, skraafotoPhotoTTL),
+		previews: dhm.NewCache[skraafotoImageKey](set.cacheBytes/(16<<10), set.cacheBytes, skraafotoPhotoTTL),
 		searchLimiter: newIPRateLimiter("skraafoto", "map.skraafoto.searchRateLimitPerMin", set.searchPerMin,
 			d.trusted, d.logf),
 		previewLimiter: newIPRateLimiter("skraafoto", "map.skraafoto.previewRateLimitPerMin", set.previewPerMin,
@@ -551,7 +555,7 @@ func (s *Server) handleSkraafotoPreview(w http.ResponseWriter, r *http.Request) 
 	}
 	v := mux.Vars(r)
 	key := skraafotoPhotoKey{collection: v["collection"], id: v["item"]}
-	if r.URL.RawQuery != "" || r.URL.ForceQuery || !skraafoto.ValidItem(key.collection, key.id) {
+	if !skraafoto.ValidItem(key.collection, key.id) {
 		writeError(w, http.StatusBadRequest, errSkraafotoRequest.Error())
 		return
 	}
@@ -560,7 +564,11 @@ func (s *Server) handleSkraafotoPreview(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, errSkraafotoRequest.Error())
 		return
 	}
-	if data, ok := p.previews.Get(key, p.now()); ok {
+	if r.URL.RawQuery != "" || r.URL.ForceQuery {
+		s.handleSkraafotoZoom(w, r, key)
+		return
+	}
+	if data, ok := p.previews.Get(skraafotoImageKey{photo: key}, p.now()); ok {
 		writeSkraafotoJPEG(w, data, "hit")
 		return
 	}
@@ -703,37 +711,43 @@ func (p *skraafotoProxy) search(ctx context.Context, key skraafotoSearchKey) ([]
 	return data, nil
 }
 
-// preview runs a cold preview: where the photo is (cached by a search,
-// or one STAC lookup of a collection on the year list), then its preview
-// from the CDN.
+// preview runs a cold preview: where the photo is, then its preview from
+// the CDN.
 func (p *skraafotoProxy) preview(ctx context.Context, key skraafotoPhotoKey) ([]byte, error) {
-	var path string
-	if b, ok := p.paths.Get(key, p.now()); ok {
-		path = string(b)
-	} else {
-		// The list, not only the name pattern, gates the token: a
-		// previews-only client would otherwise never fill the cache the
-		// handler checks.
-		years, err := p.yearList(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if !containsInt(years, collectionYear(key.collection)) {
-			return nil, errSkraafotoYear
-		}
-		it, err := p.stac.Item(ctx, key.collection, key.id)
-		if err != nil {
-			return nil, err
-		}
-		path = it.Path
-		p.paths.Put(key, []byte(path), p.now())
+	path, err := p.photoPath(ctx, key)
+	if err != nil {
+		return nil, err
 	}
 	data, err := p.cdn.Preview(ctx, path)
 	if err != nil {
 		return nil, err
 	}
-	p.previews.Put(key, data, p.now())
+	p.previews.Put(skraafotoImageKey{photo: key}, data, p.now())
 	return data, nil
+}
+
+// photoPath is where photo key is on the CDN: cached by a search, or one
+// STAC lookup of a collection on the year list.
+func (p *skraafotoProxy) photoPath(ctx context.Context, key skraafotoPhotoKey) (string, error) {
+	if b, ok := p.paths.Get(key, p.now()); ok {
+		return string(b), nil
+	}
+	// The list, not only the name pattern, gates the token: a
+	// previews-only client would otherwise never fill the cache the
+	// handler checks.
+	years, err := p.yearList(ctx)
+	if err != nil {
+		return "", err
+	}
+	if !containsInt(years, collectionYear(key.collection)) {
+		return "", errSkraafotoYear
+	}
+	it, err := p.stac.Item(ctx, key.collection, key.id)
+	if err != nil {
+		return "", err
+	}
+	p.paths.Put(key, []byte(it.Path), p.now())
+	return it.Path, nil
 }
 
 // writeFetchError maps a failed cold request. None carries upstream text.
@@ -761,7 +775,7 @@ func (p *skraafotoProxy) writeFetchError(w http.ResponseWriter, r *http.Request,
 		setRetryAfter(w, skraafotoBusyRetry)
 		writeError(w, http.StatusServiceUnavailable, "skraafoto busy")
 		return
-	case errors.Is(err, errSkraafotoYear):
+	case errors.Is(err, errSkraafotoYear), errors.Is(err, skraafoto.ErrOutsideFrame):
 		writeError(w, http.StatusBadRequest, errSkraafotoRequest.Error())
 		return
 	case dhm.FailureReason(err) == "status 404":
