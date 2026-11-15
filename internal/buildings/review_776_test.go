@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/meshcore-analyzer/dhm"
 )
 
 // TestFetcherWithoutNowUsesTheClock (#776 review N1): FetcherOptions.Now
@@ -103,4 +105,44 @@ func selX(sel *ast.SelectorExpr) (string, bool) {
 		return "", false
 	}
 	return id.Name, true
+}
+
+// TestClassifyHighSkipShareIsUnusable (#776 review N3): Page.Skipped was
+// never read, so a page whose features were all skipped read as a corridor
+// without buildings, and every elevated sample in it became Vegetation. A
+// skipped feature is a building whose footprint was lost, so a page that
+// lost more than 1 in 20 of its features cannot classify its segment: its
+// samples stay unclassified. At or below that share the page is used.
+func TestClassifyHighSkipShareIsUnusable(t *testing.T) {
+	c := mustCorridor(t, [2]float64{570000, 6223000}, [2]float64{575000, 6223000}) // 1 segment
+	s := profileAlong(c, 25, 20, constant(12))
+	full := rect(c, 0, c.LengthM(), -30, 30)
+	footprints := func(n int) []dhm.MultiPolygon {
+		out := make([]dhm.MultiPolygon, n)
+		for i := range out {
+			out[i] = full
+		}
+		return out
+	}
+	for name, tc := range map[string]struct {
+		page Page
+		want Class
+	}{
+		"all skipped":     {Page{Skipped: 3}, Unclassified},
+		"1 of 1 skipped":  {Page{Skipped: 1}, Unclassified},
+		"2 of 20 skipped": {Page{Footprints: footprints(18), Skipped: 2}, Unclassified},
+		"1 of 19 skipped": {Page{Footprints: footprints(18), Skipped: 1}, Unclassified},
+		"1 of 20 skipped": {Page{Footprints: footprints(19), Skipped: 1}, Building},
+		"none skipped":    {Page{Footprints: footprints(1)}, Building},
+		"empty page":      {Page{}, Vegetation},
+	} {
+		page := tc.page
+		got := mustClassify(t, c, s, []*Page{&page})
+		for i, cl := range got {
+			if cl != tc.want {
+				t.Errorf("%s: sample %d is %q, want %q", name, i, cl, tc.want)
+				break
+			}
+		}
+	}
 }
