@@ -729,12 +729,16 @@ function withStubWms() {
   return ctx;
 }
 
-test('F8 getTileSpec() drops the wms descriptor — the page resolvers are M1b', () => {
+// #741 M1b turned this tripwire around: getTileSpec() now carries the
+// descriptor (test-issue-741-skaermkort.js pins the real provider).
+test('F8 getTileSpec() carries the wms descriptor (M1b)', () => {
   const ctx = withStubWms();
   const spec = ctx.window.MC_getTileSpec('light');
   assert.ok(spec, 'the active style still resolves to a spec');
-  assert.ok(!spec.wms, 'M1b: getTileSpec() must learn to carry the descriptor');
-  assert.ok(!spec.url, 'a WMS style has no tile template, so today the pages get nothing');
+  assert.ok(spec.wms, 'M1b: getTileSpec() carries the descriptor');
+  assert.strictEqual(spec.wms.url, STUB_WMS_STYLE.wms.url);
+  assert.strictEqual(spec.wms.layers, STUB_WMS_STYLE.wms.layers);
+  assert.ok(!spec.url, 'a WMS style has no tile template');
 });
 
 test('F8 the layer control is the one site that hands the factory a wms spec', () => {

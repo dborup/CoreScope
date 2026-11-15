@@ -87,3 +87,42 @@ func TestWarnGatedTileDefaultsEsriAndDataforsyningen741(t *testing.T) {
 		t.Fatalf("want only the Esri warning, got %q", got)
 	}
 }
+
+// The shipped example keeps the provider off, with an empty token, and
+// says that the token is sent to browsers and is not the DHM token.
+func TestDataforsyningenExampleConfigIsOff741(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "config.example.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ex struct {
+		Map struct {
+			Tiles struct {
+				Providers struct {
+					Comment         string `json:"_comment_dataforsyningen"`
+					Dataforsyningen *struct {
+						Enabled *bool   `json:"enabled"`
+						Token   *string `json:"token"`
+					} `json:"dataforsyningen"`
+				} `json:"providers"`
+			} `json:"tiles"`
+		} `json:"map"`
+	}
+	if err := json.Unmarshal(data, &ex); err != nil {
+		t.Fatal(err)
+	}
+	d := ex.Map.Tiles.Providers.Dataforsyningen
+	if d == nil || d.Enabled == nil || *d.Enabled || d.Token == nil || *d.Token != "" {
+		t.Fatalf("config.example.json must ship map.tiles.providers.dataforsyningen as {enabled: false, token: \"\"}, got %+v", d)
+	}
+	c := ex.Map.Tiles.Providers.Comment
+	for _, s := range []string{"sent to the browser", "map.dhm.token", "Denmark only", "rotate"} {
+		if !strings.Contains(c, s) {
+			t.Errorf("_comment_dataforsyningen does not say %q: %s", s, c)
+		}
+	}
+	// The example's own defaults are not gated off.
+	for _, w := range esriTileWarnings(t, string(data)) {
+		t.Fatalf("the example warns about its own defaults: %s", w)
+	}
+}
