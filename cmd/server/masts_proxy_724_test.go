@@ -836,7 +836,7 @@ func TestMastsClientConfig(t *testing.T) {
 		got = append(got, k)
 	}
 	sort.Strings(got)
-	if want := []string{"attribution", "cellExtent", "cellSizeM", "enabled", "minZoom", "sourceUrl", "url"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"attribution", "cellExtent", "cellSizeM", "enabled", "hintDistanceM", "hintStrongM", "minZoom", "sourceUrl", "url"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("masts block keys %v, want %v", got, want)
 	}
 	var c MastsClientConfig
@@ -844,7 +844,7 @@ func TestMastsClientConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := MastsClientConfig{Enabled: true, URL: "/api/masts", MinZoom: 13, CellSizeM: 2000,
-		Attribution: mastedb.Attribution, SourceURL: mastedb.SourceURL, CellExtent: [4]int{219, 3017, 462, 3209}}
+		Attribution: mastedb.Attribution, SourceURL: mastedb.SourceURL, CellExtent: [4]int{219, 3017, 462, 3209}, HintDistanceM: 500, HintStrongM: 100}
 	if c != want {
 		t.Fatalf("masts block %+v, want %+v", c, want)
 	}
@@ -928,12 +928,18 @@ func TestMastsConfigExampleIsOffAndStripped(t *testing.T) {
 		Enabled             bool `json:"enabled"`
 		CellRateLimitPerMin *int `json:"cellRateLimitPerMin"`
 		MaxInFlight         *int `json:"maxInFlight"`
+		MinZoom             *int `json:"minZoom"`
+		HintDistanceM       *int `json:"hintDistanceM"`
+		HintStrongM         *int `json:"hintStrongM"`
 	}
 	if err := json.Unmarshal(raw, &ex); err != nil {
 		t.Fatal(err)
 	}
 	if ex.CellRateLimitPerMin == nil || *ex.CellRateLimitPerMin != mastsCellRateLimitDefault ||
-		ex.MaxInFlight == nil || *ex.MaxInFlight != mastsMaxInFlightDefault {
+		ex.MaxInFlight == nil || *ex.MaxInFlight != mastsMaxInFlightDefault ||
+		ex.MinZoom == nil || *ex.MinZoom != mastsMinZoom ||
+		ex.HintDistanceM == nil || *ex.HintDistanceM != mastsHintDistanceDefault ||
+		ex.HintStrongM == nil || *ex.HintStrongM != mastsHintStrongDefault {
 		t.Fatalf("example documents %+v, not the shipped defaults", ex)
 	}
 	cfg := writeMastsConfig(t, string(data))

@@ -124,6 +124,14 @@
       "measurementNote": "New suite; #724 M4 interference hint in the Map Path profile with intercepted dhm and masts client-config blocks, a stubbed /api/terrain/profile and a stubbed /api/masts with fixed synthetic sites (neither the proxy's upstream, Mastedatabasen nor DHM is ever contacted): an end 320 m from an 800 MHz site shows the chip in the title row and its note, hostile stub text inert, and with both overlays off only the end cells are asked for, each once; dark-theme chip colour; 40 m from a 900 MHz site is the strong tier; an 1800 MHz site, an 800 MHz site 520 m away and a band-less GSM-R site give no hint; without the masts block no chip and no request; at 375 px the chip stays inside the panel; leaving the Map page with a path open three times leaves no theme-refresh listener or data-theme observer behind (#768 review 1). About 25s locally; no CI duration measured yet. Assigned to shard 1 next to the #724 M3 suite."
     },
     {
+      "file": "test-issue-724-m5-masts-customizer-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #724 M5 antenna sites settings in the customizer with intercepted dhm and masts client-config blocks (operator minZoom 14), a stubbed /api/terrain/profile and a stubbed /api/masts with fixed synthetic sites (neither the proxy's upstream, Mastedatabasen nor DHM is ever contacted): the Display tab's Antenna Sites section with the four settings at the operator values and server bounds, 48px inputs; changing the hint distance and strong tier updates an open profile's chip and note without a reload and fetches the newly needed cell; out-of-bounds values are put back and never stored; a value back at the operator's is a cleared override; the section survives a reload and reaches the export; a raised zoom gate asks for no cell and says so, and lowering it loads the view at once; the sites-by-default switch starts the next map without them while masts=1 in a link still wins; no section without the masts block. About 10s locally; no CI duration measured yet. Assigned to shard 1 next to the other #724 suites."
+    },
+    {
       "file": "test-issue-723-heritage-info-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },
