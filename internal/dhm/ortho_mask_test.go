@@ -1,7 +1,10 @@
 package dhm
 
 import (
+	"bytes"
+	"encoding/json"
 	"math"
+	"os"
 	"testing"
 )
 
@@ -154,5 +157,30 @@ func BenchmarkOrthoForeignMask(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		foreignTileMask(fl, OrthoMaskZoom)
+	}
+}
+
+// test-fixtures/dhm-ortho-foreign-mask.json is the mask exactly as
+// /api/config/client sends it (dhm.ortho.foreignMask), for the browser
+// suite test-issue-728-ortho-base-e2e.js, whose server has no DHM token.
+// UPDATE_DHM_MASK_FIXTURE=1 rewrites it after a change to the mask.
+func TestOrthoForeignMaskFixture(t *testing.T) {
+	const fixture = "../../test-fixtures/dhm-ortho-foreign-mask.json"
+	want, err := json.Marshal(OrthoForeignMask())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = append(want, '\n')
+	if os.Getenv("UPDATE_DHM_MASK_FIXTURE") == "1" {
+		if err := os.WriteFile(fixture, want, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := os.ReadFile(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("%s is stale; rerun with UPDATE_DHM_MASK_FIXTURE=1", fixture)
 	}
 }

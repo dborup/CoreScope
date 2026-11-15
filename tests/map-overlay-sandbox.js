@@ -17,7 +17,10 @@
  *     and dropping it again on that layer's 'remove'. remove() only stops
  *     listening to layeradd and does not give map.attributionControl back.
  *     getContainer() returns a stub element whose classList records the
- *     classes added to it (#752 adds the compact class there).
+ *     classes added to it (#752 adds the compact class there);
+ *   - like Leaflet, map.addLayer fires the layer's own 'add' last, and a
+ *     tile layer has GridLayer's _isValidTile (always true here), which
+ *     the #728 ortho layer extends; the tile pane records its attributes.
  */
 'use strict';
 const vm = require('vm');
@@ -127,7 +130,9 @@ function makeLeaflet() {
   const L = {
     CRS: { EPSG3857: { code: 'EPSG:3857' } },
     latLngBounds: (b) => ({ _bounds: b }),
-    tileLayer: (url, opts) => evented({ _url: url, options: opts || {}, kind: 'tile' }),
+    // _isValidTile is Leaflet's GridLayer bounds check, which the #728 ortho
+    // layer extends; here every tile is valid.
+    tileLayer: (url, opts) => evented({ _url: url, options: opts || {}, kind: 'tile', _isValidTile: () => true }),
     control: {
       layers: (base, overlays, opts) => {
         const overlayLabels = Object.keys(overlays || {}).map(name => {
@@ -212,7 +217,15 @@ function makeLeaflet() {
 }
 
 function makeMap() {
-  const panes = { tilePane: { zIndex: 200, attrs: {}, setAttribute() {}, removeAttribute() {}, style: {} } };
+  const tileAttrs = {};
+  const panes = {
+    tilePane: {
+      zIndex: 200, attrs: tileAttrs, style: {},
+      setAttribute(k, v) { tileAttrs[k] = String(v); },
+      getAttribute(k) { return Object.prototype.hasOwnProperty.call(tileAttrs, k) ? tileAttrs[k] : null; },
+      removeAttribute(k) { delete tileAttrs[k]; },
+    },
+  };
   const layers = new Set();
   const map = {
     _controls: [], _attributionControls: [], panes, layers,
@@ -232,6 +245,8 @@ function makeMap() {
       if (l.kind === 'layerGroup') { l._map = map; l.members.forEach(m => map.addLayer(m)); }
       if (map._controls.some(c => !c._removed && Object.values(c.overlays || {}).includes(l))) map.fire('overlayadd', { layer: l });
       map.fire('layeradd', { layer: l });
+      // Leaflet's Map._layerAdd ends with layer.fire('add').
+      if (l.fire) l.fire('add');
       return map;
     },
     removeLayer(l) {
@@ -260,7 +275,7 @@ function makeSandbox(opts) {
   const replaced = [];
   const loc = { hash: 'hash' in opts ? opts.hash : '#/map', pathname: '/', search: opts.search || '' };
   const ctx = {
-    console, URLSearchParams, JSON, Math, Object, Array, String, Number, Boolean,
+    console, URLSearchParams, JSON, Math, Object, Array, String, Number, Boolean, atob,
     location: loc,
     history: {
       state: null,
