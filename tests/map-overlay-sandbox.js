@@ -20,7 +20,9 @@
  *     classes added to it (#752 adds the compact class there);
  *   - like Leaflet, map.addLayer fires the layer's own 'add' last, and a
  *     tile layer has GridLayer's _isValidTile (always true here), which
- *     the #728 ortho layer extends; the tile pane records its attributes.
+ *     the #728 ortho layer extends; the tile pane records its attributes;
+ *   - the map has a settable view (map.view: zoom and pixel bounds) behind
+ *     getZoom and getPixelBounds, and tile layers getTileSize (#728 N3).
  */
 'use strict';
 const vm = require('vm');
@@ -132,7 +134,7 @@ function makeLeaflet() {
     latLngBounds: (b) => ({ _bounds: b }),
     // _isValidTile is Leaflet's GridLayer bounds check, which the #728 ortho
     // layer extends; here every tile is valid.
-    tileLayer: (url, opts) => evented({ _url: url, options: opts || {}, kind: 'tile', _isValidTile: () => true }),
+    tileLayer: (url, opts) => evented({ _url: url, options: opts || {}, kind: 'tile', _isValidTile: () => true, getTileSize: () => ({ x: 256, y: 256 }) }),
     control: {
       layers: (base, overlays, opts) => {
         const overlayLabels = Object.keys(overlays || {}).map(name => {
@@ -154,7 +156,7 @@ function makeLeaflet() {
       },
     },
   };
-  L.tileLayer.wms = (url, opts) => evented({ _url: url, options: opts || {}, kind: 'wms' });
+  L.tileLayer.wms = (url, opts) => evented({ _url: url, options: opts || {}, kind: 'wms', getTileSize: () => ({ x: 256, y: 256 }) });
   // #724 — what public/masts-layer.js builds: layer groups of canvas
   // circle markers. A group on a map puts its members on that map.
   L.canvas = (opts) => ({ kind: 'canvas', options: opts || {} });
@@ -230,6 +232,10 @@ function makeMap() {
   const map = {
     _controls: [], _attributionControls: [], panes, layers,
     getPane: (n) => panes[n],
+    // The view, for the #728 N3 in-view test: zoom 12, pixels 0..1024 × 0..768.
+    view: { zoom: 12, min: { x: 0, y: 0 }, max: { x: 1024, y: 768 } },
+    getZoom: () => map.view.zoom,
+    getPixelBounds: () => ({ min: map.view.min, max: map.view.max }),
     createPane: (n) => {
       const classes = [];
       panes[n] = { style: {}, classList: { add: (c) => classes.push(c) }, classes };

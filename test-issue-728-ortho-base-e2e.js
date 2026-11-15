@@ -24,6 +24,11 @@
  *      request no ortho tile.
  *   7. Over the whole run, no browser request carries "token" or goes to
  *      a dataforsyningen or datafordeler host.
+ *   8. #728 N3: with the stub refusing cold tiles beyond a budget the way
+ *      the proxy's admission bound does (busy: 1×1 PNG, no-store), each
+ *      busy ortho/hillshade tile in view is fetched once more after 3-5 s
+ *      and the view ends with no blank tile; no tile is fetched more than
+ *      twice; a busy tile panned out of view is not fetched again.
  *
  * Usage:
  *   BASE_URL=http://localhost:13728 node test-issue-728-ortho-base-e2e.js
@@ -430,6 +435,96 @@ const allRequests = [];
         await shot(page, 'ortho-oresund-' + theme + '.jpg');
       } finally { await ctx.close(); }
     }
+  });
+
+  // 8 — #728 N3: busy tiles are retried once, in view, without a storm.
+  // The stub plays the proxy's admission bound (#744): a view's cold tiles
+  // beyond the first BUSY_ADMIT (ortho and hillshade together) come back
+  // busy (1×1 transparent PNG, no-store), as the server answers them.
+  // Retries are answered with real tiles. A 1100×720 view at z12 is 24
+  // tiles per layer, so admit 24 refuses half of an ortho + hillshade view.
+  const BUSY_ADMIT = 24;
+  const TRANSPARENT_1PX = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+  async function busyCtx(opts, admit = BUSY_ADMIT) {
+    const c = await newCtx(opts);
+    const log = []; // { path, t, busy }
+    const seen = new Map();
+    let admitted = 0;
+    const t0 = Date.now();
+    const answer = async (route, body) => {
+      const p = new URL(route.request().url()).pathname + new URL(route.request().url()).search;
+      const n = (seen.get(p) || 0) + 1;
+      seen.set(p, n);
+      const busy = n === 1 && admitted >= admit;
+      if (n === 1 && !busy) admitted++;
+      log.push({ path: p, t: Date.now() - t0, busy, n });
+      if (busy) await route.fulfill({ status: 200, contentType: 'image/png', headers: { 'Cache-Control': 'no-store', 'X-CoreScope-Tile': 'busy' }, body: TRANSPARENT_1PX });
+      else await route.fulfill({ status: 200, contentType: 'image/png', headers: { 'Cache-Control': 'public, max-age=86400', 'X-CoreScope-Tile': 'miss' }, body });
+    };
+    // Registered after newCtx's routes, so these win.
+    await c.ctx.route(url => new URL(url).pathname.startsWith(ORTHO_PATH), route => answer(route, ORTHO_STUB));
+    await c.ctx.route(url => new URL(url).pathname === DHM_BLOCK.url, route => answer(route, TERRAIN_STUB));
+    return Object.assign(c, { log, seen, t0 });
+  }
+  const placeholders = (page) => page.evaluate(() =>
+    Array.from(document.querySelectorAll('.mc-ortho-tiles img.leaflet-tile, .mc-terrain-tiles img.leaflet-tile'))
+      .filter(i => i.complete && i.naturalWidth === 1).length);
+
+  await step('N3: ortho + hillshade cold, some tiles busy → each retried once after ≥3 s, all real after, no storm', async () => {
+    const { ctx, page, log } = await busyCtx({ tiles: ESRI_ON, storage: { 'mc-ortho-base': '1', 'mc-terrain-dhm': '1' }, viewport: { width: 1100, height: 720 } });
+    try {
+      await gotoMap(page, '#/map', VIEWS.copenhagen);
+      const busy = log.filter(e => e.busy);
+      assert(busy.length > 0, 'the stub refused no tile: ' + log.length + ' requests');
+      const before = await placeholders(page);
+      assert(before > 0, 'no blank tile before the retries');
+      await page.waitForTimeout(5500);
+      const after = await placeholders(page);
+      const first = new Map();
+      for (const e of log) if (e.n === 1) first.set(e.path, e.t);
+      const retries = log.filter(e => e.n === 2);
+      const counts = Array.from(new Set(log.map(e => e.path))).map(p => log.filter(e => e.path === p).length);
+      const gaps = retries.map(e => e.t - first.get(e.path));
+      const window = retries.length ? Math.max(...retries.map(e => e.t)) - Math.min(...retries.map(e => e.t)) : 0;
+      console.log(`       ${first.size} tiles, ${busy.length} busy, ${retries.length} retries, max ${Math.max(...counts)} requests per tile, retry gap ${Math.min(...gaps)}–${Math.max(...gaps)} ms, retries spread over ${window} ms, blank ${before} → ${after}`);
+      assert(Math.max(...counts) <= 2, 'a tile was requested ' + Math.max(...counts) + ' times');
+      assert(retries.length <= busy.length, retries.length + ' retries for ' + busy.length + ' busy tiles');
+      assert(retries.every(e => first.has(e.path) && log.find(f => f.path === e.path && f.n === 1).busy), 'a real tile was retried');
+      assert(Math.min(...gaps) >= 2900, 'a retry came after ' + Math.min(...gaps) + ' ms');
+      assert(Math.max(...gaps) <= 5600, 'a retry came after ' + Math.max(...gaps) + ' ms');
+      assert(after === 0, after + ' tiles still blank after the retries');
+    } finally { await ctx.close(); }
+  });
+
+  await step('N3: a busy tile that left the view before the delay is not retried; one still in view is', async () => {
+    const { ctx, page, log } = await busyCtx({ tiles: ESRI_ON, storage: { 'mc-ortho-base': '1' }, viewport: { width: 1100, height: 720 } }, 8);
+    try {
+      await gotoMap(page, '#/map', VIEWS.copenhagen);
+      const busyPaths = new Set(log.filter(e => e.busy).map(e => e.path));
+      assert(busyPaths.size > 0, 'the stub refused no tile');
+      // About two tiles right, at once: some busy tiles leave the view but
+      // stay loaded (Leaflet's keepBuffer), so only the in-view test stops them.
+      await pan(page, 560, 0);
+      await page.waitForTimeout(5500);
+      const inView = await page.evaluate((paths) => {
+        const box = document.querySelector('.leaflet-container').getBoundingClientRect();
+        const out = {};
+        for (const img of document.querySelectorAll('.mc-ortho-tiles img.leaflet-tile')) {
+          const p = new URL(img.src).pathname;
+          if (!paths.includes(p)) continue;
+          const r = img.getBoundingClientRect();
+          out[p] = r.right > box.left && r.left < box.right && r.bottom > box.top && r.top < box.bottom;
+        }
+        return out;
+      }, Array.from(busyPaths));
+      const retried = new Set(log.filter(e => e.n === 2).map(e => e.path));
+      const outOfView = Array.from(busyPaths).filter(p => !inView[p]);
+      console.log(`       ${busyPaths.size} busy, ${outOfView.length} out of view after the pan (${outOfView.filter(p => p in inView).length} still loaded), ${retried.size} retried`);
+      assert(outOfView.length > 0, 'the pan left no busy tile out of view');
+      for (const p of outOfView) assert(!retried.has(p), 'out-of-view tile retried: ' + p);
+      assert(Array.from(retried).every(p => inView[p]), 'a retried tile is not in view');
+      assert(retried.size > 0, 'no in-view busy tile was retried');
+    } finally { await ctx.close(); }
   });
 
   // 7 — over the whole run: no token, no Dataforsyningen/Datafordeler host
