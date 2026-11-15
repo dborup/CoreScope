@@ -10,6 +10,7 @@ package main
 
 import (
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,11 +49,14 @@ func benchTerrainEnv(b *testing.B, pc dhm.ProfileConfig) *terrainEnv {
 	return newTerrainEnv(t, src, pc, nil)
 }
 
-// dokk1Shifted is the Dokk1 path moved i × 2 m east: a new cache key each
-// time, past the 5-decimal snap.
+// dokk1Shifted is the Dokk1 path moved by 2 m steps, up to 18 m east and
+// 78 m north: 400 distinct cache keys past the 5-decimal snap, all over
+// Dokk1's roof, so every miss with the classification on asks for
+// footprints.
 func dokk1Shifted(i int) string {
-	e := dokk1E + 2*float64(i%5000)
-	return pathQuery(utmPt(e, dokk1N-138), utmPt(e, dokk1N+99))
+	e := dokk1E + 2*float64(i%10)
+	n := dokk1N + 2*float64(i/10%40)
+	return pathQuery(utmPt(e, n-138), utmPt(e, n+99))
 }
 
 func BenchmarkTerrainProfileP50(b *testing.B) {
@@ -66,4 +70,40 @@ func BenchmarkTerrainProfileP50(b *testing.B) {
 		env := benchTerrainEnv(b, dhm.ProfileConfig{CacheEntries: intp(4096)})
 		benchTerrainP50(b, env, dokk1Shifted, "miss")
 	})
+	// With the building classification (#730 M2), on a local stub of the
+	// footprint service: a hit reads the classes from the entry; a miss
+	// also asks for and classifies the corridor's footprints.
+	b.Run("on/hit", func(b *testing.B) {
+		env := benchBuildingsEnv(b, dhm.ProfileConfig{})
+		q := pathQuery(dokk1A, dokk1B)
+		benchWantBuilding(b, env, q)
+		benchTerrainP50(b, env.terrainEnv, func(int) string { return q }, "hit")
+	})
+	b.Run("on/miss", func(b *testing.B) {
+		if b.N > 400 {
+			b.Fatal("at most 400 distinct paths")
+		}
+		env := benchBuildingsEnv(b, dhm.ProfileConfig{CacheEntries: intp(4096)})
+		benchTerrainP50(b, env.terrainEnv, dokk1Shifted, "miss")
+		if n := env.ogc.calls.Load(); int(n) != b.N {
+			b.Fatalf("%d footprint requests for %d misses", n, b.N)
+		}
+	})
+}
+
+// benchBuildingsEnv is benchTerrainEnv with the classification on, on a
+// stub footprint service holding Dokk1.
+func benchBuildingsEnv(b *testing.B, pc dhm.ProfileConfig) *buildingsEnv {
+	t := &testing.T{}
+	ogc := newStubOGC(t, dokk1Footprint)
+	b.Cleanup(ogc.srv.Close)
+	return newBuildingsEnv(t, dokk1Ground, dokk1Surface, ogc, pc)
+}
+
+// benchWantBuilding fetches q once and checks it is classified.
+func benchWantBuilding(b *testing.B, env *buildingsEnv, q string) {
+	w := env.get(q)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"cause":"building"`) {
+		b.Fatalf("%d: %s", w.Code, w.Body.String())
+	}
 }
