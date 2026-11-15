@@ -399,6 +399,7 @@
     {
       id: TERRAIN_ID, storageKey: 'mc-terrain-dhm', hashParam: 'terrain', layerProp: '_mcTerrainLayer',
       pane: 'mcTerrainPane', paneZ: 250, paneClass: 'mc-terrain-pane', className: 'mc-terrain-tiles', opacity: 0.65,
+      retryPlaceholders: true, // #728 N3: a DHM proxy tile
       config: getTerrainConfig,
       label: function () { return TERRAIN_LABEL; },
       layers: function (cfg) { return cfg.layer; }
@@ -548,6 +549,59 @@
     return buildCredit(cfg.attribution, creditLinks(cfg));
   }
 
+  /* #728 N3 (#769 review) — one retry of a DHM placeholder tile.
+   *
+   * The DHM proxy answers a tile it cannot serve with a 1×1 transparent
+   * PNG: `busy` when its admission bound of cold tiles (#744) is full,
+   * `unavailable` after an upstream failure (both no-store), `outside`
+   * beyond the coverage (cached for a day). With the ortho base layer and
+   * the hillshade both cold, a view is about 120 tiles against 64
+   * admission slots, so part of it comes back busy, and Leaflet keeps a
+   * loaded tile: it stayed blank until it left the view.
+   *
+   * An <img> cannot read the X-CoreScope-Tile header, but every real DHM
+   * tile is 256×256, so a 1×1 image is a placeholder. Each one is reloaded
+   * once (same URL), RETRY_MS plus up to RETRY_JITTER_MS later, so the
+   * retries of one view are spread out instead of arriving together, and
+   * only if it is still loaded (not unloaded or aborted, which is also
+   * what happens to every tile when its layer leaves the map) and in view
+   * at the map's zoom. A no-store answer is fetched again; an `outside`
+   * one comes from the browser cache without a request. Bounded: one
+   * retry per tile element (so at most one extra request per tile), and
+   * every pending timer is cleared when the layer leaves the map.
+   */
+  var RETRY_MS = 3000;
+  var RETRY_JITTER_MS = 2000;
+
+  function _tileInView(map, layer, c) {
+    if (c.z !== Math.round(map.getZoom())) return false;
+    var ts = layer.getTileSize(), pb = map.getPixelBounds();
+    return c.x * ts.x < pb.max.x && (c.x + 1) * ts.x > pb.min.x &&
+           c.y * ts.y < pb.max.y && (c.y + 1) * ts.y > pb.min.y;
+  }
+
+  function retryPlaceholderTiles(map, layer) {
+    var pending = [];
+    layer.on('tileload', function (e) {
+      var img = e.tile, coords = e.coords;
+      if (!img || img._mcRetried || img.naturalWidth !== 1 || img.naturalHeight !== 1) return;
+      img._mcRetried = true;
+      var t = setTimeout(function () {
+        var i = pending.indexOf(t);
+        if (i >= 0) pending.splice(i, 1);
+        if (img._mcGone || !_tileInView(map, layer, coords)) return;
+        img.src = img.src;
+      }, RETRY_MS + Math.floor(Math.random() * RETRY_JITTER_MS));
+      pending.push(t);
+    });
+    layer.on('tileunload tileabort', function (e) { if (e.tile) e.tile._mcGone = true; });
+    layer.on('remove', function () {
+      pending.forEach(function (t) { clearTimeout(t); });
+      pending = [];
+    });
+    return layer;
+  }
+
   function _createOverlayLayer(map, o, cfg) {
     if (o.create) return o.create(map, cfg);
     if (!map.getPane(o.pane)) {
@@ -561,7 +615,7 @@
     // request, layers, styles, format, transparent, version, width, height,
     // crs and bbox (the DHM proxy accepts nothing else). `bounds` keeps
     // Leaflet from requesting tiles outside the data at all.
-    return L.tileLayer.wms(cfg.url, {
+    var layer = L.tileLayer.wms(cfg.url, {
       layers: o.layers(cfg),
       styles: '',
       format: 'image/png',
@@ -577,6 +631,7 @@
       attribution: _overlayCredit(cfg),
       className: o.className
     });
+    return o.retryPlaceholders ? retryPlaceholderTiles(map, layer) : layer;
   }
 
   // The class the compact (inset) credit is styled by; public/style.css
@@ -788,6 +843,7 @@
     ortho._isValidTile = function (coords) {
       return inBounds.call(this, coords) && !orthoTileSkipped(mask, coords.z, coords.x, coords.y);
     };
+    retryPlaceholderTiles(map, ortho);
     var esri = _hasId('esri-imagery') ? REGISTRY['esri-imagery'] : null;
     if (!esri) return ortho;
     var under = L.tileLayer(esri.url(), { attribution: esri.attribution, maxZoom: esri.maxZoom });
