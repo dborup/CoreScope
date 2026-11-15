@@ -22,7 +22,12 @@
  *      every other key;
  *   7. the credit links in the #733 order, and the server's wording;
  *   8. the profile: endpoint A/B and a chart sample → lat/lon, reusing
- *      the #781 mapping (fraction + latLonAt).
+ *      the #781 mapping (fraction + latLonAt), on unevenly spaced samples
+ *      (#818);
+ *   9. the open viewer's object URLs (#818): one per preview fetched,
+ *      none revoked while on screen, every one revoked once by close;
+ *  10. the node action only inside the block's bounds, Denmark (#818),
+ *      by the heritage overlay's own bounds test.
  *
  * Usage: node test-issue-737-skraafoto-viewer.js
  */
@@ -41,7 +46,7 @@ function eq(actual, expected, msg) {
   assert.deepStrictEqual(JSON.parse(JSON.stringify(actual === undefined ? null : actual)), expected, msg);
 }
 
-const { TP, win } = loadTerrainProfile(['terrain-profile-cursor.js', 'skraafoto.js']);
+const { TP, win } = loadTerrainProfile(['terrain-profile-cursor.js', 'skraafoto.js', 'heritage-info.js']);
 const SF = win.Skraafoto;
 const CUR = win.TerrainProfileCursor;
 assert.ok(SF, 'public/skraafoto.js must define window.Skraafoto');
@@ -59,6 +64,13 @@ function goConsts(file) {
 }
 const GO = goConsts('internal/skraafoto/skraafoto.go');
 const DHM = goConsts('internal/dhm/dhm.go');
+// dhm.Coverage, the box the server sends as the block's bounds.
+const COVERAGE = (function () {
+  const src = fs.readFileSync(path.join(__dirname, 'internal', 'dhm', 'dhm.go'), 'utf8');
+  const m = /^var Coverage = Bounds\{South: ([0-9.]+), West: ([0-9.]+), North: ([0-9.]+), East: ([0-9.]+)\}$/m.exec(src);
+  assert.ok(m, 'dhm.Coverage not found in internal/dhm/dhm.go');
+  return [[Number(m[1]), Number(m[2])], [Number(m[3]), Number(m[4])]];
+})();
 
 // /api/config/client's skraafoto block, field for field as
 // cmd/server/skraafoto_proxy.go (SkraafotoClientConfig) sends it.
@@ -70,7 +82,7 @@ const CREDIT = {
 const CFG = {
   enabled: true, searchUrl: '/api/skraafoto/search',
   previewUrl: '/api/skraafoto/preview/{collection}/{item}', maxPx: 1024,
-  note: GO.PrivacyNote, credit: CREDIT,
+  note: GO.PrivacyNote, credit: CREDIT, bounds: COVERAGE,
 };
 
 // One photo as GET /api/skraafoto/search returns it.
@@ -247,13 +259,17 @@ test('creditLinks: dataset then licence (the #733/#765 ordering contract)', () =
 
 // ── 8. Profile points ───────────────────────────────────────────────────────
 
-/* A 101-sample free-point path from (56.17, 10.12) to (56.12, 10.22). */
+/* A 101-sample free-point path from (56.17, 10.12) to (56.12, 10.22),
+ * sampled the way the server samples: every stepM, with a shorter last
+ * step to B. Unevenly spaced on purpose (#818): with even samples a
+ * sample's fraction of the path equals i/(n-1), so a mapping that
+ * counted samples instead of metres would pass. */
 function profile() {
-  const n = 101, D = 8400, samples = [];
-  for (let i = 0; i < n; i++) samples.push({ d: D * i / (n - 1), dtm: 30, dsm: 32 });
+  const n = 101, step = 84, D = step * (n - 2) + 42, samples = [];
+  for (let i = 0; i < n; i++) samples.push({ d: Math.min(step * i, D), dtm: 30, dsm: 32 });
   const end = (lat, lon) => ({ lat, lon, kind: 'point', groundM: 30, antennaM: 10, antennaSource: 'point-default', assumed: true });
   return {
-    a: end(56.17, 10.12), b: end(56.12, 10.22), distanceM: D, stepM: 84, sampleCount: n, model: 'both',
+    a: end(56.17, 10.12), b: end(56.12, 10.22), distanceM: D, stepM: step, sampleCount: n, model: 'both',
     coverage: { state: 'full', pct: 100, firstGapM: null }, samples,
     physics: { freqMHz: 869.618, freqSource: 'firmware', lambdaM: 0.34474, k: 1.3333333333333333, kSource: 'default', f1MaxM: 13.4 },
     verdict: { state: 'clear', model: 'dtm', criterion: 0.6, worstClearanceM: 5, worstAtM: 4200, worstF1Fraction: 1 },
@@ -273,10 +289,19 @@ test('pointAt: a chart sample is the #781 cursor\'s point on the drawn line', ()
   const data = profile();
   const g = TP.chartGeometry(data);
   eq(TP.pointAt(data, g, 0), { lat: 56.17, lon: 10.12, distanceM: 0 });
-  eq(TP.pointAt(data, g, 100), { lat: 56.12, lon: 10.22, distanceM: 8400 });
+  eq(TP.pointAt(data, g, 100), { lat: 56.12, lon: 10.22, distanceM: 8358 });
   const mid = TP.pointAt(data, g, 25);
-  const ll = CUR.latLonAt([56.17, 10.12], [56.12, 10.22], CUR.fraction(g, 25));
+  // Sample 25 is 2100 m along 8358 m: the fraction is in metres, not i/(n-1).
+  const f = CUR.fraction(g, 25);
+  assert.ok(Math.abs(f - 2100 / 8358) < 1e-12, 'fraction ' + f);
+  const ll = CUR.latLonAt([56.17, 10.12], [56.12, 10.22], f);
   eq(mid, { lat: Math.round(ll[0] * 1e5) / 1e5, lon: Math.round(ll[1] * 1e5) / 1e5, distanceM: 2100 });
+  const byCount = CUR.latLonAt([56.17, 10.12], [56.12, 10.22], 25 / 100);
+  assert.notDeepStrictEqual([mid.lat, mid.lon], [Math.round(byCount[0] * 1e5) / 1e5, Math.round(byCount[1] * 1e5) / 1e5],
+    'the fixture must tell metres from sample counts');
+  const last = TP.pointAt(data, g, 99);
+  const l99 = CUR.latLonAt([56.17, 10.12], [56.12, 10.22], 8316 / 8358);
+  eq(last, { lat: Math.round(l99[0] * 1e5) / 1e5, lon: Math.round(l99[1] * 1e5) / 1e5, distanceM: 8316 }, 'the sample before the short last step');
   eq(TP.pointAt(data, g, -1), null);
   eq(TP.pointAt(data, g, 101), null);
   eq(TP.pointAt(data, null, 3), null);
@@ -292,5 +317,188 @@ test('chartIndexAt: a click x on the plot is the #781 nearest sample', () => {
   eq(TP.chartIndexAt(g, { left: 0, width: 0 }, 50), -1);
 });
 
-console.log('\n' + passed + ' passed, ' + failed + ' failed\n');
-process.exit(failed ? 1 : 0);
+// ── 9. Object URLs of the open viewer (#818) ────────────────────────────────
+
+/* A small DOM for open(): elements with listeners, attributes (src
+ * mirrored), children and focus, all recorded so a test can find them by
+ * data-testid and click them. */
+function fakeDom() {
+  const all = [];
+  function element(tag) {
+    const e = {
+      tagName: String(tag).toUpperCase(), attrs: {}, children: [], listeners: {}, parentNode: null, style: {},
+      hidden: false, disabled: false, value: '', className: '', _text: '',
+      classList: { _c: new Set(), add(c) { this._c.add(c); }, remove(c) { this._c.delete(c); },
+        toggle(c, on) { if (on) this._c.add(c); else this._c.delete(c); }, contains(c) { return this._c.has(c); } },
+      setAttribute(k, v) { e.attrs[k] = String(v); },
+      getAttribute(k) { return Object.prototype.hasOwnProperty.call(e.attrs, k) ? e.attrs[k] : null; },
+      removeAttribute(k) { delete e.attrs[k]; },
+      appendChild(c) { e.children.push(c); c.parentNode = e; return c; },
+      removeChild(c) { e.children = e.children.filter((x) => x !== c); c.parentNode = null; return c; },
+      addEventListener(t, f) { (e.listeners[t] = e.listeners[t] || []).push(f); },
+      fire(t) { (e.listeners[t] || []).forEach((f) => f({ target: e, preventDefault() {}, stopImmediatePropagation() {} })); },
+      focus() { doc.activeElement = e; },
+      contains(x) { for (let n = x; n; n = n.parentNode) if (n === e) return true; return false; },
+      querySelectorAll() { return []; },
+    };
+    Object.defineProperty(e, 'textContent', {
+      get() { return e._text + e.children.map((c) => c.textContent).join(''); },
+      set(v) { e._text = v == null ? '' : String(v); e.children = []; },
+    });
+    Object.defineProperty(e, 'innerHTML', { set(v) { e._text = String(v); } });
+    Object.defineProperty(e, 'src', { get() { return e.getAttribute('src') || ''; }, set(v) { e.setAttribute('src', v); } });
+    all.push(e);
+    return e;
+  }
+  const doc = {
+    createElement: element, activeElement: null,
+    addEventListener() {}, removeEventListener() {},
+    querySelector: () => null,
+  };
+  doc.body = element('body');
+  return { doc, byTid: (t) => all.find((e) => e.getAttribute('data-testid') === t) };
+}
+
+/* The search and preview endpoints, as the M1 proxy answers. A preview
+ * is held while svc.hold is set, until svc.release() lets the oldest go. */
+function fakeService() {
+  const svc = { search: [], preview: [], hold: false, held: [] };
+  svc.fetch = (u) => {
+    if (u.indexOf(CFG.searchUrl + '?') === 0) {
+      svc.search.push(u);
+      const year = Number(new URLSearchParams(u.split('?')[1]).get('year')) || 2025;
+      const body = { collection: 'skraafotos' + year, year, years: [2025, 2023, 2021, 2019],
+        photos: SF.DIRECTIONS.map((d, i) => photo(d, year, i + 1)), credit: CREDIT };
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+    }
+    svc.preview.push(u);
+    const answer = () => ({ ok: true, status: 200, blob: () => Promise.resolve({ of: u }) });
+    if (!svc.hold) return Promise.resolve(answer());
+    return new Promise((r) => svc.held.push(() => r(answer())));
+  };
+  svc.release = () => svc.held.shift()();
+  return svc;
+}
+
+/* withViewer runs fn against a viewer opened on the fake DOM, with
+ * URL.createObjectURL / revokeObjectURL counted, and restores the
+ * sandbox after. */
+async function withViewer(fn) {
+  const dom = fakeDom();
+  const svc = fakeService();
+  const urls = { created: [], revoked: [], of: {} };
+  const saved = { document: win.document, URL: win.URL };
+  win.document = dom.doc;
+  win.URL = {
+    createObjectURL(b) { const u = 'blob:test/' + (urls.created.length + 1); urls.created.push(u); urls.of[b.of] = u; return u; },
+    revokeObjectURL(u) { urls.revoked.push(u); },
+  };
+  const settle = () => new Promise((r) => setImmediate(r));
+  const img = () => dom.byTid('sf-img');
+  const t = {
+    dom, svc, urls, settle,
+    shown: () => img().getAttribute('src'),
+    urlOf: (year, dir) => urls.of[SF.previewURL(photo(dir, year, SF.DIRECTIONS.indexOf(dir) + 1))],
+    async tap(dir) { dom.byTid('sf-dir-' + dir).fire('click'); await settle(); t.check(); },
+    async year(y) { const s = dom.byTid('sf-year'); s.value = String(y); s.fire('change'); await settle(); await settle(); t.check(); },
+    // The photo on screen is never one already revoked.
+    check() {
+      const on = t.shown();
+      assert.ok(!on || urls.revoked.indexOf(on) < 0, 'the photo on screen was revoked: ' + on);
+    },
+  };
+  try {
+    t.viewer = SF.open({ lat: 56.15674, lon: 10.21076, cfg: CFG, fetch: svc.fetch });
+    assert.ok(t.viewer, 'the viewer opened');
+    await settle(); await settle();
+    await fn(t);
+  } finally {
+    if (t.viewer) t.viewer.close(false);
+    win.document = saved.document;
+    win.URL = saved.URL;
+  }
+}
+
+/* Ten previews in one dialog, 2025 and 2023 in all five directions,
+ * then back to 2025 north from the dialog's copy: on screen, and now the
+ * oldest copy kept. */
+async function tenThenBack(t) {
+  for (const d of ['east', 'south', 'west', 'nadir']) await t.tap(d);
+  await t.year(2023);
+  for (const d of ['north', 'east', 'south', 'west']) await t.tap(d);
+  eq(t.svc.preview.length, 10, 'ten previews fetched');
+  await t.year(2025);
+  await t.tap('north');
+  eq(t.svc.preview.length, 10, 'back to 2025 north from the copy, not fetched again');
+  eq(t.shown(), t.urlOf(2025, 'north'), '2025 north on screen');
+  eq(t.urls.revoked, [], 'nothing revoked while ten are kept');
+}
+
+const asyncTests = [];
+function testAsync(name, fn) { asyncTests.push([name, fn]); }
+
+testAsync('object URLs: the eleventh preview drops 2025 north, revoked once it is off screen', () => withViewer(async (t) => {
+  await tenThenBack(t);
+  await t.year(2021); // 2021 north: the eleventh preview
+  eq(t.svc.preview.length, 11);
+  eq(t.shown(), t.urlOf(2021, 'north'), '2021 north on screen');
+  eq(t.urls.revoked, [t.urlOf(2025, 'north')], 'the photo that left the screen, and only it');
+  t.viewer.close(true);
+  eq(t.urls.created.length, 11, 'one object URL per preview');
+  eq(t.urls.revoked.slice().sort(), t.urls.created.slice().sort(), 'close revokes every one, each once');
+}));
+
+testAsync('object URLs: close revokes the photo on screen that was dropped from the copies', () => withViewer(async (t) => {
+  await tenThenBack(t);
+  t.svc.hold = true;
+  await t.year(2021); // 2021 north is asked for and held
+  await t.year(2019); // ... and is stale before it lands
+  eq(t.svc.held.length, 2, '2021 and 2019 north held');
+  t.svc.release(); // 2021 north lands: kept, not shown, and 2025 north drops out
+  await t.settle();
+  t.check();
+  eq(t.shown(), t.urlOf(2025, 'north'), '2025 north is still the image source');
+  eq(t.urls.revoked, [], 'not revoked while it is the image source');
+  t.viewer.close(true);
+  t.svc.release(); // 2019 north lands after close: no object URL for it
+  await t.settle();
+  eq(t.urls.created.length, 11);
+  eq(t.shown(), null, 'close clears the image');
+  eq(t.urls.revoked.slice().sort(), t.urls.created.slice().sort(), 'close revokes every one, each once');
+}));
+
+// ── 10. Only inside the coverage (#818) ─────────────────────────────────────
+
+testAsync('node action: offered inside the block\'s bounds (Denmark), not outside', () => withViewer(async () => {
+  eq(COVERAGE, [[54.4265, 7.99125], [57.778, 15.5995]], 'dhm.Coverage');
+  const inDK = [{ lat: 56.15674, lon: 10.21076 }, { lat: 55.10, lon: 14.70 }, { lat: 57.72, lon: 10.58 },
+    { lat: COVERAGE[0][0], lon: COVERAGE[0][1] }, { lat: COVERAGE[1][0], lon: COVERAGE[1][1] }];
+  const outside = [{ lat: 37.888, lon: -122.268 }, { lat: 59.91, lon: 10.75 }, { lat: 52.52, lon: 13.40 },
+    { lat: 56.15, lon: 7.99 }, { lat: 56.15, lon: 15.60 }, { lat: 54.42, lon: 10 }, { lat: 57.78, lon: 10 }];
+  inDK.forEach((n) => assert.ok(SF.nodeAction(Object.assign({ name: 'x' }, n), CFG), 'no action at ' + JSON.stringify(n)));
+  outside.forEach((n) => assert.strictEqual(SF.nodeAction(Object.assign({ name: 'x' }, n), CFG), null, 'action at ' + JSON.stringify(n)));
+  const noBounds = Object.assign({}, CFG);
+  delete noBounds.bounds;
+  assert.ok(SF.nodeAction({ name: 'x', lat: 37.888, lon: -122.268 }, noBounds), 'a block without bounds sets no limit');
+}));
+
+testAsync('node action: the coverage test is the heritage overlay\'s, not a copy', () => withViewer(async () => {
+  const hi = win.HeritageInfo;
+  assert.strictEqual(typeof hi.inBounds, 'function', 'HeritageInfo.inBounds is exported');
+  const asked = [];
+  const real = hi.inBounds;
+  hi.inBounds = (b, lat, lon) => { asked.push([b, lat, lon]); return false; };
+  try {
+    assert.strictEqual(SF.nodeAction({ name: 'x', lat: 56.15674, lon: 10.21076 }, CFG), null, 'its answer decides');
+    eq(asked, [[COVERAGE, 56.15674, 10.21076]]);
+  } finally { hi.inBounds = real; }
+}));
+
+(async () => {
+  for (const [name, fn] of asyncTests) {
+    try { await fn(); passed++; console.log('  ✅ ' + name); }
+    catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
+  }
+  console.log('\n' + passed + ' passed, ' + failed + ' failed\n');
+  process.exit(failed ? 1 : 0);
+})();

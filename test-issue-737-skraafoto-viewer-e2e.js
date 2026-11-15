@@ -34,11 +34,19 @@
  *   8. Path profile: A, B and a clicked chart point (the #781 mapping) open
  *      the viewer at those coordinates; the panel's head and chart do not
  *      move when the row is on;
- *   9. phones, real taps from a cold start: 375x560 portrait and 640x360
- *      landscape — the dialog sits above the bottom nav and inside the
- *      viewport, its controls are hit by themselves, and the profile panel
- *      keeps its layout;
- *  10. a node name is text, never markup.
+ *   9. phones, 375x560 portrait and 640x360 landscape: on a first visit
+ *      (no gesture hint marked as seen) from `/` to the viewer by real
+ *      taps (More, Nodes, the node's row, the action), and from a shared
+ *      profile link — the dialog sits above the bottom nav and inside the
+ *      viewport, its controls are hit by themselves, the gesture hints
+ *      that are up do not cover it (#818), and the profile panel keeps
+ *      its layout;
+ *  10. a node name is text, never markup;
+ *  11. a node outside the block's bounds (Denmark) has no action, while
+ *      "Terrain profile to…" is still offered (#818).
+ *
+ * The fixture's nodes are in California: the node used here is moved to
+ * Aarhus in the stubbed /api/nodes answers (o.abroad keeps it where it is).
  *
  * SHOTS_DIR=dir also writes screenshots for the PR.
  *
@@ -62,8 +70,10 @@ const CREDIT = {
 };
 const SF_BLOCK = {
   enabled: true, searchUrl: SEARCH_PATH, previewUrl: '/api/skraafoto/preview/{collection}/{item}',
-  maxPx: 1024, note: PRIVACY, credit: CREDIT,
+  maxPx: 1024, note: PRIVACY, credit: CREDIT, bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
 };
+// Where the node under test is moved to, inside the bounds.
+const AARHUS = { lat: 56.15674, lon: 10.21076 };
 const DHM_ATTRIBUTION = 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0';
 const DHM_BLOCK = {
   enabled: true, url: '/api/map/dhm/wms', layer: 'dhm_terraen_skyggekort',
@@ -177,7 +187,9 @@ function searchAnswer(q, o) {
   /* o.sf false: no skraafoto block. o.search: 'ok' | 429 | 503 | 502 |
    * 'empty'. o.previewFail: { north: 503 } fails those directions.
    * o.holdSearch: the first search waits until rec.release() is called.
-   * o.nodeName: { pk, name } rewrites that node's name. */
+   * o.nodeName: name rewrites the moved node's name. o.abroad leaves the
+   * moved node at its own (Californian) position. o.firstVisit marks no
+   * gesture hint as seen. */
   async function newCtx(o) {
     o = o || {};
     const ctx = await browser.newContext({
@@ -223,14 +235,23 @@ function searchAnswer(q, o) {
       const u = new URL(route.request().url());
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profileFor(u.searchParams)) });
     });
-    if (o.nodeName) {
-      await ctx.route(url => new URL(url).pathname === '/api/nodes/' + o.nodeName.pk, async (route) => {
-        const response = await route.fetch();
-        const body = await response.json();
-        if (body && body.node) body.node.name = o.nodeName.name; else if (body) body.name = o.nodeName.name;
-        await route.fulfill({ response, json: body });
-      });
-    }
+    // The node under test, in every /api/nodes answer (list, detail).
+    await ctx.route(url => /^\/api\/nodes(\/|$)/.test(new URL(url).pathname), async (route) => {
+      if (!MOVED_PK) { await route.fallback(); return; }
+      const response = await route.fetch();
+      let body;
+      try { body = await response.json(); } catch (_) { await route.fulfill({ response }); return; }
+      (function walk(v) {
+        if (!v || typeof v !== 'object') return;
+        if (Array.isArray(v)) { v.forEach(walk); return; }
+        if (typeof v.public_key === 'string' && v.public_key.toLowerCase() === MOVED_PK) {
+          if (!o.abroad) { v.lat = AARHUS.lat; v.lon = AARHUS.lon; }
+          if (o.nodeName) v.name = o.nodeName;
+        }
+        Object.keys(v).forEach(k => walk(v[k]));
+      })(body);
+      await route.fulfill({ response, json: body });
+    });
     await ctx.route(url => new URL(url).pathname === '/api/map/dhm/wms', (route) =>
       route.fulfill({ status: 200, contentType: 'image/png', body: PNG_1X1 }));
     // Every other host: refused and recorded. Map tiles get a blank PNG.
@@ -242,19 +263,22 @@ function searchAnswer(q, o) {
         await route.abort();
       }
     });
-    await ctx.addInitScript(() => {
+    await ctx.addInitScript((firstVisit) => {
       try {
         localStorage.setItem('meshcore-theme', 'light');
         localStorage.setItem('meshcore-map-clustering', 'false');
-        ['row-swipe', 'tab-swipe', 'edge-drawer', 'pull-refresh']
-          .forEach(k => localStorage.setItem('meshcore-gesture-hints-' + k, 'seen'));
+        if (!firstVisit) {
+          ['row-swipe', 'tab-swipe', 'edge-drawer', 'pull-refresh']
+            .forEach(k => localStorage.setItem('meshcore-gesture-hints-' + k, 'seen'));
+        }
       } catch (_) {}
-    });
+    }, !!o.firstVisit);
     const page = await ctx.newPage();
     page.on('pageerror', e => rec.errors.push(String(e)));
     return { ctx, page, rec };
   }
 
+  let MOVED_PK = null;
   const nodes = await (async () => {
     const { ctx, page } = await newCtx({ sf: false });
     await page.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
@@ -273,7 +297,8 @@ function searchAnswer(q, o) {
   })();
   assert(nodes.fixed && nodes.nofix && nodes.zero, 'the fixture needs a node with a fix, one without and one at 0,0');
   const PK = nodes.fixed.pk.toLowerCase();
-  const LAT5 = Number(nodes.fixed.lat).toFixed(5), LON5 = Number(nodes.fixed.lon).toFixed(5);
+  MOVED_PK = PK;
+  const LAT5 = AARHUS.lat.toFixed(5), LON5 = AARHUS.lon.toFixed(5);
 
   async function gotoNode(page, pk, extra) {
     await page.goto(`${BASE}/#/nodes/${pk}${extra || ''}`, { waitUntil: 'domcontentloaded' });
@@ -627,7 +652,52 @@ function searchAnswer(q, o) {
     });
   }
 
-  // ── 9. Phones: real taps from a cold start ────────────────────────────────
+  // ── 9. Phones: a first visit by real taps from `/`, and a profile link ────
+  /* tapToNode is a first visit's way to a node: `/`, then More, Nodes and
+   * the node's row, each a tap; on a phone the row opens the node page. */
+  async function tapToNode(page, pk) {
+    await page.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
+    await page.tap('[data-bottom-nav-tab="more"]');
+    await page.tap('[data-bottom-nav-more-route="nodes"]');
+    const row = page.locator(`tr[data-key="${pk}"]`);
+    await row.waitFor({ timeout: 30000 });
+    await row.scrollIntoViewIfNeeded();
+    await row.locator('td:visible').first().tap();
+    await page.waitForSelector('.node-full-card', { timeout: 30000 });
+    await page.waitForSelector(ACTION, { timeout: 10000 });
+    await hintsUp(page);
+  }
+  /* hintsUp waits for the first visit's gesture hints, shown 800 ms after
+   * a route change (gesture-hints.js) and up for 8 s. */
+  async function hintsUp(page) {
+    await page.waitForSelector('.gesture-hint:not(.gesture-hint-fading)', { timeout: 5000 });
+  }
+  /* noHintOver: on a first visit the gesture hints are up; none of them
+   * may cover the viewer (#818). Each hint that overlaps the dialog is
+   * probed at points of the overlap: what is hit there is the viewer. */
+  async function noHintOver(page) {
+    const r = await page.evaluate((sel) => {
+      const d = document.querySelector(sel).getBoundingClientRect();
+      const hints = Array.from(document.querySelectorAll('.gesture-hint'));
+      const over = [];
+      hints.forEach((h) => {
+        const b = h.getBoundingClientRect();
+        const x0 = Math.max(b.left, d.left), x1 = Math.min(b.right, d.right);
+        const y0 = Math.max(b.top, d.top), y1 = Math.min(b.bottom, d.bottom);
+        if (x1 - x0 < 1 || y1 - y0 < 1) return;
+        const hits = [];
+        for (const fx of [0.2, 0.5, 0.8]) for (const fy of [0.2, 0.5, 0.8]) {
+          const t = document.elementFromPoint(x0 + (x1 - x0) * fx, y0 + (y1 - y0) * fy);
+          hits.push(!!t && !!t.closest('[data-testid="sf-overlay"]'));
+        }
+        over.push({ id: h.getAttribute('data-gesture-hint'), hits });
+      });
+      return { shown: hints.map(h => h.getAttribute('data-gesture-hint')), over };
+    }, DIALOG);
+    assert(r.over.length > 0, 'no gesture hint over the dialog to test against; shown: ' + r.shown.join(','));
+    r.over.forEach((o) => assert(o.hits.every(Boolean), 'the gesture hint "' + o.id + '" covers the viewer: ' + JSON.stringify(o.hits)));
+    for (const sel of [CLOSE, DIR('north'), DIR('nadir'), YEAR, IMG]) assert(await hitsItself(page, sel), sel + ' is covered');
+  }
   async function aboveNav(page) {
     const nav = await page.$eval('.bottom-nav', e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e); return { top: r.top, shown: s.display !== 'none' && r.height > 0 }; });
     const d = await rect(page, DIALOG);
@@ -656,12 +726,20 @@ function searchAnswer(q, o) {
   }
   for (const [label, viewport] of [['375x560 portrait', { width: 375, height: 560 }], ['640x360 landscape', { width: 640, height: 360 }]]) {
     {
-      const { ctx, page, rec } = await newCtx({ viewport, touch: true });
-      await gotoNode(page, PK);
-      await page.waitForSelector(ACTION, { timeout: 10000 });
+      const { ctx, page, rec } = await newCtx({ viewport, touch: true, firstVisit: true });
+      await tapToNode(page, nodes.fixed.pk);
       await page.locator(ACTION).scrollIntoViewIfNeeded();
       await page.tap(ACTION);
       await waitReady(page);
+      await step(`${label} first visit: from / to the viewer by taps, no gesture hint marked as seen`, async () => {
+        assert(page.url().includes('#/nodes/' + PK), page.url());
+        const seen = await page.evaluate(() => Object.keys(localStorage).filter(k => /^meshcore-gesture-hints-/.test(k) && localStorage.getItem(k) === 'seen'));
+        assert(seen.length === 0, 'marked as seen: ' + seen.join(','));
+      });
+      await step(`${label} first visit: no gesture hint covers the viewer`, async () => {
+        await noHintOver(page);
+      });
+      await shot(page, '818-first-visit-' + viewport.width);
       await step(`${label} node page: the dialog sits above the bottom nav, controls hit by themselves`, async () => {
         await aboveNav(page);
       });
@@ -669,8 +747,10 @@ function searchAnswer(q, o) {
         await page.tap(DIR('east'));
         await waitReady(page);
         assert(await page.getAttribute(DIR('east'), 'aria-pressed') === 'true', 'east not selected');
-        await page.locator(FULL).scrollIntoViewIfNeeded();
-        assert(await hitsItself(page, FULL), 'Full resolution covered');
+        for (const sel of [FULL, NOTE]) {
+          await page.locator(sel).scrollIntoViewIfNeeded();
+          assert(await hitsItself(page, sel), sel + ' covered');
+        }
         await page.tap(CLOSE);
         await page.waitForSelector(DIALOG, { state: 'detached', timeout: 3000 });
         assert(await active(page) === 'node-skraafoto', 'focus on ' + await active(page));
@@ -680,6 +760,10 @@ function searchAnswer(q, o) {
       await ctx.close();
     }
     {
+      // From a shared profile link, hints seen: on a phone the panel
+      // covers the map while it waits for B (#790), so B cannot be picked
+      // by a tap yet, and on a first visit at 640x360 the tab-swipe hint
+      // lies over the row's B button (the page's, not the viewer's).
       const { ctx, page, rec } = await newCtx({ viewport, touch: true });
       await gotoProfile(page);
       await page.waitForSelector(SF_ROW, { timeout: 5000 });
@@ -733,7 +817,7 @@ function searchAnswer(q, o) {
   // ── 10. A node name is text ───────────────────────────────────────────────
   {
     const evil = '<img src=x onerror="window.__sfXss=1">Mast';
-    const { ctx, page } = await newCtx({ nodeName: { pk: PK, name: evil } });
+    const { ctx, page } = await newCtx({ nodeName: evil });
     await gotoNode(page, PK);
     await page.waitForSelector(ACTION, { timeout: 10000 });
     await page.click(ACTION);
@@ -743,6 +827,20 @@ function searchAnswer(q, o) {
       assert(where.includes(evil), 'label: ' + where);
       assert(await page.evaluate(() => window.__sfXss === undefined), 'markup ran');
       assert(await page.$(DIALOG + ' img[src="x"]') === null, 'an <img> from the name');
+    });
+    await ctx.close();
+  }
+
+  // ── 11. Only inside the coverage ──────────────────────────────────────────
+  {
+    const { ctx, page, rec } = await newCtx({ abroad: true });
+    await gotoNode(page, PK);
+    await page.waitForSelector('[data-testid="node-terrain-profile"]', { timeout: 10000 });
+    await page.waitForTimeout(300);
+    await step('a node outside Denmark has no oblique photo action; the terrain profile is still offered', async () => {
+      assert(await page.$(ACTION) === null, 'action on a node at ' + nodes.fixed.lat + ',' + nodes.fixed.lon);
+      assert(await page.$('[data-testid="node-terrain-profile"]'), 'no terrain profile action');
+      assert(rec.search.length === 0 && rec.preview.length === 0, 'requests ' + rec.search.length);
     });
     await ctx.close();
   }
