@@ -101,8 +101,9 @@ var coverageParams = map[string]string{
 	"format":       "GTiff",
 }
 
-// coverageQuery is the GetCoverage query for a validated request.
-func (r RasterRequest) coverageQuery() url.Values {
+// CoverageQuery is the GetCoverage query for a validated request. The live
+// smoke check (#803) sends it too.
+func (r RasterRequest) CoverageQuery() url.Values {
 	q := url.Values{}
 	for k, v := range coverageParams {
 		q.Set(k, v)
@@ -118,7 +119,7 @@ func (r RasterRequest) coverageQuery() url.Values {
 }
 
 // parseCoverageQuery accepts only the exact GetCoverage shape that
-// coverageQuery builds. Client.Get runs it on every WCS call.
+// CoverageQuery builds. Client.Get runs it on every WCS call.
 func parseCoverageQuery(q url.Values) (RasterRequest, error) {
 	free, err := ExactQuery(q, coverageParams, "coverage", "bbox", "width", "height")
 	if err != nil {
@@ -163,7 +164,7 @@ func parseSize(s string) (int, error) {
 	return n, nil
 }
 
-// checkCoverageQuery accepts q only in the exact spelling coverageQuery
+// checkCoverageQuery accepts q only in the exact spelling CoverageQuery
 // builds for the request it parses to. A numerically valid but
 // non-canonical bbox or size (0x1p19, 5.75e5, 575000., 0179) would
 // otherwise reach upstream in a shape this package never sends.
@@ -172,7 +173,7 @@ func checkCoverageQuery(q url.Values) error {
 	if err != nil {
 		return err
 	}
-	if q.Encode() != r.coverageQuery().Encode() {
+	if q.Encode() != r.CoverageQuery().Encode() {
 		return ErrBadRequest
 	}
 	return nil
@@ -192,7 +193,7 @@ func NewWCSSource(c *Client) *WCSSource { return &WCSSource{c} }
 // the query); every upstream or decoding failure is a FetchError, and so
 // is a done ctx ("canceled" or "timeout").
 func (s *WCSSource) FetchRaster(ctx context.Context, r RasterRequest) (Grid, error) {
-	data, err := s.c.get(ctx, nil, WCSService, r.coverageQuery(), geoTIFFContentTypes)
+	data, err := s.c.get(ctx, nil, WCSService, r.CoverageQuery(), geoTIFFContentTypes)
 	if err != nil {
 		return Grid{}, err
 	}

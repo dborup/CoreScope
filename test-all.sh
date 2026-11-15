@@ -49,6 +49,7 @@ run test-issue-336-external-asset-pinning.js
 run test-issue-628-vendor-gitattributes.js
 run test-issue-442-instrumented-vendor-copy.js
 run test-issue-715-og-denmark.js
+run test-issue-739-og-outline.js
 run test-nav-dynamic-link-lifecycle.js
 run test-nav-first-load-fit.js
 run test-nav-priority-scheduler.js
@@ -162,11 +163,13 @@ run test-issue-728-ortho-followups.js
 run test-packets-window-pinned.js
 run test-issue-733-dhm-credit.js
 run test-issue-734-dhm-overlays.js
+run test-issue-734-customizer-overlays.js
 run test-issue-738-foreign-fill-ui.js
 run test-issue-730-buildings-ui.js
 run test-issue-752-inset-attribution.js
 run test-issue-741-base-layer-factory.js
 run test-issue-741-skaermkort.js
+run test-issue-741-natur-friluft.js
 run test-issue-764-no-osm-fallback.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js

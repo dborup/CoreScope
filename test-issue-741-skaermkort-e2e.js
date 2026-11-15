@@ -42,6 +42,27 @@
  *      nothing is requested; at 6 a pick loads zoom-6 tiles, and the map
  *      then cannot be zoomed out below 6.
  *
+ * #741 M2 — Natur- og Friluftskort (wms/natur_friluftskort, layer
+ * Natur_Friluft_basis), on the same gate and token:
+ *  12. Off with Skærmkort (steps 1 above include it); on, offered on Map
+ *      and Live as a light style only, in the customizer's light list and
+ *      not its dark list, and nothing requested until it is picked.
+ *  13. Picked: 512 px EPSG:3857 GetMaps of Natur_Friluft_basis with the
+ *      allow-listed parameters (TRANSPARENT=FALSE, uppercase as WMS 1.3.0
+ *      and Dataforsyningen require, #820) and the same dummy token, the
+ *      exact credit with its dataset and licence links, no filter in light
+ *      or in dark (light only). Back to Auto stops the requests.
+ *  14. No extra tile churn: with every GetMap answered after 1.0 s (the
+ *      owner's cold timing), the same pick/pan/zoom script costs Natur
+ *      exactly the requests it costs Skærmkort, with no URL fetched twice.
+ *  15. Perf: a full 1920x1080 view is at most 20 GetMaps; measured against
+ *      the same layer built at 256 px through the same factory.
+ *  16. A real phone flow from a cold start at 375x560: tap the layer
+ *      control, tap Natur; it survives a theme switch from the More sheet
+ *      and SPA navigation (bottom nav to Live, which keeps its own view
+ *      outside Denmark and requests nothing; back to Map; a link into Live
+ *      at a Danish view; Map again), with the tiles and the credit visible.
+ *
  * Usage:
  *   BASE_URL=http://localhost:13741 node test-issue-741-skaermkort-e2e.js
  * Optional: SCREENSHOT_DIR=<dir> writes small screenshots (stub tiles only).
@@ -59,6 +80,15 @@ const CREDIT = 'Indeholder data fra Klimadatastyrelsen og GeoDanmark, Skærmkort
 const DATASET_URL = 'https://dataforsyningen.dk/data/962';
 const LICENSE_URL = 'https://creativecommons.org/licenses/by/4.0/';
 const OSM_CREDIT = '© OpenStreetMap contributors';
+// #741 M2
+const NATUR_ID = 'dataforsyningen-natur-friluft';
+const NATUR_BASE = 'https://api.dataforsyningen.dk/wms/natur_friluftskort';
+const NATUR_LAYER = 'Natur_Friluft_basis';
+const SK_CREDIT = { text: CREDIT, dataset: DATASET_URL, datasetText: 'Skærmkort' };
+const NATUR_CREDIT = { text: 'Indeholder data fra Klimadatastyrelsen, Natur- og Friluftskort, CC BY 4.0',
+  dataset: 'https://dataforsyningen.dk/data/2683', datasetText: 'Natur- og Friluftskort' };
+// The owner's cold timing for a Natur GetMap (#741 token checks).
+const NATUR_COLD_MS = 1000;
 const LIGHT_IDS = ['dataforsyningen-skaermkort', 'dataforsyningen-skaermkort-graa', 'dataforsyningen-skaermkort-daempet'];
 const DARK_IDS = ['dataforsyningen-skaermkort-graa-dark'];
 const ALL_IDS = LIGHT_IDS.concat(DARK_IDS);
@@ -107,6 +137,15 @@ const WMS_STUBS = {
   dtk_skaermkort: png(512, grid([244, 236, 214], [214, 120, 60])),
   dtk_skaermkort_graa: png(512, grid([232, 232, 232], [140, 140, 140])),
   dtk_skaermkort_daempet: png(512, grid([236, 233, 224], [168, 150, 120])),
+  // #741 M2: an outdoor-map stand-in (fields, a lake, a forest, a path) —
+  // a stub, not the agency's cartography.
+  Natur_Friluft_basis: png(512, (i, j) => {
+    if (i % 128 < 3 || j % 128 < 3) return [150, 120, 90];
+    if (Math.abs(i - j) < 4) return [200, 60, 40];
+    if ((i - 140) * (i - 140) + (j - 360) * (j - 360) < 70 * 70) return [170, 211, 233];
+    if (i > 300 && j < 260) return [196, 224, 170];
+    return [246, 243, 226];
+  }),
 };
 const OTHER_STUB = png(256, () => [200, 200, 200]);
 const TERRAIN_STUB = png(256, (i, j) => { const v = 150 + Math.round(70 * Math.sin(i / 19) * Math.cos(j / 23)); return [v, v, v]; });
@@ -120,9 +159,9 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
 // The GetMap parameters Leaflet sends for these layers, and nothing else.
 const PARAMS = ['token', 'service', 'request', 'layers', 'styles', 'format', 'transparent', 'version', 'width', 'height', 'crs', 'bbox'];
-function checkGetMap(url, layer) {
+function checkGetMap(url, layer, base = WMS_BASE) {
   const u = new URL(url);
-  assert(u.origin + u.pathname === WMS_BASE, 'wrong service: ' + url);
+  assert(u.origin + u.pathname === base, 'wrong service: ' + url);
   const keys = Array.from(u.searchParams.keys());
   assert(keys.slice().sort().join() === PARAMS.slice().sort().join(), 'parameters ' + keys.join(',') + ' in ' + url);
   assert(u.searchParams.getAll('token').length === 1 && u.searchParams.get('token') === TOKEN, 'token: ' + url);
@@ -148,7 +187,8 @@ function checkGetMap(url, layer) {
   console.log(`\n=== #741 M1b Skærmkort against ${BASE} ===\n`);
 
   // tiles: the map.tiles block to serve; dhm: add the hillshade block.
-  async function newCtx({ tiles, dhm = false, theme = 'light', storage = {}, viewport = { width: 1100, height: 720 }, phone = false }) {
+  // wmsDelayMs: answer every Dataforsyningen GetMap that much later (#741 M2).
+  async function newCtx({ tiles, dhm = false, theme = 'light', storage = {}, viewport = { width: 1100, height: 720 }, phone = false, wmsDelayMs = 0 }) {
     const ctx = await browser.newContext(phone
       ? { viewport, hasTouch: true, isMobile: true, deviceScaleFactor: 2 }
       : { viewport });
@@ -171,6 +211,7 @@ function checkGetMap(url, layer) {
       if (/[?&]token=/i.test(url)) rec.tokens.push(url);
       if (url.indexOf('https://api.dataforsyningen.dk/') === 0) {
         rec.wms.push(url);
+        if (wmsDelayMs) await new Promise(r => setTimeout(r, wmsDelayMs));
         const layer = new URL(url).searchParams.get('layers');
         await route.fulfill({ status: 200, contentType: 'image/png', body: WMS_STUBS[layer] || OTHER_STUB });
         return;
@@ -230,7 +271,7 @@ function checkGetMap(url, layer) {
     await page.evaluate((t) => document.documentElement.setAttribute('data-theme', t), theme);
     await page.waitForTimeout(900);
   }
-  async function state(page) {
+  async function state(page, wmsBase = WMS_BASE) {
     return page.evaluate((base) => {
       const pane = document.querySelector('.leaflet-tile-pane');
       const attr = document.querySelector('.leaflet-control-attribution');
@@ -258,7 +299,7 @@ function checkGetMap(url, layer) {
         })(),
         zTile: z('.leaflet-tile-pane'), zTerrain: z('.mc-terrain-pane'),
       };
-    }, WMS_BASE);
+    }, wmsBase);
   }
   async function pan(page, dx, dy) {
     const b = await page.$eval('.leaflet-container', el => { const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; });
@@ -273,10 +314,10 @@ function checkGetMap(url, layer) {
     if (!SHOT_DIR) return;
     await page.screenshot({ path: path.join(SHOT_DIR, name), type: 'jpeg', quality: 60 });
   }
-  function checkCredit(s, label) {
-    assert(s.attribution.includes(CREDIT), label + ': credit missing: ' + JSON.stringify(s.attribution));
-    const ds = s.links.filter(l => l.href === DATASET_URL), li = s.links.filter(l => l.href === LICENSE_URL);
-    assert(ds.length === 1 && ds[0].text === 'Skærmkort', label + ': dataset link: ' + JSON.stringify(s.links));
+  function checkCredit(s, label, c = SK_CREDIT) {
+    assert(s.attribution.includes(c.text), label + ': credit missing: ' + JSON.stringify(s.attribution));
+    const ds = s.links.filter(l => l.href === c.dataset), li = s.links.filter(l => l.href === LICENSE_URL);
+    assert(ds.length === 1 && ds[0].text === c.datasetText, label + ': dataset link: ' + JSON.stringify(s.links));
     assert(li.length === 1 && li[0].text === 'CC BY 4.0', label + ': licence link: ' + JSON.stringify(s.links));
     for (const l of ds.concat(li)) {
       assert(l.target === '_blank' && /noopener/.test(l.rel), label + ': link attributes: ' + JSON.stringify(l));
@@ -285,7 +326,8 @@ function checkGetMap(url, layer) {
   }
   function checkTokens(rec, label) {
     for (const u of rec.tokens) {
-      assert(u.indexOf(WMS_BASE + '?token=' + TOKEN + '&') === 0, label + ': a token went somewhere else: ' + u);
+      assert(u.indexOf(WMS_BASE + '?token=' + TOKEN + '&') === 0 || u.indexOf(NATUR_BASE + '?token=' + TOKEN + '&') === 0,
+        label + ': a token went somewhere else: ' + u);
     }
   }
 
@@ -303,7 +345,7 @@ function checkGetMap(url, layer) {
           await gotoMap(page, p.hash);
           const ids = await offeredIds(page);
           assert(ids.length > 0, 'control not populated');
-          for (const id of ALL_IDS) assert(!ids.includes(id), id + ' offered');
+          for (const id of ALL_IDS.concat(NATUR_ID)) assert(!ids.includes(id), id + ' offered');
           await pan(page, 250, 0);
           await zoomIn(page);
           assert(rec.wms.length === 0, 'Dataforsyningen requests: ' + rec.wms.length);
@@ -324,7 +366,7 @@ function checkGetMap(url, layer) {
       await page.waitForSelector('#cv2-light-tile-provider', { timeout: 5000 });
       const opts = await page.$$eval('#cv2-light-tile-provider option, #cv2-dark-tile-provider option', os => os.map(o => o.value));
       assert(opts.length > 0, 'no provider options');
-      for (const id of ALL_IDS) assert(!opts.includes(id), id + ' offered in the customizer');
+      for (const id of ALL_IDS.concat(NATUR_ID)) assert(!opts.includes(id), id + ' offered in the customizer');
     } finally { await ctx.close(); }
   });
 
@@ -355,7 +397,7 @@ function checkGetMap(url, layer) {
         await gotoMap(page, p.hash);
         const ids = await offeredIds(page);
         for (const id of ALL_IDS) assert(ids.includes(id), id + ' not offered: ' + ids.join(','));
-        const labels = await page.$$eval('.leaflet-control-layers-base label[data-tile-id^="dataforsyningen-"]', ls => ls.map(l => l.textContent.trim()));
+        const labels = await page.$$eval('.leaflet-control-layers-base label[data-tile-id^="dataforsyningen-skaermkort"]', ls => ls.map(l => l.textContent.trim()));
         assert(labels.join('|') === 'Skærmkort (Denmark)|Skærmkort grå (Denmark)|Skærmkort dæmpet (Denmark)|Skærmkort grå (Denmark)', 'labels: ' + labels.join('|'));
         await pan(page, 250, 0);
         await zoomIn(page);
@@ -620,7 +662,7 @@ function checkGetMap(url, layer) {
   // picked; once picked, the map cannot be zoomed out below 6.
   await step('Map: below zoom 6 the Skærmkort entries are disabled; at 6 a pick loads, and the map stays at 6 or above', async () => {
     const { ctx, page, rec } = await newCtx({ tiles: { providers: { dataforsyningen: ON } } });
-    const disabled = () => page.$$eval('.leaflet-control-layers-base label[data-tile-id^="dataforsyningen-"] input', is => is.map(i => i.disabled));
+    const disabled = () => page.$$eval('.leaflet-control-layers-base label[data-tile-id^="dataforsyningen-skaermkort"] input', is => is.map(i => i.disabled));
     try {
       await gotoMap(page, '#/map', { lat: 56.0, lon: 10.5, zoom: 5 });
       assert((await disabled()).join() === 'true,true,true,true', 'at zoom 5: ' + (await disabled()).join());
@@ -660,7 +702,231 @@ function checkGetMap(url, layer) {
     } finally { await ctx.close(); }
   });
 
+  // ── #741 M2: Natur- og Friluftskort ──────────────────────────────────────
+  const naturOn = (extra) => Object.assign({ providers: { dataforsyningen: ON } }, extra || {});
+
+  // 12 — offered as a light style only, nothing requested until picked
+  for (const p of [{ name: 'Map', hash: '#/map' }, { name: 'Live', hash: '#/live' }]) {
+    await step(`M2 ${p.name}: on → Natur is offered once, among the light styles, and nothing is requested until picked`, async () => {
+      const { ctx, page, rec } = await newCtx({ tiles: naturOn() });
+      try {
+        await gotoMap(page, p.hash);
+        const ids = await offeredIds(page);
+        assert(ids.filter(id => id === NATUR_ID).length === 1, 'Natur offered ' + ids.filter(id => id === NATUR_ID).length + ' times: ' + ids.join(','));
+        assert(ids.indexOf(NATUR_ID) < ids.indexOf('dataforsyningen-skaermkort-graa-dark') && ids.indexOf(NATUR_ID) < ids.indexOf('osm-dark'),
+          'not among the light styles: ' + ids.join(','));
+        const label = await page.$eval(`.leaflet-control-layers-base label[data-tile-id="${NATUR_ID}"]`, l => l.textContent.trim());
+        assert(label === 'Natur- og Friluftskort (Denmark)', 'label: ' + label);
+        await pan(page, 250, 0);
+        await zoomIn(page);
+        assert(rec.wms.length === 0, 'requests before a pick: ' + rec.wms.length);
+      } finally { await ctx.close(); }
+    });
+  }
+
+  await step('M2 Customizer: Natur is in the light provider list and not in the dark one', async () => {
+    const { ctx, page } = await newCtx({ tiles: naturOn() });
+    try {
+      await gotoMap(page, '#/map');
+      await page.waitForFunction(() => window._customizerV2 && window._customizerV2.initDone, null, { timeout: 15000 });
+      await page.click('#customizeToggle');
+      await page.waitForSelector('.cust-overlay:not(.hidden)', { timeout: 5000 });
+      await page.click('.cust-tab[data-tab="display"]');
+      await page.waitForSelector(`#cv2-light-tile-provider option[value="${NATUR_ID}"]`, { state: 'attached', timeout: 5000 });
+      const darkOpts = await page.$$eval('#cv2-dark-tile-provider option', os => os.map(o => o.value));
+      assert(!darkOpts.includes(NATUR_ID), 'offered as a dark style: ' + darkOpts.join(','));
+    } finally { await ctx.close(); }
+  });
+
+  // 13 — picked: request shape, tiles, credit, no filter in either theme
+  for (const p of [{ name: 'Map', hash: '#/map' }, { name: 'Live', hash: '#/live' }]) {
+    for (const theme of ['light', 'dark']) {
+      await step(`M2 ${p.name} (${theme}): picking Natur loads 512 px EPSG:3857 TRANSPARENT=FALSE GetMaps of Natur_Friluft_basis with the exact credit and no filter`, async () => {
+        const { ctx, page, rec } = await newCtx({ tiles: naturOn(), theme });
+        try {
+          await gotoMap(page, p.hash);
+          await selectBase(page, NATUR_ID);
+          await page.waitForTimeout(600);
+          assert(rec.wms.length > 0, 'no GetMap request');
+          for (const u of rec.wms) {
+            const g = checkGetMap(u, NATUR_LAYER, NATUR_BASE);
+            assert(g.z === DK_VIEW.zoom, 'bbox at zoom ' + g.z + ', map at ' + DK_VIEW.zoom);
+          }
+          const s = await state(page, NATUR_BASE);
+          assert(s.wmsTiles > 0 && s.wmsTiles === s.wmsImgs, 'tiles rendered: ' + s.wmsTiles + '/' + s.wmsImgs);
+          assert(s.filter === 'none', theme + ': filter ' + s.filter + ' (light only: never inverted)');
+          checkCredit(s, p.name, NATUR_CREDIT);
+          assert(!s.attribution.includes(CREDIT), 'the Skærmkort credit is shown with Natur: ' + s.attribution);
+          assert(s.attributionVisible, 'credit not visible');
+          await shot(page, `741-m2-${p.name.toLowerCase()}-natur-${theme}.jpg`);
+          if (theme === 'dark' && p.name === 'Map' && SHOT_DIR) {
+            // For the PR's dark-mode argument only: the same stub tiles under
+            // the existing invert filter, then the filter is put back.
+            await page.evaluate((f) => { document.querySelector('.leaflet-tile-pane').style.filter = f; }, INVERT);
+            await shot(page, '741-m2-map-natur-dark-if-inverted.jpg');
+            await page.evaluate(() => { document.querySelector('.leaflet-tile-pane').style.filter = ''; });
+          }
+          await zoomIn(page);
+          await pan(page, -300, 120);
+          for (const u of rec.wms) checkGetMap(u, NATUR_LAYER, NATUR_BASE);
+          checkTokens(rec, p.name);
+
+          await selectBase(page, '__auto__');
+          const n = rec.wms.length;
+          await pan(page, 300, 0);
+          assert(rec.wms.length === n, 'requests after Auto: ' + (rec.wms.length - n));
+          assert(!(await state(page, NATUR_BASE)).attribution.includes(NATUR_CREDIT.text), 'Natur credit left behind');
+          assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+        } finally { await ctx.close(); }
+      });
+    }
+  }
+
+  // 14 — no extra tile churn against Skærmkort, with 1.0 s responses
+  await step('M2 churn: with 1.0 s GetMaps, the same pick/pan/zoom script requests the same tiles for Natur as for Skærmkort, none twice', async () => {
+    const run = async (id) => {
+      const { ctx, page, rec } = await newCtx({ tiles: naturOn(), wmsDelayMs: NATUR_COLD_MS });
+      try {
+        await gotoMap(page, '#/map');
+        await selectBase(page, id);
+        await page.waitForTimeout(1500);
+        await pan(page, 260, 0);
+        await page.waitForTimeout(1500);
+        await zoomIn(page);
+        await page.waitForTimeout(1500);
+        await pan(page, -200, 140);
+        await page.waitForTimeout(2500);
+        assert(rec.errors.length === 0, id + ': console errors: ' + rec.errors.join(' | '));
+        return rec.wms.slice();
+      } finally { await ctx.close(); }
+    };
+    const natur = await run(NATUR_ID), sk = await run('dataforsyningen-skaermkort');
+    const tileKeys = (urls) => urls.map(u => new URL(u).searchParams.get('bbox')).sort();
+    const dups = (urls) => urls.length - new Set(urls).size;
+    console.log(`    script: Natur ${natur.length} GetMaps (${dups(natur)} repeated), Skærmkort ${sk.length} (${dups(sk)} repeated)`);
+    for (const u of natur) checkGetMap(u, NATUR_LAYER, NATUR_BASE);
+    assert(natur.length > 0, 'nothing requested');
+    assert(dups(natur) === 0, 'a Natur tile was fetched twice');
+    assert(tileKeys(natur).join('|') === tileKeys(sk).join('|'), 'different tiles: Natur ' + natur.length + ', Skærmkort ' + sk.length);
+  });
+
+  // 15 — perf: requests per full view, 512 px (shipped) against 256 px
+  await step('M2 perf: a full 1920x1080 view of Natur is at most 20 GetMaps; measured against 256 px tiles with 1.0 s responses', async () => {
+    const { ctx, page, rec } = await newCtx({ tiles: naturOn({ lightDefault: NATUR_ID }), viewport: { width: 1920, height: 1080 }, wmsDelayMs: NATUR_COLD_MS });
+    try {
+      await gotoMap(page, '#/map');
+      await page.waitForTimeout(1500);
+      const first = rec.wms.length;
+      const view = await page.$eval('.leaflet-container', el => ({ w: el.clientWidth, h: el.clientHeight }));
+      assert(first > 0 && first <= 20, 'requests for one view: ' + first);
+      for (const u of rec.wms) checkGetMap(u, NATUR_LAYER, NATUR_BASE);
+      // The same layer through the same factory, once as shipped and once
+      // at 256 px, on a bare 1920x1080 map at the same view: requests and
+      // the time until Leaflet's 'load' (every tile in view answered).
+      const measure = async (opts) => {
+        const before = rec.wms.length;
+        const ms = await page.evaluate(({ o, v }) => new Promise((resolve) => {
+          const el = document.createElement('div');
+          el.style.cssText = 'position:fixed;left:0;top:0;width:1920px;height:1080px;z-index:99999';
+          document.body.appendChild(el);
+          const m = L.map(el, { zoomControl: false, attributionControl: false }).setView([v.lat, v.lon], v.zoom);
+          const layer = window.MC_createBaseLayer(window.MC_getTileSpec('light'), Object.assign({ maxZoom: 19 }, o));
+          const t0 = performance.now();
+          layer.on('load', () => { const t = performance.now() - t0; m.remove(); el.remove(); resolve(t); });
+          layer.addTo(m);
+        }), { o: opts, v: DK_VIEW });
+        return { n: rec.wms.length - before, ms: Math.round(ms) };
+      };
+      const r512 = await measure({});
+      const r256 = await measure({ tileSize: 256, zoomOffset: 0 });
+      console.log(`    page map ${view.w}x${view.h}: ${first} GetMaps for the first view`);
+      console.log(`    bare 1920x1080 map, 1.0 s GetMaps: 512 px ${r512.n} requests, all in after ${r512.ms} ms; 256 px ${r256.n} requests, ${r256.ms} ms`);
+      assert(r512.n > 0 && r512.n <= 20 && r256.n > r512.n * 2, '512 px ' + r512.n + ', 256 px ' + r256.n);
+    } finally { await ctx.close(); }
+  });
+
+  // 16 — the phone flow, from a cold start
+  await step('M2 phone 375x560 from a cold start: pick Natur in the layer control; it survives a theme switch and SPA navigation to Live and back, with the credit visible', async () => {
+    const { ctx, page, rec } = await newCtx({ tiles: naturOn(), viewport: { width: 375, height: 560 }, phone: true });
+    try {
+      await gotoMap(page, '#/map');
+      for (const b of await page.$$('text=Got it')) { try { await b.tap(); } catch (_) {} }
+      await page.waitForTimeout(300);
+      await page.tap('.leaflet-control-layers-toggle');
+      await page.waitForSelector('.leaflet-control-layers-expanded', { timeout: 5000 });
+      const label = page.locator(`.leaflet-control-layers-base label[data-tile-id="${NATUR_ID}"]`);
+      await label.scrollIntoViewIfNeeded();
+      const box = await label.boundingBox();
+      assert(box && box.x >= 0 && box.x + box.width <= 375 && box.height > 0, 'label not on screen: ' + JSON.stringify(box));
+      await label.tap();
+      await page.waitForTimeout(1200);
+      assert(await checkedId(page) === NATUR_ID, 'not selected: ' + await checkedId(page));
+      assert(rec.wms.length > 0, 'no GetMap request after the tap');
+      for (const u of rec.wms) checkGetMap(u, NATUR_LAYER, NATUR_BASE);
+      await page.tap('.leaflet-container', { position: { x: 300, y: 300 } });
+      await page.waitForTimeout(500);
+      let s = await state(page, NATUR_BASE);
+      assert(s.wmsTiles > 0, 'no Natur tile rendered');
+      checkCredit(s, 'phone', NATUR_CREDIT);
+      assert(s.attributionVisible, 'credit not visible on the phone');
+      await shot(page, '741-m2-phone-picked.jpg');
+
+      // Theme switch through the More sheet's dark-mode button.
+      await page.tap('.bottom-nav >> text=More');
+      await page.waitForSelector('.bottom-nav-sheet-darkbtn', { state: 'visible', timeout: 5000 });
+      await page.tap('.bottom-nav-sheet-darkbtn');
+      await page.waitForTimeout(900);
+      assert(await page.evaluate(() => document.documentElement.getAttribute('data-theme')) === 'dark', 'theme did not switch');
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(400);
+      if (await page.locator('.bottom-nav-sheet-darkbtn').isVisible()) {
+        await page.tap('.leaflet-container', { position: { x: 300, y: 250 } });
+        await page.waitForTimeout(400);
+      }
+      assert(await checkedId(page) === NATUR_ID, 'theme switch: ' + await checkedId(page));
+      s = await state(page, NATUR_BASE);
+      assert(s.wmsTiles > 0 && s.filter === 'none', 'theme switch: tiles ' + s.wmsTiles + ', filter ' + s.filter);
+      checkCredit(s, 'phone, dark', NATUR_CREDIT);
+      assert(s.attributionVisible, 'credit not visible after the theme switch');
+      await shot(page, '741-m2-phone-dark.jpg');
+
+      // SPA navigation, no reload. Live first keeps its own last view, which
+      // on the fixture is its nodes in California: the pick holds and,
+      // outside the Denmark bounds, nothing is requested. Then Map, then a
+      // link into Live at a Danish view, then Map again through the bottom
+      // nav: the pick, the tiles and the credit follow each time.
+      await page.tap('.leaflet-control-zoom-in');
+      await page.waitForTimeout(900);
+      const nav = [
+        { name: 'Live (its own view, outside Denmark)', go: () => page.tap('.bottom-nav a[href="#/live"]'), hash: '#/live', inDk: false },
+        { name: 'Map', go: () => page.tap('.bottom-nav a[href="#/map"]'), hash: '#/map', inDk: true },
+        { name: 'Live (a link at a Danish view)', go: () => page.evaluate((v) => { location.hash = `#/live?lat=${v.lat}&lon=${v.lon}&zoom=${v.zoom}`; }, DK_VIEW), hash: '#/live?', inDk: true },
+        { name: 'Map again', go: () => page.tap('.bottom-nav a[href="#/map"]'), hash: '#/map', inDk: true },
+      ];
+      for (const n of nav) {
+        rec.wms.length = 0;
+        await n.go();
+        await page.waitForFunction((h) => location.hash.indexOf(h) === 0, n.hash, { timeout: 5000 });
+        await settle(page);
+        assert(await checkedId(page) === NATUR_ID, n.name + ': ' + await checkedId(page));
+        s = await state(page, NATUR_BASE);
+        assert(s.filter === 'none', n.name + ': filter ' + s.filter);
+        if (!n.inDk) {
+          assert(rec.wms.length === 0 && s.wmsImgs === 0, n.name + ': requested outside the bounds: ' + rec.wms.length);
+          continue;
+        }
+        assert(s.wmsTiles > 0 && s.wmsTiles === s.wmsImgs, n.name + ': tiles ' + s.wmsTiles + '/' + s.wmsImgs);
+        for (const u of s.wmsSrcs.concat(rec.wms)) checkGetMap(u, NATUR_LAYER, NATUR_BASE);
+        checkCredit(s, n.name, NATUR_CREDIT);
+        assert(s.attributionVisible, n.name + ': credit not visible');
+        await shot(page, `741-m2-phone-${n.name.split(' ')[0].toLowerCase()}${n.name.indexOf('again') > 0 ? '-again' : ''}.jpg`);
+      }
+      checkTokens(rec, 'phone');
+      assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+    } finally { await ctx.close(); }
+  });
+
   await browser.close();
-  console.log(`\n=== #741 M1b Skærmkort: ${passed} passed, ${failed} failed ===`);
+  console.log(`\n=== #741 Skærmkort (M1b) and Natur- og Friluftskort (M2): ${passed} passed, ${failed} failed ===`);
   process.exit(failed ? 1 : 0);
 })().catch(e => { console.error(e); process.exit(1); });

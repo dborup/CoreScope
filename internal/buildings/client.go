@@ -74,11 +74,12 @@ func NewClient(opts ClientOptions) *Client {
 	return &Client{opts: opts, http: dhm.NewNoRedirectClient(opts.Timeout)}
 }
 
-// segmentURL is the items URL for a valid segment. Only the line's four
+// SegmentURL is the items URL for a valid segment. Only the line's four
 // decimetre integers and the allow-listed radius vary, and the filter is
 // escaped by hand: digits and "." need no escaping, and "(", ",", " " and
-// ")" are written as %28, %2C, %20 and %29.
-func (c *Client) segmentURL(s Segment) string {
+// ")" are written as %28, %2C, %20 and %29. The live smoke check (#803)
+// sends it too.
+func (c *Client) SegmentURL(s Segment) string {
 	l := s.Line
 	return c.opts.BaseURL + "?" + fixedQuery +
 		"&filter=DWITHIN%28geometry%2CLINESTRING%28" +
@@ -99,7 +100,7 @@ func (c *Client) FetchSegment(ctx context.Context, s Segment) (Page, error) {
 	if !s.Valid() {
 		return Page{}, ErrBadSegment
 	}
-	body, err := dhm.GetBody(ctx, c.http, c.segmentURL(s), "application/geo+json", acceptedContentTypes, c.opts.MaxBodyBytes)
+	body, err := dhm.GetBody(ctx, c.http, c.SegmentURL(s), "application/geo+json", acceptedContentTypes, c.opts.MaxBodyBytes)
 	if err != nil {
 		return Page{}, err
 	}

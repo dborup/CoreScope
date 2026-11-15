@@ -94,7 +94,7 @@ func TestPreview_ReadsOnlyIFD4(t *testing.T) {
 		from, _ := strconv.ParseInt(m[1], 10, 64)
 		to, _ := strconv.ParseInt(m[2], 10, 64)
 		bytesRead += to - from + 1
-		if i == 0 && (from != 0 || to != headerBytes-1) {
+		if i == 0 && (from != 0 || to != HeaderBytes-1) {
 			t.Fatalf("header read %d-%d", from, to)
 		}
 		if i > 0 && (from < lo || to >= hi) {
@@ -152,11 +152,11 @@ func TestPreview_StrictRanges(t *testing.T) {
 		},
 		"200 with a content range": func(w http.ResponseWriter, r *http.Request) bool {
 			w.Header().Set("Content-Range", "bytes 0-65535/"+strconv.Itoa(len(file)))
-			w.Write(file[:headerBytes])
+			w.Write(file[:HeaderBytes])
 			return true
 		},
 		"other range": func(w http.ResponseWriter, r *http.Request) bool {
-			skraafototest.WriteRange(w, file[1:headerBytes+1], 1, int64(len(file)))
+			skraafototest.WriteRange(w, file[1:HeaderBytes+1], 1, int64(len(file)))
 			return true
 		},
 		"404": func(w http.ResponseWriter, r *http.Request) bool { http.NotFound(w, r); return true },

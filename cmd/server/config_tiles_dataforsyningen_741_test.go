@@ -116,7 +116,10 @@ func TestDataforsyningenExampleConfigIsOff741(t *testing.T) {
 		t.Fatalf("config.example.json must ship map.tiles.providers.dataforsyningen as {enabled: false, token: \"\"}, got %+v", d)
 	}
 	c := ex.Map.Tiles.Providers.Comment
-	for _, s := range []string{"sent to the browser", "map.dhm.token", "Denmark only", "rotate"} {
+	// #741 M2: the same block switches Natur- og Friluftskort on, and the
+	// comment names its style id, that it is light only, and its credit.
+	for _, s := range []string{"sent to the browser", "map.dhm.token", "Denmark only", "rotate",
+		"dataforsyningen-natur-friluft", "Natur- og Friluftskort", "light only", "Natur_Friluft_basis"} {
 		if !strings.Contains(c, s) {
 			t.Errorf("_comment_dataforsyningen does not say %q: %s", s, c)
 		}

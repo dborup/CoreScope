@@ -238,3 +238,7 @@ CoreScope was developed in the [upstream Kpa-clawbot/CoreScope project](https://
 Terrain profiles use Danmarks Højdemodel: "Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0". With the optional cross-border fill they also use Copernicus DEM GLO-30, which every mixed profile credits as "produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved" ([Copernicus DEM licence](https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/DEM/resources/license/License-COPDEM-30.pdf)).
 
 The organisations in charge of the Copernicus programme by law or by delegation do not incur any liability for any use of the Copernicus WorldDEM-30.
+
+### Map Data
+
+The terrain profile's coverage gate (Danish land and sea) and the Denmark outline in the link-preview image are derived from Topografisk Landpolygon: "Indeholder data fra Klimadatastyrelsen, Topografisk Landpolygon, november 2026" ([Vilkår for brug af frie geografiske data](https://www.sdfe.dk/Media/638052180760639799/)).

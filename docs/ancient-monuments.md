@@ -122,6 +122,8 @@ the other customizer settings.
 
 An imported file is checked against the same rules. A value out of range is
 refused with a message, and an unknown key is ignored with a warning.
+`"warnDistanceM": null` is accepted and means the same as leaving the key
+out: every zone the server reports.
 
 ### What stays server-only
 

@@ -311,6 +311,16 @@ test('validateShape names every bad value and its bounds; unknown keys only warn
   assert(warnings.some((w) => /Unknown heritage key in import: radiusM/.test(w)), warnings.join('\n'));
 });
 
+test('an import stating warnDistanceM: null (the default) is accepted, as on write (#825 F3)', () => {
+  const c = loadCustomizer();
+  const res = c.api.validateShape({ heritage: { warnDistanceM: null, opacityPct: 50 } });
+  assert.strictEqual(res.valid, true, res.errors.join(' | '));
+  c.api.writeOverrides({ heritage: { warnDistanceM: null, opacityPct: 50 } });
+  assert.deepStrictEqual(plain(stored(c).heritage), { opacityPct: 50 });
+  // null stays refused for a key whose default is not null.
+  assert.strictEqual(c.api.validateShape({ heritage: { opacityPct: null } }).valid, false);
+});
+
 test('the heritage section survives an export round trip', () => {
   const first = loadCustomizer();
   const delta = { heritage: { enabled: true, opacityPct: 55, profileWarning: false, warnDistanceM: 40 } };
