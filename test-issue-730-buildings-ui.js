@@ -166,26 +166,53 @@ test('forest: the canopy is trees/other, and there is no building', () => {
   assert.ok(/<polygon class="tp-band tp-band-v"[^>]*fill="var\(--terrain-vegetation\)"/.test(svg), 'vegetation fill');
 });
 
-test('the runs tile the band: they meet at the midpoint between two samples, on both edges', () => {
-  // Five samples 0, 100, ..., 400 m; classes none, b, b, none, v.
+test('the runs tile the band: a class claims the slope to a sample without one; two classes meet halfway', () => {
+  // Six samples 0, 100, ..., 500 m; classes none, b, b, none, v, b.
   const p = forest();
-  p.distanceM = 400;
-  p.samples = [0, 1, 2, 3, 4].map(i => ({ d: 100 * i, dtm: 10, dsm: 30 }));
-  p.samples[1].cls = 'b'; p.samples[2].cls = 'b'; p.samples[4].cls = 'v';
+  p.distanceM = 500;
+  p.samples = [0, 1, 2, 3, 4, 5].map(i => ({ d: 100 * i, dtm: 10, dsm: 30 }));
+  p.samples[1].cls = 'b'; p.samples[2].cls = 'b'; p.samples[4].cls = 'v'; p.samples[5].cls = 'b';
   const g = TP.chartGeometry(p);
-  eq(g.bands.map(b => [b.from, b.to, b.cls]), [[0, 0, null], [1, 2, 'b'], [3, 3, null], [4, 4, 'v']]);
+  // The samples without a class lie between classified ones, so the
+  // classes claim both their slopes and they draw nothing of their own.
+  eq(g.bands.map(b => [b.from, b.to, b.cls]), [[1, 2, 'b'], [4, 4, 'v'], [5, 5, 'b']]);
   const pts = g.bands.map(b => b.points.split(' ').map(xy => xy.split(',').map(Number)));
   const x = g.x, sY = g.surfaceY, tY = g.terrainY;
   const mid = (a, b) => Math.round((a + b) / 2 * 100) / 100;
   const m = (arr, i) => mid(arr[i], arr[i + 1]);
-  // First run: from sample 0 to the midpoint with sample 1, and back.
-  eq(pts[0], [[x[0], sY[0]], [m(x, 0), m(sY, 0)], [m(x, 0), m(tY, 0)], [x[0], tY[0]]]);
-  // The building run starts where the first ended and ends at the
-  // midpoint with sample 3.
-  eq(pts[1], [[m(x, 0), m(sY, 0)], [x[1], sY[1]], [x[2], sY[2]], [m(x, 2), m(sY, 2)],
-    [m(x, 2), m(tY, 2)], [x[2], tY[2]], [x[1], tY[1]], [m(x, 0), m(tY, 0)]]);
-  // The last run ends on the last sample.
-  eq(pts[3], [[m(x, 3), m(sY, 3)], [x[4], sY[4]], [x[4], tY[4]], [m(x, 3), m(tY, 3)]]);
+  const at = (i) => [x[i], sY[i]], down = (i) => [x[i], tY[i]];
+  // The building runs from sample 0 to sample 3: both slopes are its own.
+  eq(pts[0], [at(0), at(1), at(2), at(3), down(3), down(2), down(1), down(0)]);
+  // The trees claim the slope from sample 3 and meet the building halfway.
+  eq(pts[1], [at(3), at(4), [m(x, 4), m(sY, 4)], [m(x, 4), m(tY, 4)], down(4), down(3)]);
+  // The last building ends on the last sample.
+  eq(pts[2], [[m(x, 4), m(sY, 4)], at(5), down(5), [m(x, 4), m(tY, 4)]]);
+});
+
+test('a stretch without a class between two classified runs draws only what they leave', () => {
+  // none, b, none, none, none, v: the middle sample of the three keeps a
+  // run of its own, from sample 2 to sample 4.
+  const p = forest();
+  p.distanceM = 500;
+  p.samples = [0, 1, 2, 3, 4, 5].map(i => ({ d: 100 * i, dtm: 10, dsm: 30 }));
+  p.samples[1].cls = 'b'; p.samples[5].cls = 'v';
+  const g = TP.chartGeometry(p);
+  eq(g.bands.map(b => [b.from, b.to, b.cls]), [[1, 1, 'b'], [2, 4, null], [5, 5, 'v']]);
+  const x = g.x;
+  const xs = g.bands.map(b => b.points.split(' ').map(xy => Number(xy.split(',')[0])));
+  eq(xs.map(a => [Math.min.apply(null, a), Math.max.apply(null, a)]), [[x[0], x[2]], [x[2], x[4]], [x[4], x[5]]]);
+});
+
+test('a classified chart cases the line of sight in the panel colour, under it', () => {
+  // Over a solid building or canopy the line of sight would be under 2:1;
+  // the casing keeps it against the panel colour wherever it crosses.
+  const svg = TP.buildChart(dokk1(), {});
+  const casing = svg.indexOf('<line class="tp-los-casing"');
+  const los = svg.indexOf('stroke="var(--los-line)" stroke-width="1.6"/>');
+  assert.ok(casing > 0 && los > casing, 'casing ' + casing + ', line ' + los);
+  assert.ok(/<line class="tp-los-casing"[^>]*stroke="var\(--card-bg\)"/.test(svg), 'casing colour');
+  assert.ok(svg.lastIndexOf('<polygon class="tp-band') < casing, 'the casing is under a band');
+  assert.ok(TP.buildChart(unclassified(dokk1()), {}).indexOf('tp-los-casing') < 0, 'casing without classes');
 });
 
 test('an unclassified answer draws byte for byte what it drew without the classification', () => {
@@ -314,6 +341,8 @@ test('the legend names both classes in text, and only when a class is drawn', ()
   };
   eq(legend(dokk1()), ['Building', 'Trees/other']);
   eq(legend(forest()), ['Building', 'Trees/other']);
+  // Partial: what is left in the clutter colour may be either.
+  eq(legend(dokk1({ state: 'partial' })), ['Building', 'Trees/other', 'Not told apart']);
   assert.strictEqual(legend(unclassified(dokk1())), null);
   assert.strictEqual(legend(dokk1({ state: 'unavailable' })), null);
   assert.ok(/class="tp-legend"[^>]*data-testid="tp-legend"/.test(TP.buildChart(dokk1(), {})), 'test id');

@@ -544,6 +544,8 @@
     vegetation: { label: 'Trees/other: ', detail: 'Where it does, no building footprint stands: it is trees or other.' }
   };
   var CLASS_PARTIAL_NOTE = 'Buildings could not be told apart from trees on part of this path.';
+  // The legend's word for the clutter colour on a partial classification.
+  var CLASS_NONE_LEGEND = 'Not told apart';
   var CLASS_TITLE = 'In the surface band, buildings are told apart from trees and other objects by building footprints.';
 
   /* The verdict states that assert terrain inside the criterion zone, and
@@ -766,13 +768,20 @@
 
   /* bandRuns splits each clutter segment (both edges present, two samples
    * or more) into runs of one class, cls[i] or null for none (#730 M3),
-   * each a polygon from the surface down to the terrain. Neighbouring runs
-   * meet halfway between their two samples, on the straight lines the
-   * chart draws there, so together they tile the band exactly. Without
-   * classes a segment is one run: the very polygon drawn before. x, sY
-   * and tY are the rounded plot coordinates. */
+   * each a polygon from the surface down to the terrain. Where a class
+   * meets a sample without one, the class claims the slope between them:
+   * that sample stands below the classification's threshold (or, on a
+   * partial classification, was not classified), so the drawn slope is
+   * the classified object's edge, not something else. Two classes meet
+   * halfway between their samples. Either way the runs tile the band
+   * exactly, and a run left with no width is not drawn. Without classes a
+   * segment is one run: the very polygon drawn before. x, sY and tY are
+   * the rounded plot coordinates. */
   function bandRuns(segments, cls, x, sY, tY) {
-    function mid(a, i) { return r2((a[i] + a[i + 1]) / 2); }
+    // A boundary is a position along the samples: i (on sample i) or
+    // i + 0.5 (halfway to the next).
+    function at(a, f) { return f % 1 ? r2((a[f - 0.5] + a[f + 0.5]) / 2) : a[f]; }
+    function point(a, f) { return at(x, f) + ',' + at(a, f); }
     var out = [];
     segments.forEach(function (seg) {
       if (seg.to === seg.from) return;
@@ -782,16 +791,20 @@
         if (run && run.cls === c) run.to = i;
         else { run = { from: i, to: i, cls: c }; runs.push(run); }
       }
-      runs.forEach(function (r) {
-        var top = [], down = [];
-        if (r.from > seg.from) top.push(mid(x, r.from - 1) + ',' + mid(sY, r.from - 1));
-        for (i = r.from; i <= r.to; i++) top.push(x[i] + ',' + sY[i]);
-        if (r.to < seg.to) {
-          top.push(mid(x, r.to) + ',' + mid(sY, r.to));
-          down.push(mid(x, r.to) + ',' + mid(tY, r.to));
-        }
-        for (i = r.to; i >= r.from; i--) down.push(x[i] + ',' + tY[i]);
-        if (r.from > seg.from) down.push(mid(x, r.from - 1) + ',' + mid(tY, r.from - 1));
+      // edge[k] is where run k ends and run k + 1 begins.
+      var edges = [];
+      for (var k = 0; k + 1 < runs.length; k++) {
+        var l = runs[k], r = runs[k + 1];
+        edges.push(l.cls === null ? l.to : r.cls === null ? r.from : l.to + 0.5);
+      }
+      runs.forEach(function (r, k) {
+        var lo = k ? edges[k - 1] : seg.from, hi = k < edges.length ? edges[k] : seg.to;
+        if (hi <= lo) return;
+        var top = [point(sY, lo)], down = [point(tY, hi)];
+        for (var j = Math.floor(lo) + 1; j < hi; j++) top.push(point(sY, j));
+        top.push(point(sY, hi));
+        for (j = Math.ceil(hi) - 1; j > lo; j--) down.push(point(tY, j));
+        down.push(point(tY, lo));
         out.push({ from: r.from, to: r.to, cls: r.cls, points: top.join(' ') + ' ' + down.join(' ') });
       });
     });
@@ -1048,9 +1061,12 @@
     out.push('<polyline points="' + polyline(g.x, g.f1TopY, 0, g.x.length - 1) + '" fill="none" stroke="var(--fresnel-100)" stroke-width="1.2"/>');
     out.push('<polyline points="' + polyline(g.x, g.f1BotY, 0, g.x.length - 1) + '" fill="none" stroke="var(--fresnel-100)" stroke-width="1.2"/>');
 
-    // 5. Line of sight.
-    out.push('<line x1="' + g.x[0] + '" y1="' + g.losY[0] + '" x2="' + g.x[g.x.length - 1] + '" y2="' + g.losY[g.losY.length - 1]
-      + '" stroke="var(--los-line)" stroke-width="1.6"/>');
+    // 5. Line of sight. Over a classified band, which is solid, it is
+    //    cased in the panel colour: on the building or the trees colour
+    //    alone it is under 2:1 (#730 M3).
+    var losPts = 'x1="' + g.x[0] + '" y1="' + g.losY[0] + '" x2="' + g.x[g.x.length - 1] + '" y2="' + g.losY[g.losY.length - 1] + '"';
+    if (classified) out.push('<line class="tp-los-casing" ' + losPts + ' stroke="var(--card-bg)" stroke-width="4"/>');
+    out.push('<line ' + losPts + ' stroke="var(--los-line)" stroke-width="1.6"/>');
 
     // 6. Intrusion markers: a band on the baseline per obstructed stretch,
     //    and a ring on the worst sample the server reported.
@@ -1089,10 +1105,14 @@
     out.push('</div>');
     // #730 M3: the band's colours in words, never colour alone. Outside
     // .tp-plot, whose span children are the positioned chart labels.
+    // On a partial classification the clutter colour that is left may be
+    // either, and says so.
     if (classified) {
+      var items = [['b', CLASSES.b.legend], ['v', CLASSES.v.legend]];
+      if (classificationState(data) === 'partial') items.push(['none', CLASS_NONE_LEGEND]);
       out.push('<div class="tp-legend" data-testid="tp-legend">');
-      ['b', 'v'].forEach(function (k) {
-        out.push('<span class="tp-legend-item"><span class="tp-swatch tp-swatch-' + k + '" aria-hidden="true"></span>' + esc(CLASSES[k].legend) + '</span>');
+      items.forEach(function (it) {
+        out.push('<span class="tp-legend-item"><span class="tp-swatch tp-swatch-' + it[0] + '" aria-hidden="true"></span>' + esc(it[1]) + '</span>');
       });
       out.push('</div>');
     }

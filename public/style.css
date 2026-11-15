@@ -6589,6 +6589,7 @@ body.embed #app.app-fixed {
 .tp-swatch { display: inline-block; width: 12px; height: 8px; border-radius: 2px; }
 .tp-swatch-b { background: var(--terrain-building); }
 .tp-swatch-v { background: var(--terrain-vegetation); }
+.tp-swatch-none { background: var(--terrain-clutter); }
 .tp-class-note {
   margin: 2px 0 0;
   font-size: var(--fs-sm);
