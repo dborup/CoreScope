@@ -152,6 +152,7 @@ run test-issue-390-legacy-tile-followups.js
 run test-issue-728-esri-imagery.js
 run test-issue-728-ortho-base.js
 run test-issue-728-dhm-tile-retry.js
+run test-issue-728-ortho-followups.js
 run test-packets-window-pinned.js
 run test-issue-733-dhm-credit.js
 run test-issue-738-foreign-fill-ui.js
