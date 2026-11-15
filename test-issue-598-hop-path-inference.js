@@ -43,6 +43,21 @@ function loadResolver() {
 }
 const HopResolver = loadResolver();
 
+// #657 — the resolver in the MAIN realm (see #598 J for why timing needs it),
+// optionally built from an edited source: the edit switches one mechanism off
+// to give the real code a baseline to compare against. It throws when the edit
+// no longer applies, so a refactor cannot turn a comparison into a no-op.
+function realmResolver(edit) {
+  const src = fs.readFileSync(path.join(REPO, 'public', 'hop-resolver.js'), 'utf8');
+  const code = edit ? edit(src) : src;
+  if (edit && code === src) throw new Error('realmResolver: the source edit did not apply');
+  const w = {};
+  new Function('window', 'console', code)(w, { debug: () => {} });
+  return w.HopResolver;
+}
+// The #657 rescue pass switched off: inferPath() as #655 shipped it.
+const withoutRescue = src => src.replace('pass < dedupKeys.size', 'pass < 0');
+
 let passed = 0, failed = 0;
 function assert(cond, msg) {
   if (cond) { passed++; console.log('  PASS  ' + msg); }
@@ -690,6 +705,29 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
   assert(worstMed < 120,
     '64 hops with 16 candidates each stays under 120 ms (median ' + worstMed.toFixed(1) + ' ms)');
 
+  // #657 — the same 64 hops with ONE prefix repeated at every position: every
+  // node is duplicated, every round bans all but one copy, and the rescue pass
+  // then has the most to do (all 16 candidates lost, 63 positions to price).
+  // Before #657 this took ~6 ms and placed nothing; one ban per round places
+  // 16 at ~300 ms. The rescue places 16 and must stay inside the same gate.
+  const repeatedHops = [];
+  for (let i = 0; i < 64; i++) repeatedHops.push('00');
+  const repeatedTimes = [];
+  let repeatedPlaced = 0;
+  for (let r = 0; r < 15; r++) {
+    const t = process.hrtime.bigint();
+    const out = Fast.inferPath(repeatedHops, { observer: { lat: 53, lon: 5.3 }, origin: { lat: 50, lon: 5 } });
+    repeatedTimes.push(Number(process.hrtime.bigint() - t) / 1e6);
+    repeatedPlaced = out.filter(e => e.located).length;
+  }
+  const repeatedMed = median(repeatedTimes);
+  console.log('    64 hops x 16 candidates, one prefix repeated: median ' + repeatedMed.toFixed(1) +
+    ' ms, ' + repeatedPlaced + ' placed');
+  assert(repeatedMed < 120,
+    '#657: 64 hops of one repeated prefix stays under 120 ms with the rescue pass (median ' +
+    repeatedMed.toFixed(1) + ' ms)');
+  assert(repeatedPlaced >= 16, '#657: and places its 16 candidates (got ' + repeatedPlaced + ')');
+
   // Bounded per path, not quadratic in the catalogue: the same 48-hop path
   // against a catalogue four times the size must not cost four times as much.
   const big = [];
@@ -859,7 +897,8 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
     return Math.sqrt(dx * dx + dy * dy);
   }
   {
-    let correct = 0, placedTotal = 0, truthHops = 0, walks = 0, duplicated = 0;
+    let correct = 0, placedTotal = 0, truthHops = 0, walks = 0, duplicated = 0, rescueChanged = 0;
+    const NoRescue = realmResolver(withoutRescue);
     for (let seed = 1; seed <= 60; seed++) {
       const n = 240 + (seed % 60), rnd = rngOf(seed), nodes = [];
       for (let i = 0; i < n; i++) {
@@ -878,8 +917,11 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
       if (truth.length < 6) continue;
       walks++; truthHops += truth.length;
       R.init(nodes); R.setPathAffinity({});
-      const out = R.inferPath(truth.map(t => t.public_key.slice(0, 2)),
-        { observer: { lat: truth[truth.length - 1].lat, lon: truth[truth.length - 1].lon } });
+      const walkOpts = { observer: { lat: truth[truth.length - 1].lat, lon: truth[truth.length - 1].lon } };
+      const out = R.inferPath(truth.map(t => t.public_key.slice(0, 2)), walkOpts);
+      NoRescue.init(nodes); NoRescue.setPathAffinity({});
+      const before = NoRescue.inferPath(truth.map(t => t.public_key.slice(0, 2)), walkOpts);
+      if (out.map(e => e.pubkey).join() !== before.map(e => e.pubkey).join()) rescueChanged++;
       const keys = [];
       out.forEach((e, i) => {
         if (!e.located) return;
@@ -897,11 +939,15 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
       ' of 1320 — the round-2 rule placed 1317');
     assert(correct >= 1293, 'and at least 1293 are the true node, got ' + correct +
       ' — the round-2 rule got 1291');
+    // #657 — the rescue only acts when a node was banned out of the path
+    // entirely, which no walk here does: their answers are the #655 ones.
+    assert(rescueChanged === 0, '#657: the rescue pass changes no walk in the corpus (got ' +
+      rescueChanged + ' of ' + walks + ')');
   }
-  // The pathological end of the scale, pinned as a number rather than a floor:
-  // 63 hops whose every relay's pubkey starts with the same byte cannot occur
-  // on a mesh, and placing anything there would cost ~20x the time (344 ms
-  // against 7 ms, for 16 placements). Reported.
+  // The pathological end of the scale: 63 hops whose every relay's pubkey
+  // starts with the same byte. #655 placed 0 here (#657); banning one
+  // duplicate per round places 16, at ~40x the time. The #657 rescue pass
+  // places the same 16 within the J gate (timed there).
   {
     const hs = [];
     for (let i = 0; i < 63; i++) hs.push('00');
@@ -909,9 +955,8 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
     const n = R.inferPath(hs, { observer: { lat: 53, lon: 5.3 }, origin: { lat: 50, lon: 5 } })
       .filter(e => e.located).length;
     placementCases.push(['63 hops x 16 candidates, 1 distinct prefix', n, null]);
-    assert(n <= 2,
-      'the degenerate single-prefix path places almost nothing and says so, rather than ' +
-      'guessing (got ' + n + '); banning one duplicate per round would place 16 at ~20x the time');
+    assert(n >= 16,
+      '#657: the single-prefix path places at least the 16 that one ban per round places (got ' + n + ')');
   }
   placementCases.forEach(([label, n, floor]) =>
     console.log('    ' + label + ': ' + n + ' placed' + (floor ? ' (floor ' + floor + ')' : '')));
@@ -934,6 +979,152 @@ console.log('\n=== #598 J: performance on 40-60-hop paths ===');
     'and is used for the forward/backward marginals the softmax needs');
   assert(!/sol\.assign/.test(body.slice(body.indexOf('const assign = sol.assign;') + 26)),
     'nothing after it reads the solver state again');
+}
+
+console.log('\n=== #657: a node banned out of the path entirely is rescued ===');
+
+{
+  // The reproduction from the issue. One node, X, sits at the sender; every
+  // hop of the path carries X's prefix, and the observer is 81 km away. With
+  // X at every position, losing it costs the same 1.6 (one unlisted hop) at
+  // each, the tie goes to the LAST hop, and X alone at the last hop does not
+  // pay for itself 81 km from the observer: #655 then left X banned at every
+  // other position and placed nothing. Leaving X out costs more than placing
+  // it next to the sender, so the model's own answer has X somewhere.
+  const R = realmResolver();
+  const Before = realmResolver(withoutRescue);
+  function rng(seed) { let h = seed >>> 0; return () => { h = (h * 1664525 + 1013904223) >>> 0; return h / 4294967296; }; }
+  // A seeded random path, positions rounded to 4 decimals so a pinned seed
+  // is the same input on every platform: up to `max.prefixes` prefixes with
+  // up to `max.cands` located candidates each, and 2 to 1 + `max.hops` hops.
+  function randomPath(seed, max, withOrigin) {
+    const r = rng(seed), pos = () => ({ lat: +(50 + r() * 1.5).toFixed(4), lon: +(5 + r() * 1.5).toFixed(4) });
+    const P = 1 + Math.floor(r() * max.prefixes), cands = 1 + Math.floor(r() * max.cands), L = 2 + Math.floor(r() * max.hops);
+    const nodes = [];
+    for (let p = 0; p < P; p++) {
+      for (let c = 0; c < cands; c++) {
+        nodes.push(Object.assign({ public_key: p.toString(16).padStart(2, '0') + c.toString(16).padStart(2, '0') + '0'.repeat(60),
+          name: 'n' + p + '-' + c, role: 'repeater' }, pos()));
+      }
+    }
+    const hops = [];
+    for (let i = 0; i < L; i++) hops.push(Math.floor(r() * P).toString(16).padStart(2, '0'));
+    const opts = { observer: pos() };
+    if (withOrigin && r() < 0.5) opts.origin = pos();
+    return { nodes: nodes, hops: hops, opts: opts };
+  }
+  const placedBy = (Res, t) => { Res.init(t.nodes); Res.setPathAffinity({}); return Res.inferPath(t.hops, t.opts); };
+  const x = node(key('ab'), 'X-AT-SENDER', 0);
+  for (const n of [9, 12, 20, 63]) {
+    const hops = [];
+    for (let i = 0; i < n; i++) hops.push('ab');
+    const opts = { observer: at(81), origin: at(0) };
+    R.init([x]); R.setPathAffinity({});
+    const out = R.inferPath(hops, opts);
+    Before.init([x]); Before.setPathAffinity({});
+    const was = Before.inferPath(hops, opts).filter(e => e.located).length;
+    const placed = out.filter(e => e.pubkey === x.public_key && e.located);
+    assert(placed.length === 1, n + ' hops of one prefix: X is placed exactly once (got ' +
+      placed.length + '; without the rescue ' + was + ')');
+    assert(out.filter(e => e.unlisted).length === n - 1, n + ' hops: every other hop is unlisted');
+  }
+
+  // Where it goes. Hops 0-7 are within the model's direct window (MAX_GAP)
+  // of the sender, so X costs the same at each of them: the unlisted hops
+  // cost 1.6 on either side of it. That is a true tie, and it goes to the
+  // LATER position as everywhere else in the duplicate rules — not to
+  // whichever of eight equal sums rounding happens to make smallest.
+  {
+    const hops = [];
+    for (let i = 0; i < 20; i++) hops.push('ab');
+    R.init([x]); R.setPathAffinity({});
+    const out = R.inferPath(hops, { observer: at(81), origin: at(0) });
+    const idx = out.findIndex(e => e.located);
+    assert(idx === 7, 'a tie between equal insertions goes to the latest tied hop, 7 (got ' + idx + ')');
+  }
+
+  // A node is not forced in: with no sender position, X 81 km from the
+  // observer costs more than an unlisted hop, so both rules leave it out.
+  {
+    const hops = [];
+    for (let i = 0; i < 12; i++) hops.push('ab');
+    R.init([x]); R.setPathAffinity({});
+    const out = R.inferPath(hops, { observer: at(81) });
+    assert(out.every(e => e.unlisted), 'without the sender anchor X does not pay for itself and stays out');
+  }
+
+  // A rescue pass is kept only when it lowers the path's total cost. Here an
+  // unchecked pass rescues nodes that push others out, ending 0.22 dearer
+  // than #655's answer (33.60 against 33.38): the guard must undo it and keep
+  // the #655 answer. Input found by a 4,000-case search, pinned literally.
+  {
+    const t = randomPath(1281, { prefixes: 4, cands: 6, hops: 24 }, false);
+    const names = Res => placedBy(Res, t).map(e => e.located ? e.name : '-').join(' ');
+    const Unchecked = realmResolver(src => src.replace('if (!(sol.total < before.total', 'if (false && !(sol.total < before.total'));
+    assert(names(Unchecked) !== names(Before), 'fixture: an unchecked rescue changes this path (' + t.hops.length + ' hops)');
+    assert(names(R) === names(Before), 'a rescue that raises the total cost is undone (got ' + names(R) + ')');
+  }
+
+  // Two single-prefix paths (one prefix repeated along 18-20 hops, 4 located
+  // candidates) where the details of the probe decide how much is rescued.
+  // Seed 6 needs the probe to price a node with it banned EVERYWHERE: left
+  // available at its kept hop, the probe counts it twice and rescues only 2
+  // (cost 31.64 against 30.39). Seed 73 needs an offer to beat leaving the
+  // node out: taking every offer spends the node on a hop it cannot pay for,
+  // and only 3 are placed (28.39 against 27.63). Costs measured, not asserted.
+  for (const [seed, want] of [[6, 4], [73, 4]]) {
+    const t = randomPath(seed, { prefixes: 3, cands: 4, hops: 20 }, true);
+    const n = placedBy(R, t).filter(e => e.located).length;
+    assert(new Set(t.hops).size === 1, 'fixture: seed ' + seed + ' repeats one prefix along ' + t.hops.length + ' hops');
+    assert(n >= want, 'seed ' + seed + ': ' + want + ' nodes placed (got ' + n + ', without the rescue ' +
+      placedBy(Before, t).filter(e => e.located).length + ')');
+  }
+
+  // The invariant holds through the rescue. Random paths of 1-63 hops over
+  // 1-8 prefixes with 1-16 candidates, some with server hints and neighbour
+  // links: no node is placed twice, and the worst stays far below the J gate.
+  {
+    let dup = 0, worst = 0, rescued = 0;
+    for (let seed = 1; seed <= 300; seed++) {
+      const r = rng(seed);
+      const P = 1 + Math.floor(r() * 8), cands = 1 + Math.floor(r() * 16), L = 1 + Math.floor(r() * 63);
+      const nodes = [];
+      for (let p = 0; p < P; p++) {
+        for (let c = 0; c < cands; c++) {
+          nodes.push({ public_key: p.toString(16).padStart(2, '0') + c.toString(16).padStart(2, '0') + '0'.repeat(60),
+            name: 'n' + p + '-' + c, role: 'repeater', lat: 50 + r() * 1.5, lon: 5 + r() * 1.5 });
+        }
+      }
+      const hops = [];
+      for (let i = 0; i < L; i++) hops.push(Math.floor(r() * P).toString(16).padStart(2, '0'));
+      const resolvedPath = r() < 0.3 ? hops.map(h => {
+        if (r() >= 0.15) return null;
+        const n = nodes.find(nd => nd.public_key.startsWith(h) && r() < 0.5);
+        return n ? n.public_key : null;
+      }) : undefined;
+      const graph = {};
+      if (r() < 0.4) {
+        for (let e = 0; e < 20; e++) {
+          const a = nodes[Math.floor(r() * nodes.length)].public_key, b = nodes[Math.floor(r() * nodes.length)].public_key;
+          (graph[a] = graph[a] || {})[b] = 1; (graph[b] = graph[b] || {})[a] = 1;
+        }
+      }
+      const opts = { observer: { lat: 50 + r() * 1.5, lon: 5 + r() * 1.5 },
+        origin: r() < 0.5 ? { lat: 50 + r() * 1.5, lon: 5 + r() * 1.5 } : undefined, resolvedPath: resolvedPath };
+      R.init(nodes); R.setPathAffinity(graph);
+      const t = process.hrtime.bigint();
+      const out = R.inferPath(hops, opts);
+      worst = Math.max(worst, Number(process.hrtime.bigint() - t) / 1e6);
+      const keys = out.filter(e => e.located).map(e => e.pubkey);
+      dup += keys.length - new Set(keys).size;
+      Before.init(nodes); Before.setPathAffinity(graph);
+      if (Before.inferPath(hops, opts).map(e => e.pubkey).join() !== out.map(e => e.pubkey).join()) rescued++;
+    }
+    console.log('    300 random paths: ' + rescued + ' changed by the rescue, worst ' + worst.toFixed(1) + ' ms');
+    assert(rescued > 0, 'fixture: the random paths exercise the rescue (' + rescued + ' changed)');
+    assert(dup === 0, 'no node is placed twice on 300 random paths through the rescue (got ' + dup + ')');
+    assert(worst < 120, 'and the slowest of them stays under the 120 ms gate (' + worst.toFixed(1) + ' ms)');
+  }
 }
 
 console.log('\n=== #598 K: no per-hop network calls, and no O(n) scan per hop ===');
