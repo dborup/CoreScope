@@ -93,6 +93,28 @@ func ResolvePalette(section map[string]string, dark bool) (p Palette, bad []stri
 	return p, bad
 }
 
+// ResolveTheme is the palette the browser shows for one mode, from the
+// theme.json-style sections theme and themeDark: in dark mode the browser
+// draws Object.assign({}, theme, themeDark) (public/app.js
+// reapplyUserThemeVars), so a key set only in theme applies in dark mode
+// too, and themeDark wins where both have it; light mode reads theme
+// alone. The inputs are not modified. bad is as for ResolvePalette, for
+// the merged section: a bad value that themeDark overrides is never used,
+// so it is not reported.
+func ResolveTheme(theme, themeDark map[string]string, dark bool) (Palette, []string) {
+	if !dark {
+		return ResolvePalette(theme, false)
+	}
+	merged := make(map[string]string, len(theme)+len(themeDark))
+	for k, v := range theme {
+		merged[k] = v
+	}
+	for k, v := range themeDark {
+		merged[k] = v
+	}
+	return ResolvePalette(merged, true)
+}
+
 var (
 	hexColorRe = regexp.MustCompile(`^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$`)
 	rgbRe      = regexp.MustCompile(`^(?i:rgb)\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$`)

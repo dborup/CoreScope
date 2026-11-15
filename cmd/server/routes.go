@@ -348,6 +348,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/map/dhm/wms", s.handleDHMTile).Methods("GET")
 	r.HandleFunc(dhmOrthoRoute, s.handleDHMOrtho).Methods("GET")
 	r.HandleFunc("/api/terrain/profile", s.handleTerrainProfile).Methods("GET")
+	r.HandleFunc(cardRoute, s.handleTerrainProfileCard).Methods("GET")
 	r.HandleFunc("/api/masts", s.handleMasts).Methods("GET")
 	r.HandleFunc("/api/terrain/heritage", s.handleHeritageInfo).Methods("GET")
 	r.HandleFunc("/api/skraafoto/search", s.handleSkraafotoSearch).Methods("GET")
@@ -845,6 +846,64 @@ func (s *Server) handleConfigRegionGroups(w http.ResponseWriter, r *http.Request
 	writeJSON(w, regionGroupsForRegions(s.cfg.RegionGroups, s.effectiveRegions()))
 }
 
+// themeLightDefaults and themeDarkDefaults are the shipped theme and
+// themeDark colours /api/config/theme starts from, before config.json and
+// theme.json. The share card's palette starts from them too
+// (cardThemeSections), so card and site agree. Read-only: mergeMap copies.
+var themeLightDefaults = map[string]interface{}{
+	"accent":       "#4a9eff",
+	"accentHover":  "#6db3ff",
+	"navBg":        "#0f0f23",
+	"navBg2":       "#1a1a2e",
+	"navText":      "#ffffff",
+	"navTextMuted": "#cbd5e1",
+	"background":   "#f4f5f7",
+	"text":         "#1a1a2e",
+	"textMuted":    "#5b6370",
+	"border":       "#e2e5ea",
+	"surface1":     "#ffffff",
+	"surface2":     "#ffffff",
+	"surface3":     "#ffffff",
+	"sectionBg":    "#eef2ff",
+	"cardBg":       "#ffffff",
+	"contentBg":    "#f4f5f7",
+	"detailBg":     "#ffffff",
+	"inputBg":      "#ffffff",
+	"rowStripe":    "#f9fafb",
+	"rowHover":     "#eef2ff",
+	"selectedBg":   "#dbeafe",
+	"statusGreen":  "#22c55e",
+	"statusYellow": "#eab308",
+	"statusRed":    "#ef4444",
+}
+
+var themeDarkDefaults = map[string]interface{}{
+	"accent":       "#4a9eff",
+	"accentHover":  "#6db3ff",
+	"navBg":        "#0f0f23",
+	"navBg2":       "#1a1a2e",
+	"navText":      "#ffffff",
+	"navTextMuted": "#cbd5e1",
+	"background":   "#0f0f23",
+	"text":         "#e2e8f0",
+	"textMuted":    "#a8b8cc",
+	"border":       "#334155",
+	"surface1":     "#1a1a2e",
+	"surface2":     "#232340",
+	"cardBg":       "#1a1a2e",
+	"contentBg":    "#0f0f23",
+	"detailBg":     "#232340",
+	"inputBg":      "#1e1e34",
+	"rowStripe":    "#1e1e34",
+	"rowHover":     "#2d2d50",
+	"selectedBg":   "#1e3a5f",
+	"statusGreen":  "#22c55e",
+	"statusYellow": "#eab308",
+	"statusRed":    "#ef4444",
+	"surface3":     "#2d2d50",
+	"sectionBg":    "#1e1e34",
+}
+
 func (s *Server) handleConfigTheme(w http.ResponseWriter, r *http.Request) {
 	theme := LoadTheme(".")
 
@@ -853,32 +912,8 @@ func (s *Server) handleConfigTheme(w http.ResponseWriter, r *http.Request) {
 		"tagline":  "Real-time MeshCore LoRa mesh network analyzer",
 	}, s.cfg.Branding, theme.Branding)
 
-	themeColors := mergeMap(map[string]interface{}{
-		"accent":       "#4a9eff",
-		"accentHover":  "#6db3ff",
-		"navBg":        "#0f0f23",
-		"navBg2":       "#1a1a2e",
-		"navText":      "#ffffff",
-		"navTextMuted": "#cbd5e1",
-		"background":   "#f4f5f7",
-		"text":         "#1a1a2e",
-		"textMuted":    "#5b6370",
-		"border":       "#e2e5ea",
-		"surface1":     "#ffffff",
-		"surface2":     "#ffffff",
-		"surface3":     "#ffffff",
-		"sectionBg":    "#eef2ff",
-		"cardBg":       "#ffffff",
-		"contentBg":    "#f4f5f7",
-		"detailBg":     "#ffffff",
-		"inputBg":      "#ffffff",
-		"rowStripe":    "#f9fafb",
-		"rowHover":     "#eef2ff",
-		"selectedBg":   "#dbeafe",
-		"statusGreen":  "#22c55e",
-		"statusYellow": "#eab308",
-		"statusRed":    "#ef4444",
-	}, s.cfg.Theme, theme.Theme)
+	themeColors := mergeMap(themeLightDefaults, s.cfg.Theme, theme.Theme)
+	themeDark := mergeMap(themeDarkDefaults, s.cfg.ThemeDark, theme.ThemeDark)
 
 	nodeColors := mergeMap(map[string]interface{}{
 		"repeater":  "#dc2626",
@@ -888,32 +923,6 @@ func (s *Server) handleConfigTheme(w http.ResponseWriter, r *http.Request) {
 		"observer":  "#8b5cf6",
 	}, s.cfg.NodeColors, theme.NodeColors)
 
-	themeDark := mergeMap(map[string]interface{}{
-		"accent":       "#4a9eff",
-		"accentHover":  "#6db3ff",
-		"navBg":        "#0f0f23",
-		"navBg2":       "#1a1a2e",
-		"navText":      "#ffffff",
-		"navTextMuted": "#cbd5e1",
-		"background":   "#0f0f23",
-		"text":         "#e2e8f0",
-		"textMuted":    "#a8b8cc",
-		"border":       "#334155",
-		"surface1":     "#1a1a2e",
-		"surface2":     "#232340",
-		"cardBg":       "#1a1a2e",
-		"contentBg":    "#0f0f23",
-		"detailBg":     "#232340",
-		"inputBg":      "#1e1e34",
-		"rowStripe":    "#1e1e34",
-		"rowHover":     "#2d2d50",
-		"selectedBg":   "#1e3a5f",
-		"statusGreen":  "#22c55e",
-		"statusYellow": "#eab308",
-		"statusRed":    "#ef4444",
-		"surface3":     "#2d2d50",
-		"sectionBg":    "#1e1e34",
-	}, s.cfg.ThemeDark, theme.ThemeDark)
 	// #1799 PR #1804 r1 item 6: REQUEST→REQ rename is a BREAKING change to
 	// the /api/config/theme shape. Compat policy for >=1 release cycle:
 	//   - INCOMING: if an operator's config.json / theme.json carries the
