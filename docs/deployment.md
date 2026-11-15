@@ -1349,9 +1349,9 @@ scripts/smoke-upstreams.sh -config /path/to/config.json
 - The Skråfoto CDN read uses the photo that the search found. Without the
   token, give a photo's CDN path with `-skraafoto-cdn-path
   /skraafoto_server/….tif`. Otherwise that probe is `SKIP`.
-- Skærmkort is always `SKIP`. Its WMS URL is built in the browser
-  (#741), and the check sends no hand-written URL. Check the Skærmkort
-  base map in a browser instead.
+- Skærmkort and Natur- og Friluftskort are always `SKIP`. Their WMS URLs
+  are built in the browser (#741), and the check sends no hand-written
+  URL. Check those base maps in a browser instead.
 - The exit status is 1 if any upstream fails, 2 if the config cannot be
   read, and 0 otherwise. `SKIP` does not fail the run.
 - It is never run in CI. Run it by hand, and paste the output into the
