@@ -155,7 +155,10 @@ func (ws *brandesWorkspace) accumulate(g *indexedDistanceGraph, src int32, bc []
 		w := ws.stack[i]
 		if sigma[w] != 0 {
 			for _, v := range ws.predBuf[g.off[w] : g.off[w]+ws.predLen[w]] {
-				delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w])
+				// float64(...) forces the product to be rounded before the
+				// add, so arm64 cannot fuse it into an FMA and every
+				// architecture produces amd64's bits (#656).
+				delta[v] += float64((sigma[v] / sigma[w]) * (1.0 + delta[w]))
 			}
 		}
 		if w != src {
