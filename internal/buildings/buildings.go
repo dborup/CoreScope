@@ -24,6 +24,11 @@
 //     only the segment's line and radius vary. It uses the shared keyless
 //     GET of internal/dhm: no redirects, a timeout, a bounded body, and
 //     failures reduced to a dhm.FetchError category (client.go).
+//   - Classify: per profile sample Building, Vegetation or Unclassified,
+//     from the share of a small track-aligned window that lies inside a
+//     footprint, over an along-track bucket index per segment, so the cost
+//     is O(samples + vertices); Needed says which segments to fetch at all
+//     (classify.go).
 //
 // The polygon reading and the point-in-polygon maths are internal/dhm's
 // (polygon.go), shared with internal/heritage.
