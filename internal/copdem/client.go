@@ -87,6 +87,9 @@ type Client struct {
 	headers  *dhm.Cache[Tile]     // size, cold calls, then the header bytes
 	blocks   *dhm.Cache[blockKey] // stored block bytes
 	requests atomic.Int64         // upstream requests sent
+	// afterMiss, set only by tests before any call, runs between a
+	// caller's cache miss and its shared read.
+	afterMiss func()
 }
 
 // blockKey is one block of one level of one tile.
@@ -160,6 +163,9 @@ func (c *Client) header(ctx context.Context, t Tile) (header, error) {
 	now := c.opts.Now()
 	enc, ok := c.headers.Get(t, now)
 	if !ok {
+		if c.afterMiss != nil {
+			c.afterMiss()
+		}
 		var err error
 		enc, _, err = c.flight.DoAdmitted(ctx, "h "+path, 0, c.adm, func(work context.Context) ([]byte, error) {
 			return c.fetchHeader(work, t)
@@ -223,6 +229,9 @@ func (c *Client) block(ctx context.Context, t Tile, h header, level, i int) ([]b
 	now := c.opts.Now()
 	if raw, ok := c.blocks.Get(key, now); ok {
 		return raw, nil
+	}
+	if c.afterMiss != nil {
+		c.afterMiss()
 	}
 	path := t.Path()
 	off, n := h.tiff.Levels[level].BlockRange(i)
