@@ -208,11 +208,14 @@
     return e;
   }
 
-  // Static markup, no interpolation: a Phosphor sprite icon.
-  function icon(name) {
+  // Static markup, no interpolation: a Phosphor sprite icon, the camera
+  // or the close cross.
+  function icon(camera) {
     var s = el('span', 'sf-icon');
     s.setAttribute('aria-hidden', 'true');
-    s.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#' + name + '"/></svg>';
+    s.innerHTML = camera
+      ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-camera"/></svg>'
+      : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg>';
     return s;
   }
 
@@ -263,7 +266,7 @@
     closeBtn.type = 'button';
     closeBtn.setAttribute('aria-label', 'Close oblique photo');
     closeBtn.setAttribute('data-testid', 'sf-close');
-    closeBtn.appendChild(icon('ph-x'));
+    closeBtn.appendChild(icon(false));
     closeBtn.addEventListener('click', function () { api.close(true); });
     head.appendChild(closeBtn);
     dialog.appendChild(head);
@@ -576,7 +579,7 @@
     b.type = 'button';
     if (o.testid) b.setAttribute('data-testid', o.testid);
     if (o.title) b.title = o.title;
-    if (o.icon !== false) b.appendChild(icon('ph-camera'));
+    if (o.icon !== false) b.appendChild(icon(true));
     b.appendChild(el('span', 'sf-action-text', o.text || 'Oblique photo'));
     b.addEventListener('click', function () {
       var p = o.getPoint ? o.getPoint() : null;
