@@ -145,13 +145,13 @@
     var tileUrl = (window.getTileUrl && window.getTileUrl()) || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
     var provider = window.getActiveTileProvider && window.getActiveTileProvider();
     var attribution = (provider && provider.attribution) || '© OpenStreetMap contributors';
-    // #741 M1a — the registry's shared base-layer factory builds the inset's
-    // base map. A WMS provider does not reach it from here yet: getTileUrl()
-    // and getActiveTileProvider() (roles.js) hand over a URL template and a
-    // credit, and nothing rebuilds a `wms` descriptor, so carrying one
-    // through the per-page resolvers is M1b's job. The 18 here is this
-    // helper's own historical ceiling, kept as is (map.js/live.js use 19).
-    var layer = baseLayer({ url: tileUrl }, { maxZoom: 18, attribution: attribution }).addTo(map);
+    // #741 — the registry's shared base-layer factory builds the inset's
+    // base map. getTileUrl() (roles.js) is a URL template only, so a WMS
+    // style (M1b) is built from the provider's own `wms` descriptor instead;
+    // the factory resolves its lazy url. The 18 here is this helper's own
+    // historical ceiling, kept as is (map.js/live.js use 19).
+    var spec = (provider && provider.wms) ? { wms: provider.wms } : { url: tileUrl };
+    var layer = baseLayer(spec, { maxZoom: 18, attribution: attribution }).addTo(map);
     // Esri 2-layer provider: add the labels reference overlay too
     if (provider && provider.refUrl) {
       try { baseLayer({ url: provider.refUrl }, { maxZoom: 18 }).addTo(map); } catch (_e) {}
