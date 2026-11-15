@@ -154,5 +154,15 @@ func CDNPath(href, id string) (string, error) {
 	return u.Path, nil
 }
 
+// CDNURL is the URL of the photo at path on the CDN, for a path cdnPathRe
+// matches (CDNPath returns only such paths): what a preview reads, and
+// what the live smoke check (#803) reads. Any other path is ErrBadRequest.
+func CDNURL(path string) (string, error) {
+	if !cdnPathRe.MatchString(path) {
+		return "", dhm.ErrBadRequest
+	}
+	return CDNBase + path, nil
+}
+
 // ViewerLink is the official viewer opened on photo id.
 func ViewerLink(id string) string { return viewerURL + "?item=" + url.QueryEscape(id) }

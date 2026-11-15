@@ -105,9 +105,9 @@ func tileCoord(s string) (int, bool) {
 	return n, true
 }
 
-// orthoQuery is the tile's upstream GetTile query, rebuilt from the
-// validated key.
-func (k TileKey) orthoQuery() url.Values {
+// OrthoQuery is the tile's upstream GetTile query, rebuilt from the
+// validated key. The live smoke check (#803) sends it too.
+func (k TileKey) OrthoQuery() url.Values {
 	q := url.Values{}
 	for key, v := range orthoParams {
 		q.Set(key, v)
@@ -118,7 +118,7 @@ func (k TileKey) orthoQuery() url.Values {
 	return q
 }
 
-// orthoQueryCheck accepts q only if it is exactly the orthoQuery of a tile
+// orthoQueryCheck accepts q only if it is exactly the OrthoQuery of a tile
 // ParseOrthoTile accepts, so Client.Get cannot send any other request to
 // the ortho service: no other layer, format, tile matrix set or parameter.
 func orthoQueryCheck(q url.Values) error {
@@ -137,7 +137,7 @@ func orthoQueryCheck(q url.Values) error {
 // JPEG is returned; anything else is a FetchError, so the proxy, which
 // caches only successes, never caches a bad tile.
 func (c *Client) FetchOrthoAdmitted(ctx context.Context, adm *Admission, k TileKey) ([]byte, error) {
-	data, err := c.get(ctx, adm, OrthoWMTSService, k.orthoQuery(), []string{"image/jpeg"})
+	data, err := c.get(ctx, adm, OrthoWMTSService, k.OrthoQuery(), []string{"image/jpeg"})
 	if err != nil {
 		return nil, err
 	}

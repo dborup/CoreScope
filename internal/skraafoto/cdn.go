@@ -16,9 +16,10 @@ const (
 	// PreviewMaxPx is the long edge of a preview (#737 Q8).
 	PreviewMaxPx = 1024
 
-	// headerBytes is the first read of a photo: the owner's check found
-	// all seven IFDs of a real photo in its first 64 KiB.
-	headerBytes = 64 << 10
+	// HeaderBytes is the first read of a photo: the owner's check found
+	// all seven IFDs of a real photo in its first 64 KiB. The live smoke
+	// check (#803) reads the same range.
+	HeaderBytes = 64 << 10
 	// maxHeaderBytes is a header after its one extension.
 	maxHeaderBytes = 1 << 20
 	// MaxPreviewTiles, MaxPreviewPixels and MaxPreviewBytes bound one
@@ -52,11 +53,15 @@ func (c *CDN) Requests() int64 { return c.lim.sent.Load() }
 
 // readRange reads r of path, a checked CDN path, holding a slot.
 func (c *CDN) readRange(ctx context.Context, path string, r dhm.Range) ([]byte, int64, error) {
+	target, err := CDNURL(path)
+	if err != nil {
+		return nil, 0, err
+	}
 	var body []byte
 	var total int64
-	err := c.lim.do(ctx, func(ctx context.Context) error {
+	err = c.lim.do(ctx, func(ctx context.Context) error {
 		var err error
-		body, total, err = dhm.RangeRead(ctx, c.lim.http, CDNBase+path, r, &c.lim.sent)
+		body, total, err = dhm.RangeRead(ctx, c.lim.http, target, r, &c.lim.sent)
 		return err
 	})
 	return body, total, err
@@ -109,14 +114,14 @@ func (c *CDN) Preview(ctx context.Context, path string) ([]byte, error) {
 // header reads and parses the photo's layout, and returns it, the file's
 // size and the bytes read.
 func (c *CDN) header(ctx context.Context, path string) (*dhm.TiledImage, int64, int, error) {
-	buf, size, err := c.readRange(ctx, path, dhm.Range{From: 0, To: headerBytes - 1, MaxBody: headerBytes})
+	buf, size, err := c.readRange(ctx, path, dhm.Range{From: 0, To: HeaderBytes - 1, MaxBody: HeaderBytes})
 	if err != nil {
 		return nil, 0, 0, err
 	}
 	layout, err := dhm.ParseTiledImage(buf, size)
-	if errors.Is(err, dhm.ErrShortHeader) && len(buf) == headerBytes {
-		more, _, err2 := c.readRange(ctx, path, dhm.Range{From: headerBytes, To: min(maxHeaderBytes, size) - 1,
-			Size: size, MaxBody: maxHeaderBytes - headerBytes})
+	if errors.Is(err, dhm.ErrShortHeader) && len(buf) == HeaderBytes {
+		more, _, err2 := c.readRange(ctx, path, dhm.Range{From: HeaderBytes, To: min(maxHeaderBytes, size) - 1,
+			Size: size, MaxBody: maxHeaderBytes - HeaderBytes})
 		if err2 != nil {
 			return nil, 0, 0, err2
 		}

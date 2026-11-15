@@ -74,9 +74,10 @@ func NewClient(opts ClientOptions) *Client {
 	}
 }
 
-// cellURL is the GetFeature URL for a valid cell. Nothing but the cell's
-// integer bbox varies.
-func (c *Client) cellURL(cell Cell) string {
+// CellURL is the GetFeature URL for a valid cell. Nothing but the cell's
+// integer bbox varies. The live smoke check
+// (#803) sends it too.
+func (c *Client) CellURL(cell Cell) string {
 	b := cell.BBox()
 	bbox := strconv.Itoa(int(b[0])) + "," + strconv.Itoa(int(b[1])) + "," +
 		strconv.Itoa(int(b[2])) + "," + strconv.Itoa(int(b[3])) + "," + CRS
@@ -90,7 +91,7 @@ func (c *Client) FetchCell(ctx context.Context, cell Cell) (Page, error) {
 	if !cell.Valid() {
 		return Page{}, ErrBadCell
 	}
-	body, err := c.fetch(ctx, c.cellURL(cell))
+	body, err := c.fetch(ctx, c.CellURL(cell))
 	if err != nil {
 		return Page{}, err
 	}

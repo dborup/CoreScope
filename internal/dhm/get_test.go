@@ -89,7 +89,7 @@ func TestGetBodySendsAcceptAndNothingElse(t *testing.T) {
 	if _, err := GetBody(context.Background(), NewNoRedirectClient(time.Second), srv.URL, "application/json", jsonTypes, 64); err != nil {
 		t.Fatal(err)
 	}
-	if got.Get("Accept") != "application/json" || got.Get("Cookie") != "" || got.Get(tokenHeader) != "" {
+	if got.Get("Accept") != "application/json" || got.Get("Cookie") != "" || got.Get(TokenHeader) != "" {
 		t.Fatalf("headers %v", got)
 	}
 }

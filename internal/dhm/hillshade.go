@@ -65,7 +65,7 @@ func (h Hillshade) layer() string { return h.overlay().Layer }
 // hillshadeQuery is the tile's GetMap query for layer h: #680's upstream
 // query with only the layer changed.
 func (k TileKey) hillshadeQuery(h Hillshade) url.Values {
-	return k.overlayQuery(h.overlay())
+	return k.OverlayQuery(h.overlay())
 }
 
 // FetchHillshade fetches one tile of layer h. Only a complete 256×256 PNG

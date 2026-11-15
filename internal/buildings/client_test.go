@@ -80,7 +80,7 @@ func TestSegmentURLGolden(t *testing.T) {
 		"&filter-crs=http://www.opengis.net/def/crs/EPSG/0/25832" +
 		"&limit=1000" +
 		"&filter=DWITHIN%28geometry%2CLINESTRING%28575432.4%206223834.6%2C574523.2%206224094.6%29%2C15%2Cmeters%29"
-	if got := NewClient(DefaultClientOptions()).segmentURL(seg); got != want {
+	if got := NewClient(DefaultClientOptions()).SegmentURL(seg); got != want {
 		t.Fatalf("URL\n%s\nwant\n%s", got, want)
 	}
 }
@@ -99,7 +99,7 @@ func TestSegmentURLDecodesToTheFixedQuery(t *testing.T) {
 		segs = append(segs, c.Segments()...)
 	}
 	for _, seg := range segs {
-		u, err := url.Parse(NewClient(DefaultClientOptions()).segmentURL(seg))
+		u, err := url.Parse(NewClient(DefaultClientOptions()).SegmentURL(seg))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -162,7 +162,7 @@ func TestFetchSegmentRequestShape(t *testing.T) {
 	if got.Method != http.MethodGet || got.URL.Path != "/ogcapi/features/building_inspire/collections/building/items" {
 		t.Fatalf("%s %s", got.Method, got.URL.Path)
 	}
-	if want := strings.SplitN(NewClient(DefaultClientOptions()).segmentURL(seg), "?", 2)[1]; got.URL.RawQuery != want {
+	if want := strings.SplitN(NewClient(DefaultClientOptions()).SegmentURL(seg), "?", 2)[1]; got.URL.RawQuery != want {
 		t.Fatalf("query\n%s\nwant\n%s", got.URL.RawQuery, want)
 	}
 	if got.Header.Get("Accept") != "application/geo+json" {

@@ -38,11 +38,11 @@ type serviceShape struct {
 	raster bool                   // responses are raster chunks: MaxCoverageBodyBytes applies
 }
 
-// tokenHeader is the request header Dataforsyningen reads the token from.
+// TokenHeader is the request header Dataforsyningen reads the token from.
 // Its documentation recommends the header over the `token` query parameter
 // as the more secure method; it also keeps the token out of every URL, and
 // so out of net/http's *url.Error text.
-const tokenHeader = "token"
+const TokenHeader = "token"
 
 // ClientOptions are the limits of the upstream client.
 type ClientOptions struct {
@@ -145,7 +145,7 @@ func (c *Client) get(ctx context.Context, adm *Admission, service string, q url.
 		return nil, ErrBadRequest
 	}
 	for k := range q {
-		if strings.EqualFold(k, tokenHeader) {
+		if strings.EqualFold(k, TokenHeader) {
 			return nil, ErrBadRequest
 		}
 	}
@@ -161,7 +161,7 @@ func (c *Client) get(ctx context.Context, adm *Admission, service string, q url.
 			maxBody = maxRasterBodyBytes
 		}
 	}
-	target := c.opts.BaseURL + service + "?" + q.Encode()
+	target := RequestURL(c.opts.BaseURL, service, q)
 	data, _, err := c.flight.DoAdmitted(ctx, strings.Join(contentTypes, ",")+" "+target, 0, adm, func(work context.Context) ([]byte, error) {
 		return c.fetch(work, target, contentTypes, maxBody)
 	})
@@ -169,6 +169,14 @@ func (c *Client) get(ctx context.Context, adm *Admission, service string, q url.
 		return nil, ContextFailure(err)
 	}
 	return data, nil
+}
+
+// RequestURL is the upstream URL of service with query q below baseURL
+// (DefaultBaseURL outside tests): what Client sends, the token aside,
+// which travels in the TokenHeader header. The live smoke check (#803)
+// builds its DHM requests with it.
+func RequestURL(baseURL, service string, q url.Values) string {
+	return baseURL + service + "?" + q.Encode()
 }
 
 // ContextFailure maps the caller's context error, when ctx ended its
@@ -200,7 +208,7 @@ func (c *Client) fetch(work context.Context, target string, contentTypes []strin
 	if err != nil {
 		return nil, FetchError{"request"}
 	}
-	req.Header.Set(tokenHeader, c.token)
+	req.Header.Set(TokenHeader, c.token)
 	req.Header.Set("Accept", strings.Join(contentTypes, ", "))
 	resp, err := c.http.Do(req)
 	if err != nil {
