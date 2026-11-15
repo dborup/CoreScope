@@ -98,9 +98,16 @@ type DHMClientConfig struct {
 	// previews (#727): the profile is served and map.dhm.profile.share.
 	// enabled is set. Without it the copy button hands out the plain
 	// #/map?profile= link, exactly as before.
-	Share       bool          `json:"share"`
-	Bounds      [2][2]float64 `json:"bounds"` // [[south, west], [north, east]]
-	Attribution string        `json:"attribution"`
+	Share bool `json:"share"`
+	// PointAntenna is how the profile resolves a free map point's antenna
+	// height when the request names none (#746): radio.antennaHeightsM.point,
+	// else the built-in default. A point has no per-node key, so this is the
+	// whole rule, and the Map page can apply a customizer point default in
+	// the one request a drop makes instead of asking twice. Present only
+	// with Profile.
+	PointAntenna *DHMPointAntenna `json:"pointAntenna,omitempty"`
+	Bounds       [2][2]float64    `json:"bounds"` // [[south, west], [north, east]]
+	Attribution  string           `json:"attribution"`
 	// The credit's parts (#733). Dataforsyningen's terms require the
 	// credit to link both the dataset and the licence, and Leaflet's
 	// attribution control is the page's, not the server's, so the link
@@ -148,6 +155,14 @@ func dhmOrthoClientConfig() *DHMOrthoClientConfig {
 		LicenseName: dhm.LicenseName,
 		LicenseURL:  dhm.LicenseURL,
 	}
+}
+
+// DHMPointAntenna is a free point's antenna height without a request
+// height, and its source: "operator-role" or "point-default", as in a
+// profile response's antennaSource.
+type DHMPointAntenna struct {
+	M      float64 `json:"m"`
+	Source string  `json:"source"`
 }
 
 func dhmClientConfig() *DHMClientConfig {
@@ -550,6 +565,10 @@ func (s *Server) dhmClientConfig() *DHMClientConfig {
 	c := dhmClientConfig()
 	c.Profile = s.terrain != nil
 	c.Share = s.terrain != nil && s.terrain.set.share.enabled
+	if s.terrain != nil {
+		h, src, _ := s.terrain.antenna(terrainEnd{kind: "point"}, nil)
+		c.PointAntenna = &DHMPointAntenna{M: h, Source: src}
+	}
 	if s.dhm.orthoCache != nil {
 		c.Ortho = dhmOrthoClientConfig()
 	}

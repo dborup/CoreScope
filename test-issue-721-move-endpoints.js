@@ -507,6 +507,117 @@ atest('moving B off a customizer default onto an operator height does not leave 
     'the new end is still marked as an assumed height (stale "theme" origin)');
 });
 
+// ── 5b. #746: a customizer point height costs no second request ───────────
+
+console.log('\n=== #746: one request per drop with a customizer point height ===');
+
+/* The server's rule for a free point (dhm.pointAntenna in the client
+ * config): its height when the request names none, and where it came from.
+ * pointFetch answers the way cmd/server/terrain_profile.go does: a point
+ * without a height gets that rule, a node its role default. */
+const SERVER_POINT = { m: 2, source: 'point-default' };
+function pointFetch(rule) {
+  const calls = [];
+  const fn = (url) => {
+    calls.push(url);
+    const q = new URLSearchParams(url.split('?')[1]);
+    const end = (side) => {
+      const point = (q.get(side) || '').indexOf(',') >= 0, h = q.get('h' + side);
+      if (h !== null) return { kind: point ? 'point' : 'node', role: point ? undefined : 'repeater', groundM: 0, antennaM: Number(h), antennaSource: 'request', assumed: false };
+      if (point) return { kind: 'point', groundM: 0, antennaM: rule.m, antennaSource: rule.source, assumed: true };
+      return { kind: 'node', role: 'repeater', groundM: 0, antennaM: 10, antennaSource: 'role-default', assumed: true };
+    };
+    return Promise.resolve({
+      a: end('a'), b: end('b'), distanceM: 1000, model: q.get('model'),
+      coverage: { state: 'full', pct: 100 },
+      samples: [{ d: 0, dtm: 0 }, { d: 500, dtm: 0 }, { d: 1000, dtm: 0 }],
+      physics: { freqMHz: 869.618, freqSource: 'firmware', lambdaM: 0.34474, k: 1, f1MaxM: 9 },
+      verdict: { state: 'clear', criterion: 0.6 },
+    });
+  };
+  fn.calls = calls;
+  fn.params = (i) => new URLSearchParams(calls[i].split('?')[1]);
+  return fn;
+}
+function openPointTool(heightPoint, rule) {
+  const env = load();
+  env.win.SITE_CONFIG = { terrain: { heightPoint: heightPoint } };
+  const fetchJSON = pointFetch(rule || SERVER_POINT);
+  const tool = env.TP.create({
+    mount: env.dom.body, fetchJSON, pointAntenna: rule === undefined ? SERVER_POINT : rule,
+    resolveNode: (pk) => ({ name: pk.slice(0, 4), lat: 56, lon: 10, role: 'repeater' }),
+    onMoveStart() {}, onMoveCancel() {}, onEndpointsChange() {},
+  });
+  return { env, tool, fetchJSON };
+}
+const POINT = { kind: 'point', lat: 56.01, lon: 10.02 };
+
+atest('a drop onto a free point is one request, carrying the customizer point height', async () => {
+  const { env, tool, fetchJSON } = openPointTool(30);
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_B });
+  await sleep(SETTLE_MS);
+  const before = fetchJSON.calls.length;
+  assert.strictEqual(tool.moveEndpoint('a', POINT), true);
+  await sleep(SETTLE_MS);
+  assert.strictEqual(fetchJSON.calls.length - before, 1,
+    'requests after the drop: ' + fetchJSON.calls.slice(before).join(' | '));
+  assert.strictEqual(lastParams(fetchJSON).get('ha'), '30');
+  assert.strictEqual(tool.getState().ha, null, 'a customizer default leaked into the shared state');
+  assert.strictEqual(env.dom.find('tp-hsrc-a').attrs['data-source'], 'theme');
+  assert.strictEqual(env.dom.find('tp-h-a').value, '30');
+  assert.ok(env.dom.find('tp-assumed-a').classList.contains('is-assumed'), 'a customizer default stopped being an assumption');
+});
+
+atest('picking a free point is one request too', async () => {
+  const { fetchJSON, tool } = openPointTool(30);
+  tool.setEndpoint('a', POINT);
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_B });
+  await sleep(SETTLE_MS);
+  assert.strictEqual(fetchJSON.calls.length, 1, 'requests: ' + fetchJSON.calls.join(' | '));
+  assert.strictEqual(fetchJSON.params(0).get('ha'), '30');
+});
+
+atest('an operator point height is never overruled, and costs no second request', async () => {
+  const { env, tool, fetchJSON } = openPointTool(30, { m: 6, source: 'operator-role' });
+  tool.setEndpoint('a', { kind: 'node', pubkey: PK_A });
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_B });
+  await sleep(SETTLE_MS);
+  const before = fetchJSON.calls.length;
+  tool.moveEndpoint('a', POINT);
+  await sleep(SETTLE_MS);
+  assert.strictEqual(fetchJSON.calls.length - before, 1);
+  assert.strictEqual(lastParams(fetchJSON).get('ha'), null, 'the customizer overruled the operator');
+  assert.strictEqual(env.dom.find('tp-hsrc-a').attrs['data-source'], 'operator');
+});
+
+atest('a customizer point height equal to the server\'s is not sent', async () => {
+  const { env, tool, fetchJSON } = openPointTool(2);
+  tool.setEndpoint('a', POINT);
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_B });
+  await sleep(SETTLE_MS);
+  assert.strictEqual(fetchJSON.calls.length, 1);
+  assert.strictEqual(fetchJSON.params(0).get('ha'), null);
+  assert.strictEqual(env.dom.find('tp-hsrc-a').attrs['data-source'], 'default');
+});
+
+atest('a height the viewer set on the point still wins over every default', async () => {
+  const { tool, fetchJSON } = openPointTool(30);
+  tool.setState(load().TP.parseState('profile=56.01000,10.02000,' + PK_B + '&ha=7'));
+  await sleep(SETTLE_MS);
+  assert.strictEqual(fetchJSON.calls.length, 1);
+  assert.strictEqual(fetchJSON.params(0).get('ha'), '7');
+});
+
+atest('without the server\'s point rule the customizer height still lands, as before', async () => {
+  const { env, tool, fetchJSON } = openPointTool(30, null);
+  tool.setEndpoint('a', POINT);
+  tool.setEndpoint('b', { kind: 'node', pubkey: PK_B });
+  await sleep(SETTLE_MS);
+  assert.strictEqual(lastParams(fetchJSON).get('ha'), '30');
+  assert.strictEqual(env.dom.find('tp-hsrc-a').attrs['data-source'], 'theme');
+});
+
 // ── 6. The buttons exist only when the host can pick ──────────────────────
 
 console.log('\n=== #721: Move A / Move B / Swap in the panel ===');

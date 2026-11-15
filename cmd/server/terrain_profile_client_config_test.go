@@ -78,3 +78,51 @@ func TestClientConfigNoDHMNoProfileFlag(t *testing.T) {
 		t.Fatalf("dhm block without a proxy: %+v", block)
 	}
 }
+
+// #746 — a free map point has no per-node key, so the server's whole rule
+// for its antenna height is the operator's radio.antennaHeightsM.point,
+// else the built-in default. The block publishes that rule so the Map page
+// can apply a customizer point default in the one request a drop makes,
+// instead of asking twice. Absent unless the profile is served.
+func TestClientConfigPointAntenna(t *testing.T) {
+	up := wcsUpstream(t, tiffAnswer)
+	for _, tc := range []struct {
+		name    string
+		profile bool
+		radio   *RadioConfig
+		want    *DHMPointAntenna
+	}{
+		{"built-in default", true, nil, &DHMPointAntenna{M: 2, Source: "point-default"}},
+		{"operator point height", true, &RadioConfig{AntennaHeightsM: map[string]float64{"point": 6.5}},
+			&DHMPointAntenna{M: 6.5, Source: "operator-role"}},
+		// A role height is no rule for a point.
+		{"operator companion height only", true, &RadioConfig{AntennaHeightsM: map[string]float64{"companion": 4}},
+			&DHMPointAntenna{M: 2, Source: "point-default"}},
+		{"profile disabled", false, &RadioConfig{AntennaHeightsM: map[string]float64{"point": 6.5}}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, router := setupTestServer(t)
+			srv.cfg.DHM = DHMConfig{Enabled: true, Token: dhmTestToken}
+			srv.dhm = newTestDHMProxy(t, up, &dhmLogSink{}, nil)
+			if tc.profile {
+				srv.terrain = newTerrainProfiler(dhm.ProfileConfig{Enabled: true},
+					tc.radio, terrainProfilerDeps{src: newFakeElevation(t, flatElev(10)), logf: (&dhmLogSink{}).logf})
+			}
+			block := clientDHMBlock(t, router)
+			if block == nil {
+				t.Fatal("no dhm block while the proxy is active")
+			}
+			if (block.PointAntenna == nil) != (tc.want == nil) || (tc.want != nil && *block.PointAntenna != *tc.want) {
+				t.Fatalf("dhm.pointAntenna = %+v, want %+v", block.PointAntenna, tc.want)
+			}
+			if tc.want == nil {
+				return
+			}
+			// The published rule is the one a point request actually gets.
+			h, src, _ := srv.terrain.antenna(terrainEnd{kind: "point"}, nil)
+			if h != block.PointAntenna.M || src != block.PointAntenna.Source {
+				t.Fatalf("published %+v, but a point resolves to %v m (%s)", block.PointAntenna, h, src)
+			}
+		})
+	}
+}
