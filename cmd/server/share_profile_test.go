@@ -58,7 +58,13 @@ func newShareEnvWith(t *testing.T, pc dhm.ProfileConfig, brand map[string]string
 	if len(edit) > 0 {
 		ed = edit[0]
 	}
-	env := newTerrainEnvWith(t, src, pc, nil, ed)
+	return shareEnvAround(t, src, newTerrainEnvWith(t, src, pc, nil, ed), brand)
+}
+
+// shareEnvAround puts the share routes and the SPA in front of env, whose
+// profiler reads src, and adds the two named fixture nodes.
+func shareEnvAround(t *testing.T, src *fakeElevation, env *terrainEnv, brand map[string]string) *shareEnv {
+	t.Helper()
 	doc := newIndexDoc(sharePublicDir, newOGMeta(brandPick(brand), sharePublicDir, nil))
 	router := mux.NewRouter()
 	env.srv.RegisterRoutes(router)

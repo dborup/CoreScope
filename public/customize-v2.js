@@ -492,6 +492,22 @@
     return out;
   }
 
+  // ── #727 M4 — share previews ──
+  // terrain.shareLinks is the viewer's own switch: whether the Path
+  // profile's Copy link hands out the link that previews in a chat (when
+  // the server serves one) or the plain map link. It is not a profile
+  // default, so it stays out of terrainSettings and never re-measures.
+  // The card's theme and names are the operator's: the card is drawn once
+  // on the server for everyone, so this section shows them and stores
+  // nothing for them.
+  var TERRAIN_SHARE_KEY = 'shareLinks';
+
+  /** The effective share switch: on unless this section says false. */
+  function shareSettings(effectiveConfig) {
+    var src = (effectiveConfig && effectiveConfig.terrain) || {};
+    return { shareLinks: src[TERRAIN_SHARE_KEY] !== false };
+  }
+
   // ── #724 M5 — antenna sites settings ──
   // Whether the sites overlay starts on, the zoom gate, and the profile
   // hint's distance and strong tier. The rule and the bounds live in
@@ -715,6 +731,14 @@
             tOut.model = tIn.model;
           } else {
             console.warn('[customizer-v2] Invalid terrain model rejected:', tIn.model);
+          }
+        }
+        // #727 M4 — the share switch, a boolean and nothing else.
+        if (tIn[TERRAIN_SHARE_KEY] != null) {
+          if (typeof tIn[TERRAIN_SHARE_KEY] === 'boolean') {
+            tOut[TERRAIN_SHARE_KEY] = tIn[TERRAIN_SHARE_KEY];
+          } else {
+            console.warn('[customizer-v2] Invalid terrain share setting rejected:', tIn[TERRAIN_SHARE_KEY]);
           }
         }
         if (Object.keys(tOut).length) clean[key] = tOut;
@@ -1248,6 +1272,10 @@
             if (TERRAIN_MODELS.indexOf(obj[key][trk]) === -1) {
               errors.push('Invalid terrain model: "' + obj[key][trk] + '" \u2014 must be dtm or both');
             }
+          } else if (trk === TERRAIN_SHARE_KEY) {
+            if (typeof obj[key][trk] !== 'boolean') {
+              errors.push('Invalid terrain setting: terrain.' + trk + ' = "' + obj[key][trk] + '" \u2014 must be true or false');
+            }
           } else if (!_own(TERRAIN_DEFAULTS, trk)) {
             console.warn('[customizer-v2] Unknown terrain key in import:', trk);
           } else if (!isValidAntennaHeight(obj[key][trk])) {
@@ -1372,7 +1400,9 @@
     if (_styleEl) return;
     _styleEl = document.createElement('style');
     _styleEl.textContent = [
-      '.cust-overlay{position:fixed;top:56px;right:12px;z-index:1050;width:480px;height:calc(100vh - 68px);background:var(--card-bg);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.3);display:flex;flex-direction:column;resize:both;min-width:320px;min-height:300px;overflow:hidden}',
+      // #727 M4 — end above the phone bottom nav (bottom-nav.css's
+      // --bottom-nav-reserve: 0px on desktop), which sits over it at z-index 1200.
+      '.cust-overlay{position:fixed;top:56px;right:12px;z-index:1050;width:480px;height:calc(100vh - 68px - var(--bottom-nav-reserve, 0px));background:var(--card-bg);border:1px solid var(--border);border-radius:10px;box-shadow:0 8px 32px rgba(0,0,0,.3);display:flex;flex-direction:column;resize:both;min-width:320px;min-height:300px;overflow:hidden}',
       '.cust-overlay.hidden{display:none}',
       '.cust-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);cursor:move;user-select:none;flex-shrink:0}',
       '.cust-header h2{margin:0;font-size:15px}',
@@ -1979,7 +2009,38 @@
           modelOpt('both', 'Terrain and surface (trees, buildings)') +
           modelOpt('dtm', 'Terrain only') +
         '</select>' +
-        '<div class="cust-hint">Terrain always decides the verdict. Surface is drawn for information and costs a second elevation request.</div></div>';
+        '<div class="cust-hint">Terrain always decides the verdict. Surface is drawn for information and costs a second elevation request.</div></div>' +
+      _renderShareSettings(tp);
+  }
+
+  // ── #727 M4 Share previews ──
+  // Inside the Terrain Profile section, so it follows the profile gate.
+  // Without the share route the viewer has nothing to choose; with it, the
+  // switch, and the operator's card look in fixed words: a server value is
+  // only ever compared, never printed.
+  function _renderShareSettings(tp) {
+    var cfg = window.MC_DHM_CFG;
+    var head = '<p class="cust-section-title" style="font-size:13px;margin:16px 0 6px">Share previews</p>';
+    if (typeof tp.shareOffered !== 'function' || !tp.shareOffered(cfg)) {
+      return head + '<div class="cust-hint">Link previews are off on this server, so Copy link hands out the plain map link.</div>';
+    }
+    var on = shareSettings(_getEffective()).shareLinks;
+    var card = cfg.card && typeof cfg.card === 'object' ? cfg.card : null;
+    var shown = function (id, label, value) {
+      return '<div class="cust-terrain-row"><div><span style="font-size:12px;font-weight:600">' + label + '</span></div>' +
+        '<span id="' + id + '" style="font-size:13px">' + value + '</span></div>';
+    };
+    return head +
+      '<div class="cust-field"><label class="cust-check" for="cv2-terrain-share" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+        '<input type="checkbox" id="cv2-terrain-share" data-cv2-terrain-share' + (on ? ' checked' : '') + ' style="width:20px;height:20px">' +
+        '<span>Copy link shares a preview' + _overrideDot('terrain', TERRAIN_SHARE_KEY) + '</span></label>' +
+        '<div class="cust-hint">Pasted into a chat, the link shows a card of the profile. Off: the plain map link, without a card.</div></div>' +
+      (card
+        ? shown('cv2-card-theme', 'Card theme', card.theme === 'light' ? 'Light' : 'Dark') +
+          shown('cv2-card-names', 'Node names on the card', card.names === false ? 'Hidden' : 'Shown') +
+          '<div class="cust-hint">Set by the operator for every shared card.</div>'
+        : '') +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-top:8px">The card is drawn on the server in the operator\u2019s saved palette, not with the colour overrides in this browser.</p>';
   }
 
   // ── #724 M5 Antenna sites settings ──
@@ -2763,6 +2824,14 @@
       });
     });
 
+    // #727 M4 — the share switch. On is the default, so only off is stored.
+    container.querySelectorAll('[data-cv2-terrain-share]').forEach(function (box) {
+      box.addEventListener('change', function () {
+        if (box.checked) clearOverride('terrain', TERRAIN_SHARE_KEY);
+        else setOverride('terrain', TERRAIN_SHARE_KEY, false);
+      });
+    });
+
     // #724 M5 — antenna sites settings. A value back at the operator's is
     // a cleared override, like the terrain defaults.
     container.querySelectorAll('[data-cv2-masts]').forEach(function (inp) {
@@ -3411,6 +3480,9 @@
     // #681 M6 — exposed for tests; see test-issue-681-m6-customizer-terrain.js.
     TERRAIN_DEFAULTS: TERRAIN_DEFAULTS,
     TERRAIN_COLOR_KEYS: TERRAIN_COLOR_KEYS,
+    // #727 M4 — exposed for tests; see test-issue-727-m4-share-customizer.js.
+    TERRAIN_SHARE_KEY: TERRAIN_SHARE_KEY,
+    shareSettings: shareSettings,
     MASTS_COLOR_KEYS: MASTS_COLOR_KEYS,
     VALID_SECTIONS: VALID_SECTIONS,
     isValidAntennaHeight: isValidAntennaHeight,
