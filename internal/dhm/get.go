@@ -10,8 +10,9 @@ import (
 )
 
 // NewNoRedirectClient is the HTTP client of a keyless upstream
-// (internal/mastedb, internal/heritage): timeout per request including the
-// body, and no redirect is ever followed, so a request only reaches the
+// (internal/mastedb, internal/heritage, internal/copdem): timeout per
+// request including the body (0: none, the request's context bounds it),
+// and no redirect is ever followed, so a request only reaches the
 // endpoint whose shape was checked.
 func NewNoRedirectClient(timeout time.Duration) *http.Client {
 	return &http.Client{
@@ -36,7 +37,7 @@ func GetBody(ctx context.Context, hc *http.Client, target, accept string, conten
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, transportFailure(ctx, err)
+		return nil, TransportFailure(ctx, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -48,7 +49,7 @@ func GetBody(ctx context.Context, hc *http.Client, target, accept string, conten
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBody)+1))
 	if err != nil {
-		return nil, transportFailure(ctx, err)
+		return nil, TransportFailure(ctx, err)
 	}
 	if len(data) > maxBody {
 		return nil, FetchError{"oversize response"}
@@ -56,8 +57,11 @@ func GetBody(ctx context.Context, hc *http.Client, target, accept string, conten
 	return data, nil
 }
 
-// transportFailure maps a request or body read error to a category.
-func transportFailure(ctx context.Context, err error) error {
+// TransportFailure maps a request or body read error to its category:
+// "canceled" when ctx was cancelled, "timeout" for a deadline or a
+// transport timeout, else "transport". ctx is the request's context.
+// GetBody and internal/copdem's range reads share it.
+func TransportFailure(ctx context.Context, err error) error {
 	switch {
 	case errors.Is(ctx.Err(), context.Canceled):
 		return FetchError{"canceled"}

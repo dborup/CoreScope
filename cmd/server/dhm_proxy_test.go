@@ -797,7 +797,7 @@ func TestDHMProxy_AcceptsLeafletBBoxes(t *testing.T) {
 		if w.Code != 200 {
 			t.Fatalf("Leaflet bbox %q (z%d/%d/%d): status %d", tc.bbox, tc.z, tc.x, tc.y, w.Code)
 		}
-		key, err := dhm.ParseTileRequest(q)
+		_, key, err := dhm.ParseTileRequest(q)
 		if err != nil || key != (dhm.TileKey{Z: tc.z, X: tc.x, Y: tc.y}) {
 			t.Fatalf("Leaflet bbox %q parsed as %+v (%v), want z%d/%d/%d", tc.bbox, key, err, tc.z, tc.x, tc.y)
 		}
@@ -964,7 +964,7 @@ func TestDHMOpenAPIDeclaresEveryRequiredParam(t *testing.T) {
 	if len(declared) != len(q) {
 		t.Errorf("OpenAPI declares %d params, the proxy accepts exactly %d", len(declared), len(q))
 	}
-	if _, err := dhm.ParseTileRequest(q); err != nil {
+	if _, _, err := dhm.ParseTileRequest(q); err != nil {
 		t.Fatalf("leafletQuery is not an accepted request: %v", err)
 	}
 }

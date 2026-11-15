@@ -122,6 +122,7 @@
     "dhm": {
       "_comment": "#680 — optional 'Terrain (DHM hillshade)' overlay on the Map and Live pages (Denmark only). Needs a personal Dataforsyningen token (free, from dataforsyningen.dk). The token stays on the server: browsers fetch tiles from /api/map/dhm/wms, which adds it, and it is never sent to clients, written to responses or logged. Off unless enabled is true and token is non-empty; otherwise the overlay is not offered and the endpoint returns 404.",
       "_comment_layer": "#687 — which DHM hillshade the server fetches: 'exaggerated' (default; the clearer quickDHM_skyggekort_terraen_overdrevet from wms/dhm_temp) or 'terrain' (dhm_terraen_skyggekort from dhm_DAF). With 'exaggerated', any tile that fails upstream is served from the terrain layer instead. Any other value logs a warning and uses 'terrain'. Browsers are unaffected either way.",
+      "_comment_overlays": "#734 - the tile proxy serves DHM overlays by id: 'terrain' (the hillshade 'layer' picks, as above), 'surface' (dhm_overflade_skyggekort, the surface hillshade with buildings and trees, zoom 7-19) and 'contours' (dhm_kurve_traditionel, 2.5 m contour lines, zoom 14-19). Browsers send the id, never an upstream layer name. surface and contours have no fallback, and every overlay draws on the same tileRateLimitPerMin budget and upstream limits. /api/config/client offers terrain and surface whenever map.dhm is enabled with a token; contours follows in a later release. There is no key to set.",
       "enabled": false,
       "token": "",
       "layer": "exaggerated",
@@ -155,6 +156,16 @@
           "enabled": false,
           "upstreamPerMin": 2,
           "_comment_upstreamPerMin": "#727 shareUpstreamPerMin - the server-wide number of upstream profile fetches per minute that shared links may cause, 0-60 (0 = sharing never goes upstream). The current /p page makes no upstream call at all, so this is an upper bound that is not yet reached; it starts to matter when previews gain the verdict and the chart image (#727 M3)."
+        },
+        "foreignFill": {
+          "_comment": "#738 - cross-border profiles. DHM covers Denmark only, so a path into Germany or across Øresund is partial with no verdict. With enabled true, the samples DHM does not cover (Swedish, German, Polish and Norwegian land, the 1.25 km off their coasts, and everything outside DHM's raster extent) are filled from Copernicus DEM GLO-30, and the profile gets a verdict on the mixed terrain model. Only a profile with at least one DHM sample is filled. GLO-30 is a ~30 m surface model: forests and towns read high, which can only make a verdict more pessimistic; the surface (DSM) verdict of a mixed profile stays unknown. The response marks it mixed, lists the filled stretches and their resolution, and carries the Copernicus credit. At most 16 upstream calls per profile; a path that needs more at full resolution uses the 1/2 overview (~60 m), and one that needs more still is not filled. If the fill fails, the profile is partial with no verdict, as without it; its DHM part is cached as usual and a later request tries only the fill again. Heights abroad are EGM2008 next to DHM's DVR90 and are not corrected (a sub-metre step). With maxPathKm at most 80, Sweden and Germany are in reach, Norway and Poland in practice not.",
+          "_comment_traffic": "Off unless enabled is true, because it sends requests to a third party: anonymous HTTPS range requests to the AWS Open Data bucket copernicus-dem-30m.s3.amazonaws.com, the only host the fill ever contacts (no token, no account, no redirects followed). One header read per 1x1 degree tile and one read per 1024x1024 block: 5 requests and about 6.4 MB for a cold 80 km profile from Copenhagen into Skåne, nothing for a cached one. No client data is sent, but the bucket sees which tiles and byte ranges are read, i.e. the coarse area being profiled. The DHM token is never sent there.",
+          "_comment_licence": "Copernicus DEM GLO-30: free of charge, worldwide, with attribution (https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/DEM/resources/license/License-COPDEM-30.pdf). The organisations in charge of the Copernicus programme by law or by delegation do not incur any liability for any use of the Copernicus WorldDEM-30",
+          "enabled": false,
+          "blockCacheMB": 32,
+          "_comment_blockCacheMB": "Compressed GLO-30 blocks kept in memory, 1-256 MB (a block is about 0.04 to 2.8 MB). Tile headers are cached on their own, at most 64 of at most 64 KB.",
+          "timeoutMs": 10000,
+          "_comment_timeoutMs": "Timeout per upstream request to the bucket, 500-10000 ms; a whole profile is still cut off after 25 s."
         }
       }
     },

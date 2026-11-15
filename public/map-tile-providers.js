@@ -421,9 +421,18 @@
   var TERRAIN_LABEL = 'Terrain (DHM hillshade)';
   var HERITAGE_ID   = 'heritage-monuments';
 
+  // A path on this server: not protocol-relative ("//host"), and not
+  // "/\host", which browsers read the same way.
+  // A same-origin absolute path: "/" and then neither "/" nor "\\" (protocol-
+  // relative) nor an ASCII control or space. The URL parser strips tab, LF and
+  // CR, so "/\t/host" would otherwise resolve to a foreign host (#777 review).
+  function _isSameOriginPath(u) {
+    return typeof u === 'string' && /^\/[^\/\\\x00-\x20]/.test(u);
+  }
+
   function getTerrainConfig() {
     var c = window.MC_DHM_CFG;
-    if (!c || c.enabled !== true || typeof c.url !== 'string' || c.url.charAt(0) !== '/' || c.url.charAt(1) === '/') return null;
+    if (!c || c.enabled !== true || !_isSameOriginPath(c.url)) return null;
     return c;
   }
 
@@ -443,7 +452,7 @@
   function getMastsConfig() {
     var c = window.MC_MASTS_CFG;
     if (!c || c.enabled !== true || !window.MastsLayer) return null;
-    if (typeof c.url !== 'string' || c.url.charAt(0) !== '/' || c.url.charAt(1) === '/') return null;
+    if (!_isSameOriginPath(c.url)) return null;
     if (!_isZoom(c.minZoom) || typeof c.cellSizeM !== 'number' || !(c.cellSizeM > 0) || Math.floor(c.cellSizeM) !== c.cellSizeM) return null;
     if (!Array.isArray(c.cellExtent) || c.cellExtent.length !== 4) return null;
     for (var i = 0; i < 4; i++) if (typeof c.cellExtent[i] !== 'number' || Math.floor(c.cellExtent[i]) !== c.cellExtent[i]) return null;
@@ -458,6 +467,7 @@
     {
       id: TERRAIN_ID, storageKey: 'mc-terrain-dhm', hashParam: 'terrain', layerProp: '_mcTerrainLayer',
       pane: 'mcTerrainPane', paneZ: 250, paneClass: 'mc-terrain-pane', className: 'mc-terrain-tiles', opacity: 0.65,
+      retryPlaceholders: true, // #728 N3: a DHM proxy tile
       config: getTerrainConfig,
       label: function () { return TERRAIN_LABEL; },
       layers: function (cfg) { return cfg.layer; }
@@ -607,6 +617,59 @@
     return buildCredit(cfg.attribution, creditLinks(cfg));
   }
 
+  /* #728 N3 (#769 review) — one retry of a DHM placeholder tile.
+   *
+   * The DHM proxy answers a tile it cannot serve with a 1×1 transparent
+   * PNG: `busy` when its admission bound of cold tiles (#744) is full,
+   * `unavailable` after an upstream failure (both no-store), `outside`
+   * beyond the coverage (cached for a day). With the ortho base layer and
+   * the hillshade both cold, a view is about 120 tiles against 64
+   * admission slots, so part of it comes back busy, and Leaflet keeps a
+   * loaded tile: it stayed blank until it left the view.
+   *
+   * An <img> cannot read the X-CoreScope-Tile header, but every real DHM
+   * tile is 256×256, so a 1×1 image is a placeholder. Each one is reloaded
+   * once (same URL), RETRY_MS plus up to RETRY_JITTER_MS later, so the
+   * retries of one view are spread out instead of arriving together, and
+   * only if it is still loaded (not unloaded or aborted, which is also
+   * what happens to every tile when its layer leaves the map) and in view
+   * at the map's zoom. A no-store answer is fetched again; an `outside`
+   * one comes from the browser cache without a request. Bounded: one
+   * retry per tile element (so at most one extra request per tile), and
+   * every pending timer is cleared when the layer leaves the map.
+   */
+  var RETRY_MS = 3000;
+  var RETRY_JITTER_MS = 2000;
+
+  function _tileInView(map, layer, c) {
+    if (c.z !== Math.round(map.getZoom())) return false;
+    var ts = layer.getTileSize(), pb = map.getPixelBounds();
+    return c.x * ts.x < pb.max.x && (c.x + 1) * ts.x > pb.min.x &&
+           c.y * ts.y < pb.max.y && (c.y + 1) * ts.y > pb.min.y;
+  }
+
+  function retryPlaceholderTiles(map, layer) {
+    var pending = [];
+    layer.on('tileload', function (e) {
+      var img = e.tile, coords = e.coords;
+      if (!img || img._mcRetried || img.naturalWidth !== 1 || img.naturalHeight !== 1) return;
+      img._mcRetried = true;
+      var t = setTimeout(function () {
+        var i = pending.indexOf(t);
+        if (i >= 0) pending.splice(i, 1);
+        if (img._mcGone || !_tileInView(map, layer, coords)) return;
+        img.src = img.src;
+      }, RETRY_MS + Math.floor(Math.random() * RETRY_JITTER_MS));
+      pending.push(t);
+    });
+    layer.on('tileunload tileabort', function (e) { if (e.tile) e.tile._mcGone = true; });
+    layer.on('remove', function () {
+      pending.forEach(function (t) { clearTimeout(t); });
+      pending = [];
+    });
+    return layer;
+  }
+
   function _createOverlayLayer(map, o, cfg) {
     if (o.create) return o.create(map, cfg);
     if (!map.getPane(o.pane)) {
@@ -620,7 +683,7 @@
     // request, layers, styles, format, transparent, version, width, height,
     // crs and bbox (the DHM proxy accepts nothing else). `bounds` keeps
     // Leaflet from requesting tiles outside the data at all.
-    return L.tileLayer.wms(cfg.url, {
+    var layer = L.tileLayer.wms(cfg.url, {
       layers: o.layers(cfg),
       styles: '',
       format: 'image/png',
@@ -636,6 +699,7 @@
       attribution: _overlayCredit(cfg),
       className: o.className
     });
+    return o.retryPlaceholders ? retryPlaceholderTiles(map, layer) : layer;
   }
 
   // The class the compact (inset) credit is styled by; public/style.css
@@ -737,6 +801,123 @@
     }
   }
 
+  /* #728 M3 — "Aerial (Denmark)": the Danish spring orthophoto as a base
+   * map, from the server's same-origin proxy (cmd/server/dhm_proxy.go,
+   * /api/map/dhm/ortho/{z}/{x}/{y}), which adds the token. Offered only
+   * while /api/config/client carries dhm.ortho (map.dhm.ortho.enabled).
+   *
+   *   - One entry for both themes: it is a photo, so it is never inverted,
+   *     and it lives outside the theme-typed REGISTRY (and so outside the
+   *     customizer's light/dark lists and the Auto layer).
+   *   - With the Esri opt-in (map.tiles.providers.esri.enabled) it is Esri
+   *     World Imagery, the M1 style, under the ortho layer, so the map is
+   *     never blank outside Denmark or below the ortho minZoom. Without it
+   *     the ortho layer is alone and those areas show the map background.
+   *   - The ortho layer draws in its own pane, mcOrthoPane (z 201): above
+   *     the base tiles (tilePane, 200), so above the Esri member however
+   *     L.Control.Layers renumbers the z-index of the layers in a pane, and
+   *     below the hillshade (mcTerrainPane, 250). Being outside tilePane it
+   *     is also outside the dark-theme invert filter.
+   *   - The ortho layer is limited to dhm.ortho.bounds, and skips the tiles
+   *     dhm.ortho.foreignMask marks (Skåne, Schleswig and Rügen inside that
+   *     rectangle, internal/dhm/ortho_mask.go): no request goes out for
+   *     them and the Esri imagery shows.
+   *   - The pick is remembered like an overlay (#680): mc-ortho-base in
+   *     localStorage and ?ortho=1 in the hash, which wins and is saved.
+   *     Any other pick (Auto or a style) clears it. Other explicit picks
+   *     are not remembered, as before.
+   *   - Its credit is the block's own, through the #733 walker.
+   */
+  var ORTHO_ID    = 'dhm-ortho';
+  var ORTHO_LABEL = 'Aerial (Denmark)';
+  var ORTHO_PREF  = { storageKey: 'mc-ortho-base', hashParam: 'ortho' };
+  var ORTHO_PANE  = 'mcOrthoPane';
+  var ORTHO_PANE_Z = 201;
+
+  function getOrthoConfig() {
+    var dhm = getTerrainConfig();
+    var c = dhm && dhm.ortho;
+    if (!c || !_isSameOriginPath(c.url)) return null;
+    if (c.url.indexOf('{z}') < 0 || c.url.indexOf('{x}') < 0 || c.url.indexOf('{y}') < 0) return null;
+    if (!_isZoom(c.minZoom) || !_isZoom(c.maxZoom) || c.minZoom > c.maxZoom) return null;
+    if (!Array.isArray(c.bounds) || c.bounds.length !== 2) return null;
+    if (typeof c.attribution !== 'string' || !c.attribution) return null;
+    return c;
+  }
+
+  function _isTileIndex(v) { return typeof v === 'number' && Math.floor(v) === v && v >= 0; }
+
+  // dhm.ortho.foreignMask as internal/dhm.TileMask sends it: zoom z, a
+  // window of cols×rows tiles from (x0, y0), bit r*cols+c of the base64
+  // `bits`, least significant bit first. Anything malformed is null: the
+  // layer then relies on `bounds` alone, as without a mask.
+  function decodeTileMask(m) {
+    if (!m || typeof m !== 'object' || typeof m.bits !== 'string' || typeof atob !== 'function') return null;
+    if (!_isZoom(m.z) || !_isTileIndex(m.x0) || !_isTileIndex(m.y0) || !_isTileIndex(m.cols) || !_isTileIndex(m.rows)) return null;
+    if (!m.cols || !m.rows) return null;
+    var bits;
+    try { bits = atob(m.bits); } catch (_) { return null; }
+    if (bits.length !== Math.ceil(m.cols * m.rows / 8)) return null;
+    return { z: m.z, x0: m.x0, y0: m.y0, cols: m.cols, rows: m.rows, bits: bits };
+  }
+
+  function _maskBit(m, c, r) {
+    if (c < 0 || r < 0 || c >= m.cols || r >= m.rows) return false;
+    var i = r * m.cols + c;
+    return ((m.bits.charCodeAt(i >> 3) >> (i & 7)) & 1) === 1;
+  }
+
+  // Whether the ortho tile z/x/y shows nothing the mask allows: at or above
+  // the mask zoom, its mask tile is marked; below it, every mask tile under
+  // it inside the window is marked (those outside the window are outside
+  // the coverage), and at least one is. O(1) above the mask zoom; at most
+  // 4^(mask zoom - z) bits below it, and the first unmarked one ends it.
+  function orthoTileSkipped(m, z, x, y) {
+    if (!m) return false;
+    if (z >= m.z) {
+      var s = Math.pow(2, z - m.z);
+      return _maskBit(m, Math.floor(x / s) - m.x0, Math.floor(y / s) - m.y0);
+    }
+    var n = Math.pow(2, m.z - z), c0 = x * n - m.x0, r0 = y * n - m.y0, any = false;
+    for (var r = Math.max(0, r0); r < Math.min(m.rows, r0 + n); r++) {
+      for (var c = Math.max(0, c0); c < Math.min(m.cols, c0 + n); c++) {
+        if (!_maskBit(m, c, r)) return false;
+        any = true;
+      }
+    }
+    return any;
+  }
+
+  function _createOrthoLayer(map, cfg) {
+    var mask = decodeTileMask(cfg.foreignMask);
+    if (!map.getPane(ORTHO_PANE)) {
+      var pane = map.createPane(ORTHO_PANE);
+      pane.style.zIndex = String(ORTHO_PANE_Z);
+      pane.style.pointerEvents = 'none';
+      pane.classList.add('mc-ortho-pane');
+    }
+    var ortho = L.tileLayer(cfg.url, {
+      pane: ORTHO_PANE,
+      minZoom: cfg.minZoom,
+      maxZoom: cfg.maxZoom,
+      bounds: L.latLngBounds(cfg.bounds),
+      attribution: buildCredit(cfg.attribution, creditLinks(cfg)),
+      className: 'mc-ortho-tiles'
+    });
+    // Leaflet 1.9.4 (vendored, pinned) asks GridLayer._isValidTile for every
+    // tile in range, and that is where `bounds` is applied; extending it is
+    // the one way to keep a tile from being requested at all.
+    var inBounds = ortho._isValidTile;
+    ortho._isValidTile = function (coords) {
+      return inBounds.call(this, coords) && !orthoTileSkipped(mask, coords.z, coords.x, coords.y);
+    };
+    retryPlaceholderTiles(map, ortho);
+    var esri = _hasId('esri-imagery') ? REGISTRY['esri-imagery'] : null;
+    if (!esri) return ortho;
+    var under = L.tileLayer(esri.url(), { attribution: esri.attribution, maxZoom: esri.maxZoom });
+    return L.layerGroup([under, ortho]);
+  }
+
   // ── Public surface ──────────────────────────────────────────────────────
   
   window.MC_DARK_TILE_DEFAULT           = DEFAULT_ID;
@@ -755,6 +936,8 @@
   window.MC_getTerrainConfig            = getTerrainConfig;
   window.MC_getHeritageConfig           = getHeritageConfig;
   window.MC_getMastsConfig              = getMastsConfig;
+  window.MC_getOrthoConfig              = getOrthoConfig;
+  window.MC_ORTHO_BASE_ID               = ORTHO_ID;
   window.MC_resolveOverlayOn            = resolveOverlayOn;
   window.MC_setLayerAttribution         = setLayerAttribution;
   window.MC_CREDIT_COMPACT_CLASS        = CREDIT_COMPACT_CLASS;
@@ -794,6 +977,10 @@
     var _isAuto    = true;  // true when "Auto" is the active selection
     var _overrideLightId = null;
     var _overrideDarkId  = null;
+    // #728 M3 — the "Aerial (Denmark)" entry is the active base layer; the
+    // viewer's stored or linked choice is read once, when it is first offered.
+    var _orthoOn         = false;
+    var _orthoPrefRead   = false;
 
     _ensureAttribution(map);
 
@@ -863,10 +1050,39 @@
       lightIds.forEach(function (id) { baseMaps[id] = _makeLayer(id); });
       darkIds.forEach(function  (id) { baseMaps[id] = _makeLayer(id); });
 
+      // #728 M3 — listed last, under its own separator, on either theme.
+      var orthoCfg = getOrthoConfig();
+      if (orthoCfg) {
+        var orthoLayer = _createOrthoLayer(map, orthoCfg);
+        orthoLayer.on('add', function () {
+          var pane = map.getPane('tilePane');
+          if (pane) {
+            pane.setAttribute('data-explicit-layer', 'true');
+            pane.style.filter = '';
+          }
+        });
+        _layerMap[ORTHO_ID] = baseMaps[ORTHO_ID] = orthoLayer;
+        if (!_orthoPrefRead) {
+          _orthoPrefRead = true;
+          if (_readOverlayPref(ORTHO_PREF)) { _orthoOn = true; _isAuto = false; }
+        }
+      } else if (_orthoOn) {
+        _orthoOn = false; // no longer offered: back to Auto, the stored choice kept
+        _isAuto = true;
+      }
+
       // #680/#723 — optional overlays; null keeps the overlay section out.
       var overlays = {};
       var overlayIds = _collectOverlays(map, overlays);
       if (!overlayIds.length) overlays = null;
+
+      // A restored Aerial pick goes on the map before the control exists, as
+      // the overlays do (_wireOverlay): added later, it would make
+      // L.Control.Layers re-render its labels and undo the surgery below.
+      if (_orthoOn) {
+        map.addLayer(_layerMap[ORTHO_ID]);
+        try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
+      }
 
       // Use the dynamic controlPosition variable instead of a hardcoded string
       _control = L.control.layers(baseMaps, overlays, { position: controlPosition }).addTo(map);
@@ -899,11 +1115,13 @@
           
           if (id === AUTO_KEY) {
             span.innerHTML = AUTO_LABEL;
+          } else if (id === ORTHO_ID) {
+            span.textContent = ' ' + ORTHO_LABEL;
           } else if (REGISTRY[id]) {
             span.innerHTML = ' ' + (REGISTRY[id].label || id);
           }
           
-          if (id === firstDarkId && lightIds.length > 0) {
+          if ((id === firstDarkId && lightIds.length > 0) || id === ORTHO_ID) {
             var sep = document.createElement('div');
             sep.className = 'leaflet-control-layers-separator';
             labelEl.parentNode.insertBefore(sep, labelEl);
@@ -912,7 +1130,9 @@
       } catch (_) {}
 
       // Decide initial active layer
-      if (_isAuto) {
+      if (_orthoOn) {
+        // Already on the map, above.
+      } else if (_isAuto) {
         // Ensure autoLayerGroup is on the map; explicit layers are off
         _activateAuto();
       } else {
@@ -928,6 +1148,14 @@
       }
 
       map._mcBaselayerchangeHandler = function (e) {
+        if (e.name === ORTHO_ID) {
+          _isAuto = false;
+          if (!_orthoOn) { _orthoOn = true; _saveOverlayPref(ORTHO_PREF, true); }
+          try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
+          return;
+        }
+        if (_orthoOn) { _orthoOn = false; _saveOverlayPref(ORTHO_PREF, false); }
+
         if (e.name === AUTO_KEY) {
           _activateAuto();
           return;

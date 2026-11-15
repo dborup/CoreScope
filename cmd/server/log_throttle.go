@@ -27,8 +27,15 @@ func (t *logThrottle) note(now time.Time, total int64, every time.Duration) (int
 	return n, true
 }
 
-// allow is note for a line that reports no count.
+// allow is note for a line that reports no count. It leaves the running
+// total alone, so a throttle used through both allow and note still
+// reports the growth since the last note (#758 review F6).
 func (t *logThrottle) allow(now time.Time, every time.Duration) bool {
-	_, ok := t.note(now, 0, every)
-	return ok
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.at.IsZero() && now.Sub(t.at) < every {
+		return false
+	}
+	t.at = now
+	return true
 }

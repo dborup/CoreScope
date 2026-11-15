@@ -40,6 +40,16 @@ package main
 //     can be a separate, complete coverage while the DTM has a hole, so
 //     a partial profile forces the surface verdict to "unknown" too
 //     (#689 review N1).
+//   - With map.dhm.profile.foreignFill.enabled (off by default), the
+//     samples DHM does not cover are filled from Copernicus DEM GLO-30
+//     (internal/copdem, #738), beside the DHM rasters and within their
+//     own budget of 16 calls. Only the DTM is filled: the DSM stays a gap
+//     abroad, so a mixed profile's surface verdict is "unknown". The
+//     response says which stretches were filled, at which resolution, and
+//     carries the Copernicus credit. A failed fill leaves the profile
+//     partial with no verdict, as before. Its DHM part is cached as
+//     usual; a cache hit tries only the fill again. A path with no DHM
+//     sample still makes no upstream call at all.
 //
 // The endpoint reads node positions from the in-memory node snapshot and
 // observer radios through a read-only query; it writes nothing.
@@ -55,12 +65,15 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dhm"
 	"golang.org/x/sync/errgroup"
 )
@@ -132,6 +145,16 @@ type terrainSettings struct {
 	maxInFlight     int
 	// share is map.dhm.profile.share (#727), see share_profile.go.
 	share shareSettings
+	// fill is map.dhm.profile.foreignFill (#738).
+	fill foreignFillSettings
+}
+
+// foreignFillSettings are map.dhm.profile.foreignFill, resolved and
+// bounded.
+type foreignFillSettings struct {
+	enabled         bool
+	blockCacheBytes int
+	timeout         time.Duration
 }
 
 // shareSettings are map.dhm.profile.share, resolved and bounded.
@@ -174,7 +197,25 @@ func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface
 			enabled:        pc.Share.Enabled,
 			upstreamPerMin: integer("share.upstreamPerMin", pc.Share.UpstreamPerMin, 2, 0, shareUpstreamPerMinMax),
 		},
+		// Off unless the operator opts in (#738 decision 3): it sends
+		// requests to a third party.
+		fill: foreignFillSettings{
+			enabled:         pc.ForeignFill.Enabled,
+			blockCacheBytes: integer("foreignFill.blockCacheMB", pc.ForeignFill.BlockCacheMB, 32, 1, 256) << 20,
+			timeout:         time.Duration(integer("foreignFill.timeoutMs", pc.ForeignFill.TimeoutMs, 10000, 500, 10000)) * time.Millisecond,
+		},
 	}
+}
+
+// fillOptions are the foreign fill client's limits for set. Its admission
+// holds every admitted profile's whole budget, so the profile's own
+// admission (maxInFlight) is the bound that bites.
+func fillOptions(set terrainSettings) copdem.Options {
+	o := copdem.DefaultOptions()
+	o.BlockCacheBytes = set.fill.blockCacheBytes
+	o.Timeout = set.fill.timeout
+	o.MaxPending = set.maxInFlight * dhm.MaxCallsPerModel
+	return o
 }
 
 // terrainRadio is RadioConfig, validated.
@@ -226,8 +267,17 @@ func validAntennaM(h float64) bool { return h >= 0 && h <= terrainMaxAntennaM }
 
 // ── Profiler ───────────────────────────────────────────────────────────────
 
+// terrainFiller fills the samples DHM does not cover (#738):
+// *copdem.Client, or a fake in tests.
+type terrainFiller interface {
+	Fill(ctx context.Context, plan *dhm.Plan) (copdem.Result, error)
+}
+
 type terrainProfiler struct {
 	src        dhm.ElevationSource
+	fill       terrainFiller // nil: map.dhm.profile.foreignFill is off
+	fillFailed atomic.Int64  // failed fills since start
+	fillLog    logThrottle   // the fill failure report, once per terrainRefusalLogEvery
 	set        terrainSettings
 	radio      terrainRadio
 	cache      *dhm.Cache[terrainKey]
@@ -249,7 +299,10 @@ type terrainProfiler struct {
 }
 
 type terrainProfilerDeps struct {
-	src        dhm.ElevationSource
+	src dhm.ElevationSource
+	// fill replaces the Copernicus client built from the settings
+	// (tests); it is used only when the fill is enabled.
+	fill       terrainFiller
 	logf       func(string, ...interface{})
 	logFailure func(what string, err error)
 	observers  func() ([]Observer, error)
@@ -284,8 +337,18 @@ func newTerrainProfiler(pc dhm.ProfileConfig, rc *RadioConfig, d terrainProfiler
 	}
 	set := resolveTerrainSettings(pc, d.logf)
 	maxBytes := terrainCacheMaxBytes(set.cacheEntries, set.plan.MaxSamples)
+	var fill terrainFiller
+	if set.fill.enabled {
+		fill = d.fill
+		if fill == nil {
+			// Its own client: the DHM token and DHM's upstream slots are
+			// never near it.
+			fill = copdem.NewClient(fillOptions(set))
+		}
+	}
 	return &terrainProfiler{
 		src:        d.src,
+		fill:       fill,
 		set:        set,
 		radio:      resolveTerrainRadio(rc, d.logf),
 		cache:      dhm.NewCache[terrainKey](set.cacheEntries, maxBytes, set.cacheTTL),
@@ -431,6 +494,9 @@ type TerrainProfileResponse struct {
 	Physics     TerrainPhysics  `json:"physics"`
 	Verdict     TerrainVerdict  `json:"verdict"`
 	Attribution string          `json:"attribution"`
+	// AttributionFill is the Copernicus DEM credit (licence Art. 6(b),
+	// #738), present exactly when Coverage.Mixed.
+	AttributionFill string `json:"attributionFill,omitempty"`
 }
 
 // TerrainEndpoint is one end of the path, snapped to 5 decimals.
@@ -449,7 +515,30 @@ type TerrainCoverage struct {
 	State     string   `json:"state"` // full, partial, none
 	Pct       float64  `json:"pct"`
 	FirstGapM *float64 `json:"firstGapM"` // distance of the first sample without data
+	// Mixed is true when samples DHM does not cover were filled from
+	// Copernicus DEM GLO-30 (#738); Fill then lists where. The DTM is
+	// then coarser outside Denmark and surface-influenced there, and the
+	// surface verdict is unknown. Omitted when false, so a profile
+	// without the fill is byte-identical to one from before it (#773).
+	Mixed bool               `json:"mixed,omitempty"`
+	Fill  []TerrainFillRange `json:"fill,omitempty"`
 }
+
+// TerrainFillRange is a stretch of the path whose DTM came from the
+// foreign fill (#738): the samples from FromM to ToM, inclusive. With
+// more than terrainMaxFillRanges stretches the nearest are merged, so a
+// range may then include a few DHM samples.
+type TerrainFillRange struct {
+	FromM  float64 `json:"fromM"`
+	ToM    float64 `json:"toM"`
+	Source string  `json:"source"` // copdem.Source: Copernicus DEM GLO-30, a surface model
+	// ResolutionM is nominal: 30, or 60 on the ½ overview (#738
+	// decision 7).
+	ResolutionM int `json:"resolutionM"`
+}
+
+// terrainMaxFillRanges bounds Coverage.Fill.
+const terrainMaxFillRanges = 64
 
 // TerrainSample is one point along the path; null/absent where there is
 // no elevation data.
@@ -516,10 +605,13 @@ type terrainKey struct {
 	Both    bool
 	Samples int
 	StepCm  int64
+	// Fill is whether the foreign fill is on (#738), so an entry made
+	// without it is never served as a profile with it, or back.
+	Fill bool
 }
 
 func (k terrainKey) String() string {
-	return fmt.Sprintf("%d,%d|%d,%d|%t|%d|%d", k.A[0], k.A[1], k.B[0], k.B[1], k.Both, k.Samples, k.StepCm)
+	return fmt.Sprintf("%d,%d|%d,%d|%t|%d|%d|%t", k.A[0], k.A[1], k.B[0], k.B[1], k.Both, k.Samples, k.StepCm, k.Fill)
 }
 
 func terrainSnapCoord(v float64) int64 { return int64(math.Round(v * terrainSnap)) }
@@ -611,7 +703,7 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 			elev.dsm = nanSlice(n)
 		}
 	} else {
-		key := terrainKey{A: req.ka, B: req.kb, Both: tq.both, Samples: n, StepCm: int64(math.Round(plan.StepM * 100))}
+		key := terrainKey{A: req.ka, B: req.kb, Both: tq.both, Samples: n, StepCm: int64(math.Round(plan.StepM * 100)), Fill: p.fill != nil}
 		data, hit := p.cache.Get(key, p.now())
 		state = "hit"
 		if !hit {
@@ -633,6 +725,8 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					return nil, err
 				}
+				// A profile left partial by a failed fill is kept too:
+				// the DHM part is good, and a hit retries only the fill.
 				enc := e.encode()
 				p.cache.Put(key, enc, p.now())
 				return enc, nil
@@ -645,6 +739,9 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 		if elev, err = decodeTerrainElevation(data, n, tq.both); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal error")
 			return
+		}
+		if hit && elev.fillFailed {
+			elev = p.retryFill(r, key, &plan, elev)
 		}
 	}
 	w.Header().Set("X-CoreScope-Cache", state)
@@ -728,8 +825,24 @@ func (s *Server) resolveTerrainEnd(ctx context.Context, ref terrainRef) (terrain
 }
 
 // terrainElevation is the cached part of a profile: elevations per
-// sample, NaN without data; dsm is nil for model=dtm.
-type terrainElevation struct{ dtm, dsm []float32 }
+// sample, NaN without data; dsm is nil for model=dtm. fill is the
+// resolution the foreign fill gave the DTM (#738), fillFailed that it
+// was tried and failed, so a cache hit tries it again.
+type terrainElevation struct {
+	dtm, dsm   []float32
+	fill       int
+	fillFailed bool
+}
+
+// The foreign fill levels of a terrainElevation.
+const (
+	fillNone     = iota
+	fillFull     // GLO-30 at full resolution, about 30 m
+	fillOverview // the ½ overview, about 60 m
+)
+
+// fillResolutionM is TerrainFillRange.ResolutionM per fill level.
+var fillResolutionM = [...]int{fillNone: 0, fillFull: 30, fillOverview: 60}
 
 func nanSlice(n int) []float32 {
 	out := make([]float32, n)
@@ -740,9 +853,13 @@ func nanSlice(n int) []float32 {
 	return out
 }
 
-// fetch gets both models concurrently; the first failure cancels the other.
+// fetch gets both models concurrently, and the foreign fill beside them
+// (#738); the first DHM failure cancels the rest. A failed fill only
+// leaves the profile partial (fillFailed).
 func (p *terrainProfiler) fetch(ctx context.Context, plan *dhm.Plan, both bool) (terrainElevation, error) {
 	var e terrainElevation
+	fill := p.startFill(ctx, plan)
+	defer fill.stop() // whichever way fetch returns
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() (err error) {
 		e.dtm, err = plan.Fetch(gctx, p.src, dhm.ModelTerrain, p.set.upstreamTimeout)
@@ -754,16 +871,130 @@ func (p *terrainProfiler) fetch(ctx context.Context, plan *dhm.Plan, both bool) 
 			return err
 		})
 	}
-	return e, g.Wait()
+	if err := g.Wait(); err != nil {
+		return e, err
+	}
+	p.applyFill(ctx, &e, plan, fill)
+	return e, nil
 }
 
-// encode is n, a DSM flag, then the float32s little-endian.
+// pendingFill is a foreign fill running beside the DHM rasters.
+type pendingFill struct {
+	done   chan fillOutcome
+	cancel context.CancelFunc
+}
+
+type fillOutcome struct {
+	res copdem.Result
+	err error
+}
+
+// startFill starts the fill of plan's uncovered samples; nil when the
+// fill is off or DHM covers every sample.
+func (p *terrainProfiler) startFill(ctx context.Context, plan *dhm.Plan) *pendingFill {
+	if p.fill == nil || plan.Covered() == len(plan.E) {
+		return nil
+	}
+	fctx, cancel := context.WithCancel(ctx)
+	f := &pendingFill{done: make(chan fillOutcome, 1), cancel: cancel}
+	go func() {
+		res, err := p.fill.Fill(fctx, plan)
+		f.done <- fillOutcome{res, err}
+	}()
+	return f
+}
+
+// stop cancels the fill without waiting for it.
+func (f *pendingFill) stop() {
+	if f != nil {
+		f.cancel()
+	}
+}
+
+// applyFill waits for the fill and writes its heights into the DTM, at
+// uncovered samples only. A failure is counted and logged by category,
+// unless the profile's own context ended.
+func (p *terrainProfiler) applyFill(ctx context.Context, e *terrainElevation, plan *dhm.Plan, f *pendingFill) {
+	if f == nil {
+		return
+	}
+	o := <-f.done
+	if o.err == nil && len(o.res.Values) != len(e.dtm) {
+		o.err = dhm.FetchError{Reason: "fill mismatch"}
+	}
+	if o.err != nil {
+		e.fillFailed = true
+		if ctx.Err() == nil {
+			p.noteFillFailure(o.err)
+		}
+		return
+	}
+	n := 0
+	for i, v := range o.res.Values {
+		if !plan.Inside(i) && !math.IsNaN(float64(v)) {
+			e.dtm[i] = v
+			n++
+		}
+	}
+	if n > 0 {
+		e.fill = fillFull + min(o.res.Level, 1)
+	}
+}
+
+// retryFill tries the foreign fill again for a cached profile whose fill
+// failed. The DHM part comes from the cache, so a failing Copernicus
+// never re-fetches DHM (#773 review finding 1). The retry is upstream
+// work: it is charged to the per-client budget like a miss and shared by
+// concurrent callers. A success replaces the cache entry; whatever stops
+// the retry, the cached partial profile e is served as it is.
+func (p *terrainProfiler) retryFill(r *http.Request, key terrainKey, plan *dhm.Plan, e terrainElevation) terrainElevation {
+	if ok, _ := p.limiter.allow(r); !ok {
+		return e
+	}
+	data, _, err := p.flight.Do(r.Context(), key.String()+"|fill", p.deadline, func(ctx context.Context) ([]byte, error) {
+		// The fill writes into its own copy: this caller may leave, and
+		// serve e, while the retry still runs for the others.
+		f := terrainElevation{dtm: slices.Clone(e.dtm), dsm: e.dsm}
+		p.applyFill(ctx, &f, plan, p.startFill(ctx, plan))
+		enc := f.encode()
+		if !f.fillFailed {
+			p.cache.Put(key, enc, p.now())
+		}
+		return enc, nil
+	})
+	if err != nil {
+		return e
+	}
+	f, err := decodeTerrainElevation(data, len(e.dtm), e.dsm != nil)
+	if err != nil {
+		return e
+	}
+	return f
+}
+
+// noteFillFailure counts a failed fill and reports it at most once per
+// terrainRefusalLogEvery, by category: no URL, no upstream text.
+func (p *terrainProfiler) noteFillFailure(err error) {
+	total := p.fillFailed.Add(1)
+	n, ok := p.fillLog.note(p.now(), total, terrainRefusalLogEvery)
+	if !ok {
+		return
+	}
+	p.logf("[dhm] terrain profile foreign fill failed (%s): %d profile(s) left partial since the last report", dhm.FailureReason(err), n)
+}
+
+// encode is n, a flags byte (bit 0: a DSM; bits 1–2: the fill level;
+// bit 3: the fill failed), then the float32s little-endian.
 func (e terrainElevation) encode() []byte {
 	n := len(e.dtm)
 	out := make([]byte, 5, 5+8*n)
 	binary.LittleEndian.PutUint32(out, uint32(n))
 	if e.dsm != nil {
 		out[4] = 1
+	}
+	out[4] |= byte(e.fill) << 1
+	if e.fillFailed {
+		out[4] |= 1 << 3
 	}
 	for _, s := range [][]float32{e.dtm, e.dsm} {
 		for _, v := range s {
@@ -778,7 +1009,9 @@ func decodeTerrainElevation(b []byte, n int, both bool) (terrainElevation, error
 	if both {
 		models = 2
 	}
-	if len(b) != 5+4*n*models || int(binary.LittleEndian.Uint32(b)) != n || (b[4] == 1) != both {
+	level, failed := int(b[4]>>1&3), b[4]&(1<<3) != 0
+	if len(b) != 5+4*n*models || int(binary.LittleEndian.Uint32(b)) != n || (b[4]&1 == 1) != both ||
+		b[4]>>4 != 0 || level > fillOverview || (failed && level != fillNone) {
 		return terrainElevation{}, errors.New("terrain cache entry does not match its key")
 	}
 	read := func(off int) []float32 {
@@ -788,7 +1021,7 @@ func decodeTerrainElevation(b []byte, n int, both bool) (terrainElevation, error
 		}
 		return out
 	}
-	e := terrainElevation{dtm: read(5)}
+	e := terrainElevation{dtm: read(5), fill: level, fillFailed: failed}
 	if both {
 		e.dsm = read(5 + 4*n)
 	}
@@ -838,6 +1071,18 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 	default:
 		resp.Coverage.State = "partial"
 	}
+	// #738: an uncovered sample with a height has it from the fill.
+	if e.fill != fillNone {
+		filled := make([]bool, n)
+		for i, v := range e.dtm {
+			filled[i] = !plan.Inside(i) && !math.IsNaN(float64(v))
+			resp.Coverage.Mixed = resp.Coverage.Mixed || filled[i]
+		}
+		if resp.Coverage.Mixed {
+			resp.Coverage.Fill = terrainFillRanges(filled, plan.StepM, fillResolutionM[e.fill])
+			resp.AttributionFill = copdem.AttributionDerived
+		}
+	}
 
 	// Endpoints.
 	overrides := [2]*float64{tq.ha, tq.hb}
@@ -882,8 +1127,9 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 		surface := link.Assess(e.dsm)
 		// A partial profile never reports a confident verdict, even on the
 		// model that only informs: the DSM can be a separate, complete
-		// coverage while the deciding DTM has a gap (#689 review N1).
-		if resp.Coverage.State != "full" {
+		// coverage while the deciding DTM has a gap (#689 review N1). Nor
+		// does a mixed one: there is no surface model abroad (#738).
+		if resp.Coverage.State != "full" || resp.Coverage.Mixed {
 			surface = dhm.Assessment{State: dhm.VerdictUnknown, WorstIndex: -1}
 		}
 		resp.Verdict.Surface = surfaceInfo(surface)
@@ -912,6 +1158,54 @@ func (p *terrainProfiler) buildResponse(tq terrainQuery, ends [2]terrainEnd, a, 
 		}
 	}
 	return resp
+}
+
+// terrainFillRanges is the stretches of filled samples, at most
+// terrainMaxFillRanges: beyond that the stretches with the smallest DHM
+// gaps between them are merged first.
+func terrainFillRanges(filled []bool, stepM float64, resolutionM int) []TerrainFillRange {
+	var runs [][2]int
+	for i := 0; i < len(filled); i++ {
+		if !filled[i] {
+			continue
+		}
+		j := i
+		for j+1 < len(filled) && filled[j+1] {
+			j++
+		}
+		runs = append(runs, [2]int{i, j})
+		i = j
+	}
+	if len(runs) == 0 {
+		return nil
+	}
+	// merge[k] joins run k to run k+1: the smallest gaps, ties to the
+	// earlier, until terrainMaxFillRanges remain.
+	merge := make([]bool, len(runs))
+	if excess := len(runs) - terrainMaxFillRanges; excess > 0 {
+		gaps := make([]int, len(runs)-1)
+		for k := range gaps {
+			gaps[k] = k
+		}
+		sort.SliceStable(gaps, func(a, b int) bool {
+			return runs[gaps[a]+1][0]-runs[gaps[a]][1] < runs[gaps[b]+1][0]-runs[gaps[b]][1]
+		})
+		for _, k := range gaps[:excess] {
+			merge[k] = true
+		}
+	}
+	out := make([]TerrainFillRange, 0, min(len(runs), terrainMaxFillRanges))
+	for k := 0; k < len(runs); k++ {
+		first := runs[k][0]
+		for merge[k] {
+			k++
+		}
+		out = append(out, TerrainFillRange{
+			FromM: round2(float64(first) * stepM), ToM: round2(float64(runs[k][1]) * stepM),
+			Source: copdem.Source, ResolutionM: resolutionM,
+		})
+	}
+	return out
 }
 
 // terrainGapKeep lists the samples that keep the data gaps of the series
