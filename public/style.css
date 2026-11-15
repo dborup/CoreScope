@@ -6550,6 +6550,12 @@ body.embed #app.app-fixed {
    holds to 4.5:1 in both themes; only the wrapping differs, because
    "Buildings/trees: Blocked" is the longest chip in the row. */
 .tp-chip-surface { white-space: normal; }
+/* #730 M3 — "Through trees" and its kin: trees mostly attenuate, so the
+   chip is a milder caveat than a building's. The warn border keeps it a
+   caveat; the text is the plain text colour, and the border dashed, so it
+   reads quieter without colour alone. Never the ok or bad pair: it is
+   not a second verdict (#729). */
+.tp-chip-mild { border-color: var(--warning); border-style: dashed; color: var(--text); }
 /* #724 M4 — the interference hint: a cellular transmitter in the 700/800/900
    MHz bands near an end. The antenna-site layer's interference colour, so
    the chip and the map ring read as one thing; the strong tier (within

@@ -531,21 +531,34 @@
    * classification.state (full, partial or unavailable), samples[].cls
    * ("b": inside a building footprint, "v": trees or other) and
    * verdict.surface.cause, read at the samples that decide the surface
-   * verdict. The band is coloured by class wherever a sample has one, but
-   * the chip names the cause only on a full classification: a partial
-   * one may hide a building among its unclassified samples, so it keeps
-   * the generic chip and says so in a muted note. Unavailable adds
-   * nothing. The verdicts never change (#681 owner decision 6). */
+   * verdict. The band is coloured by class wherever a sample has one, and
+   * the chip names the cause on a full or a partial classification: the
+   * server says "building" only where a classified building obstructs,
+   * and "vegetation" only when every obstructing raised sample is
+   * classified trees/other, so its cause is exact on a partial one too
+   * (#797 review finding 4); anything else keeps the generic chip. A
+   * building caveats in the warn tone, trees in a milder one: they mostly
+   * attenuate. A partial or unavailable classification says so in a
+   * muted note. The verdicts never change (#681 owner decision 6). */
   var CLASS_STATES = { full: true, partial: true, unavailable: true };
   var CLASSES = {
     b: { legend: 'Building', readout: 'building', fill: 'var(--terrain-building)' },
     v: { legend: 'Trees/other', readout: 'trees/other', fill: 'var(--terrain-vegetation)' }
   };
+  /* The chip by cause (#730 research §6): "Blocked by building" and
+   * "Through trees" when the surface blocks, else the surface's own word
+   * with what stands there. Never a second verdict: each label names the
+   * surface state and no other, and the tone stays a caveat. */
   var CAUSES = {
-    building: { label: 'Buildings: ', detail: 'Where it does, a building footprint stands: it is a building.' },
-    vegetation: { label: 'Trees/other: ', detail: 'Where it does, no building footprint stands: it is trees or other.' }
+    building: { blocked: 'Blocked by building', suffix: ' — building', tone: 'warn',
+      detail: 'Where it does, a building footprint stands: it is a building.' },
+    vegetation: { blocked: 'Through trees', suffix: ' — through trees', tone: 'mild',
+      detail: 'Where it does, no building footprint stands: it is trees or other.' }
   };
-  var CLASS_PARTIAL_NOTE = 'Buildings could not be told apart from trees on part of this path.';
+  var CLASS_NOTES = {
+    partial: 'Buildings could not be told apart from trees on part of this path.',
+    unavailable: 'Buildings could not be told apart from trees on this path.'
+  };
   // The legend's word for the clutter colour on a partial classification.
   var CLASS_NONE_LEGEND = 'Not told apart';
   var CLASS_TITLE = 'In the surface band, buildings are told apart from trees and other objects by building footprints.';
@@ -658,16 +671,21 @@
     return c === 'b' || c === 'v' ? c : null;
   }
 
-  // The cause the chip may name: only on a full classification.
+  // The cause the chip may name: on a full or partial classification.
   function surfaceCause(data) {
-    if (classificationState(data) !== 'full') return null;
+    var cs = classificationState(data);
+    if (cs !== 'full' && cs !== 'partial') return null;
     var c = data.verdict.surface.cause;
     return c === 'building' || c === 'vegetation' ? c : null;
   }
 
-  // classNote is the muted note of a partial classification, else null.
+  /* classNote is the muted note of a partial or unavailable
+   * classification, else null. Unavailable means the lookup failed: say
+   * that nothing was told apart rather than nothing at all (#797 review
+   * finding 1). */
   function classNote(data) {
-    return classificationState(data) === 'partial' ? CLASS_PARTIAL_NOTE : null;
+    var cs = classificationState(data);
+    return Object.prototype.hasOwnProperty.call(CLASS_NOTES, cs) ? CLASS_NOTES[cs] : null;
   }
 
   /* surfaceChip maps verdict.surface to the second chip. It returns null
@@ -691,14 +709,16 @@
       && SURFACE_RANK[state] < SURFACE_RANK[terrain.state];
     // #730 M3: what stands there, when the classification says.
     var cause = known ? surfaceCause(data) : null;
+    var c = cause ? CAUSES[cause] : null;
     return {
       state: state,
-      label: (cause ? CAUSES[cause].label : SURFACE_PREFIX) + (known ? known.label : 'No verdict'),
+      label: c ? (state === 'blocked' ? c.blocked : known.label + c.suffix)
+        : SURFACE_PREFIX + (known ? known.label : 'No verdict'),
       // Never a second verdict: the surface informs, so it caveats in the
-      // warn tone whatever state it is in, rather than going red beside a
-      // terrain chip that is green.
-      tone: 'warn',
-      detail: known ? known.surface + (cause ? ' ' + CAUSES[cause].detail : '') : SURFACE_UNKNOWN_DETAIL,
+      // warn tone (trees in the milder one) whatever state it is in,
+      // rather than going red beside a terrain chip that is green.
+      tone: c ? c.tone : 'warn',
+      detail: known ? known.surface + (c ? ' ' + c.detail : '') : SURFACE_UNKNOWN_DETAIL,
       note: true,
       show: show
     };
@@ -1085,9 +1105,10 @@
       txt += ' Worst clearance ' + fmtMetres(worst) + ' at ' + fmtMetres(data.verdict.worstAtM) + ' along the path.';
     }
     if (surf && surf.show) txt += ' ' + surf.label + '. ' + surf.detail + (surf.note ? ' ' + SURFACE_NOTE : '');
-    if (classified) txt += ' ' + CLASS_TITLE;
+    // The note rides with the classified band; an unavailable
+    // classification draws none, and its note is the panel's own line.
     var cn = classNote(data);
-    if (cn) txt += ' ' + cn;
+    if (classified) txt += ' ' + CLASS_TITLE + (cn ? ' ' + cn : '');
     return txt;
   }
 
@@ -1611,7 +1632,7 @@
       ui.surfaceNote.setAttribute('data-testid', 'tp-surface-note');
       ui.surfaceNote.hidden = true;
       body.appendChild(ui.surfaceNote);
-      // #730 M3: a partial classification says so, muted.
+      // #730 M3: a partial or unavailable classification says so, muted.
       ui.classNote = el('p', 'tp-class-note');
       ui.classNote.setAttribute('data-testid', 'tp-class-note');
       ui.classNote.hidden = true;
@@ -2273,7 +2294,7 @@
     heritageNote: heritageNote,
     SURFACE_NOTE: SURFACE_NOTE,
     classNote: classNote,
-    CLASS_PARTIAL_NOTE: CLASS_PARTIAL_NOTE,
+    CLASS_PARTIAL_NOTE: CLASS_NOTES.partial,
     chartGeometry: chartGeometry,
     buildChart: buildChart,
     create: create,
