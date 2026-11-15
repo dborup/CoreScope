@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-734-customizer-overlays-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #734 customizer (AGENTS rule 8) DHM overlay defaults with an intercepted dhm client-config block (dhm.overlays), a stubbed /api/map/dhm/wms and stubbed third-party tiles: a phone at 375x560 from a cold start sets the default hillshade, contours on and the contour min-zoom by real taps in the Display tab (48px, on screen, uncovered, no sideways overflow) and the open map's contour label follows at once; the next map starts with them, asks no contour tile below the min-zoom and does after one + tap, and the link carries neither default; a link wins over them; the export carries the section; no section without the dhm block. About 25s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-807-map-hash-size-unknown-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
