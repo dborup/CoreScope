@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -637,7 +639,7 @@ func TestDHMOrtho728_OfferedAndRouted(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	if got := strings.Join(keys, ","); got != "attribution,bounds,datasetName,datasetUrl,licenseName,licenseUrl,maxZoom,minZoom,url" {
+	if got := strings.Join(keys, ","); got != "attribution,bounds,datasetName,datasetUrl,foreignMask,licenseName,licenseUrl,maxZoom,minZoom,url" {
 		t.Fatalf("dhm.ortho keys %s", got)
 	}
 	var o DHMOrthoClientConfig
@@ -646,6 +648,19 @@ func TestDHMOrtho728_OfferedAndRouted(t *testing.T) {
 	}{&o}); err != nil {
 		t.Fatal(err)
 	}
+	// M3: the mask of tiles the base layer skips is dhm's, as built.
+	wantMask := dhm.OrthoForeignMask()
+	if o.ForeignMask == nil || !reflect.DeepEqual(*o.ForeignMask, wantMask) {
+		t.Fatalf("dhm.ortho.foreignMask %+v, want %+v", o.ForeignMask, wantMask)
+	}
+	var rawMask struct {
+		Bits json.RawMessage `json:"bits"`
+	}
+	json.Unmarshal(block.Ortho["foreignMask"], &rawMask)
+	if want := `"` + base64.StdEncoding.EncodeToString(wantMask.Bits) + `"`; string(rawMask.Bits) != want {
+		t.Fatalf("foreignMask.bits is not the mask's standard base64: %.40s…", rawMask.Bits)
+	}
+	o.ForeignMask = nil
 	c := dhm.Coverage
 	want := DHMOrthoClientConfig{
 		URL: "/api/map/dhm/ortho/{z}/{x}/{y}", MinZoom: 7, MaxZoom: 20,

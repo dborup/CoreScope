@@ -140,6 +140,11 @@ type DHMOrthoClientConfig struct {
 	DatasetURL  string        `json:"datasetUrl"`
 	LicenseName string        `json:"licenseName"`
 	LicenseURL  string        `json:"licenseUrl"`
+	// ForeignMask marks the z12 tiles inside Bounds that DHM does not
+	// cover: Skåne, Schleswig and Rügen away from the coast (M3). The
+	// base layer requests no ortho tile there, so the Esri imagery under
+	// it shows and no upstream fetch is spent on another country.
+	ForeignMask *dhm.TileMask `json:"foreignMask"`
 }
 
 // dhmCoverageBounds is dhm.Coverage as Leaflet bounds.
@@ -148,7 +153,7 @@ func dhmCoverageBounds() [2][2]float64 {
 	return [2][2]float64{{c.South, c.West}, {c.North, c.East}}
 }
 
-func dhmOrthoClientConfig() *DHMOrthoClientConfig {
+func dhmOrthoClientConfig(mask *dhm.TileMask) *DHMOrthoClientConfig {
 	return &DHMOrthoClientConfig{
 		URL:         dhmOrthoRoute,
 		MinZoom:     dhm.OrthoMinZoom,
@@ -159,6 +164,7 @@ func dhmOrthoClientConfig() *DHMOrthoClientConfig {
 		DatasetURL:  dhm.OrthoDatasetURL,
 		LicenseName: dhm.LicenseName,
 		LicenseURL:  dhm.LicenseURL,
+		ForeignMask: mask,
 	}
 }
 
@@ -313,6 +319,9 @@ type dhmProxy struct {
 	// orthoCache holds ortho tiles (#728); nil while map.dhm.ortho is off,
 	// and the ortho route then answers 404.
 	orthoCache *dhm.Cache[dhmCacheKey]
+	// orthoMask is dhm.OrthoForeignMask, built when the proxy starts so no
+	// client config request pays for it (#728 M3); nil with orthoCache.
+	orthoMask *dhm.TileMask
 	// limiter and admit are shared by every tile product: one token, one
 	// fair-use budget.
 	limiter *ipRateLimiter // nil: no per-client limit
@@ -367,6 +376,8 @@ func newDHMProxy(cfg dhm.Config, opts dhmProxyOptions) *dhmProxy {
 	}
 	if cfg.Ortho.Enabled {
 		p.orthoCache = dhm.NewCache[dhmCacheKey](opts.orthoCacheMaxEntries, opts.orthoCacheMaxBytes, opts.orthoCacheTTL)
+		mask := dhm.OrthoForeignMask()
+		p.orthoMask = &mask
 	}
 	return p
 }
@@ -577,7 +588,7 @@ func (s *Server) dhmClientConfig() *DHMClientConfig {
 		c.PointAntenna = &DHMPointAntenna{M: h, Source: src}
 	}
 	if s.dhm.orthoCache != nil {
-		c.Ortho = dhmOrthoClientConfig()
+		c.Ortho = dhmOrthoClientConfig(s.dhm.orthoMask)
 	}
 	return c
 }
