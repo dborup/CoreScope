@@ -239,7 +239,7 @@ func TestClientGetWMSOnlyTileShape(t *testing.T) {
 	b := someTile().BBox()
 	cases := map[string]func(url.Values){
 		"browser transparent":    func(q url.Values) { q.Set("transparent", "true") },
-		"other layer":            func(q url.Values) { q.Set("layers", "dhm_overflade_skyggekort") },
+		"other layer":            func(q url.Values) { q.Set("layers", "dhm_kurve_0_5_m") }, // #734 allow-lists the surface layer
 		"bigger image":           func(q url.Values) { q.Set("width", "512"); q.Set("height", "512") },
 		"jpeg":                   func(q url.Values) { q.Set("format", "image/jpeg") },
 		"extra key":              func(q url.Values) { q.Set("exceptions", "XML") },

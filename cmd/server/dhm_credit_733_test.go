@@ -64,11 +64,12 @@ func TestClientDHMBlockCarriesCreditLinks(t *testing.T) {
 	}
 	sort.Strings(got)
 	// Exactly these keys: the four credit fields the links need, the
-	// derived credit the profile footer shows (#765), and nothing else new.
+	// derived credit the profile footer shows (#765), the per-overlay
+	// dataset links (#734), and nothing else new.
 	want := []string{
 		"attribution", "attributionDerived", "bounds", "datasetName", "datasetUrl", "enabled",
 		"layer", "licenseName", "licenseUrl", "maxZoom", "minZoom",
-		"profile", "share", "url",
+		"overlays", "profile", "share", "url",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("dhm block keys %v, want %v", got, want)

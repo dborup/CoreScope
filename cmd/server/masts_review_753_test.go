@@ -85,7 +85,7 @@ func TestMastsStarvedFetchIsBusyAndRefunded(t *testing.T) {
 	if w.Header().Get("Retry-After") == "" || w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("starved fetch headers %v", w.Header())
 	}
-	if got := logs.String(); strings.Contains(got, "upstream cell failed") || !strings.Contains(got, "map.masts.maxInFlight") {
+	if got := logs.String(); strings.Contains(got, "upstream cell failed") || !strings.Contains(got, "upstream slots") {
 		t.Fatalf("starved fetch logged as %q, want the busy line and no upstream failure", got)
 	}
 	if n := f.hits.Load(); int(n) != mastsUpstreamSlots {

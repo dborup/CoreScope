@@ -36,10 +36,11 @@ type routeError struct {
 }
 
 type paramMeta struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Required    bool   `json:"required,omitempty"`
-	Type        string `json:"type"` // "string", "integer", "boolean"
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Required    bool     `json:"required,omitempty"`
+	Type        string   `json:"type"`           // "string", "integer", "boolean"
+	Enum        []string `json:"enum,omitempty"` // the only accepted values, if fixed
 }
 
 // routeDescriptions returns metadata for all known API routes.
@@ -57,7 +58,7 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/config/theme":      {Summary: "Get theme configuration", Description: "Returns color maps, CSS variables, and theme defaults.", Tag: "config"},
 		"GET /api/config/map":        {Summary: "Get map configuration", Tag: "config"},
 		"GET /api/config/geo-filter": {Summary: "Get geo-filter configuration", Tag: "config"},
-		"GET /api/map/dhm/wms": {Summary: "DHM hillshade tile (WMS proxy; exaggerated by default, terrain fallback)", Description: "Read-only proxy for one 256x256 EPSG:3857 tile of the Danmarks Hojdemodel hillshade from Dataforsyningen; the server adds its access token. The browser always requests the dhm_terraen_skyggekort shape below; the server chooses the upstream layer. Accepts exactly service=WMS, request=GetMap, version=1.3.0, layers=dhm_terraen_skyggekort, styles=, format=image/png, transparent=true, width=256, height=256, crs=EPSG:3857 and a bbox that is one web-mercator tile at zoom 7-19; anything else is 400. map.dhm.layer picks the upstream: exaggerated (default; quickDHM_skyggekort_terraen_overdrevet from wms/dhm_temp, falling back per tile to dhm_terraen_skyggekort when it answers non-200, a wrong content type or an invalid PNG, or the connection fails; not on a timeout or a full upstream budget) or terrain (dhm_terraen_skyggekort only). The X-CoreScope-Tile header says: hit / miss = the configured layer from the cache / from upstream; fallback = the exaggerated attempt failed and the terrain tile was fetched upstream; fallback-hit = the exaggerated attempt still went upstream and failed, and the terrain tile came from the cache; outside = outside DHM coverage, no upstream call; unavailable = no tile (transparent, no-store); busy = refused without an upstream call because map tiles are already being fetched server-wide (transparent, no-store, not charged to the per-client budget; #744). Fallback tiles are browser-cached for 10 minutes, other tiles for 24 hours (#687). Tiles outside DHM coverage and upstream failures return a transparent PNG. 404 unless map.dhm is enabled with a token. (#680)", Tag: "config",
+		"GET /api/map/dhm/wms": {Summary: "DHM overlay tile: hillshade, surface hillshade or contours (WMS proxy; hillshade exaggerated by default, terrain fallback)", Description: "Read-only proxy for one 256x256 EPSG:3857 tile of a Danmarks Hojdemodel overlay from Dataforsyningen; the server adds its access token. layers=terrain, surface or contours names the overlay, and the server maps it to the upstream layer; no upstream layer name is accepted (#734). terrain is the hillshade described below; surface is dhm_overflade_skyggekort from dhm_DAF, zoom 7-19; contours is dhm_kurve_traditionel from dhm_DAF, zoom 14-19 (2.5 m contour lines). surface and contours have no fallback: a failed tile is unavailable. layers=dhm_terraen_skyggekort, the #680 value, is an alias of terrain for one release. Accepts exactly service=WMS, request=GetMap, version=1.3.0, one layers value as above, styles=, format=image/png, transparent=true, width=256, height=256, crs=EPSG:3857 and a bbox that is one web-mercator tile at a zoom inside the overlay's range; anything else is 400. map.dhm.layer picks the terrain upstream: exaggerated (default; quickDHM_skyggekort_terraen_overdrevet from wms/dhm_temp, falling back per tile to dhm_terraen_skyggekort when it answers non-200, a wrong content type or an invalid PNG, or the connection fails; not on a timeout or a full upstream budget) or terrain (dhm_terraen_skyggekort only). The X-CoreScope-Tile header says: hit / miss = the overlay's layer from the cache / from upstream; fallback = the exaggerated attempt failed and the terrain tile was fetched upstream; fallback-hit = the exaggerated attempt still went upstream and failed, and the terrain tile came from the cache; outside = outside DHM coverage, no upstream call; unavailable = no tile (transparent, no-store); busy = refused without an upstream call because map tiles are already being fetched server-wide (transparent, no-store, not charged to the per-client budget; #744). Fallback tiles are browser-cached for 10 minutes, other tiles for 24 hours (#687). Tiles outside DHM coverage and upstream failures return a transparent PNG. 404 unless map.dhm is enabled with a token. (#680)", Tag: "config",
 			QueryParams: dhmTileQueryParams(),
 			Errors:      []routeError{{Status: "429", Description: "Per-client budget of tiles not in the server cache exceeded (map.dhm.tileRateLimitPerMin, default 1200/min; cached and outside-coverage tiles are not counted). Retry-After gives the seconds to wait."}}},
 		"GET " + dhmOrthoRoute: {Summary: "Danish orthophoto tile (WMTS proxy)", Description: "Read-only proxy for one 256x256 EPSG:3857 JPEG tile of the GeoDanmark spring orthophoto (Ortofoto foraar) from Dataforsyningen's WMTS orto_foraar_webm_DAF, layer orto_foraar_webm, tile matrix set DFD_GoogleMapsCompatible; the server adds its access token. z, x and y are plain decimal tile coordinates on the usual web-mercator grid at zoom 7-20; any other value, or any query string, is 400. The X-CoreScope-Tile header says: hit / miss = from the cache / from upstream (image/jpeg, browser-cached for 24 hours); outside = outside DHM coverage, no upstream call; unavailable = no tile (upstream failure or a body that is not a complete 256x256 JPEG); busy = refused without an upstream call because map tiles are already being fetched server-wide (#744). outside, unavailable and busy return a transparent PNG; unavailable and busy are no-store, and busy is not charged to the per-client budget. Ortho tiles share the hillshade's per-client budget and server-wide upstream limits, and are cached apart from it for 7 days. 404 unless map.dhm is enabled with a token and map.dhm.ortho.enabled. (#728)", Tag: "config",
@@ -1286,11 +1287,15 @@ func buildOpenAPISpec(router *mux.Router, version string) map[string]interface{}
 			if len(meta.QueryParams) > 0 {
 				params := make([]interface{}, 0, len(meta.QueryParams))
 				for _, qp := range meta.QueryParams {
+					schema := map[string]interface{}{"type": qp.Type}
+					if len(qp.Enum) > 0 {
+						schema["enum"] = qp.Enum
+					}
 					p := map[string]interface{}{
 						"name":     qp.Name,
 						"in":       "query",
 						"required": qp.Required,
-						"schema":   map[string]interface{}{"type": qp.Type},
+						"schema":   schema,
 					}
 					if qp.Description != "" {
 						p["description"] = qp.Description

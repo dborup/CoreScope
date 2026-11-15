@@ -134,6 +134,14 @@ The standard container starts the server on internal port `3000` with database `
 
 When running the Go binaries directly, use the server's `-port` and `-db` flags for explicit overrides. The server uses `DB_PATH` only when `dbPath` is absent from its configuration; `PORT` is not a server configuration override. `GOMEMLIMIT` and the `runtime` settings control the Go runtime's soft memory limit separately from the packet-store budget.
 
+### Cross-Border Terrain Profiles (Optional)
+
+The Map page's path profile uses Danmarks Højdemodel (`map.dhm`), which covers Denmark only, so a path into Germany or across Øresund is partial with no verdict. Setting `map.dhm.profile.foreignFill.enabled` fills the samples DHM does not cover from [Copernicus DEM GLO-30](https://registry.opendata.aws/copernicus-dem/), and the profile gets a verdict on the mixed terrain model. See `map.dhm.profile.foreignFill` in [config.example.json](config.example.json) for the limits.
+
+- **Off by default.** When on, the server sends anonymous HTTPS range requests to the AWS Open Data bucket `copernicus-dem-30m` (no token, no account): one header read per 1° tile and one read per block, about 6.4 MB for a cold 80 km profile from Copenhagen into Skåne. No client data is sent, but the bucket sees which tiles and byte ranges are read, which reveals the coarse area being profiled.
+- **Coarser, surface-influenced data abroad.** GLO-30 is a ~30 m surface model: forests and towns read high, which can only make a verdict more pessimistic. A mixed profile has no surface (DSM) verdict. GLO-30 heights (EGM2008) are not adjusted to DHM's (DVR90); the step at the border is sub-metre.
+- **Scope.** Only profiles with at least one DHM sample are filled, with at most 16 upstream calls each (falling back to the ½ overview, ~60 m). With the 80 km path limit, Sweden and Germany are in reach, and Norway and Poland effectively are not. If the fill fails, the profile stays partial with no verdict.
+
 ## Architecture
 
 ```text
@@ -224,3 +232,9 @@ CoreScope was developed in the [upstream Kpa-clawbot/CoreScope project](https://
 ## License
 
 [GPL-3.0-or-later](LICENSE).
+
+### Elevation Data
+
+Terrain profiles use Danmarks Højdemodel: "Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0". With the optional cross-border fill they also use Copernicus DEM GLO-30, which every mixed profile credits as "produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved" ([Copernicus DEM licence](https://documentation.dataspace.copernicus.eu/APIs/SentinelHub/Data/DEM/resources/license/License-COPDEM-30.pdf)).
+
+The organisations in charge of the Copernicus programme by law or by delegation do not incur any liability for any use of the Copernicus WorldDEM-30.

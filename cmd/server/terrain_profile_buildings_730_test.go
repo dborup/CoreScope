@@ -176,7 +176,7 @@ func newBuildingsEnv(t *testing.T, dtm, dsm func(e, n float64) float32, ogc *stu
 		pc.RateLimitPerMin = intp(0)
 	}
 	set := resolveTerrainSettings(pc, func(string, ...interface{}) {})
-	env := newTerrainEnv(t, src, pc, nil, func(d *terrainProfilerDeps) { d.buildings = ogc.source(set) })
+	env := newTerrainEnvWith(t, src, pc, nil, func(d *terrainProfilerDeps) { d.buildings = ogc.source(set) })
 	return &buildingsEnv{terrainEnv: env, ogc: ogc, src: src}
 }
 
@@ -650,7 +650,7 @@ func TestTerrainBuildings_EntryFormat(t *testing.T) {
 		classes: &terrainClasses{state: terrainClassPartial, truncated: true,
 			cls: []buildings.Class{0, buildings.Vegetation, buildings.Building, 0}}}
 	enc := e.encode()
-	if len(enc) != 5+8*n+2+n || enc[4] != terrainEntryClassified {
+	if len(enc) != 5+8*n+2+n || enc[4] != 1|terrainEntryClassified {
 		t.Fatalf("entry %d bytes, format %d", len(enc), enc[4])
 	}
 	got, err := decodeTerrainElevation(enc, n, true, true)
@@ -678,6 +678,17 @@ func TestTerrainBuildings_EntryFormat(t *testing.T) {
 		if _, err := decodeTerrainElevation(c.b, n, c.both, c.classified); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	// The fill flags (#738) and the classification share the byte, and
+	// both survive a round trip.
+	mixed := e
+	mixed.fill, mixed.fillFailed = fillNone, true
+	if got, err := decodeTerrainElevation(mixed.encode(), n, true, true); err != nil || !got.fillFailed || got.classes == nil || got.classes.cls[2] != buildings.Building {
+		t.Fatalf("fill flags with classes: %+v, %v", got, err)
+	}
+	mixed.fill, mixed.fillFailed = fillOverview, false
+	if got, err := decodeTerrainElevation(mixed.encode(), n, true, true); err != nil || got.fill != fillOverview || got.classes == nil {
+		t.Fatalf("fill level with classes: %+v, %v", got, err)
 	}
 	// The legacy formats still read as before.
 	if got, err := decodeTerrainElevation(legacy, n, true, false); err != nil || got.classes != nil || got.dsm[2] != 30 {
@@ -727,7 +738,7 @@ func TestTerrainBuildings_OtherFormatIsFetchedAgain(t *testing.T) {
 	}
 	wantCause(t, resp, "building")
 	data, ok := env.p.cache.Get(key, env.p.now())
-	if !ok || data[4] != terrainEntryClassified {
+	if !ok || data[4]&terrainEntryClassified == 0 {
 		t.Fatal("old entry not replaced by a classified one")
 	}
 	if ogc.calls.Load() != 1 || env.src.calls.Load() != 2 {
@@ -741,7 +752,7 @@ func TestTerrainBuildings_OtherFormatIsFetchedAgain(t *testing.T) {
 func TestTerrainProfileGolden_BuildingsOffWithASource(t *testing.T) {
 	ogc := newStubOGC(t, dokk1Footprint)
 	got := terrainGoldenAnswers(t, func(src *fakeElevation) *terrainEnv {
-		return newTerrainEnv(t, src, dhm.ProfileConfig{}, nil, func(d *terrainProfilerDeps) {
+		return newTerrainEnvWith(t, src, dhm.ProfileConfig{}, nil, func(d *terrainProfilerDeps) {
 			d.buildings = ogc.source(resolveTerrainSettings(dhm.ProfileConfig{}, func(string, ...interface{}) {}))
 		})
 	})

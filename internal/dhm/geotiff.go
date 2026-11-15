@@ -27,6 +27,12 @@ import (
 // allocation depends on a size read from the file except the bounded
 // raster itself: the IFD keeps only the fixed set of tags the decoder
 // reads, however many entries the file lists.
+//
+// #738 adds a second shape for the Copernicus GLO-30 foreign fill
+// (geotiff_tiled.go): tiled, EPSG:4326, read block by block from a range
+// read of the file's IFDs. It shares the IFD reader, the sample-shape and
+// GeoKey checks and the row decoder below; which coordinate system a read
+// accepts is fixed per entry point (tiffCRS), so neither loosens the other.
 
 // errBadTIFF is every decode failure. Its text is fixed, so it never
 // carries file content.
@@ -34,6 +40,7 @@ var errBadTIFF = errors.New("unsupported or malformed GeoTIFF")
 
 // TIFF tags read by the decoder.
 const (
+	tagNewSubfileType  = 254
 	tagImageWidth      = 256
 	tagImageLength     = 257
 	tagBitsPerSample   = 258
@@ -44,8 +51,12 @@ const (
 	tagSamplesPerPixel = 277
 	tagRowsPerStrip    = 278
 	tagStripByteCounts = 279
+	tagPlanarConfig    = 284
 	tagPredictor       = 317
 	tagTileWidth       = 322
+	tagTileLength      = 323
+	tagTileOffsets     = 324
+	tagTileByteCounts  = 325
 	tagSampleFormat    = 339
 	tagModelPixelScale = 33550
 	tagModelTiepoint   = 33922
@@ -62,6 +73,8 @@ var readTags = map[uint16]bool{
 	tagStripOffsets: true, tagSamplesPerPixel: true, tagRowsPerStrip: true, tagStripByteCounts: true,
 	tagPredictor: true, tagTileWidth: true, tagSampleFormat: true, tagModelPixelScale: true,
 	tagModelTiepoint: true, tagModelTransform: true, tagGeoKeyDirectory: true, tagGDALNoData: true,
+	tagNewSubfileType: true, tagPlanarConfig: true,
+	tagTileLength: true, tagTileOffsets: true, tagTileByteCounts: true,
 }
 
 // TIFF field types.
@@ -84,13 +97,28 @@ const (
 	maxNoDataLen = 64 // GDAL writes e.g. "-9999" or "-3.4028234663852886e+38"
 
 	// GeoKeys.
-	geoKeyModelType    = 1024
-	geoKeyRasterType   = 1025
-	geoKeyProjectedCS  = 3072
-	modelTypeProjected = 1
-	rasterPixelIsArea  = 1
-	rasterPixelIsPoint = 2
-	epsgUTM32          = 25832
+	geoKeyModelType      = 1024
+	geoKeyRasterType     = 1025
+	geoKeyGeographicType = 2048
+	geoKeyProjectedCS    = 3072
+	modelTypeProjected   = 1
+	modelTypeGeographic  = 2
+	rasterPixelIsArea    = 1
+	rasterPixelIsPoint   = 2
+	epsgUTM32            = 25832
+	epsgWGS84            = 4326
+)
+
+// tiffCRS is the one coordinate system a read accepts (#738).
+type tiffCRS int
+
+const (
+	// crsUTM32 is the DHM WCS raster: EPSG:25832, GeoKeys optional, area
+	// or point.
+	crsUTM32 tiffCRS = iota
+	// crsWGS84 is a Copernicus GLO-30 tile: EPSG:4326 and PixelIsPoint,
+	// every GeoKey required.
+	crsWGS84
 )
 
 // tiffField is one IFD entry. Its data has been bounds-checked against the
@@ -120,14 +148,23 @@ type tiffReader struct {
 	buf    []byte
 	order  binary.ByteOrder
 	fields map[uint16]tiffField
+	crs    tiffCRS
+	// size is the length of the whole file. buf is all of it for the
+	// strip decoder; for a tiled header it may be a prefix, and a read
+	// past buf but inside size is ErrShortHeader rather than malformed.
+	size uint64
 }
 
 // decodeGeoTIFF decodes a DHM GeoTIFF. The returned Grid carries the
 // file's georeferencing when it has one; otherwise Georef is the zero
 // value and the caller supplies it.
 func decodeGeoTIFF(buf []byte) (Grid, error) {
-	r := &tiffReader{buf: buf}
-	if err := r.readIFD(); err != nil {
+	r := &tiffReader{buf: buf, size: uint64(len(buf)), crs: crsUTM32}
+	first, err := r.readHeader()
+	if err != nil {
+		return Grid{}, err
+	}
+	if _, err := r.readIFD(first); err != nil {
 		return Grid{}, err
 	}
 	w, err := r.uint(tagImageWidth, 0, false)
@@ -141,40 +178,15 @@ func decodeGeoTIFF(buf []byte) (Grid, error) {
 	if w < 1 || h < 1 || w > MaxRasterSize || h > MaxRasterSize {
 		return Grid{}, errBadTIFF
 	}
-	for _, want := range []struct {
-		tag  uint16
-		def  uint32
-		only uint32
-	}{
-		{tagBitsPerSample, 0, 32},
-		{tagSampleFormat, 1, sampleFormatFloat},
-		{tagSamplesPerPixel, 1, 1},
-		// #686 review N2: bit order and row/column order other than the
-		// TIFF default would decode to wrong values, so they are errors.
-		{tagFillOrder, 1, 1},
-		{tagOrientation, 1, 1},
-	} {
-		v, err := r.uint(want.tag, want.def, true)
-		if err != nil || v != want.only {
-			return Grid{}, errBadTIFF
-		}
-		if f, ok := r.fields[want.tag]; ok && f.count != 1 {
-			return Grid{}, errBadTIFF
-		}
+	if err := r.sampleShape(); err != nil {
+		return Grid{}, err
 	}
 	if _, tiled := r.fields[tagTileWidth]; tiled {
 		return Grid{}, errBadTIFF
 	}
-	compression, err := r.uint(tagCompression, compressionNone, true)
+	compression, predictor, err := r.coding()
 	if err != nil {
 		return Grid{}, err
-	}
-	predictor, err := r.uint(tagPredictor, predictorNone, true)
-	if err != nil {
-		return Grid{}, err
-	}
-	if predictor != predictorNone && predictor != predictorHorizontal && predictor != predictorFloatingPoint {
-		return Grid{}, errBadTIFF
 	}
 
 	g := Grid{Width: int(w), Height: int(h)}
@@ -190,9 +202,67 @@ func decodeGeoTIFF(buf []byte) (Grid, error) {
 	return g, nil
 }
 
-// readIFD reads the header and the first IFD. Later IFDs (overviews,
-// masks) are ignored.
-func (r *tiffReader) readIFD() error {
+// sampleShape checks the one sample layout both readers take: one 32-bit
+// IEEE float per pixel, in the default bit and row order.
+func (r *tiffReader) sampleShape() error {
+	for _, want := range []struct {
+		tag  uint16
+		def  uint32
+		only uint32
+	}{
+		{tagBitsPerSample, 0, 32},
+		{tagSampleFormat, 1, sampleFormatFloat},
+		{tagSamplesPerPixel, 1, 1},
+		// #686 review N2: bit order and row/column order other than the
+		// TIFF default would decode to wrong values, so they are errors.
+		{tagFillOrder, 1, 1},
+		{tagOrientation, 1, 1},
+	} {
+		v, err := r.uint(want.tag, want.def, true)
+		if err != nil || v != want.only {
+			return errBadTIFF
+		}
+		if f, ok := r.fields[want.tag]; ok && f.count != 1 {
+			return errBadTIFF
+		}
+	}
+	return nil
+}
+
+// coding returns the compression and predictor, either of the shapes the
+// row decoder undoes.
+func (r *tiffReader) coding() (compression, predictor uint32, err error) {
+	if compression, err = r.uint(tagCompression, compressionNone, true); err != nil {
+		return 0, 0, err
+	}
+	if compression != compressionNone && compression != compressionDeflate && compression != compressionDeflateOld {
+		return 0, 0, errBadTIFF
+	}
+	if predictor, err = r.uint(tagPredictor, predictorNone, true); err != nil {
+		return 0, 0, err
+	}
+	if predictor != predictorNone && predictor != predictorHorizontal && predictor != predictorFloatingPoint {
+		return 0, 0, errBadTIFF
+	}
+	return compression, predictor, nil
+}
+
+// within checks that n bytes at at lie inside buf. Past buf but inside
+// the file is ErrShortHeader: buf is a prefix (a tiled header read), and
+// more of the file would hold them. Anything else is malformed.
+func (r *tiffReader) within(at, n uint64) error {
+	switch end := at + n; { // both below 2^35: no overflow
+	case end <= uint64(len(r.buf)):
+		return nil
+	case end <= r.size:
+		return ErrShortHeader
+	}
+	return errBadTIFF
+}
+
+// readHeader checks the byte order and the TIFF magic, and returns the
+// offset of the first IFD.
+func (r *tiffReader) readHeader() (uint64, error) {
 	b := r.buf
 	switch {
 	case len(b) >= 8 && b[0] == 'I' && b[1] == 'I':
@@ -200,18 +270,30 @@ func (r *tiffReader) readIFD() error {
 	case len(b) >= 8 && b[0] == 'M' && b[1] == 'M':
 		r.order = binary.BigEndian
 	default:
-		return errBadTIFF
+		return 0, errBadTIFF
 	}
 	if r.order.Uint16(b[2:]) != 42 { // 43 is BigTIFF
-		return errBadTIFF
+		return 0, errBadTIFF
 	}
 	off := uint64(r.order.Uint32(b[4:]))
-	if off < 8 || off+2 > uint64(len(b)) {
-		return errBadTIFF
+	if off < 8 {
+		return 0, errBadTIFF
+	}
+	return off, nil
+}
+
+// readIFD reads the IFD at off into r.fields, replacing the previous
+// one, and returns the offset of the next IFD (0: none). The strip
+// decoder reads only the first; the tiled reader also reads the second
+// (the overview).
+func (r *tiffReader) readIFD(off uint64) (uint64, error) {
+	b := r.buf
+	if err := r.within(off, 2); err != nil {
+		return 0, err
 	}
 	n := uint64(r.order.Uint16(b[off:]))
-	if off+2+n*12 > uint64(len(b)) {
-		return errBadTIFF
+	if err := r.within(off+2, n*12); err != nil {
+		return 0, err
 	}
 	r.fields = make(map[uint16]tiffField, len(readTags))
 	for i := uint64(0); i < n; i++ {
@@ -233,14 +315,23 @@ func (r *tiffReader) readIFD() error {
 			data = e[8 : 8+total]
 		} else {
 			at := uint64(r.order.Uint32(e[8:]))
-			if at+total > uint64(len(b)) {
-				return errBadTIFF
+			if err := r.within(at, total); err != nil {
+				return 0, err
 			}
 			data = b[at : at+total]
 		}
 		r.fields[tag] = tiffField{typ: typ, count: count, data: data}
 	}
-	return nil
+	// The next-IFD offset. A file cut off right after the entries has
+	// none; the strip decoder never needed one.
+	var next uint64
+	switch err := r.within(off+2+n*12, 4); {
+	case err == nil:
+		next = uint64(r.order.Uint32(b[off+2+n*12:]))
+	case errors.Is(err, ErrShortHeader):
+		return 0, err
+	}
+	return next, nil
 }
 
 // at returns element i of a SHORT or LONG field.
@@ -346,13 +437,22 @@ func (r *tiffReader) georef() (Georef, error) {
 	return g, nil
 }
 
-// geoKeys checks the GeoKeyDirectory, when present: the model must be
-// projected and EPSG:25832, and the raster type area or point. It reports
-// whether the raster is PixelIsPoint.
+// geoKeys checks the GeoKeyDirectory against r.crs and reports whether
+// the raster is PixelIsPoint.
+//
+// crsUTM32, when the directory is present: the model must be projected
+// and EPSG:25832, and the raster type area or point. Other keys are not
+// read.
+//
+// crsWGS84 (#738): the directory and its model, raster and geographic
+// type keys are required, inline, and exactly geographic, PixelIsPoint
+// and EPSG:4326; a projected CRS key is an error. A file that declares
+// any other CRS is refused rather than read as WGS84 (#738 research §3.4,
+// review round 2 finding 8).
 func (r *tiffReader) geoKeys() (bool, error) {
 	f, ok := r.fields[tagGeoKeyDirectory]
 	if !ok {
-		return false, nil
+		return false, r.requireGeoKeys(false)
 	}
 	if f.typ != typeShort || f.count < 4 {
 		return false, errBadTIFF
@@ -361,36 +461,52 @@ func (r *tiffReader) geoKeys() (bool, error) {
 	if uint64(f.count) < 4+4*uint64(nKeys) {
 		return false, errBadTIFF
 	}
-	point := false
+	wgs84 := r.crs == crsWGS84
+	model := uint32(modelTypeProjected)
+	if wgs84 {
+		model = modelTypeGeographic
+	}
+	point, seen := false, 0
 	for k := 0; k < int(nKeys); k++ {
 		id, _ := r.at(f, 4+4*k)
 		loc, _ := r.at(f, 5+4*k)
 		val, _ := r.at(f, 7+4*k)
 		inline := loc == 0
+		ok := true
 		switch id {
 		case geoKeyModelType:
-			if !inline || val != modelTypeProjected {
-				return false, errBadTIFF
-			}
+			ok = inline && val == model
+			seen |= 1
 		case geoKeyProjectedCS:
-			if !inline || val != epsgUTM32 {
-				return false, errBadTIFF
-			}
+			ok = !wgs84 && inline && val == epsgUTM32
 		case geoKeyRasterType:
-			if !inline || (val != rasterPixelIsArea && val != rasterPixelIsPoint) {
-				return false, errBadTIFF
-			}
+			ok = inline && (val == rasterPixelIsPoint || !wgs84 && val == rasterPixelIsArea)
 			point = val == rasterPixelIsPoint
+			seen |= 2
+		case geoKeyGeographicType:
+			if wgs84 {
+				ok = inline && val == epsgWGS84
+				seen |= 4
+			}
+		}
+		if !ok {
+			return false, errBadTIFF
 		}
 	}
-	return point, nil
+	return point, r.requireGeoKeys(seen == 7)
+}
+
+// requireGeoKeys is the crsWGS84 rule that the model, raster and
+// geographic type keys were all present.
+func (r *tiffReader) requireGeoKeys(all bool) error {
+	if r.crs == crsWGS84 && !all {
+		return errBadTIFF
+	}
+	return nil
 }
 
 // strips decodes all strips into a w×h raster.
 func (r *tiffReader) strips(w, h int, compression, predictor uint32) ([]float32, error) {
-	if compression != compressionNone && compression != compressionDeflate && compression != compressionDeflateOld {
-		return nil, errBadTIFF
-	}
 	rps, err := r.uint(tagRowsPerStrip, uint32(h), true)
 	if err != nil {
 		return nil, err
@@ -419,38 +535,64 @@ func (r *tiffReader) strips(w, h int, compression, predictor uint32) ([]float32,
 	}
 
 	out := make([]float32, w*h)
-	raw := make([]byte, rowBytes)
-	var tmp []byte
-	if predictor == predictorFloatingPoint {
-		tmp = make([]byte, rowBytes)
-	}
-	var zr io.ReadCloser
+	d := newRowDecoder(r, compression, predictor, w)
 	for i := 0; i < nStrips; i++ {
 		src, _ := r.strip(offsets, counts, i)
-		rows := min(int(rps), h-i*int(rps))
-		var in io.Reader = bytes.NewReader(src)
-		if compression != compressionNone {
-			if zr, err = resetZlib(zr, src); err != nil {
-				return nil, errBadTIFF
-			}
-			in = zr
-		}
-		for y := i * int(rps); y < i*int(rps)+rows; y++ {
-			if _, err := io.ReadFull(in, raw); err != nil {
-				return nil, errBadTIFF
-			}
-			r.decodeRow(out[y*w:(y+1)*w], raw, predictor, tmp)
-		}
-		if compression != compressionNone {
-			// The stream must end exactly here, with a valid checksum:
-			// a strip never inflates past its rows.
-			var extra [1]byte
-			if k, err := zr.Read(extra[:]); k != 0 || err != io.EOF {
-				return nil, errBadTIFF
-			}
+		y := i * int(rps)
+		rows := min(int(rps), h-y)
+		if err := d.decode(src, out[y*w:(y+rows)*w]); err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
+}
+
+// rowDecoder inflates and un-predicts rows of float32 samples, one strip
+// (decodeGeoTIFF) or one block (TiledGeoTIFF.DecodeBlock) at a time; it
+// reuses its buffers and its inflater across calls.
+type rowDecoder struct {
+	r                      *tiffReader
+	compression, predictor uint32
+	raw, tmp               []byte // one row: stored bytes, predictor scratch
+	zr                     io.ReadCloser
+}
+
+func newRowDecoder(r *tiffReader, compression, predictor uint32, w int) *rowDecoder {
+	d := &rowDecoder{r: r, compression: compression, predictor: predictor, raw: make([]byte, 4*w)}
+	if predictor == predictorFloatingPoint {
+		d.tmp = make([]byte, 4*w)
+	}
+	return d
+}
+
+// decode fills dst, whole rows of len(raw)/4 samples, from src, the stored
+// bytes of one strip or block. A compressed src must inflate to exactly
+// those rows, with a valid checksum.
+func (d *rowDecoder) decode(src []byte, dst []float32) error {
+	w := len(d.raw) / 4
+	var in io.Reader = bytes.NewReader(src)
+	if d.compression != compressionNone {
+		var err error
+		if d.zr, err = resetZlib(d.zr, src); err != nil {
+			return errBadTIFF
+		}
+		in = d.zr
+	}
+	for y := 0; y < len(dst)/w; y++ {
+		if _, err := io.ReadFull(in, d.raw); err != nil {
+			return errBadTIFF
+		}
+		d.r.decodeRow(dst[y*w:(y+1)*w], d.raw, d.predictor, d.tmp)
+	}
+	if d.compression != compressionNone {
+		// The stream must end exactly here, with a valid checksum: a strip
+		// or block never inflates past its rows.
+		var extra [1]byte
+		if k, err := d.zr.Read(extra[:]); k != 0 || err != io.EOF {
+			return errBadTIFF
+		}
+	}
+	return nil
 }
 
 // strip returns the stored bytes of strip i, checked against the buffer.

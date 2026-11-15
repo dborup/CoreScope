@@ -100,24 +100,30 @@ type terrainEnv struct {
 	logs   *dhmLogSink
 }
 
-// newTerrainEnv is a test server with the profile enabled on src; mods
-// adjust the profiler's dependencies first.
-func newTerrainEnv(t *testing.T, src dhm.ElevationSource, pc dhm.ProfileConfig, radio *RadioConfig, mods ...func(*terrainProfilerDeps)) *terrainEnv {
+// newTerrainEnv is a test server with the profile enabled on src.
+func newTerrainEnv(t *testing.T, src dhm.ElevationSource, pc dhm.ProfileConfig, radio *RadioConfig) *terrainEnv {
+	t.Helper()
+	return newTerrainEnvWith(t, src, pc, radio, nil)
+}
+
+// newTerrainEnvWith is newTerrainEnv with the profiler's dependencies
+// edited first (#738: the foreign fill's client).
+func newTerrainEnvWith(t *testing.T, src dhm.ElevationSource, pc dhm.ProfileConfig, radio *RadioConfig, edit func(*terrainProfilerDeps)) *terrainEnv {
 	t.Helper()
 	srv, router := setupTestServer(t)
 	logs := &dhmLogSink{}
 	pc.Enabled = true
 	srv.cfg.Radio = radio
-	deps := terrainProfilerDeps{
+	d := terrainProfilerDeps{
 		src:        src,
 		logf:       logs.logf,
 		logFailure: func(what string, err error) { logs.logf("[dhm] upstream %s failed (%s)", what, dhm.FailureReason(err)) },
 		observers:  func() ([]Observer, error) { return nil, nil },
 	}
-	for _, m := range mods {
-		m(&deps)
+	if edit != nil {
+		edit(&d)
 	}
-	srv.terrain = newTerrainProfiler(pc, radio, deps)
+	srv.terrain = newTerrainProfiler(pc, radio, d)
 	if srv.terrain == nil {
 		t.Fatal("newTerrainProfiler returned nil for an enabled profile")
 	}

@@ -277,6 +277,35 @@ func TestFetchOrthoUpstreamFailures(t *testing.T) {
 	}
 }
 
+// #769 review N1: the ortho service has the 1 MiB tile cap, not the
+// raster cap the WCS gets. The JPEG decoder stops at the end-of-image
+// marker, so a real tile padded with zeros to the cap is still a valid
+// tile: exactly 1 MiB passes, one byte more is "oversize response", and
+// so is a body under the WCS raster cap.
+func TestFetchOrthoBodyCap(t *testing.T) {
+	const tileCap = 1 << 20
+	if o := DefaultClientOptions(); o.MaxBodyBytes != tileCap {
+		t.Fatalf("tile cap changed to %d", o.MaxBodyBytes)
+	}
+	padded := func(n int) *upstream {
+		return serveJPEG(t, append(append([]byte{}, jpegStub...), make([]byte, n-len(jpegStub))...))
+	}
+	data, err := newTestClient(t, padded(tileCap), &logSink{}).FetchOrthoAdmitted(context.Background(), nil, someTile())
+	if err != nil || len(data) != tileCap {
+		t.Fatalf("tile of exactly %d bytes: %d bytes, err %v", tileCap, len(data), err)
+	}
+	for _, n := range []int{tileCap + 1, tileCap + 4096} {
+		data, err := newTestClient(t, padded(n), &logSink{}).FetchOrthoAdmitted(context.Background(), nil, someTile())
+		var fe FetchError
+		if data != nil || !errors.As(err, &fe) || fe.Reason != "oversize response" {
+			t.Fatalf("tile of %d bytes: %d bytes, err %v; want oversize response", n, len(data), err)
+		}
+	}
+	if allowedServices[OrthoWMTSService].raster {
+		t.Fatal("the ortho service is marked raster: it would get the WCS body cap")
+	}
+}
+
 // A full Admission refuses a cold ortho tile without an upstream request,
 // like a hillshade tile (#744).
 func TestFetchOrthoAdmissionFull(t *testing.T) {

@@ -26,7 +26,7 @@ package main
 //     soon after; a deterministic answer (nothing elevated, a truncated
 //     segment) is cached like any profile.
 //   - The classes are one byte per sample in the profile's cache entry,
-//     behind a format byte, so an entry of another format is rejected and
+//     behind a flag bit, so an entry of another format is rejected and
 //     fetched again rather than misread.
 //
 // The response gains named fields only: classification{state, truncated},
@@ -292,31 +292,33 @@ func (c *terrainClasses) sampleClass(i int) string {
 	return ""
 }
 
-// The cache entry (terrainElevation.encode): a legacy entry's byte 4 is 0
-// (DTM only) or 1 (DTM and DSM); a classified one's is
-// terrainEntryClassified, and its elevations are followed by the state,
-// the truncated flag and one class byte per sample.
+// The cache entry (terrainElevation.encode): byte 4 holds flags, bit 0 a
+// DSM and bits 1-3 the foreign fill (#738); terrainEntryClassified (bit 4)
+// marks a classified entry, whose elevations are followed by the state,
+// the truncated flag and one class byte per sample. Before #730 M2 bit 4
+// had to be 0, so an older reader refuses a classified entry too.
 const (
-	terrainEntryClassified byte = 2
+	terrainEntryClassified byte = 1 << 4
 	terrainEntryHeader          = 5
 )
 
-// terrainEntryOK checks an entry's format byte and length against what the
-// profiler expects for n samples: an entry of another format is rejected,
-// never misread.
+// terrainEntryOK checks an entry's DSM and classification flags and its
+// length against what the profiler expects for n samples: an entry of
+// another format is rejected, never misread. decodeTerrainElevation checks
+// the fill bits.
 func terrainEntryOK(b []byte, n int, both, classified bool) bool {
 	if len(b) < terrainEntryHeader {
 		return false
 	}
-	models, format := 1, byte(0)
+	models := 1
 	if both {
-		models, format = 2, 1
+		models = 2
 	}
 	size := terrainEntryHeader + 4*n*models
 	if classified {
-		format, size = terrainEntryClassified, size+2+n
+		size += 2 + n
 	}
-	return b[4] == format && len(b) == size
+	return b[4]&1 == 1 == both && (b[4]&terrainEntryClassified != 0) == classified && len(b) == size
 }
 
 // appendTo writes c after an entry's elevations.
