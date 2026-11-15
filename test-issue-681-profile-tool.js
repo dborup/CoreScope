@@ -1282,15 +1282,17 @@ test('the link leaves the model out only for a "both" nobody stated', () => {
   const both = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: 'both' };
   const dtm = Object.assign({}, both, { model: 'dtm' });
   const stated = Object.assign({}, both, { modelExplicit: true });
-  assert.strictEqual(TP.serializeState(both, { model: 'both' }).model, undefined);
-  assert.strictEqual(TP.serializeState(dtm, { model: 'both' }).model, 'dtm');
-  // #746: a stated "both" is written down under either default, or a
-  // recipient on a dtm default would reopen the link as terrain-only.
-  assert.strictEqual(TP.serializeState(stated, { model: 'both' }).model, 'both');
-  assert.strictEqual(TP.serializeState(stated, { model: 'dtm' }).model, 'both');
-  // Review PR#714: anything but "both" is always written down, whatever the
-  // sharer's own default is — the recipient may not share it.
-  assert.strictEqual(TP.serializeState(dtm, { model: 'dtm' }).model, 'dtm');
+  // serializeState takes no default: the sharer's own default never
+  // decides what the link says (#765).
+  assert.strictEqual(TP.serializeState(both).model, undefined);
+  // Review PR#714: anything but "both" is always written down — the
+  // recipient may not share the sharer's default.
+  assert.strictEqual(TP.serializeState(dtm).model, 'dtm');
+  // #746: a stated "both" is written down, or a recipient on a dtm default
+  // would reopen the link as terrain-only.
+  const qs = new URLSearchParams(TP.serializeState(stated)).toString();
+  assert.strictEqual(new URLSearchParams(qs).get('model'), 'both');
+  assert.strictEqual(TP.parseState(qs, { model: 'dtm' }).model, 'both');
 });
 
 test('a terrain-only link means terrain-only to a recipient on the standard default', () => {
@@ -1310,7 +1312,7 @@ test('a non-default model round-trips through the link under either default', ()
     // Chosen: the viewer picked it, so it is stated (#746).
     const state = { a: { kind: 'node', pubkey: PK_A }, b: { kind: 'node', pubkey: PK_B }, model: chosen,
       modelExplicit: true, ha: null, hb: null, k: null, freq: null };
-    const qs = new URLSearchParams(TP.serializeState(state, { model: def })).toString();
+    const qs = new URLSearchParams(TP.serializeState(state)).toString();
     assert.strictEqual(TP.parseState(qs, { model: def }).model, chosen, def + ' default, ' + chosen + ' chosen');
   });
 });
@@ -1656,9 +1658,9 @@ test('the same holds for the /p share link', () => {
 test('a link without a model gets none, whatever the sharer\'s own default', () => {
   // Presence, not a comparison with the current default: the link never
   // said "both", so it does not start saying so under a dtm default.
+  // serializeState is not given the sharer's default at all (#765).
   const state = TP.parseState('profile=' + PK_A + ',' + PK_B, { model: 'both' });
-  assert.strictEqual(TP.serializeState(state, { model: 'both' }).model, undefined);
-  assert.strictEqual(TP.serializeState(state, { model: 'dtm' }).model, undefined);
+  assert.strictEqual(TP.serializeState(state).model, undefined);
 });
 
 atest('an imported model=both stays pinned when the customizer moves to dtm', async () => {
