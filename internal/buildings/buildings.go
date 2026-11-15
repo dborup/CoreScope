@@ -32,12 +32,14 @@
 //   - Fetcher: the Client behind a bounded per-segment cache (dhm.Cache),
 //     coalescing (dhm.Flight), an in-flight bound (dhm.Admission) and an
 //     upstream concurrency limit (fetcher.go).
+//   - AttributionDerived: the CC BY 4.0 credit of a profile classified
+//     with the footprints, built from DHM's own (credit.go).
 //
 // The polygon reading and the point-in-polygon maths are internal/dhm's
 // (polygon.go), shared with internal/heritage.
 //
-// Nothing here is wired into the server yet: the terrain profile route,
-// its response fields and the credit come with #730 M2.
+// The terrain profile route uses it (cmd/server/terrain_buildings.go,
+// #730 M2) while map.dhm.profile.buildings is enabled.
 package buildings
 
 import "github.com/meshcore-analyzer/dhm"

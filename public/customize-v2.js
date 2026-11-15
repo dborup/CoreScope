@@ -36,8 +36,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain'];
+  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts'];
+  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -486,6 +486,38 @@
     return out;
   }
 
+  // ── #724 M5 — antenna sites settings ──
+  // Whether the sites overlay starts on, the zoom gate, and the profile
+  // hint's distance and strong tier. The rule and the bounds live in
+  // public/masts-layer.js (MastsLayer.validSetting / settings), shared with
+  // the layer and the hint, so the customizer stores exactly what they use;
+  // the operator's own values arrive in the client block (map.masts.*,
+  // bounded by cmd/server/masts_proxy.go) and are the starting point.
+  // Without the layer on the page no value is accepted at all.
+  var MASTS_SETTING_KEYS = ['enabled', 'minZoom', 'hintDistanceM', 'hintStrongM'];
+  var _lastMasts = null;
+
+  function _mastsLayer() {
+    var ML = window.MastsLayer;
+    return ML && typeof ML.settings === 'function' && typeof ML.validSetting === 'function' ? ML : null;
+  }
+
+  function _mastsCfg() { return window.MC_getMastsConfig ? window.MC_getMastsConfig() : null; }
+
+  function isValidMastsSetting(key, val) {
+    var ML = _mastsLayer();
+    return !!ML && MASTS_SETTING_KEYS.indexOf(key) >= 0 && ML.validSetting(key, val);
+  }
+
+  /** The effective antenna sites settings (this section over the
+   *  operator's), or null without the layer module. */
+  function mastsSettings(effectiveConfig) {
+    var ML = _mastsLayer();
+    if (!ML) return null;
+    var sec = effectiveConfig && effectiveConfig.masts;
+    return ML.settings(_mastsCfg(), sec && typeof sec === 'object' ? sec : {});
+  }
+
   // ── Validation helpers ──
 
   /* An imported file is plain JSON, so a key may well be "hasOwnProperty";
@@ -680,6 +712,17 @@
           }
         }
         if (Object.keys(tOut).length) clean[key] = tOut;
+      } else if (key === 'masts' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #724 M5 — the antenna sites settings, each by the layer's rule.
+        var mIn = delta[key];
+        var mOut = {};
+        for (var mki = 0; mki < MASTS_SETTING_KEYS.length; mki++) {
+          var mk2 = MASTS_SETTING_KEYS[mki];
+          if (!_own(mIn, mk2) || mIn[mk2] == null) continue;
+          if (isValidMastsSetting(mk2, mIn[mk2])) mOut[mk2] = mIn[mk2];
+          else console.warn('[customizer-v2] Invalid antenna sites setting rejected:', 'masts.' + mk2, mIn[mk2]);
+        }
+        if (Object.keys(mOut).length) clean[key] = mOut;
       } else if (key === 'branding' || key === 'home') {
         // Pass through as-is (object shape)
         if (typeof delta[key] === 'object' && delta[key] !== null) {
@@ -962,6 +1005,16 @@
     }
     _lastTerrain = terrainNow;
 
+    /* #724 M5 — the same for the antenna sites settings: the layer re-gates
+     * its view and the profile hint re-pins and re-tiers on this event. */
+    var mastsNow = JSON.stringify(mastsSettings(effectiveConfig));
+    if (_lastMasts !== null && _lastMasts !== mastsNow) {
+      try {
+        window.dispatchEvent(new CustomEvent('masts-defaults-changed'));
+      } catch (_e) { /* no CustomEvent: the next view reads them anyway */ }
+    }
+    _lastMasts = mastsNow;
+
     // Dispatch theme-changed event (bare, no payload — matches existing behavior)
     window.dispatchEvent(new CustomEvent('theme-changed'));
   }
@@ -1196,6 +1249,20 @@
           }
         }
       }
+      // #724 M5 — masts: the antenna sites settings, bounded integers and
+      // one boolean.
+      if (key === 'masts' && typeof obj[key] === 'object' && obj[key] !== null) {
+        for (var msk in obj[key]) {
+          if (!_own(obj[key], msk)) continue;
+          if (MASTS_SETTING_KEYS.indexOf(msk) === -1) {
+            console.warn('[customizer-v2] Unknown masts key in import:', msk);
+          } else if (!isValidMastsSetting(msk, obj[key][msk])) {
+            var lim = _mastsLayer() && _mastsLayer().LIMITS[msk];
+            errors.push('Invalid antenna sites setting: masts.' + msk + ' = "' + obj[key][msk] + '" \u2014 must be ' +
+              (msk === 'enabled' ? 'true or false' : lim ? 'a whole number ' + lim[0] + '-' + lim[1] : 'unavailable without the antenna sites layer'));
+          }
+        }
+      }
       // Validate distanceUnit
       if (key === 'distanceUnit' && DISTANCE_UNIT_VALUES.indexOf(obj[key]) === -1) {
         errors.push('Invalid distanceUnit: "' + obj[key] + '" — must be km, mi, or auto');
@@ -1386,7 +1453,7 @@
       { id: 'theme', glyph: 'ph:palette', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', glyph: 'ph:target', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'home', glyph: 'ph:house', title: 'Home', badge: _tabBadge('home') },
-      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
+      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', glyph: 'ph:map-trifold', title: 'GeoFilter' },
       { id: 'export', glyph: 'ph:download-simple', title: 'Export' }
     ];
@@ -1867,6 +1934,7 @@
       _renderHide1ByteHopsToggle() +
       _renderTileProviderSelector() +
       _renderTerrainSettings() +
+      _renderMastsSettings() +
     '</div>';
   }
 
@@ -1906,6 +1974,42 @@
           modelOpt('dtm', 'Terrain only') +
         '</select>' +
         '<div class="cust-hint">Terrain always decides the verdict. Surface is drawn for information and costs a second elevation request.</div></div>';
+  }
+
+  // ── #724 M5 Antenna sites settings ──
+  // Shown only where the server offers the layer. Every value starts at the
+  // operator's; a value back at it is a cleared override.
+  function _renderMastsSettings() {
+    var ML = _mastsLayer(), cfg = _mastsCfg();
+    if (!ML || !cfg) return '';
+    var m = mastsSettings(_getEffective());
+    var op = ML.settings(cfg, {});
+    var num = function (key, label, hint, min, max, step) {
+      var id = 'cv2-masts-' + key;
+      return '<div class="cust-terrain-row">' +
+        '<div><label for="' + id + '">' + label + _overrideDot('masts', key) + '</label>' +
+          '<div class="cust-hint">' + hint + '</div></div>' +
+        '<input type="number" id="' + id + '" min="' + min + '" max="' + max + '" step="' + step + '" ' +
+          'inputmode="numeric" data-cv2-masts="' + key + '" value="' + escAttr(String(m[key])) + '">' +
+      '</div>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Antenna Sites</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">The Map\u2019s antenna sites layer (Mastedatabasen) and the interference hint in the Path profile. The hint is based on distance only: the source publishes no height or power.</p>' +
+      '<div class="cust-field"><label class="cust-check" for="cv2-masts-enabled" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+        '<input type="checkbox" id="cv2-masts-enabled" data-cv2-masts="enabled"' + (m.enabled ? ' checked' : '') + ' style="width:20px;height:20px">' +
+        '<span>Show antenna sites on the map by default' + _overrideDot('masts', 'enabled') + '</span></label>' +
+        '<div class="cust-hint">A link that says otherwise still wins.</div></div>' +
+      num('minZoom', 'Antenna sites from zoom', 'The server\u2019s gate is ' + op.minZoom + '; you can only raise it', op.minZoom, ML.LIMITS.minZoom[1], 1) +
+      num('hintDistanceM', 'Interference hint within (m)', 'A 700/800/900 MHz site this close to an end gets a hint', ML.LIMITS.hintDistanceM[0], ML.LIMITS.hintDistanceM[1], 10) +
+      num('hintStrongM', 'Strong hint within (m)', 'Possibly the same building or mast; 0 turns it off', ML.LIMITS.hintStrongM[0], m.hintDistanceM, 10);
+  }
+
+  /* One antenna sites input: a whole number (or the checkbox) by the
+   * layer's rule. A zoom gate below the operator's, or a strong tier past
+   * the distance, is not stored; the input shows the effective value. */
+  function _mastsInputValue(key, inp) {
+    if (key === 'enabled') return !!inp.checked;
+    return /^[0-9]{1,4}$/.test(inp.value) ? Number(inp.value) : null;
   }
 
   // ── #1633 / #674 1-byte path hops: Show / Mark / Hide ──
@@ -2653,6 +2757,30 @@
       });
     });
 
+    // #724 M5 — antenna sites settings. A value back at the operator's is
+    // a cleared override, like the terrain defaults.
+    container.querySelectorAll('[data-cv2-masts]').forEach(function (inp) {
+      var key = inp.dataset.cv2Masts;
+      inp.addEventListener('change', function () {
+        var ML = _mastsLayer(), cfg = _mastsCfg();
+        if (!ML || !cfg) return;
+        var v = _mastsInputValue(key, inp);
+        var now = mastsSettings(_getEffective());
+        var op = ML.settings(cfg, {});
+        if (v === null || !isValidMastsSetting(key, v) ||
+            (key === 'minZoom' && v < op.minZoom) ||
+            (key === 'hintStrongM' && v > now.hintDistanceM)) {
+          // Put the effective value back rather than storing nonsense.
+          if (key === 'enabled') inp.checked = now.enabled; else inp.value = String(now[key]);
+          return;
+        }
+        if (v === op[key]) clearOverride('masts', key);
+        else setOverride('masts', key, v);
+        // A new default applies to the next map, not one the viewer chose.
+        if (key === 'enabled' && window.MC_forgetOverlayPref) window.MC_forgetOverlayPref('masts-sites');
+      });
+    });
+
     // #1633 / #674 1-byte path hops select — persists + fires
     // mc-hide-1byte-hops-changed through hop-filter.js; consumers re-render
     // or rely on the next navigation refresh (analytics tab, packets list).
@@ -3280,6 +3408,11 @@
     MASTS_COLOR_KEYS: MASTS_COLOR_KEYS,
     VALID_SECTIONS: VALID_SECTIONS,
     isValidAntennaHeight: isValidAntennaHeight,
-    terrainSettings: terrainSettings
+    terrainSettings: terrainSettings,
+    // #724 M5 — exposed for tests; see test-issue-724-m5-masts-customizer.js.
+    MASTS_SETTING_KEYS: MASTS_SETTING_KEYS,
+    isValidMastsSetting: isValidMastsSetting,
+    mastsSettings: mastsSettings,
+    renderMastsSettings: _renderMastsSettings
   };
 })();

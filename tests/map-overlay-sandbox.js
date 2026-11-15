@@ -347,4 +347,36 @@ function liveCredits(map) {
   return liveAttributions(map).flatMap(c => c.credits()).sort();
 }
 
-module.exports = { makeStorage, makeLeaflet, makeAttributionStub, makeMap, makeSandbox, buildControl, liveAttributions, liveCredits, makeElement, makeTextNode };
+/* public/terrain-profile.js with the credit walker it uses, in a vm
+ * sandbox on the element model above, in page order (#733, #738). */
+function loadTerrainProfile() {
+  const doc = {
+    createElement: makeElement, createTextNode: makeTextNode,
+    addEventListener() {}, body: { appendChild() {} },
+    documentElement: { getAttribute: () => 'light' },
+    querySelector: () => null, querySelectorAll: () => [],
+  };
+  const storage = { getItem: () => null, setItem() {}, removeItem() {} };
+  const win = {
+    addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
+    matchMedia: () => ({ matches: false }),
+    innerWidth: 1280, innerHeight: 800, document: doc, localStorage: storage,
+  };
+  const ctx = {
+    window: win, document: doc, console, Math, Date, JSON, Array, Object, String, Number,
+    RegExp, Error, TypeError, Boolean, isNaN, isFinite, parseInt, parseFloat,
+    URLSearchParams, Map, Set, Promise, encodeURIComponent, decodeURIComponent,
+    setTimeout: () => 0, clearTimeout: () => {},
+    location: { hash: '#/map', pathname: '/', search: '' }, history: { state: null, replaceState() {} },
+    CustomEvent: function (type, init) { this.type = type; this.detail = (init && init.detail) || null; },
+  };
+  ctx.localStorage = storage;
+  vm.createContext(ctx);
+  for (const f of ['map-tile-providers.js', 'antenna-height.js', 'terrain-profile.js']) {
+    vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', f), 'utf8'), ctx);
+  }
+  if (!ctx.window.TerrainProfile) throw new Error('terrain-profile.js must define window.TerrainProfile');
+  return { TP: ctx.window.TerrainProfile, win };
+}
+
+module.exports = { makeStorage, makeLeaflet, makeAttributionStub, makeMap, makeSandbox, buildControl, liveAttributions, liveCredits, makeElement, makeTextNode, loadTerrainProfile };

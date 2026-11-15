@@ -14,7 +14,8 @@
  * per request, which the server proxies on demand with a shared cache
  * (cmd/server/masts_proxy.go). The browser:
  *   - fetches nothing unless one of the two overlays is on and the map is
- *     at or above the zoom gate (cfg.minZoom, 13);
+ *     at or above the zoom gate (settings(cfg).minZoom: 13, or what the
+ *     operator or this viewer raised it to, #724 M5);
  *   - enumerates the cells of the viewport (cellsForView), at most
  *     VIEW_CELL_CAP of them, centre first, and never one outside the
  *     server's extent (cfg.cellExtent);
@@ -34,6 +35,14 @@
  * band, service, commissioning date), every one escaped with the shared
  * escapeHtml (app.js). There is no operator, height or structure type,
  * because the source publishes none.
+ *
+ * Settings (#724 M5): the zoom gate, the profile hint's distance and strong
+ * tier, and whether the sites overlay starts on. The operator's values come
+ * in the client block (map.masts.minZoom / hintDistanceM / hintStrongM,
+ * bounded in cmd/server/masts_proxy.go); this viewer's own come from the
+ * customizer (public/customize-v2.js, section `masts`, on
+ * window.SITE_CONFIG). settings() resolves both, and the customizer fires
+ * `masts-defaults-changed` when they move.
  */
 (function () {
   'use strict';
@@ -55,9 +64,59 @@
   var DEBOUNCE_MS = 250;
   // #724 owner decision 2: the distance a cellular transmitter in these
   // bands may matter at, and the strong tier. Also used by the M4 hint
-  // (public/masts-hint.js). The customizer exposes them in M5.
+  // (public/masts-hint.js). These are the built-in defaults; the operator
+  // and the viewer may change them (settings, #724 M5).
   var HINT_DISTANCE_M = 500;
   var HINT_STRONG_M = 100;
+  var MIN_ZOOM = 13;
+  // The bounds of each setting, as cmd/server/masts_proxy.go bounds the
+  // operator's (mastsMinZoom..mastsMinZoomMax, mastsHintDistanceMin..Max,
+  // 0..the distance). The distance stays within half a 2 km cell less the
+  // hint's 10 m pad, so each profile end pins at most four cells.
+  var LIMITS = {
+    minZoom: [MIN_ZOOM, 18],
+    hintDistanceM: [100, 990],
+    hintStrongM: [0, 990]
+  };
+
+  /** Whether `v` is a usable value of setting `key`; integers only. */
+  function validSetting(key, v) {
+    if (key === 'enabled') return typeof v === 'boolean';
+    var b = Object.prototype.hasOwnProperty.call(LIMITS, key) ? LIMITS[key] : null;
+    return !!b && typeof v === 'number' && Math.floor(v) === v && v >= b[0] && v <= b[1];
+  }
+
+  /**
+   * The effective settings: the viewer's customizer section over the
+   * operator's client block over the built-ins. `section` defaults to the
+   * live window.SITE_CONFIG.masts; pass {} for the operator's values alone.
+   * The viewer may raise the zoom gate, never lower it below the
+   * operator's; a strong tier past the distance is the distance.
+   * @returns {{enabled:boolean, minZoom:number, hintDistanceM:number, hintStrongM:number}}
+   */
+  function settings(cfg, section) {
+    cfg = cfg || {};
+    var base = {
+      enabled: true,
+      minZoom: validSetting('minZoom', cfg.minZoom) ? cfg.minZoom : MIN_ZOOM,
+      hintDistanceM: validSetting('hintDistanceM', cfg.hintDistanceM) ? cfg.hintDistanceM : HINT_DISTANCE_M,
+      hintStrongM: validSetting('hintStrongM', cfg.hintStrongM) ? cfg.hintStrongM : HINT_STRONG_M
+    };
+    if (base.hintStrongM > base.hintDistanceM) base.hintStrongM = Math.min(HINT_STRONG_M, base.hintDistanceM);
+    var src = section;
+    if (src === undefined) {
+      try { src = window.SITE_CONFIG && window.SITE_CONFIG.masts; } catch (_) { src = null; }
+    }
+    var out = { enabled: base.enabled, minZoom: base.minZoom, hintDistanceM: base.hintDistanceM, hintStrongM: base.hintStrongM };
+    if (src && typeof src === 'object') {
+      for (var k in out) {
+        if (Object.prototype.hasOwnProperty.call(src, k) && validSetting(k, src[k])) out[k] = src[k];
+      }
+    }
+    if (out.minZoom < base.minZoom) out.minZoom = base.minZoom;
+    if (out.hintStrongM > out.hintDistanceM) out.hintStrongM = out.hintDistanceM;
+    return out;
+  }
 
   // ── WGS84 → EPSG:25832 (ETRS89 / UTM 32N) ───────────────────────────────
   // The Krüger series to fourth order, as internal/dhm/utm.go, which is
@@ -323,8 +382,9 @@
       h += '</tbody></table>';
     }
     if (site.interference) {
-      h += '<p class="mc-masts-popup-hint">Has a 700/800/900 MHz entry. Within about ' + HINT_DISTANCE_M +
-        ' m, especially within ' + HINT_STRONG_M + ' m, a cellular transmitter like this may desensitise an unfiltered ' +
+      var hs = settings(cfg);
+      h += '<p class="mc-masts-popup-hint">Has a 700/800/900 MHz entry. Within about ' + hs.hintDistanceM +
+        ' m, especially within ' + hs.hintStrongM + ' m, a cellular transmitter like this may desensitise an unfiltered ' +
         '868 MHz receiver; a band-pass filter or another site may help. Based on distance only: the source ' +
         'publishes no height or power.</p>';
     }
@@ -355,7 +415,8 @@
 
   function statusText(z, cfg, active, stats, tooWide) {
     if (!active) return '';
-    if (z < cfg.minZoom) return 'Zoom in to ' + cfg.minZoom + '+ to see antenna positions';
+    var gate = settings(cfg).minZoom;
+    if (z < gate) return 'Zoom in to ' + gate + '+ to see antenna positions';
     // Over VIEW_CELL_CAP at or above the gate (a large display): the map
     // already is at the gate zoom, so asking for it would be wrong (#758 F1).
     if (tooWide) return 'This view is too wide for antenna positions; zoom in one more step';
@@ -471,7 +532,7 @@
       debounceT = null;
       var want = [];
       tooWide = false;
-      if (active() && map.getZoom() >= cfg.minZoom) {
+      if (active() && map.getZoom() >= settings(cfg).minZoom) {
         var b = map.getBounds();
         var list = cellsForView({ south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() }, cfg);
         if (list) want = list.map(function (c) { return c.key; });
@@ -504,6 +565,8 @@
       themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     } catch (_) {}
     window.addEventListener('theme-refresh', restyle);
+    // #724 M5: a new zoom gate applies to the view at once.
+    window.addEventListener('masts-defaults-changed', schedule);
 
     map.on('moveend zoomend', schedule);
     groups.sites.on('add remove', schedule);
@@ -513,6 +576,7 @@
       loader.destroy();
       if (themeObs) themeObs.disconnect();
       window.removeEventListener('theme-refresh', restyle);
+      window.removeEventListener('masts-defaults-changed', schedule);
       map._mcMasts = null;
     });
 
@@ -521,9 +585,11 @@
       setStatusElement: function (el) { statusEl = el; renderStatus(); },
       /* Keeps `keys` loaded (and fetches the missing ones, paced like the
        * view's) until the next pin; onChange runs when one of them settles.
-       * pin([]) lets them go back to the LRU. */
+       * pin([]) lets them go back to the LRU. At most PIN_CELL_CAP keys,
+       * the first ones, so the view's share of the budget holds whatever
+       * a caller passes (#768 delta review). */
       pin: function (keys, onChange) {
-        pinned = (keys || []).slice();
+        pinned = (keys || []).slice(0, PIN_CELL_CAP);
         pinListener = onChange || null;
         pinSig = '';
         loader.view(wantedKeys());
@@ -545,6 +611,10 @@
     CONCURRENCY: CONCURRENCY,
     HINT_DISTANCE_M: HINT_DISTANCE_M,
     HINT_STRONG_M: HINT_STRONG_M,
+    MIN_ZOOM: MIN_ZOOM,
+    LIMITS: LIMITS,
+    validSetting: validSetting,
+    settings: settings,
     toUTM32: toUTM32,
     cellsForView: cellsForView,
     createCellLoader: createCellLoader,

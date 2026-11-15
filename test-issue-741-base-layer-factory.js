@@ -605,8 +605,10 @@ test('F6 the Esri layer under the ortho layer is the registry style, built by th
   const under = members[0];
   assert.strictEqual(under.kind, 'tile');
   assert.strictEqual(under._url, esri.url(), 'the style\'s lazy url is resolved by the factory');
-  sameOptions(under.options, { attribution: esri.attribution, maxZoom: esri.maxZoom },
-    'exactly the options the direct call built before #778');
+  // #783: Esri keeps its own ceiling as maxNativeZoom and upscales up to the
+  // ortho layer's maxZoom, so z20 outside Denmark is not blank.
+  sameOptions(under.options, { attribution: esri.attribution, maxNativeZoom: esri.maxZoom, maxZoom: 20 },
+    'exactly the options the direct call built after #783');
 });
 
 test('F6 the layer control offers every style with its own credit and ceiling', () => {

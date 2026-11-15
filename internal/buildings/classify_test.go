@@ -70,7 +70,7 @@ func TestClassifyDokk1(t *testing.T) {
 	buildings := 0
 	for i, cl := range got {
 		switch {
-		case !s.elevated(i, DefaultOptions().ThresholdM) && cl != Unclassified:
+		case !s.Elevated(i, DefaultOptions().ThresholdM) && cl != Unclassified:
 			t.Errorf("sample %d at ground level classified %q", i, cl)
 		case cl == Vegetation:
 			t.Errorf("sample %d inside Dokk1 read as vegetation", i)
@@ -210,10 +210,15 @@ func TestClassifyUnusablePages(t *testing.T) {
 			}
 		}
 	}
-	// A page with skipped features is still used.
-	got := mustClassify(t, c, s, []*Page{{Footprints: full, Skipped: 3}, {Footprints: full}, {Footprints: full}})
+	// A page that skipped a few features is still used; one that skipped
+	// many is not (TestClassifyHighSkipShareIsUnusable).
+	var few []dhm.MultiPolygon
+	for len(few) < 19 {
+		few = append(few, full[0])
+	}
+	got := mustClassify(t, c, s, []*Page{{Footprints: few, Skipped: 1}, {Footprints: full}, {Footprints: full}})
 	if got[0] != Building {
-		t.Fatalf("page with skipped features unused: %q", got[0])
+		t.Fatalf("page with 1 of 20 features skipped unused: %q", got[0])
 	}
 }
 

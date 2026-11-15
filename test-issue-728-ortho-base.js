@@ -184,7 +184,8 @@ test('A2 Esri on: Esri World Imagery under the ortho layer, in one group', () =>
   assert.ok(!esri.options.pane, 'Esri draws in the tile pane');
   assert.strictEqual(ortho.options.pane, 'mcOrthoPane');
   assert.strictEqual(esri.options.attribution, ESRI_CREDIT);
-  assert.strictEqual(esri.options.maxZoom, 19);
+  assert.strictEqual(esri.options.maxNativeZoom, 19);
+  assert.strictEqual(esri.options.maxZoom, 20, 'the ortho layer\'s maxZoom (#728 F6)');
   assert.ok(!esri.options.bounds, 'Esri is the fallback everywhere, so it has no bounds');
   assert.deepStrictEqual(ortho.options.bounds._bounds, orthoBlock().bounds);
 });

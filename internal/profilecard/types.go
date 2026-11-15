@@ -25,6 +25,16 @@ type TerrainProfileResponse struct {
 	// AttributionFill is the Copernicus DEM credit, present exactly when
 	// Coverage.Mixed (#738).
 	AttributionFill string `json:"attributionFill,omitempty"`
+	// Classification is the building classification of the surface
+	// (#730 M2); nil without it.
+	Classification *TerrainClassification `json:"classification,omitempty"`
+}
+
+// TerrainClassification is the state of the building classification:
+// full, partial or unavailable, and whether a segment was truncated.
+type TerrainClassification struct {
+	State     string `json:"state"`
+	Truncated bool   `json:"truncated"`
 }
 
 // TerrainEndpoint is one end of the path, snapped to 5 decimals.
@@ -64,6 +74,7 @@ type TerrainSample struct {
 	D   float64  `json:"d"`
 	DTM *float64 `json:"dtm"`
 	DSM *float64 `json:"dsm,omitempty"`
+	Cls string   `json:"cls,omitempty"` // "b" building, "v" trees/other (#730 M2)
 }
 
 // TerrainPhysics are the radio parameters the verdict was computed with.
@@ -97,10 +108,12 @@ type TerrainClearance struct {
 
 // TerrainSurfaceInfo is the surface model's assessment. Reason is
 // "antennaBelowSurface" when the surface is above the antenna at an
-// endpoint (#745); Endpoint is then "A", "B" or "both".
+// endpoint (#745); Endpoint is then "A", "B" or "both". Cause is what
+// stands where it is decided, with the building classification (#730 M2).
 type TerrainSurfaceInfo struct {
 	State string `json:"state"`
 	TerrainClearance
 	Reason   string `json:"reason,omitempty"`
 	Endpoint string `json:"endpoint,omitempty"`
+	Cause    string `json:"cause,omitempty"`
 }

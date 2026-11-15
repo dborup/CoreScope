@@ -27,7 +27,7 @@ const MaxVertices = 50000
 // corridor than it returned, so the segment's samples stay unclassified.
 // Skipped counts features without a usable footprint (no geometry, not a
 // polygon, a ring under four positions, an empty MultiPolygon), which were
-// left out.
+// left out; a page that skipped too many is not used either (usable).
 //
 // A Page may be shared between callers (Fetcher): treat it as read-only.
 // The JSON tags are the cache encoding only.
@@ -35,6 +35,19 @@ type Page struct {
 	Footprints []dhm.MultiPolygon `json:"footprints"`
 	Truncated  bool               `json:"truncated,omitempty"`
 	Skipped    int                `json:"skipped,omitempty"`
+}
+
+// maxSkippedOneIn: a page that skipped more than 1 in maxSkippedOneIn of
+// its features is not used.
+const maxSkippedOneIn = 20
+
+// usable reports whether the page can classify its segment: complete, and
+// with at most 1 in maxSkippedOneIn of its features skipped. A skipped
+// feature is a building whose footprint was lost, and its samples would
+// read as Vegetation; a page that lost them all would read as a corridor
+// without buildings (#776 review N3). Real pages skip none.
+func (p *Page) usable() bool {
+	return !p.Truncated && p.Skipped*maxSkippedOneIn <= p.Skipped+len(p.Footprints)
 }
 
 var errShape = errors.New("buildings: unexpected response shape")
@@ -74,12 +87,13 @@ type feature struct {
 
 // Parse reads the OGC API Features GeoJSON of one segment's request.
 // Anything off-shape is an error: another document (an OGC API exception
-// is JSON too), trailing data, a missing features array, more than
-// MaxFeatures features, a numberMatched or numberReturned that is not a
-// count or disagrees with the page, a member of features that is not a
-// Feature, a position outside coordWindow, or more than MaxVertices
-// vertices. A feature without a usable footprint is skipped and counted
-// instead, and costs no vertex budget.
+// is JSON too), trailing data, a missing features array, a numberMatched
+// or numberReturned that is not a count or disagrees with the page, a
+// member of features that is not a Feature, a position outside
+// coordWindow, or more than MaxVertices vertices. More than MaxFeatures
+// features is a Truncated page without footprints. A feature without a
+// usable footprint is skipped and counted instead, and costs no vertex
+// budget.
 func Parse(body []byte) (Page, error) { return parse(body, MaxVertices) }
 
 func parse(body []byte, maxVertices int) (Page, error) {
@@ -91,7 +105,7 @@ func parse(body []byte, maxVertices int) (Page, error) {
 	if _, err := dec.Token(); err != io.EOF {
 		return Page{}, errShape
 	}
-	if doc.Type != "FeatureCollection" || doc.Features == nil || len(*doc.Features) > MaxFeatures {
+	if doc.Type != "FeatureCollection" || doc.Features == nil {
 		return Page{}, errShape
 	}
 	features := *doc.Features
@@ -101,6 +115,12 @@ func parse(body []byte, maxVertices int) (Page, error) {
 	}
 	if returned, ok, err := count(doc.NumberReturned); err != nil || ok && returned != len(features) {
 		return Page{}, errShape
+	}
+	if len(features) > MaxFeatures {
+		// More buildings than the limit asked for: the corridor holds more
+		// than one page, so the segment stays unclassified, as for any
+		// truncated page (#776 review N4), and its footprints are not read.
+		return Page{Truncated: true}, nil
 	}
 	page := Page{Footprints: make([]dhm.MultiPolygon, 0, len(features))}
 	page.Truncated = matched > len(features) || !hasMatched && len(features) >= MaxFeatures
