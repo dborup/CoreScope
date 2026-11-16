@@ -1,6 +1,6 @@
 package main
 
-// Last known advert hash size per node (#807).
+// Last known advert facts per node (#807 hash size, #848 last advert).
 //
 // computeNodeHashSizeInfo only sees adverts inside the in-memory packet-store
 // window. A repeater whose flood-advert interval is longer than the window
@@ -11,8 +11,14 @@ package main
 // ADVERT from SQLite, refreshed in the background. It only fills hash_size
 // when the window has no value: the window always wins, and
 // hash_size_inconsistent / hash_sizes_seen still come from the window alone.
+//
+// The same snapshot holds each node's newest own ADVERT timestamp (#848),
+// which the health endpoints use for stats.lastAdvert when the window has
+// none (applyLastKnownAdvert), so a node quiet longer than the window does
+// not read as "Last activity unknown".
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -21,10 +27,10 @@ import (
 	"github.com/meshcore-analyzer/packetpath"
 )
 
-// lastKnownHashSizeRefreshInterval is how often the snapshot is re-read. The
+// lastKnownAdvertRefreshInterval is how often the snapshot is re-read. The
 // window covers every advert newer than the store retention, so the snapshot
 // only matters once an advert has aged out; a few minutes of lag is harmless.
-const lastKnownHashSizeRefreshInterval = 10 * time.Minute
+const lastKnownAdvertRefreshInterval = 10 * time.Minute
 
 // advertDeclaredHashSize returns the hash size an ADVERT's path byte declares,
 // or ok=false when the packet says nothing about it. Shared by the window scan
@@ -59,86 +65,141 @@ func advertDeclaredHashSize(rawHex string) (int, bool) {
 	return int((pathByte>>6)&0x3) + 1, true
 }
 
-// lastKnownAdvertHashSizeSQL returns, for every row of nodes, the raw_hex of
-// that node's newest ADVERT that can declare a size. It is one statement with
-// one correlated subquery per node; each subquery seeks
-// idx_transmissions_from_pubkey and walks it newest id first, stopping at the
-// first match (LIMIT 1, no sort). The unary + on payload_type keeps the
-// planner off idx_transmissions_payload_type, which would visit every ADVERT
-// in the database (same reasoning as nodeAdvertScanSQL). The two NOT clauses
-// pre-filter the sizeless zero-hop direct adverts so the walk does not stop on
-// one; advertDeclaredHashSize re-checks every returned row in Go, which stays
-// the single authority (a row the SQL lets through but Go rejects simply
-// leaves the node unknown).
-var lastKnownAdvertHashSizeSQL = fmt.Sprintf(`SELECT n.public_key, (
-		SELECT t.raw_hex FROM transmissions t
-		WHERE t.from_pubkey = n.public_key AND +t.payload_type = %d
-		  AND NOT (COALESCE(t.route_type, -1) = %d AND substr(t.raw_hex, 3, 2) = '00')
-		  AND NOT (COALESCE(t.route_type, -1) = %d AND substr(t.raw_hex, 11, 2) = '00')
-		ORDER BY t.id DESC LIMIT 1)
-	FROM nodes n`, PayloadADVERT, RouteDirect, RouteTransportDirect)
+// LastKnownAdvert is what the database remembers about a node's adverts,
+// for when the packet-store window has nothing (#807, #848).
+type LastKnownAdvert struct {
+	// HashSize is the size declared by the node's newest size-declaring
+	// ADVERT; 0 means unknown.
+	HashSize int
+	// LastAdvert is the first_seen of the node's newest own ADVERT under the
+	// window's identity rule (ownAdvertMatches); "" means none.
+	LastAdvert string
+}
 
-// LoadLastKnownAdvertHashSizes reads each node's newest size-declaring ADVERT
-// and returns pubkey → hash size. Nodes without such an advert are absent.
-// Read-only. Fails on databases that predate transmissions.from_pubkey.
-func (db *DB) LoadLastKnownAdvertHashSizes() (map[string]int, error) {
-	rows, err := db.conn.Query(lastKnownAdvertHashSizeSQL)
+// lastKnownAdvertJSON is decoded_json when it is valid JSON, else NULL, so
+// json_extract never raises on a malformed row.
+const lastKnownAdvertJSON = `CASE WHEN json_valid(t.decoded_json) THEN t.decoded_json END`
+
+// lastKnownAdvertSQL returns, for every row of nodes, the raw_hex of that
+// node's newest ADVERT that can declare a size (#807), and the first_seen and
+// decoded_json of its newest own ADVERT (#848). It is one statement with two
+// correlated subqueries per node; each seeks idx_transmissions_from_pubkey
+// and walks it newest id first, stopping at the first match (LIMIT 1, no
+// sort). The second returns a rowid, joined back by primary key.
+//
+//   - The unary + on payload_type keeps the planner off
+//     idx_transmissions_payload_type, which would visit every ADVERT in the
+//     database (same reasoning as nodeAdvertScanSQL).
+//   - Size: the two NOT clauses pre-filter the sizeless zero-hop direct
+//     adverts so the walk does not stop on one; advertDeclaredHashSize
+//     re-checks every returned row in Go.
+//   - Last advert: the same identity rule as the window (txIsOwnAdvert):
+//     exact origin (from_pubkey and the decoded pubKey both equal the node's
+//     key, never a path or prefix match) and a signature that is not invalid.
+//     The walk skips rows that fail it, so a forged advert can neither count
+//     nor hide an older valid one. lastKnownAdvertTimestamp re-checks the
+//     returned row in Go.
+var lastKnownAdvertSQL = fmt.Sprintf(`SELECT k.public_key, k.size_raw, a.first_seen, a.decoded_json
+	FROM (SELECT n.public_key AS public_key, (
+		SELECT t.raw_hex FROM transmissions t
+		WHERE t.from_pubkey = n.public_key AND +t.payload_type = %[1]d
+		  AND NOT (COALESCE(t.route_type, -1) = %[2]d AND substr(t.raw_hex, 3, 2) = '00')
+		  AND NOT (COALESCE(t.route_type, -1) = %[3]d AND substr(t.raw_hex, 11, 2) = '00')
+		ORDER BY t.id DESC LIMIT 1) AS size_raw, (
+		SELECT t.id FROM transmissions t
+		WHERE t.from_pubkey = n.public_key AND +t.payload_type = %[1]d
+		  AND json_extract(%[4]s, '$.signatureValid') IS NOT 0
+		  AND lower(json_extract(%[4]s, '$.pubKey')) = lower(n.public_key)
+		ORDER BY t.id DESC LIMIT 1) AS advert_id
+	FROM nodes n) k
+	LEFT JOIN transmissions a ON a.id = k.advert_id`, PayloadADVERT, RouteDirect, RouteTransportDirect, lastKnownAdvertJSON)
+
+// lastKnownAdvertTimestamp re-checks one snapshot row against the window's
+// identity rule and returns its timestamp, or "" when it does not count.
+func lastKnownAdvertTimestamp(pubkey, firstSeen, decodedJSON string) string {
+	var d struct {
+		PubKey         string `json:"pubKey"`
+		SignatureValid *bool  `json:"signatureValid"`
+	}
+	if json.Unmarshal([]byte(decodedJSON), &d) != nil {
+		return ""
+	}
+	if !ownAdvertMatches(d.PubKey, d.SignatureValid != nil && !*d.SignatureValid, pubkey) {
+		return ""
+	}
+	if _, ok := parseRelayTS(firstSeen); !ok {
+		return ""
+	}
+	return firstSeen
+}
+
+// LoadLastKnownAdverts reads each node's last known advert facts. Nodes
+// without any are absent. Read-only. Fails on databases that predate
+// transmissions.from_pubkey.
+func (db *DB) LoadLastKnownAdverts() (map[string]LastKnownAdvert, error) {
+	rows, err := db.conn.Query(lastKnownAdvertSQL)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make(map[string]int)
+	out := make(map[string]LastKnownAdvert)
 	for rows.Next() {
 		var pk string
-		var raw *string
-		if err := rows.Scan(&pk, &raw); err != nil {
+		var raw, firstSeen, decoded *string
+		if err := rows.Scan(&pk, &raw, &firstSeen, &decoded); err != nil {
 			return nil, err
 		}
-		if raw == nil {
-			continue
+		var known LastKnownAdvert
+		if raw != nil {
+			if hs, ok := advertDeclaredHashSize(*raw); ok {
+				known.HashSize = hs
+			}
 		}
-		if hs, ok := advertDeclaredHashSize(*raw); ok {
-			out[pk] = hs
+		if firstSeen != nil && decoded != nil {
+			known.LastAdvert = lastKnownAdvertTimestamp(pk, *firstSeen, *decoded)
+		}
+		if known != (LastKnownAdvert{}) {
+			out[pk] = known
 		}
 	}
 	return out, rows.Err()
 }
 
-// refreshLastKnownHashSizes re-reads the snapshot and installs it. On error
+// refreshLastKnownAdverts re-reads the snapshot and installs it. On error
 // the previous snapshot stays in place.
-func (s *PacketStore) refreshLastKnownHashSizes() {
+func (s *PacketStore) refreshLastKnownAdverts() {
 	if s.db == nil || s.db.conn == nil {
 		return
 	}
 	start := time.Now()
-	m, err := s.db.LoadLastKnownAdvertHashSizes()
+	m, err := s.db.LoadLastKnownAdverts()
 	if err != nil {
-		log.Printf("[hash-size] last-known advert hash size load failed: %v", err)
+		log.Printf("[last-known-advert] load failed: %v", err)
 		return
 	}
-	s.lastKnownHashSizes.Store(&m)
+	s.lastKnownAdverts.Store(&m)
 	if d := time.Since(start); d > time.Second {
-		log.Printf("[hash-size] last-known advert hash sizes: %d nodes in %s", len(m), d)
+		log.Printf("[last-known-advert] %d nodes in %s", len(m), d)
 	}
 }
 
-// LastKnownHashSizes returns the current snapshot (read-only; nil before the
-// first successful load, which reads as "no remembered sizes").
-func (s *PacketStore) LastKnownHashSizes() map[string]int {
-	if p := s.lastKnownHashSizes.Load(); p != nil {
+// LastKnownAdverts returns the current snapshot (read-only; nil before the
+// first successful load, which reads as "nothing remembered").
+func (s *PacketStore) LastKnownAdverts() map[string]LastKnownAdvert {
+	if p := s.lastKnownAdverts.Load(); p != nil {
 		return *p
 	}
 	return nil
 }
 
-// StartLastKnownHashSizeRecomputer loads the snapshot synchronously (so the
+// StartLastKnownAdvertRecomputer loads the snapshot synchronously (so the
 // first request after a restart already has it) and then refreshes it every
 // interval. The returned func stops the goroutine.
-func (s *PacketStore) StartLastKnownHashSizeRecomputer(interval time.Duration) func() {
+func (s *PacketStore) StartLastKnownAdvertRecomputer(interval time.Duration) func() {
 	if interval <= 0 {
-		interval = lastKnownHashSizeRefreshInterval
+		interval = lastKnownAdvertRefreshInterval
 	}
-	s.refreshLastKnownHashSizes()
+	s.refreshLastKnownAdverts()
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -148,7 +209,7 @@ func (s *PacketStore) StartLastKnownHashSizeRecomputer(interval time.Duration) f
 		for {
 			select {
 			case <-t.C:
-				s.refreshLastKnownHashSizes()
+				s.refreshLastKnownAdverts()
 			case <-stop:
 				return
 			}

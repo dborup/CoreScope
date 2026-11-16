@@ -426,7 +426,8 @@ func heardBySchemas() map[string]*openAPISchema {
 			"avgSnr":             num("Mean SNR (dB) over the node's direct receptions (HeardDirectObserver); null without one. Other copies carry the SNR of whichever node the observer heard."),
 			"avgHops":            {Type: "integer", Description: "Node health only: rounded mean path length of the node's transmissions."},
 			"lastHeard":          {Type: "string", Nullable: true, Description: "Newest own ADVERT or unambiguous relay evidence (#64)."},
-			"lastAdvert":         {Type: "string", Nullable: true, Description: "Newest own ADVERT."},
+			"lastAdvert":         {Type: "string", Nullable: true, Description: "Newest own ADVERT: from the packet-store window, else the newest own ADVERT in the database (#848)."},
+			"lastAdvertSource":   {Type: "string", Description: "Where lastAdvert came from: window (in-memory packet store) or db (database, outside the window). Omitted when lastAdvert is null (#848)."},
 		},
 	}
 	direct := &openAPISchema{Type: "array", Items: openAPIRef("HeardDirectObserver"), Description: "Observers that received the node's own transmission, most direct receptions first."}
