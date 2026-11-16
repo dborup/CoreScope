@@ -34,5 +34,14 @@ test('the terrain share page and the customizer guide link to it', () => {
   assert.ok(read('docs/user-guide/customization.md').includes('(../node-share-previews.md)'), 'customization.md');
 });
 
+test('every relative .md link in the three pages resolves', () => {
+  ['docs/node-share-previews.md', 'docs/share-previews.md', 'docs/user-guide/customization.md'].forEach((f) => {
+    const links = [...read(f).matchAll(/\]\(([^)#:]+\.md)(#[^)]*)?\)/g)].map((m) => m[1]);
+    links.forEach((l) => {
+      assert.ok(fs.existsSync(path.join(__dirname, path.dirname(f), l)), f + ' links to a missing ' + l);
+    });
+  });
+});
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed\n');
 if (failed > 0) process.exit(1);
