@@ -1901,7 +1901,9 @@ body.scroll-locked { overflow: hidden; }
   width: clamp(160px, 18vw, 240px);
   max-width: calc(100vw - 24px);
   font-size: 13px;
-  max-height: calc(100% - 24px); overflow-y: auto;
+  /* #839: and above the map credit (bottom right), which ran under it;
+     map.js publishes the credit's height. */
+  max-height: calc(100% - 24px - var(--map-credit-height, 0px)); overflow-y: auto;
   /* #1236: keep the scrollbar gutter reserved so the scroll affordance is
      visible even when content briefly fits — users get a consistent visual
      cue that the panel is scrollable. */
@@ -2903,6 +2905,18 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 }
 [data-theme="dark"] .leaflet-control-layers-toggle {
   filter: invert(1);
+}
+
+/* #839 — every map credit follows the theme (Leaflet's own is a white bar,
+   which stayed light over a dark map). One more class than leaflet.css's
+   rule, which loads after this file; the compact inset credit below and the
+   Matrix theme still override it. */
+.leaflet-container .leaflet-control.leaflet-control-attribution {
+  background: color-mix(in srgb, var(--surface-1) 85%, transparent);
+  color: var(--text-muted);
+}
+.leaflet-container .leaflet-control.leaflet-control-attribution a {
+  color: var(--link-color);
 }
 
 /* #752 — the inset maps credit the viewer's active base map through the
