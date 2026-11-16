@@ -353,6 +353,26 @@
   var SITE_LABEL = 'Antenna sites (mast, tower or rooftop)';
   var INTERFERENCE_LABEL = 'Nearby transmitters (interference)';
 
+  /* #839 — Mastedatabasen publishes a commissioning date as the Danish
+   * local midnight in UTC ("2022-02-02T23:00:00Z" is 3 February), so the
+   * popup shows the date in Danish time as YYYY-MM-DD. Anything that is
+   * not an ISO date or a timestamp with its zone is shown as published. */
+  var ISO_DATE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2}))?$/;
+  var _dkDateFormat = null;
+  function commissionedDate(v) {
+    if (typeof v !== 'string' || !ISO_DATE.test(v)) return v;
+    var d = new Date(v);
+    if (isNaN(d.getTime())) return v;
+    try {
+      if (!_dkDateFormat) {
+        _dkDateFormat = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Copenhagen', year: 'numeric', month: '2-digit', day: '2-digit' });
+      }
+      var p = {};
+      _dkDateFormat.formatToParts(d).forEach(function (x) { p[x.type] = x.value; });
+      return p.year + '-' + p.month + '-' + p.day;
+    } catch (_) { return v; }
+  }
+
   /**
    * The popup of one site: published fields only, each escaped.
    * @param {object} site  one entry of MastsCellResponse.sites
@@ -377,7 +397,7 @@
         var en = entries[i];
         h += '<tr' + (en.interference ? ' class="mc-masts-int"' : '') + '><td>' + esc(en.technology) + '</td><td>' +
           (en.bandMHz ? esc(en.bandMHz) : '—') + '</td><td>' + esc(en.service || '—') + '</td><td>' +
-          esc(en.commissioned || '—') + '</td></tr>';
+          esc(commissionedDate(en.commissioned) || '—') + '</td></tr>';
       }
       h += '</tbody></table>';
     }
@@ -628,6 +648,7 @@
     cellsForView: cellsForView,
     createCellLoader: createCellLoader,
     popupHTML: popupHTML,
+    commissionedDate: commissionedDate,
     statusText: statusText,
     /** The overlay layer of one category ('sites' | 'interference'). */
     layer: function (map, cfg, kind) { return controllerFor(map, cfg).groups[kind]; },

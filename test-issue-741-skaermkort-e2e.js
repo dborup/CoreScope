@@ -398,7 +398,7 @@ function checkGetMap(url, layer, base = WMS_BASE) {
         const ids = await offeredIds(page);
         for (const id of ALL_IDS) assert(ids.includes(id), id + ' not offered: ' + ids.join(','));
         const labels = await page.$$eval('.leaflet-control-layers-base label[data-tile-id^="dataforsyningen-skaermkort"]', ls => ls.map(l => l.textContent.trim()));
-        assert(labels.join('|') === 'Skærmkort (Denmark)|Skærmkort grå (Denmark)|Skærmkort dæmpet (Denmark)|Skærmkort grå (Denmark)', 'labels: ' + labels.join('|'));
+        assert(labels.join('|') === 'Skærmkort (Denmark)|Skærmkort grå (Denmark)|Skærmkort dæmpet (Denmark)|Skærmkort grå (Denmark) (dark)', 'labels: ' + labels.join('|'));
         await pan(page, 250, 0);
         await zoomIn(page);
         assert(rec.wms.length === 0, 'requests before a pick: ' + rec.wms.length);

@@ -174,6 +174,7 @@ run test-issue-741-skaermkort.js
 run test-issue-741-natur-friluft.js
 run test-issue-741-customizer-base-maps.js
 run test-issue-839-map-chrome-fit.js
+run test-issue-839-map-polish.js
 run test-issue-764-no-osm-fallback.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js

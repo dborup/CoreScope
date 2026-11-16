@@ -42,6 +42,7 @@
   let areaOutlineHandler = null;
   let mapThemeObs = null;        // theme observer and tile-provider listener
   let tileProviderHandler = null; // of this mount, removed by destroy()
+  let creditObs = null;          // #839 credit-height observer, removed by destroy()
 
   // Returns alive(): true while the mount that called mapToken() is current.
   function mapToken() {
@@ -528,6 +529,20 @@
       controlsPanel.classList.toggle('collapsed', controlsCollapsed);
       toggleBtn.setAttribute('aria-expanded', String(!controlsCollapsed));
     });
+
+    // #839: the panel reaches down to the bottom-right map credit, which ran
+    // under it. Publish the credit's height as --map-credit-height so the
+    // panel's max-height (style.css) stops above it; it follows the credit
+    // as overlays add and remove theirs.
+    const credit = map.attributionControl && map.attributionControl.getContainer();
+    if (credit) {
+      const publishCredit = () => controlsPanel.style.setProperty('--map-credit-height', Math.ceil(credit.getBoundingClientRect().height) + 'px');
+      publishCredit();
+      if (typeof ResizeObserver === 'function') {
+        creditObs = new ResizeObserver(publishCredit);
+        creditObs.observe(credit);
+      }
+    }
 
     // #1329: Map controls accordion. Make each section's legend a button-
     // style toggle with aria-expanded. On mobile (≤640px) only one section
@@ -3284,6 +3299,8 @@
     if (mapThemeObs) mapThemeObs.disconnect();
     if (tileProviderHandler) window.removeEventListener('mc-tile-provider-changed', tileProviderHandler);
     mapThemeObs = tileProviderHandler = null;
+    if (creditObs) creditObs.disconnect();
+    creditObs = null;
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
     // #1771 review fix: invalidate the Important Links overlay's in-flight

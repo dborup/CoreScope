@@ -23,7 +23,9 @@
  *     the #728 ortho layer extends; the tile pane records its attributes;
  *   - the map has a settable view (map.view: zoom and pixel bounds) behind
  *     getZoom and getPixelBounds, and tile layers getTileSize (#728 N3);
- *   - L.stamp, as Leaflet stamps the layer of each control input (#734).
+ *   - L.stamp, as Leaflet stamps the layer of each control input (#734);
+ *   - like Leaflet, a layer on a map has `_map` (the #839 base-map retry
+ *     reads the map from it), cleared when it is removed.
  */
 'use strict';
 const vm = require('vm');
@@ -264,7 +266,8 @@ function makeMap() {
     addLayer(l) {
       if (layers.has(l)) return map;
       layers.add(l);
-      if (l.kind === 'layerGroup') { l._map = map; l.members.forEach(m => map.addLayer(m)); }
+      l._map = map;
+      if (l.kind === 'layerGroup') l.members.forEach(m => map.addLayer(m));
       if (map._controls.some(c => !c._removed && Object.values(c.overlays || {}).includes(l))) map.fire('overlayadd', { layer: l });
       map.fire('layeradd', { layer: l });
       // Leaflet's Map._layerAdd ends with layer.fire('add').
@@ -274,10 +277,12 @@ function makeMap() {
     removeLayer(l) {
       if (!layers.has(l)) return map;
       layers.delete(l);
-      if (l.kind === 'layerGroup') { l.members.forEach(m => map.removeLayer(m)); l._map = null; }
+      if (l.kind === 'layerGroup') l.members.forEach(m => map.removeLayer(m));
       map.fire('layerremove', { layer: l });
       if (map._controls.some(c => !c._removed && Object.values(c.overlays || {}).includes(l))) map.fire('overlayremove', { layer: l });
       if (l.fire) l.fire('remove');
+      // Leaflet's Map.removeLayer clears _map after the layer's 'remove'.
+      l._map = null;
       return map;
     },
   };
