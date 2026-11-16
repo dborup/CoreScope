@@ -10,6 +10,14 @@
       "measurementNote": "New suite; #839 CS-Macmini rc19 findings 1, 2, 7, 8, 9 with an intercepted client config (staging base maps with a dummy token, DHM overlays with Aerial, monuments, antenna sites), a stubbed /api/masts with one 9-station site, a stubbed monument lookup and 1x1 third-party tiles: at 375x560 (light, dark), 360x640 and 640x360 the open layer list ends above the credit and real touch swipes (no scrollTop fallback) plus a real tap reach Nearby transmitters; with the antenna site on the left, in the middle and on the right the popup clears every map button (the path-profile ruler included) and the credit, its source link can be swiped to and its close button tapped without arming the ruler; the monument popup on the right does the same; the antenna popup stays whole at 1440x900; the tap that closes the layer control asks for no monument info; Reset All forgets the layer control's hillshade and monuments; the customizer logs no colour-format warning. 24 cases, about 85s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
     },
     {
+      "file": "test-issue-792-elevation-overlay-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #792 colour-by-elevation DHM overlay with an intercepted dhm client-config block (dhm.overlays with the elevation entry), every elevation tile the proxy-rendered fixture test-fixtures/dhm-elevation-792.png and stubbed third-party tiles: a phone at 375x560 from a cold start turns it on by a real tap under the contours (z12 tiles, ?elevation=1, stored), sees the legend only while it is on (bar from the --dhm-elevation-* variables, 0/50/100/175 m) and the derived credit, taps + twice to z14 with no tile asked above z13, keeps it over a reload and taps it off; #831 F1: at z14 from a cold start, \"Contour lines\" is tapped without scrolling the layer list, with elevation off and on; the customizer opacity reaches the layer live; ?elevation=0 beats storage; no toggle without the entry. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-839-live-teardown-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },

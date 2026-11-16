@@ -6,52 +6,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"strings"
 	"testing"
-)
 
-func TestParseCSSColor(t *testing.T) {
-	ok := []struct {
-		in   string
-		want color.NRGBA
-	}{
-		{"#abc", color.NRGBA{0xaa, 0xbb, 0xcc, 0xff}},
-		{"#ABCD", color.NRGBA{0xaa, 0xbb, 0xcc, 0xdd}},
-		{"#1d4ed8", color.NRGBA{0x1d, 0x4e, 0xd8, 0xff}},
-		{"#1D4ED8", color.NRGBA{0x1d, 0x4e, 0xd8, 0xff}},
-		{"#1d4ed880", color.NRGBA{0x1d, 0x4e, 0xd8, 0x80}},
-		{"  #fff  ", color.NRGBA{0xff, 0xff, 0xff, 0xff}},
-		{"rgb(1, 2, 3)", color.NRGBA{1, 2, 3, 0xff}},
-		{"rgb(255,0,128)", color.NRGBA{255, 0, 128, 0xff}},
-		{"RGB(10, 20, 30)", color.NRGBA{10, 20, 30, 0xff}},
-		// The shipped --terrain-clutter values.
-		{"rgba(122, 170, 132, 0.45)", color.NRGBA{122, 170, 132, 115}},
-		{"rgba(84, 124, 92, 0.55)", color.NRGBA{84, 124, 92, 140}},
-		{"rgba(0, 0, 0, 0)", color.NRGBA{0, 0, 0, 0}},
-		{"rgba(0, 0, 0, 1)", color.NRGBA{0, 0, 0, 255}},
-		{"rgba(0, 0, 0, .5)", color.NRGBA{0, 0, 0, 128}},
-		{"rgba( 74 , 158 , 255 , 0.15 )", color.NRGBA{74, 158, 255, 38}},
-	}
-	for _, c := range ok {
-		got, valid := ParseCSSColor(c.in)
-		if !valid || got != c.want {
-			t.Errorf("ParseCSSColor(%q) = %v, %v; want %v, true", c.in, got, valid, c.want)
-		}
-	}
-	bad := []string{
-		"", "#", "#ab", "#abcde", "#abcdefa", "#ggg", "#12345g", "abc", "red", "transparent",
-		"var(--los-line)", "rgb(256, 0, 0)", "rgb(-1, 0, 0)", "rgb(1, 2)", "rgb(1, 2, 3, 4, 5)",
-		"rgb(1, 2, 3", "rgb 1, 2, 3)", "rgba(1, 2, 3, 1.5)", "rgba(1, 2, 3, -0.1)", "rgba(1, 2, 3, NaN)",
-		"rgba(1, 2, 3, Inf)", "rgba(1, 2, 3, 1e0)", "rgb(1.5, 2, 3)", "rgb(+1, 2, 3)", "rgb(0x1, 2, 3)",
-		"rgb(1, 2, 3) x", "#fff;", "hsl(0, 0%, 0%)", "rgba(1, 2, 3, 0.5, 1)", "rgba(1,2,3,)",
-		strings.Repeat("#", 200),
-	}
-	for _, in := range bad {
-		if got, valid := ParseCSSColor(in); valid {
-			t.Errorf("ParseCSSColor(%q) = %v, true; want invalid", in, got)
-		}
-	}
-}
+	"github.com/meshcore-analyzer/cardkit"
+)
 
 // The shipped palette is not a second copy of the colours: it is pinned to
 // the two files the browser takes them from. The six terrain keys come from
@@ -86,7 +44,7 @@ func TestDefaultPaletteMatchesFrontend(t *testing.T) {
 	for _, dark := range []bool{false, true} {
 		pal := DefaultPalette(dark)
 		for _, pf := range paletteFields(&pal) {
-			key := pf.key
+			key := pf.Key
 			var want string
 			if v, ok := terrainVars[key]; ok {
 				all := regexp.MustCompile(regexp.QuoteMeta(v)+`:\s*(#[0-9a-fA-F]+|rgba?\([^)]*\))\s*;`).FindAllSubmatch(css, -1)
@@ -109,11 +67,11 @@ func TestDefaultPaletteMatchesFrontend(t *testing.T) {
 				}
 				want = presetValue(section, key)
 			}
-			wantC, ok := ParseCSSColor(want)
+			wantC, ok := cardkit.ParseCSSColor(want)
 			if !ok {
 				t.Fatalf("%s: frontend value %q does not parse", key, want)
 			}
-			got := *pf.c
+			got := *pf.C
 			if got != wantC {
 				t.Errorf("dark=%v %s = %v; frontend has %s", dark, key, got, want)
 			}

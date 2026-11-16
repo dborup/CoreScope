@@ -598,8 +598,8 @@
   }
 
   // ── #734 — DHM overlay defaults ──
-  // Which hillshade a map starts with, whether the contour lines do, and
-  // the contour min-zoom. The rule, the built-ins and the server's bounds
+  // Which hillshade a map starts with, whether the contour lines do, the
+  // contour min-zoom and (#792) the elevation colours' opacity. The rule, the built-ins and the server's bounds
   // live in public/map-tile-providers.js (MC_DHMOverlays), which the
   // overlays use, so the customizer stores exactly what they read. The
   // server's map.dhm config itself stays server-only (#681 M6): this is a
@@ -1488,6 +1488,7 @@
               errors.push('Invalid DHM overlay setting: dhmOverlays.' + dsk + ' = "' + dv + '" \u2014 must be ' +
                 (dsk === 'hillshade' ? DO.HILLSHADE_VALUES.slice(0, -1).join(', ') + ' or ' + DO.HILLSHADE_VALUES[DO.HILLSHADE_VALUES.length - 1]
                   : dsk === 'contours' ? 'true or false'
+                  : dsk === 'elevationOpacity' ? 'a whole percent ' + DO.ELEVATION_OPACITY_RANGE[0] + '-' + DO.ELEVATION_OPACITY_RANGE[1]
                   : dRange ? 'a whole zoom ' + dRange[0] + '-' + dRange[1] : 'a whole zoom'));
             }
           }
@@ -2310,6 +2311,15 @@
             '<div class="cust-hint">The server draws them from ' + range[0] + '; you can only raise it</div></div>' +
           '<input type="number" id="cv2-overlay-contourMinZoom" min="' + range[0] + '" max="' + range[1] + '" step="1" ' +
             'inputmode="numeric" data-cv2-overlay="contourMinZoom" value="' + escAttr(String(d.contourMinZoom)) + '">' +
+        '</div>';
+    }
+    if (has('elevation')) {
+      var op = D.ELEVATION_OPACITY_RANGE;
+      html += '<div class="cust-terrain-row">' +
+          '<div><label for="cv2-overlay-elevationOpacity">Elevation colours opacity (%)' + _overrideDot('dhmOverlays', 'elevationOpacity') + '</label>' +
+            '<div class="cust-hint">How strongly the colour-by-elevation layer covers the map, ' + op[0] + '-' + op[1] + '</div></div>' +
+          '<input type="number" id="cv2-overlay-elevationOpacity" min="' + op[0] + '" max="' + op[1] + '" step="5" ' +
+            'inputmode="numeric" data-cv2-overlay="elevationOpacity" value="' + escAttr(String(d.elevationOpacity)) + '">' +
         '</div>';
     }
     return html;
@@ -3244,6 +3254,7 @@
         if (!D) return;
         var v = key === 'contours' ? !!inp.checked
           : key === 'contourMinZoom' ? (/^[0-9]{1,2}$/.test(inp.value) ? Number(inp.value) : null)
+          : key === 'elevationOpacity' ? (/^[0-9]{1,3}$/.test(inp.value) ? Number(inp.value) : null)
           : inp.value;
         var now = dhmOverlaySettings(_getEffective());
         var built = D.settings({});

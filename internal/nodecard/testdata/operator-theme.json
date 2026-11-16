@@ -1,0 +1,23 @@
+{
+  "theme": {
+    "background": "#fef7f2",
+    "text": "#1c0f06",
+    "textMuted": "#6b5344",
+    "border": "#e8d5c8",
+    "statusRed": "#b91c1c",
+    "accent": "#c2410c"
+  },
+  "themeDark": {
+    "background": "#1a0f08",
+    "text": "#f0ddd0",
+    "textMuted": "#b09080",
+    "border": "#4a2a18",
+    "statusRed": "#f87171"
+  },
+  "nodeColors": {
+    "repeater": "#7c3aed",
+    "room": "#0e7490",
+    "sensor": "#a16207",
+    "companion": "#2563eb"
+  }
+}

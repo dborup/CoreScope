@@ -83,12 +83,16 @@ require github.com/meshcore-analyzer/mastedb v0.0.0
 
 replace github.com/meshcore-analyzer/mastedb => ../../internal/mastedb
 
-// internal/profilecard (#727): the share-card renderer. It brings
-// golang.org/x/image, pinned there at v0.23.0 to keep go 1.22, and
-// golang.org/x/text.
+// internal/profilecard (#727): the share-card renderer. It draws through
+// internal/cardkit (#811 M1), which brings golang.org/x/image, pinned
+// there at v0.23.0 to keep go 1.22, and golang.org/x/text.
 require github.com/meshcore-analyzer/profilecard v0.0.0
 
 replace github.com/meshcore-analyzer/profilecard => ../../internal/profilecard
+
+require github.com/meshcore-analyzer/cardkit v0.0.0 // indirect
+
+replace github.com/meshcore-analyzer/cardkit => ../../internal/cardkit
 
 require github.com/meshcore-analyzer/copdem v0.0.0
 

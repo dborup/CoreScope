@@ -2,11 +2,8 @@ package profilecard
 
 import (
 	"image/color"
-	"math"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
+
+	"github.com/meshcore-analyzer/cardkit"
 )
 
 // Palette is every colour the card uses. The keys are the ones theme.json
@@ -19,19 +16,14 @@ type Palette struct {
 	Fresnel100, Fresnel60, ProfileBlocked color.NRGBA
 }
 
-type paletteField struct {
-	key string // theme.json key
-	c   *color.NRGBA
-}
-
 // paletteFields maps each theme.json key to its field in p, in a fixed
 // order.
-func paletteFields(p *Palette) []paletteField {
-	return []paletteField{
-		{"background", &p.Background}, {"text", &p.Text}, {"textMuted", &p.TextMuted}, {"border", &p.Border},
-		{"statusGreen", &p.StatusGreen}, {"statusYellow", &p.StatusYellow}, {"statusRed", &p.StatusRed},
-		{"terrainFill", &p.TerrainFill}, {"terrainClutter", &p.TerrainClutter}, {"losLine", &p.LosLine},
-		{"fresnel100", &p.Fresnel100}, {"fresnel60", &p.Fresnel60}, {"profileBlocked", &p.ProfileBlocked},
+func paletteFields(p *Palette) []cardkit.ColorField {
+	return []cardkit.ColorField{
+		{Key: "background", C: &p.Background}, {Key: "text", C: &p.Text}, {Key: "textMuted", C: &p.TextMuted}, {Key: "border", C: &p.Border},
+		{Key: "statusGreen", C: &p.StatusGreen}, {Key: "statusYellow", C: &p.StatusYellow}, {Key: "statusRed", C: &p.StatusRed},
+		{Key: "terrainFill", C: &p.TerrainFill}, {Key: "terrainClutter", C: &p.TerrainClutter}, {Key: "losLine", C: &p.LosLine},
+		{Key: "fresnel100", C: &p.Fresnel100}, {Key: "fresnel60", C: &p.Fresnel60}, {Key: "profileBlocked", C: &p.ProfileBlocked},
 	}
 }
 
@@ -65,111 +57,28 @@ func DefaultPalette(dark bool) Palette {
 		if dark {
 			v = t.dark
 		}
-		*fields[i].c, _ = ParseCSSColor(v)
+		*fields[i].C, _ = cardkit.ParseCSSColor(v)
 	}
 	return p
 }
 
 // ResolvePalette is the palette for one theme.json section ("theme" or
 // "themeDark"): each known key that parses replaces the shipped default of
-// the same section; keys it does not know are ignored. bad lists, sorted,
-// the keys whose value did not parse, so the caller can warn once per key.
-// It never returns a value: theme.json is operator input and does not
-// belong in a log line.
+// the same section; keys it does not know are ignored. bad is as for
+// cardkit.ResolveColors.
 func ResolvePalette(section map[string]string, dark bool) (p Palette, bad []string) {
 	p = DefaultPalette(dark)
-	for _, f := range paletteFields(&p) {
-		v, ok := section[f.key]
-		if !ok {
-			continue
-		}
-		if c, ok := ParseCSSColor(v); ok {
-			*f.c = c
-		} else {
-			bad = append(bad, f.key)
-		}
-	}
-	sort.Strings(bad)
+	// Two statements: in "return p, f(&p)" Go does not specify whether p
+	// is read before or after f writes through &p.
+	bad = cardkit.ResolveColors(section, paletteFields(&p))
 	return p, bad
 }
 
 // ResolveTheme is the palette the browser shows for one mode, from the
-// theme.json-style sections theme and themeDark: in dark mode the browser
-// draws Object.assign({}, theme, themeDark) (public/app.js
-// reapplyUserThemeVars), so a key set only in theme applies in dark mode
-// too, and themeDark wins where both have it; light mode reads theme
-// alone. The inputs are not modified. bad is as for ResolvePalette, for
-// the merged section: a bad value that themeDark overrides is never used,
-// so it is not reported.
+// theme.json-style sections theme and themeDark, merged as the browser
+// merges them (cardkit.MergeTheme). bad is as for ResolvePalette, for the
+// merged section: a bad value that themeDark overrides is never used, so
+// it is not reported.
 func ResolveTheme(theme, themeDark map[string]string, dark bool) (Palette, []string) {
-	if !dark {
-		return ResolvePalette(theme, false)
-	}
-	merged := make(map[string]string, len(theme)+len(themeDark))
-	for k, v := range theme {
-		merged[k] = v
-	}
-	for k, v := range themeDark {
-		merged[k] = v
-	}
-	return ResolvePalette(merged, true)
-}
-
-var (
-	hexColorRe = regexp.MustCompile(`^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$`)
-	rgbRe      = regexp.MustCompile(`^(?i:rgb)\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$`)
-	rgbaRe     = regexp.MustCompile(`^(?i:rgba)\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*([01]|0?\.\d{1,6}|1\.0{1,6})\s*\)$`)
-)
-
-// ParseCSSColor reads the CSS colour forms theme.json and style.css use for
-// these keys: #rgb, #rgba, #rrggbb, #rrggbbaa, rgb(r, g, b) and
-// rgba(r, g, b, a) with integer channels 0–255 and a plain-decimal alpha
-// 0–1. Anything else (names, var(), hsl(), exponents, percentages) is
-// rejected rather than guessed at.
-func ParseCSSColor(s string) (color.NRGBA, bool) {
-	s = strings.TrimSpace(s)
-	if len(s) > 64 {
-		return color.NRGBA{}, false
-	}
-	if hexColorRe.MatchString(s) {
-		h := s[1:]
-		if len(h) <= 4 {
-			var b strings.Builder
-			for _, c := range h {
-				b.WriteRune(c)
-				b.WriteRune(c)
-			}
-			h = b.String()
-		}
-		if len(h) == 6 {
-			h += "ff"
-		}
-		v, err := strconv.ParseUint(h, 16, 32)
-		if err != nil {
-			return color.NRGBA{}, false
-		}
-		return color.NRGBA{uint8(v >> 24), uint8(v >> 16), uint8(v >> 8), uint8(v)}, true
-	}
-	m := rgbRe.FindStringSubmatch(s)
-	alpha := uint8(255)
-	if m == nil {
-		m = rgbaRe.FindStringSubmatch(s)
-		if m == nil {
-			return color.NRGBA{}, false
-		}
-		a, err := strconv.ParseFloat(m[4], 64)
-		if err != nil || a < 0 || a > 1 {
-			return color.NRGBA{}, false
-		}
-		alpha = uint8(math.Floor(float64(a*255) + 0.5))
-	}
-	var ch [3]uint8
-	for i := range ch {
-		v, err := strconv.Atoi(m[i+1])
-		if err != nil || v > 255 {
-			return color.NRGBA{}, false
-		}
-		ch[i] = uint8(v)
-	}
-	return color.NRGBA{ch[0], ch[1], ch[2], alpha}, true
+	return ResolvePalette(cardkit.MergeTheme(theme, themeDark, dark), dark)
 }
