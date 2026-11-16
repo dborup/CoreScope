@@ -37,7 +37,6 @@ package main
 
 import (
 	"fmt"
-	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -206,7 +205,7 @@ func (p *terrainProfiler) sharePage(req terrainRequest) ogPage {
 		desc += " · antenna heights assumed"
 	}
 	pg := ogPage{
-		Title:       "Path profile: " + fmtMetres(round2(req.plan.DistanceM)),
+		Title:       "Path profile: " + profilecard.FmtDistance(round2(req.plan.DistanceM)),
 		Description: desc,
 		Path:        sharePath + "?" + shareQuery(req.q),
 	}
@@ -275,16 +274,4 @@ func shareRefParam(r terrainRef) string {
 		return r.pubkey
 	}
 	return strconv.FormatFloat(r.pt.Lat, 'f', -1, 64) + "," + strconv.FormatFloat(r.pt.Lon, 'f', -1, 64)
-}
-
-// fmtMetres is public/terrain-profile.js fmtMetres, so a preview states a
-// distance exactly as the panel it links to: one decimal, in km from 10 km.
-func fmtMetres(v float64) string {
-	if math.IsNaN(v) || math.IsInf(v, 0) {
-		return "—"
-	}
-	if math.Abs(v) >= 10000 {
-		return strconv.FormatFloat(math.Round(v/1000*10)/10, 'f', -1, 64) + " km"
-	}
-	return strconv.FormatFloat(math.Round(v*10)/10, 'f', -1, 64) + " m"
 }

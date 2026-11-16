@@ -368,14 +368,14 @@ func TestShareProfile_TagsForTwoNodes(t *testing.T) {
 }
 
 // The title states the distance exactly as the panel does for the same
-// query: fmtMetres over the JSON endpoint's distanceM. Measuring it cached
+// query: fmtDistance over the JSON endpoint's distanceM (#839 §8). Measuring it cached
 // the profile, so the card's verdict word follows (#727 M3).
 func TestShareProfile_DistanceMatchesTheProfile(t *testing.T) {
 	env := newShareEnv(t, true, nil)
 	b := offsetPt(56.1, 10.1, 3456, 2100)
 	resp := decodeProfile(t, env.get(pathQuery(shareKeyA, b)))
-	want := "Path profile: " + fmtMetres(resp.DistanceM) + " · " + profilecard.MainVerdict(resp).Word
-	if got := titleOf(t, env.share(shareQ(shareKeyA, b)).Body.String()); got != want || !strings.Contains(got, " m · ") {
+	want := "Path profile: " + profilecard.FmtDistance(resp.DistanceM) + " · " + profilecard.MainVerdict(resp).Word
+	if got := titleOf(t, env.share(shareQ(shareKeyA, b)).Body.String()); got != want || !strings.Contains(got, " km · ") {
 		t.Fatalf("title %q, want %q", got, want)
 	}
 }
@@ -786,18 +786,6 @@ func TestShareProfile_Settings(t *testing.T) {
 	}
 	if sc := cfg.DHM.Profile.Share; !sc.Enabled || sc.UpstreamPerMin == nil || *sc.UpstreamPerMin != 5 {
 		t.Fatalf("share config %+v", sc)
-	}
-}
-
-// fmtMetres is the panel's rule (public/terrain-profile.js fmtMetres).
-func TestFmtMetres(t *testing.T) {
-	for v, want := range map[float64]string{
-		0: "0 m", 12.34: "12.3 m", 9999.94: "9999.9 m", 9999.96: "10000 m",
-		10000: "10 km", 11149.99: "11.1 km", 11150: "11.2 km", 80000: "80 km",
-	} {
-		if got := fmtMetres(v); got != want {
-			t.Errorf("fmtMetres(%v) = %q, want %q", v, got, want)
-		}
 	}
 }
 

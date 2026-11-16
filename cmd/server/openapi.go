@@ -75,7 +75,7 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "freq", Description: "frequency in MHz, 150-2500", Type: "number"},
 			},
 			Errors: []routeError{
-				{Status: "400", Description: "Invalid or unknown parameter, identical endpoints, or path longer than map.dhm.profile.maxPathKm (default 80 km; no upstream call)."},
+				{Status: "400", Description: "Invalid or unknown parameter, identical endpoints, or path longer than map.dhm.profile.maxPathKm (default 80 km; no upstream call). A path that is too long answers {\"error\":\"path too long\",\"maxPathKm\":<limit>}."},
 				{Status: "404", Description: "Profile disabled, or a public key that is unknown, hidden or has no position."},
 				{Status: "429", Description: "Per-client budget of profiles not in the cache exceeded (map.dhm.profile.rateLimitPerMin, default 10/min). Retry-After gives the seconds to wait."},
 				{Status: "502", Description: "The elevation service failed; no upstream detail is returned."},

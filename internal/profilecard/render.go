@@ -166,11 +166,11 @@ func AltText(resp TerrainProfileResponse, names [2]string, opt Options) string {
 	main := verdictChip(resp)
 	a := fs.endpointLabel(resp.A, names[0], 0, opt.HideNames)
 	b := fs.endpointLabel(resp.B, names[1], 1, opt.HideNames)
-	txt := "Terrain profile from " + a + " to " + b + ", " + fmtMetres(resp.DistanceM) + ". " + main.label + ". " + main.detail
+	txt := "Terrain profile from " + a + " to " + b + ", " + fmtDistance(resp.DistanceM) + ". " + main.label + ". " + main.detail
 	wc, okC := value(resp.Verdict.WorstClearanceM)
 	at, okA := value(resp.Verdict.WorstAtM)
 	if main.state != "unknown" && okC && okA {
-		txt += " Worst clearance " + fmtMetres(wc) + " at " + fmtMetres(at) + " along the path."
+		txt += " Worst clearance " + fmtMetres(wc) + " at " + fmtDistance(at) + " along the path."
 	}
 	if surf, show := surfaceChip(resp); show {
 		txt += " " + surf.label + "."
@@ -370,7 +370,7 @@ func (r *renderer) header(resp TerrainProfileResponse, names [2]string, opt Opti
 
 	parts := []string{"Path profile"}
 	if finite(resp.DistanceM) && resp.DistanceM > 0 {
-		parts = append(parts, fmtMetres(resp.DistanceM))
+		parts = append(parts, fmtDistance(resp.DistanceM))
 	}
 	if f := resp.Physics.FreqMHz; finite(f) && f > 0 {
 		parts = append(parts, fmtNum(jsRound(f, 3))+" MHz")
@@ -727,12 +727,12 @@ func (r *renderer) plot(resp TerrainProfileResponse, g geom) {
 
 	// Distance axis.
 	r.text("axis-x", "0", plotX, axisBaseline, axisSize, false, muted)
-	mid := fmtMetres(g.D / 2)
-	if g.D >= 10000 { // same unit as the end label
-		mid = fmtNum(jsRound(g.D/2000, 1)) + " km"
+	mid := fmtDistance(g.D / 2)
+	if g.D >= 1000 && g.D < 2000 { // same unit as the end label
+		mid = strconv.FormatFloat(jsRound(g.D/2000, 2), 'f', 2, 64) + " km"
 	}
 	r.text("axis-x", mid, plotX+plotW/2-r.fs.measure(mid, axisSize, false)/2, axisBaseline, axisSize, false, muted)
-	end := r.fs.fit(fmtMetres(g.D), axisSize, false, plotW/2-40)
+	end := r.fs.fit(fmtDistance(g.D), axisSize, false, plotW/2-40)
 	r.text("axis-x", end, plotX+plotW-r.fs.measure(end, axisSize, false), axisBaseline, axisSize, false, muted)
 }
 
@@ -770,7 +770,7 @@ func (r *renderer) footer(resp TerrainProfileResponse, main chip, opt Options, p
 			parts = append(parts, main.detail)
 		}
 	case okC && okA:
-		parts = append(parts, "Worst clearance "+fmtMetres(wc)+" at "+fmtMetres(at))
+		parts = append(parts, "Worst clearance "+fmtMetres(wc)+" at "+fmtDistance(at))
 	}
 	heights := fmtMetres(resp.A.AntennaM) + " / " + fmtMetres(resp.B.AntennaM)
 	if resp.A.Assumed || resp.B.Assumed {
@@ -820,6 +820,27 @@ func fmtNum(v float64) string {
 	}
 	return strconv.FormatFloat(v, 'f', -1, 64)
 }
+
+// fmtDistance is the panel's fmtDistance, for a distance along the path
+// (#839 §8): whole metres under 1 km, km with two decimals to 10 km and
+// one from there. fmtMetres stays for heights and clearances.
+func fmtDistance(v float64) string {
+	if !finite(v) {
+		return "—"
+	}
+	if m := jsRound(v, 0); m < 1000 {
+		return fmtNum(m) + " m"
+	}
+	places := 2
+	if jsRound(v/1000, 2) >= 10 {
+		places = 1
+	}
+	return strconv.FormatFloat(jsRound(v/1000, places), 'f', places, 64) + " km"
+}
+
+// FmtDistance is fmtDistance for the share page's title, so the title and
+// the card it previews state a distance the same way.
+func FmtDistance(v float64) string { return fmtDistance(v) }
 
 // fmtMetres is the panel's fmtMetres: km with one decimal from 10 km.
 func fmtMetres(v float64) string {

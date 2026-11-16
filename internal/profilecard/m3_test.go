@@ -366,3 +366,21 @@ func TestLongTitleKeepsTheGapBeforeTheBadge(t *testing.T) {
 		t.Fatal("precondition: no title was shrunk or shortened")
 	}
 }
+
+// #839 §8: a distance along the path is the panel's fmtDistance — whole
+// metres under 1 km, two decimals to 10 km, one from there — never
+// "8141.4 m".
+func TestFmtDistance(t *testing.T) {
+	for v, want := range map[float64]string{
+		0: "0 m", 12.4: "12 m", 999.4: "999 m", 999.6: "1.00 km", 1000: "1.00 km",
+		3912.3: "3.91 km", 8141.4: "8.14 km", 9994.9: "9.99 km", 9999.9: "10.0 km",
+		10000: "10.0 km", 11149.99: "11.1 km", 11150: "11.2 km", 80000: "80.0 km",
+	} {
+		if got := fmtDistance(v); got != want {
+			t.Errorf("fmtDistance(%v) = %q, want %q", v, got, want)
+		}
+	}
+	if got := FmtDistance(8141.4); got != "8.14 km" {
+		t.Errorf("FmtDistance(8141.4) = %q", got)
+	}
+}
