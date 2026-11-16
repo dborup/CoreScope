@@ -199,10 +199,16 @@ function expectedOptions(ctx, id) {
   };
 }
 
+// #845: the control lists one theme's styles, so each style is looked up
+// in the control of its own theme.
+function controlOfTheme(id) {
+  const ctx = makeSandbox({ mapCfg: ON(), theme: DARK_IDS.includes(id) ? 'dark' : 'light' });
+  return { ctx, ctl: buildControl(ctx, true).ctl };
+}
+
 test('W the layer control builds every style as L.tileLayer.wms with exactly these options', () => {
-  const ctx = makeSandbox({ mapCfg: ON() });
-  const { ctl } = buildControl(ctx, true);
   for (const id of ALL_IDS) {
+    const { ctx, ctl } = controlOfTheme(id);
     const layer = ctl.base[id];
     assert.ok(layer, id + ' is offered in the layer control');
     assert.strictEqual(layer.kind, 'wms', id);
@@ -223,10 +229,8 @@ test('W the token is URL-encoded, sits on the base URL exactly once, and is trim
 });
 
 test('W the token is not a Leaflet option (Leaflet would rename or duplicate a wmsParam)', () => {
-  const ctx = makeSandbox({ mapCfg: ON() });
-  const { ctl } = buildControl(ctx, true);
   for (const id of ALL_IDS) {
-    const o = ctl.base[id].options;
+    const o = controlOfTheme(id).ctl.base[id].options;
     for (const k of Object.keys(o)) assert.ok(!/token/i.test(k), id + ': option ' + k);
     for (const k of ['uppercase', 'detectRetina', 'id', 'provider', 'label', 'type', 'invertFilter', 'url', 'wms']) {
       assert.ok(!(k in o), id + ': ' + k + ' must not become a request parameter');
@@ -431,8 +435,9 @@ test('P the pick survives SPA navigation: a new map and control start from it', 
   pick(first, SK);
   const again = buildControl(ctx, true).map; // back on Map (or on to Live)
   assert.deepStrictEqual(shown(again), [SK]);
-  pick(again, 'carto-voyager-dark');
-  assert.deepStrictEqual(shown(buildControl(ctx, true).map), ['carto-voyager-dark'], 'any registry style, either theme');
+  // #845: any registry style the theme lists (CARTO is off by default now).
+  pick(again, 'osm-standard');
+  assert.deepStrictEqual(shown(buildControl(ctx, true).map), ['osm-standard'], 'any registry style of the theme');
 });
 
 test('P a restored pick is on the map before the control exists (Leaflet would re-render the labels)', () => {

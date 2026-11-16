@@ -192,8 +192,10 @@ const allRequests = [];
     await waitReady(page);
   }
   const offeredIds = (page) => page.$$eval('.leaflet-control-layers-base label[data-tile-id]', ls => ls.map(l => l.getAttribute('data-tile-id')));
-  const checkedId = (page) => page.$eval('.leaflet-control-layers-base', el => {
-    const i = el.querySelector('input:checked');
+  // #845: the base maps sit in two lists (the base list and the Denmark
+  // group's), one radio group across both.
+  const checkedId = (page) => page.evaluate(() => {
+    const i = document.querySelector('.leaflet-control-layers-base input:checked');
     const l = i && i.closest('label');
     return l ? l.getAttribute('data-tile-id') : null;
   });
@@ -276,13 +278,13 @@ const allRequests = [];
       } finally { await ctx.close(); }
     });
     for (const theme of ['light', 'dark']) {
-      await step(`${p.name} (${theme}): offered as "Aerial (Denmark)", zero ortho requests until picked (pan + zoom)`, async () => {
+      await step(`${p.name} (${theme}): offered as "Aerial photo" (#845), zero ortho requests until picked (pan + zoom)`, async () => {
         const { ctx, page, rec } = await newCtx({ theme, tiles: ESRI_ON });
         try {
           await gotoMap(page, p.hash);
           const ids = await offeredIds(page);
           assert(ids.filter(id => id === 'dhm-ortho').length === 1, 'entries: ' + ids.join(','));
-          assert((await state(page)).label === 'Aerial (Denmark)', 'label ' + (await state(page)).label);
+          assert((await state(page)).label === 'Aerial photo', 'label ' + (await state(page)).label);
           await pan(page, 220, 0);
           await zoomIn(page);
           await pan(page, -120, 80);

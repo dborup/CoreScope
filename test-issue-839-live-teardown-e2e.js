@@ -54,20 +54,24 @@ async function coldStart() {
   page.__errors = [];
   page.on('pageerror', (e) => page.__errors.push(String(e && e.stack || e)));
   await page.addInitScript(() => {
-    const probe = window.__839 = { liveThemeObs: 0, mql: {}, tile: {}, docClick: {} };
+    const probe = window.__839 = { liveThemeObs: 0, ctlThemeObs: 0, mql: {}, tile: {}, docClick: {} };
     const OrigMO = window.MutationObserver;
     window.MutationObserver = class extends OrigMO {
       observe(target, opts) {
         const filt = opts && opts.attributeFilter;
+        const stack = new Error().stack || '';
+        // #845: the layer control (map-tile-providers.js, built from
+        // live.js) watches the theme too; it is counted on its own.
+        const key = /map-tile-providers\.js/.test(stack) ? 'ctlThemeObs' : 'liveThemeObs';
         if (!this.__counted && target === document.documentElement && filt && filt.indexOf('data-theme') >= 0 &&
-            /live\.js/.test(new Error().stack || '')) {
-          this.__counted = true;
-          probe.liveThemeObs++;
+            /live\.js/.test(stack)) {
+          this.__counted = key;
+          probe[key]++;
         }
         return super.observe(target, opts);
       }
       disconnect() {
-        if (this.__counted) { this.__counted = false; probe.liveThemeObs--; }
+        if (this.__counted) { probe[this.__counted]--; this.__counted = false; }
         return super.disconnect();
       }
     };
@@ -130,6 +134,7 @@ const typeErrors = (page) => page.__errors.filter((e) => /TypeError/.test(e));
     await clickLive(page);
     const mounted = await probe(page);
     assert(mounted.liveThemeObs === 1, 'Live theme observer while mounted: ' + mounted.liveThemeObs);
+    assert(mounted.ctlThemeObs === 1, 'Live layer-control theme observer while mounted (#845): ' + mounted.ctlThemeObs);
     await clickPackets(page);
     await toggleTheme(page);
     assert(typeErrors(page).length === 0, 'TypeError after leaving Live: ' + typeErrors(page)[0]);
@@ -152,6 +157,7 @@ const typeErrors = (page) => page.__errors.filter((e) => /TypeError/.test(e));
     const after = await probe(page);
     const left = [];
     if (after.liveThemeObs !== 0) left.push('Live data-theme observers: ' + after.liveThemeObs);
+    if (after.ctlThemeObs !== 0) left.push('Live layer-control data-theme observers (#845): ' + after.ctlThemeObs);
     for (const [name, n] of Object.entries(after.mql)) {
       if (n !== (base.mql[name] || 0)) left.push('(pointer: fine) change listener ' + name + ': ' + n);
     }

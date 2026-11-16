@@ -176,7 +176,8 @@ test('S3 stale saved choice: the saved value is kept and comes back when the gat
 });
 
 test('S4 stale saved choice with an operator default: the operator default wins over the built-in', () => {
-  const r = render(page({ tiles: { lightDefault: 'carto-light', darkDefault: 'carto-dark' } }, STALE));
+  // #845: CARTO is opt-in now, so the operator who names it turns it on.
+  const r = render(page({ tiles: { lightDefault: 'carto-light', darkDefault: 'carto-dark', providers: { carto: { enabled: true } } } }, STALE));
   assert.strictEqual(r.light.selected, 'carto-light');
   assert.strictEqual(r.dark.selected, 'carto-dark');
 });

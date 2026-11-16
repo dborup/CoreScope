@@ -188,7 +188,9 @@ async function darkLegacyTests() {
     for (const stored of ['carto-dark', 'osm-dark']) {
       await asyncTest('P1 browser choice ' + stored + ' wins over ' + label, async () => {
         const ctx = await configuredStack(config, 'dark', stored);
-        assert.strictEqual(ctx.MC_getTileSpec('dark').id, stored,
+        // #845: CARTO is off here, so a saved carto-dark is migrated (to
+        // OSM Standard dark, Esri being off) — still the browser's choice.
+        assert.strictEqual(ctx.MC_getTileSpec('dark').id, stored === 'carto-dark' ? 'osm-dark' : stored,
           'an explicit choice, including the fallback id itself, beats the legacy URL');
         assert.notStrictEqual(ctx.getTileUrl(), DARK_URL);
         assert.ok(ctx.getActiveTileProvider());
@@ -230,9 +232,10 @@ async function darkLegacyTests() {
 
   await asyncTest('P1 explicit programmatic server default wins over the legacy dark URL', async () => {
     const ctx = await configuredStack({ tiles: { dark: DARK_URL } }, 'dark');
-    ctx.MC_setServerDefaultTileProvider('carto-dark');
-    assert.strictEqual(ctx.MC_getTileSpec('dark').id, 'carto-dark');
-    assert.ok(ctx.getTileUrl().includes('cartocdn.com'));
+    // #845: an enabled style (CARTO is off by default now).
+    ctx.MC_setServerDefaultTileProvider('osm-dark');
+    assert.strictEqual(ctx.MC_getTileSpec('dark').id, 'osm-dark');
+    assert.ok(ctx.getTileUrl().includes('tile.openstreetmap.org'));
   });
 
   await asyncTest('P1 a legacy dark URL keeps the generic credit even with an unused OSM vendor configured', async () => {

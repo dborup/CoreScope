@@ -396,9 +396,17 @@ function checkGetMap(url, layer, base = WMS_BASE) {
       try {
         await gotoMap(page, p.hash);
         const ids = await offeredIds(page);
-        for (const id of ALL_IDS) assert(ids.includes(id), id + ' not offered: ' + ids.join(','));
+        // #845: the light theme lists the three light styles, in the
+        // Denmark group, without "(Denmark)"; the grey dark twin is listed
+        // in the dark theme instead.
+        for (const id of ALL_IDS.filter(i => !/-dark$/.test(i))) assert(ids.includes(id), id + ' not offered: ' + ids.join(','));
+        assert(!ids.includes('dataforsyningen-skaermkort-graa-dark'), 'the dark twin is offered in the light theme: ' + ids.join(','));
         const labels = await page.$$eval('.leaflet-control-layers-base label[data-tile-id^="dataforsyningen-skaermkort"]', ls => ls.map(l => l.textContent.trim()));
-        assert(labels.join('|') === 'Skærmkort (Denmark)|Skærmkort grå (Denmark)|Skærmkort dæmpet (Denmark)|Skærmkort grå (Denmark) (dark)', 'labels: ' + labels.join('|'));
+        assert(labels.join('|') === 'Skærmkort|Skærmkort grå|Skærmkort dæmpet', 'labels: ' + labels.join('|'));
+        await setTheme(page, 'dark');
+        await page.waitForTimeout(400);
+        const dark = await offeredIds(page);
+        assert(dark.includes('dataforsyningen-skaermkort-graa-dark') && !dark.includes('dataforsyningen-skaermkort'), 'dark list: ' + dark.join(','));
         await pan(page, 250, 0);
         await zoomIn(page);
         assert(rec.wms.length === 0, 'requests before a pick: ' + rec.wms.length);
@@ -665,9 +673,10 @@ function checkGetMap(url, layer, base = WMS_BASE) {
     const disabled = () => page.$$eval('.leaflet-control-layers-base label[data-tile-id^="dataforsyningen-skaermkort"] input', is => is.map(i => i.disabled));
     try {
       await gotoMap(page, '#/map', { lat: 56.0, lon: 10.5, zoom: 5 });
-      assert((await disabled()).join() === 'true,true,true,true', 'at zoom 5: ' + (await disabled()).join());
+      // #845: the light theme lists the three light Skærmkort styles.
+      assert((await disabled()).join() === 'true,true,true', 'at zoom 5: ' + (await disabled()).join());
       await zoomIn(page);
-      assert((await disabled()).join() === 'false,false,false,false', 'at zoom 6: ' + (await disabled()).join());
+      assert((await disabled()).join() === 'false,false,false', 'at zoom 6: ' + (await disabled()).join());
       await selectBase(page, 'dataforsyningen-skaermkort');
       assert(rec.wms.length > 0, 'nothing loaded at zoom 6');
       for (const u of rec.wms) assert(checkGetMap(u, 'dtk_skaermkort').z === 6, 'not a zoom-6 tile: ' + u);
@@ -713,10 +722,11 @@ function checkGetMap(url, layer, base = WMS_BASE) {
         await gotoMap(page, p.hash);
         const ids = await offeredIds(page);
         assert(ids.filter(id => id === NATUR_ID).length === 1, 'Natur offered ' + ids.filter(id => id === NATUR_ID).length + ' times: ' + ids.join(','));
-        assert(ids.indexOf(NATUR_ID) < ids.indexOf('dataforsyningen-skaermkort-graa-dark') && ids.indexOf(NATUR_ID) < ids.indexOf('osm-dark'),
+        // #845: the light theme lists light styles only.
+        assert(!ids.includes('dataforsyningen-skaermkort-graa-dark') && !ids.includes('osm-dark'),
           'not among the light styles: ' + ids.join(','));
         const label = await page.$eval(`.leaflet-control-layers-base label[data-tile-id="${NATUR_ID}"]`, l => l.textContent.trim());
-        assert(label === 'Natur- og Friluftskort (Denmark)', 'label: ' + label);
+        assert(label === 'Natur- og Friluftskort', 'label: ' + label);
         await pan(page, 250, 0);
         await zoomIn(page);
         assert(rec.wms.length === 0, 'requests before a pick: ' + rec.wms.length);
@@ -742,10 +752,13 @@ function checkGetMap(url, layer, base = WMS_BASE) {
   for (const p of [{ name: 'Map', hash: '#/map' }, { name: 'Live', hash: '#/live' }]) {
     for (const theme of ['light', 'dark']) {
       await step(`M2 ${p.name} (${theme}): picking Natur loads 512 px EPSG:3857 TRANSPARENT=FALSE GetMaps of Natur_Friluft_basis with the exact credit and no filter`, async () => {
-        const { ctx, page, rec } = await newCtx({ tiles: naturOn(), theme });
+        // #845: the dark list offers dark styles only, so Natur (light
+        // only) is picked in the light theme and kept across the switch.
+        const { ctx, page, rec } = await newCtx({ tiles: naturOn(), theme: 'light' });
         try {
           await gotoMap(page, p.hash);
           await selectBase(page, NATUR_ID);
+          if (theme === 'dark') { await setTheme(page, 'dark'); await page.waitForTimeout(600); }
           await page.waitForTimeout(600);
           assert(rec.wms.length > 0, 'no GetMap request');
           for (const u of rec.wms) {

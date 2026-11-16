@@ -8,9 +8,8 @@
  *       the layer leaves the map.
  *   F4  The antenna-site popup shows a commissioning date as the Danish
  *       date (YYYY-MM-DD), not the UTC timestamp of the local midnight.
- *   F5  A dark style that shares its label with a light style is listed as
- *       "<label> (dark)" in the layer control, so no two base maps share a
- *       name; the customizer's own label stays plain.
+ *   F5  No two base maps share a name in the layer control; since #845 the
+ *       control lists one theme's styles, so there is no "(dark)" suffix.
  *   F6  The Map Controls panel stops above the map credit (style.css uses
  *       the credit height map.js publishes). The repeated DHM credit is
  *       kept on purpose: each one links its own dataset, which the CC BY
@@ -28,7 +27,7 @@
 const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
-const { makeSandbox, makeMap } = require('./tests/map-overlay-sandbox');
+const { makeSandbox, makeMap, buildControl } = require('./tests/map-overlay-sandbox');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -199,45 +198,30 @@ test('F4 commissionedDate: Danish date for ISO values, the published text otherw
 
 console.log('\n── #839 F5: no two base maps share a name in the layer control ──');
 
-test('F5 every registry style has a distinct layer-control label', () => {
-  const ctx = makeSandbox({ mapCfg: ALL_ON });
-  const reg = ctx.window.MC_TILE_PROVIDERS;
-  const labels = Object.keys(reg).map(id => ctx.window.MC_baseLayerLabel(id));
-  const dup = labels.filter((l, i) => labels.indexOf(l) !== i);
-  assert.deepStrictEqual(dup, [], 'duplicate labels: ' + dup.join(', '));
+// #845 supersedes the "(dark)" suffix: the control lists one theme's
+// styles, so the twins never meet and every label stays plain.
+test('F5 (#845) in each theme no two listed base maps share a label', () => {
+  for (const theme of ['light', 'dark']) {
+    const ctx = makeSandbox({ mapCfg: ALL_ON, theme });
+    const reg = ctx.window.MC_TILE_PROVIDERS;
+    const { ctl } = buildControl(ctx, true);
+    const labels = Object.keys(ctl.base).filter(id => id !== '__auto__').map(id => reg[id].label);
+    const dup = labels.filter((l, i) => labels.indexOf(l) !== i);
+    assert.deepStrictEqual(dup, [], theme + ': duplicate labels: ' + dup.join(', '));
+  }
 });
 
-test('F5 the dark twins are "(dark)"; dark-only styles and every light style keep their label', () => {
+test('F5 (#845) no "(dark)" suffix: the helper is gone and the registry labels are plain', () => {
   const ctx = makeSandbox({ mapCfg: ALL_ON });
-  const label = ctx.window.MC_baseLayerLabel;
-  const want = {
-    'carto-voyager-dark': 'Carto Voyager (dark)',
-    'positron-dark': 'Carto Positron (dark)',
-    'esri-imagery-dark': 'Esri World Imagery (dark)',
-    'dataforsyningen-skaermkort-graa-dark': 'Skærmkort grå (Denmark) (dark)',
-    'osm-dark': 'OSM Standard (dark)',
-    'stamen-toner-dark': 'Stamen Toner Lite (dark)',
-    'carto-dark': 'Carto Dark',
-    'esri-darkgray-labels': 'Esri Dark Gray Canvas',
-    'dataforsyningen-skaermkort-graa': 'Skærmkort grå (Denmark)',
-    'osm-standard': 'OSM Standard',
-  };
-  for (const id of Object.keys(want)) assert.strictEqual(label(id), want[id], id);
-  // The customizer lists the themes apart and keeps the plain label.
+  assert.strictEqual(ctx.window.MC_baseLayerLabel, undefined);
   assert.strictEqual(ctx.window.MC_TILE_PROVIDERS['osm-dark'].label, 'OSM Standard');
-});
-
-test('F5 with Carto off the built-in OSM pair is still told apart; an unknown id is its own label', () => {
-  const ctx = makeSandbox({ mapCfg: { tiles: { providers: { carto: { enabled: false } } } } });
-  assert.strictEqual(ctx.window.MC_baseLayerLabel('osm-dark'), 'OSM Standard (dark)');
-  assert.strictEqual(ctx.window.MC_baseLayerLabel('osm-standard'), 'OSM Standard');
-  assert.strictEqual(ctx.window.MC_baseLayerLabel('no-such-style'), 'no-such-style');
 });
 
 test('F5 the layer control writes the label as text, not markup', () => {
   const src = fs.readFileSync(path.join(__dirname, 'public', 'map-tile-providers.js'), 'utf8');
-  assert(/span\.textContent = ' ' \+ baseLayerLabel\(id\);/.test(src), 'the control must label each style through baseLayerLabel');
-  assert(!/span\.innerHTML = ' ' \+ \(REGISTRY\[id\]\.label/.test(src));
+  const ctl = src.slice(src.indexOf('window.MC_createLayerControl'));
+  assert(/name\.textContent = ' ' \+ parts\.name;/.test(ctl), 'the control must write each row name as text');
+  assert(!/innerHTML/.test(ctl), 'innerHTML in the layer control');
 });
 
 console.log('\n── #839 F6: the credit is not covered by the Map Controls panel ──');
