@@ -54,6 +54,11 @@ class El {
     return null;
   }
   all() { return [this].concat(...this.children.map(c => c.all())); }
+  // One class selector, as heritage-info asks for the open layer control.
+  querySelector(sel) { return this.all().find(e => e !== this && (e.className || '').split(/\s+/).includes(sel.replace(/^\./, ''))) || null; }
+  addEventListener(t, fn) { (this._l = this._l || []).push([t, fn]); }
+  removeEventListener(t, fn) { this._l = (this._l || []).filter(([u, f]) => !(u === t && f === fn)); }
+  dispatch(t) { (this._l || []).filter(([u]) => u === t).forEach(([, f]) => f({ type: t })); }
   byClass(c) { return this.all().filter(e => (e.className || '').split(/\s+/).includes(c)); }
 }
 function makeDocument() {
@@ -336,6 +341,52 @@ test('detach removes the listeners', () => {
   s.click();
   assert.strictEqual(s.fetch.calls.length, 0);
   assert(!s.map.listens('click') && !s.map.listens('preclick'));
+});
+
+// ── #839 finding 7: the tap that closes the layer control ───────────────────
+
+function openControl(map) {
+  const c = new El('div'); c.className = 'leaflet-control-layers leaflet-control-layers-expanded';
+  map.container.appendChild(c);
+  return c;
+}
+
+test('a tap that closes the layer control is no lookup; the next tap is (#839 F7)', () => {
+  const s = setup();
+  const c = openControl(s.map);
+  // Leaflet collapses the control on the tap's compatibility mouseleave,
+  // after the finger went down and before preclick.
+  s.map.container.dispatch('pointerdown');
+  c.className = 'leaflet-control-layers';
+  s.click();
+  assert.strictEqual(s.fetch.calls.length, 0, 'the closing tap asked');
+  assert.strictEqual(s.map.popups.length, 0, 'the closing tap opened a popup');
+  s.map.container.dispatch('pointerdown');
+  s.click();
+  assert.strictEqual(s.fetch.calls.length, 1, 'the next tap did not ask');
+});
+
+test('touchstart alone (no pointer events) also marks the closing tap (#839 F7)', () => {
+  const s = setup();
+  const c = openControl(s.map);
+  s.map.container.dispatch('touchstart');
+  c.className = 'leaflet-control-layers';
+  s.click();
+  assert.strictEqual(s.fetch.calls.length, 0);
+});
+
+test('a click while the control is still open at preclick is no lookup (#839 F7)', () => {
+  const s = setup();
+  openControl(s.map);
+  s.click();
+  assert.strictEqual(s.fetch.calls.length, 0);
+});
+
+test('detach removes the pointerdown and touchstart listeners (#839 F7)', () => {
+  const s = setup();
+  assert.strictEqual(s.map.container._l.length, 2);
+  s.ctl.detach();
+  assert.strictEqual(s.map.container._l.length, 0);
 });
 
 // ── Popup ──────────────────────────────────────────────────────────────────

@@ -18,14 +18,15 @@
  *     the built-ins with dhm-defaults-changed after the pipeline re-runs
  *   - #737: the `skraafoto` section (the oblique photo viewer's defaults),
  *     back to the built-ins in the effective config the viewer reads
+ *   - #839 finding 8: the map layer control's own choices (mc-terrain-dhm,
+ *     mc-contours-dhm, mc-heritage, mc-masts, mc-masts-int, mc-ortho-base)
  *
  * Must NOT touch:
  *   - localStorage: meshcore-theme (theme light/dark),
  *     meshcore-gesture-hints-* (own button), meshcore-favorites,
  *     mc-channels-* selection state, mc-terrain-h:* (the viewer's own
  *     per-endpoint antenna heights — the profile panel's data, not the
- *     customizer's, exactly like favorites), mc-terrain-dhm /
- *     mc-contours-dhm (the viewer's own DHM layer-control choices)
+ *     customizer's, exactly like favorites)
  */
 'use strict';
 
@@ -190,6 +191,16 @@ test('resetAll function is exposed on _customizerV2 API', () => {
   assert.strictEqual(typeof env.api.resetAll, 'function', 'expected api.resetAll to be a function');
 });
 
+test('clears the map layer control\'s own choices, keeps the theme (#839 finding 8)', () => {
+  const env = loadCustomizer({ dhm: { enabled: true, url: '/api/map/dhm/wms', layer: 'x', minZoom: 7, maxZoom: 19 } });
+  const keys = ['mc-terrain-dhm', 'mc-contours-dhm', 'mc-heritage', 'mc-masts', 'mc-masts-int', 'mc-ortho-base'];
+  keys.forEach((k) => env.localStorage.setItem(k, '1'));
+  env.localStorage.setItem('meshcore-theme', 'dark');
+  env.api.resetAll();
+  keys.forEach((k) => assert.strictEqual(env.localStorage.getItem(k), null, k + ' survived'));
+  assert.strictEqual(env.localStorage.getItem('meshcore-theme'), 'dark');
+});
+
 test('clears cs-theme-overrides localStorage key', () => {
   const env = loadCustomizer();
   env.localStorage.setItem('cs-theme-overrides', JSON.stringify({ theme: { accent: '#ff0000' } }));
@@ -302,15 +313,6 @@ test('clears the heritage override section with cs-theme-overrides', () => {
   assert.strictEqual(env.localStorage.getItem('cs-theme-overrides'), null);
 });
 
-test('does NOT clear the viewer’s own on/off of the monuments overlay', () => {
-  // mc-heritage is the map's remembered toggle (like ?heritage=1 in a
-  // link), the viewer's own choice on the map, not a customizer value.
-  const env = loadCustomizer();
-  env.localStorage.setItem('mc-heritage', '1');
-  env.api.resetAll();
-  assert.strictEqual(env.localStorage.getItem('mc-heritage'), '1');
-});
-
 test('clears the path-profile chart vars from root.style', () => {
   const env = loadCustomizer();
   const vars = ['--terrain-fill', '--terrain-clutter', '--los-line',
@@ -364,16 +366,11 @@ test('resets the DHM overlay defaults to the built-ins and tells an open map', (
   assert.ok(env.ctx.window._events.some(e => e.type === 'dhm-defaults-changed'), 'no dhm-defaults-changed after reset');
 });
 
-test('does NOT clear the viewer’s own DHM layer-control choices', () => {
-  // mc-terrain-dhm / mc-contours-dhm are what the viewer picked in the map's
-  // layer control, like mc-masts: not customizer state.
-  const env = loadCustomizer({ dhm: DHM_BLOCK });
-  env.localStorage.setItem('mc-terrain-dhm', 'surface');
-  env.localStorage.setItem('mc-contours-dhm', '1');
-  env.api.resetAll();
-  assert.strictEqual(env.localStorage.getItem('mc-terrain-dhm'), 'surface');
-  assert.strictEqual(env.localStorage.getItem('mc-contours-dhm'), '1');
-});
+// #839 finding 8 reverses the two "does NOT clear the viewer's own DHM /
+// monuments layer-control choices" cases that stood here: a choice made in
+// the map's layer control outranks every default this panel sets, so a
+// Reset All that kept it did not reset the map. Covered by "clears the map
+// layer control's own choices" above.
 
 // ── #737 — the oblique photo viewer's defaults ──
 

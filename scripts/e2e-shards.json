@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-839-map-phone-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #839 CS-Macmini rc19 findings 1, 2, 7, 8, 9 with an intercepted client config (staging base maps with a dummy token, DHM overlays with Aerial, monuments, antenna sites), a stubbed /api/masts with one 9-station site, a stubbed monument lookup and 1x1 third-party tiles: at 375x560 (light, dark), 360x640 and 640x360 the open layer list ends above the credit and a swipe plus a real tap reaches Nearby transmitters; the antenna popup clears every map button and the credit, its source link can be swiped to and its close button tapped, and stays whole at 1440x900; the tap that closes the layer control asks for no monument info; Reset All forgets the layer control's hillshade and monuments; the customizer logs no colour-format warning. About 60s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-734-customizer-overlays-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
