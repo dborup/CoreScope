@@ -133,6 +133,10 @@
     if (!c || !control._map || c.className.indexOf('leaflet-control-layers-expanded') < 0) return;
     var s = c.querySelector('.leaflet-control-layers-list');
     if (!s) return;
+    // Measuring at full height clamps scrollTop to 0; a refit (a row
+    // tapped, markers re-added, a packet animation) must not throw the
+    // viewer back to the top of the list (#841 F8).
+    var keep = s.scrollTop;
     s.style.height = '';
     var mr = map.getContainer().getBoundingClientRect();
     var sr = s.getBoundingClientRect(), cr = c.getBoundingClientRect();
@@ -145,6 +149,7 @@
     } else {
       s.classList.remove('leaflet-control-layers-scrollbar');
     }
+    s.scrollTop = keep;
   }
 
   /* Makes a layer control's list end above the chrome under it, every time

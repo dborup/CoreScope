@@ -11,7 +11,8 @@
  *      narrow button it would overlap (the gear, the ruler) is a wall when
  *      the popup fits beside it (640x360, #841 F1) and not when it does not
  *      (375x560); the geometry of the 375x560, 640x360 and 1440x900 maps;
- *      fitLayerControl schedules nothing while the control is closed;
+ *      fitLayerControl schedules nothing while the control is closed, and
+ *      a refit keeps the open list's scroll position (#841 F8);
  *   3. MC_forgetMapLayerPrefs (map-tile-providers.js): every overlay and
  *      the Aerial base forgotten, their link parameters dropped, the rest
  *      of the link kept, no history write when there is nothing to drop;
@@ -150,6 +151,47 @@ test('fitLayerControl schedules no refit while the control is closed (#841 F5)',
   container.className += ' leaflet-control-layers-expanded';
   handlers.forEach((h) => h()); handlers.forEach((h) => h());
   assert.strictEqual(timers.length, 1, 'an open control did not coalesce a burst into one refit');
+});
+
+test('a refit of the open list keeps its scroll position (#841 F8)', () => {
+  const timers = [];
+  const ctx = { window: {}, Math, Array, setTimeout: (fn) => { timers.push(fn); return timers.length; } };
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'map-chrome-fit.js'), 'utf8'), ctx);
+  const rect = (l, t, r, b) => () => ({ left: l, top: t, right: r, bottom: b, width: r - l, height: b - t });
+  // The list as a browser lays it out: 600 px of rows, and a height of ''
+  // (the full rows) leaves nothing to scroll, so scrollTop clamps to 0.
+  let h = '', top = 0;
+  const list = {
+    scrollHeight: 600,
+    classList: { add() {}, remove() {} },
+    getBoundingClientRect() { return rect(10, 126, 280, h ? 126 + parseInt(h, 10) : 726)(); },
+    get scrollTop() { return top; },
+    set scrollTop(v) { top = Math.max(0, Math.min(v, h ? 600 - parseInt(h, 10) : 0)); },
+  };
+  list.style = {
+    get height() { return h; },
+    set height(v) { h = v; if (!v) top = 0; },
+  };
+  const container = {
+    className: 'leaflet-control-layers leaflet-control-layers-expanded',
+    querySelector: () => list,
+    getBoundingClientRect() { const b = list.getBoundingClientRect(); return rect(10, 120, 280, b.bottom + 6)(); },
+  };
+  const handlers = [];
+  const map = {
+    on: (ev, fn) => handlers.push(fn), off() {},
+    getContainer: () => ({ getBoundingClientRect: rect(0, 0, 375, 452), ownerDocument: { querySelectorAll: () => [] }, querySelectorAll: () => [] }),
+  };
+  const control = { _map: map, getContainer: () => container, expand() {} };
+  ctx.window.MapChromeFit.fitLayerControl(map, control);
+  control.expand();
+  assert.ok(h, 'the list was not given a height, so this case proves nothing');
+  list.scrollTop = 250;
+  assert.strictEqual(list.scrollTop, 250);
+  handlers.forEach((hd) => hd());
+  timers.splice(0).forEach((fn) => fn());
+  assert.strictEqual(list.scrollTop, 250, 'the refit threw the list back to scrollTop ' + list.scrollTop);
 });
 
 // ── MC_forgetMapLayerPrefs ─────────────────────────────────────────────────

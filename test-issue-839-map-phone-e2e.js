@@ -16,14 +16,18 @@
  *      (interference)", brought into view inside the list by real touch
  *      swipes only (a list a finger cannot scroll fails, #841 F2), is not
  *      covered by the credit and a real tap there switches it on; at zoom
- *      12 the antenna "Zoom in to 13+" line under it can be seen too;
+ *      12 the antenna "Zoom in to 13+" line under it can be seen too; a
+ *      refit of the open list (a real tap on a row, layers removed and
+ *      added the way a marker refresh does) keeps its scroll position
+ *      (#841 F8);
  *   2. finding 2 — at the same phone sizes, with the antenna site on the
  *      left, in the middle and on the right of the map (#841 F1), a tap on
  *      it opens a popup that overlaps no map button (the gear and the
  *      path-profile ruler included) and stops above the credit; its source
  *      link, swiped into view inside the popup, is uncovered; a tap on its ✕
  *      closes it and does not arm the ruler. The monument popup on the
- *      right does the same (#841 F6). At 1440x900 the antenna popup shows
+ *      right, high up (red on master in portrait, #841 F9) and lower down,
+ *      does the same and stops above the credit (#841 F6). At 1440x900 the antenna popup shows
  *      whole, unscrolled, clear of the Map Controls panel (no regression);
  *   3. finding 7 — at 375x560 and 640x360 with monuments on, the tap that
  *      closes the open layer control asks for no monument info and opens no
@@ -327,6 +331,43 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     } finally { await ctx.close(); }
   });
 
+  // #841 F8: a refit of the open list (a row tapped, markers re-added after
+  // an ADVERT, a packet animation on Live) keeps where the viewer scrolled
+  // to; it used to throw the list back to the top every time.
+  for (const v of PHONES) {
+    await step(`finding 1, ${v.name} (#841 F8): the open list keeps its scroll position when it is refitted`, async () => {
+      const { ctx, page, rec } = await newCtx({ viewport: { width: v.width, height: v.height } });
+      try {
+        await gotoMap(page, '&terrain=surface&contours=1&heritage=1');
+        await page.tap('.leaflet-control-layers-toggle');
+        await page.waitForSelector('.leaflet-control-layers-expanded', { timeout: 3000 });
+        await bringIntoBox(page, LIST, INT_LABEL);
+        await page.waitForTimeout(400); // let a fling settle
+        const top = () => page.evaluate((s) => document.querySelector(s).scrollTop, LIST);
+        const s0 = await top();
+        assert(s0 > 0, 'the list did not scroll, so this case proves nothing');
+        // A real tap on a row: the layer it adds refits the list.
+        await tapAt(page, await center(page, INT_LABEL));
+        await page.waitForTimeout(400);
+        const s1 = await top();
+        assert(Math.abs(s1 - s0) <= 1, `a tap on a row threw the list from scrollTop ${s0} to ${s1}`);
+        // What a marker refresh does: layers removed and added again.
+        await page.evaluate(({ lat, lon }) => {
+          const m = (window.__mcMaps || []).filter((x) => x._mcMasts).pop();
+          const g = window.L.layerGroup().addTo(m);
+          for (let i = 0; i < 8; i++) window.L.circleMarker([lat, lon], { radius: 2 }).addTo(g);
+          m.removeLayer(g);
+          window.L.layerGroup().addTo(m);
+        }, JELLING);
+        await page.waitForTimeout(400);
+        const s2 = await top();
+        assert(Math.abs(s2 - s0) <= 1, `layers added and removed threw the list from scrollTop ${s0} to ${s2}`);
+        assert(await page.$('.leaflet-control-layers-expanded'), 'the list closed');
+        assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+      } finally { await ctx.close(); }
+    });
+  }
+
   // ── 2. finding 2: the antenna-site popup ─────────────────────────────────
   async function openSite(page, touch) {
     await page.waitForFunction(() => (window.__mcMaps || []).some((m) => m._mcMasts && m._mcMasts.stats && !m._mcMasts.stats().pending), null, { timeout: 10000 }).catch(() => {});
@@ -406,22 +447,27 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       });
     }
   }
-  for (const v of PHONES) {
-    await step(`finding 2, ${v.name}, monument popup on the right (#841 F6): clear of every button, its ✕ closes it`, async () => {
+  // (0.85, 0.35) is a spot where the portrait popup used to cover the
+  // ruler (#841 F9); (0.85, 0.6) the one where the landscape one did.
+  const MONUMENT_SPOTS = [{ fx: 0.85, fy: 0.35 }, { fx: 0.85, fy: 0.6 }];
+  for (const v of PHONES) for (const spot of MONUMENT_SPOTS) {
+    await step(`finding 2, ${v.name}, monument popup on the right at (${spot.fx}, ${spot.fy}) (#841 F6, F9): clear of every button and the credit, its ✕ closes it`, async () => {
       const { ctx, page, rec } = await newCtx({ viewport: { width: v.width, height: v.height }, noSites: true });
       try {
         await gotoMap(page, '&heritage=1');
         assert((await rulerState(page)).shown, 'the path-profile ruler is not offered, so this case proves nothing');
-        const spot = await page.evaluate(() => {
+        const at = await page.evaluate((spot) => {
           const m = document.querySelector('.leaflet-container').getBoundingClientRect();
-          return { x: Math.round(m.left + m.width * 0.85), y: Math.round(m.top + m.height * 0.6) };
-        });
-        await tapAt(page, spot);
+          return { x: Math.round(m.left + m.width * spot.fx), y: Math.round(m.top + m.height * spot.fy) };
+        }, spot);
+        await tapAt(page, at);
         await page.waitForSelector('.mc-heritage-popup', { timeout: 4000 });
         await page.waitForTimeout(700); // the auto-pan
         const g = await popupGeometry(page, '.mc-heritage-popup');
         assert(g.covered.length === 0, 'the popup is under ' + g.covered.join(', ') + ': ' + JSON.stringify(g.wrap));
         assert(g.wrap.t >= g.map.t, 'the popup starts above the map');
+        const floor = await bottomChromeTop(page);
+        assert(g.wrap.b <= floor, `the popup ends at y=${Math.round(g.wrap.b)}, under the credit/nav at y=${Math.round(floor)}`);
         const close = await hitsItself(page, '.mc-heritage-popup .leaflet-popup-close-button');
         assert(close.ok, 'a tap on the ✕ lands on ' + close.on);
         await tapAt(page, await center(page, '.mc-heritage-popup .leaflet-popup-close-button'));
