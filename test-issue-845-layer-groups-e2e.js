@@ -29,6 +29,19 @@
  *   7. CARTO is not listed by default, and a saved "carto-dark" pick (Esri
  *      on) shows Esri Dark Gray Canvas with no request to cartocdn.com;
  *   8. no console errors anywhere.
+ * #859 follow-ups (the #856 review):
+ *   9. at 375x560, 640x360 (touch) and 1440, a row inside the Denmark group
+ *      is as tall as a row outside it, and on a coarse pointer every row is
+ *      at least TOUCH_ROW_MIN px tall;
+ *  10. after Leaflet re-renders the control (a listed overlay removed and
+ *      added again programmatically, as L.Control.Layers' _update does), the
+ *      rows are new elements and are still grouped, cleaned and hinted;
+ *  11. the Antenna sites row carries the "zoom 13+" hint, at the row's right,
+ *      and follows the customizer's gate (#724 M5) at once.
+ *  12. owner addition to #859 (a #856 regression): in the dark theme the
+ *      Denmark group lists all four Danish base maps plus Aerial photo (a
+ *      light-only map as the light map, never hidden), and a real tap on
+ *      each makes it the one selected base map and loads its tiles.
  *
  * Usage:
  *   BASE_URL=http://localhost:13845 node test-issue-845-layer-groups-e2e.js
@@ -87,6 +100,9 @@ const LIST = '.leaflet-control-layers-list';
 const DK = '.mc-layers-dk';
 const DK_BTN = '.mc-layers-dk-toggle';
 const row = (id) => `.leaflet-control-layers-base label[data-tile-id="${id}"]`;
+// #859 — the smallest row height on a coarse pointer (the Denmark toggle's
+// own min-height in public/style.css).
+const TOUCH_ROW_MIN = 32;
 
 let passed = 0, failed = 0;
 // E2E_845_ONLY=<regex> runs the matching cases only (for mutation runs).
@@ -134,6 +150,22 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       }
       await route.abort();
     });
+    // #859 — keeps every Leaflet map the page makes, so a case can make the
+    // layer control re-render the way Leaflet does (window.L is set once,
+    // by the vendored leaflet.js).
+    if (o.captureMaps) {
+      await ctx.addInitScript(() => {
+        let real;
+        Object.defineProperty(window, 'L', {
+          configurable: true,
+          get() { return real; },
+          set(v) {
+            real = v;
+            try { v.Map.addInitHook(function () { (window.__e2eMaps = window.__e2eMaps || []).push(this); }); } catch (_) {}
+          },
+        });
+      });
+    }
     await ctx.addInitScript((st) => {
       try {
         ['row-swipe', 'tab-swipe', 'edge-drawer', 'pull-refresh']
@@ -346,7 +378,10 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         await openControl(page, view);
         rows = await baseRows(page);
         const ids = rows.map((r) => r.id);
-        assert(ids.includes('osm-dark') && ids.includes('esri-darkgray-labels') && !ids.includes('osm-standard') && !ids.includes('opentopomap'), 'dark list: ' + ids);
+        // #859: a style with both variants is listed as the dark one; the
+        // light-only maps (OpenTopoMap, Skærmkort, ...) stay listed as they are.
+        assert(ids.includes('osm-dark') && ids.includes('esri-darkgray-labels') && !ids.includes('osm-standard') && ids.includes('opentopomap') &&
+          !ids.includes('dataforsyningen-skaermkort-graa') && ids.includes('dataforsyningen-skaermkort'), 'dark list: ' + ids);
         const on = rows.filter((r) => r.checked).map((r) => r.id);
         assert(on.length === 1 && on[0] === 'dataforsyningen-skaermkort-graa-dark', 'dark pick: ' + on);
         const filter = await page.evaluate(() => document.querySelector('.leaflet-tile-pane').style.filter);
@@ -443,6 +478,151 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
     } finally { await ctx.close(); }
   });
+
+  // ── 9. #859: tap height ──────────────────────────────────────────────────
+  const rowHeights = (page) => page.evaluate(() => Array.from(document.querySelectorAll('.leaflet-control-layers-list label'))
+    .map((l) => ({ id: l.getAttribute('data-tile-id') || l.getAttribute('data-overlay-id'), h: l.getBoundingClientRect().height, dk: !!l.closest('.mc-layers-dk') }))
+    .filter((r) => r.h > 0));
+  for (const view of [VIEWS[0], VIEWS[2], VIEWS[3]]) {
+    await step(`${view.name}: rows in the Denmark group are as tall as the others${view.touch ? ', and every row is at least ' + TOUCH_ROW_MIN + ' px on touch' : ''} (#859)`, async () => {
+      const { ctx, page, rec } = await newCtx({ view });
+      try {
+        await gotoMap(page);
+        await openControl(page, view);
+        const rows = await rowHeights(page);
+        const out = rows.filter((r) => !r.dk), dk = rows.filter((r) => r.dk);
+        assert(out.length >= 3 && dk.length >= 8, 'rows: ' + out.length + ' outside, ' + dk.length + ' in the group');
+        const fmt = (rs) => rs.map((r) => r.id + '=' + r.h.toFixed(1)).join(' ');
+        const outMin = Math.min.apply(null, out.map((r) => r.h));
+        const short = dk.filter((r) => r.h < outMin - 0.5);
+        assert(!short.length, 'rows in the group shorter than the others (' + outMin.toFixed(1) + ' px): ' + fmt(short));
+        if (view.touch) {
+          const small = rows.filter((r) => r.h < TOUCH_ROW_MIN - 0.5);
+          assert(!small.length, 'rows under ' + TOUCH_ROW_MIN + ' px on touch: ' + fmt(small));
+        }
+        assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+      } finally { await ctx.close(); }
+    });
+  }
+
+  // ── 10. #859: laid out after every Leaflet re-render ─────────────────────
+  await step('375x560: after Leaflet re-renders the control, its new rows are still grouped, cleaned and hinted (#859)', async () => {
+    const view = VIEWS[0];
+    const { ctx, page, rec } = await newCtx({ view, captureMaps: true });
+    try {
+      await gotoMap(page);
+      await openControl(page, view);
+      const r = await page.evaluate(() => {
+        const old = document.querySelector('label[data-tile-id="dataforsyningen-skaermkort"]');
+        const map = (window.__e2eMaps || []).filter((m) => m._container && m._container.isConnected && m._mcMastsSitesLayer).pop();
+        if (!old || !map) return { setup: !!old + '/' + !!map };
+        const layer = map._mcMastsSitesLayer;
+        // L.Control.Layers listens to each listed layer's add/remove and
+        // re-renders every row (_update) when it is not its own click.
+        map.removeLayer(layer);
+        map.addLayer(layer);
+        const now = document.querySelector('label[data-tile-id="dataforsyningen-skaermkort"]');
+        const labels = Array.from(document.querySelectorAll('.leaflet-control-layers-list label'));
+        const danish = labels.filter((l) => /^(dataforsyningen|dhm-ortho)/.test(l.getAttribute('data-tile-id') || ''));
+        const overlays = labels.filter((l) => l.hasAttribute('data-overlay-id'));
+        const contour = document.querySelector('label[data-overlay-id="dhm-contours"] .mc-layer-hint');
+        return {
+          rerendered: !!now && now !== old,
+          danish: danish.length, danishOutside: danish.filter((l) => !l.closest('.mc-layers-dk-base')).map((l) => l.getAttribute('data-tile-id')),
+          overlays: overlays.length, overlaysOutside: overlays.filter((l) => !l.closest('.mc-layers-dk-overlays')).map((l) => l.getAttribute('data-overlay-id')),
+          text: document.querySelector('.leaflet-control-layers-list').textContent,
+          contourHint: contour ? contour.textContent : null,
+          layerOn: map.hasLayer(layer),
+        };
+      });
+      assert(!r.setup, 'no Skærmkort row or no map: ' + r.setup);
+      assert(r.rerendered, 'Leaflet did not re-render the rows');
+      assert(r.danish >= 5 && !r.danishOutside.length, 'Danish rows outside the group after a re-render: ' + r.danishOutside.join(','));
+      assert(r.overlays >= 5 && !r.overlaysOutside.length, 'overlay rows outside the group after a re-render: ' + r.overlaysOutside.join(','));
+      assert(!/\(Denmark\)|\(DHM|zoom \d+\+\)/.test(r.text), 'raw labels after a re-render: ' + r.text);
+      assert(r.contourHint === 'zoom 14+', 'contour hint after a re-render: ' + r.contourHint);
+      assert(r.layerOn, 'the antenna sites layer did not come back');
+      assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+    } finally { await ctx.close(); }
+  });
+
+  // ── 11. #859: the antenna sites zoom hint ────────────────────────────────
+  await step('375x560: the Antenna sites row shows "zoom 13+" at its right (#859)', async () => {
+    const view = VIEWS[0];
+    const { ctx, page, rec } = await newCtx({ view });
+    try {
+      await gotoMap(page);
+      await openControl(page, view);
+      const h = await page.evaluate(() => {
+        const l = document.querySelector('label[data-overlay-id="masts-sites"]');
+        const hint = l && l.querySelector('.mc-layer-hint');
+        if (!hint) return null;
+        return { text: hint.textContent, name: l.querySelector('.mc-layer-name').textContent.trim(),
+          gap: Math.round(l.getBoundingClientRect().right - hint.getBoundingClientRect().right),
+          oneLine: hint.getClientRects().length === 1 };
+      });
+      assert(h && h.text === 'zoom 13+', 'antenna sites hint: ' + JSON.stringify(h));
+      assert(h.name === 'Antenna sites (mast, tower or rooftop)', 'name: ' + h.name);
+      assert(h.gap <= 12 && h.oneLine, 'the hint is not at the row\'s right on one line: ' + JSON.stringify(h));
+      // The customizer raises the gate (#724 M5): the hint follows at once.
+      const raised = await page.evaluate(() => {
+        window.SITE_CONFIG = Object.assign({}, window.SITE_CONFIG, { masts: { minZoom: 15 } });
+        window.dispatchEvent(new CustomEvent('masts-defaults-changed'));
+        const hint = document.querySelector('label[data-overlay-id="masts-sites"] .mc-layer-hint');
+        return hint ? hint.textContent : null;
+      });
+      assert(raised === 'zoom 15+', 'after the customizer raised the gate to 15: ' + raised);
+      assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+    } finally { await ctx.close(); }
+  });
+
+  // ── 12. #859 owner addition: no Danish map hidden in the dark theme ──────
+  const DK_DARK = [
+    { id: 'dataforsyningen-skaermkort', name: 'Skærmkort', src: /api\.dataforsyningen\.dk\/topo_skaermkort_DAF\?.*LAYERS=dtk_skaermkort(&|$)/i, inverted: false },
+    { id: 'dataforsyningen-skaermkort-daempet', name: 'Skærmkort dæmpet', src: /LAYERS=dtk_skaermkort_daempet/i, inverted: false },
+    { id: 'dataforsyningen-natur-friluft', name: 'Natur- og Friluftskort', src: /natur_friluftskort\?.*LAYERS=Natur_Friluft_basis/i, inverted: false },
+    { id: 'dataforsyningen-skaermkort-graa-dark', name: 'Skærmkort grå', src: /LAYERS=dtk_skaermkort_graa/i, inverted: true },
+    { id: 'dhm-ortho', name: 'Aerial photo', src: /\/api\/map\/dhm\/ortho\/\d+\/\d+\/\d+/, inverted: false },
+  ];
+  for (const view of [VIEWS[0], VIEWS[3]]) {
+    await step(`${view.name} dark: the Denmark group lists all four Danish base maps and Aerial photo, and each loads tiles when tapped (#859)`, async () => {
+      const { ctx, page, rec } = await newCtx({ view, storage: { 'meshcore-theme': 'dark' } });
+      try {
+        await gotoMap(page);
+        assert(await theme(page) === 'dark', 'not dark');
+        await openControl(page, view);
+        const rows = await baseRows(page);
+        const dk = rows.filter((r) => r.dk);
+        assert(dk.map((r) => r.id).join(',') === DK_DARK.map((d) => d.id).join(','),
+          'the dark Denmark group lists: ' + dk.map((r) => r.id).join(','));
+        for (const d of DK_DARK) {
+          assert(dk.find((r) => r.id === d.id).text === d.name, d.id + ' reads ' + JSON.stringify(dk.find((r) => r.id === d.id).text));
+        }
+        for (const d of DK_DARK) {
+          await pickBase(page, view, d.id);
+          await page.waitForFunction((re) => Array.from(document.querySelectorAll('.leaflet-pane img.leaflet-tile'))
+            .some((i) => new RegExp(re[0], re[1]).test(i.src) && i.complete && i.naturalWidth > 0), [d.src.source, d.src.flags], { timeout: 8000 })
+            .catch(() => {});
+          const r = await page.evaluate(({ id, re }) => {
+            const tiles = Array.from(document.querySelectorAll('.leaflet-pane img.leaflet-tile')).filter((i) => new RegExp(re[0], re[1]).test(i.src));
+            const pane = document.querySelector('.leaflet-tile-pane');
+            return {
+              checked: Array.from(document.querySelectorAll('.leaflet-control-layers-base label[data-tile-id]'))
+                .filter((l) => l.querySelector('input').checked).map((l) => l.getAttribute('data-tile-id')),
+              loaded: tiles.filter((i) => i.complete && i.naturalWidth > 0).length,
+              filter: pane ? pane.style.filter : '',
+            };
+          }, { id: d.id, re: [d.src.source, d.src.flags] });
+          assert(r.checked.length === 1 && r.checked[0] === d.id, d.id + ': selected ' + r.checked.join(','));
+          assert(r.loaded > 0, d.id + ': no tile loaded');
+          if (d.id !== 'dhm-ortho') {
+            assert(/invert/.test(r.filter) === d.inverted, d.id + ': tile filter ' + JSON.stringify(r.filter) + (d.inverted ? ' (not inverted)' : ' (a light-only map is shown inverted, not as the light map)'));
+          }
+        }
+        assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+      } finally { await ctx.close(); }
+    });
+  }
 
   await browser.close();
   console.log(`\n${passed} passed, ${failed} failed`);

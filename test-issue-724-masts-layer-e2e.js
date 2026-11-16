@@ -213,10 +213,14 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     await step(`${pg.name}: two toggles, sites on, interference off by default, credit shown`, async () => {
       const { ctx, page, rec } = await newCtx();
       await gotoMap(page, pg.hash);
-      const labels = await page.$$eval('.leaflet-control-layers-overlays label', (ls) => ls.map((l) => [l.getAttribute('data-overlay-id'), l.textContent.trim()]));
+      // #859: the row's name is read apart from its zoom hint.
+      const labels = await page.$$eval('.leaflet-control-layers-overlays label', (ls) => ls.map((l) => {
+        const n = l.querySelector('.mc-layer-name'), h = l.querySelector('.mc-layer-hint');
+        return [l.getAttribute('data-overlay-id'), (n ? n.textContent : l.textContent).trim(), h ? h.textContent : ''];
+      }));
       const ids = labels.map((l) => l[0]).filter((x) => x && x.startsWith('masts'));
       assert(JSON.stringify(ids) === '["masts-sites","masts-interference"]', 'toggles ' + JSON.stringify(labels));
-      assert(labels.some((l) => l[1] === 'Antenna sites (mast, tower or rooftop)'), 'site label');
+      assert(labels.some((l) => l[1] === 'Antenna sites (mast, tower or rooftop)' && l[2] === 'zoom 13+'), 'site label ' + JSON.stringify(labels));
       assert(labels.some((l) => l[1] === 'Nearby transmitters (interference)'), 'interference label');
       assert((await checked(page, SITE_SEL)) === true, 'sites not on');
       assert((await checked(page, INT_SEL)) === false, 'interference on by default');

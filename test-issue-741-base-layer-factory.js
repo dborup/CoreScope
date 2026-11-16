@@ -616,8 +616,10 @@ test('F6 the layer control offers every style with its own credit and ceiling', 
   const { ctl } = buildControl(ctx, true);
   const reg = ctx.window.MC_TILE_PROVIDERS;
   const ids = Object.keys(ctl.base).filter(k => k !== '__auto__');
-  // #845: the control lists the current (light) theme's styles only.
-  const light = Object.keys(reg).filter(k => reg[k].type === 'light');
+  // #845: the control lists the current (light) theme's styles; #859: and
+  // the styles with no light variant (dark-only), which are never hidden.
+  const LG = ctx.window.MC_LayerGroups;
+  const light = Object.keys(reg).filter(k => reg[k].type === 'light' || !LG.counterpartId(k, reg));
   assert.deepStrictEqual(ids.sort(), light.sort(), 'every offered style of the theme is selectable');
   for (const id of ids) {
     const p = reg[id], layer = ctl.base[id];

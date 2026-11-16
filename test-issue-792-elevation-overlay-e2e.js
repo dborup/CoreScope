@@ -281,8 +281,11 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
       await step('375x560: two taps on + reach z14; no tile above z13, the z13 tiles stay', async () => {
         const from = rec.tiles.length;
-        // Close the layer list so + is not covered.
-        await page.touchscreen.tap(vp.width / 2, vp.height / 2);
+        // Close the layer list so + is not covered: a tap on the map beside
+        // the open list (#859: its taller touch rows reach the centre, where
+        // a tap would land on the Denmark toggle instead of the map).
+        const list = await page.locator('.leaflet-control-layers').boundingBox();
+        await page.touchscreen.tap(Math.round((list.x + list.width + vp.width) / 2), vp.height / 2);
         await page.waitForTimeout(400);
         for (let i = 0; i < 2; i++) {
           await page.tap('.leaflet-control-zoom-in');

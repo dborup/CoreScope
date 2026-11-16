@@ -2970,15 +2970,23 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   font-size: 0.85em;
   color: var(--text-muted);
 }
-.mc-layers-dk-body label > span {
+/* #859 — every row of the list, in the Denmark group or not, is laid out
+   the same way, so the tap targets match; on a coarse pointer each row is
+   as tall as the Denmark toggle. MapChromeFit (#841) keeps the taller list
+   scrollable above the credits and the bottom nav. */
+.leaflet-control-layers-list label > span {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-height: 20px;
 }
-.mc-layers-dk-body label > span > span {
+.leaflet-control-layers-list label > span > span {
   display: flex;
   flex: 1 1 auto;
   align-items: baseline;
+}
+@media (pointer: coarse) {
+  .leaflet-control-layers-list label > span { min-height: 32px; }
 }
 .mc-layer-hint {
   margin-left: auto;

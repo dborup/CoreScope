@@ -217,18 +217,30 @@
   var GATE_HINT = {
     dataforsyningen: 'set map.tiles.providers.dataforsyningen.enabled: true and a non-empty map.tiles.providers.dataforsyningen.token'
   };
-  function _warnUnavailableDefault(key, id) {
-    if (typeof id !== 'string' || !id || _hasId(id)) return;
-    if (_warnedDefaults[key + '=' + id]) return;
-    _warnedDefaults[key + '=' + id] = true;
+  /* #859 — the warning names the id the operator configured, not the one
+   * it was migrated to (#845), and says why: a CARTO default resolves to
+   * its keyless equivalent while CARTO is off, which is the default. */
+  function unavailableDefaultMessage(key, id) {
+    if (typeof id !== 'string' || !id || _hasId(id)) return null;
     var style = Object.prototype.hasOwnProperty.call(BASE_STYLES, id) ? BASE_STYLES[id] : null;
+    var head = '[map tiles] map.tiles.' + key + ' "' + id + '" is ';
+    if (style && style.provider === 'carto') {
+      var to = migrateTileId(id);
+      return head + 'not used: CARTO is off by default since #845 (keyless CARTO tiles are stamped ' +
+        '"API KEY REQUIRED"; set map.tiles.providers.carto.enabled: true to use it anyway). ' +
+        (to !== id ? 'Using "' + to + '" instead.' : 'Using the fallback base map instead.');
+    }
     var why = style
       ? 'its provider is not enabled (' + (GATE_HINT[style.provider] || 'set map.tiles.providers.' + style.provider + '.enabled: true') + ')'
       : 'it is not a known tile style';
+    return head + 'ignored: ' + why + '. Using the fallback base map instead.';
+  }
+  function _warnUnavailableDefault(key, id) {
+    var msg = unavailableDefaultMessage(key, id);
+    if (!msg || _warnedDefaults[key + '=' + id]) return;
+    _warnedDefaults[key + '=' + id] = true;
     try {
-      if (typeof console !== 'undefined' && console.warn) {
-        console.warn('[map tiles] map.tiles.' + key + ' "' + id + '" is ignored: ' + why + '. Using the fallback base map instead.');
-      }
+      if (typeof console !== 'undefined' && console.warn) console.warn(msg);
     } catch (_) {}
   }
 
@@ -291,8 +303,9 @@
 
     if (_hasId(_cfgDefault('darkDefault'))) _serverDefault = _cfgDefault('darkDefault');
     if (_hasId(_cfgDefault('lightDefault'))) _serverDefaultLight = _cfgDefault('lightDefault');
-    _warnUnavailableDefault('darkDefault', _cfgDefault('darkDefault'));
-    _warnUnavailableDefault('lightDefault', _cfgDefault('lightDefault'));
+    // #859 — warned about as configured, before any CARTO migration.
+    _warnUnavailableDefault('darkDefault', _cfg && _cfg.darkDefault);
+    _warnUnavailableDefault('lightDefault', _cfg && _cfg.lightDefault);
 
     // When called after async config loads, notify maps to re-sync tiles
     if (fromAsync) {
@@ -979,6 +992,10 @@
       defaultOn: function () { return window.MastsLayer.settings(getMastsConfig()).enabled; }, offInHash: true,
       config: getMastsConfig,
       label: function () { return window.MastsLayer.SITE_LABEL; },
+      // #859 — the zoom gate as the row's hint; this viewer's, as the
+      // status line under the pair shows it (the label stays the layer's
+      // key, so it carries none).
+      hint: function (cfg) { return 'zoom ' + window.MastsLayer.settings(cfg).minZoom + '+'; },
       create: function (map, cfg) { return window.MastsLayer.layer(map, cfg, 'sites'); }
     },
     {
@@ -1481,6 +1498,17 @@
     }
   }
 
+  // #859 — an overlay's zoom hint when its label carries none, else ''.
+  function _overlayHint(id) {
+    for (var i = 0; i < OVERLAYS.length; i++) {
+      var o = OVERLAYS[i];
+      if (o.id !== id || !o.hint) continue;
+      var cfg = o.config();
+      return cfg ? o.hint(cfg) : '';
+    }
+    return '';
+  }
+
   // An overlay's own addition to its label in the control (the antenna
   // sites' status line), after every control build.
   function _decorateOverlay(map, id, labelEl) {
@@ -1628,12 +1656,12 @@
 
   /* #845 — the layer control's model, pure so it can be tested alone.
    *
-   *   - Only the current theme's variants are listed. A style's counterpart
-   *     in the other theme is the style of the same provider and label
-   *     (osm-standard / osm-dark, esri-imagery / esri-imagery-dark, ...),
-   *     which is also how a pick follows a theme switch. An explicit pick
-   *     with no counterpart (a light-only map picked before switching to
-   *     dark) stays listed, so the pick is never lost.
+   *   - A style with both variants is listed once, as the current theme's.
+   *     A style's counterpart in the other theme is the style of the same
+   *     provider and label (osm-standard / osm-dark, esri-imagery /
+   *     esri-imagery-dark, ...), which is also how a pick follows a theme
+   *     switch. A style with no counterpart is always listed, as it is
+   *     (#859: a light-only map in dark mode), so no map is ever hidden.
    *   - The Danish base maps (Dataforsyningen, and Aerial, which lives
    *     outside the registry) go into the "Denmark" group, as do all the
    *     overlays, which are all Danish data.
@@ -1664,13 +1692,16 @@
   }
 
   // The base-map ids the control lists for one theme, in registry order:
-  // { world: [...], denmark: [...] }. `keepId` is the viewer's explicit pick.
-  function themeBaseIds(reg, isDark, keepId) {
+  // { world: [...], denmark: [...] }. #859 — nothing is hidden: a style of
+  // the other theme is left out only when its counterpart is listed; one
+  // with no counterpart is listed as it is (a light-only map is offered,
+  // and shown, as the light map in dark mode).
+  function themeBaseIds(reg, isDark) {
     reg = reg || REGISTRY;
     var type = isDark ? 'dark' : 'light';
     var out = { world: [], denmark: [] };
     Object.keys(reg).forEach(function (id) {
-      if (reg[id].type !== type && !(id === keepId && !counterpartId(id, reg))) return;
+      if (reg[id].type !== type && counterpartId(id, reg)) return;
       out[isDenmarkBase(id, reg) ? 'denmark' : 'world'].push(id);
     });
     return out;
@@ -1940,7 +1971,9 @@
         var os = overlayLabels[j].querySelectorAll('span');
         if (os.length) {
           var t = os[os.length - 1];
-          _setRowText(t, t.textContent.trim(), true);
+          var text = t.textContent.trim();
+          var extra = j < overlayIds.length && !ZOOM_HINT_RE.test(text) ? _overlayHint(overlayIds[j]) : '';
+          _setRowText(t, extra ? text + ' ' + extra : text, true);
         }
         dk.overlays.appendChild(overlayLabels[j]);
       }
@@ -1973,10 +2006,10 @@
         try { map.off('baselayerchange', map._mcBaselayerchangeHandler); } catch (_) {}
       }
 
-      // #845 — only this theme's variants (and an explicit pick that has
-      // none in it), the Danish ones listed in the Denmark group.
+      // #845 — this theme's variant of each style (#859: a style with none
+      // in it as its other one), the Danish ones in the Denmark group.
       _builtDark = _isDark();
-      var listed = themeBaseIds(REGISTRY, _builtDark, _isAuto ? null : _sessionBasePick);
+      var listed = themeBaseIds(REGISTRY, _builtDark);
 
       function _makeLayer(id) {
         var p   = REGISTRY[id];
@@ -2130,6 +2163,12 @@
     // stay, one per Live/Map visit).
     var onDHMDefaults = function () { if (!map._mcGone) _buildControl(); };
     window.addEventListener('dhm-defaults-changed', onDHMDefaults);
+    // #859 — the customizer moved the antenna sites' zoom gate: the rows
+    // are laid out again, so the hint follows (no rebuild needed).
+    var onMastsDefaults = function () {
+      if (!map._mcGone && _control && _control._map && typeof _control._update === 'function') _control._update();
+    };
+    window.addEventListener('masts-defaults-changed', onMastsDefaults);
     // #845 — the list follows the theme: rebuilt when it flips (never per
     // map move), an explicit pick moved to its counterpart in the new one.
     var onTheme = function () {
@@ -2155,6 +2194,7 @@
       try {
         if (window.removeEventListener) {
           window.removeEventListener('dhm-defaults-changed', onDHMDefaults);
+          window.removeEventListener('masts-defaults-changed', onMastsDefaults);
           window.removeEventListener('mc-tile-provider-changed', onConfigProviders);
         }
       } catch (_) {}
