@@ -1729,6 +1729,16 @@
     return hex;
   }
 
+  /* #839 finding 9 — the value attribute of an <input type="color">: the
+   * colour as 6-digit hex, or no attribute at all when it is not one we can
+   * convert (an unset key, a var()). The picker then shows black, as it did
+   * when it rejected the value, but the browser no longer warns about a
+   * format it cannot take each time the panel renders. */
+  function _colorValueAttr(val) {
+    var hex = _cssColorToHex(val);
+    return hex ? ' value="' + escAttr(hex) + '"' : '';
+  }
+
   /* Review PR#714 — the alpha of a CSS colour, 0-1, or 1 when it has none
    * or is not one we can read. */
   function _cssColorAlpha(val) {
@@ -1787,12 +1797,10 @@
     if (isFont) {
       inputHtml = '<input type="text" data-cv2-field="' + section + '.' + key + '" value="' + escAttr(val) + '" style="width:160px;font-size:11px;font-family:var(--mono);padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--text)">';
     } else {
-      // Ensure hex is 7 chars for color input
-      var hexVal = val.length === 7 ? val : (val.length === 4 ? '#' + val[1] + val[1] + val[2] + val[2] + val[3] + val[3] : _cssColorToHex(val));
       // data-cv2-alpha carries a translucent colour's alpha over to the
       // pick, which the native picker cannot express (review PR#714).
       var alpha = _cssColorAlpha(val);
-      inputHtml = '<input type="color" data-cv2-field="' + section + '.' + key + '" value="' + escAttr(hexVal) + '"' +
+      inputHtml = '<input type="color" data-cv2-field="' + section + '.' + key + '"' + _colorValueAttr(val) +
         (alpha < 1 ? ' data-cv2-alpha="' + alpha + '"' : '') + '>' +
         '<span class="cust-hex">' + esc(val) + '</span>';
     }
@@ -2053,7 +2061,7 @@
       rows += '<div class="cust-color-row">' +
         '<div><label>' + renderConfigGlyph(NODE_EMOJI[key]) + ' ' + NODE_LABELS[key] + _overrideDot('nodeColors', key) + '</label>' +
         '<div class="cust-hint">' + (NODE_HINTS[key] || '') + '</div></div>' +
-        '<input type="color" data-cv2-field="nodeColors.' + key + '" value="' + val + '">' +
+        '<input type="color" data-cv2-field="nodeColors.' + key + '"' + _colorValueAttr(val) + '>' +
         '<span class="cust-node-dot" style="background:' + val + '"></span>' +
         '<span class="cust-hex">' + val + '</span></div>';
     }
@@ -2067,7 +2075,7 @@
       typeRows += '<div class="cust-color-row">' +
         '<div><label>' + renderConfigGlyph(TYPE_EMOJI[tkey] || '') + ' ' + TYPE_LABELS[tkey] + _overrideDot('typeColors', tkey) + '</label>' +
         '<div class="cust-hint">' + (TYPE_HINTS[tkey] || '') + '</div></div>' +
-        '<input type="color" data-cv2-field="typeColors.' + tkey + '" value="' + tval + '">' +
+        '<input type="color" data-cv2-field="typeColors.' + tkey + '"' + _colorValueAttr(tval) + '>' +
         '<span class="cust-node-dot" style="background:' + tval + '"></span>' +
         '<span class="cust-hex">' + tval + '</span></div>';
     }
@@ -2109,7 +2117,7 @@
       '<p class="cust-hint" style="margin-bottom:8px">Outline around each map marker. Dial these down when hundreds of nodes make the default white border overwhelming. Changes are live on every mounted marker.</p>' +
       '<div class="cust-color-row"><div><label>Color' + _overrideDot('markerStroke', 'color') + '</label>' +
         '<div class="cust-hint">Marker outline color. Defaults to white for contrast on dark + light tiles.</div></div>' +
-        '<input type="color" data-cv2-field="markerStroke.color" value="' + esc(msColor) + '">' +
+        '<input type="color" data-cv2-field="markerStroke.color"' + _colorValueAttr(msColor) + '>' +
         '<span class="cust-node-dot" style="background:' + esc(msColor) + '"></span>' +
         '<span class="cust-hex">' + esc(msColor) + '</span></div>' +
       '<div class="cust-color-row"><div><label>Width' + _overrideDot('markerStroke', 'width') + '</label>' +
@@ -2167,6 +2175,7 @@
       _renderHide1ByteHopsToggle() +
       '<div data-cv2-tile-providers>' + (_shownTileSelectorHtml = _renderTileProviderSelector()) + '</div>' +
       _renderTerrainSettings() +
+      _renderShareSection() +
       _renderMastsSettings() +
       _renderDHMOverlaySettings() +
       _renderHeritageSettings() +
@@ -2210,22 +2219,37 @@
           modelOpt('dtm', 'Terrain only') +
         '</select>' +
         '<div class="cust-hint">Terrain always decides the verdict. Surface is drawn for information and costs a second elevation request.</div></div>' +
-      _renderShareSettings(tp);
+      _renderShareSettings(tp, '<p class="cust-section-title" style="font-size:13px;margin:16px 0 6px">Share previews</p>');
   }
 
-  // ── #727 M4 Share previews ──
-  // Inside the Terrain Profile section, so it follows the profile gate.
-  // Without the share route the viewer has nothing to choose; with it, the
-  // switch, and the operator's card look in fixed words: a server value is
-  // only ever compared, never printed.
-  function _renderShareSettings(tp) {
+  // ── #727 M4 / #811 M4 Share previews ──
+  // One viewer switch for both card types: terrain profiles (dhm.share) and
+  // node pages (the share block, share.nodes.enabled). Inside the Terrain
+  // Profile section when the profile is offered, else its own section when
+  // only node cards are. Without either route the viewer has nothing to
+  // choose; with one, the switch, and the operator's card look in fixed
+  // words: a server value is only ever compared, never printed.
+  function _nodeShareCfg() {
+    var NS = window.NodeShare, cfg = window.MC_SHARE_CFG;
+    return NS && typeof NS.offered === 'function' && NS.offered(cfg) ? cfg : null;
+  }
+
+  function _renderShareSettings(tp, head) {
     var cfg = window.MC_DHM_CFG;
-    var head = '<p class="cust-section-title" style="font-size:13px;margin:16px 0 6px">Share previews</p>';
-    if (typeof tp.shareOffered !== 'function' || !tp.shareOffered(cfg)) {
+    var profiles = !!tp && typeof tp.shareOffered === 'function' && tp.shareOffered(cfg);
+    var nodes = _nodeShareCfg();
+    if (!profiles && !nodes) {
       return head + '<div class="cust-hint">Link previews are off on this server, so Copy link hands out the plain map link.</div>';
     }
     var on = shareSettings(_getEffective()).shareLinks;
-    var card = cfg.card && typeof cfg.card === 'object' ? cfg.card : null;
+    // Both cards are drawn with map.dhm.profile.card, so one look is shown.
+    var src = profiles ? cfg.card : nodes.card;
+    var card = src && typeof src === 'object' ? src : null;
+    var hint = !nodes
+      ? 'Pasted into a chat, the link shows a card of the profile. Off: the plain map link, without a card.'
+      : profiles
+        ? 'Pasted into a chat, a profile link or a node link (repeaters, rooms and sensors) shows a card. Off: the plain map or node link, without a card.'
+        : 'Pasted into a chat, a node link (repeaters, rooms and sensors) shows a card of the node. Off: the plain node link, without a card.';
     var shown = function (id, label, value) {
       return '<div class="cust-terrain-row"><div><span style="font-size:12px;font-weight:600">' + label + '</span></div>' +
         '<span id="' + id + '" style="font-size:13px">' + value + '</span></div>';
@@ -2234,13 +2258,22 @@
       '<div class="cust-field"><label class="cust-check" for="cv2-terrain-share" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
         '<input type="checkbox" id="cv2-terrain-share" data-cv2-terrain-share' + (on ? ' checked' : '') + ' style="width:20px;height:20px">' +
         '<span>Copy link shares a preview' + _overrideDot('terrain', TERRAIN_SHARE_KEY) + '</span></label>' +
-        '<div class="cust-hint">Pasted into a chat, the link shows a card of the profile. Off: the plain map link, without a card.</div></div>' +
+        '<div class="cust-hint">' + hint + '</div></div>' +
       (card
         ? shown('cv2-card-theme', 'Card theme', card.theme === 'light' ? 'Light' : 'Dark') +
           shown('cv2-card-names', 'Node names on the card', card.names === false ? 'Hidden' : 'Shown') +
           '<div class="cust-hint">Set by the operator for every shared card.</div>'
         : '') +
       '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-top:8px">The card is drawn on the server in the operator\u2019s saved palette, not with the colour overrides in this browser.</p>';
+  }
+
+  // #811 M4: node cards without the terrain profile get the switch in a
+  // section of their own; with the profile it lives in that section.
+  function _renderShareSection() {
+    var tp = window.TerrainProfile;
+    if (tp && typeof tp.offered === 'function' && tp.offered(window.MC_DHM_CFG)) return '';
+    if (!_nodeShareCfg()) return '';
+    return _renderShareSettings(null, '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Share previews</p>');
   }
 
   // ── #724 M5 Antenna sites settings ──
@@ -2287,7 +2320,7 @@
       return '<option value="' + v + '"' + (d.hillshade === v ? ' selected' : '') + '>' + labels[v] + '</option>';
     }).join('');
     var html = '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">DHM Map Overlays</p>' +
-      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">What the Map and Live pages start with from the Danish elevation model (DHM). A link that says otherwise still wins, and so does a choice you made in the map\u2019s layer control.</p>';
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">What the Map and Live pages start with from the Danish elevation model (DHM). A link that says otherwise still wins, and so does a choice you made in the map\u2019s layer control, until Reset All.</p>';
     if (has('terrain') || has('surface')) {
       html += '<div class="cust-field"><label for="cv2-overlay-hillshade">Hillshade by default' + _overrideDot('dhmOverlays', 'hillshade') + '</label>' +
         '<select id="cv2-overlay-hillshade" data-cv2-overlay="hillshade" style="width:100%;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);touch-action:manipulation">' +
@@ -2347,7 +2380,7 @@
     };
     return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Ancient Monuments</p>' +
       '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">The Map\u2019s protected ancient monuments overlay (Slots- og Kulturstyrelsen, zoom ' + _heritageCfg().minZoom + '+) and its warning in the Path profile.</p>' +
-      check('enabled', 'Show protected ancient monuments on the map by default', 'A link that says otherwise, or your own last choice on the map, still wins.') +
+      check('enabled', 'Show protected ancient monuments on the map by default', 'A link that says otherwise, or your own last choice on the map, still wins, until Reset All.') +
       num('opacityPct', 'Monuments overlay opacity (%)', 'How strongly the zones and points cover the map', 5, String(h.opacityPct)) +
       (profile
         ? check('profileWarning', 'Warn about monuments in the Path profile', 'Off: the profile asks the server nothing and shows no monument note. No note never means there is no monument.') +
@@ -3797,6 +3830,13 @@
     for (var i = 0; i < CUSTOMIZER_LS_KEYS.length; i++) {
       try { localStorage.removeItem(CUSTOMIZER_LS_KEYS[i]); } catch (_e) { /* ignore */ }
     }
+    // The map layer control's own choices (hillshade, contours, monuments,
+    // antenna sites, Aerial): they outrank the defaults set here, so a reset
+    // that kept them would not reset the map (#839 finding 8). The keys
+    // live with the overlays in map-tile-providers.js.
+    try {
+      if (typeof window !== 'undefined' && typeof window.MC_forgetMapLayerPrefs === 'function') window.MC_forgetMapLayerPrefs();
+    } catch (_e) { /* ignore */ }
 
     // 2. CB preset — body[data-cb-preset] + CSS var teardown lives in
     //    MeshCorePresets.clearPreset(). Prefer the canonical helper so
@@ -3919,8 +3959,10 @@
     isValidColor: isValidColor,
     // #681 M6 — exposed for tests; see test-issue-681-m6-customizer-terrain.js.
     cssColorToHex: _cssColorToHex,
+    colorValueAttr: _colorValueAttr,
     colorWithAlpha: _colorWithAlpha,
     renderTerrainSettings: _renderTerrainSettings,
+    renderShareSection: _renderShareSection,
     isValidHomeUrl: isValidHomeUrl,
     isOverridden: _isOverridden,
     // #1496 — full reset (not just STORAGE_KEY). See _resetAll() above.

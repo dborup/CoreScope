@@ -45,6 +45,15 @@
     return lat >= bounds[0][0] && lat <= bounds[1][0] && lon >= bounds[0][1] && lon <= bounds[1][1];
   }
 
+  // A tap on the map while the layer control is open only closes the
+  // control; it is no lookup (#839 finding 7). Leaflet collapses the
+  // control on the tap's compatibility mouseleave, before preclick, so the
+  // state is read when the finger goes down (attach: pointerdown).
+  function layerControlOpen(map) {
+    var c = map && map.getContainer && map.getContainer();
+    return !!(c && c.querySelector && c.querySelector('.leaflet-control-layers-expanded'));
+  }
+
   function ownedTarget(ev) {
     if (!ev) return false;
     if (ev._stopped) return true;
@@ -128,6 +137,8 @@
     var doFetch = opts.fetch || function (u, i) { return global.fetch(u, i); };
     var doc = opts.document || global.document;
     var busyAtPress = false;
+    var controlOpenAtDown = false;
+    var container = map.getContainer ? map.getContainer() : null;
     var seq = 0;
     var ctrl = null;
     var popup = null;
@@ -148,12 +159,18 @@
         popup = global.L.popup({ className: 'mc-heritage-popup', maxWidth: 260, autoPanPadding: [16, 16] });
         popup.on('remove', abort);
       }
+      // Room measured before every layout, as for the antenna popup: clear
+      // of the zoom/layers column, the gear and the ruler, scrolling inside
+      // the map on a phone (#839 finding 2, #841 F6).
+      var fit = global.MapChromeFit;
+      if (fit) fit.fitPopup(map, popup, latlng);
       popup.setLatLng(latlng).setContent(content);
       if (!popup.isOpen()) popup.openOn(map);
     }
 
     function onPreclick(e) {
-      busyAtPress = !!isBusy() || ownedTarget(e && e.originalEvent);
+      busyAtPress = !!isBusy() || ownedTarget(e && e.originalEvent) || controlOpenAtDown || layerControlOpen(map);
+      controlOpenAtDown = false;
     }
 
     function onClick(e) {
@@ -189,12 +206,22 @@
       if (popup) map.closePopup(popup);
     }
 
+    function onDown() { controlOpenAtDown = layerControlOpen(map); }
+
+    if (container && container.addEventListener) {
+      container.addEventListener('pointerdown', onDown, true);
+      container.addEventListener('touchstart', onDown, { capture: true, passive: true });
+    }
     map.on('preclick', onPreclick);
     map.on('click', onClick);
     map.on('overlayremove', onOverlayRemove);
     return {
       detach: function () {
         abort();
+        if (container && container.removeEventListener) {
+          container.removeEventListener('pointerdown', onDown, true);
+          container.removeEventListener('touchstart', onDown, { capture: true, passive: true });
+        }
         map.off('preclick', onPreclick);
         map.off('click', onClick);
         map.off('overlayremove', onOverlayRemove);

@@ -290,3 +290,24 @@ func TestRoleLabel(t *testing.T) {
 		}
 	}
 }
+
+// CardedRoles is the list cmd/server publishes as share.roles (#811 M4):
+// exactly the roles Carded accepts.
+func TestCardedRoles(t *testing.T) {
+	got := CardedRoles()
+	seen := map[string]bool{}
+	for _, r := range got {
+		if !Carded(r) {
+			t.Errorf("CardedRoles lists %q, which Carded refuses", r)
+		}
+		seen[r] = true
+	}
+	for _, r := range []string{"repeater", "room", "sensor"} {
+		if !seen[r] {
+			t.Errorf("CardedRoles misses %q", r)
+		}
+	}
+	if len(got) != 3 || seen["companion"] {
+		t.Errorf("CardedRoles = %v", got)
+	}
+}

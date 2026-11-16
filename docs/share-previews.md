@@ -7,6 +7,9 @@ profile. Opened in a browser, it goes straight to the same profile on the Map.
 
 Sharing is off by default (#727).
 
+Node pages have share previews too, with their own switch on the server:
+see [Share previews for node links](node-share-previews.md).
+
 ## What the card shows
 
 The card is a 1200×630 PNG drawn on the server, `GET /api/terrain/profile.png`.
@@ -61,7 +64,8 @@ again within a minute.
   `share.upstreamPerMin` to `0`.
 - **Viewer.** In the customizer, open **Display → Terrain Profile → Share
   previews** and turn off **Copy link shares a preview**. That browser's
-  Copy link then hands out the plain map link. The setting is stored as
+  Copy link then hands out the plain map link. The same switch covers
+  [node links](node-share-previews.md#turning-it-off). The setting is stored as
   `terrain.shareLinks` (only `false` is stored), goes into an export, and
   **Reset** removes it. It cannot turn previews on when the server has them
   off.
