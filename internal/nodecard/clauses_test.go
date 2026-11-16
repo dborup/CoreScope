@@ -246,8 +246,8 @@ func TestFallbackTitle(t *testing.T) {
 		fxKey: "Node 3f2a91c0", strings.ToUpper(fxKey): "Node 3f2a91c0",
 		"3f2a": "Node", "": "Node", "<script>abcdefgh": "Node", "zz2a91c0d4": "Node",
 	} {
-		if got := fallbackTitle(key); got != want {
-			t.Errorf("fallbackTitle(%q) = %q, want %q", key, got, want)
+		if got := FallbackTitle(key); got != want {
+			t.Errorf("FallbackTitle(%q) = %q, want %q", key, got, want)
 		}
 	}
 }
@@ -264,6 +264,37 @@ func TestNoCoordinatesOrPackets(t *testing.T) {
 			if coordRe.MatchString(r.Text) {
 				t.Errorf("%s: %s run %q looks like a coordinate", c.name, r.Role, r.Text)
 			}
+		}
+	}
+}
+
+// Clauses is exactly what the card draws (#811 M3): the server's
+// og:description and version hash read it, so they can never describe a
+// card that differs from the one served.
+func TestClausesAreTheDrawnTiles(t *testing.T) {
+	over := fxRepeater()
+	over.Relay.AirtimePeakPct = fp(12.5)
+	for _, in := range []NodeCardInput{fxRepeater(), fxRoom(), fxSensor(), over} {
+		ts, cs := tiles(in), Clauses(in)
+		if len(ts) != len(cs) {
+			t.Fatalf("%s: %d clauses for %d tiles", in.Role, len(cs), len(ts))
+		}
+		for i := range ts {
+			if c := cs[i]; c.Label != ts[i].label || c.Value != ts[i].value || c.Detail != ts[i].detail || c.Over != ts[i].over {
+				t.Errorf("%s clause %d = %+v, tile %+v", in.Role, i, c, ts[i])
+			}
+		}
+	}
+	if !Clauses(over)[4].Over {
+		t.Error("a busiest hour over the limit is not flagged")
+	}
+}
+
+// The badge words, which the server's og:title repeats.
+func TestRoleLabel(t *testing.T) {
+	for role, want := range map[string]string{"repeater": "Repeater", "room": "Room Server", "sensor": "Sensor"} {
+		if got := RoleLabel(role); got != want {
+			t.Errorf("RoleLabel(%q) = %q, want %q", role, got, want)
 		}
 	}
 }

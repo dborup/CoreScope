@@ -270,6 +270,12 @@
       }
     }
   },
+  "share": {
+    "nodes": {
+      "_comment": "#811 - shareable node links with link previews. With enabled true, /p?node=<64-hex public key> answers link-preview crawlers with that node's name and role, the configured area it is in (from areas, only when it is in one), when it was last heard, its relays and seen airtime (repeaters and rooms) and its neighbour count, and a 1200x630 card, GET /api/nodes/{pubkey}/card.png, as og:image. Cards exist for repeaters, rooms and sensors only: a companion link gets the plain site preview. No position, map or packet content is shown. Hidden nodes (nodeBlacklist, observerBlacklist, hiddenNamePrefixes), unknown and inactive nodes get the plain site preview with 404. Only full 64-hex keys are accepted. A browser opening /p?node= moves straight on to the node page. The card uses the theme and names settings of map.dhm.profile.card, is cached for 10 minutes (64 cards) and, when not cached, is charged to map.dhm.profile.rateLimitPerMin per client. It needs no upstream service and works without map.dhm. Set branding.publicBaseUrl when you enable this. Off by default.",
+      "enabled": false
+    }
+  },
   "home": {
     "heroTitle": "CoreScope",
     "heroSubtitle": "Find your nodes to start monitoring them.",
