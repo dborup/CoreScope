@@ -236,8 +236,9 @@ func (p *terrainProfiler) sharePage(req terrainRequest) ogPage {
 		opt.Pending = true
 	}
 	pg.Image = p.cardPath(req, e.cardClasses(), ready)
-	pg.ImageAlt = profilecard.AltText(resp, cardNames(req), opt)
-	pg.ImageAltCredit = profilecard.AltCredit(resp, opt)
+	// Whole sentences within the limit (#846); renderProfile's clip is
+	// only a backstop.
+	pg.ImageAlt = profilecard.AltText(resp, cardNames(req), opt, ogImageAltMaxRunes)
 	return pg
 }
 

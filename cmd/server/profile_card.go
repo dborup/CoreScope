@@ -60,7 +60,8 @@ const (
 	// by a crawler.
 	cardRendererVersion = "846.1"
 	// cardBytesPerEntry is the byte bound per cached card. Real cards are
-	// 80–94 KB (#755 review); 128 KiB leaves room for an unusual one, and
+	// 80–94 KB (#755 review), a classified one up to 100 KB (#846);
+	// 128 KiB leaves room for an unusual one, and
 	// the default 64 entries keep the plan's ~8 MiB (#727 plan §3.2).
 	cardBytesPerEntry       = 128 << 10
 	cardCacheEntriesDefault = 64

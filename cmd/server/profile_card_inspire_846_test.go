@@ -86,6 +86,19 @@ func TestProfileCard846_URLAndCardFollowTheClassification(t *testing.T) {
 		t.Fatalf("v moved without a change: %q then %q", url2, url3)
 	}
 
+	// The state alone, the same classes: partial back to full. The card
+	// changes ("Not told apart" leaves the legend), so v moves too.
+	env.reclassify(t, target, func(c *terrainClasses) { c.state = terrainClassFull })
+	pngFull := wantCard(t, env.card(q), "miss")
+	if bytes.Equal(png2, pngFull) {
+		t.Fatal("precondition: the state did not change the card")
+	}
+	urlFull := mustMeta(t, env.share(target).Body.String(), "og:image")
+	if urlFull == url2 || urlFull == url1 {
+		t.Fatal("the classification state changed the card, but not its immutable og:image URL")
+	}
+	url2 = urlFull
+
 	// No class left: the footprints are no longer credited, so the credit
 	// changes, and with it the card and v.
 	env.reclassify(t, target, func(c *terrainClasses) {
@@ -136,25 +149,51 @@ func TestProfileCard846_KeyNeedsTheProfileOnlyWhenClassified(t *testing.T) {
 	wantCard(t, env.card(q), "hit")
 }
 
-// og:image:alt names the footprints when the card credits them, and the
-// sentence survives the 300-rune clip of the alt text whole: the rest of
-// the alt is clipped first.
+// A model=both path wholly outside DHM on a classifying server is never
+// in the elevation cache: it needs no fetch and has no classes. Its card is
+// still a cache hit the second time, served before the per-IP charge
+// (#850 review F5).
+func TestProfileCard846_PathOutsideDHMIsACardHit(t *testing.T) {
+	env := newCardBuildingsEnv(t, newStubOGC(t, dokk1Footprint))
+	const lundPt = "55.70470,13.19100"
+	q, target := pathQuery(malmoPt, lundPt, "model=both"), shareQ(malmoPt, lundPt, "model=both")
+	if req := env.resolveShare(t, target); req.plan.Calls() != 0 {
+		t.Fatalf("precondition: Malmö → Lund makes %d upstream calls", req.plan.Calls())
+	}
+	wantCard(t, env.card(q), "miss")
+	calls := env.src.calls.Load()
+	for i := 0; i < 2; i++ {
+		wantCard(t, env.card(q), "hit")
+	}
+	if env.src.calls.Load() != calls {
+		t.Fatal("a card hit went upstream")
+	}
+}
+
+// og:image:alt names the footprints when the card credits them, and keeps
+// whole sentences within its 300 runes (#850 review F1): the verdict and
+// the surface sentence stay next to the credit, with coordinate endpoints
+// and with names of the longest drawable length.
 func TestShareProfile846_AltNamesTheFootprints(t *testing.T) {
 	env := newCardBuildingsEnv(t, newStubOGC(t, dokk1Footprint))
 	const pkA = "a846a846a846a846a846a846a846a846a846a846a846a846a846a846a846a846"
 	const pkB = "b846b846b846b846b846b846b846b846b846b846b846b846b846b846b846b846"
-	long := strings.Repeat("Havnefront Repeater ", 3)[:48]
+	long := strings.Repeat("Havnefront-Repeater-", 3)[:48]
 	for i, pk := range []string{pkA, pkB} {
 		pt := []string{dokk1A, dokk1B}[i]
 		ll := strings.Split(pt, ",")
 		env.addNode(t, pk, long, "repeater", ll[0], ll[1])
 	}
+	credit := "Buildings: " + buildings.DatasetName + " (" + buildings.Source + "), " + dhm.LicenseName + "."
 	for _, tc := range []struct{ a, b string }{{dokk1A, dokk1B}, {pkA, pkB}} {
 		q, target := pathQuery(tc.a, tc.b, "model=both"), shareQ(tc.a, tc.b, "model=both")
 		wantCard(t, env.card(q), "miss")
 		alt := mustMeta(t, env.share(target).Body.String(), "og:image:alt")
-		if !strings.Contains(alt, buildings.DatasetName) || !strings.Contains(alt, buildings.Source) || !strings.HasSuffix(alt, ".") {
-			t.Errorf("og:image:alt %q does not name the footprints whole", alt)
+		if !strings.HasSuffix(alt, " Buildings/trees: Blocked. "+credit) {
+			t.Errorf("og:image:alt %q\ndoes not end with the surface sentence and the credit %q", alt, credit)
+		}
+		if !strings.Contains(alt, ". Terrain: ") || strings.Contains(alt, "…") {
+			t.Errorf("og:image:alt %q lost the verdict or was cut", alt)
 		}
 		if n := utf8.RuneCountInString(alt); n > ogImageAltMaxRunes {
 			t.Errorf("og:image:alt is %d runes, over %d", n, ogImageAltMaxRunes)
@@ -163,10 +202,10 @@ func TestShareProfile846_AltNamesTheFootprints(t *testing.T) {
 			t.Errorf("twitter:image:alt %q differs", tw)
 		}
 	}
-	// The long names make the rest of the alt longer than the clip.
+	// The long names leave no room for the tightest point.
 	alt := mustMeta(t, env.share(shareQ(pkA, pkB, "model=both")).Body.String(), "og:image:alt")
-	if !strings.Contains(alt, "…") {
-		t.Errorf("precondition: og:image:alt %q was not clipped", alt)
+	if !strings.Contains(alt, long) || strings.Contains(alt, "Tightest point") {
+		t.Errorf("precondition: og:image:alt %q kept every sentence", alt)
 	}
 
 	// Without the classification, nothing names the footprints.

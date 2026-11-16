@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/meshcore-analyzer/buildings"
 	"github.com/meshcore-analyzer/cardkit"
@@ -58,6 +59,13 @@ func TestBuildingsCreditOnlyWhenClassified(t *testing.T) {
 	unavailableButCredited.Attribution = buildings.AttributionDerived
 	dtm := fxTown("full")
 	dtm.Model = "dtm"
+	// A state the server never sends, with the credit claimed: the gate
+	// names full and partial, not "anything but unavailable".
+	unknownState := func(state string) TerrainProfileResponse {
+		r := fxTown("full")
+		r.Classification.State = state
+		return r
+	}
 
 	for _, tc := range []struct {
 		name    string
@@ -72,6 +80,8 @@ func TestBuildingsCreditOnlyWhenClassified(t *testing.T) {
 		{"not classified", fxClear(), Options{}, false},
 		{"classified, none raised", unused, Options{}, false},
 		{"unavailable, credit claimed", unavailableButCredited, Options{}, false},
+		{"unknown state, credit claimed", unknownState("FULL"), Options{}, false},
+		{"empty state, credit claimed", unknownState(""), Options{}, false},
 		{"full, pending", fxTown("full"), Options{Pending: true}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -374,22 +384,142 @@ func TestClassLegend(t *testing.T) {
 	}
 }
 
-// og:image:alt names the footprints' dataset and source when the card
-// credits them, from internal/buildings' own parts.
-func TestAltCredit(t *testing.T) {
-	for _, st := range []string{"full", "partial"} {
-		got := AltCredit(fxTown(st), Options{})
-		if !strings.Contains(got, buildings.DatasetName) || !strings.Contains(got, buildings.Source) || !strings.Contains(got, dhm.LicenseName) {
-			t.Errorf("%s: alt credit %q lacks the dataset, source or licence", st, got)
+// The legend has no fit check (#850 review F2): it always fits between the
+// "0" and the middle distance label. That label is fmtDistance of half
+// the path, or "0.xx km" up to 2 km, and the server accepts no path over
+// dhm.MaxRasterSpanM, so it is never longer than 8 runes, never wider
+// than 8 of the widest glyph "m". The widest legend, a partial one, ends
+// clear of a label that wide.
+func TestLegendAlwaysFits(t *testing.T) {
+	for _, d := range []float64{999, 1999.99, 19999, dhm.MaxRasterSpanM} {
+		if mid := fmtDistance(d / 2); utf8.RuneCountInString(mid) > 8 {
+			t.Fatalf("precondition: middle label %q of a %.0f m path is over 8 runes", mid, d)
 		}
-		if AltCredit(fxTown(st), Options{Pending: true}) != "" {
-			t.Errorf("%s: a pending card credits the footprints in its alt", st)
+	}
+	fs, err := cardkit.LoadFonts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	widest := fs.Measure(strings.Repeat("m", 8), axisSize, false)
+	limit := plotX + plotW/2 - widest/2 - legendGap
+	legend := runsOf(renderRuns(t, fxTown("partial"), Options{}), "legend")
+	if len(legend) != 3 {
+		t.Fatalf("precondition: partial legend %+v", legend)
+	}
+	if last := legend[len(legend)-1]; last.X+last.W > limit {
+		t.Errorf("legend ends at x=%d, past %d where the widest middle label would start less its gap", last.X+last.W, limit)
+	}
+}
+
+// altMaxRunes is cmd/server's og:image:alt limit (ogImageAltMaxRunes).
+const altMaxRunes = 300
+
+// og:image:alt names the footprints' dataset, source and licence when the
+// card credits them, from internal/buildings' own parts, and ends with
+// that sentence; a pending or unclassified card names none of them.
+func TestAltCredit(t *testing.T) {
+	for _, part := range []string{buildings.DatasetName, buildings.Source, dhm.LicenseName} {
+		if !strings.Contains(altCredit, part) {
+			t.Errorf("alt credit %q lacks %q", altCredit, part)
+		}
+	}
+	for _, st := range []string{"full", "partial"} {
+		if got := AltText(fxTown(st), [2]string{"A", "B"}, Options{}, altMaxRunes); !strings.HasSuffix(got, " "+altCredit) {
+			t.Errorf("%s: alt %q does not end with the credit", st, got)
+		}
+		if got := AltText(fxTown(st), [2]string{"A", "B"}, Options{Pending: true}, altMaxRunes); strings.Contains(got, buildings.DatasetName) {
+			t.Errorf("%s: a pending card credits the footprints in its alt: %q", st, got)
 		}
 	}
 	for name, r := range map[string]TerrainProfileResponse{"unavailable": fxTown("unavailable"), "clear": fxClear()} {
-		if got := AltCredit(r, Options{}); got != "" {
-			t.Errorf("%s: alt credit %q on an unclassified card", name, got)
+		if got := AltText(r, [2]string{"A", "B"}, Options{}, altMaxRunes); strings.Contains(got, buildings.DatasetName) || strings.Contains(got, buildings.Source) {
+			t.Errorf("%s: alt %q credits the footprints on an unclassified card", name, got)
 		}
+	}
+}
+
+// og:image:alt keeps its sentences whole (#850 review F1). When they do
+// not all fit, the tightest point is left out first, then the verdict's
+// explanation, and nothing more: the endpoints, the verdict, the surface
+// and the credit always stay, up to names of cardkit.MaxNameRunes.
+func TestAltTextKeepsWholeSentences(t *testing.T) {
+	name := func(n int) string { return strings.Repeat("Havnefront-Repeater-", 3)[:n] }
+	wc, at := -10.5, 12345.0
+	// longest is the longest alt a card can have: every verdict word is
+	// at most "Terrain: Marginal", every explanation at most "Usable"'s,
+	// and "antenna below the surface at A and B" is the longest surface
+	// sentence. state picks the verdict; the path is the longest one the
+	// server accepts (dhm.MaxRasterSpanM).
+	longest := func(state string) TerrainProfileResponse {
+		r := fxTown("full")
+		r.DistanceM = dhm.MaxRasterSpanM
+		r.Verdict.State = state
+		r.Verdict.WorstClearanceM, r.Verdict.WorstAtM = &wc, &at
+		r.Verdict.Surface = &TerrainSurfaceInfo{State: "blocked", Reason: "antennaBelowSurface", Endpoint: "both"}
+		return r
+	}
+	plainSurface := fxTown("full")
+	plainSurface.Verdict.State = "fresnel100"
+	plainSurface.Verdict.Surface = &TerrainSurfaceInfo{State: "blocked"}
+	if s, ok := surfaceChip(plainSurface); !ok || s.label != "Buildings/trees: Blocked" {
+		t.Fatalf("precondition: surface chip %+v %v", s, ok)
+	}
+	for _, tc := range []struct {
+		name    string
+		resp    TerrainProfileResponse
+		names   [2]string
+		surface string
+		credit  bool
+	}{
+		{"short names, plain surface", plainSurface, [2]string{"Dokk1", "Havn"}, "Buildings/trees: Blocked.", true},
+		{"unclassified, long names", fxBlocked(), [2]string{name(48), name(48)}, "", false},
+		// MeshCore's advert carries at most 31 bytes of name
+		// (MAX_ADVERT_DATA_SIZE 32 less the flags byte).
+		{"firmware's longest names, usable", longest("fresnel100"), [2]string{name(31), name(31)}, "Buildings/trees: antenna below the surface at A and B — check the antenna height.", true},
+		{"drawable longest names, marginal", longest("fresnel60"), [2]string{name(cardkit.MaxNameRunes), name(cardkit.MaxNameRunes)}, "Buildings/trees: antenna below the surface at A and B — check the antenna height.", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := AltText(tc.resp, tc.names, Options{}, altMaxRunes)
+			if n := utf8.RuneCountInString(got); n > altMaxRunes {
+				t.Fatalf("%d runes, over %d: %q", n, altMaxRunes, got)
+			}
+			main := verdictChip(tc.resp)
+			lead := "Terrain profile from " + tc.names[0] + " to " + tc.names[1] + ", " + fmtDistance(tc.resp.DistanceM) + ". " + main.label + "."
+			if !strings.HasPrefix(got, lead) {
+				t.Errorf("alt %q\ndoes not start with %q", got, lead)
+			}
+			if tc.surface != "" && !strings.Contains(got, " "+tc.surface) {
+				t.Errorf("alt %q\nlost the surface %q", got, tc.surface)
+			}
+			if tc.credit != strings.HasSuffix(got, " "+altCredit) {
+				t.Errorf("alt %q\ncredit at the end: %v, want %v", got, !tc.credit, tc.credit)
+			}
+			// got is the whole alt less whole sentences: the first of these
+			// that fits.
+			full := AltText(tc.resp, tc.names, Options{}, 1<<30)
+			v := tc.resp.Verdict
+			tight := " Tightest point for the Fresnel zone: clearance " + fmtMetres(*v.WorstClearanceM) + " at " + fmtDistance(*v.WorstAtM) + " along the path."
+			if !strings.Contains(full, tight) {
+				t.Fatalf("precondition: full alt %q lacks %q", full, tight)
+			}
+			noTight := strings.Replace(full, tight, "", 1)
+			for _, want := range []string{full, noTight, strings.Replace(noTight, " "+main.detail, "", 1)} {
+				if utf8.RuneCountInString(want) <= altMaxRunes {
+					if got != want {
+						t.Errorf("alt %q\nwant %q", got, want)
+					}
+					break
+				}
+			}
+		})
+	}
+	// The longest realistic alt keeps the endpoints, the verdict, the
+	// surface and the credit, and nothing else.
+	r := longest("fresnel100")
+	names := [2]string{name(31), name(31)}
+	want := "Terrain profile from " + names[0] + " to " + names[1] + ", 80.0 km. Terrain: Usable. Buildings/trees: antenna below the surface at A and B — check the antenna height. " + altCredit
+	if got := AltText(r, names, Options{}, altMaxRunes); got != want {
+		t.Errorf("longest realistic alt\n%q\nwant %q", got, want)
 	}
 }
 

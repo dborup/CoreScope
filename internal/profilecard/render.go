@@ -15,6 +15,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/meshcore-analyzer/buildings"
 	"github.com/meshcore-analyzer/cardkit"
@@ -167,10 +168,17 @@ func render(resp TerrainProfileResponse, names [2]string, pal Palette, opt Optio
 	return img, r.runs, nil
 }
 
-// AltText is the card's text alternative (og:image:alt): the Go twin of
-// public/terrain-profile.js chartTitle, with the card's own endpoint labels
-// and chips, so it says what the picture shows.
-func AltText(resp TerrainProfileResponse, names [2]string, opt Options) string {
+// AltText is the card's text alternative (og:image:alt) in at most
+// maxRunes runes: the Go twin of public/terrain-profile.js chartTitle, with
+// the card's own endpoint labels and chips, so it says what the picture
+// shows, and the footprints' credit when the card draws it (#846).
+//
+// Sentences are kept whole. When they do not all fit, the tightest point
+// goes first, then the verdict's explanation. The endpoints, the verdict,
+// the surface and the credit always stay: for names of any drawable
+// length (cardkit.MaxNameRunes) they fit in og:image:alt's 300 runes
+// (TestAltTextKeepsWholeSentences). The caller clips anything longer.
+func AltText(resp TerrainProfileResponse, names [2]string, opt Options, maxRunes int) string {
 	fs, err := cardkit.LoadFonts()
 	if err != nil {
 		return ""
@@ -181,30 +189,57 @@ func AltText(resp TerrainProfileResponse, names [2]string, opt Options) string {
 	main := verdictChip(resp)
 	a := endpointLabel(fs, resp.A, names[0], 0, opt.HideNames)
 	b := endpointLabel(fs, resp.B, names[1], 1, opt.HideNames)
-	txt := "Terrain profile from " + a + " to " + b + ", " + fmtDistance(resp.DistanceM) + ". " + main.label + ". " + main.detail
+	// drop is the round a sentence is left out in; 0 is never left out.
+	type sentence struct {
+		text string
+		drop int
+	}
+	ss := []sentence{
+		{"Terrain profile from " + a + " to " + b + ", " + fmtDistance(resp.DistanceM) + ".", 0},
+		{main.label + ".", 0},
+		{main.detail, 2},
+	}
 	wc, okC := value(resp.Verdict.WorstClearanceM)
 	at, okA := value(resp.Verdict.WorstAtM)
 	// The verdict's worst point is the smallest Fresnel ratio, which need
 	// not be the least clearance on the path (#839): named for what it is.
 	if main.state != "unknown" && okC && okA {
-		txt += " Tightest point for the Fresnel zone: clearance " + fmtMetres(wc) + " at " + fmtDistance(at) + " along the path."
+		ss = append(ss, sentence{"Tightest point for the Fresnel zone: clearance " + fmtMetres(wc) + " at " + fmtDistance(at) + " along the path.", 1})
 	}
 	if surf, show := surfaceChip(resp); show {
-		txt += " " + surf.label + "."
+		ss = append(ss, sentence{surf.label + ".", 0})
 	}
-	return txt
+	if !opt.Pending && buildingsCredited(resp) {
+		ss = append(ss, sentence{altCredit, 0})
+	}
+	length := func() int {
+		n := len(ss) - 1 // the spaces between them
+		for _, s := range ss {
+			n += utf8.RuneCountInString(s.text)
+		}
+		return n
+	}
+	for drop := 1; drop <= 2 && length() > maxRunes; drop++ {
+		kept := ss[:0]
+		for _, s := range ss {
+			if s.drop != drop {
+				kept = append(kept, s)
+			}
+		}
+		ss = kept
+	}
+	parts := make([]string, len(ss))
+	for i, s := range ss {
+		parts[i] = s.text
+	}
+	return strings.Join(parts, " ")
 }
 
-// AltCredit is the sentence og:image:alt ends with when the card credits
-// the building footprints (#846), "" otherwise: their dataset, source and
-// licence, from internal/buildings' own parts. It is apart from AltText so
-// the caller can clip AltText and keep the credit whole.
-func AltCredit(resp TerrainProfileResponse, opt Options) string {
-	if opt.Pending || !buildingsCredited(resp) {
-		return ""
-	}
-	return "Buildings told apart from trees with " + buildings.DatasetName + " (" + buildings.Source + "), " + dhm.LicenseName + "."
-}
+// altCredit is the sentence og:image:alt ends with when the card credits
+// the building footprints (#846): their dataset, source and licence, from
+// internal/buildings' own parts. It is shorter than the card's credit
+// line, so the surface sentence fits next to it.
+const altCredit = "Buildings: " + buildings.DatasetName + " (" + buildings.Source + "), " + dhm.LicenseName + "."
 
 // pendingResponse is resp without anything measured: no samples, no
 // verdict, no ground heights. What is left (endpoints, distance, radio,
@@ -777,7 +812,7 @@ func (r *renderer) plot(resp TerrainProfileResponse, g geom) {
 	end := r.fs.Fit(fmtDistance(g.D), axisSize, false, plotW/2-40)
 	r.text("axis-x", end, plotX+plotW-r.fs.Measure(end, axisSize, false), axisBaseline, axisSize, false, muted)
 	if cls != nil {
-		r.legend(resp, plotX+r.fs.Measure("0", axisSize, false)+legendGap, midX-legendGap)
+		r.legend(resp, plotX+r.fs.Measure("0", axisSize, false)+legendGap)
 	}
 }
 
@@ -804,13 +839,13 @@ func (r *renderer) bandColor(cls []byte, c int) color.NRGBA {
 	return r.pal.TerrainClutter
 }
 
-// legend names the band's colours in the axis row, between x0 and x1:
-// the panel's legend under its chart (#797), with "Not told apart" for
-// the clutter colour a partial classification leaves. The row has room
-// for it on every card (the middle distance label is at least 400 px
-// away); were it ever too narrow, the legend is left out rather than
-// drawn over a label.
-func (r *renderer) legend(resp TerrainProfileResponse, x0, x1 int) {
+// legend names the band's colours in the axis row from x0: the panel's
+// legend under its chart (#797), with "Not told apart" for the clutter
+// colour a partial classification leaves. It needs no fit check: the
+// middle distance label it must stay clear of is at most 8 runes for any
+// path the server accepts (dhm.MaxRasterSpanM), and the row has room for
+// the legend next to a label that long (TestLegendAlwaysFits).
+func (r *renderer) legend(resp TerrainProfileResponse, x0 int) {
 	items := []struct {
 		word string
 		c    color.NRGBA
@@ -820,13 +855,6 @@ func (r *renderer) legend(resp TerrainProfileResponse, x0, x1 int) {
 			word string
 			c    color.NRGBA
 		}{legendNone, r.pal.TerrainClutter})
-	}
-	w := -legendGap
-	for _, it := range items {
-		w += legendSwatch + legendGap/4 + r.fs.Measure(it.word, axisSize, false) + legendGap
-	}
-	if x0+w > x1 {
-		return
 	}
 	x := x0
 	for _, it := range items {

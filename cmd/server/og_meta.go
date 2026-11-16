@@ -256,11 +256,9 @@ type ogPage struct {
 	Path string
 	// Image is the share card's path and query ("/api/terrain/profile.png?…",
 	// #727 M3), built like Path; "" keeps the site image. ImageAlt is its
-	// text alternative, and ImageAltCredit a credit it ends with (#846):
-	// ImageAlt is clipped to leave room for it, so it is never cut.
-	Image          string
-	ImageAlt       string
-	ImageAltCredit string
+	// text alternative.
+	Image    string
+	ImageAlt string
 }
 
 // The share card's size (internal/profilecard), stated in og:image:width
@@ -293,10 +291,6 @@ func (o *ogMeta) renderProfile(doc string, r *http.Request, pg ogPage) []byte {
 	if origin != "" && pg.Image != "" {
 		image = html.EscapeString(origin + pg.Image)
 		alt := ogText(pg.ImageAlt, ogImageAltMaxRunes)
-		if credit := ogClip(pg.ImageAltCredit, ogImageAltMaxRunes); credit != "" {
-			room := ogImageAltMaxRunes - utf8.RuneCountInString(credit) - 1
-			alt = ogText(ogClip(pg.ImageAlt, max(room, 1))+" "+credit, ogImageAltMaxRunes)
-		}
 		dims = fmt.Sprintf(`<meta property="og:image:width" content="%d">`+"\n  "+`<meta property="og:image:height" content="%d">`, ogCardWidth, ogCardHeight)
 		if alt != "" {
 			dims += "\n  " + `<meta property="og:image:alt" content="` + alt + `">` + "\n  " + `<meta name="twitter:image:alt" content="` + alt + `">`
