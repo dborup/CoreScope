@@ -84,6 +84,9 @@ func (s *Server) registerShareRoutes(router *mux.Router, doc *indexDoc) {
 		// request's Host, so one card serves every viewer.
 		p.card.site = doc.og.publicHost()
 	}
+	if s.nodeCards != nil {
+		s.nodeCards.site = doc.og.publicHost()
+	}
 	router.HandleFunc(sharePath, s.handleShareProfile(doc)).Methods("GET", "HEAD")
 	router.HandleFunc(sharePath+"/", handleShareSlash).Methods("GET", "HEAD")
 }
@@ -100,6 +103,12 @@ func handleShareSlash(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleShareProfile(doc *indexDoc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// #811 M3: a node key makes it a node page (node_share.go); the
+		// profile grammar never sees one.
+		if _, ok := r.URL.Query()["node"]; ok {
+			s.handleShareNode(doc, w, r)
+			return
+		}
 		p := s.terrain
 		if p == nil || !p.set.share.enabled {
 			doc.serveSite(w, r, http.StatusOK)

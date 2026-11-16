@@ -451,15 +451,20 @@ func refuseCard(w http.ResponseWriter, code int, msg string) {
 // writeCard writes a card. A complete card never changes for its URL; a
 // degraded one is re-fetched within a minute.
 func writeCard(w http.ResponseWriter, b []byte, state string) {
+	cc := cardCacheComplete
+	if state == "degraded" {
+		cc = cardCacheDegraded
+	}
+	writeCardAs(w, b, state, cc)
+}
+
+// writeCardAs writes a card of either type with its Cache-Control.
+func writeCardAs(w http.ResponseWriter, b []byte, state, cacheControl string) {
 	h := w.Header()
 	h.Set("Content-Type", "image/png")
 	h.Set("Content-Length", strconv.Itoa(len(b)))
 	h.Set("X-CoreScope-Card", state)
-	if state == "degraded" {
-		h.Set("Cache-Control", cardCacheDegraded)
-	} else {
-		h.Set("Cache-Control", cardCacheComplete)
-	}
+	h.Set("Cache-Control", cacheControl)
 	w.Write(b)
 }
 

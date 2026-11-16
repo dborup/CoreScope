@@ -103,6 +103,9 @@ type Server struct {
 	// terrain is the #681 terrain profile; nil unless the proxy is active
 	// and map.dhm.profile.enabled (the endpoint then answers 404).
 	terrain *terrainProfiler
+	// nodeCards is the node share card (#811 M3); nil unless
+	// share.nodes.enabled.
+	nodeCards *nodeCards
 	// masts is the #724 antenna sites proxy; nil while map.masts is off
 	// (the endpoint then answers 404).
 	masts *mastsProxy
@@ -243,6 +246,7 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 		masts: newMastsProxyFromConfig(cfg),
 	}
 	s.terrain = newTerrainProfilerFromConfig(cfg, s.dhm, db)
+	s.initNodeCards()
 	s.heritage = newHeritageQueryFromConfig(cfg)
 	s.skraafoto = newSkraafotoProxyFromConfig(cfg)
 	return s
@@ -432,6 +436,8 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/nodes/{pubkey}/clock-skew", s.handleNodeClockSkew).Methods("GET")
 	r.HandleFunc("/api/observers/clock-skew", s.handleObserverClockSkew).Methods("GET")
 	r.HandleFunc("/api/nodes/{pubkey}/neighbors", s.handleNodeNeighbors).Methods("GET")
+	// #811 M3: the node share card; 404 unless share.nodes.enabled.
+	r.HandleFunc("/api/nodes/{pubkey}/card.png", s.handleNodeCard).Methods("GET")
 	// Keep specific sub-routes (…/reach, …/rx-coverage) registered BEFORE the
 	// catch-all /api/nodes/{pubkey} — mux matches in registration order, so
 	// reordering these below the catch-all would shadow them and break the route.

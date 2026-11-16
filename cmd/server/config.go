@@ -284,6 +284,10 @@ type Config struct {
 	CacheInvalidMs   *int                   `json:"cacheInvalidateMs"`
 	ExternalUrls     map[string]interface{} `json:"externalUrls"`
 
+	// Share is the top-level share block (#811): link previews that need
+	// no upstream call. Server-only, like map.dhm.
+	Share ShareConfig `json:"share"`
+
 	// DHM is map.dhm, lifted out of Map by extractDHMConfig so the token
 	// never rides along when Map is shipped to the browser (#680).
 	DHM DHMConfig `json:"-"`
@@ -816,6 +820,20 @@ type HealthThresholds struct {
 }
 
 // ThemeFile mirrors theme.json overlay.
+// ShareConfig is config.json `share` (#811).
+type ShareConfig struct {
+	// Nodes is the node share card: /p?node=<pubkey> and
+	// GET /api/nodes/{pubkey}/card.png.
+	Nodes ShareNodesConfig `json:"nodes"`
+}
+
+// ShareNodesConfig is config.json `share.nodes` (#811 M3). Off unless
+// Enabled (owner decision Q2). The card's theme and names setting are
+// map.dhm.profile.card's, shared with the terrain card.
+type ShareNodesConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
 type ThemeFile struct {
 	Branding   map[string]interface{} `json:"branding"`
 	Theme      map[string]interface{} `json:"theme"`
