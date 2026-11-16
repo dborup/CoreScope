@@ -251,6 +251,12 @@ jobs:
           # budget fails at 50 ms, twice the 25 ms target it logs against,
           # and the geometry ratio is a median of rounds (#759 review).
           (cd internal/profilecard && go test -count=1 -run 'TestRenderWithinBudget|TestRenderTimeIndependentOfSampleCount|TestGeometryLinearInSamples' -v ./... | grep -E '^(=== RUN|--- |ok|FAIL|PASS)|per card|draw:|geometry:')
+          # internal/nodecard (#811 M2): the node share-card renderer. Not
+          # imported by cmd/server until M3, so its tests run only here; its
+          # per-card budget skips under -race and runs once more without it,
+          # the same mechanism as the terrain card's (#755).
+          (cd internal/nodecard && go test -race ./...)
+          (cd internal/nodecard && go test -count=1 -run 'TestRenderWithinBudget|TestCardSizeBound' -v ./... | grep -E '^(=== RUN|--- |ok|FAIL|PASS)|per card|largest card')
           # internal/heritage (#723 M2): protection-zone WFS client, parser and
           # nearest-zone maths, tested against a fake WFS.
           (cd internal/heritage && go test -race ./...)
