@@ -342,10 +342,11 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     try {
       await gotoMap(page, '#/map');
       const ids = await offeredIds(page);
-      // #845: the light theme lists light styles only; the dark-only Dark
-      // Gray Canvas and the dark imagery twin are offered in the dark theme.
-      for (const id of ESRI_IDS.filter((i) => i === 'esri-imagery')) assert(ids.includes(id), id + ' not offered: ' + ids.join(','));
-      for (const id of ESRI_IDS.filter((i) => i !== 'esri-imagery')) assert(!ids.includes(id), id + ' offered in the light theme: ' + ids.join(','));
+      // #845: the light theme lists the light imagery, not its dark twin;
+      // #859: the dark-only Dark Gray Canvas has no light variant, so it is
+      // listed in both themes (no map is hidden).
+      for (const id of ['esri-imagery', 'esri-darkgray-labels']) assert(ids.includes(id), id + ' not offered: ' + ids.join(','));
+      assert(!ids.includes('esri-imagery-dark'), 'esri-imagery-dark offered in the light theme: ' + ids.join(','));
       const label = await page.$eval('.leaflet-control-layers-base label[data-tile-id="esri-imagery"]', l => l.textContent.trim());
       assert(label === 'Esri World Imagery', 'label: ' + label);
       await pan(page, 250, 0);

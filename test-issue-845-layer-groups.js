@@ -83,12 +83,16 @@ test('G3 Aerial (dhm-ortho) belongs to the Denmark group', () => {
   assert.strictEqual(LG.isDenmarkBase('osm-standard', reg.MC_TILE_PROVIDERS), false);
 });
 
-test('T1 light lists no dark style, dark lists no light style', () => {
+// #859 — a style of the other theme is listed only when it has no
+// counterpart (a light-only map in dark mode); it is never hidden.
+const onlyOwnOrSingle = (P, ids, type) => ids.forEach(id => assert.ok(P[id].type === type || !LG.counterpartId(id, P), id));
+test('T1 light lists no dark style that has a light variant, dark no light style that has a dark one (#859)', () => {
   const P = reg.MC_TILE_PROVIDERS;
   const light = LG.themeBaseIds(P, false, null), dark = LG.themeBaseIds(P, true, null);
-  light.world.concat(light.denmark).forEach(id => assert.strictEqual(P[id].type, 'light', id));
-  dark.world.concat(dark.denmark).forEach(id => assert.strictEqual(P[id].type, 'dark', id));
-  assert.deepStrictEqual(Array.from(dark.denmark), ['dataforsyningen-skaermkort-graa-dark']);
+  onlyOwnOrSingle(P, light.world.concat(light.denmark), 'light');
+  onlyOwnOrSingle(P, dark.world.concat(dark.denmark), 'dark');
+  assert.deepStrictEqual(Array.from(dark.denmark), ['dataforsyningen-skaermkort', 'dataforsyningen-skaermkort-daempet',
+    'dataforsyningen-natur-friluft', 'dataforsyningen-skaermkort-graa-dark']);
   assert.ok(dark.world.includes('osm-dark') && dark.world.includes('esri-darkgray-labels') && dark.world.includes('esri-imagery-dark'));
 });
 
@@ -150,18 +154,19 @@ test('O1 a saved state wins; else open over Denmark only', () => {
 });
 
 // ── T: the control ──────────────────────────────────────────────────────────
-test('T3 the control lists only the light variants in light, Danish ones included', () => {
+test('T3 the control lists the light variants in light (#859: and the dark-only maps), Danish ones included', () => {
   const c = control({ mapCfg: ALL, theme: 'light' });
   const P = c.ctx.window.MC_TILE_PROVIDERS;
-  c.base().filter(id => id !== '__auto__').forEach(id => assert.strictEqual(P[id].type, 'light', id));
+  onlyOwnOrSingle(P, c.base().filter(id => id !== '__auto__'), 'light');
   assert.ok(c.base().includes('dataforsyningen-skaermkort'));
   assert.strictEqual(c.base()[0], '__auto__');
 });
 
-test('T4 the control lists only the dark variants in dark', () => {
+test('T4 the control lists the dark variants in dark (#859: and the light-only maps)', () => {
   const c = control({ mapCfg: ALL, theme: 'dark' });
   const P = c.ctx.window.MC_TILE_PROVIDERS;
-  c.base().filter(id => id !== '__auto__').forEach(id => assert.strictEqual(P[id].type, 'dark', id));
+  onlyOwnOrSingle(P, c.base().filter(id => id !== '__auto__'), 'dark');
+  assert.ok(!c.base().includes('osm-standard') && c.base().includes('dataforsyningen-natur-friluft'));
 });
 
 test('T5 a theme switch rebuilds the list and moves the pick to its counterpart, on the map', () => {

@@ -406,7 +406,10 @@ function checkGetMap(url, layer, base = WMS_BASE) {
         await setTheme(page, 'dark');
         await page.waitForTimeout(400);
         const dark = await offeredIds(page);
-        assert(dark.includes('dataforsyningen-skaermkort-graa-dark') && !dark.includes('dataforsyningen-skaermkort'), 'dark list: ' + dark.join(','));
+        // #859: grå is listed as its dark twin; the light-only Skærmkort and
+        // dæmpet stay listed in the dark theme (never hidden).
+        assert(dark.includes('dataforsyningen-skaermkort-graa-dark') && !dark.includes('dataforsyningen-skaermkort-graa') &&
+          dark.includes('dataforsyningen-skaermkort') && dark.includes('dataforsyningen-skaermkort-daempet'), 'dark list: ' + dark.join(','));
         await pan(page, 250, 0);
         await zoomIn(page);
         assert(rec.wms.length === 0, 'requests before a pick: ' + rec.wms.length);
@@ -752,8 +755,8 @@ function checkGetMap(url, layer, base = WMS_BASE) {
   for (const p of [{ name: 'Map', hash: '#/map' }, { name: 'Live', hash: '#/live' }]) {
     for (const theme of ['light', 'dark']) {
       await step(`M2 ${p.name} (${theme}): picking Natur loads 512 px EPSG:3857 TRANSPARENT=FALSE GetMaps of Natur_Friluft_basis with the exact credit and no filter`, async () => {
-        // #845: the dark list offers dark styles only, so Natur (light
-        // only) is picked in the light theme and kept across the switch.
+        // #845: Natur (light only) is picked in the light theme and kept
+        // across the switch (#859: it is also offered in the dark list).
         const { ctx, page, rec } = await newCtx({ tiles: naturOn(), theme: 'light' });
         try {
           await gotoMap(page, p.hash);
