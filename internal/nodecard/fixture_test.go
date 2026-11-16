@@ -45,3 +45,26 @@ func fxCompanion() NodeCardInput {
 	in.Name, in.Role, in.Relay = "Phone", "companion", nil
 	return in
 }
+
+// The #857 fields on the room and sensor fixtures. Rooms carry transported
+// scopes like repeaters; a sensor has no relay block and no scopes row.
+func fxRoomFull() NodeCardInput {
+	in := fxRoom()
+	in.FirstSeen = ago(36 * 24 * time.Hour)
+	in.AvgHops = ip(2)
+	in.OwnScope = sp("")
+	in.TransportedScopes = []string{"#dk-aarhus"}
+	in.FloodInterval = &AdvertInterval{Seconds: 12 * 3600, Confidence: "medium", Snapped: true}
+	return in
+}
+
+func fxSensorFull() NodeCardInput {
+	in := fxSensor()
+	in.FirstSeen = ago(3*24*time.Hour + 5*time.Hour)
+	in.AvgHops = ip(1)
+	in.OwnScope = sp("*")
+	// 300 min is past the settable 60–240 min (+10 %), so the estimator
+	// leaves it unsnapped (snapAdvertInterval): the note is honest (#861).
+	in.ZeroHopInterval = &AdvertInterval{Seconds: 300 * 60, Confidence: "high", Snapped: false}
+	return in
+}

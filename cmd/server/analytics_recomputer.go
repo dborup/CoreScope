@@ -388,6 +388,18 @@ func (r *analyticsRecomputer) Load() interface{} {
 	return snap.v
 }
 
+// Peek returns the snapshot Load would, without counting as a read: a
+// paused recomputer (pauseWhenIdle) stays paused. For callers that only
+// borrow a value when one is there, such as the node share card (#857),
+// so a crawler fetching cards cannot keep a background pass running.
+func (r *analyticsRecomputer) Peek() interface{} {
+	snap, _ := r.cache.Load().(*recomputerSnapshot)
+	if snap == nil {
+		return nil
+	}
+	return snap.v
+}
+
 // SnapshotInfo reports when the current snapshot was stored and whether it
 // is stale: it outlived a scheduled refresh that pauseWhenIdle skipped and
 // no newer snapshot has been stored yet (#492). It is not a read. Always

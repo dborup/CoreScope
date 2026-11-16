@@ -99,11 +99,19 @@ func TestLongNameTruncated(t *testing.T) {
 	}
 }
 
-// Every card is 1200×630 and under the size bound: 64 KiB, below a terrain
-// card (~80 KB), so the ~64 cached node cards of #811 M3 stay under 4 MiB.
+// Every card is 1200×630 and under the size bound: 64 KiB for a card of up
+// to six clauses (#837: below a terrain card, ~80 KB, so the ~64 cached
+// node cards of #811 M3 stay under 4 MiB), and maxDenseCardBytes for the
+// dense grid of #857, still under the server's 128 KiB per cached card
+// (#755, cardBytesPerEntry), which bounds the cache's memory either way.
 func TestCardSizeBound(t *testing.T) {
-	largest := 0
+	largest, largestDense := 0, 0
 	for _, c := range goldenCases() {
+		dense := len(tiles(c.in)) > 2*tileCols
+		bound := maxCardBytes
+		if dense {
+			bound = maxDenseCardBytes
+		}
 		for _, dark := range []bool{true, false} {
 			out, err := Render(c.in, optFor(t, c, dark))
 			if err != nil {
@@ -113,18 +121,23 @@ func TestCardSizeBound(t *testing.T) {
 			if err != nil || cfg.Width != Width || cfg.Height != Height {
 				t.Fatalf("%s: %dx%d %v", c.name, cfg.Width, cfg.Height, err)
 			}
-			if len(out) > largest {
-				largest = len(out)
+			if dense {
+				largestDense = max(largestDense, len(out))
+			} else {
+				largest = max(largest, len(out))
 			}
-			if len(out) > maxCardBytes {
-				t.Errorf("%s: %d bytes, bound %d", c.name, len(out), maxCardBytes)
+			if len(out) > bound {
+				t.Errorf("%s: %d bytes, bound %d", c.name, len(out), bound)
 			}
 		}
 	}
-	t.Logf("largest card %d bytes (bound %d)", largest, maxCardBytes)
+	t.Logf("largest card %d bytes (bound %d), largest dense card %d bytes (bound %d)", largest, maxCardBytes, largestDense, maxDenseCardBytes)
 }
 
-const maxCardBytes = 64 << 10
+const (
+	maxCardBytes      = 64 << 10
+	maxDenseCardBytes = 96 << 10
+)
 
 // The per-card budget, the mechanism of #755: the target is logged
 // against, the test fails at twice it, so a loaded shared runner cannot
