@@ -821,3 +821,65 @@ func BenchmarkNodeShare_Page(b *testing.B) {
 		})
 	}
 }
+
+// #811 follow-up: no relay snapshot yet → the relay lines are left off; a
+// published snapshot that does not hold the repeater or room → 0, as the
+// node page (GET /api/nodes/{pk}) reports.
+func TestNodeShare_RelayZeroWhenMissingFromSnapshot(t *testing.T) {
+	e := newNodeShareEnv(t, true, nil)
+	for _, pk := range []string{nsRepeater, nsRoom} {
+		e.setRelay(nil)
+		e.srv.neighborGraph.Store(nil)
+		in := e.input(t, pk)
+		if in.Relay != nil {
+			t.Errorf("%s: relay %+v before any snapshot", pk[:8], *in.Relay)
+		}
+		before := mustMeta(t, e.get("/p?node="+pk).Body.String(), "og:description")
+		if strings.Contains(before, "Relayed") || strings.Contains(before, "airtime") {
+			t.Errorf("%s: no snapshot, og:description %q", pk[:8], before)
+		}
+		vNone := e.c.version(in)
+
+		// Published, holding another key only (an empty map behaves alike).
+		for _, snap := range []map[string]RepeaterRelayInfo{
+			{strings.Repeat("ab", 32): {RelayCount24h: 9, RelayCount1h: 1}},
+			{},
+		} {
+			e.setRelay(snap)
+			in := e.input(t, pk)
+			rs := in.Relay
+			if rs == nil || rs.Relayed24h == nil || *rs.Relayed24h != 0 || rs.Relayed1h == nil || *rs.Relayed1h != 0 ||
+				rs.AirtimePct24h == nil || *rs.AirtimePct24h != 0 || rs.AirtimePeakPct == nil || *rs.AirtimePeakPct != 0 {
+				t.Fatalf("%s: missing from a published snapshot, relay %+v", pk[:8], rs)
+			}
+			desc := mustMeta(t, e.get("/p?node="+pk).Body.String(), "og:description")
+			want := "Relayed 24 h: 0 · Relayed 1 h: 0 · Seen airtime 24 h: 0.0% · Busiest hour: 0.0%"
+			if !strings.Contains(desc, want) {
+				t.Errorf("%s: og:description %q lacks %q", pk[:8], desc, want)
+			}
+			if e.c.version(in) == vNone {
+				t.Errorf("%s: card version unchanged by the relay lines", pk[:8])
+			}
+			if w := e.get("/api/nodes/" + pk + "/card.png"); w.Code != 200 {
+				t.Errorf("%s: card %d", pk[:8], w.Code)
+			}
+		}
+
+		// The node page's numbers for the same node are 0 too.
+		w := e.get("/api/nodes/" + pk)
+		if w.Code != 200 {
+			t.Fatalf("%s: /api/nodes status %d", pk[:8], w.Code)
+		}
+		var body struct {
+			Node map[string]any `json:"node"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []string{"relay_count_24h", "relay_count_1h", "est_airtime_pct_24h", "est_airtime_peak_pct"} {
+			if v, ok := body.Node[k].(float64); !ok || v != 0 {
+				t.Errorf("%s: node page %s = %v", pk[:8], k, body.Node[k])
+			}
+		}
+	}
+}

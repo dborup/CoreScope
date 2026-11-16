@@ -153,6 +153,9 @@ run test-issue-790-profile-compact.js
 run test-issue-721-move-endpoints.js
 run test-issue-727-share-link.js
 run test-issue-811-node-share-handoff.js
+run test-issue-811-m4-node-share.js
+run test-issue-811-m4-share-customizer.js
+run test-issue-811-m4-docs.js
 run test-issue-727-m4-share-customizer.js
 run test-issue-781-profile-cursor.js
 run test-issue-839-profile-ux.js

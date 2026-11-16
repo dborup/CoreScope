@@ -1690,6 +1690,10 @@ type ClientConfigResponse struct {
 	// preview). Omitted unless map.skraafoto.enabled and map.dhm has a
 	// token; it never carries the token.
 	Skraafoto *SkraafotoClientConfig `json:"skraafoto,omitempty"`
+
+	// Share offers node share links (#811 M4). Omitted unless
+	// share.nodes.enabled is on.
+	Share *ShareClientConfig `json:"share,omitempty"`
 }
 
 // PrivacyClientConfig is the privacy block of /api/config/client. It carries

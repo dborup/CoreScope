@@ -325,6 +325,21 @@
     });
   }
 
+  // Copy URL (#811 M4): the link that previews as a node card when the
+  // server shares node cards for this role, else the plain #/nodes/ link.
+  // Built at click time, so a late /api/config/client or a customizer
+  // change applies without a re-render.
+  function bindCopyUrl(btn, n) {
+    if (!btn) return;
+    const idle = btn.innerHTML;
+    btn.addEventListener('click', () => {
+      window.copyToClipboard(window.NodeShare.copyURL(n), () => {
+        btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Copied!';
+        setTimeout(() => { btn.innerHTML = idle; }, 2000);
+      });
+    });
+  }
+
   function mountNodeActions(row, n) {
     if (!row) return;
     var tp = window.TerrainProfile, sf = window.Skraafoto;
@@ -1213,15 +1228,7 @@
         } catch {}
       }
 
-      // Copy URL
-      const nodeUrl = location.origin + '/#/nodes/' + encodeURIComponent(n.public_key);
-      document.getElementById('copyUrlBtn')?.addEventListener('click', () => {
-        const btn = document.getElementById('copyUrlBtn');
-        window.copyToClipboard(nodeUrl, () => {
-          btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Copied!';
-          setTimeout(() => btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-clipboard-text"/></svg> Copy URL', 2000);
-        });
-      });
+      bindCopyUrl(document.getElementById('copyUrlBtn'), n);
 
       // Copy short URL — issue #772. Uses an 8-char pubkey prefix; the
       // backend resolves it to the canonical pubkey when unambiguous.
@@ -2117,7 +2124,6 @@
     const hasLoc = n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
     const estimatesEnabled = window.EstimatedPositions?.enabled() !== false;
     const hasEstLoc = estimatesEnabled && n.estimated_lat != null && n.estimated_lon != null;
-    const nodeUrl = location.origin + '/#/nodes/' + encodeURIComponent(n.public_key);
 
     // Status calculation via shared helper
     const lastHeard = getLastAdvert(n, stats, adverts);
@@ -2148,6 +2154,7 @@
 
         <div class="node-detail-section">
           <div class="node-detail-key mono" style="font-size:11px;word-break:break-all;margin-bottom:4px">${n.public_key}</div>
+          <button class="btn-primary" id="panelCopyUrlBtn" style="font-size:11px;padding:2px 8px;cursor:pointer"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-clipboard-text"/></svg> Copy URL</button>
         </div>
 
         <div class="node-detail-section">
@@ -2250,6 +2257,7 @@
     }
 
     mountNodeActions(panel.querySelector('.node-detail-actions'), n);
+    bindCopyUrl(panel.querySelector('#panelCopyUrlBtn'), n);
 
     // Wire "Details" button via the unified navigateToNode helper
     var detailBtn = panel.querySelector('.node-detail-btn');

@@ -669,6 +669,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		Heritage:            s.heritageClientConfig(),
 		Masts:               s.mastsClientConfig(),
 		Skraafoto:           s.skraafotoClientConfig(),
+		Share:               s.shareClientConfig(),
 	})
 }
 
