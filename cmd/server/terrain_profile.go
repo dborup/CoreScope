@@ -61,6 +61,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -110,6 +111,8 @@ const (
 	terrainSnap = 1e5
 	// terrainMaxAntennaM bounds an antenna height above ground.
 	terrainMaxAntennaM = 100
+	// terrainMaxPathKmDefault is map.dhm.profile.maxPathKm's default.
+	terrainMaxPathKmDefault = 80
 )
 
 // terrainPointKey is the antennaHeightsM key of a free map point.
@@ -186,7 +189,7 @@ func resolveTerrainSettings(pc dhm.ProfileConfig, logf func(string, ...interface
 	num, integer := k.num, k.integer
 	return terrainSettings{
 		// The planner's rasters are at most dhm.MaxRasterSpanM (80 km).
-		maxPathM: 1000 * num("maxPathKm", pc.MaxPathKm, 80, 0, dhm.MaxRasterSpanM/1000, true),
+		maxPathM: 1000 * num("maxPathKm", pc.MaxPathKm, terrainMaxPathKmDefault, 0, dhm.MaxRasterSpanM/1000, true),
 		plan: dhm.PlanOptions{
 			MaxSamples: integer("maxSamples", pc.MaxSamples, 3200, 16, 3200),
 			ChunkM:     1000 * num("chunkKm", pc.ChunkKm, 2.5, 0, dhm.MaxRasterSpanM/1000, false),
@@ -629,10 +632,26 @@ func (p *terrainProfiler) elevationKey(req terrainRequest) terrainKey {
 }
 
 // terrainRequestError is a refusal: its status and a fixed message that
-// echoes nothing from the request.
+// echoes nothing from the request. maxPathKm is set on "path too long"
+// only: the limit the path broke, so the panel can name it (#839 §6).
 type terrainRequestError struct {
-	status int
-	msg    string
+	status    int
+	msg       string
+	maxPathKm float64
+}
+
+// terrainRefusal is the JSON body of a refused profile request: the usual
+// {"error": ...}, plus the limit on a path that is too long.
+type terrainRefusal struct {
+	Error     string  `json:"error"`
+	MaxPathKm float64 `json:"maxPathKm,omitempty"`
+}
+
+// writeRefusal writes rerr as writeError would, with its limit.
+func writeRefusal(w http.ResponseWriter, rerr *terrainRequestError) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(rerr.status)
+	json.NewEncoder(w).Encode(terrainRefusal{Error: rerr.msg, MaxPathKm: rerr.maxPathKm})
 }
 
 // resolveTerrainRequest is the shared prelude after parsing: resolve both
@@ -645,7 +664,7 @@ func (s *Server) resolveTerrainRequest(ctx context.Context, p *terrainProfiler, 
 	for i, ref := range [2]terrainRef{tq.a, tq.b} {
 		e, ok := s.resolveTerrainEnd(ctx, ref)
 		if !ok {
-			return req, &terrainRequestError{http.StatusNotFound, "node not found"}
+			return req, &terrainRequestError{status: http.StatusNotFound, msg: "node not found"}
 		}
 		req.ends[i] = e
 	}
@@ -658,10 +677,10 @@ func (s *Server) resolveTerrainRequest(ctx context.Context, p *terrainProfiler, 
 	req.b = dhm.LatLon{Lat: float64(req.kb[0]) / terrainSnap, Lon: float64(req.kb[1]) / terrainSnap}
 	d := dhm.GroundDistance(req.a, req.b)
 	if !(d >= 1) {
-		return req, &terrainRequestError{http.StatusBadRequest, dhm.ErrBadRequest.Error()}
+		return req, &terrainRequestError{status: http.StatusBadRequest, msg: dhm.ErrBadRequest.Error()}
 	}
 	if d > p.set.maxPathM {
-		return req, &terrainRequestError{http.StatusBadRequest, "path too long"}
+		return req, &terrainRequestError{http.StatusBadRequest, "path too long", p.set.maxPathM / 1000}
 	}
 	req.plan = dhm.PlanProfile(req.a, req.b, p.set.plan)
 	return req, nil
@@ -680,7 +699,7 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	req, rerr := s.resolveTerrainRequest(r.Context(), p, tq)
 	if rerr != nil {
-		writeError(w, rerr.status, rerr.msg)
+		writeRefusal(w, rerr)
 		return
 	}
 	plan := req.plan
@@ -1388,13 +1407,20 @@ func clearanceOf(a dhm.Assessment) TerrainClearance {
 // each came from: the request, the operator's config, or a default.
 func (p *terrainProfiler) linkParams(tq terrainQuery) (freq float64, freqSource string, k float64, kSource string) {
 	freq, freqSource = p.frequency(tq.freq)
+	k, kSource = p.kFactor(tq.k)
+	return freq, freqSource, k, kSource
+}
+
+// kFactor resolves the k-factor: the request, the operator's config, or
+// the standard atmosphere.
+func (p *terrainProfiler) kFactor(req *float64) (float64, string) {
 	switch {
-	case tq.k != nil:
-		return freq, freqSource, *tq.k, "request"
+	case req != nil:
+		return *req, "request"
 	case p.radio.k != 0:
-		return freq, freqSource, p.radio.k, "config"
+		return p.radio.k, "config"
 	}
-	return freq, freqSource, dhm.DefaultKFactor, "default"
+	return dhm.DefaultKFactor, "default"
 }
 
 // antenna is the antenna height above ground for an endpoint, most

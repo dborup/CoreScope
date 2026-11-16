@@ -67,7 +67,8 @@
 
   function num(v) { return (v === null || v === undefined || !isFinite(Number(v))) ? null : Number(v); }
   function signed(v) { return (v < 0 ? '−' : '') + Math.abs(v).toFixed(1); }
-  function fmtDistance(m) { return m >= 1000 ? (m / 1000).toFixed(2) + ' km' : Math.round(m) + ' m'; }
+  // #839 §8: one rule for distances along the path, terrain-profile.js's.
+  function fmtDistance(m) { return global.TerrainProfile.fmtDistance(m); }
 
   /* readout builds the words for sample i: heights are the DHM values
    * above sea level as the server sent them; clearance is the line of

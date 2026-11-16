@@ -297,6 +297,33 @@ func TestTokenIsSentOnlyWhereNeededAndNeverPrinted(t *testing.T) {
 	}
 }
 
+// A search with several candidates reads the first with a CDN path, not
+// the last (v0.2.9 review nit, #829 N8).
+func TestCDNReadIsTheFirstSearchCandidate(t *testing.T) {
+	const secondID = "2025_82_24_2_0139_00000127_100mm"
+	const secondPath = "/skraafoto_server/100mm/2025/10km_622_57/1km_6223_575/" + secondID + ".tif"
+	second := `{"type":"Feature","id":"` + secondID + `","collection":"skraafotos2025",` +
+		`"properties":{"direction":"north","datetime":"2025-04-01T10:00:00Z"},` +
+		`"assets":{"data":{"href":"` + skraafoto.CDNBase + secondPath + `"}}}`
+	twoFeatures := strings.TrimSuffix(searchAnswer, "]}") + "," + second + "]}"
+	f := newFake(t)
+	f.override = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.Host != "api.dataforsyningen.dk" || !strings.HasPrefix(r.URL.Path, "/rest/skraafoto_api/") {
+			return false
+		}
+		w.Header().Set("Content-Type", "application/geo+json")
+		w.Write([]byte(twoFeatures))
+		return true
+	}
+	code, out := runSmoke(t, f, "-config", writeConfig(t, `{"map":{"dhm":{"enabled":true,"token":"`+testToken+`"}}}`))
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if l := resultLine(t, out, "skraafoto-cdn-range"); !strings.Contains(l, "url="+skraafoto.CDNBase+searchPath) {
+		t.Fatalf("CDN read not the first candidate: %q", l)
+	}
+}
+
 // An upstream that echoes the token back (an error page, a redirect
 // target) cannot get it printed either.
 func TestEchoedTokenIsRedacted(t *testing.T) {
@@ -584,6 +611,26 @@ func TestSkaermkortIsSkippedWithoutABuilder(t *testing.T) {
 	for _, s := range f.requests() {
 		if strings.Contains(strings.ToLower(s.rawQuery), "skaermkort") {
 			t.Fatalf("Skærmkort requested: %s", s.rawQuery)
+		}
+	}
+}
+
+// Natur- og Friluftskort (#741 M2) is built in the browser too, so the
+// report lists it as SKIP with that reason rather than leaving it out
+// (v0.2.9 review nit, #821 N2).
+func TestNaturFriluftIsSkippedWithoutABuilder(t *testing.T) {
+	f := newFake(t)
+	code, out := runSmoke(t, f, "-config", writeConfig(t, `{"map":{"dhm":{"token":"`+testToken+`"}}}`))
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if l := resultLine(t, out, "natur-friluft-wms"); !strings.HasPrefix(l, "SKIP") || !strings.Contains(l, "#741") ||
+		!strings.Contains(l, "built in the browser") {
+		t.Fatalf("%q", l)
+	}
+	for _, s := range f.requests() {
+		if strings.Contains(strings.ToLower(s.path), "natur_friluft") {
+			t.Fatalf("Natur- og Friluftskort requested: %s", s.path)
 		}
 	}
 }

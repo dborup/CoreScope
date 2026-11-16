@@ -126,6 +126,11 @@ test('unknown size: label is marked unknown, not a confirmed 1-byte label', () =
   assert.ok(/class="mc-mb-label[^"]*\bhs-unknown\b/.test(html), 'hs-unknown class: ' + html);
   assert.ok(/aria-label="[^"]*hash size unknown"/.test(html), 'aria says size unknown: ' + html);
   assert.ok(/title="[^"]*[Hh]ash size unknown/.test(html), 'tooltip says size unknown');
+  // A node can have adverts that declare no size (zero-hop direct, pre-#3293
+  // firmware), so the tooltip must not claim none was seen (v0.2.9 review
+  // nit, #809).
+  assert.ok(/title="[^"]*no size-declaring advert known/.test(html), 'tooltip names the missing size-declaring advert: ' + html);
+  assert.ok(!/no advert seen yet/.test(html), 'tooltip must not claim no advert was seen: ' + html);
   // "?" is already the multi-byte "suspected" glyph, so the unknown-size
   // marker is an ellipsis: "the prefix may be longer".
   assert.ok(/>96\u2026</.test(html), 'visible text is the 1-byte prefix plus an ellipsis: ' + html);

@@ -10,6 +10,22 @@
       "measurementNote": "New suite; #792 colour-by-elevation DHM overlay with an intercepted dhm client-config block (dhm.overlays with the elevation entry), every elevation tile the proxy-rendered fixture test-fixtures/dhm-elevation-792.png and stubbed third-party tiles: a phone at 375x560 from a cold start turns it on by a real tap under the contours (z12 tiles, ?elevation=1, stored), sees the legend only while it is on (bar from the --dhm-elevation-* variables, 0/50/100/175 m) and the derived credit, taps + twice to z14 with no tile asked above z13, keeps it over a reload and taps it off; #831 F1: at z14 from a cold start, \"Contour lines\" is tapped without scrolling the layer list, with elevation off and on; the customizer opacity reaches the layer live; ?elevation=0 beats storage; no toggle without the entry. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
     },
     {
+      "file": "test-issue-839-live-teardown-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #839 finding 1: leaving Live leaves none of its observers or listeners behind. From a cold start with real clicks at 1440x900 (Home, Live, Packets, dark-mode toggle): no TypeError on a theme toggle after Live is left (the rc19 regression from #735), none after two visits and two toggles, and after three visits no Live data-theme MutationObserver, no (pointer: fine) media-query listener and no extra mc-tile-provider-changed listener; leaving with a feed card open by Back leaves no outside-click listener. About 15s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
+      "file": "test-issue-839-nodes-landscape-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #839 finding 2: the Nodes list is reachable in phone landscape. From a cold start with touch at 640x360 and 568x320 (Home, More, Nodes, dismiss tips, one-finger CDP swipes with a wheel fallback): the first row ends fully above the bottom nav, uncovered, a tap opens #/nodes/{pubkey}, no sideways overflow; 375x560 portrait is a guard. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-734-customizer-overlays-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
@@ -47,7 +63,7 @@
       "env": { "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; #741 customizer follow-up on a 375x560 touch phone from a cold start with real taps, an intercepted map.tiles client-config block, a dummy token and every third-party tile stubbed: with the gate on and the customizer opened before /api/config/client lands, the Display tab's base-map lists gain Skaermkort standard, graa, daempet and Natur- og Friluftskort (light) and Skaermkort graa (dark) in place; picking daempet swaps the Map in place, survives a reload and is selected again; Reset All clears it and the Map swaps back to OSM. With the gate off or tokenless and a saved Dataforsyningen light and dark choice, nothing is offered, the built-ins are selected and OSM tiles load in light and after a theme switch from the More sheet, with no Dataforsyningen request. About 20s locally; no CI duration measured yet. Assigned to shard 2, next to the other #741 suite."
+      "measurementNote": "New suite; #741 customizer follow-up on a 375x560 touch phone from a cold start with real taps, an intercepted map.tiles client-config block, a dummy token and every third-party tile stubbed: with the gate on and the customizer opened before /api/config/client lands, the Display tab's base-map lists gain Skaermkort standard, graa, daempet and Natur- og Friluftskort (light) and Skaermkort graa (dark) in place; picking daempet swaps the Map in place, survives a reload and is selected again; Reset All clears it and the Map swaps back to OSM. With the gate off or tokenless and a saved Dataforsyningen light and dark choice, nothing is offered, the built-ins are selected and OSM tiles load in light and after a theme switch from the More sheet, with no Dataforsyningen request. Review round 2 adds the config landing while the viewer types in Branding → Site Name (focus and keystrokes kept) and while a base-map select has the focus (left alone until the focus leaves); the v0.2.9 nits sweep adds a config event with unchanged lists, which must not rebuild the open selects. About 50s locally; no CI duration measured yet. Assigned to shard 2, next to the other #741 suite."
     },
     {
       "file": "test-issue-741-skaermkort-e2e.js",
@@ -56,6 +72,14 @@
       "output": "e2e",
       "meanSeconds": 0,
       "measurementNote": "New suite; #741 M1b Dataforsyningen Skaermkort base maps through WMS in EPSG:3857 on Map and Live, with an intercepted map.tiles client-config block and a dummy token, every api.dataforsyningen.dk request answered by a 512 px stub in the browser and every other third-party tile stubbed: off by default and for enabled-without-token and enabled-as-string (no layer-control or customizer entry, no request), a gated-off default falls back to OSM with a warning naming both switches; on, four styles offered and nothing requested until picked; every GetMap carries exactly the allow-listed parameters, 512x512, EPSG:3857, the dummy token once and a bbox of 512 px at the map zoom; the CC BY 4.0 credit with dataset and licence links; grey under the invert filter in dark; the DHM hillshade above it; Auto swaps WMS and OSM on a theme switch both ways; the customizer choice applies in place and after a reload; a 375x560 phone flow picks a style in the layer control and keeps it through a theme switch, a control rebuild and SPA navigation, with a reload back to Auto; nothing requested outside the bounds; at most 20 GetMap requests per 1920x1080 view. #741 M2 adds Natur- og Friluftskort (wms/natur_friluftskort, Natur_Friluft_basis) on the same gate and token: offered as a light style only (layer control and the customizer's light list), nothing requested until picked, 512 px EPSG:3857 GetMaps with the same dummy token, its own CC BY 4.0 credit, no filter in either theme, the same tiles as Skaermkort for one pick/pan/zoom script with 1.0 s stub responses and none twice, at most 20 GetMaps per 1920x1080 view against 256 px tiles, and a 375x560 cold-start phone flow through a theme switch and SPA navigation to Live and back. About 180s locally with M2 (179s measured); no CI duration measured yet. Assigned to shard 2, next to the #728 base-map suites."
+    },
+    {
+      "file": "test-issue-839-map-polish-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #839 rc19 map findings on the Map page at Jelling with an intercepted map.tiles block (OSM, Esri, Dataforsyningen with a dummy token) and dhm block (hillshade + contours, each crediting its own dataset), a stubbed /api/map/dhm/wms, every Dataforsyningen GetMap answered in the browser and every other third-party request stubbed or refused: a Natur- og Friluftskort tile first answered 200 application/xml with a WMS ServiceException is fetched exactly once more and drawn, and a tile that keeps failing is fetched exactly twice; the masts popup date is the Danish date in Chromium's Intl; the layer control lists no base map twice in light and dark, the dark twins say (dark) and the dark Skaermkort graa entry is the inverted one; with Skaermkort, hillshade and contours at 1440x900 the credit lies clear of the Map Controls panel and is hit by itself, and both DHM dataset credits stay linked (a #733/#734 guard); the attribution bar takes --surface-1 and --text-muted in both themes. About 70s locally (67s measured); no CI duration measured yet. Assigned to shard 2, next to the #741 and #733 suites it follows up."
     },
     {
       "file": "test-issue-728-ortho-base-e2e.js",
@@ -74,12 +98,20 @@
       "measurementNote": "New suite; #733 DHM credit compliance with an intercepted map.dhm client-config block (credit link fields + profile: true), a stubbed /api/map/dhm/wms tile and a stubbed /api/terrain/profile: on Map and Live the hillshade credit names Klimadatastyrelsen, links the Danmarks Hojdemodel dataset and the CC BY 4.0 licence with target=_blank and rel=noopener, renders exactly the server's plain credit text, is visible and uncovered, and goes away with the overlay; a pre-#733 block without the link fields still shows the plain credit with no links; the profile chart footer carries the same two links plus the 'data bearbejdet' derived note, exactly once; and at 360x740 that footer stays inside the panel and the viewport, legible and uncovered, with both links at least 44px and hit by themselves. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds, next to the #728 credit suite."
     },
     {
+      "file": "test-issue-737-customizer-skraafoto-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #737 customizer (AGENTS rule 8) Skraafoto viewer defaults with an intercepted skraafoto client-config block (and dhm with profile: true), stubbed /api/skraafoto/search, previews, the ?zoom=1 crop and /api/terrain/profile in the M1/M3a/M3b shapes, every other host refused: a phone at 375x560 from a cold start sets the first photo, the first view and the line of sight by real taps in the Display tab (48px, on screen, uncovered, no sideways overflow); by taps to the node the viewer opens on that direction's crop; auto from a profile is the side view without the line; a deep link's direction wins; the export carries the section without server keys; Reset All brings M3c back; no section without the block. About 16s locally; no CI duration measured yet. Assigned to shard 2 next to the #737 viewer suite."
+    },
+    {
       "file": "test-issue-737-skraafoto-viewer-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
       "output": "e2e",
       "meanSeconds": 0,
-      "measurementNote": "New suite; #737 M2 Skraafoto (oblique aerial photo) viewer with an intercepted skraafoto client-config block (and dhm with profile: true), stubbed /api/skraafoto/search and /api/skraafoto/preview/{collection}/{item} in the M1 shapes, canvas-drawn JPEG previews and every other host refused: the gate (no block, a node without a fix, the node list), the node page dialog (loading, newest year facing north, five directions, the year selector without 2017, date, privacy note, credit links, Full resolution), lazy previews, a year change, Escape and Close focus return, the hash deep link and a cold deep link, search 429/503/502 and preview 503, an empty answer, the side pane, the Path profile A/B/clicked chart point (#781 mapping) and an unmoved head and chart, and real taps from a cold start at 375x560 and 640x360 above the bottom nav. About 15s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds, next to the #733 credit suite."
+      "measurementNote": "New suite; #737 M2 Skraafoto (oblique aerial photo) viewer with an intercepted skraafoto client-config block (and dhm with profile: true), stubbed /api/skraafoto/search and /api/skraafoto/preview/{collection}/{item} in the M1 shapes, canvas-drawn JPEG previews and every other host refused: the gate (no block, a node without a fix, the node list), the node page dialog (loading, newest year facing north, five directions, the year selector without 2017, date, privacy note, credit links, Full resolution), lazy previews, a year change, Escape and Close focus return, the hash deep link and a cold deep link, search 429/503/502 and preview 503, an empty answer, the side pane, the Path profile A/B/clicked chart point (#781 mapping) and an unmoved head and chart, and real taps from a cold start at 375x560 and 640x360 above the bottom nav. About 15s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds, next to the #733 credit suite. #737 M3c adds the marks to the same suite (stubbed search with frame/point/inFrame/approx/path and a stubbed ?zoom=1 crop with the marker and box headers): the crosshair on the point through a resize and a rotation, dashed when approximate, absent out of frame, the aria-pressed zoom toggle fetching the crop once, the line of sight from a profile and its side-view default direction, on desktop and from a cold start at 375x560 and 640x360 by taps; about 35s locally in all."
     },
     {
       "file": "test-issue-738-foreign-fill-ui-e2e.js",
@@ -154,6 +186,14 @@
       "output": "e2e",
       "meanSeconds": 0,
       "measurementNote": "New suite; #681 M6 customizer terrain settings with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile that resolves ha/hb/model the way the server does: the five antenna-height defaults and the elevation-model select on the Display tab, the six chart colours on the Theme tab in light and dark, a changed antenna default re-measuring and redrawing an open profile without overruling an operator-set height or reaching the link, a changed chart colour becoming the chart's computed fill, a terrain-only default opening a terrain-only profile while a link that states the model still wins, 48px touch targets at 360x740 and 740x360, the export carrying the terrain section and no token with nothing under map.dhm in the client, and axe plus measured label contrast in light and dark. Review round 2 (PR#714) adds: a hex antenna height planted in storage is no default in the profile or the customizer, a pick over the translucent clutter colour keeps its alpha, and the Terrain Profile section is hidden with the profile off or no dhm block. About 85s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681 DHM suites."
+    },
+    {
+      "file": "test-issue-839-profile-ux-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #839 Path profile findings with an intercepted dhm and skraafoto client-config block and a stubbed /api/terrain/profile: at 375x560 and 640x360 with real taps and at 1440x900 with clicks, from a cold start, an A marker after the first pick, both ends and the chart cursor's dot in view once the profile is drawn and after fold/unfold, the distance axis in km, a visible Chart point hint, a too-long refusal with the limit in km, and a malformed /p link with a visible notice and a clean URL. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other profile suites."
     },
     {
       "file": "test-issue-790-profile-mobile-pick-e2e.js",

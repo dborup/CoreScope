@@ -271,4 +271,13 @@ func TestClientConfigUngatedBaseMapTokenIsLogged741(t *testing.T) {
 	if out := load(`{"map": {"tiles": {"providers": {"dataforsyningen": {"enabled": false, "token": ""}}}}}`); strings.Contains(out, "dataforsyningen") {
 		t.Fatalf("the shipped example logs a drop:\n%s", out)
 	}
+	// A token that is not a string is dropped and logged too, without its
+	// value (v0.2.9 review nit, #805 N1).
+	out = load(`{"map": {"tiles": {"providers": {"dataforsyningen": {"enabled": true, "token": ["` + baseMapTestToken + `"]}}}}}`)
+	if !strings.Contains(out, "map.tiles.providers.dataforsyningen.token") {
+		t.Fatalf("the drop of a non-string token is not logged:\n%s", out)
+	}
+	if strings.Contains(out, baseMapTestToken) {
+		t.Fatalf("the log line prints the token:\n%s", out)
+	}
 }

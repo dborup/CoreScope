@@ -43,7 +43,26 @@
  *      (#818), and the profile panel keeps its layout;
  *  10. a node name is text, never markup;
  *  11. a node outside the block's bounds (Denmark) has no action, while
- *      "Terrain profile to…" is still offered (#818).
+ *      "Terrain profile to…" is still offered (#818);
+ *  12. #737 M3c, the marks: the stubbed search carries M3a's frame,
+ *      point, inFrame, approx and, when asked for a path, path (preview
+ *      pixels); the stubbed preview answers ?zoom=1&x=&y= with a crop and
+ *      M3b's marker and box headers. The crosshair sits on the point (to
+ *      1.5 px, by Skraafoto.displayMap on the image box, which letterboxes)
+ *      and stays there through a resize and a rotation; it is dashed when
+ *      approx, absent out of frame; the zoom button (aria-pressed) fetches
+ *      the crop on the first click only and moves the crosshair to the
+ *      crop marker; from a profile the search asks for the line, the line
+ *      of sight is drawn through the path's points and the first photo is
+ *      the side view of A–B; the layer's aria-label says where the point
+ *      is; and, on the phones of 9, the crosshair, the line and a tapped
+ *      zoom from a cold start;
+ *  13. #839: on a cross-border profile A is offered and B, in the
+ *      Copernicus fill, is not, and Chart point goes with a point picked
+ *      in the fill; a path wholly abroad has no row; an empty answer's
+ *      message is centred with no empty Year box; from a profile a dotted
+ *      drop joins the crosshair to the line (the stub's beam), overview
+ *      and crop, with a note saying the line is at antenna height.
  *
  * The fixture's nodes are in California: the node used here is moved to
  * Aarhus in the stubbed /api/nodes answers (o.abroad keeps it where it is).
@@ -88,6 +107,23 @@ const PNG_1X1 = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGM4ceIEAAS0AlkWLoFAAAAAAElFTkSuQmCC',
   'base64');
 const DIRS = ['north', 'east', 'south', 'west', 'nadir'];
+// #737 M3c: the stubbed photos are 480x320, so is the M3a frame. The
+// point, the line through it, and the crop around it (box 120x80 preview
+// pixels, cut 4x finer: the marker at the crop's centre).
+const FRAME = { width: 480, height: 320 };
+const PT = { x: 130.5, y: 210.2 };
+const LINE = [{ x: 20, y: 300 }, { x: 130.5, y: 210.2 }, { x: 470, y: 30 }];
+const CROP_BOX = '70.5,170.2,190.5,250.2';
+// #839: the line's point above the crosshair (the server's beam), on LINE.
+const BEAM = { x: 147.5, y: 201.2 };
+const CROP_MARKER = '240,160';
+const ZOOM = '[data-testid="sf-zoom"]';
+const MARKS = '[data-testid="sf-marks"]';
+const CROSS = '[data-testid="sf-cross"]';
+const LOS = '[data-testid="sf-los"]';
+const LOS_NOTE = '[data-testid="sf-los-note"]';
+// A north–south profile: its side view looks east (or west).
+const P_NS = '56.10000,10.20000,56.20000,10.20000';
 
 const ACTION = '[data-testid="node-skraafoto"]';
 const DIALOG = '[data-testid="sf-dialog"]';
@@ -150,11 +186,14 @@ function searchAnswer(q, o) {
   const c = 'skraafotos' + year;
   const photos = DIRS.filter(d => !(o.missing || []).includes(d)).map((d, i) => {
     const id = year + '_83_36_' + (DIRS.indexOf(d) + 1) + '_0020_0000' + (3045 + i);
-    return {
+    const ph = {
       id, collection: c, direction: d, datetime: year + '-05-07T10:21:33Z',
       viewerUrl: 'https://skraafoto.dataforsyningen.dk/?item=' + id,
       previewUrl: PREVIEW_PREFIX + c + '/' + id,
+      frame: FRAME, point: PT, inFrame: !o.outOfFrame, approx: !!o.approx,
     };
+    if (q.get('path')) { ph.path = LINE; ph.beam = BEAM; } // M3a: only when a path is asked for; #839 beam
+    return ph;
   });
   return { collection: c, year, years: [2025, 2023, 2021, 2019, 2017], photos, credit: CREDIT };
 }
@@ -168,11 +207,12 @@ function searchAnswer(q, o) {
   console.log(`\n=== #737 M2 Skråfoto viewer against ${BASE} ===\n`);
 
   // One 480x320 JPEG per direction, drawn here: no image fixture, no CDN.
+  // 'crop' is the zoomed crop (#737 M3c).
   const JPEG = await (async () => {
     const page = await browser.newPage();
     const out = await page.evaluate((dirs) => {
       const res = {};
-      dirs.forEach((d, i) => {
+      dirs.concat(['crop']).forEach((d, i) => {
         const c = document.createElement('canvas');
         c.width = 480; c.height = 320;
         const g = c.getContext('2d');
@@ -196,14 +236,15 @@ function searchAnswer(q, o) {
    * o.holdSearch: the first search waits until rec.release() is called.
    * o.nodeName: name rewrites the moved node's name. o.abroad leaves the
    * moved node at its own (Californian) position. o.firstVisit marks no
-   * gesture hint as seen. */
+   * gesture hint as seen. o.profile(body) rewrites the profile answer
+   * (#839). */
   async function newCtx(o) {
     o = o || {};
     const ctx = await browser.newContext({
       viewport: o.viewport || { width: 1280, height: 860 },
       hasTouch: !!o.touch, isMobile: !!o.touch,
     });
-    const rec = { search: [], preview: [], profile: [], external: [], errors: [], release: null };
+    const rec = { search: [], preview: [], zoom: [], profile: [], external: [], errors: [], release: null };
     let hold = o.holdSearch ? new Promise(r => { rec.release = r; }) : null;
     await ctx.route(BASE + '/api/config/client', async (route) => {
       const response = await route.fetch();
@@ -224,10 +265,18 @@ function searchAnswer(q, o) {
         return;
       }
       await route.fulfill({ status: 200, contentType: 'application/json',
-        body: JSON.stringify(searchAnswer(u.searchParams, { empty: mode === 'empty', missing: o.missing })) });
+        body: JSON.stringify(searchAnswer(u.searchParams, { empty: mode === 'empty', missing: o.missing, approx: o.approx, outOfFrame: o.outOfFrame })) });
     });
     await ctx.route(url => new URL(url).pathname.startsWith(PREVIEW_PREFIX), async (route) => {
-      const p = new URL(route.request().url()).pathname;
+      const pu = new URL(route.request().url());
+      const p = pu.pathname;
+      if (pu.search) {
+        // #737 M3b: the crop around a point, with its marker and box.
+        rec.zoom.push(pu);
+        await route.fulfill({ status: 200, contentType: 'image/jpeg', body: JPEG.crop,
+          headers: { 'Cache-Control': 'public, max-age=604800', 'X-CoreScope-Skraafoto-Marker': CROP_MARKER, 'X-CoreScope-Skraafoto-Crop': CROP_BOX } });
+        return;
+      }
       rec.preview.push(p);
       const n = Number(p.split('_')[3]); // the direction number in the id
       const dir = DIRS[n - 1];
@@ -241,7 +290,8 @@ function searchAnswer(q, o) {
     await ctx.route(url => new URL(url).pathname === PROFILE_PATH, async (route) => {
       const u = new URL(route.request().url());
       rec.profile.push(u);
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profileFor(u.searchParams)) });
+      const body = profileFor(u.searchParams);
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(o.profile ? o.profile(body) : body) });
     });
     // The node under test, in every /api/nodes answer (list, detail).
     await ctx.route(url => /^\/api\/nodes(\/|$)/.test(new URL(url).pathname), async (route) => {
@@ -329,8 +379,8 @@ function searchAnswer(q, o) {
     await page.waitForFunction(() => window.MeshConfigReady !== undefined, null, { timeout: 15000 });
     await page.evaluate(() => window.MeshConfigReady);
   }
-  async function gotoProfile(page) {
-    await page.goto(`${BASE}/#/map?profile=${P}`, { waitUntil: 'domcontentloaded' });
+  async function gotoProfile(page, profile) {
+    await page.goto(`${BASE}/#/map?profile=${profile || P}`, { waitUntil: 'domcontentloaded' });
     await themeSettled(page);
     await page.waitForSelector(PANEL + '.is-open', { timeout: 30000 });
     await page.waitForSelector(PLOT, { timeout: 15000 });
@@ -556,6 +606,18 @@ function searchAnswer(q, o) {
       await waitReady(page);
       assert(rec.preview.length === 2, rec.preview.join(' '));
     });
+    // #833 F2: hidden is an HTML attribute only; the SVG layer must be
+    // hidden by the attribute, and lose the last photo's text, on error.
+    await step('preview 503 after a shown photo: the marks layer is hidden and says nothing stale', async () => {
+      const shown = await page.$eval(MARKS, (e) => ({ attr: e.hasAttribute('hidden'), display: getComputedStyle(e).display, label: e.getAttribute('aria-label') }));
+      assert(!shown.attr && shown.display !== 'none' && shown.label, 'south marks not shown ' + JSON.stringify(shown));
+      await page.click(DIR('north'));
+      await page.waitForFunction((sel) => document.querySelector(sel).getAttribute('data-state') === 'error', DIALOG, { timeout: 5000 });
+      const m = await page.$eval(MARKS, (e) => ({ attr: e.hasAttribute('hidden'), display: getComputedStyle(e).display,
+        label: e.getAttribute('aria-label'), role: e.getAttribute('role'), kids: e.childElementCount }));
+      assert(m.attr && m.display === 'none', 'layer not hidden ' + JSON.stringify(m));
+      assert(m.label === null && m.role === null && m.kids === 0, 'stale layer ' + JSON.stringify(m));
+    });
     await ctx.close();
   }
   {
@@ -568,6 +630,17 @@ function searchAnswer(q, o) {
       assert(/no oblique photos/i.test(await page.textContent(STATUS)), await page.textContent(STATUS));
       assert(rec.preview.length === 0, 'preview asked');
     });
+    await step('#839 no photos: the message is centred in the stage, with no empty Year box', async () => {
+      const g = await page.evaluate(() => {
+        const st = document.querySelector('[data-testid="sf-stage"]').getBoundingClientRect();
+        const t = document.querySelector('[data-testid="sf-status"]').getBoundingClientRect();
+        const y = document.querySelector('[data-testid="sf-year-wrap"]');
+        return { off: (t.left + t.right) / 2 - (st.left + st.right) / 2, year: y ? getComputedStyle(y).display : 'absent' };
+      });
+      assert(Math.abs(g.off) <= 2, 'the message is ' + g.off.toFixed(1) + ' px off the stage centre');
+      assert(g.year === 'none', 'the Year field shows with no year: ' + g.year);
+    });
+    await shot(page, '839-empty');
     await ctx.close();
   }
   {
@@ -675,6 +748,254 @@ function searchAnswer(q, o) {
       assert(same(boxes[true].chart, boxes[false].chart), 'chart ' + JSON.stringify(boxes));
       assert(Math.abs(boxes[true].panel.y - boxes[false].panel.y) < 0.5, 'panel ' + JSON.stringify(boxes));
     });
+  }
+
+
+  // ── 12. #737 M3c: the marks ───────────────────────────────────────────────
+  /* crossAt is where the crosshair is drawn on screen, and where it should
+   * be: the image box plus the contain mapping (Skraafoto.displayMap) of
+   * the point in the layer's space, the photo's natural size. */
+  async function crossAt(page) {
+    return page.evaluate((s) => {
+      const img = document.querySelector(s.IMG), c = document.querySelector(s.CROSS);
+      if (!img || !c) return null;
+      const r = img.getBoundingClientRect(), b = c.getBoundingClientRect();
+      const m = window.Skraafoto.displayMap({ width: img.naturalWidth, height: img.naturalHeight }, { width: r.width, height: r.height });
+      const p = window.Skraafoto.toDisplay({ x: Number(c.getAttribute('data-x')), y: Number(c.getAttribute('data-y')) }, m);
+      return { x: b.x + b.width / 2, y: b.y + b.height / 2, wantX: r.x + p.x, wantY: r.y + p.y,
+        data: [Number(c.getAttribute('data-x')), Number(c.getAttribute('data-y'))],
+        img: { x: r.x, y: r.y, w: r.width, h: r.height }, arm: b.width,
+        dash: getComputedStyle(c.querySelector('.sf-cross-line')).strokeDasharray };
+    }, { IMG, CROSS });
+  }
+  async function crossOnPoint(page, want, label) {
+    const c = await crossAt(page);
+    assert(c, (label || '') + ' no crosshair');
+    assert(c.data[0] === want.x && c.data[1] === want.y, (label || '') + ' crosshair at ' + c.data + ', want ' + JSON.stringify(want));
+    assert(Math.abs(c.x - c.wantX) <= 1.5 && Math.abs(c.y - c.wantY) <= 1.5, (label || '') + ' drawn at ' + JSON.stringify(c));
+    assert(c.x >= c.img.x && c.x <= c.img.x + c.img.w && c.y >= c.img.y && c.y <= c.img.y + c.img.h, (label || '') + ' off the image ' + JSON.stringify(c));
+    return c;
+  }
+  /* losPoints is the drawn line's points on screen and where the stub's
+   * path points should be. */
+  async function losOnPath(page, path) {
+    const r = await page.evaluate((s) => {
+      const img = document.querySelector(s.IMG), l = document.querySelector(s.LOS);
+      if (!l) return null;
+      const box = img.getBoundingClientRect();
+      const ctm = l.getScreenCTM();
+      const pts = Array.from(l.points).map((p) => ({ x: ctm.a * p.x + ctm.c * p.y + ctm.e, y: ctm.b * p.x + ctm.d * p.y + ctm.f }));
+      const m = window.Skraafoto.displayMap({ width: img.naturalWidth, height: img.naturalHeight }, { width: box.width, height: box.height });
+      const want = s.path.map((p) => { const q = window.Skraafoto.toDisplay(p, m); return { x: box.x + q.x, y: box.y + q.y }; });
+      const layer = document.querySelector(s.MARKS);
+      return { pts, want, visible: getComputedStyle(l).visibility !== 'hidden' && !layer.hasAttribute('hidden') && getComputedStyle(layer).display !== 'none' };
+    }, { IMG, LOS, MARKS, path });
+    assert(r && r.visible, 'no line of sight drawn');
+    assert(r.pts.length === path.length, 'points ' + r.pts.length);
+    r.pts.forEach((p, i) => assert(Math.abs(p.x - r.want[i].x) <= 1.5 && Math.abs(p.y - r.want[i].y) <= 1.5,
+      'line point ' + i + ' at ' + JSON.stringify(p) + ', want ' + JSON.stringify(r.want[i])));
+  }
+  /* noSpill (#833 F1) proves nothing of the marks is painted outside the
+   * photo: the letterbox bars (the image box minus its contain content
+   * rect) look the same with the marks shown and with them hidden.
+   * needBars: the viewport must letterbox, or the check says nothing. */
+  async function noSpill(page, needBars, label) {
+    const g = await page.evaluate((s) => {
+      const img = document.querySelector(s.IMG), b = img.getBoundingClientRect();
+      const m = window.Skraafoto.displayMap({ width: img.naturalWidth, height: img.naturalHeight }, { width: b.width, height: b.height });
+      const c = { x: b.x + m.x, y: b.y + m.y, w: img.naturalWidth * m.scale, h: img.naturalHeight * m.scale };
+      return { b: { x: b.x, y: b.y, w: b.width, h: b.height }, c };
+    }, { IMG });
+    const bars = [];
+    const left = g.c.x - g.b.x, right = g.b.x + g.b.w - (g.c.x + g.c.w);
+    const top = g.c.y - g.b.y, bottom = g.b.y + g.b.h - (g.c.y + g.c.h);
+    if (left >= 4) bars.push({ x: g.b.x, y: g.b.y, width: left - 1, height: g.b.h });
+    if (right >= 4) bars.push({ x: g.c.x + g.c.w + 1, y: g.b.y, width: right - 1, height: g.b.h });
+    if (top >= 4) bars.push({ x: g.b.x, y: g.b.y, width: g.b.w, height: top - 1 });
+    if (bottom >= 4) bars.push({ x: g.b.x, y: g.c.y + g.c.h + 1, width: g.b.w, height: bottom - 1 });
+    if (needBars) assert(bars.length > 0, (label || '') + ' no letterbox to check ' + JSON.stringify(g));
+    for (const clip of bars) {
+      const on = await page.screenshot({ clip });
+      await page.$eval(MARKS, (e) => { e.style.visibility = 'hidden'; });
+      const off = await page.screenshot({ clip });
+      await page.$eval(MARKS, (e) => { e.style.visibility = ''; });
+      assert(on.equals(off), (label || '') + ' the marks are painted on the letterbox bar ' + JSON.stringify(clip));
+    }
+    return bars.length;
+  }
+  const cropPath = (path) => path.map((p) => ({ x: (p.x - 70.5) * 4, y: (p.y - 170.2) * 4 }));
+  const markLabel = (page) => page.getAttribute(MARKS, 'aria-label');
+  /* dropOn: the #839 drop runs from the crosshair at `from` to the beam
+   * at `to` (photo pixels), drawn on screen where the image puts them. */
+  async function dropOn(page, from, to) {
+    const r = await page.evaluate((s) => {
+      const img = document.querySelector(s.IMG), l = document.querySelector('[data-testid="sf-drop"]');
+      if (!l) return null;
+      const box = img.getBoundingClientRect();
+      const ctm = l.getScreenCTM();
+      const at = (x, y) => ({ x: ctm.a * x + ctm.c * y + ctm.e, y: ctm.b * x + ctm.d * y + ctm.f });
+      const m = window.Skraafoto.displayMap({ width: img.naturalWidth, height: img.naturalHeight }, { width: box.width, height: box.height });
+      const want = [s.from, s.to].map((p) => { const q = window.Skraafoto.toDisplay(p, m); return { x: box.x + q.x, y: box.y + q.y }; });
+      return { got: [at(l.x1.baseVal.value, l.y1.baseVal.value), at(l.x2.baseVal.value, l.y2.baseVal.value)], want,
+        dash: getComputedStyle(l).strokeDasharray };
+    }, { IMG, from, to });
+    assert(r, 'no drop line');
+    r.got.forEach((p, i) => assert(Math.abs(p.x - r.want[i].x) <= 1.5 && Math.abs(p.y - r.want[i].y) <= 1.5,
+      'drop end ' + i + ' at ' + JSON.stringify(p) + ', want ' + JSON.stringify(r.want[i])));
+    assert(r.dash && r.dash !== 'none', 'the drop is not dotted: ' + r.dash);
+  }
+
+  {
+    const { ctx, page, rec } = await newCtx({});
+    await gotoNode(page, PK);
+    await page.waitForSelector(ACTION, { timeout: 10000 });
+    await page.click(ACTION);
+    await waitReady(page);
+    await step('M3c node: a crosshair on the point, no line, and its text equivalent', async () => {
+      await crossOnPoint(page, PT);
+      assert(await page.$(LOS) === null, 'a line without a profile');
+      assert(await page.getAttribute(MARKS, 'role') === 'img', 'the layer is an image');
+      assert(await markLabel(page) === 'Point marked at the centre-left.', await markLabel(page));
+      const c = await crossAt(page);
+      assert(c.dash === 'none', 'solid when not approximate: ' + c.dash);
+      assert(rec.search[0].searchParams.get('path') === null, 'a node asks for no line');
+      assert(await page.$eval(MARKS, (e) => getComputedStyle(e).pointerEvents) === 'none', 'the layer takes taps');
+    });
+    await step('M3c node: Zoom in is a real button, nothing fetched before a click', async () => {
+      assert(await page.$eval(ZOOM, (e) => e.tagName === 'BUTTON' && e.type === 'button'), 'not a button');
+      assert(await page.getAttribute(ZOOM, 'aria-pressed') === 'false', 'pressed');
+      assert((await page.textContent(ZOOM)).trim() === 'Zoom in', await page.textContent(ZOOM));
+      assert(rec.zoom.length === 0, 'crop fetched before a click');
+    });
+    await shot(page, '737-m3c-node-cross');
+    await step('M3c node: Zoom in fetches the crop once, the crosshair moves to the crop marker', async () => {
+      await page.click(ZOOM);
+      await waitReady(page);
+      assert(rec.zoom.length === 1, 'crops ' + rec.zoom.length);
+      const q = rec.zoom[0].searchParams;
+      assert(q.toString() === 'zoom=1&x=130.5&y=210.2', q.toString());
+      assert(rec.zoom[0].pathname === rec.preview[0], rec.zoom[0].pathname + ' vs ' + rec.preview[0]);
+      assert(await page.getAttribute(ZOOM, 'aria-pressed') === 'true', 'not pressed');
+      assert((await page.textContent(ZOOM)).trim() === 'Zoom out', await page.textContent(ZOOM));
+      await crossOnPoint(page, { x: 240, y: 160 }, 'zoomed');
+      assert(/zoomed in/.test(await page.getAttribute(IMG, 'alt')), await page.getAttribute(IMG, 'alt'));
+      assert(await markLabel(page) === 'Point marked at the centre.', await markLabel(page));
+    });
+    await shot(page, '737-m3c-node-zoom');
+    await step('M3c node: Zoom out puts the kept preview back; zoom again uses the kept crop', async () => {
+      const previews = rec.preview.length;
+      await page.click(ZOOM);
+      await waitReady(page);
+      await crossOnPoint(page, PT, 'zoomed out');
+      await page.click(ZOOM);
+      await waitReady(page);
+      assert(rec.preview.length === previews && rec.zoom.length === 1, 'fetched again ' + rec.preview.length + '/' + rec.zoom.length);
+      await crossOnPoint(page, { x: 240, y: 160 }, 'zoomed again');
+    });
+    await step('M3c node: another direction turns zoom off and fetches no crop', async () => {
+      await page.click(DIR('east'));
+      await waitReady(page);
+      assert(await page.getAttribute(ZOOM, 'aria-pressed') === 'false', 'still pressed');
+      assert(rec.zoom.length === 1, 'crops ' + rec.zoom.length);
+      await crossOnPoint(page, PT, 'east');
+    });
+    await step('M3c node: the crosshair stays on the point through a resize and a rotation', async () => {
+      for (const vp of [{ width: 900, height: 520 }, { width: 520, height: 900 }, { width: 1280, height: 860 }]) {
+        await page.setViewportSize(vp);
+        await page.waitForTimeout(150);
+        const c = await crossOnPoint(page, PT, vp.width + 'x' + vp.height);
+        // Sized in screen pixels: 2 x 14 px arms, whatever the scale.
+        assert(Math.abs(c.arm - 28) <= 2, vp.width + 'x' + vp.height + ' arm ' + c.arm);
+      }
+    });
+    await step('M3c node: no page errors, nothing outside this server asked', async () => {
+      assert(rec.errors.length === 0, rec.errors.join(' | '));
+      assert(sfRequests(rec).length === 0, sfRequests(rec).join(' '));
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page } = await newCtx({ approx: true });
+    await gotoNode(page, PK);
+    await page.waitForSelector(ACTION, { timeout: 10000 });
+    await page.click(ACTION);
+    await waitReady(page);
+    await step('M3c approx: the crosshair is dashed and the text says approximate', async () => {
+      const c = await crossOnPoint(page, PT);
+      assert(c.dash !== 'none' && c.dash !== '', 'not dashed: ' + c.dash);
+      assert(await markLabel(page) === 'Point marked at the centre-left, position approximate.', await markLabel(page));
+    });
+    await shot(page, '737-m3c-approx');
+    await ctx.close();
+  }
+  {
+    const { ctx, page, rec } = await newCtx({ outOfFrame: true });
+    await gotoNode(page, PK);
+    await page.waitForSelector(ACTION, { timeout: 10000 });
+    await page.click(ACTION);
+    await waitReady(page);
+    await step('M3c out of frame: no crosshair, zoom disabled, said in words', async () => {
+      assert(await page.$(CROSS) === null, 'a crosshair out of frame');
+      assert(await page.$eval(ZOOM, (e) => e.disabled), 'zoom enabled');
+      assert(await markLabel(page) === 'The point is outside this photo.', await markLabel(page));
+      assert(rec.zoom.length === 0, 'crops ' + rec.zoom.length);
+    });
+    await ctx.close();
+  }
+  {
+    const { ctx, page, rec } = await newCtx({});
+    await gotoProfile(page, P_NS);
+    await page.waitForSelector(SF_ROW, { timeout: 5000 });
+    await step('M3c profile: the search asks for the line, at the profile\'s antenna heights', async () => {
+      await page.click(SF_A);
+      await waitReady(page);
+      const q = rec.search[0].searchParams;
+      assert(q.get('path') === P_NS && q.get('ha') === '10' && q.get('hb') === '10', q.toString());
+    });
+    await step('M3c profile: a north–south line opens on the side view, looking east', async () => {
+      assert(await page.getAttribute(DIR('east'), 'aria-pressed') === 'true', 'east not chosen');
+      assert(rec.preview.length === 1 && /_2_/.test(rec.preview[0]), rec.preview.join(' '));
+      assert((await hashParam(page)).split(',')[2] === 'east', await hashParam(page));
+    });
+    await step('M3c profile: the line of sight through the path\'s points, the crosshair on the point', async () => {
+      await losOnPath(page, LINE);
+      await crossOnPoint(page, PT);
+      assert(await markLabel(page) === 'Point marked at the centre-left. Line of sight from A to B drawn on the photo, at antenna height; a dotted line drops from it to the point.', await markLabel(page));
+    });
+    await step('#839 profile: a dotted drop joins the crosshair to the line, and a note says why', async () => {
+      await dropOn(page, PT, BEAM);
+      assert(await page.isVisible(LOS_NOTE), 'no note');
+      assert(/drawn at antenna height/.test(await page.textContent(LOS_NOTE)), await page.textContent(LOS_NOTE));
+    });
+    await shot(page, '737-m3c-profile-line');
+    await step('M3c profile: zoomed, the line is moved into the crop', async () => {
+      await page.click(ZOOM);
+      await waitReady(page);
+      await losOnPath(page, cropPath(LINE));
+      await crossOnPoint(page, { x: 240, y: 160 });
+      await dropOn(page, { x: 240, y: 160 }, cropPath([BEAM])[0]);
+    });
+    await step('M3c profile: zoomed in a short window, the line stays on the photo, off the letterbox', async () => {
+      const vp = page.viewportSize();
+      await page.setViewportSize({ width: 1280, height: 600 });
+      await page.waitForTimeout(200);
+      await noSpill(page, true, '1280x600');
+      await losOnPath(page, cropPath(LINE));
+      await page.setViewportSize(vp);
+      await page.waitForTimeout(200);
+    });
+    await shot(page, '737-m3c-profile-zoom');
+    await step('M3c profile: another direction is chosen by hand and kept for the next year', async () => {
+      await page.click(DIR('north'));
+      await waitReady(page);
+      await page.selectOption(YEAR, '2023');
+      await waitReady(page);
+      assert(await page.getAttribute(DIR('north'), 'aria-pressed') === 'true', 'north not kept');
+      assert(await page.getAttribute(ZOOM, 'aria-pressed') === 'false', 'zoom kept over a year change');
+      await losOnPath(page, LINE);
+      assert(rec.errors.length === 0, rec.errors.join(' | '));
+    });
+    await ctx.close();
   }
 
   // ── 9. Phones: a cold start from `/` by real taps ─────────────────────────
@@ -809,6 +1130,28 @@ function searchAnswer(q, o) {
     await step(`${label} node page: the dialog sits above the bottom nav, controls hit by themselves`, async () => {
       await aboveNav(page);
     });
+    await step(`${label} M3c node page: the crosshair on the point; a tap on Zoom in zooms on it`, async () => {
+      await crossOnPoint(page, PT);
+      await page.locator(ZOOM).scrollIntoViewIfNeeded();
+      const z = await rect(page, ZOOM);
+      assert(z.h >= 44 && z.w >= 44, `zoom target ${z.w}x${z.h}`);
+      assert(await hitsItself(page, ZOOM), 'zoom covered');
+      await page.tap(ZOOM);
+      await waitReady(page);
+      assert(rec.zoom.length === 1 && await page.getAttribute(ZOOM, 'aria-pressed') === 'true', 'crops ' + rec.zoom.length);
+      await crossOnPoint(page, { x: 240, y: 160 }, 'zoomed');
+      await shot(page, '737-m3c-zoom-' + viewport.width);
+      await page.tap(ZOOM);
+      await waitReady(page);
+      await crossOnPoint(page, PT, 'zoomed out');
+      // The phone turned and back: the crosshair follows the photo.
+      await page.setViewportSize({ width: viewport.height, height: viewport.width });
+      await page.waitForTimeout(200);
+      await crossOnPoint(page, PT, 'rotated');
+      await page.setViewportSize(viewport);
+      await page.waitForTimeout(200);
+      await crossOnPoint(page, PT, 'rotated back');
+    });
     await step(`${label} node page: tapping a direction and Close work`, async () => {
       await page.tap(DIR('east'));
       await waitReady(page);
@@ -884,6 +1227,26 @@ function searchAnswer(q, o) {
       assert(q.get('lat') === want[0].toFixed(5) && q.get('lon') === want[1].toFixed(5), q.toString() + ' want ' + want);
       await aboveNav(page);
     });
+    await step(`${label} M3c profile: the line and the crosshair drawn, on the side view of A–B`, async () => {
+      const q = rec.search[rec.search.length - 1].searchParams;
+      const path = (q.get('path') || '').split(',').map(Number);
+      assert(path.length === 4 && Math.abs(path[0] - ends.a[0]) < 1e-5 && Math.abs(path[2] - ends.b[0]) < 1e-5, 'path ' + q.get('path'));
+      const want = await page.evaluate((p) => window.Skraafoto.perpendicularDirection(
+        { a: { lat: p[0], lon: p[1] }, b: { lat: p[2], lon: p[3] } },
+        ['north', 'east', 'south', 'west', 'nadir'].map((d) => ({ direction: d }))), path);
+      assert(await page.getAttribute(DIR(want), 'aria-pressed') === 'true', 'not the side view ' + want);
+      await losOnPath(page, LINE);
+      await crossOnPoint(page, PT);
+      await page.locator(ZOOM).scrollIntoViewIfNeeded();
+      await page.tap(ZOOM);
+      await waitReady(page);
+      await losOnPath(page, cropPath(LINE));
+      await crossOnPoint(page, { x: 240, y: 160 }, 'zoomed');
+      // #833 F1: 640x360 letterboxes the photo; the zoomed line runs far
+      // outside the crop and must be clipped to the photo.
+      await noSpill(page, viewport.width > viewport.height, label + ' zoomed');
+      await page.locator(CLOSE).scrollIntoViewIfNeeded();
+    });
     await shot(page, '737-profile-' + viewport.width);
     await step(`${label} profile: Close taps back to the point button, the panel is intact`, async () => {
       await page.tap(CLOSE);
@@ -928,6 +1291,46 @@ function searchAnswer(q, o) {
       assert(where.includes(evil), 'label: ' + where);
       assert(await page.evaluate(() => window.__sfXss === undefined), 'markup ran');
       assert(await page.$(DIALOG + ' img[src="x"]') === null, 'an <img> from the name');
+    });
+    await ctx.close();
+  }
+
+  // ── 13. #839: the profile's photo buttons only where DHM measured ─────────
+  {
+    // Cross-border: the second half filled from Copernicus (#738).
+    const { ctx, page } = await newCtx({ profile: (b) => Object.assign(b, {
+      coverage: { state: 'full', pct: 100, firstGapM: null, mixed: true, fill: [{ fromM: D / 2, toM: D, source: 'copdem-glo30', resolutionM: 30 }] },
+      attributionFill: 'Copernicus' }) });
+    await gotoProfile(page);
+    await page.waitForSelector(SF_ROW, { timeout: 5000 });
+    await step('#839 cross-border: A is offered, B (in the fill) is not', async () => {
+      assert(await page.isVisible(SF_A), 'A not offered in Denmark');
+      assert(!(await page.isVisible(SF_B)), 'B offered abroad');
+      assert(await page.isVisible(SF_POINT), 'no Chart point on a path partly in Denmark');
+    });
+    await step('#839 cross-border: a chart point in the fill takes Chart point away, one in Denmark brings it back', async () => {
+      const pr = await rect(page, PLOT + ' svg');
+      await page.mouse.click(pr.x + pr.w * sampleX(75) / VIEW_W, pr.y + pr.h / 2);
+      await page.waitForFunction((s) => document.querySelector(s).hidden, SF_POINT, { timeout: 3000 });
+      await page.mouse.click(pr.x + pr.w * sampleX(25) / VIEW_W, pr.y + pr.h / 2);
+      await page.waitForFunction((s) => { const b = document.querySelector(s); return !b.hidden && !b.disabled; }, SF_POINT, { timeout: 3000 });
+      assert(await page.isVisible(SF_ROW), 'the row went');
+    });
+    await shot(page, '839-cross-border');
+    await ctx.close();
+  }
+  {
+    // Wholly abroad: no DHM sample, so no samples at all (the server's shape).
+    const { ctx, page, rec } = await newCtx({ profile: (b) => Object.assign(b, {
+      a: Object.assign(b.a, { groundM: null }), b: Object.assign(b.b, { groundM: null }),
+      coverage: { state: 'none', pct: 0, firstGapM: 0 }, samples: [],
+      verdict: { state: 'unknown', model: 'dtm', criterion: 0.6, worstClearanceM: null, worstAtM: null, worstF1Fraction: null } }) });
+    await page.goto(`${BASE}/#/map?profile=${P}`, { waitUntil: 'domcontentloaded' });
+    await themeSettled(page);
+    await page.waitForSelector(PANEL + '.is-open [data-testid="tp-status"]', { timeout: 30000 });
+    await step('#839 wholly abroad: no oblique photo row, nothing asked', async () => {
+      assert(!(await page.isVisible(SF_ROW)), 'the row is offered on a path wholly abroad');
+      assert(rec.search.length === 0, 'searches ' + rec.search.length);
     });
     await ctx.close();
   }

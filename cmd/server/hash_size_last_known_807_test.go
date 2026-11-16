@@ -145,9 +145,34 @@ func TestLastKnownHashSize807_ColdStart(t *testing.T) {
 	store := NewPacketStore(db, nil)                                      // never Load()ed
 	stop := store.StartLastKnownHashSizeRecomputer(time.Hour)
 	defer stop()
+	// The prewarm is synchronous: the snapshot is there when Start returns
+	// (v0.2.9 review nit, #809 GM5).
+	if got := store.LastKnownHashSizes()[pk807]; got != 3 {
+		t.Fatalf("snapshot right after Start = %d, want 3", got)
+	}
 	list, detail := get807(t, router807(t, db, store))
 	wantSize807(t, "/api/nodes", list, 3)
 	wantSize807(t, "/api/nodes/{pk}", detail, 3)
+}
+
+// The recomputer refreshes the snapshot every interval: an advert stored
+// after Start is picked up without a restart (v0.2.9 review nit, #809 GM1).
+func TestLastKnownHashSize807_PeriodicRefresh(t *testing.T) {
+	db := setupTestDB(t)
+	seed807Node(t, db)
+	store := NewPacketStore(db, nil)
+	stop := store.StartLastKnownHashSizeRecomputer(20 * time.Millisecond)
+	defer stop()
+	if got := store.LastKnownHashSizes()[pk807]; got != 0 {
+		t.Fatalf("size before any advert = %d, want 0", got)
+	}
+	seed807Advert(t, db, "h807tick", "1140aabbcc", RouteFlood, time.Hour) // 0x40 → 2-byte
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if store.LastKnownHashSizes()[pk807] == 2 {
+			return
+		}
+	}
+	t.Fatalf("snapshot never refreshed: size %d, want 2", store.LastKnownHashSizes()[pk807])
 }
 
 // A newer zero-hop direct advert whose path byte is 0x00 says nothing about

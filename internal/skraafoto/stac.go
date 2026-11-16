@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -143,17 +144,19 @@ func (s *STAC) Years(ctx context.Context) ([]int, error) {
 	return ParseCollections(body)
 }
 
-// Search returns the best-centred photo of year's collection that
-// contains the EPSG:25832 point (e, n) and faces d, or nil when there is
-// none: the one query shape the server sends.
-func (s *STAC) Search(ctx context.Context, year, e, n int, d Direction) (*Item, error) {
+// Search returns the photos of year's collection that contain the
+// EPSG:25832 point (e, n) and face d, at most SearchLimit, nearest the
+// footprint centroid first: the one query shape the server sends.
+// skipped is how many candidates after the first were left out
+// (ParseSearch).
+func (s *STAC) Search(ctx context.Context, year, e, n int, d Direction) (items []Item, skipped int, err error) {
 	path, q, err := searchRequest(year, e, n, d)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	body, err := s.get(ctx, path, q, maxItemsBody)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	return ParseSearch(body, year, d)
 }
@@ -178,7 +181,7 @@ func searchRequest(year, e, n int, d Direction) (string, url.Values, error) {
 	filter := fmt.Sprintf(`{"and":[{"contains":[{"property":"geometry"},{"type":"Point","coordinates":[%d,%d]}]},`+
 		`{"eq":[{"property":"direction"},"%s"]}]}`, e, n, d)
 	q := url.Values{
-		"limit": {"1"}, "filter": {filter}, "filter-lang": {"cql-json"},
+		"limit": {strconv.Itoa(SearchLimit)}, "filter": {filter}, "filter-lang": {"cql-json"},
 		"filter-crs": {epsg25832}, "crs": {epsg25832},
 	}
 	return "/collections/" + Collection(year) + "/items", q, nil

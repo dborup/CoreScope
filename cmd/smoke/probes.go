@@ -27,6 +27,12 @@ const skaermkortSkip = "no Go request builder: the Skærmkort WMS URL is built i
 	"(public/map-tile-providers.js, #741), with map.tiles.providers.dataforsyningen.token; " +
 	"probe it here once a Go builder exists"
 
+// naturSkip is why Natur- og Friluftskort is not probed, for the same
+// reason as Skærmkort (#741 M2).
+const naturSkip = "no Go request builder: the Natur- og Friluftskort WMS URL is built in the browser " +
+	"(public/map-tile-providers.js, #741 M2), with map.tiles.providers.dataforsyningen.token; " +
+	"probe it here once a Go builder exists"
+
 // settings are the command's knobs.
 type settings struct {
 	year int // Skråfoto collection the search asks
@@ -213,7 +219,7 @@ func buildProbes(s settings) []probe {
 	})
 
 	// Skråfoto: the search, then a read of the photo it found (or the
-	// default photo without a token).
+	// -skraafoto-cdn-path photo without a token; SKIP without either).
 	cdnPath := s.cdnPath
 	ps = append(ps, probe{
 		name:   "skraafoto-stac-search",
@@ -222,8 +228,15 @@ func buildProbes(s settings) []probe {
 		status: http.StatusOK,
 		check:  checkFeatures,
 		then: func(r *reply) {
-			if item, err := skraafoto.ParseSearch(r.body, s.year, skraafoto.North); err == nil && item != nil && item.Path != "" {
-				cdnPath = item.Path
+			// ParseSearch returns the candidates nearest the footprint
+			// centroid first (#737 M3a); the first with a CDN path is read.
+			if items, _, err := skraafoto.ParseSearch(r.body, s.year, skraafoto.North); err == nil {
+				for _, item := range items {
+					if item.Path != "" {
+						cdnPath = item.Path
+						break
+					}
+				}
 			}
 		},
 	})
@@ -242,5 +255,6 @@ func buildProbes(s settings) []probe {
 	})
 
 	ps = append(ps, probe{name: "skaermkort-wms", skip: skaermkortSkip})
+	ps = append(ps, probe{name: "natur-friluft-wms", skip: naturSkip})
 	return ps
 }

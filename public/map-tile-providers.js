@@ -501,7 +501,7 @@
       var url = typeof w.url === 'function' ? w.url() : w.url;
       var layer = L.tileLayer.wms(url, _withOpts(o, opts));
       layer._mcWmsKey = _wmsKey(w, url);
-      return layer;
+      return retryErroredTiles(layer);
     }
     return L.tileLayer(typeof s.url === 'function' ? s.url() : s.url, _withOpts(o, opts));
   }
@@ -556,12 +556,14 @@
    *     hash (?terrain=1, ?heritage=1, ?masts=0, ?mastsInt=1). A =1 / =0 in
    *     the hash wins over the stored choice and is saved, like Live's
    *     ?heard= (#660). An overlay is off until chosen, except one marked
-   *     defaultOn, whose "off" is then written to the hash as =0. defaultOn
-   *     may be a function: the antenna sites' default is the customizer's
-   *     (#724 M5), and their "off" is written as =0 either way. The DHM
-   *     overlays have a customDefault instead (#734, the customizer's
-   *     dhmOverlays): used only when neither the hash nor storage says, and
-   *     their "off" is written as =0 only while that default is on.
+   *     defaultOn, whose "off" is then written to the hash as =0 while that
+   *     default is on. defaultOn may be a function, asked each time: the
+   *     antenna sites' and the monuments' defaults are the customizer's
+   *     (#724 M5, #723 M4). The antenna sites are also marked offInHash, so
+   *     their "off" is written as =0 either way. The DHM overlays have a
+   *     customDefault instead (#734, the customizer's dhmOverlays): used
+   *     only when neither the hash nor storage says, and their "off" is
+   *     written as =0 only while that default is on (see _offInHash).
    *   - A map without an attribution control (Live) gets one for its
    *     lifetime (_ensureAttribution), because the base map's credit and
    *     every overlay's credit are required.
@@ -1184,16 +1186,21 @@
            c.y * ts.y < pb.max.y && (c.y + 1) * ts.y > pb.min.y;
   }
 
-  function retryPlaceholderTiles(map, layer) {
+  /* The one retry both cases below share: on `event`, a tile `needsRetry`
+   * accepts is reloaded once (same URL) after the jittered delay, if it is
+   * still loaded and in view on the map the layer is on then (`map`, or
+   * the layer's own map for a base layer that any page may add). */
+  function _retryTilesOnce(map, layer, event, needsRetry) {
     var pending = [];
-    layer.on('tileload', function (e) {
+    layer.on(event, function (e) {
       var img = e.tile, coords = e.coords;
-      if (!img || img._mcRetried || img.naturalWidth !== 1 || img.naturalHeight !== 1) return;
+      if (!img || img._mcRetried || !needsRetry(img)) return;
       img._mcRetried = true;
       var t = setTimeout(function () {
         var i = pending.indexOf(t);
         if (i >= 0) pending.splice(i, 1);
-        if (img._mcGone || !_tileInView(map, layer, coords)) return;
+        var m = map || layer._map;
+        if (img._mcGone || !m || !_tileInView(m, layer, coords)) return;
         img.src = img.src;
       }, RETRY_MS + Math.floor(Math.random() * RETRY_JITTER_MS));
       pending.push(t);
@@ -1204,6 +1211,25 @@
       pending = [];
     });
     return layer;
+  }
+
+  function retryPlaceholderTiles(map, layer) {
+    return _retryTilesOnce(map, layer, 'tileload', function (img) {
+      return img.naturalWidth === 1 && img.naturalHeight === 1;
+    });
+  }
+
+  /* #839 — one retry of a failed WMS base-map tile. Dataforsyningen's WMS
+   * (Natur- og Friluftskort above all) sometimes answers a GetMap with
+   * HTTP 200 and a ServiceException in XML ("msDrawMap(): Image handling
+   * error"); Chrome blocks that answer (ERR_BLOCKED_BY_ORB), the tile fires
+   * `tileerror` and Leaflet never asks for it again, so a 512 px block
+   * stayed blank until it left the view. The same URL a few seconds later
+   * is a tile. Same bounds as the DHM placeholders: one retry per tile
+   * element, only while it is loaded and in view, every timer cleared when
+   * the layer leaves the map. */
+  function retryErroredTiles(layer) {
+    return _retryTilesOnce(null, layer, 'tileerror', function () { return true; });
   }
 
   function _createOverlayLayer(map, o, cfg) {
@@ -1545,6 +1571,26 @@
    * the Aerial entry (which has its own pref) clear it. */
   var _sessionBasePick = null;
 
+  /* #839 — the name of a style in the layer control. Most dark styles are
+   * a light style under the invert filter (or, for Esri World Imagery, the
+   * same photo), with the same label, so the control listed five names
+   * twice and a tap took the first match. A dark style whose label a light
+   * style in the registry also has is listed as "<label> (dark)"; the
+   * customizer keeps the plain label, since it lists the themes apart. */
+  var DARK_SUFFIX = ' (dark)';
+  function baseLayerLabel(id) {
+    var p = _hasId(id) ? REGISTRY[id] : null;
+    if (!p) return id;
+    var label = p.label || id;
+    if (p.type !== 'dark') return label;
+    for (var k in REGISTRY) {
+      if (Object.prototype.hasOwnProperty.call(REGISTRY, k) && REGISTRY[k].type === 'light' && REGISTRY[k].label === label) {
+        return label + DARK_SUFFIX;
+      }
+    }
+    return label;
+  }
+
   // ── Public surface ──────────────────────────────────────────────────────
   
   window.MC_DARK_TILE_DEFAULT           = DEFAULT_ID;
@@ -1588,6 +1634,7 @@
     buildElevationLegend: buildElevationLegend
   };
   window.MC_setLayerAttribution         = setLayerAttribution;
+  window.MC_baseLayerLabel              = baseLayerLabel;
   window.MC_CREDIT_COMPACT_CLASS        = CREDIT_COMPACT_CLASS;
   // #733 — exposed so a caller (and the unit tests) build an overlay credit
   // the one way, rather than assembling the links a second time.
@@ -1764,7 +1811,7 @@
           } else if (id === ORTHO_ID) {
             span.textContent = ' ' + ORTHO_LABEL;
           } else if (REGISTRY[id]) {
-            span.innerHTML = ' ' + (REGISTRY[id].label || id);
+            span.textContent = ' ' + baseLayerLabel(id);
           }
           
           if ((id === firstDarkId && lightIds.length > 0) || id === ORTHO_ID) {
@@ -1824,19 +1871,26 @@
     _buildControl();
 
     // Re-build when server config arrives async so newly-enabled providers appear
-    window.addEventListener('mc-tile-provider-changed', function (e) {
-      if (e && e.detail && e.detail.fromConfig) _buildControl();
-    });
+    var onConfigProviders = function (e) {
+      if (!map._mcGone && e && e.detail && e.detail.fromConfig) _buildControl();
+    };
+    window.addEventListener('mc-tile-provider-changed', onConfigProviders);
 
     // #734 — the customizer moved a DHM overlay default: rebuild, so the
     // contour label and minZoom follow at once. The on/off defaults apply
     // to the next map; layers and choices survive the rebuild. A removed
-    // map stops listening.
+    // map stops listening — to both events (#839: the config one used to
+    // stay, one per Live/Map visit).
     var onDHMDefaults = function () { if (!map._mcGone) _buildControl(); };
     window.addEventListener('dhm-defaults-changed', onDHMDefaults);
     map.on('unload', function () {
       map._mcGone = true;
-      try { if (window.removeEventListener) window.removeEventListener('dhm-defaults-changed', onDHMDefaults); } catch (_) {}
+      try {
+        if (window.removeEventListener) {
+          window.removeEventListener('dhm-defaults-changed', onDHMDefaults);
+          window.removeEventListener('mc-tile-provider-changed', onConfigProviders);
+        }
+      } catch (_) {}
     });
 
     // When the site theme flips, update the Auto tile via the existing _syncDarkTiles

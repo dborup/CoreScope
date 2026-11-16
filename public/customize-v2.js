@@ -36,8 +36,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage'];
+  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto'];
+  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -570,6 +570,33 @@
     return R.resolve(sec && typeof sec === 'object' ? sec : {});
   }
 
+  // ── #737 — the oblique photo (Skråfoto) viewer's defaults ──
+  // The first direction, the first zoom and whether the line of sight is
+  // drawn. The keys, values and defaults are the viewer's own rule
+  // (public/skraafoto.js, Skraafoto.SETTINGS), which the viewer reads from
+  // the effective config when it opens, so the customizer stores exactly
+  // what it uses. The server's map.skraafoto config stays server-only.
+  // Without the viewer on the page no value is accepted.
+  function _skraafotoRule() {
+    var S = window.Skraafoto;
+    var R = S && S.SETTINGS;
+    return R && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function isValidSkraafotoSetting(key, val) {
+    var R = _skraafotoRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective viewer defaults (this section over the built-ins), or
+   *  null without the viewer. */
+  function skraafotoSettings(effectiveConfig) {
+    var R = _skraafotoRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.skraafoto;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
   // ── #734 — DHM overlay defaults ──
   // Which hillshade a map starts with, whether the contour lines do, the
   // contour min-zoom and (#792) the elevation colours' opacity. The rule, the built-ins and the server's bounds
@@ -821,6 +848,16 @@
           else console.warn('[customizer-v2] Invalid ancient monuments setting rejected:', 'heritage.' + hk2, hIn[hk2]);
         }
         if (Object.keys(hOut).length) clean[key] = hOut;
+      } else if (key === 'skraafoto' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #737 — the oblique photo viewer's defaults, by the viewer's rule.
+        var sIn = delta[key], sOut = {}, sRule = _skraafotoRule(), sKeys = sRule ? sRule.KEYS : [];
+        for (var ski = 0; ski < sKeys.length; ski++) {
+          var sk2 = sKeys[ski];
+          if (!_own(sIn, sk2) || sIn[sk2] == null) continue;
+          if (isValidSkraafotoSetting(sk2, sIn[sk2])) sOut[sk2] = sIn[sk2];
+          else console.warn('[customizer-v2] Invalid oblique photo setting rejected:', 'skraafoto.' + sk2, sIn[sk2]);
+        }
+        if (Object.keys(sOut).length) clean[key] = sOut;
       } else if (key === 'dhmOverlays' && typeof delta[key] === 'object' && delta[key] !== null) {
         // #734 — the DHM overlay defaults, each by the overlays' rule.
         var dIn = delta[key];
@@ -1071,9 +1108,13 @@
       }
     }
 
-    // Distance unit → sync to localStorage for all pages
+    // Distance unit → sync to localStorage for all pages. With no unit set
+    // (a reset field, no server default) the mirror goes too, or
+    // getDistanceUnit() keeps the old pick while the dropdown says auto (#839).
     if (typeof effectiveConfig.distanceUnit === 'string' && DISTANCE_UNIT_VALUES.indexOf(effectiveConfig.distanceUnit) >= 0) {
       localStorage.setItem('meshcore-distance-unit', effectiveConfig.distanceUnit);
+    } else {
+      localStorage.removeItem('meshcore-distance-unit');
     }
 
     // Nav gradient
@@ -1414,6 +1455,22 @@
           }
         }
       }
+      // #737 — skraafoto: two lists of values and a boolean.
+      if (key === 'skraafoto' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var srule = _skraafotoRule();
+        var orList = function (l) { return l.slice(0, -1).join(', ') + ' or ' + l[l.length - 1]; };
+        for (var ssk in obj[key]) {
+          if (!_own(obj[key], ssk)) continue;
+          if (!srule) {
+            errors.push('Invalid oblique photo setting: skraafoto.' + ssk + ' \u2014 unavailable without the oblique photo viewer');
+          } else if (srule.KEYS.indexOf(ssk) === -1) {
+            console.warn('[customizer-v2] Unknown skraafoto key in import:', ssk);
+          } else if (!srule.valid(ssk, obj[key][ssk])) {
+            errors.push('Invalid oblique photo setting: skraafoto.' + ssk + ' = "' + obj[key][ssk] + '" \u2014 must be ' +
+              (ssk === 'direction' ? orList(srule.DIRECTIONS) : ssk === 'zoom' ? orList(srule.ZOOMS) : 'true or false'));
+          }
+        }
+      }
       // #734 — dhmOverlays: the hillshade enum, a boolean, a zoom inside
       // the server's contour range.
       if (key === 'dhmOverlays' && typeof obj[key] === 'object' && obj[key] !== null) {
@@ -1629,7 +1686,7 @@
       { id: 'theme', glyph: 'ph:palette', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', glyph: 'ph:target', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'home', glyph: 'ph:house', title: 'Home', badge: _tabBadge('home') },
-      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
+      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', glyph: 'ph:map-trifold', title: 'GeoFilter' },
       { id: 'export', glyph: 'ph:download-simple', title: 'Export' }
     ];
@@ -2113,6 +2170,7 @@
       _renderMastsSettings() +
       _renderDHMOverlaySettings() +
       _renderHeritageSettings() +
+      _renderSkraafotoSettings() +
     '</div>';
   }
 
@@ -2295,6 +2353,38 @@
         ? check('profileWarning', 'Warn about monuments in the Path profile', 'Off: the profile asks the server nothing and shows no monument note. No note never means there is no monument.') +
           num('warnDistanceM', 'Warn within (m) of a zone', 'Empty: every zone the server reports (its own radius). An end inside a zone is always shown.', 10,
             h.warnDistanceM === null ? '' : String(h.warnDistanceM), 'server radius')
+        : '');
+  }
+
+  // ── #737 Oblique photo viewer defaults ──
+  // Shown only while the server offers the photos (its skraafoto block);
+  // the line-of-sight row only where the Path profile tool is offered too.
+  // A value back at its default is a cleared override.
+  function _renderSkraafotoSettings() {
+    var R = _skraafotoRule();
+    var S = window.Skraafoto;
+    if (!R || !S.offered(window.MC_SKRAAFOTO_CFG)) return '';
+    var s = skraafotoSettings(_getEffective());
+    var tp = window.TerrainProfile;
+    var profile = !!(tp && typeof tp.offered === 'function' && tp.offered(window.MC_DHM_CFG));
+    var select = function (key, label, values, hint) {
+      var id = 'cv2-skraafoto-' + key;
+      return '<div class="cust-field"><label for="' + id + '">' + label + _overrideDot('skraafoto', key) + '</label>' +
+        '<select id="' + id + '" data-cv2-skraafoto="' + key + '" style="width:100%;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);touch-action:manipulation">' +
+          values.map(function (v) {
+            return '<option value="' + escAttr(v) + '"' + (s[key] === v ? ' selected' : '') + '>' + escAttr(R.LABELS[key][v]) + '</option>';
+          }).join('') +
+        '</select><div class="cust-hint">' + hint + '</div></div>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Oblique Photos</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">How the oblique aerial photo viewer opens, on a node and in the Path profile.</p>' +
+      select('direction', 'First photo', R.DIRECTIONS, 'A shared link to a photo still opens that direction.') +
+      select('zoom', 'First view', R.ZOOMS, 'Zoomed in only where the point is in the photo; the Zoom button still switches.') +
+      (profile
+        ? '<div class="cust-field"><label class="cust-check" for="cv2-skraafoto-lineOfSight" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+            '<input type="checkbox" id="cv2-skraafoto-lineOfSight" data-cv2-skraafoto="lineOfSight"' + (s.lineOfSight ? ' checked' : '') + ' style="width:20px;height:20px">' +
+            '<span>Draw the line of sight from a Path profile' + _overrideDot('skraafoto', 'lineOfSight') + '</span></label>' +
+            '<div class="cust-hint">Off: the photo shows only the point.</div></div>'
         : '');
   }
 
@@ -3128,6 +3218,24 @@
       });
     });
 
+    // #737 — oblique photo viewer defaults. A value back at its default is
+    // a cleared override; a bad one is put back. The next viewer reads it.
+    container.querySelectorAll('[data-cv2-skraafoto]').forEach(function (inp) {
+      var key = inp.dataset.cv2Skraafoto;
+      inp.addEventListener('change', function () {
+        var R = _skraafotoRule();
+        if (!R) return;
+        var v = key === 'lineOfSight' ? !!inp.checked : inp.value;
+        if (!isValidSkraafotoSetting(key, v)) {
+          var now = skraafotoSettings(_getEffective());
+          if (key === 'lineOfSight') inp.checked = now.lineOfSight; else inp.value = now[key];
+          return;
+        }
+        if (v === R.DEFAULTS[key]) clearOverride('skraafoto', key);
+        else setOverride('skraafoto', key, v);
+      });
+    });
+
     // #734 — DHM overlay defaults. A value back at the built-in is a
     // cleared override; a new on/off default applies to the next map, so
     // the remembered choice of that overlay is forgotten (as #724 M5).
@@ -3683,7 +3791,8 @@
       'meshcore-hide-1byte-hops',  // #1633 hide 1-byte path hops toggle (pre-#674)
       'meshcore-1byte-hops-mode',  // #674 1-byte path hops: show/mark/hide
       'mc-dark-tile-provider',     // #1430 dark-tile provider pick
-      'mc-light-tile-provider'     // light-tile provider pick (#741)
+      'mc-light-tile-provider',    // light-tile provider pick (#741)
+      'meshcore-distance-unit'     // mirror of the Distance unit pick (#839)
     ];
     for (var i = 0; i < CUSTOMIZER_LS_KEYS.length; i++) {
       try { localStorage.removeItem(CUSTOMIZER_LS_KEYS[i]); } catch (_e) { /* ignore */ }
@@ -3846,8 +3955,19 @@
     isValidHeritageSetting: isValidHeritageSetting,
     heritageSettings: heritageSettings,
     renderHeritageSettings: _renderHeritageSettings,
+    // #737 — exposed for tests; see test-issue-737-customizer-skraafoto.js.
+    // A getter: public/skraafoto.js loads after this file (index.html).
+    get SKRAAFOTO_SETTING_KEYS() { var R = _skraafotoRule(); return R ? R.KEYS.slice() : []; },
+    isValidSkraafotoSetting: isValidSkraafotoSetting,
+    skraafotoSettings: skraafotoSettings,
+    renderSkraafotoSettings: _renderSkraafotoSettings,
+    countOverrides: _countOverrides,
     // #741 — exposed for tests; see test-issue-741-customizer-base-maps.js.
     renderTileProviderSelector: _renderTileProviderSelector,
-    hasResettableCustomization: _hasResettableCustomization
+    hasResettableCustomization: _hasResettableCustomization,
+    // v0.2.9 review nit (#825 N1) — exposed for tests; see
+    // test-issue-734-customizer-overlays.js (Display badge and order).
+    renderTabs: _renderTabs,
+    renderDisplay: _renderDisplay
   };
 })();

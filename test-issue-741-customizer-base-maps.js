@@ -205,6 +205,15 @@ test('R3 Reset all tells open maps to swap the light base map back', () => {
   assert.strictEqual(light[0].detail.id, 'osm-standard');
 });
 
+test('R3b Reset all tells open maps to swap the dark base map back', () => {
+  // v0.2.9 review nit (#828 N1): the dark half of the re-apply loop.
+  const p = page(ON, { 'mc-dark-tile-provider': 'dataforsyningen-skaermkort-graa-dark' });
+  p.cust.api.resetAll();
+  const dark = p.regEvents.filter((e) => e.type === 'mc-tile-provider-changed' && e.detail && e.detail.type === 'dark');
+  assert.strictEqual(dark.length, 1, 'dark re-apply events: ' + dark.length);
+  assert.strictEqual(dark[0].detail.id, 'osm-dark');
+});
+
 test('R4 Reset all leaves no tile key behind, after the re-apply', () => {
   const p = page(ON, Object.assign({}, STALE));
   p.cust.api.resetAll();

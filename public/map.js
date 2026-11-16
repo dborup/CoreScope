@@ -42,6 +42,7 @@
   let areaOutlineHandler = null;
   let mapThemeObs = null;        // theme observer and tile-provider listener
   let tileProviderHandler = null; // of this mount, removed by destroy()
+  let creditObs = null;          // #839 credit-height observer, removed by destroy()
 
   // Returns alive(): true while the mount that called mapToken() is current.
   function mapToken() {
@@ -202,7 +203,7 @@
     // reads the aria-label only (avoids "check mark 3 E" literal announcements).
     var visible = (glyph ? glyph + '\u2009' : '') + shortHash + (hsUnknown ? '\u2026' : '');
     var unknownClass = hsUnknown ? ' hs-unknown' : '';
-    var titleAttr = hsUnknown ? ' title="Hash size unknown \u2014 no advert seen yet"' : '';
+    var titleAttr = hsUnknown ? ' title="Hash size unknown \u2014 no size-declaring advert known"' : '';
     var html = '<div class="mc-mb-label' + statusClass + unknownClass + '"' + titleAttr + ' role="img" aria-label="' + ariaStatus + '">' +
       '<span aria-hidden="true">' + visible + '</span>' + obsIndicator + '</div>';
     return L.divIcon({
@@ -528,6 +529,20 @@
       controlsPanel.classList.toggle('collapsed', controlsCollapsed);
       toggleBtn.setAttribute('aria-expanded', String(!controlsCollapsed));
     });
+
+    // #839: the panel reaches down to the bottom-right map credit, which ran
+    // under it. Publish the credit's height as --map-credit-height so the
+    // panel's max-height (style.css) stops above it; it follows the credit
+    // as overlays add and remove theirs.
+    const credit = map.attributionControl && map.attributionControl.getContainer();
+    if (credit) {
+      const publishCredit = () => controlsPanel.style.setProperty('--map-credit-height', Math.ceil(credit.getBoundingClientRect().height) + 'px');
+      publishCredit();
+      if (typeof ResizeObserver === 'function') {
+        creditObs = new ResizeObserver(publishCredit);
+        creditObs.observe(credit);
+      }
+    }
 
     // #1329: Map controls accordion. Make each section's legend a button-
     // style toggle with aria-expanded. On mobile (≤640px) only one section
@@ -2732,6 +2747,7 @@
   var profileArm = null;      // 'a' | 'b' while picking, else null
   var profileLine = null;     // the measured path
   var profileGhost = null;    // live preview from A to the pointer
+  var profileFirstEnd = null; // #839 §1: the lone A while B is still to be picked
   var profileCursorDot = null; // #781: the chart cursor's point on profileLine
   var profileBtn = null;
   var profileHintEl = null;
@@ -2842,6 +2858,8 @@
       onMoveCancel: profileDisarm,
       onEndpointsChange: profileDrawLine,
       onCursor: profileCursorAt,
+      // #839 §2: a fold or unfold changes how much map the panel leaves.
+      onLayoutChange: profileKeepInView,
       onClose: function () {
         profileDisarm();
         profileClearLine();
@@ -2874,9 +2892,10 @@
     profileBtn.setAttribute('aria-pressed', armed ? 'true' : 'false');
   }
 
-  function profileShowHint(text) {
+  function profileShowHint(text, isError) {
     if (!profileHintEl) return;
     profileHintEl.textContent = text;
+    profileHintEl.classList.toggle('is-error', !!isError);
     profileHintEl.hidden = false;
   }
 
@@ -2936,7 +2955,7 @@
       // onEndpointsChange and measures once.
       var moveSide = profileMoving;
       profileDisarm();
-      tool.moveEndpoint(moveSide, ref);
+      if (tool.moveEndpoint(moveSide, ref)) profileKeepInView();
       return;
     }
     var side = profileArm === 'b' ? 'b' : 'a';
@@ -2950,6 +2969,7 @@
       profileDisarm();
     }
     profileDrawLine();
+    if (side === 'b') profileKeepInView();
   }
 
   /* profileArmFor arms the one picker for an end. With `move` it replaces
@@ -3027,6 +3047,7 @@
 
   function profileClearLine() {
     profileClearGhost();
+    profileClearFirstEnd();
     profileHideCursorDot();
     profileCursorDot = null;
     profileDrag = null;
@@ -3046,8 +3067,9 @@
     if (!map || !profileTool) { profileClearLine(); return; }
     var st = profileTool.getState();
     var a = profileRefLatLng(st.a), b = profileRefLatLng(st.b);
-    if (!a || !b) { profileClearLine(); return; }
+    if (!a || !b) { profileClearLine(); if (a) profileShowFirstEnd(a); return; }
     profileClearGhost();
+    profileClearFirstEnd();
     // No `color` option: the stroke comes from --los-line in style.css, so
     // the line follows the theme and the customizer like everything else.
     if (profileLine) profileLine.setLatLngs([a, b]);
@@ -3055,6 +3077,31 @@
     profileEndMarker('a', a);
     profileEndMarker('b', b);
     if (profileMastHint) profileMastHint.update(a, b);
+  }
+
+  /* #839 §1: the first end, on the map as soon as it is picked. The ghost
+   * line follows a mouse only, so on a touch screen nothing else says what
+   * the second tap measures from. Not interactive: a tap on it falls
+   * through to the map, and the draggable A/B ends take over once B is
+   * picked. */
+  function profileShowFirstEnd(ll) {
+    if (!map) return;
+    profileFirstEnd = L.marker(ll, {
+      // Static markup, no interpolation.
+      icon: L.divIcon({ className: 'tp-end-marker tp-end-marker-a tp-end-first',
+        html: '<span class="tp-end-dot">A</span>', iconSize: [48, 48], iconAnchor: [24, 24] }),
+      interactive: false, keyboard: false, zIndexOffset: 2000,
+    }).addTo(map);
+    var icon = profileFirstEnd.getElement();
+    if (icon) {
+      icon.setAttribute('data-testid', 'tp-end-first');
+      icon.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  function profileClearFirstEnd() {
+    if (profileFirstEnd && map) { try { map.removeLayer(profileFirstEnd); } catch (_) {} }
+    profileFirstEnd = null;
   }
 
   // ── #721: drag an end ──
@@ -3189,7 +3236,8 @@
       // #681 M5: node detail sends profile=<one key> — A is that node, and
       // the picker is armed for B, exactly as if A had just been clicked.
       var start = window.TerrainProfile.parseStart(qs);
-      if (!start || !ensureProfileTool()) return;
+      if (!start) { if (window.TerrainProfile.invalidLink(qs)) profileBadLink(); return; }
+      if (!ensureProfileTool()) return;
       await profileLoadExtraNode(start.pubkey);
       if (!alive() || !ensureProfileTool()) return;
       profileArmFor('a');
@@ -3204,6 +3252,19 @@
     profileFitPath();
   }
 
+  /* profileBadLink answers a link whose profile cannot be read (#839 §7),
+   * such as /p?profile=garbage after its handoff: the junk leaves the
+   * address bar (no history entry), and the hint says what happened until
+   * the next tap on the map or the ruler. */
+  function profileBadLink() {
+    try {
+      history.replaceState(history.state, '', location.pathname + location.search
+        + window.TerrainProfile.withProfileParams(location.hash, {}));
+    } catch (_) { /* the notice still shows */ }
+    profileShowHint('This profile link is invalid, so no profile was opened. Use the ruler to measure a path.', true);
+    if (map) map.once('click', function () { if (!profileArm) profileHideHint(); });
+  }
+
   /* profileFitPath brings a profile opened from the URL (a deep link or a
    * /p handoff) into view above the panel (#746): someone who receives a
    * link sees where the path is, not their own last view. Once, when the
@@ -3216,13 +3277,72 @@
   function profileFitPath() {
     var st = profileTool && profileTool.getState();
     var a = st && profileRefLatLng(st.a), b = st && profileRefLatLng(st.b);
-    var panel = profileTool && profileTool.el();
-    if (!map || !a || !b || !panel) return;
-    var cap = parseFloat(getComputedStyle(panel).getPropertyValue('--tp-panel-max-h'));
-    var pad = window.TerrainProfile.fitPadding(map.getSize().y, panel.offsetHeight, cap);
+    if (!map || !a || !b || !(profileTool && profileTool.el())) return;
+    var pad = profileFitPad();
     profileLinkMove(function () {
       map.fitBounds(L.latLngBounds([a, b]), Object.assign(pad, { maxZoom: PROFILE_FIT_MAX_ZOOM, animate: false }));
     });
+  }
+
+  /* profileFitPad is the fitBounds padding that keeps a path clear of the
+   * panel as it is laid out now: at the bottom, reserved at the height it
+   * may grow to (#765), or docked at the right on a short landscape screen
+   * (#839 §2), and clear of the map's own buttons on either side. The panel
+   * says which through its CSS variables. */
+  function profileFitPad() {
+    var TP = window.TerrainProfile;
+    var size = map.getSize();
+    // How far the buttons reach in from each side; one wide across the
+    // middle (the attribution) counts for neither.
+    var left = 0, right = 0;
+    profileControlBoxes().forEach(function (b) {
+      if (b.right < size.x / 2) left = Math.max(left, b.right);
+      else if (b.left > size.x / 2) right = Math.max(right, size.x - b.left);
+    });
+    var panel = profileTool && profileTool.el();
+    if (!panel || !panel.classList.contains('is-open')) return TP.fitPadding(size.y, 0, NaN, left, right);
+    var cs = getComputedStyle(panel);
+    var px = function (name) { return parseFloat(cs.getPropertyValue(name)); };
+    if (cs.getPropertyValue('--tp-dock').trim() === 'right') return TP.fitPaddingBeside(size.x, panel.offsetWidth, left);
+    // A compact bar or a folded head does not grow; the full panel grows
+    // to its cap once the chart arrives (#765).
+    var cap = panel.classList.contains('tp-compact') || panel.classList.contains('tp-folded') ? panel.offsetHeight
+      : TP.panelCap(size.y, px('--tp-panel-max-h'), px('--tp-map-keep'), px('--tp-panel-min-h'));
+    return TP.fitPadding(size.y, panel.offsetHeight, cap, left, right);
+  }
+
+  /* profileControlBoxes are the boxes of the buttons over the map (zoom,
+   * layers, the ruler, the settings toggle and the open Map Controls), in
+   * map container pixels: an end under one cannot be seen, and the fit
+   * keeps clear of them. Read on a pick or a fold only, never per frame. */
+  function profileControlBoxes() {
+    var wrap = map && map.getContainer().parentNode;
+    if (!wrap) return [];
+    var m = map.getContainer().getBoundingClientRect();
+    var els = wrap.querySelectorAll('.leaflet-control-container .leaflet-control, .map-profile-toggle, .map-controls-toggle, .map-controls');
+    var out = [];
+    for (var i = 0; i < els.length; i++) {
+      var r = els[i].getBoundingClientRect();
+      if (r.width && r.height) out.push({ left: r.left - m.left, top: r.top - m.top, right: r.right - m.left, bottom: r.bottom - m.top });
+    }
+    return out;
+  }
+
+  /* profileKeepInView brings both ends back into view when one is hidden
+   * — under the panel, off the map or under a map button (#839 §2, §3):
+   * an end clicked low on the map that the panel then opens over. It moves
+   * nothing while both can be seen, and never zooms in past the viewer's
+   * own zoom. The viewer's own pick moved the map, so the view is theirs
+   * and is saved as usual (unlike a link's fit, #765). */
+  function profileKeepInView() {
+    var st = profileTool && profileTool.getState();
+    var a = st && profileRefLatLng(st.a), b = st && profileRefLatLng(st.b);
+    if (!map || !a || !b) return;
+    var pad = profileFitPad();
+    var size = map.getSize();
+    var pts = [a, b].map(function (ll) { var p = map.latLngToContainerPoint(ll); return { x: p.x, y: p.y }; });
+    if (window.TerrainProfile.endsVisible(pts, { x: size.x, y: size.y }, pad, profileControlBoxes())) return;
+    map.fitBounds(L.latLngBounds([a, b]), Object.assign(pad, { maxZoom: map.getZoom() }));
   }
 
   /* profileLinkMove makes one map move on behalf of a profile link and keeps
@@ -3284,6 +3404,8 @@
     if (mapThemeObs) mapThemeObs.disconnect();
     if (tileProviderHandler) window.removeEventListener('mc-tile-provider-changed', tileProviderHandler);
     mapThemeObs = tileProviderHandler = null;
+    if (creditObs) creditObs.disconnect();
+    creditObs = null;
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;
     // #1771 review fix: invalidate the Important Links overlay's in-flight

@@ -249,6 +249,20 @@ test('a removed map stops listening for dhm-defaults-changed', () => {
   assert.strictEqual(s.map._controls.length, n, 'a removed map rebuilt its control');
 });
 
+test('a removed map takes its dhm-defaults-changed listener off the window', () => {
+  // v0.2.9 review nit (#826 F2): the test above passes on the _mcGone guard
+  // alone; this one pins the removeEventListener.
+  const ctx = makeSandbox({ dhm: DHM });
+  const live = new Set();
+  const add = ctx.window.addEventListener, remove = ctx.window.removeEventListener;
+  ctx.window.addEventListener = (type, fn) => { if (type === 'dhm-defaults-changed') live.add(fn); return add(type, fn); };
+  ctx.window.removeEventListener = (type, fn) => { if (type === 'dhm-defaults-changed') live.delete(fn); return remove(type, fn); };
+  const { map } = buildControl(ctx);
+  assert(live.size >= 1, 'no dhm-defaults-changed listener registered');
+  map.fire('unload');
+  assert.strictEqual(live.size, 0, 'listeners left after unload: ' + live.size);
+});
+
 // ── 5. The customizer ───────────────────────────────────────────────────────
 
 function loadCustomizer(opts) {
@@ -260,6 +274,37 @@ function loadCustomizer(opts) {
   });
 }
 const stored = (c) => JSON.parse(c.localStorage.getItem('cs-theme-overrides') || '{}');
+
+test('the Display tab badge counts the DHM overlay and monument overrides, and DHM comes first', () => {
+  // v0.2.9 review nit (#825 N1): two lines resolved by hand in the #825
+  // merge (the badge sum and the section order) had no test.
+  const c = loadCustomizerSandbox({
+    dhm: DHM,
+    scripts: ['map-tile-providers.js'],
+    setup: (ctx) => {
+      ctx.location = { hash: '#/map', pathname: '/', search: '' };
+      ctx.history = { state: null, replaceState() {} };
+      ctx.URLSearchParams = URLSearchParams;
+      ctx.window.MC_HERITAGE_CFG = {
+        enabled: true, url: 'https://www.kulturarv.dk/ffgeoserver/public/wms',
+        layers: 'fundogfortidsminder_areal_beskyttelse,fundogfortidsminder_punkt_fredet',
+        minZoom: 12, maxZoom: 19, bounds: [[54.4646, 8.0899], [57.7289, 15.5689]], attribution: 'x',
+      };
+    },
+  });
+  c.api.writeOverrides({
+    dhmOverlays: { hillshade: 'surface', contours: true, contourMinZoom: 16 },
+    heritage: { enabled: true, opacityPct: 50, profileWarning: false, warnDistanceM: 200 },
+  });
+  const m = c.api.renderTabs().match(/data-tab="display"[^>]*>[\s\S]*?<\/button>/);
+  assert(m, 'no Display tab');
+  const badge = m[0].match(/cv2-tab-badge">(\d+)</);
+  assert(badge && badge[1] === '7', 'Display badge: ' + (badge && badge[1]));
+  const html = c.api.renderDisplay();
+  const dhmAt = html.indexOf('DHM Map Overlays'), herAt = html.indexOf('Ancient Monuments');
+  assert(dhmAt >= 0 && herAt >= 0, 'sections missing: ' + dhmAt + ' / ' + herAt);
+  assert(dhmAt < herAt, 'DHM Map Overlays must come before Ancient Monuments');
+});
 
 test('dhmOverlays is a known object section', () => {
   const { api } = loadCustomizer();
