@@ -1787,11 +1787,16 @@ body.scroll-locked { overflow: hidden; }
   display: flex; align-items: center; justify-content: center;
   padding: clamp(8px, 2vw, 24px); /* #1059: viewport-edge breathing room */
 }
-/* #812 M4: View Path opens from the packet detail, which on a phone is the
- * slide-over panel (--z-modal) under the sticky top nav (1100). At 200 the
- * modal sat below both, and its Close and Copy link could not be tapped.
- * On the modal layer, appended after the panel, it stacks above them. */
-#packetPathModal.modal-overlay { z-index: var(--z-modal); }
+/* #812 M4: up to 1023 px View Path opens from the packet detail's bottom
+ * sheet (<=640) or slide-over panel (641-1023, --z-modal), and the modal's
+ * top runs under the sticky top nav (1100). At 200 it sat below them, and
+ * its Close and Copy link could not be tapped. There it takes the modal
+ * layer; appended after the panel, it stacks above it. From 1024 px the
+ * detail is a side pane and the nav and the search stay above the modal
+ * (#180), so the rule stops there. */
+@media (max-width: 1023px) {
+  #packetPathModal.modal-overlay { z-index: var(--z-modal); }
+}
 .modal {
   /* #1059: fluid via min(); cap height at 90vh; internal scroll.
      MINOR-6: dropped redundant `width: ...` — `max-width: min(90vw, 500px)`
