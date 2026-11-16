@@ -401,7 +401,7 @@ func assertNoPayload(t *testing.T, e *packetShareEnv, hash string) {
 	}
 	ps := e.share(t, hash)
 	js, _ := json.Marshal(ps.in)
-	texts := []string{w.Body.String(), string(js), fmt.Sprintf("%+v", ps.in), strings.Join(ps.areas, "|"), e.c.page(hash, ps).ImageAlt}
+	texts := []string{w.Body.String(), string(js), fmt.Sprintf("%+v", ps.in), strings.Join(ps.areas, "|"), e.c.page(sharedPacket{Hash: hash}, ps).ImageAlt}
 	for _, s := range packetCardStrings(reflect.ValueOf(ps.in)) {
 		texts = append(texts, s)
 	}

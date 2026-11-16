@@ -9,8 +9,14 @@ package main
 //     is the plain site document, as /p?node= is when node sharing is off,
 //     and the card route is 404.
 //   - The key is exactly 16 hex characters, either case; a numeric packet
-//     id is refused. The only other keys are v, accepted and ignored, and
-//     the click-tracking keys /p already ignores; anything else is a 400.
+//     id is refused. The only other keys are v, accepted and ignored,
+//     viewPath (#812 M3), and the click-tracking keys /p already ignores;
+//     anything else is a 400.
+//   - #812 M3: viewPath=1 (exactly that) makes it a View Path link, the
+//     link of the View Path modal (#/packets/<hash>?viewPath=1). It is the
+//     same page with the same gate, lookup, visibility rule, tags and card
+//     (one v, one cache entry); only og:url carries viewPath=1, and the
+//     index.html handoff opens the modal.
 //   - The packet is looked up as the packet page does: the in-memory store
 //     first, then the DB. Unknown packets, and packets gone from both, are
 //     the plain site document with a 404; nothing from the request is
@@ -490,8 +496,14 @@ func packetCardPath(hash, v string) string {
 	return "/api/packets/" + hash + "/card.png?v=" + v
 }
 
-// page is the preview of a shared packet.
-func (c *packetCards) page(hash string, ps packetShare) ogPage {
+// page is the preview of a shared packet. A View Path link differs only in
+// og:url: it shares the card, its v and its cache entry.
+func (c *packetCards) page(sp sharedPacket, ps packetShare) ogPage {
+	hash := sp.Hash
+	link := sharePath + "?packet=" + hash
+	if sp.ViewPath {
+		link += "&viewPath=1"
+	}
 	in := ps.in
 	title := packetTitle(in)
 	desc := append(packetNames(in), packetStats(in)...)
@@ -514,7 +526,7 @@ func (c *packetCards) page(hash string, ps packetShare) ogPage {
 	return ogPage{
 		Title:       title,
 		Description: strings.Join(desc, " · "),
-		Path:        sharePath + "?packet=" + hash,
+		Path:        link,
 		Image:       packetCardPath(hash, c.version(in)),
 		ImageAlt:    alt,
 	}
@@ -522,20 +534,31 @@ func (c *packetCards) page(hash string, ps packetShare) ogPage {
 
 // ── Requests ───────────────────────────────────────────────────────────────
 
+// sharedPacket is a parsed /p?packet= link.
+type sharedPacket struct {
+	Hash string // lower case
+	// ViewPath marks the View Path modal's link (#812 M3): the same
+	// preview, handed off to #/packets/<hash>?viewPath=1.
+	ViewPath bool
+}
+
 // parseSharedPacket is the /p?packet= grammar: packet, exactly 16 hex
-// characters of either case, once; v once, at most 64 bytes, ignored;
-// tracking keys ignored; nothing else. It returns the hash in lower case.
-func parseSharedPacket(q url.Values) (string, bool) {
+// characters of either case, once; viewPath, exactly "1", once; v once, at
+// most 64 bytes, ignored; tracking keys ignored; nothing else.
+func parseSharedPacket(q url.Values) (sharedPacket, bool) {
 	for k, vs := range q {
 		if isShareTrackingParam(k) {
 			continue
 		}
-		if (k != "packet" && k != "v") || len(vs) != 1 || len(vs[0]) > 64 {
-			return "", false
+		if (k != "packet" && k != "v" && k != "viewPath") || len(vs) != 1 || len(vs[0]) > 64 {
+			return sharedPacket{}, false
 		}
 	}
-	h := strings.ToLower(q.Get("packet"))
-	return h, hashPattern.MatchString(h)
+	if vp, ok := q["viewPath"]; ok && vp[0] != "1" {
+		return sharedPacket{}, false
+	}
+	sp := sharedPacket{Hash: strings.ToLower(q.Get("packet")), ViewPath: q.Has("viewPath")}
+	return sp, hashPattern.MatchString(sp.Hash)
 }
 
 // handleSharePacket is /p with a packet hash.
@@ -545,19 +568,19 @@ func (s *Server) handleSharePacket(doc *indexDoc, w http.ResponseWriter, r *http
 		doc.serveSite(w, r, http.StatusOK)
 		return
 	}
-	hash, ok := parseSharedPacket(r.URL.Query())
+	sp, ok := parseSharedPacket(r.URL.Query())
 	if !ok {
 		doc.serveSite(w, r, http.StatusBadRequest)
 		return
 	}
-	ps, found := s.resolvePacketShare(r.Context(), c, hash)
+	ps, found := s.resolvePacketShare(r.Context(), c, sp.Hash)
 	if !found {
 		doc.serveSite(w, r, http.StatusNotFound)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-	w.Write(doc.og.renderProfile(doc.profile, r, c.page(hash, ps)))
+	w.Write(doc.og.renderProfile(doc.profile, r, c.page(sp, ps)))
 }
 
 // handlePacketCard is GET /api/packets/{hash}/card.png.

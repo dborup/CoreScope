@@ -154,6 +154,7 @@ run test-issue-721-move-endpoints.js
 run test-issue-727-share-link.js
 run test-issue-811-node-share-handoff.js
 run test-issue-812-packet-share-handoff.js
+run test-issue-812-viewpath-share-handoff.js
 run test-issue-811-m4-node-share.js
 run test-issue-811-m4-share-customizer.js
 run test-issue-811-m4-docs.js
