@@ -225,6 +225,39 @@ test('clears mc-light-tile-provider localStorage key (#741)', () => {
   assert.strictEqual(env.localStorage.getItem('mc-light-tile-provider'), null);
 });
 
+// #839 #3 — the Distance unit pick lives in cs-theme-overrides AND is
+// mirrored to meshcore-distance-unit, which getDistanceUnit() (app.js)
+// reads. Reset All cleared the first but not the mirror, so distances
+// stayed in miles while the dropdown said auto.
+test('#839: clears the meshcore-distance-unit mirror of a picked unit', () => {
+  const env = loadCustomizer();
+  env.localStorage.setItem('cs-theme-overrides', JSON.stringify({ distanceUnit: 'mi' }));
+  env.api.init({});
+  assert.strictEqual(env.localStorage.getItem('meshcore-distance-unit'), 'mi', 'precondition: the pipeline mirrors the pick');
+  env.api.resetAll();
+  assert.strictEqual(env.localStorage.getItem('meshcore-distance-unit'), null);
+});
+
+// Guard for the fix: an operator's server default still reaches the mirror
+// once the Reset All button re-runs the pipeline (init() runs it here).
+test('#839: after Reset All the mirror follows the server default', () => {
+  const env = loadCustomizer();
+  env.localStorage.setItem('cs-theme-overrides', JSON.stringify({ distanceUnit: 'km' }));
+  env.api.init({ distanceUnit: 'mi' });
+  assert.strictEqual(env.localStorage.getItem('meshcore-distance-unit'), 'km');
+  env.api.resetAll();
+  env.api.init({ distanceUnit: 'mi' });
+  assert.strictEqual(env.localStorage.getItem('meshcore-distance-unit'), 'mi');
+});
+
+test('#839: resetting the Distance unit field alone also clears the mirror', () => {
+  const env = loadCustomizer();
+  env.localStorage.setItem('cs-theme-overrides', JSON.stringify({ distanceUnit: 'mi' }));
+  env.api.init({});
+  env.api.clearOverride(null, 'distanceUnit');
+  assert.strictEqual(env.localStorage.getItem('meshcore-distance-unit'), null);
+});
+
 test('removes data-cb-preset body attribute', () => {
   const env = loadCustomizer();
   env.body.setAttribute('data-cb-preset', 'deut');

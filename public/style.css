@@ -4933,6 +4933,19 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
+  /* #839 — a node opens as its own page here, so the empty side pane's
+     "Select a node" placeholder only took height from the list. */
+  .nodes-page .split-layout .panel-right.empty { display: none; }
+}
+
+/* #839 — Nodes in phone landscape (640x360, 568x320): the stacked top bar
+   and region chips fill #app above the bottom nav and left the list's own
+   scroll box ~12px, so no row could be reached. On a short phone the page
+   scrolls as one: the top bar scrolls away and the list follows it. */
+@media (max-width: 640px) and (max-height: 500px) {
+  .nodes-page { overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .nodes-page .split-layout { flex: none; height: auto; overflow: visible; }
+  .nodes-page .panel-left { flex: none; }
 }
 
 /* #630-5: Analytics tabs — horizontal scroll on small screens */

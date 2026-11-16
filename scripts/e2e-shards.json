@@ -2,6 +2,22 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-839-live-teardown-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #839 finding 1: leaving Live leaves none of its observers or listeners behind. From a cold start with real clicks at 1440x900 (Home, Live, Packets, dark-mode toggle): no TypeError on a theme toggle after Live is left (the rc19 regression from #735), none after two visits and two toggles, and after three visits no Live data-theme MutationObserver, no (pointer: fine) media-query listener and no extra mc-tile-provider-changed listener; leaving with a feed card open by Back leaves no outside-click listener. About 15s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
+      "file": "test-issue-839-nodes-landscape-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #839 finding 2: the Nodes list is reachable in phone landscape. From a cold start with touch at 640x360 and 568x320 (Home, More, Nodes, dismiss tips, one-finger CDP swipes with a wheel fallback): the first row ends fully above the bottom nav, uncovered, a tap opens #/nodes/{pubkey}, no sideways overflow; 375x560 portrait is a guard. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-734-customizer-overlays-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
