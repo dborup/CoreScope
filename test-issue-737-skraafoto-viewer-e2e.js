@@ -56,7 +56,13 @@
  *      of sight is drawn through the path's points and the first photo is
  *      the side view of A–B; the layer's aria-label says where the point
  *      is; and, on the phones of 9, the crosshair, the line and a tapped
- *      zoom from a cold start.
+ *      zoom from a cold start;
+ *  13. #839: on a cross-border profile A is offered and B, in the
+ *      Copernicus fill, is not, and Chart point goes with a point picked
+ *      in the fill; a path wholly abroad has no row; an empty answer's
+ *      message is centred with no empty Year box; from a profile a dotted
+ *      drop joins the crosshair to the line (the stub's beam), overview
+ *      and crop, with a note saying the line is at antenna height.
  *
  * The fixture's nodes are in California: the node used here is moved to
  * Aarhus in the stubbed /api/nodes answers (o.abroad keeps it where it is).
@@ -108,11 +114,14 @@ const FRAME = { width: 480, height: 320 };
 const PT = { x: 130.5, y: 210.2 };
 const LINE = [{ x: 20, y: 300 }, { x: 130.5, y: 210.2 }, { x: 470, y: 30 }];
 const CROP_BOX = '70.5,170.2,190.5,250.2';
+// #839: the line's point above the crosshair (the server's beam), on LINE.
+const BEAM = { x: 147.5, y: 201.2 };
 const CROP_MARKER = '240,160';
 const ZOOM = '[data-testid="sf-zoom"]';
 const MARKS = '[data-testid="sf-marks"]';
 const CROSS = '[data-testid="sf-cross"]';
 const LOS = '[data-testid="sf-los"]';
+const LOS_NOTE = '[data-testid="sf-los-note"]';
 // A north–south profile: its side view looks east (or west).
 const P_NS = '56.10000,10.20000,56.20000,10.20000';
 
@@ -183,7 +192,7 @@ function searchAnswer(q, o) {
       previewUrl: PREVIEW_PREFIX + c + '/' + id,
       frame: FRAME, point: PT, inFrame: !o.outOfFrame, approx: !!o.approx,
     };
-    if (q.get('path')) ph.path = LINE; // M3a: only when a path is asked for
+    if (q.get('path')) { ph.path = LINE; ph.beam = BEAM; } // M3a: only when a path is asked for; #839 beam
     return ph;
   });
   return { collection: c, year, years: [2025, 2023, 2021, 2019, 2017], photos, credit: CREDIT };
@@ -816,6 +825,25 @@ function searchAnswer(q, o) {
   }
   const cropPath = (path) => path.map((p) => ({ x: (p.x - 70.5) * 4, y: (p.y - 170.2) * 4 }));
   const markLabel = (page) => page.getAttribute(MARKS, 'aria-label');
+  /* dropOn: the #839 drop runs from the crosshair at `from` to the beam
+   * at `to` (photo pixels), drawn on screen where the image puts them. */
+  async function dropOn(page, from, to) {
+    const r = await page.evaluate((s) => {
+      const img = document.querySelector(s.IMG), l = document.querySelector('[data-testid="sf-drop"]');
+      if (!l) return null;
+      const box = img.getBoundingClientRect();
+      const ctm = l.getScreenCTM();
+      const at = (x, y) => ({ x: ctm.a * x + ctm.c * y + ctm.e, y: ctm.b * x + ctm.d * y + ctm.f });
+      const m = window.Skraafoto.displayMap({ width: img.naturalWidth, height: img.naturalHeight }, { width: box.width, height: box.height });
+      const want = [s.from, s.to].map((p) => { const q = window.Skraafoto.toDisplay(p, m); return { x: box.x + q.x, y: box.y + q.y }; });
+      return { got: [at(l.x1.baseVal.value, l.y1.baseVal.value), at(l.x2.baseVal.value, l.y2.baseVal.value)], want,
+        dash: getComputedStyle(l).strokeDasharray };
+    }, { IMG, from, to });
+    assert(r, 'no drop line');
+    r.got.forEach((p, i) => assert(Math.abs(p.x - r.want[i].x) <= 1.5 && Math.abs(p.y - r.want[i].y) <= 1.5,
+      'drop end ' + i + ' at ' + JSON.stringify(p) + ', want ' + JSON.stringify(r.want[i])));
+    assert(r.dash && r.dash !== 'none', 'the drop is not dotted: ' + r.dash);
+  }
 
   {
     const { ctx, page, rec } = await newCtx({});
@@ -932,7 +960,12 @@ function searchAnswer(q, o) {
     await step('M3c profile: the line of sight through the path\'s points, the crosshair on the point', async () => {
       await losOnPath(page, LINE);
       await crossOnPoint(page, PT);
-      assert(await markLabel(page) === 'Point marked at the centre-left. Line of sight from A to B drawn on the photo.', await markLabel(page));
+      assert(await markLabel(page) === 'Point marked at the centre-left. Line of sight from A to B drawn on the photo, at antenna height; a dotted line drops from it to the point.', await markLabel(page));
+    });
+    await step('#839 profile: a dotted drop joins the crosshair to the line, and a note says why', async () => {
+      await dropOn(page, PT, BEAM);
+      assert(await page.isVisible(LOS_NOTE), 'no note');
+      assert(/drawn at antenna height/.test(await page.textContent(LOS_NOTE)), await page.textContent(LOS_NOTE));
     });
     await shot(page, '737-m3c-profile-line');
     await step('M3c profile: zoomed, the line is moved into the crop', async () => {
@@ -940,6 +973,7 @@ function searchAnswer(q, o) {
       await waitReady(page);
       await losOnPath(page, cropPath(LINE));
       await crossOnPoint(page, { x: 240, y: 160 });
+      await dropOn(page, { x: 240, y: 160 }, cropPath([BEAM])[0]);
     });
     await step('M3c profile: zoomed in a short window, the line stays on the photo, off the letterbox', async () => {
       const vp = page.viewportSize();

@@ -143,7 +143,7 @@ test('crop → displayed: the crop marker lands where the zoomed photo shows the
 // ── 3. The marks of a photo ─────────────────────────────────────────────────
 
 test('marks: the crosshair at the point, in preview space, only when inFrame', () => {
-  eq(SF.marks(photo('north')), { width: 1024, height: 765, point: { x: 300.5, y: 400.2 }, path: null, approx: false });
+  eq(SF.marks(photo('north')), { width: 1024, height: 765, point: { x: 300.5, y: 400.2 }, path: null, beam: null, approx: false });
   eq(SF.marks(photo('north', { approx: true })).approx, true, 'approx carried');
   eq(SF.marks(photo('north', { inFrame: false, point: { x: -40, y: 10 } })).point, null, 'out of frame: no crosshair');
   eq(SF.marks(photo('north', { point: undefined, inFrame: false })).point, null);
@@ -165,7 +165,7 @@ test('marks: zoomed, the crop marker and the line moved into crop pixels', () =>
   const path = [{ x: 172.5, y: 312.8 }, { x: 428.5, y: 487.55 }];
   const crop = { box: { x0: 172.5, y0: 312.8, x1: 428.5, y1: 487.55 }, width: 1024, height: 699, marker: { x: 512, y: 349.6 } };
   const m = SF.marks(photo('south', { path, approx: true }), crop);
-  eq(m, { width: 1024, height: 699, point: { x: 512, y: 349.6 }, path: [{ x: 0, y: 0 }, { x: 1024, y: 699 }], approx: true, zoomed: true });
+  eq(m, { width: 1024, height: 699, point: { x: 512, y: 349.6 }, path: [{ x: 0, y: 0 }, { x: 1024, y: 699 }], beam: null, approx: true, zoomed: true });
   eq(SF.marks(photo('south'), Object.assign({}, crop, { marker: null })).point, null, 'no marker header, no crosshair');
   eq(SF.marks(photo('south', { path }), Object.assign({}, crop, { box: null })).path, null, 'no box header, no line');
   eq(SF.marks(photo('south'), Object.assign({}, crop, { marker: { x: 1100, y: 3 } })).point, null, 'a marker outside the crop');
@@ -267,9 +267,9 @@ test('markText: the point, how sure, and the line', () => {
   eq(SF.markText({ width: 900, height: 600, point: { x: 450, y: 300 }, path: null, approx: true }),
     'Point marked at the centre, position approximate.');
   eq(SF.markText({ width: 900, height: 600, point: null, path: [{ x: 0, y: 0 }, { x: 9, y: 9 }], approx: false }),
-    'The point is outside this photo. Line of sight from A to B drawn on the photo.');
+    'The point is outside this photo. Line of sight from A to B drawn on the photo, at antenna height.');
   eq(SF.markText({ width: 900, height: 600, point: { x: 800, y: 50 }, path: [{ x: 0, y: 0 }, { x: 9, y: 9 }], approx: false }),
-    'Point marked at the top-right. Line of sight from A to B drawn on the photo.');
+    'Point marked at the top-right. Line of sight from A to B drawn on the photo, at antenna height.');
   eq(SF.markText({ width: 900, height: 600, point: null, path: null, approx: false, zoomed: true }),
     'Not marked in this view.', 'zoomed without a usable marker: not "outside this photo"');
   eq(SF.markText(null), '');
@@ -389,7 +389,7 @@ test('viewer: the marks are an SVG layer in preview space, with the crosshair an
     eq(find(clipG, (e) => e.attrs['data-testid'] === 'sf-cross').length, 1, 'the crosshair inside the clip');
     eq(svg.getAttribute('preserveAspectRatio'), 'xMidYMid meet', 'the image is object-fit: contain');
     eq(svg.getAttribute('role'), 'img');
-    eq(svg.getAttribute('aria-label'), 'Point marked at the centre-left. Line of sight from A to B drawn on the photo.');
+    eq(svg.getAttribute('aria-label'), 'Point marked at the centre-left. Line of sight from A to B drawn on the photo, at antenna height.');
     const cross = t.mark('sf-cross');
     eq([cross.getAttribute('data-x'), cross.getAttribute('data-y')], ['300.5', '400.2']);
     eq(cross.getAttribute('transform'), 'translate(300.5 400.2)');

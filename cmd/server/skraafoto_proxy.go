@@ -341,6 +341,12 @@ type SkraafotoPhoto struct {
 	// where it leaves; absent without a path, or when none of it is in
 	// frame.
 	Path []SkraafotoPixel `json:"path,omitempty"`
+	// Beam is the line of sight's point above Point: the line's point
+	// nearest it, at the line's height there (#839). Point is on the
+	// ground and the line between the antennas, so in an oblique photo
+	// the two are apart; the viewer joins them. Absent without a Path, or
+	// when the point is more than skraafotoBeamMaxM off the line.
+	Beam *SkraafotoPixel `json:"beam,omitempty"`
 	// Approx is true when a height came from the photo's footprint, not
 	// from DHM: the point may then be off by a few metres.
 	Approx bool `json:"approx"`

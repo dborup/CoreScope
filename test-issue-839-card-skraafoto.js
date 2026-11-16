@@ -250,6 +250,46 @@ test('10: the stage stacks the status under the photo frame, centred', () => {
   assert.ok(/\.sf-year-wrap\[hidden\]\s*\{\s*display:\s*none;\s*\}/.test(CSS), '.sf-year-wrap is inline-flex, which beats [hidden]');
 });
 
+test('11: marks carry the beam point, moved into a crop like the line', () => {
+  const p = photo('east', { path: [{ x: 10, y: 700 }, { x: 1000, y: 80 }], beam: { x: 302, y: 380.6 } });
+  eq(SF.marks(p, null).beam, { x: 302, y: 380.6 });
+  const z = SF.marks(p, Object.assign({ marker: { x: 512, y: 349.5 } }, CROP));
+  eq(z.beam, JSON.parse(JSON.stringify(SF.toCrop({ x: 302, y: 380.6 }, CROP))));
+  eq(SF.marks(photo('east', { beam: { x: 302, y: 380.6 } }), null).beam, null, 'no beam without a line');
+  eq(SF.marks(photo('east', { path: [{ x: 10, y: 700 }, { x: 1000, y: 80 }], beam: { x: 'a' } }), null).beam, null, 'junk is dropped');
+});
+
+test('11: from a profile, a dotted drop joins the crosshair to the line, and the words say why', () => withViewer(
+  { line: LINE }, {}, async (t) => {
+    t.load(1024, 765);
+    const drop = t.mark('sf-drop');
+    assert.ok(drop, 'no drop line');
+    eq([drop.getAttribute('x1'), drop.getAttribute('y1'), drop.getAttribute('x2'), drop.getAttribute('y2')], ['300.5', '400.2', '302', '380.6']);
+    assert.ok(/at antenna height/.test(t.marks().getAttribute('aria-label')), t.marks().getAttribute('aria-label'));
+    const note = t.dom.byTid('sf-los-note');
+    eq(note.hidden, false);
+    eq(note.textContent, 'The line of sight is drawn at antenna height, above the ground; the dotted line drops from it to the point on the ground.');
+    await t.click('sf-zoom');
+    t.load(1024, 699);
+    const z = t.mark('sf-drop');
+    const b = SF.toCrop({ x: 302, y: 380.6 }, CROP);
+    eq([z.getAttribute('x1'), z.getAttribute('y1'), z.getAttribute('x2'), z.getAttribute('y2')],
+      ['512', '349.5', String(Math.round(b.x * 100) / 100), String(Math.round(b.y * 100) / 100)], 'zoomed: marker to the beam in the crop');
+  }));
+
+test('11: an answer without a beam still says why the line is apart from the point', () => withViewer(
+  { line: LINE }, { beam: null }, async (t) => {
+    t.load(1024, 765);
+    eq(t.mark('sf-drop'), null);
+    eq(t.dom.byTid('sf-los-note').textContent, 'The line of sight is drawn at antenna height, so it passes above the point on the ground.');
+  }));
+
+test('11: from a node (no line): no drop and no note', () => withViewer({}, {}, async (t) => {
+  t.load(1024, 765);
+  eq(t.mark('sf-drop'), null);
+  eq(t.dom.byTid('sf-los-note').hidden, true);
+}));
+
 (async () => {
   for (const [name, fn] of asyncTests) {
     try { await fn(); passed++; console.log('  ✅ ' + name); }

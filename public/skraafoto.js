@@ -372,13 +372,16 @@
 
   /* marks is what to draw on photo p: { width, height } is the space (the
    * preview's frame, or zoomed the crop's size), point the crosshair
-   * (null: none), path the line of sight (null: none). crop, when zoomed:
-   * { box, width, height, marker }, from the M3b headers; zoomed is then
-   * true. null when the photo has no camera model (no frame). */
+   * (null: none), path the line of sight (null: none), beam the line's
+   * point above the crosshair (#839; null: none, and never without a
+   * line). crop, when zoomed: { box, width, height, marker }, from the
+   * M3b headers; zoomed is then true. null when the photo has no camera
+   * model (no frame). */
   function marks(p, crop) {
     var frame = size(p && p.frame);
     if (!frame) return null;
     var line = pathOf(p.path);
+    var beam = line ? xy(p.beam) : null;
     var approx = p.approx === true;
     if (crop) {
       var cs = size(crop);
@@ -386,9 +389,23 @@
       var mk = xy(crop.marker);
       if (mk && (mk.x < 0 || mk.y < 0 || mk.x > cs.width || mk.y > cs.height)) mk = null;
       var moved = line && crop.box ? line.map(function (q) { return toCrop(q, crop); }) : null;
-      return { width: cs.width, height: cs.height, point: mk, path: moved, approx: approx, zoomed: true };
+      return { width: cs.width, height: cs.height, point: mk, path: moved, beam: moved && beam ? toCrop(beam, crop) : null,
+        approx: approx, zoomed: true };
     }
-    return { width: frame.width, height: frame.height, point: p.inFrame === true ? xy(p.point) : null, path: line, approx: approx };
+    return { width: frame.width, height: frame.height, point: p.inFrame === true ? xy(p.point) : null, path: line, beam: beam, approx: approx };
+  }
+
+  /* dropShown: the drop from the crosshair up to the line is drawn. */
+  function dropShown(m) { return !!(m && m.point && m.path && m.beam); }
+
+  /* losNote says why the line of sight is not on the crosshair: it is
+   * drawn at antenna height, the point is on the ground, so an oblique
+   * photo shows them apart (#839). '' without a line. */
+  function losNote(m) {
+    if (!m || !m.path) return '';
+    return dropShown(m)
+      ? 'The line of sight is drawn at antenna height, above the ground; the dotted line drops from it to the point on the ground.'
+      : 'The line of sight is drawn at antenna height, so it passes above the point on the ground.';
   }
 
   /* zoomURL is the M3b crop around photo p's point, or null when there is
@@ -445,7 +462,9 @@
     var t = m.point
       ? 'Point marked at the ' + placeWords(m.point, m.width, m.height) + (m.approx ? ', position approximate.' : '.')
       : m.zoomed ? 'Not marked in this view.' : 'The point is outside this photo.';
-    return m.path ? t + ' Line of sight from A to B drawn on the photo.' : t;
+    if (!m.path) return t;
+    return t + ' Line of sight from A to B drawn on the photo, at antenna height'
+      + (dropShown(m) ? '; a dotted line drops from it to the point.' : '.');
   }
 
   // ── DOM ────────────────────────────────────────────────────────────────────
@@ -618,6 +637,11 @@
     ui.full.hidden = true;
     meta.appendChild(ui.full);
     dialog.appendChild(meta);
+    // #839: why the line of sight is not on the crosshair.
+    ui.losNote = el('p', 'sf-los-note');
+    ui.losNote.setAttribute('data-testid', 'sf-los-note');
+    ui.losNote.hidden = true;
+    dialog.appendChild(ui.losNote);
 
     // The privacy note (#737 Q10) and the credit are the server's words,
     // from its block: no copy of either lives here (#733 guard).
@@ -708,7 +732,7 @@
       var c = crop ? { box: crop.box, marker: crop.marker, width: ui.img.naturalWidth, height: ui.img.naturalHeight } : null;
       var m = marks(p, c);
       if (!m) { hideMarks(); return; }
-      if (!drawLine) m.path = null;
+      if (!drawLine) m.path = m.beam = null;
       var root = ui.marks;
       root.textContent = '';
       root.setAttribute('viewBox', '0 0 ' + m.width + ' ' + m.height);
@@ -736,6 +760,18 @@
         los.setAttribute('points', pts);
         los.setAttribute('data-testid', 'sf-los');
       }
+      if (dropShown(m)) {
+        // Under the crosshair: from the point on the ground up to the line.
+        var dl = [round2(m.point.x), round2(m.point.y), round2(m.beam.x), round2(m.beam.y)];
+        ['sf-drop-halo', 'sf-drop'].forEach(function (cls) {
+          var e = svg('line', cls, g);
+          e.setAttribute('x1', String(dl[0]));
+          e.setAttribute('y1', String(dl[1]));
+          e.setAttribute('x2', String(dl[2]));
+          e.setAttribute('y2', String(dl[3]));
+          if (cls === 'sf-drop') e.setAttribute('data-testid', 'sf-drop');
+        });
+      }
       if (m.point) {
         var x = round2(m.point.x), y = round2(m.point.y);
         var cross = svg('g', 'sf-cross' + (m.approx ? ' sf-cross-approx' : ''), g);
@@ -755,6 +791,8 @@
         });
       }
       root.removeAttribute('hidden');
+      ui.losNote.textContent = losNote(m);
+      ui.losNote.hidden = !ui.losNote.textContent;
     }
 
     /* hideMarks takes the layer away while a photo loads or fails: hidden,
@@ -765,6 +803,8 @@
       ui.marks.removeAttribute('role');
       ui.marks.removeAttribute('aria-label');
       ui.marks.setAttribute('hidden', '');
+      ui.losNote.textContent = '';
+      ui.losNote.hidden = true;
     }
 
     // The crosshair is sized in screen pixels: redrawn when the image is
