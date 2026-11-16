@@ -836,6 +836,9 @@
       (cfg.map && cfg.map.tiles && cfg.map.tiles.darkUrl) || null;
     // #680 — terrain overlay offer; absent unless the server's DHM proxy is on.
     window.MC_DHM_CFG = cfg.dhm || null;
+    // #811 M4 — node share links (public/node-share.js); absent unless
+    // share.nodes.enabled is on.
+    window.MC_SHARE_CFG = cfg.share || null;
     // #723 — protected ancient monuments overlay; absent unless map.heritage is on.
     window.MC_HERITAGE_CFG = cfg.heritage || null;
     // #724 — antenna sites overlay; absent unless map.masts is on.
