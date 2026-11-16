@@ -14,6 +14,9 @@ type Palette struct {
 	StatusGreen, StatusYellow, StatusRed  color.NRGBA
 	TerrainFill, TerrainClutter, LosLine  color.NRGBA
 	Fresnel100, Fresnel60, ProfileBlocked color.NRGBA
+	// The surface band's classes (#846): inside a building footprint, and
+	// raised with none (trees/other), as the panel draws them (#797).
+	TerrainBuilding, TerrainVegetation color.NRGBA
 }
 
 // paletteFields maps each theme.json key to its field in p, in a fixed
@@ -24,6 +27,7 @@ func paletteFields(p *Palette) []cardkit.ColorField {
 		{Key: "statusGreen", C: &p.StatusGreen}, {Key: "statusYellow", C: &p.StatusYellow}, {Key: "statusRed", C: &p.StatusRed},
 		{Key: "terrainFill", C: &p.TerrainFill}, {Key: "terrainClutter", C: &p.TerrainClutter}, {Key: "losLine", C: &p.LosLine},
 		{Key: "fresnel100", C: &p.Fresnel100}, {Key: "fresnel60", C: &p.Fresnel60}, {Key: "profileBlocked", C: &p.ProfileBlocked},
+		{Key: "terrainBuilding", C: &p.TerrainBuilding}, {Key: "terrainVegetation", C: &p.TerrainVegetation},
 	}
 }
 
@@ -49,6 +53,8 @@ func DefaultPalette(dark bool) Palette {
 		{"fresnel100", "#6d28d9", "#c4b5fd"},
 		{"fresnel60", "#a78bfa", "#8b5cf6"},
 		{"profileBlocked", "#b91c1c", "#f87171"},
+		{"terrainBuilding", "#5e1f0c", "#e6cdb0"},
+		{"terrainVegetation", "#5a9466", "#337f4c"},
 	}
 	var p Palette
 	fields := paletteFields(&p)

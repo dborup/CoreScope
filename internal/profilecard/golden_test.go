@@ -78,6 +78,16 @@ func goldenCases() []goldenCase {
 		{name: "mixed-fill", resp: fxMixed(), names: [2]string{"Hill Repeater", "Harbour Mast"}, state: "clear",
 			opt:  Options{Site: "mesh.example"},
 			want: map[string]string{"attributionFill": "Copernicus DEM GLO-30", "attribution": "data bearbejdet", "site": "mesh.example"}},
+		// #846: the surface band by class, its legend and the INSPIRE
+		// credit, in both themes; "unavailable" is the unclassified card
+		// of the same path (the footprint lookup failed).
+		{name: "classified-full", resp: fxTown("full"), names: [2]string{"Rådhus Repeater", "Havn Mast"}, state: "clear", lightPNG: true,
+			opt:  Options{Site: "mesh.example"},
+			want: map[string]string{"attribution": "INSPIRE – Bygninger", "legend": "Building | Trees/other", "surface-badge": "Blocked", "site": "mesh.example"}},
+		{name: "classified-partial", resp: fxTown("partial"), names: [2]string{"Rådhus Repeater", "Havn Mast"}, state: "clear", lightPNG: true,
+			want: map[string]string{"attribution": "INSPIRE – Bygninger", "legend": "Not told apart"}},
+		{name: "classified-unavailable", resp: fxTown("unavailable"), names: [2]string{"Rådhus Repeater", "Havn Mast"}, state: "clear", lightPNG: true,
+			want: map[string]string{"attribution": "Danmarks Højdemodel, CC BY 4.0"}},
 		{name: "operator-palette", resp: fxMarginal(), names: [2]string{"Ridge North", "Valley Node"}, theme: "operator", state: "fresnel60",
 			opt:  Options{Site: "mesh.example"},
 			want: map[string]string{"site": "mesh.example"}},

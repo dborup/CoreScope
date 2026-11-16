@@ -650,11 +650,11 @@ func (e *shareEnv) cachedResponse(t *testing.T, target string) TerrainProfileRes
 	if rerr != nil {
 		t.Fatal(rerr.msg)
 	}
-	resp, ok := e.p.cachedResponse(req)
+	el, ok := e.p.cachedElevation(req)
 	if !ok {
 		t.Fatal("not cached")
 	}
-	return resp
+	return e.p.buildResponse(req.q, req.ends, req.a, req.b, &req.plan, el)
 }
 
 // The share card's verdict word and the /p title's agree for every
