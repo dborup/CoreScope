@@ -65,7 +65,7 @@ description with the same values as text, `og:url` built from the key, and
 - **Server.** Every value on the card comes from snapshots the server already
   keeps for the Nodes page, so a card never scans the database. Drawing one
   takes about 10 ms of CPU on a fast machine, independent of the size of the
-  network, and a card is about 40 KB. Cards are cached for 10 minutes
+  network, and a card is about 45 KB. Cards are cached for 10 minutes
   (64 cards, also bounded by bytes) and are served with
   `Cache-Control: public, max-age=600`. A card that is not cached counts
   against the per-client `map.dhm.profile.rateLimitPerMin` and is drawn in the
