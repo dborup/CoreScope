@@ -2167,6 +2167,7 @@
       _renderHide1ByteHopsToggle() +
       '<div data-cv2-tile-providers>' + (_shownTileSelectorHtml = _renderTileProviderSelector()) + '</div>' +
       _renderTerrainSettings() +
+      _renderShareSection() +
       _renderMastsSettings() +
       _renderDHMOverlaySettings() +
       _renderHeritageSettings() +
@@ -2210,22 +2211,37 @@
           modelOpt('dtm', 'Terrain only') +
         '</select>' +
         '<div class="cust-hint">Terrain always decides the verdict. Surface is drawn for information and costs a second elevation request.</div></div>' +
-      _renderShareSettings(tp);
+      _renderShareSettings(tp, '<p class="cust-section-title" style="font-size:13px;margin:16px 0 6px">Share previews</p>');
   }
 
-  // ── #727 M4 Share previews ──
-  // Inside the Terrain Profile section, so it follows the profile gate.
-  // Without the share route the viewer has nothing to choose; with it, the
-  // switch, and the operator's card look in fixed words: a server value is
-  // only ever compared, never printed.
-  function _renderShareSettings(tp) {
+  // ── #727 M4 / #811 M4 Share previews ──
+  // One viewer switch for both card types: terrain profiles (dhm.share) and
+  // node pages (the share block, share.nodes.enabled). Inside the Terrain
+  // Profile section when the profile is offered, else its own section when
+  // only node cards are. Without either route the viewer has nothing to
+  // choose; with one, the switch, and the operator's card look in fixed
+  // words: a server value is only ever compared, never printed.
+  function _nodeShareCfg() {
+    var NS = window.NodeShare, cfg = window.MC_SHARE_CFG;
+    return NS && typeof NS.offered === 'function' && NS.offered(cfg) ? cfg : null;
+  }
+
+  function _renderShareSettings(tp, head) {
     var cfg = window.MC_DHM_CFG;
-    var head = '<p class="cust-section-title" style="font-size:13px;margin:16px 0 6px">Share previews</p>';
-    if (typeof tp.shareOffered !== 'function' || !tp.shareOffered(cfg)) {
+    var profiles = !!tp && typeof tp.shareOffered === 'function' && tp.shareOffered(cfg);
+    var nodes = _nodeShareCfg();
+    if (!profiles && !nodes) {
       return head + '<div class="cust-hint">Link previews are off on this server, so Copy link hands out the plain map link.</div>';
     }
     var on = shareSettings(_getEffective()).shareLinks;
-    var card = cfg.card && typeof cfg.card === 'object' ? cfg.card : null;
+    // Both cards are drawn with map.dhm.profile.card, so one look is shown.
+    var src = profiles ? cfg.card : nodes.card;
+    var card = src && typeof src === 'object' ? src : null;
+    var hint = !nodes
+      ? 'Pasted into a chat, the link shows a card of the profile. Off: the plain map link, without a card.'
+      : profiles
+        ? 'Pasted into a chat, a profile link or a node link (repeaters, rooms and sensors) shows a card. Off: the plain map or node link, without a card.'
+        : 'Pasted into a chat, a node link (repeaters, rooms and sensors) shows a card of the node. Off: the plain node link, without a card.';
     var shown = function (id, label, value) {
       return '<div class="cust-terrain-row"><div><span style="font-size:12px;font-weight:600">' + label + '</span></div>' +
         '<span id="' + id + '" style="font-size:13px">' + value + '</span></div>';
@@ -2234,13 +2250,22 @@
       '<div class="cust-field"><label class="cust-check" for="cv2-terrain-share" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
         '<input type="checkbox" id="cv2-terrain-share" data-cv2-terrain-share' + (on ? ' checked' : '') + ' style="width:20px;height:20px">' +
         '<span>Copy link shares a preview' + _overrideDot('terrain', TERRAIN_SHARE_KEY) + '</span></label>' +
-        '<div class="cust-hint">Pasted into a chat, the link shows a card of the profile. Off: the plain map link, without a card.</div></div>' +
+        '<div class="cust-hint">' + hint + '</div></div>' +
       (card
         ? shown('cv2-card-theme', 'Card theme', card.theme === 'light' ? 'Light' : 'Dark') +
           shown('cv2-card-names', 'Node names on the card', card.names === false ? 'Hidden' : 'Shown') +
           '<div class="cust-hint">Set by the operator for every shared card.</div>'
         : '') +
       '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-top:8px">The card is drawn on the server in the operator\u2019s saved palette, not with the colour overrides in this browser.</p>';
+  }
+
+  // #811 M4: node cards without the terrain profile get the switch in a
+  // section of their own; with the profile it lives in that section.
+  function _renderShareSection() {
+    var tp = window.TerrainProfile;
+    if (tp && typeof tp.offered === 'function' && tp.offered(window.MC_DHM_CFG)) return '';
+    if (!_nodeShareCfg()) return '';
+    return _renderShareSettings(null, '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Share previews</p>');
   }
 
   // ── #724 M5 Antenna sites settings ──
@@ -3921,6 +3946,7 @@
     cssColorToHex: _cssColorToHex,
     colorWithAlpha: _colorWithAlpha,
     renderTerrainSettings: _renderTerrainSettings,
+    renderShareSection: _renderShareSection,
     isValidHomeUrl: isValidHomeUrl,
     isOverridden: _isOverridden,
     // #1496 — full reset (not just STORAGE_KEY). See _resetAll() above.
