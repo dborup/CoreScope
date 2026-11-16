@@ -154,6 +154,102 @@ test('the words are the card\'s, and no longer claim "Denmark only"', () => {
   eq(c.detail, 'This path lies entirely outside Denmark, so there is no terrain data for it.');
 });
 
+// ── 10/11. The viewer ──────────────────────────────────────────────────────
+
+console.log('\n=== #839 findings 10, 11: the Skråfoto viewer ===\n');
+
+const FRAME = { width: 1024, height: 765 };
+function photo(dir, extra) {
+  const n = SF.DIRECTIONS.indexOf(dir) + 1;
+  const id = '2025_83_36_' + n + '_0020_00003045';
+  return Object.assign({
+    id, collection: 'skraafotos2025', direction: dir, datetime: '2025-05-07T10:21:33Z',
+    viewerUrl: 'https://skraafoto.dataforsyningen.dk/?item=' + id,
+    previewUrl: '/api/skraafoto/preview/skraafotos2025/' + id,
+    frame: FRAME, point: { x: 300.5, y: 400.2 }, inFrame: true, approx: false,
+  }, extra || {});
+}
+const LINE = { a: { lat: 56.1, lon: 10.2 }, b: { lat: 56.2, lon: 10.2 }, ha: 20, hb: 20 };
+const CROP = { box: { x0: 172.5, y0: 312.8, x1: 428.5, y1: 487.55 }, width: 1024, height: 699 };
+
+/* A search answering photos (none with empty: true), the line and the
+ * beam only when a path is asked for; previews and the M3b crop. */
+function fakeService(o) {
+  o = o || {};
+  const svc = { search: [] };
+  const headers = (h) => ({ get: (k) => (Object.prototype.hasOwnProperty.call(h, k) ? h[k] : null) });
+  svc.fetch = (u) => {
+    if (u.indexOf(CFG.searchUrl + '?') === 0) {
+      svc.search.push(u);
+      const line = new URLSearchParams(u.split('?')[1]).get('path');
+      const extra = line ? { path: [{ x: 10, y: 700 }, { x: 1000, y: 80 }], beam: o.beam === undefined ? { x: 302, y: 380.6 } : o.beam } : {};
+      const body = o.empty ? { collection: 'skraafotos2025', year: 0, years: [], photos: [], credit: null }
+        : { collection: 'skraafotos2025', year: 2025, years: [2025, 2023], photos: SF.DIRECTIONS.map((d) => photo(d, extra)), credit: null };
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+    }
+    if (u.indexOf('?zoom=1') > 0) {
+      return Promise.resolve({ ok: true, status: 200,
+        headers: headers({ 'X-CoreScope-Skraafoto-Marker': '512,349.5', 'X-CoreScope-Skraafoto-Crop': '172.5,312.8,428.5,487.55' }),
+        blob: () => Promise.resolve({ of: u }) });
+    }
+    return Promise.resolve({ ok: true, status: 200, headers: headers({}), blob: () => Promise.resolve({ of: u }) });
+  };
+  return svc;
+}
+
+function find(e, pred, out) {
+  out = out || [];
+  if (pred(e)) out.push(e);
+  (e.children || []).forEach((c) => find(c, pred, out));
+  return out;
+}
+
+async function withViewer(o, svcOpts, fn) {
+  const dom = fakeDom();
+  const svc = fakeService(svcOpts);
+  const saved = { document: win.document, URL: win.URL };
+  win.document = dom.doc;
+  let n = 0;
+  win.URL = { createObjectURL: () => 'blob:test/' + (++n), revokeObjectURL() {} };
+  const settle = async () => { for (let i = 0; i < 4; i++) await new Promise((r) => setImmediate(r)); };
+  const img = () => dom.byTid('sf-img');
+  const t = {
+    dom, svc, settle,
+    marks: () => dom.byTid('sf-marks'),
+    mark: (tid) => find(dom.byTid('sf-marks'), (e) => e.attrs['data-testid'] === tid)[0] || null,
+    load(w, h) { img().naturalWidth = w; img().naturalHeight = h; img().onload(); },
+    async click(tid) { dom.byTid(tid).fire('click'); await settle(); },
+  };
+  let viewer = null;
+  try {
+    viewer = SF.open(Object.assign({ lat: 56.15, lon: 10.2, cfg: CFG, fetch: svc.fetch }, o));
+    assert.ok(viewer, 'the viewer opened');
+    await settle();
+    await fn(t);
+  } finally {
+    if (viewer) viewer.close(false);
+    win.document = saved.document;
+    win.URL = saved.URL;
+  }
+}
+
+test('10: an empty answer shows no empty Year select', () => withViewer({}, { empty: true }, async (t) => {
+  eq(t.dom.byTid('sf-dialog').getAttribute('data-state'), 'empty');
+  eq(t.dom.byTid('sf-status').textContent, 'No oblique photos at this point.');
+  eq(t.dom.byTid('sf-year-wrap').hidden, true, 'the Year field is hidden with no year to pick');
+}));
+
+test('10: a photo with years shows the Year field again', () => withViewer({}, {}, async (t) => {
+  eq(t.dom.byTid('sf-year-wrap').hidden, false);
+}));
+
+test('10: the stage stacks the status under the photo frame, centred', () => {
+  const m = /\n\.sf-stage \{([^}]*)\}/.exec(CSS);
+  assert.ok(m, 'no .sf-stage rule');
+  assert.ok(/flex-direction:\s*column;/.test(m[1]), '.sf-stage is a row: the empty frame pushes the status off centre');
+  assert.ok(/\.sf-year-wrap\[hidden\]\s*\{\s*display:\s*none;\s*\}/.test(CSS), '.sf-year-wrap is inline-flex, which beats [hidden]');
+});
+
 (async () => {
   for (const [name, fn] of asyncTests) {
     try { await fn(); passed++; console.log('  ✅ ' + name); }

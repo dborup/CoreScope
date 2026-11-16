@@ -554,6 +554,8 @@
     });
     controls.appendChild(dirs);
     var yearWrap = el('label', 'sf-year-wrap');
+    yearWrap.setAttribute('data-testid', 'sf-year-wrap');
+    ui.yearWrap = yearWrap;
     yearWrap.appendChild(el('span', 'sf-year-label', 'Year'));
     ui.year = el('select', 'sf-year');
     ui.year.setAttribute('data-testid', 'sf-year');
@@ -673,6 +675,8 @@
       });
       ui.year.value = String(state.year);
       ui.year.disabled = years.length < 2;
+      // No year to show (an empty answer, #839): no empty select either.
+      ui.yearWrap.hidden = !years.length;
       syncZoom();
     }
 

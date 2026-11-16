@@ -621,6 +621,17 @@ function searchAnswer(q, o) {
       assert(/no oblique photos/i.test(await page.textContent(STATUS)), await page.textContent(STATUS));
       assert(rec.preview.length === 0, 'preview asked');
     });
+    await step('#839 no photos: the message is centred in the stage, with no empty Year box', async () => {
+      const g = await page.evaluate(() => {
+        const st = document.querySelector('[data-testid="sf-stage"]').getBoundingClientRect();
+        const t = document.querySelector('[data-testid="sf-status"]').getBoundingClientRect();
+        const y = document.querySelector('[data-testid="sf-year-wrap"]');
+        return { off: (t.left + t.right) / 2 - (st.left + st.right) / 2, year: y ? getComputedStyle(y).display : 'absent' };
+      });
+      assert(Math.abs(g.off) <= 2, 'the message is ' + g.off.toFixed(1) + ' px off the stage centre');
+      assert(g.year === 'none', 'the Year field shows with no year: ' + g.year);
+    });
+    await shot(page, '839-empty');
     await ctx.close();
   }
   {
