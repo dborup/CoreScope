@@ -251,11 +251,11 @@ func TestShareProfile_NoVerdictWordInTheTitleOutsideDHM(t *testing.T) {
 	}
 	body := env.share(shareQ(a, b)).Body.String()
 	for _, k := range []string{"og:title", "twitter:title"} {
-		if got := mustMeta(t, body, k); got != "Path profile: 5561.5 m" {
+		if got := mustMeta(t, body, k); got != "Path profile: 5.56 km" {
 			t.Fatalf("%s %q", k, got)
 		}
 	}
-	if got := titleOf(t, body); got != "Path profile: 5561.5 m" {
+	if got := titleOf(t, body); got != "Path profile: 5.56 km" {
 		t.Fatalf("title %q", got)
 	}
 	wantCard(t, env.card(pathQuery(a, b)), "miss")

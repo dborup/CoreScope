@@ -1901,7 +1901,9 @@ body.scroll-locked { overflow: hidden; }
   width: clamp(160px, 18vw, 240px);
   max-width: calc(100vw - 24px);
   font-size: 13px;
-  max-height: calc(100% - 24px); overflow-y: auto;
+  /* #839: and above the map credit (bottom right), which ran under it;
+     map.js publishes the credit's height. */
+  max-height: calc(100% - 24px - var(--map-credit-height, 0px)); overflow-y: auto;
   /* #1236: keep the scrollbar gutter reserved so the scroll affordance is
      visible even when content briefly fits — users get a consistent visual
      cue that the panel is scrollable. */
@@ -2903,6 +2905,18 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 }
 [data-theme="dark"] .leaflet-control-layers-toggle {
   filter: invert(1);
+}
+
+/* #839 — every map credit follows the theme (Leaflet's own is a white bar,
+   which stayed light over a dark map). One more class than leaflet.css's
+   rule, which loads after this file; the compact inset credit below and the
+   Matrix theme still override it. */
+.leaflet-container .leaflet-control.leaflet-control-attribution {
+  background: color-mix(in srgb, var(--surface-1) 85%, transparent);
+  color: var(--text-muted);
+}
+.leaflet-container .leaflet-control.leaflet-control-attribution a {
+  color: var(--link-color);
 }
 
 /* #752 — the inset maps credit the viewer's active base map through the
@@ -6345,6 +6359,8 @@ body.embed #app.app-fixed {
   text-align: center;
 }
 .map-profile-hint[hidden] { display: none; }
+/* #839 §7: a profile link that could not be read. */
+.map-profile-hint.is-error { border-color: var(--danger); border-left-width: 4px; }
 .leaflet-container.tp-picking { cursor: crosshair; }
 
 .tp-path-line { stroke: var(--los-line); stroke-opacity: 0.95; }
@@ -6389,6 +6405,12 @@ body.embed #app.app-fixed {
   /* The cap is a variable so the Map page can keep a linked path clear of
      the panel before the chart has grown it to the cap (#746). */
   --tp-panel-max-h: 420px;
+  /* #839 §2: the map the open profile always leaves above it, so the path,
+     its ends and the chart cursor's dot can be seen beside the chart. It is
+     the fit's free strip (FIT_MIN_FREE_PX) plus its two margins; map.js
+     reads both variables back for the fit (TerrainProfile.panelCap). */
+  --tp-map-keep: 184px;
+  --tp-panel-min-h: 120px;
   position: absolute;
   left: 0;
   right: 0;
@@ -6398,14 +6420,18 @@ body.embed #app.app-fixed {
   flex-direction: column;
   min-height: 0;
   /* Never taller than the map area minus a strip of map, and never taller
-     than the chart plus its controls need. */
-  max-height: min(var(--tp-panel-max-h), calc(100% - 24px));
+     than the chart plus its controls need; the body scrolls. */
+  max-height: min(var(--tp-panel-max-h), max(var(--tp-panel-min-h), calc(100% - var(--tp-map-keep))));
   background: var(--card-bg);
   color: var(--text);
   border-top: 1px solid var(--border);
   box-shadow: 0 -8px 24px var(--shadow);
 }
 .tp-panel.is-open { display: flex; }
+/* The compact bar and the folded head are short; only the grown panel
+   keeps the strip of map (#790 keeps them whole on any screen). */
+.tp-panel.tp-compact,
+.tp-panel.tp-folded { max-height: min(var(--tp-panel-max-h), calc(100% - 12px)); }
 .tp-head {
   flex: 0 0 auto;
   display: flex;
@@ -6770,6 +6796,9 @@ body.embed #app.app-fixed {
 .tp-sf-row[hidden] { display: none; }
 .tp-sf-label { font-size: var(--fs-sm); color: var(--text-muted); margin-right: 2px; }
 .tp-sf-btn { min-width: 48px; }
+/* #839 §12: why Chart point is off, visible on a touch screen too. */
+.tp-sf-hint { font-size: var(--fs-sm); color: var(--text-muted); }
+.tp-sf-hint[hidden] { display: none; }
 /* Both open a dialog over themselves: the browser's tap highlight would
    be painted over the photo until the next touch. */
 .tp-sf-btn, .sf-node-action { -webkit-tap-highlight-color: transparent; }
@@ -7004,10 +7033,9 @@ body.embed #app.app-fixed {
 .tp-swap-field { min-width: 0; align-self: center; }
 .tp-swap { min-width: 48px; }
 
-/* Short landscape (#666/#672): the chart gives up height first, the panel
-   may take nearly the whole map area, and the body still scrolls. */
+/* Short screens (#666/#672): the chart gives up height first, and the body
+   still scrolls. */
 @media (max-height: 560px) {
-  .tp-panel { max-height: calc(100% - 12px); }
   .tp-chart .tp-svg { height: 108px; }
   .tp-head { padding: 2px 8px; }
 }
@@ -7017,4 +7045,26 @@ body.embed #app.app-fixed {
 }
 @media (max-width: 600px) and (max-height: 560px) {
   .tp-field { min-width: 46%; }
+}
+/* #839 §2: a short landscape screen has no height to spare for a strip of
+   map above the grown panel, so the panel docks at the right, full height,
+   and the path is fitted into the map beside it (--tp-dock, read by
+   map.js). The compact bar and the folded head stay at the bottom (#790). */
+/* Narrower still (568x320): no room to dock and no height for a strip
+   without losing the chart (#723), so the grown panel takes nearly the
+   whole map as before; folding it gives the map back. */
+@media (max-height: 560px) and (orientation: landscape) and (max-width: 599px) {
+  .tp-panel { --tp-map-keep: 12px; }
+}
+@media (max-height: 560px) and (orientation: landscape) and (min-width: 600px) {
+  .tp-panel:not(.tp-compact):not(.tp-folded) {
+    --tp-dock: right;
+    top: 0;
+    left: auto;
+    width: min(60%, 460px);
+    max-height: none;
+    border-top: none;
+    border-left: 1px solid var(--border);
+    box-shadow: -8px 0 24px var(--shadow);
+  }
 }

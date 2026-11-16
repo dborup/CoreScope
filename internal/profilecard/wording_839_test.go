@@ -17,7 +17,7 @@ func TestWording839_WorstPointIsTheTightestFresnelPoint(t *testing.T) {
 	resp.Verdict.WorstClearanceM, resp.Verdict.WorstAtM, resp.Verdict.WorstF1Fraction = &wc, &at, &f
 
 	alt := AltText(resp, [2]string{"Padborg", "Flensburg"}, Options{})
-	if want := " Tightest point for the Fresnel zone: clearance " + fmtMetres(wc) + " at " + fmtMetres(at) + " along the path."; !strings.Contains(alt, want) {
+	if want := " Tightest point for the Fresnel zone: clearance " + fmtMetres(wc) + " at " + fmtDistance(at) + " along the path."; !strings.Contains(alt, want) {
 		t.Errorf("og:image:alt %q\nlacks %q", alt, want)
 	}
 	_, runs, err := render(resp, [2]string{"Padborg", "Flensburg"}, DefaultPalette(false), Options{})
@@ -25,7 +25,7 @@ func TestWording839_WorstPointIsTheTightestFresnelPoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	summary := runText(runs, "summary")
-	if want := "Tightest Fresnel point: clearance " + fmtMetres(wc) + " at " + fmtMetres(at); !strings.Contains(summary, want) {
+	if want := "Tightest Fresnel point: clearance " + fmtMetres(wc) + " at " + fmtDistance(at); !strings.Contains(summary, want) {
 		t.Errorf("summary %q\nlacks %q", summary, want)
 	}
 	for _, s := range []string{alt, summary} {

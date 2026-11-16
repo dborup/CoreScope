@@ -87,6 +87,9 @@ type Client struct {
 	headers  *dhm.Cache[Tile]     // size, cold calls, then the header bytes
 	blocks   *dhm.Cache[blockKey] // stored block bytes
 	requests atomic.Int64         // upstream requests sent
+	// afterMiss, set only by tests before any call, runs between a
+	// caller's cache miss and its shared read.
+	afterMiss func()
 }
 
 // blockKey is one block of one level of one tile.
@@ -156,18 +159,11 @@ type header struct {
 // up to maxHeaderBytes when the IFDs continue. Only a listed tile is read
 // (rangeGet).
 func (c *Client) header(ctx context.Context, t Tile) (header, error) {
-	path := t.Path()
-	now := c.opts.Now()
-	enc, ok := c.headers.Get(t, now)
-	if !ok {
-		var err error
-		enc, _, err = c.flight.DoAdmitted(ctx, "h "+path, 0, c.adm, func(work context.Context) ([]byte, error) {
-			return c.fetchHeader(work, t)
-		})
-		if err != nil {
-			return header{}, dhm.ContextFailure(err)
-		}
-		c.headers.Put(t, enc, now)
+	enc, err := cachedRead(c, ctx, c.headers, t, "h "+t.Path(), func(work context.Context) ([]byte, error) {
+		return c.fetchHeader(work, t)
+	})
+	if err != nil {
+		return header{}, err
 	}
 	size := int64(binary.LittleEndian.Uint64(enc))
 	tiff, err := dhm.ParseTiledGeoTIFF(enc[headerMeta:], size)
@@ -219,21 +215,42 @@ func (c *Client) block(ctx context.Context, t Tile, h header, level, i int) ([]b
 	if level < 0 || level >= len(h.tiff.Levels) || i < 0 || i >= h.tiff.Levels[level].NumBlocks() {
 		return nil, dhm.ErrBadRequest
 	}
-	key := blockKey{t, level, i}
-	now := c.opts.Now()
-	if raw, ok := c.blocks.Get(key, now); ok {
-		return raw, nil
-	}
 	path := t.Path()
 	off, n := h.tiff.Levels[level].BlockRange(i)
-	raw, _, err := c.flight.DoAdmitted(ctx, fmt.Sprintf("b %s %d-%d", path, off, off+n-1), 0, c.adm, func(work context.Context) ([]byte, error) {
+	return cachedRead(c, ctx, c.blocks, blockKey{t, level, i}, fmt.Sprintf("b %s %d-%d", path, off, off+n-1), func(work context.Context) ([]byte, error) {
 		b, _, err := c.rangeGet(work, path, off, off+n-1, h.size, maxBlockBody)
 		return b, err
+	})
+}
+
+// cachedRead returns key's bytes from cache, or reads them once through
+// the flight under flightKey, shared by every caller asking meanwhile.
+// The read looks in the cache again and stores what it read before its
+// call ends (#834): a caller that missed the cache just as an equal read
+// ended starts a new call, and that call finds the bytes, so every caller
+// either joins the read or finds its result. A failed read stores nothing.
+func cachedRead[K comparable](c *Client, ctx context.Context, cache *dhm.Cache[K], key K, flightKey string, read func(context.Context) ([]byte, error)) ([]byte, error) {
+	now := c.opts.Now()
+	if raw, ok := cache.Get(key, now); ok {
+		return raw, nil
+	}
+	if c.afterMiss != nil {
+		c.afterMiss()
+	}
+	raw, _, err := c.flight.DoAdmitted(ctx, flightKey, 0, c.adm, func(work context.Context) ([]byte, error) {
+		if raw, ok := cache.Get(key, now); ok {
+			return raw, nil
+		}
+		raw, err := read(work)
+		if err != nil {
+			return nil, err
+		}
+		cache.Put(key, raw, now)
+		return raw, nil
 	})
 	if err != nil {
 		return nil, dhm.ContextFailure(err)
 	}
-	c.blocks.Put(key, raw, now)
 	return raw, nil
 }
 

@@ -154,6 +154,7 @@ run test-issue-721-move-endpoints.js
 run test-issue-727-share-link.js
 run test-issue-727-m4-share-customizer.js
 run test-issue-781-profile-cursor.js
+run test-issue-839-profile-ux.js
 run test-issue-737-skraafoto-viewer.js
 run test-issue-737-m3c-skraafoto-marks.js
 run test-issue-737-customizer-skraafoto.js
@@ -174,6 +175,7 @@ run test-issue-741-base-layer-factory.js
 run test-issue-741-skaermkort.js
 run test-issue-741-natur-friluft.js
 run test-issue-741-customizer-base-maps.js
+run test-issue-839-map-polish.js
 run test-issue-764-no-osm-fallback.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js

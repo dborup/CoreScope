@@ -239,6 +239,15 @@
     return PUBKEY_RE.test(pk) ? { kind: 'node', pubkey: pk } : null;
   }
 
+  /* invalidLink is true when a link names a profile that neither reader
+   * accepts (#839 §7): /p?profile=garbage hands off to #/map?profile=garbage,
+   * and that must say so rather than open a plain map. */
+  function invalidLink(input) {
+    var p = toParams(input);
+    if (!p || p.get(HASH_PARAM) === null) return false;
+    return !parseState(p) && !parseStart(p);
+  }
+
   function fmtCoord(v) { return Number(v).toFixed(5); }
 
   function refToParam(ref) {
@@ -527,7 +536,17 @@
     return C.nearestIndex(g.x, (clientX - rect.left) / rect.width * g.view.w);
   }
 
-  function fmtDistance(m) { return m >= 1000 ? (m / 1000).toFixed(2) + ' km' : Math.round(m) + ' m'; }
+  /* fmtDistance is a distance along the path (#839 §8): whole metres under
+   * 1 km, km with two decimals to 10 km and one from there — never a
+   * decimetre over kilometres. The chart, its title, the hover readout and
+   * the share card all use it; fmtMetres is for heights and clearances. */
+  function fmtDistance(m) {
+    var n = Number(m);
+    if (!isFinite(n)) return '—';
+    if (Math.round(n) < 1000) return Math.round(n) + ' m';
+    var km = n / 1000;
+    return km.toFixed(Math.round(km * 100) < 1000 ? 2 : 1) + ' km';
+  }
 
   // ── Fitting a linked path into view (#746) ───────────────────────────────
 
@@ -543,11 +562,68 @@
    * shorter: it grows to the cap when the chart arrives. With no useful
    * strip left (a short landscape screen) the panel is not reserved, and
    * the path fits the whole map rather than a sliver. */
-  function fitPadding(mapH, panelH, panelMaxH) {
+  function fitPadding(mapH, panelH, panelMaxH, left, right) {
     var m = FIT_MARGIN_PX;
     var reserve = Math.max(Number(panelH) || 0, isFinite(panelMaxH) ? Number(panelMaxH) : 0);
     var bottom = (reserve > 0 && mapH - reserve - 2 * m >= FIT_MIN_FREE_PX) ? reserve + m : m;
-    return { paddingTopLeft: [m, m], paddingBottomRight: [m, bottom] };
+    return { paddingTopLeft: [insetPad(left), m], paddingBottomRight: [insetPad(right), bottom] };
+  }
+
+  /* fitPaddingBeside is fitPadding for a panel docked at the right edge,
+   * full height (a short landscape screen, #839 §2): it costs right padding
+   * only, and is not reserved when the map beside it is too narrow. */
+  function fitPaddingBeside(mapW, panelW, left) {
+    var m = FIT_MARGIN_PX, l = insetPad(left), w = Number(panelW) || 0;
+    var right = (w > 0 && mapW - w - l - m >= FIT_MIN_FREE_PX) ? w + m : m;
+    return { paddingTopLeft: [l, m], paddingBottomRight: [right, m] };
+  }
+
+  /* endsVisible is true when every point (map container pixels) can be
+   * seen (#839 §3): on the map, outside the part `pad` reserves for the
+   * panel, and not under an obstacle box such as the zoom buttons. The
+   * fit's own margin is not required: an end near an edge is in view. */
+  function endsVisible(pts, size, pad, obstacles) {
+    var m = FIT_MARGIN_PX;
+    var right = size.x - Math.max(0, pad.paddingBottomRight[0] - m);
+    var bottom = size.y - Math.max(0, pad.paddingBottomRight[1] - m);
+    return pts.every(function (p) {
+      if (!(p.x >= 0 && p.y >= 0 && p.x <= right && p.y <= bottom)) return false;
+      return !(obstacles || []).some(function (o) {
+        return p.x >= o.left && p.x <= o.right && p.y >= o.top && p.y <= o.bottom;
+      });
+    });
+  }
+
+  /* insetPad keeps a fitted end clear of the map's own buttons and panels
+   * along an edge (the zoom buttons on the left, the map controls on the
+   * right, #839 §2): `inset` is how far they reach in from that edge. */
+  function insetPad(inset) {
+    var l = Number(inset);
+    return isFinite(l) && l > 0 ? Math.max(FIT_MARGIN_PX, Math.round(l) + FIT_MARGIN_PX / 2) : FIT_MARGIN_PX;
+  }
+
+  /* panelCap is the height the panel may grow to in a mapH-tall map: its
+   * CSS cap, but never so tall that less than `keep` px of map is left
+   * above it (#839 §2), and never under `floor`. It is the same rule as
+   * the .tp-panel max-height in style.css, which reads the same three
+   * variables. */
+  function panelCap(mapH, cap, keep, floor) {
+    var c = isFinite(cap) ? Number(cap) : Infinity;
+    if (!isFinite(keep) || !(mapH > 0)) return isFinite(c) ? c : NaN;
+    return Math.min(c, Math.max(isFinite(floor) ? Number(floor) : 0, mapH - Number(keep)));
+  }
+
+  // ── Refusals the viewer can act on (#839 §6) ─────────────────────────────
+
+  /* refusal turns a server refusal the viewer can fix into words, else
+   * null. "path too long" is /api/terrain/profile's fixed message for a
+   * path over map.dhm.profile.maxPathKm, and the refusal carries that limit
+   * (err.maxPathKm), so the panel can state it. */
+  function refusal(err) {
+    if (!err || err.message !== 'path too long') return null;
+    var km = Number(err.maxPathKm);
+    var limit = isFinite(km) && km > 0 ? ' The terrain profile covers paths up to ' + round(km, 1) + ' km.' : '';
+    return { label: 'Too long', text: 'This path is too long to measure.' + limit + ' Pick two ends closer together.' };
   }
 
   // ── Per-viewer height memory ─────────────────────────────────────────────
@@ -1214,7 +1290,7 @@
    * part of this chart that carries no text at all. */
   function chartTitle(data, chip, names, surf, classified) {
     var a = names.nameA || 'A', b = names.nameB || 'B';
-    var txt = 'Terrain profile from ' + a + ' to ' + b + ', ' + fmtMetres(data.distanceM) + '. ' + chip.label + '. ' + chip.detail;
+    var txt = 'Terrain profile from ' + a + ' to ' + b + ', ' + fmtDistance(data.distanceM) + '. ' + chip.label + '. ' + chip.detail;
     var note = mixedNote(data);
     if (note) txt += ' ' + note;
     // The verdict's worst point is the smallest Fresnel ratio, not
@@ -1222,7 +1298,7 @@
     // is, as the share card's AltText names it.
     var worst = data.verdict && data.verdict.worstClearanceM;
     if (worst !== null && worst !== undefined && isFinite(Number(worst))) {
-      txt += ' Tightest point for the Fresnel zone: clearance ' + fmtMetres(worst) + ' at ' + fmtMetres(data.verdict.worstAtM) + ' along the path.';
+      txt += ' Tightest point for the Fresnel zone: clearance ' + fmtMetres(worst) + ' at ' + fmtDistance(data.verdict.worstAtM) + ' along the path.';
     }
     if (surf && surf.show) txt += ' ' + surf.label + '. ' + surf.detail + (surf.note ? ' ' + SURFACE_NOTE : '');
     // The note rides with the classified band; an unavailable
@@ -1336,7 +1412,7 @@
 
     // Distance axis, as HTML for the same reason as the elevation ticks.
     labels.push(label('tp-ax tp-ax-x0', p.x, VIEW.h - 14, '0'));
-    labels.push(label('tp-ax tp-ax-x1', p.x + p.w, VIEW.h - 14, fmtMetres(data.distanceM)));
+    labels.push(label('tp-ax tp-ax-x1', p.x + p.w, VIEW.h - 14, fmtDistance(data.distanceM)));
     out.push('</svg>');
     out.push(labels.join(''));
     out.push('</div>');
@@ -1580,7 +1656,10 @@
     var fetchJSON = opts.fetchJSON || function (url) {
       return global.fetch(url).then(function (r) {
         if (!r.ok) return r.json().catch(function () { return {}; }).then(function (b) {
-          throw new Error(b && b.error ? b.error : 'Request failed (' + r.status + ')');
+          var err = new Error(b && b.error ? b.error : 'Request failed (' + r.status + ')');
+          // #839 §6: a refusal's limit, for refusal().
+          if (b && isFinite(Number(b.maxPathKm))) err.maxPathKm = Number(b.maxPathKm);
+          throw err;
         });
         return r.json();
       });
@@ -1719,6 +1798,8 @@
       ui.fold.addEventListener('click', function () {
         folded = !folded;
         syncCompact();
+        // #839 §2: the panel changed size; the host keeps the path in view.
+        if (typeof opts.onLayoutChange === 'function') opts.onLayoutChange();
       });
       title.appendChild(ui.fold);
       head.appendChild(title);
@@ -2018,6 +2099,11 @@
             line: sightLine(drawn && drawn.data) };
         } });
       ui.sfRow.appendChild(ui.sfPoint);
+      /* #839 §12: why Chart point is off, in words a touch screen shows.
+       * The button's title says it too, but only a mouse ever sees that. */
+      ui.sfHint = el('span', 'tp-sf-hint', 'Tap the chart to choose a point.');
+      ui.sfHint.setAttribute('data-testid', 'tp-sf-hint');
+      ui.sfRow.appendChild(ui.sfHint);
       setPicked(null);
       ui.chart.addEventListener('click', function (e) {
         var plot = drawn && e.target && e.target.closest ? e.target.closest('.tp-plot') : null;
@@ -2035,6 +2121,7 @@
       picked = p || null;
       if (!ui.sfPoint) return;
       ui.sfPoint.disabled = !picked;
+      ui.sfHint.hidden = !!picked;
       ui.sfPoint.querySelector('.sf-action-text').textContent = picked ? 'Chart point · ' + fmtDistance(picked.distanceM) : 'Chart point';
       ui.sfPoint.title = picked
         ? 'Oblique aerial photo at the chart point ' + fmtDistance(picked.distanceM) + ' from A'
@@ -2438,13 +2525,15 @@
         lookupHeritage(data, mine);
       }).catch(function (err) {
         if (mine !== seq || !open) return;
-        setChip({ state: 'error', tone: 'unknown', label: 'No profile', detail: String(err && err.message || err) });
+        var why = refusal(err);
+        setChip({ state: 'error', tone: 'unknown', label: why ? why.label : 'No profile', detail: why ? why.text : String(err && err.message || err) });
         setSurfaceChip(null);
         setMixed(null);
         setClassified(null);
         if (ui.assumed) ui.assumed.hidden = true;
-        setStatus(String((err && err.message) || 'Could not load the terrain profile.'), 'tp-error');
-        ui.detail.textContent = 'Could not load the terrain profile.';
+        setStatus(why ? why.text : String((err && err.message) || 'Could not load the terrain profile.'), 'tp-error');
+        // A refusal the viewer can fix says so once, in the chart's place.
+        ui.detail.textContent = why ? '' : 'Could not load the terrain profile.';
       });
     }
 
@@ -2635,12 +2724,19 @@
     MAX_HEIGHT_M: MAX_HEIGHT_M,
     parseState: parseState,
     parseStart: parseStart,
+    invalidLink: invalidLink,
+    withProfileParams: withProfileParams,
     pointRef: pointRef,
     markerRef: markerRef,
     snapEndpoint: snapEndpoint,
     shareURL: shareURL,
     shareOffered: shareOffered,
     fitPadding: fitPadding,
+    fitPaddingBeside: fitPaddingBeside,
+    panelCap: panelCap,
+    endsVisible: endsVisible,
+    refusal: refusal,
+    fmtDistance: fmtDistance,
     parseProfilePair: parseProfilePair,
     offered: offered,
     nodeEntryHash: nodeEntryHash,

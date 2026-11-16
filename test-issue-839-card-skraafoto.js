@@ -89,10 +89,10 @@ console.log('\n=== #839 finding 4: the tightest Fresnel point ===\n');
 test('the chart text names the tightest point of the Fresnel zone, as the card does', () => {
   const html = TP.buildChart(profile({ fill: [{ fromM: 3000, toM: 8000, source: 'copdem-glo30', resolutionM: 30 }] }), {});
   const title = /<title>([^<]*)<\/title>/.exec(html)[1];
-  assert.ok(title.indexOf(' Tightest point for the Fresnel zone: clearance -11.3 m at 5786.7 m along the path.') >= 0, title);
+  assert.ok(title.indexOf(' Tightest point for the Fresnel zone: clearance -11.3 m at 5.79 km along the path.') >= 0, title);
   assert.ok(!/worst clearance/i.test(title), title);
   // The Go twin (AltText) says it in the same words.
-  assert.ok(RENDER_GO.indexOf('" Tightest point for the Fresnel zone: clearance " + fmtMetres(wc) + " at " + fmtMetres(at) + " along the path."') >= 0,
+  assert.ok(RENDER_GO.indexOf('" Tightest point for the Fresnel zone: clearance " + fmtMetres(wc) + " at " + fmtDistance(at) + " along the path."') >= 0,
     'internal/profilecard/render.go AltText does not use the same words');
 });
 
