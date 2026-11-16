@@ -260,6 +260,11 @@ jobs:
           # terrain card's (#755).
           (cd internal/nodecard && go test -race ./...)
           (cd internal/nodecard && go test -count=1 -run 'TestRenderWithinBudget|TestCardSizeBound' -v ./... | grep -E '^(=== RUN|--- |ok|FAIL|PASS)|per card|largest card')
+          # internal/packetcard (#812 M1): the packet share-card renderer;
+          # its per-card budget skips under -race and runs once more
+          # without it, the same mechanism as the node card's.
+          (cd internal/packetcard && go test -race ./...)
+          (cd internal/packetcard && go test -count=1 -run 'TestRenderWithinBudget|TestCardSizeBound' -v ./... | grep -E '^(=== RUN|--- |ok|FAIL|PASS)|per card|largest card')
           # internal/heritage (#723 M2): protection-zone WFS client, parser and
           # nearest-zone maths, tested against a fake WFS.
           (cd internal/heritage && go test -race ./...)
