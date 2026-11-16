@@ -56,6 +56,31 @@ const (
 	footerRule  = 548
 	footerBase  = 594
 	footerSpace = 32 // between the as-of line and the site name
+
+	// The dense grid (#857), for more than 2*tileCols clauses: 4 columns
+	// by 3 rows, smaller text, the same safe area and footer.
+	denseCols       = 4
+	denseTileW      = (Width - 2*safeMargin) / denseCols
+	denseTop        = 172
+	denseRowH       = 128
+	denseLabelSize  = 18
+	denseValueSize  = 34
+	denseMinValue   = 22
+	denseDetailSize = 17
+	denseValueDrop  = 42
+	denseDetailDrop = 66
+	maxTiles        = 3 * denseCols
+
+	// The mid grid (#857), for up to two rows of four: the wide grid's
+	// rows, text between the two.
+	midLabelSize    = 20
+	midValueSize    = 40
+	midMinValue     = 26
+	midDetailSize   = 18
+	midValueDrop    = 50
+	midDetailDrop   = 78
+	maxScopesInText = 3 // transported scopes named in the clause text
+	scopeSep        = ", "
 )
 
 // warnPct is the duty-cycle limit seen airtime is flagged at: the default
@@ -77,6 +102,12 @@ type textRun struct {
 type tile struct {
 	label, value, detail string
 	over                 bool
+	// absTime: detail is the absolute time of value, which follows
+	// value's wording (last heard, first seen).
+	absTime bool
+	// scopes, when set, is the full list value names (transported
+	// scopes); the card draws as many as fit, then "+N".
+	scopes []string
 }
 
 // Carded reports whether role has a node card: repeaters, rooms and
@@ -223,6 +254,10 @@ type Clause struct {
 	// Over is a seen airtime at or over the duty-cycle limit, drawn in the
 	// warning colour.
 	Over bool
+	// AbsTime is true when Detail is the absolute UTC time of Value
+	// (last heard, first seen): it follows Value's wording, so the
+	// server's v leaves it out and buckets by the wording (#857).
+	AbsTime bool
 }
 
 // Clauses are the stat clauses Render draws for in, in drawing order.
@@ -230,7 +265,7 @@ func Clauses(in NodeCardInput) []Clause {
 	ts := tiles(in)
 	out := make([]Clause, len(ts))
 	for i, t := range ts {
-		out[i] = Clause{Label: t.label, Value: t.value, Detail: t.detail, Over: t.over}
+		out[i] = Clause{Label: t.label, Value: t.value, Detail: t.detail, Over: t.over, AbsTime: t.absTime}
 	}
 	return out
 }
@@ -241,9 +276,10 @@ func Clauses(in NodeCardInput) []Clause {
 func tiles(in NodeCardInput) []tile {
 	var ts []tile
 	if !in.LastHeard.IsZero() {
-		ts = append(ts, tile{label: "Last heard", value: RelativeTime(in.LastHeard, in.AsOf), detail: absUTC(in.LastHeard)})
+		ts = append(ts, timeTile("Last heard", in.LastHeard, in.AsOf))
 	}
-	if rs := in.Relay; rs != nil && (in.Role == "repeater" || in.Role == "room") {
+	relays := in.Role == "repeater" || in.Role == "room"
+	if rs := in.Relay; rs != nil && relays {
 		if v, ok := count(rs.Relayed24h); ok {
 			ts = append(ts, tile{label: "Relayed 24 h", value: v})
 		}
@@ -260,7 +296,115 @@ func tiles(in NodeCardInput) []tile {
 	if v, ok := count(in.Neighbors); ok {
 		ts = append(ts, tile{label: "Neighbors", value: v})
 	}
+	// #857, with the node page's labels and its rules for hiding a row.
+	if !in.FirstSeen.IsZero() {
+		ts = append(ts, timeTile("First seen", in.FirstSeen, in.AsOf))
+	}
+	if p := in.AvgHops; p != nil && *p > 0 { // nodes.js: ${stats.avgHops ? … : ''}
+		ts = append(ts, tile{label: "Avg Hops", value: strconv.Itoa(*p)})
+	}
+	if t, ok := ownScopeTile(in.OwnScope, in.OwnScopeConfirmed); ok {
+		ts = append(ts, t)
+	}
+	if relays {
+		if t, ok := scopesTile(in.TransportedScopes); ok {
+			ts = append(ts, t)
+		}
+	}
+	if t, ok := intervalTile("Estimated flood interval", in.FloodInterval, floodUnit); ok {
+		ts = append(ts, t)
+	}
+	if t, ok := intervalTile("Estimated zero-hop interval", in.ZeroHopInterval, zeroHopUnit); ok {
+		ts = append(ts, t)
+	}
 	return ts
+}
+
+func timeTile(label string, at, asOf time.Time) tile {
+	return tile{label: label, value: RelativeTime(at, asOf), detail: absUTC(at), absTime: true}
+}
+
+// ownScopeTile is nodes.js row-own-scope: NULL has no row on the card
+// (the node page's "—"), "" is "unknown scope", any other value is the
+// scope as stored ("*" included). Confirmed is the page's check mark.
+func ownScopeTile(scope *string, confirmed bool) (tile, bool) {
+	if scope == nil {
+		return tile{}, false
+	}
+	v := "unknown scope"
+	if *scope != "" {
+		if v = cardkit.Sanitize(*scope); v == "" {
+			return tile{}, false
+		}
+	}
+	t := tile{label: "Own scope", value: v}
+	if confirmed {
+		t.detail = "confirmed"
+	}
+	return t, true
+}
+
+// scopesTile names at most maxScopesInText scopes, then "+N"; the card
+// draws as many of t.scopes as fit.
+func scopesTile(raw []string) (tile, bool) {
+	var scopes []string
+	for _, s := range raw {
+		if s = cardkit.Sanitize(s); s != "" {
+			scopes = append(scopes, s)
+		}
+	}
+	if len(scopes) == 0 {
+		return tile{}, false
+	}
+	return tile{label: "Transported scopes", value: scopeList(scopes, min(len(scopes), maxScopesInText)), scopes: scopes}, true
+}
+
+// scopeList is the first k scopes and "+N" for the rest.
+func scopeList(scopes []string, k int) string {
+	s := strings.Join(scopes[:k], scopeSep)
+	if k < len(scopes) {
+		s += " +" + strconv.Itoa(len(scopes)-k)
+	}
+	return s
+}
+
+// intervalUnit is one class of node-adverts.js INTERVAL_CLASSES.
+type intervalUnit struct {
+	seconds float64
+	label   string
+	rng     string
+}
+
+var (
+	floodUnit   = intervalUnit{3600, "h", "3–168 h"}
+	zeroHopUnit = intervalUnit{60, "min", "60–240 min"}
+)
+
+// intervalTile is node-adverts.js intervalRow for an estimate, at medium
+// or high confidence only (#857: a low-confidence estimate is dropped).
+// The sample count is left out: it changes with every advert, the
+// interval does not.
+func intervalTile(label string, iv *AdvertInterval, u intervalUnit) (tile, bool) {
+	if iv == nil || iv.Seconds <= 0 || (iv.Confidence != "high" && iv.Confidence != "medium") {
+		return tile{}, false
+	}
+	t := tile{label: label, value: "≈ " + fmtInterval(iv.Seconds, u), detail: iv.Confidence + " confidence"}
+	if !iv.Snapped {
+		// Both notes do not fit a tile; this one matters more, and the
+		// confidence is medium or high whenever a tile is drawn.
+		t.detail = "outside the settable " + u.rng
+	}
+	return t, true
+}
+
+// fmtInterval is node-adverts.js fmtInterval: Math.round to one decimal in
+// the class's unit, and flood under an hour in whole minutes.
+func fmtInterval(seconds int64, u intervalUnit) string {
+	v := float64(seconds) / u.seconds
+	if u.seconds == 3600 && v < 1 {
+		return strconv.FormatFloat(math.Floor(float64(seconds)/60+0.5), 'f', -1, 64) + " min"
+	}
+	return strconv.FormatFloat(math.Floor(v*10+0.5)/10, 'f', -1, 64) + " " + u.label
 }
 
 func count(p *int) (string, bool) {
@@ -336,23 +480,72 @@ func RelativeTime(last, asOf time.Time) string {
 
 func absUTC(t time.Time) string { return t.UTC().Format("2006-01-02 15:04") + " UTC" }
 
+// grid is one tile layout: the M2 grid for up to six clauses, the dense
+// one (#857) for more.
+type grid struct {
+	cols, w, top, rowH                int
+	labelSize, valueSize, minValue    int
+	detailSize, valueDrop, detailDrop int
+}
+
+var (
+	wideGrid  = grid{tileCols, tileW, tileTop, tileRowH, labelSize, valueSize, minValueSize, detailSize, valueDrop, detailDrop}
+	midGrid   = grid{denseCols, denseTileW, tileTop, tileRowH, midLabelSize, midValueSize, midMinValue, midDetailSize, midValueDrop, midDetailDrop}
+	denseGrid = grid{denseCols, denseTileW, denseTop, denseRowH, denseLabelSize, denseValueSize, denseMinValue, denseDetailSize, denseValueDrop, denseDetailDrop}
+)
+
+// gridFor picks the layout for n clauses: the M2 grid up to six, four
+// columns on the same two rows up to eight, the dense 4×3 grid beyond.
+func gridFor(n int) grid {
+	switch {
+	case n <= 2*tileCols:
+		return wideGrid
+	case n <= 2*denseCols:
+		return midGrid
+	}
+	return denseGrid
+}
+
 func (r *renderer) tiles(ts []tile) {
+	g := gridFor(len(ts))
 	for i, t := range ts {
-		if i >= 2*tileCols {
-			break // six clauses at most; tiles() never makes more
+		if i >= maxTiles {
+			break // twelve clauses at most; tiles() never makes more
 		}
-		x := safeMargin + (i%tileCols)*tileW
-		y := tileTop + (i/tileCols)*tileRowH
-		maxW := tileW - tileGap
+		x := safeMargin + (i%g.cols)*g.w
+		y := g.top + (i/g.cols)*g.rowH
+		maxW := g.w - tileGap
 		valueC, detailC := r.pal.Text, r.pal.TextMuted
 		if t.over {
 			valueC, detailC = r.pal.StatusRed, r.pal.StatusRed
 		}
-		r.text("label", r.fs.Fit(t.label, labelSize, false, maxW), x, y, labelSize, false, cardkit.Opaque(r.pal.TextMuted))
-		size, v := r.fit(t.value, valueSize, minValueSize, true, maxW)
-		r.text("value", v, x, y+valueDrop, size, true, cardkit.Opaque(valueC))
-		r.text("detail", r.fs.Fit(t.detail, detailSize, false, maxW), x, y+detailDrop, detailSize, false, cardkit.Opaque(detailC))
+		r.text("label", r.fs.Fit(t.label, g.labelSize, false, maxW), x, y, g.labelSize, false, cardkit.Opaque(r.pal.TextMuted))
+		size, v := r.fit(t.value, g.valueSize, g.minValue, true, maxW)
+		if t.scopes != nil {
+			size, v = r.fitScopes(t.scopes, g.valueSize, g.minValue, maxW)
+		}
+		r.text("value", v, x, y+g.valueDrop, size, true, cardkit.Opaque(valueC))
+		r.text("detail", r.fs.Fit(t.detail, g.detailSize, false, maxW), x, y+g.detailDrop, g.detailSize, false, cardkit.Opaque(detailC))
 	}
+}
+
+// fitScopes draws the whole list when it fits at some size down to
+// minSize; else, at minSize, as many scopes as fit and "+N" for the rest,
+// and at worst the first scope shortened with "…" before "+N".
+func (r *renderer) fitScopes(scopes []string, size, minSize, maxW int) (int, string) {
+	all := scopeList(scopes, len(scopes))
+	for ; size > minSize; size -= 4 {
+		if r.fs.Measure(all, size, true) <= maxW {
+			return size, all
+		}
+	}
+	for k := len(scopes); k >= 1; k-- {
+		if s := scopeList(scopes, k); r.fs.Measure(s, minSize, true) <= maxW {
+			return minSize, s
+		}
+	}
+	rest := " +" + strconv.Itoa(len(scopes)-1)
+	return minSize, r.fs.Fit(scopes[0], minSize, true, maxW-r.fs.Measure(rest, minSize, true)) + rest
 }
 
 // ── Footer ───────────────────────────────────────────────────────────────

@@ -1,0 +1,36 @@
+badge   24px bold    x=1055 y= 64 w= 103 Repeater
+title   44px bold    x=  44 y= 78 w= 427 DK_7800_Kjeldbjerg
+area    24px regular x=  44 y=114 w= 117 Midtjylland
+label   18px regular x=  24 y=172 w=  85 Last heard
+value   34px bold    x=  24 y=214 w= 110 3h ago
+detail  17px regular x=  24 y=238 w= 183 2026-11-15 10:08 UTC
+label   18px regular x= 312 y=172 w= 107 Relayed 24 h
+value   34px bold    x= 312 y=214 w=  85 1,234
+label   18px regular x= 600 y=172 w=  97 Relayed 1 h
+value   34px bold    x= 600 y=214 w=  38 56
+label   18px regular x= 888 y=172 w= 142 Seen airtime 24 h
+value   34px bold    x= 888 y=214 w=  96 ≥3.2%
+detail  17px regular x= 888 y=238 w=  93 lower bound
+label   18px regular x=  24 y=300 w= 101 Busiest hour
+value   34px bold    x=  24 y=342 w=  96 ≥8.1%
+detail  17px regular x=  24 y=366 w=  93 lower bound
+label   18px regular x= 312 y=300 w=  83 Neighbors
+value   34px bold    x= 312 y=342 w=  38 12
+label   18px regular x= 600 y=300 w=  80 First seen
+value   34px bold    x= 600 y=342 w= 147 412d ago
+detail  17px regular x= 600 y=366 w= 183 2025-09-29 13:20 UTC
+label   18px regular x= 888 y=300 w=  78 Avg Hops
+value   34px bold    x= 888 y=342 w=  19 3
+label   18px regular x=  24 y=428 w=  90 Own scope
+value   34px bold    x=  24 y=470 w= 260 #dk-midtjylland
+detail  17px regular x=  24 y=494 w=  75 confirmed
+label   18px regular x= 312 y=428 w= 159 Transported scopes
+value   22px bold    x= 312 y=470 w= 204 #dk, #dk-aarhus +1
+label   18px regular x= 600 y=428 w= 190 Estimated flood interval
+value   34px bold    x= 600 y=470 w=  96 ≈ 47 h
+detail  17px regular x= 600 y=494 w= 120 high confidence
+label   18px regular x= 888 y=428 w= 226 Estimated zero-hop interval
+value   34px bold    x= 888 y=470 w= 155 ≈ 120 min
+detail  17px regular x= 888 y=494 w= 148 medium confidence
+asof    22px regular x=  24 y=594 w= 290 as of 2026-11-15 13:20 UTC
+site    22px regular x=1031 y=594 w= 145 mesh.example

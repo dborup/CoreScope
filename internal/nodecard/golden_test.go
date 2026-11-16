@@ -53,7 +53,30 @@ func goldenCases() []goldenCase {
 	sparse := fxRepeater()
 	sparse.Area, sparse.Neighbors, sparse.LastHeard = "", nil, time.Time{}
 	sparse.Relay = &RelayStats{Relayed1h: ip(2)}
+	// #857: the densest card (all twelve clauses) with a long name and a
+	// scope list too long for its tile.
+	dense := fxRepeaterFull()
+	dense.Name = long.Name
+	dense.TransportedScopes = []string{"#dk", "#dk-aarhus", "#dk-midtjylland", "#dk-nordjylland", "#se-skane", "#de-nord", "#dk-fyn"}
+	dense.Relay.AirtimePeakPct = fp(12.5)
+	// The common #857 card: a repeater whose only new values are first seen
+	// and avg hops (no scopes known, no confident interval).
+	eight := fxRepeater()
+	eight.FirstSeen, eight.AvgHops = ago(243*24*time.Hour+5*time.Hour), ip(8)
 	return []goldenCase{
+		{name: "repeater-full", in: fxRepeaterFull(), opt: Options{Site: "mesh.example"}, lightPNG: true,
+			want: map[string]string{"label": "First seen | Avg Hops | Own scope | Transported scopes | Estimated flood interval | Estimated zero-hop interval",
+				"value": "≈ 47 h | ≈ 120 min", "detail": "confirmed | high confidence | medium confidence"}},
+		{name: "room-full", in: fxRoomFull(),
+			want:   map[string]string{"badge": "Room Server", "value": "unknown scope | #dk-aarhus | ≈ 12 h"},
+			absent: map[string]string{"label": "zero-hop"}},
+		{name: "sensor-full", in: fxSensorFull(),
+			want:   map[string]string{"value": "* | ≈ 60.5 min", "detail": "outside the settable 60–240 min"},
+			absent: map[string]string{"label": "Transported"}},
+		{name: "dense-long-name", in: dense, opt: Options{Site: "mesh.example"},
+			want: map[string]string{"title": "…", "value": " +", "detail": "at or over the 10% limit"}},
+		{name: "repeater-eight", in: eight, opt: Options{Site: "mesh.example"},
+			want: map[string]string{"label": "First seen | Avg Hops", "value": "243d ago"}},
 		{name: "repeater", in: fxRepeater(), opt: Options{Site: "mesh.example"}, lightPNG: true,
 			want: map[string]string{"title": "DK_7800_Kjeldbjerg", "badge": "Repeater", "area": "Midtjylland",
 				"value": "1,234", "asof": "as of 2026-11-15 13:20 UTC", "site": "mesh.example"}},

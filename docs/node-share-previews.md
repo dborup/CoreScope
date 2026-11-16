@@ -48,7 +48,25 @@ The card is a 1200×630 PNG drawn on the server,
   over 24 h and in the busiest hour. Seen airtime is a lower bound, so it is
   shown with "≥" and flagged at 10 %, as in the busiest-repeaters table;
 - the neighbour count;
+- with the node page's labels and values (#857):
+  - **First seen**, as a relative time and in UTC;
+  - **Avg Hops**, the mean path length of the node's packets the server
+    still holds in memory. It is left off when those hold no path, as the
+    node page leaves it off;
+  - **Own scope**, the region the node's own adverts carry: the scope,
+    "unknown scope" for an empty one, and "confirmed" when the firmware
+    reported it itself. A node with no known scope has no line;
+  - for repeaters and rooms, **Transported scopes**: as many as fit, then
+    "+N" for the rest;
+  - **Estimated flood interval** and **Estimated zero-hop interval**, at
+    medium or high confidence only, from the server's mesh-wide advert
+    interval pass (the same estimate as the node page). An estimate with
+    low confidence, too few adverts or no repeating gap is left off;
 - "as of" with the time the card was drawn, and the site name.
+
+A card with seven or eight values draws them in four columns, and one with
+more in four columns by three rows. `og:description` lists the values in the order above and, when they do
+not fit its 200 characters, leaves off the last ones whole.
 
 A value the server does not have yet is left off, never drawn as 0. The
 relay lines of a repeater or room are left off only until the server has
@@ -66,9 +84,11 @@ description with the same values as text, `og:url` built from the key, and
 - **No upstream service.** A node card needs no DHM token and no other
   upstream call, and it works without `map.dhm`.
 - **Server.** Every value on the card comes from snapshots the server already
-  keeps for the Nodes page, so a card never scans the database. Drawing one
-  takes about 10 ms of CPU on a fast machine, independent of the size of the
-  network, and a card is about 45 KB. Cards are cached for 10 minutes
+  keeps for the Nodes page and the advert interval analytics, the node's
+  packets in memory, and one read of the node's own database row (its
+  scope), so a card never scans the database. Drawing one takes about 10 ms
+  of CPU on a fast machine, independent of the size of the network, and a
+  card is about 45–85 KB. Cards are cached for 10 minutes
   (64 cards, also bounded by bytes) and are served with
   `Cache-Control: public, max-age=600`. A card that is not cached counts
   against the per-client `map.dhm.profile.rateLimitPerMin` and is drawn in the

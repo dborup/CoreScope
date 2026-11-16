@@ -710,6 +710,29 @@ func (s *PacketStore) advertIntervalSnapshot() *advertIntervalSnapshot {
 	return s.computeAdvertIntervalAnalytics()
 }
 
+// publishedAdvertIntervals is pk's row of the published snapshot: the
+// estimates node detail's advertIntervals makes (same newest adverts per
+// class, classifier and estimator), without a scan. ok is false while no
+// snapshot is published and for a key the snapshot does not hold. It never
+// computes one and never wakes a paused recomputer (Peek), so a node share
+// card (#857) costs a binary search, O(log nodes).
+func (s *PacketStore) publishedAdvertIntervals(pk string) (flood, zeroHop AdvertIntervalEstimate, ok bool) {
+	rc := s.recomputer(&s.recompAdvertIntervals)
+	if rc == nil {
+		return flood, zeroHop, false
+	}
+	snap, _ := rc.Peek().(*advertIntervalSnapshot)
+	if snap == nil {
+		return flood, zeroHop, false
+	}
+	rows := snap.rows
+	i := sort.Search(len(rows), func(i int) bool { return rows[i].pubkey >= pk })
+	if i == len(rows) || rows[i].pubkey != pk {
+		return flood, zeroHop, false
+	}
+	return rows[i].flood, rows[i].zeroHop, true
+}
+
 // GetAdvertIntervalAnalytics serves the snapshot: unfiltered as computed,
 // else re-aggregated over the rows heard in region and placed in area.
 func (s *PacketStore) GetAdvertIntervalAnalytics(region, area string) AdvertIntervalAnalyticsResponse {

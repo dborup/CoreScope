@@ -48,6 +48,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/mux"
 	"github.com/meshcore-analyzer/dhm"
@@ -232,7 +233,56 @@ func (s *Server) resolveNodeShare(ctx context.Context, c *nodeCards, pk string) 
 		k := nodeNeighborCount(g, pk, in.AsOf)
 		in.Neighbors = &k
 	}
+	s.addNodePageFields(&in, n)
 	return nodeShare{in: in, carded: true}, true
+}
+
+// addNodePageFields adds the #857 fields, each from the source the node
+// page reads, never re-derived:
+//   - first seen: nodes.first_seen, from the node snapshot;
+//   - avg hops: the health stats' avgHops over the in-memory window
+//     (avgHopsOf), dropped when the window has no hop data (#848's DB
+//     fallback covers adverts, not hops);
+//   - own scope: default_scope and default_scope_confirmed_at of the node
+//     row GET /api/nodes/{pk} reads (one primary-key read, no scan);
+//   - transported scopes: the published relay snapshot's TransportedScopes
+//     (repeaters and rooms; the relay lookup above);
+//   - advert intervals: the published /api/analytics/advert-intervals
+//     snapshot, the same estimator as node detail's advertIntervals. Node
+//     detail's own path scans every ADVERT row of the node on a miss
+//     (~110-330 ms for a busy node), which a crawler must not trigger.
+func (s *Server) addNodePageFields(in *nodecard.NodeCardInput, n nodeInfo) {
+	in.FirstSeen = parseNodeTimestamp(n.FirstSeen)
+	if h, ok := s.store.NodeAvgHops(n.PublicKey); ok {
+		in.AvgHops = &h
+	}
+	if s.db != nil && s.db.conn != nil {
+		// The node page's reading: absent (an older schema) or NULL is no
+		// row, "" stays "" ("unknown scope"); a non-empty
+		// default_scope_confirmed_at is the confirmed mark.
+		row, err := s.db.GetNodeByPubkey(n.PublicKey)
+		if scope, ok := row["default_scope"].(string); err == nil && ok {
+			at, _ := row["default_scope_confirmed_at"].(string)
+			in.OwnScope, in.OwnScopeConfirmed = &scope, at != ""
+		}
+	}
+	if in.Role == "repeater" || in.Role == "room" {
+		if info, ok := s.store.publishedRelayInfo(in.PubKey); ok {
+			in.TransportedScopes = info.TransportedScopes
+		}
+	}
+	if flood, zeroHop, ok := s.store.publishedAdvertIntervals(in.PubKey); ok {
+		in.FloodInterval, in.ZeroHopInterval = cardAdvertInterval(flood), cardAdvertInterval(zeroHop)
+	}
+}
+
+// cardAdvertInterval is an estimate the card may draw: status estimated
+// with an interval. The card itself drops a low-confidence one.
+func cardAdvertInterval(e AdvertIntervalEstimate) *nodecard.AdvertInterval {
+	if e.Status != advertIntervalEstimated || e.IntervalS == nil || *e.IntervalS <= 0 {
+		return nil
+	}
+	return &nodecard.AdvertInterval{Seconds: *e.IntervalS, Confidence: e.Confidence, Snapped: e.Snapped}
 }
 
 // publishedRelayInfo is pk's entry in the published relay snapshot (the
@@ -291,9 +341,11 @@ func (c *nodeCards) title(in nodecard.NodeCardInput) string {
 }
 
 // clauses are the area and the card's stat clauses as text ("Last heard:
-// 3h ago"), in the card's order. A trace airtime, "<0.1%" on the card, is
-// "under 0.1%" here: ogClip drops angle brackets, and "0.1%" would
-// overstate it.
+// 3h ago"), in the card's order, which is also their priority (#857): the
+// #811 clauses first, then first seen, avg hops, own scope, transported
+// scopes and the two advert intervals. A trace airtime, "<0.1%" on the
+// card, is "under 0.1%" here: ogClip drops angle brackets, and "0.1%"
+// would overstate it.
 func clauses(in nodecard.NodeCardInput) []string {
 	var out []string
 	if in.Area != "" {
@@ -318,7 +370,14 @@ func (c *nodeCards) version(in nodecard.NodeCardInput) string {
 	fmt.Fprintf(h, "%s|%s|%t|%q\n", nodeCardRendererVersion, c.palFP, c.names, c.site)
 	fmt.Fprintf(h, "%s|%q|%s|%q\n", in.PubKey, in.Name, in.Role, in.Area)
 	for _, cl := range nodecard.Clauses(in) {
-		fmt.Fprintf(h, "%q|%q|%t\n", cl.Label, cl.Value, cl.Over)
+		// An absolute-time detail follows the value's wording (#857: v is
+		// bucketed by "3h ago" / "412d ago"); every other detail ("confirmed",
+		// "high confidence") is a displayed value of its own.
+		detail := cl.Detail
+		if cl.AbsTime {
+			detail = ""
+		}
+		fmt.Fprintf(h, "%q|%q|%q|%t\n", cl.Label, cl.Value, detail, cl.Over)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }
@@ -334,11 +393,11 @@ func (c *nodeCards) page(in nodecard.NodeCardInput) ogPage {
 	cl := clauses(in)
 	desc := nodecard.RoleLabel(in.Role)
 	if len(cl) > 0 {
-		desc = strings.Join(cl, " · ")
+		desc = joinWithin("", cl, " · ", ogDescriptionMaxRunes)
 	}
 	alt := "Node card: " + title
 	if len(cl) > 0 {
-		alt += ". " + strings.Join(cl, ". ")
+		alt = joinWithin(alt+". ", cl, ". ", ogImageAltMaxRunes)
 	}
 	return ogPage{
 		Title:       title,
@@ -346,6 +405,19 @@ func (c *nodeCards) page(in nodecard.NodeCardInput) ogPage {
 		Path:        sharePath + "?node=" + in.PubKey,
 		Image:       nodeCardPath(in.PubKey, c.version(in)),
 		ImageAlt:    alt,
+	}
+}
+
+// joinWithin is prefix and parts joined by sep, dropping the last parts
+// (the lowest priority, #857) until the text as a tag shows it (ogClip)
+// fits maxRunes. The first part is always kept; ogText still cuts it when
+// it alone is too long.
+func joinWithin(prefix string, parts []string, sep string, maxRunes int) string {
+	for n := len(parts); ; n-- {
+		s := prefix + strings.Join(parts[:n], sep)
+		if n == 1 || utf8.RuneCountInString(ogClip(s, 0)) <= maxRunes {
+			return s
+		}
 	}
 }
 

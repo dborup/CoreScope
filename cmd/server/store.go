@@ -7735,6 +7735,18 @@ type nodeInfo struct {
 	ObservationCount int    // count of advertisements/observations; used for tier-3 tiebreak in resolveWithContext
 }
 
+// parseNodeTimestamp reads a nodes.last_seen / first_seen value: RFC3339,
+// or SQLite's "2006-01-02 15:04:05" (UTC). Zero when empty or unreadable.
+func parseNodeTimestamp(s string) time.Time {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse("2006-01-02 15:04:05", s); err == nil {
+		return t
+	}
+	return time.Time{}
+}
+
 // schemaDegradationLogged is now a PacketStore field (see type definition) so
 // each store/test instance has a fresh dedupe set. Issue #1199 item 5: the
 // prior package-level sync.Map silently suppressed re-emission across tests.
@@ -7821,12 +7833,8 @@ func (s *PacketStore) getAllNodes() ([]nodeInfo, bool) {
 			n.Lon = lon.Float64
 			n.HasGPS = !(n.Lat == 0 && n.Lon == 0)
 		}
-		if hasLastSeen && lastSeen.Valid && lastSeen.String != "" {
-			if t, err := time.Parse(time.RFC3339, lastSeen.String); err == nil {
-				n.LastSeen = t
-			} else if t, err := time.Parse("2006-01-02 15:04:05", lastSeen.String); err == nil {
-				n.LastSeen = t
-			}
+		if hasLastSeen && lastSeen.Valid {
+			n.LastSeen = parseNodeTimestamp(lastSeen.String)
 		}
 		if hasAdvertCount && advertCount.Valid {
 			n.ObservationCount = int(advertCount.Int64)
@@ -10728,7 +10736,6 @@ func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]in
 	activity := newNodeActivity24h(now, s.nodeActivityCoverageStartLocked(now))
 
 	var packetsToday int
-	var totalHops, hopCount int
 	var lastHeard, lastAdvert string
 	heard := newHeardByAccumulator(pubkey, pm)
 	totalObservations := 0
@@ -10740,12 +10747,6 @@ func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]in
 			packetsToday++
 		}
 		updateOwnAdvertActivity(pkt, activityKey, &lastHeard, &lastAdvert)
-		// Hop counting
-		hops := txGetParsedPath(pkt)
-		if len(hops) > 0 {
-			totalHops += len(hops)
-			hopCount++
-		}
 		heard.add(pkt)
 	}
 	s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard, make(map[int]struct{}))
@@ -10781,10 +10782,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]in
 		return &canRelay
 	})
 
-	avgHops := 0
-	if hopCount > 0 {
-		avgHops = int(math.Round(float64(totalHops) / float64(hopCount)))
-	}
+	avgHops, _ := avgHopsOf(packets)
 
 	// Recent packets (up to 20, newest first — read from tail of oldest-first slice)
 	recentLimit := 20
@@ -10811,6 +10809,32 @@ func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]in
 		"recentPackets": recentPackets,
 		"activity24h":   activity,
 	}, nil
+}
+
+// avgHopsOf is the health stats' avgHops: the rounded mean path length of
+// the transmissions that have a path. ok is false when none has one (the
+// window holds no hop data); avgHops is then 0, as health reports it.
+func avgHopsOf(packets []*StoreTx) (avgHops int, ok bool) {
+	var totalHops, hopCount int
+	for _, pkt := range packets {
+		if hops := txGetParsedPath(pkt); len(hops) > 0 {
+			totalHops += len(hops)
+			hopCount++
+		}
+	}
+	if hopCount == 0 {
+		return 0, false
+	}
+	return int(math.Round(float64(totalHops) / float64(hopCount))), true
+}
+
+// NodeAvgHops is GetNodeHealth's stats.avgHops for pubkey, read from the
+// in-memory window alone: O(the node's transmissions) under the read lock,
+// no DB read. ok is false when the window holds no hop data for it.
+func (s *PacketStore) NodeAvgHops(pubkey string) (int, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return avgHopsOf(s.byNode[pubkey])
 }
 
 // GetNodeAnalytics computes analytics for a single node using in-memory byNode index.
