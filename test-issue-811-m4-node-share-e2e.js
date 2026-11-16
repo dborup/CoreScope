@@ -190,11 +190,20 @@ async function main() {
     }
     async function copyCount(page) { return page.evaluate(() => window.__copied.length); }
 
+    /* A list row can be re-rendered (a debounced search, a WebSocket
+     * refresh) between finding it and pressing it; press it again then. */
     async function press(page, sel, phone) {
-      const loc = page.locator(sel).first();
-      await loc.waitFor({ state: 'visible', timeout: 10000 });
-      await loc.scrollIntoViewIfNeeded();
-      if (phone) await loc.tap(); else await loc.click();
+      for (let attempt = 1; ; attempt++) {
+        const loc = page.locator(sel).first();
+        try {
+          await loc.waitFor({ state: 'visible', timeout: 10000 });
+          await loc.scrollIntoViewIfNeeded();
+          if (phone) await loc.tap(); else await loc.click();
+          return;
+        } catch (e) {
+          if (attempt >= 3 || !/not attached|detached/i.test(e.message)) throw e;
+        }
+      }
     }
 
     /* Nodes list → search → the row, by real clicks or taps. */
@@ -207,6 +216,11 @@ async function main() {
       }
       await press(page, '#nodeSearch', phone);
       await page.locator('#nodeSearch').fill(name);
+      // Wait out the debounced search: only matching rows are left.
+      await page.waitForFunction((n) => {
+        const rows = document.querySelectorAll('#nodesBody tr[data-value]');
+        return rows.length > 0 && Array.from(rows).every(r => r.textContent.indexOf(n) >= 0);
+      }, name, { timeout: 10000 });
       await press(page, 'tr[data-value="' + pk + '"]', phone);
     }
 
@@ -220,8 +234,8 @@ async function main() {
     {
       const { ctx, page, rec } = await cold({});
       await page.goto(BASE + '/');
-      await openFromList(page, REPEATER_NAME, REPEATER, false);
       await step('1440: the side pane’s Copy URL hands out /p?node=<pk> for a repeater', async () => {
+        await openFromList(page, REPEATER_NAME, REPEATER, false);
         assert.equal(await copyWith(page, '#panelCopyUrlBtn', false), SHARE);
       });
       await step('1440: Details → the node page’s Copy URL hands out the same link', async () => {
@@ -234,8 +248,8 @@ async function main() {
         assert.equal(await copyWith(page, '#copyShortUrlBtn', false), BASE + '/#/nodes/' + REPEATER.slice(0, 8));
       });
       await page.goto(BASE + '/');
-      await openFromList(page, COMPANION_NAME, COMPANION, false);
       await step('1440: a companion gets the plain link, in the side pane and on its page', async () => {
+        await openFromList(page, COMPANION_NAME, COMPANION, false);
         const plain = BASE + '/#/nodes/' + COMPANION;
         assert.equal(await copyWith(page, '#panelCopyUrlBtn', false), plain);
         await press(page, '.node-detail-btn', false);
