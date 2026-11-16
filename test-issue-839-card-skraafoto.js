@@ -91,8 +91,9 @@ test('the chart text names the tightest point of the Fresnel zone, as the card d
   const title = /<title>([^<]*)<\/title>/.exec(html)[1];
   assert.ok(title.indexOf(' Tightest point for the Fresnel zone: clearance -11.3 m at 5.79 km along the path.') >= 0, title);
   assert.ok(!/worst clearance/i.test(title), title);
-  // The Go twin (AltText) says it in the same words.
-  assert.ok(RENDER_GO.indexOf('" Tightest point for the Fresnel zone: clearance " + fmtMetres(wc) + " at " + fmtDistance(at) + " along the path."') >= 0,
+  // The Go twin (AltText) says it in the same words, as one of its
+  // sentences (#850: they are joined with a space).
+  assert.ok(RENDER_GO.indexOf('"Tightest point for the Fresnel zone: clearance " + fmtMetres(wc) + " at " + fmtDistance(at) + " along the path."') >= 0,
     'internal/profilecard/render.go AltText does not use the same words');
 });
 

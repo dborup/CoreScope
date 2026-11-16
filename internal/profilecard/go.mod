@@ -5,6 +5,9 @@ go 1.22
 require (
 	// The shared card primitives (#811 M1): fonts, canvas, colours, PNG.
 	github.com/meshcore-analyzer/cardkit v0.0.0
+	// The INSPIRE buildings credit (#846): the panel's own line, not a
+	// copy; stdlib-only beyond internal/dhm.
+	github.com/meshcore-analyzer/buildings v0.0.0
 	// The fill credit's parts (#738); stdlib-only beyond internal/dhm.
 	github.com/meshcore-analyzer/copdem v0.0.0
 	github.com/meshcore-analyzer/dhm v0.0.0
@@ -23,3 +26,5 @@ replace github.com/meshcore-analyzer/dhm => ../dhm
 replace github.com/meshcore-analyzer/copdem => ../copdem
 
 replace github.com/meshcore-analyzer/cardkit => ../cardkit
+
+replace github.com/meshcore-analyzer/buildings => ../buildings
