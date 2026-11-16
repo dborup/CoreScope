@@ -16,6 +16,8 @@
  *   - #723 M4: the `heritage` override section
  *   - #734: the `dhmOverlays` section (the DHM overlay defaults), back to
  *     the built-ins with dhm-defaults-changed after the pipeline re-runs
+ *   - #737: the `skraafoto` section (the oblique photo viewer's defaults),
+ *     back to the built-ins in the effective config the viewer reads
  *
  * Must NOT touch:
  *   - localStorage: meshcore-theme (theme light/dark),
@@ -130,7 +132,9 @@ function makeSandbox() {
 
 // opts.dhm: a dhm client block, which also loads the real
 // public/map-tile-providers.js before the customizer (index.html order), so
-// the #734 DHM overlay defaults have their rule.
+// the #734 DHM overlay defaults have their rule. opts.skraafoto: a
+// skraafoto client block, which also loads the real public/skraafoto.js
+// (the #737 viewer defaults' rule).
 function loadCustomizer(opts) {
   opts = opts || {};
   const env = makeSandbox();
@@ -169,6 +173,10 @@ function loadCustomizer(opts) {
   if (opts.dhm) {
     env.ctx.window.MC_DHM_CFG = opts.dhm;
     vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'map-tile-providers.js'), 'utf8'), env.ctx, { filename: 'map-tile-providers.js' });
+  }
+  if (opts.skraafoto) {
+    env.ctx.window.MC_SKRAAFOTO_CFG = opts.skraafoto;
+    vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'skraafoto.js'), 'utf8'), env.ctx, { filename: 'skraafoto.js' });
   }
   vm.runInContext(code, env.ctx, { filename: 'customize-v2.js' });
   env.api = env.ctx.window._customizerV2;
@@ -365,6 +373,28 @@ test('does NOT clear the viewer’s own DHM layer-control choices', () => {
   env.api.resetAll();
   assert.strictEqual(env.localStorage.getItem('mc-terrain-dhm'), 'surface');
   assert.strictEqual(env.localStorage.getItem('mc-contours-dhm'), '1');
+});
+
+// ── #737 — the oblique photo viewer's defaults ──
+
+const SKRAAFOTO_BLOCK = {
+  enabled: true, searchUrl: '/api/skraafoto/search',
+  previewUrl: '/api/skraafoto/preview/{collection}/{item}', maxPx: 1024,
+  bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
+};
+
+test('resets the oblique photo defaults to the built-ins the viewer reads', () => {
+  const env = loadCustomizer({ skraafoto: SKRAAFOTO_BLOCK });
+  env.api.writeOverrides({ skraafoto: { direction: 'west', zoom: 'zoomed', lineOfSight: false } });
+  env.api.init({});
+  const R = env.ctx.window.Skraafoto.SETTINGS;
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(R.resolve())),
+    { direction: 'west', zoom: 'zoomed', lineOfSight: false }, 'the section did not apply');
+  env.api.resetAll();
+  env.api.init({}); // the Reset button runs the pipeline next
+  assert.strictEqual(env.localStorage.getItem('cs-theme-overrides'), null);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(R.resolve())),
+    { direction: 'auto', zoom: 'overview', lineOfSight: true });
 });
 
 test('does NOT clear the viewer’s own remembered antenna heights', () => {
