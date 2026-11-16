@@ -134,6 +134,16 @@ func parseOverlayID(layers string) (Overlay, bool) {
 // raster (#792) instead of fetching them from a WMS.
 func (o Overlay) Rendered() bool { return o.Service == WCSService }
 
+// acceptsStyle reports whether style is a browser `styles` value for o.
+// It is empty for an upstream overlay: the server sets the upstream style
+// (#734). A rendered overlay names its ramp, ElevationStyle (#860), so a
+// new ramp is a new tile URL that no browser or shared cache holds; empty
+// is still accepted for one release, from pages loaded before #860, and
+// renders the current ramp.
+func (o Overlay) acceptsStyle(style string) bool {
+	return style == "" || o.Rendered() && style == ElevationStyle
+}
+
 // Covers reports whether tile k can hold any of o's data: it meets the
 // DHM coverage and, for a rendered overlay (#792), the WCS RasterExtent
 // too. A tile it does not cover is transparent with no upstream call, so

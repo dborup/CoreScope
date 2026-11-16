@@ -2,6 +2,7 @@ package dhm
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"net/url"
 	"strconv"
@@ -62,15 +63,24 @@ func (k TileKey) String() string { return fmt.Sprintf("%d/%d/%d", k.Z, k.X, k.Y)
 
 // ParseTileRequest validates a browser tile query and returns the overlay
 // and the tile it names (#734): layers is an overlay id or the legacy
-// terrain alias, and the tile's zoom is inside that overlay's range. Any
-// deviation is ErrBadRequest.
+// terrain alias, and the tile's zoom is inside that overlay's range.
+// styles is empty, except that a rendered overlay names its ramp there
+// (#860, Overlay.acceptsStyle). Any deviation is ErrBadRequest.
 func ParseTileRequest(q url.Values) (Overlay, TileKey, error) {
+	style := ""
+	if vs := q["styles"]; len(vs) == 1 && vs[0] != "" {
+		// Checked against the overlay below; the rest of the query must
+		// still be the exact shape, so a copy with styles empty is.
+		style = vs[0]
+		q = maps.Clone(q)
+		q["styles"] = []string{""}
+	}
 	free, err := ExactQuery(q, tileParams, "layers", "bbox")
 	if err != nil {
 		return Overlay{}, TileKey{}, err
 	}
 	o, ok := parseOverlayID(free["layers"])
-	if !ok {
+	if !ok || !o.acceptsStyle(style) {
 		return Overlay{}, TileKey{}, ErrBadRequest
 	}
 	k, err := TileFromBBox(free["bbox"])

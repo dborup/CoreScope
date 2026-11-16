@@ -215,6 +215,9 @@ type DHMOverlayClientConfig struct {
 	// LegendM are the ramp stops in metres of the elevation colours
 	// (#792); the colours are --dhm-elevation-<m> in public/style.css.
 	LegendM []int `json:"legendM,omitempty"`
+	// Style is the ramp's id (dhm.ElevationStyle, #860), which the page
+	// sends as the tile's `styles`: a new ramp is a new tile URL.
+	Style string `json:"style,omitempty"`
 }
 
 // dhmClientOverlayIDs are the overlays offered to the page: every id the
@@ -240,6 +243,7 @@ func dhmOverlayClientConfigs() []DHMOverlayClientConfig {
 			for _, s := range dhm.ElevationRamp {
 				e.LegendM = append(e.LegendM, s.M)
 			}
+			e.Style = dhm.ElevationStyle
 		}
 		out = append(out, e)
 	}
@@ -352,6 +356,10 @@ func dhmTileQueryParams() []paramMeta {
 		desc := "must be exactly " + strconv.Quote(fixed[k])
 		if fixed[k] == "" {
 			desc = "must be present and empty"
+		}
+		if k == "styles" {
+			desc = "must be present and empty, except for layers=elevation: the ramp id from /api/config/client " +
+				"dhm.overlays[].style (" + strconv.Quote(dhm.ElevationStyle) + "), or empty for one release (#860)"
 		}
 		out = append(out, paramMeta{Name: k, Description: desc, Type: "string", Required: true})
 	}

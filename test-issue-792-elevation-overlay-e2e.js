@@ -49,7 +49,9 @@ const OVERLAYS_734 = [
 ];
 const ELEVATION = {
   id: 'elevation', minZoom: 9, maxZoom: 13, datasetName: 'Danmarks Højdemodel', datasetUrl: 'https://dataforsyningen.dk/data/930',
-  attribution: ATTRIBUTION + ' — data bearbejdet', legendM: [0, 25, 50, 75, 100, 125, 150, 175],
+  // #860: the stops tuned to Danish land and the ramp id (dhm.ElevationStyle).
+  attribution: ATTRIBUTION + ' — data bearbejdet', legendM: [0, 2, 5, 10, 15, 20, 25, 30, 40, 50, 65, 80, 100, 130, 175],
+  style: 'ramp-471e5e7c',
 };
 function dhmBlock(overlays) {
   return {
@@ -243,6 +245,8 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
           assert(tiles[0].searchParams.has(k), 'request lacks ' + k);
         }
         assert(Array.from(tiles[0].searchParams.keys()).length === 11, 'extra request keys: ' + tiles[0].search);
+        // #860: the ramp id is the tile's styles, so a new ramp is a new URL.
+        assert(tiles.every(u => u.searchParams.get('styles') === ELEVATION.style), 'styles ' + tiles[0].searchParams.get('styles'));
         assert(/[?&]elevation=1\b/.test(s.hash), 'hash ' + s.hash);
         assert(s.stored === '1', 'stored ' + s.stored);
         assert(s.paneZ === '245', 'pane z ' + s.paneZ);
@@ -256,8 +260,16 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
           const bar = box.querySelector('.mc-elev-legend-bar');
           const r = box.getBoundingClientRect();
           const root = getComputedStyle(document.documentElement);
+          const rect = (e) => { const q = e.getBoundingClientRect(); return { left: q.left, right: q.right, top: q.top, bottom: q.bottom }; };
           return {
             text: Array.from(box.querySelectorAll('.mc-elev-legend-scale span')).map(s => s.textContent),
+            // #860: where each label is drawn, and what is drawn on top of it.
+            spans: Array.from(box.querySelectorAll('.mc-elev-legend-scale span')).map(s => {
+              const q = rect(s);
+              const top = document.elementFromPoint((q.left + q.right) / 2, (q.top + q.bottom) / 2);
+              return Object.assign(q, { visible: !!top && (top === s || s.contains(top)) });
+            }),
+            barR: rect(bar),
             image: getComputedStyle(bar).backgroundImage,
             first: root.getPropertyValue('--dhm-elevation-0').trim(),
             last: root.getPropertyValue('--dhm-elevation-175').trim(),
@@ -268,13 +280,23 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         }, SEL);
         assert(legend, 'no legend under the toggle');
         assert(await legendHidden(page) === false, 'the legend is hidden while the overlay is on');
-        assert(legend.text.join('|') === '0|50|100|175 m', 'legend ' + legend.text.join('|'));
-        assert(legend.first === '#4a8c5c' && legend.last === '#f2eee9', 'variables ' + legend.first + ' ' + legend.last);
-        // The bar is the variables resolved: rgb(74, 140, 92) … rgb(242, 238, 233).
-        assert(/^linear-gradient\(to right, rgb\(74, 140, 92\) 0%,/.test(legend.image) && /rgb\(242, 238, 233\) 100%\)$/.test(legend.image), legend.image);
+        assert(legend.text.join('|') === '0|5|15|25|40|65|175 m', 'legend ' + legend.text.join('|'));
+        assert(legend.first === '#007974' && legend.last === '#642560', 'variables ' + legend.first + ' ' + legend.last);
+        // The bar is the variables resolved, one equal step per stop (#860):
+        // rgb(0, 121, 116) 0%, rgb(31, 155, 130) 7.14…%, … rgb(100, 37, 96) 100%.
+        assert(/^linear-gradient\(to right, rgb\(0, 121, 116\) 0%, rgb\(31, 155, 130\) 7\.14\d*%,/.test(legend.image) &&
+          /rgb\(100, 37, 96\) 100%\)$/.test(legend.image), legend.image);
+        // #860 on the phone: every label is on screen, inside the bar's width,
+        // clear of its neighbours and not covered.
+        legend.spans.forEach((r, i) => {
+          assert(r.left >= legend.barR.left - 0.5 && r.right <= legend.barR.right + 0.5, 'label ' + legend.text[i] + ' outside the bar ' + JSON.stringify(r));
+          assert(r.left >= 0 && r.right <= vp.width && r.bottom <= vp.height, 'label ' + legend.text[i] + ' off screen ' + JSON.stringify(r));
+          assert(r.visible, 'label ' + legend.text[i] + ' is covered');
+          if (i) assert(r.left >= legend.spans[i - 1].right + 2, 'labels ' + legend.text[i - 1] + ' and ' + legend.text[i] + ' touch');
+        });
         assert(legend.barH >= 8, 'bar ' + legend.barH + 'px');
         assert(legend.r.left >= 0 && legend.r.right <= vp.width + 1 && legend.r.bottom <= vp.height + 1, 'legend off screen ' + JSON.stringify(legend.r));
-        assert(legend.aria === 'Elevation colours from 0 to 175 m', legend.aria);
+        assert(legend.aria === 'Elevation colours from 0 to 175 m, stops at 0, 2, 5, 10, 15, 20, 25, 30, 40, 50, 65, 80, 100, 130 and 175 m', legend.aria);
         const over = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
         assert(over <= 0, 'horizontal overflow ' + over);
       });

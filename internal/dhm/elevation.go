@@ -3,6 +3,8 @@ package dhm
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"image"
 	"image/color"
 	"image/png"
@@ -62,39 +64,83 @@ type RampStop struct {
 	R, G, B uint8
 }
 
-// ElevationRamp is the fixed colour ramp, lowland green through yellow and
-// brown to light high ground. Between stops a whole-metre height is the
-// linear mix, rounded per channel. public/style.css carries the same stops
-// as --dhm-elevation-N for the legend (pinned by cmd/server's
+// ElevationRamp is the fixed colour ramp, tuned to Denmark's flat land
+// (#860). Between stops a whole-metre height is the linear mix, rounded
+// per channel. public/style.css carries the same stops as
+// --dhm-elevation-N for the legend (pinned by cmd/server's
 // TestDHM792_LegendCSSMatchesTheRamp).
+//
+// The stops come from the land's height distribution, measured over all
+// Danish land (TestElevation860_MeasureLandDistribution on Copernicus DEM
+// GLO-90: 42,650 km², median 27.9 m; p10 3.8, p20 9.0, p30 14.7, p40 21.0,
+// p50 27.9, p60 35.0, p70 42.7, p80 52.4, p90 67.7, p95 80.7, p98 96.6,
+// p99.9 129.8 m). Below 80 m they sit at round metres near the deciles, so
+// each band holds 5-14 % of the land instead of the #792 linear ramp's
+// 45 % in its first band (TestElevation860_BandsShareTheLand); 2 m splits
+// off the marsh and reclaimed land; 80, 100 and 130 m keep three bands for
+// the hills (the top 5 %).
+//
+// The colours run teal (0-2 m: low-lying, kept apart from the lowland),
+// green (5-20 m), yellow (25-30 m), orange (40-65 m) and red from 80 m,
+// to crimson and plum on the highest ground. They were picked in OKLCH:
+// neighbouring stops differ by at least 0.035 (OKLab), and each shows on
+// light and dark base maps at the default opacity (TestElevation860_*).
 var ElevationRamp = []RampStop{
-	{0, 0x4a, 0x8c, 0x5c},
-	{25, 0x7f, 0xb0, 0x69},
-	{50, 0xc2, 0xcf, 0x7e},
-	{75, 0xec, 0xd9, 0x8b},
-	{100, 0xd9, 0xa9, 0x6a},
-	{125, 0xb0, 0x7c, 0x4f},
-	{150, 0xa8, 0x90, 0x7e},
-	{175, 0xf2, 0xee, 0xe9},
+	{0, 0x00, 0x79, 0x74},
+	{2, 0x1f, 0x9b, 0x82},
+	{5, 0x4e, 0xa9, 0x54},
+	{10, 0x7a, 0xbd, 0x4f},
+	{15, 0xa6, 0xcf, 0x51},
+	{20, 0xc5, 0xdb, 0x55},
+	{25, 0xed, 0xdf, 0x5c},
+	{30, 0xfe, 0xc9, 0x43},
+	{40, 0xfc, 0xba, 0x43},
+	{50, 0xf8, 0x96, 0x2d},
+	{65, 0xea, 0x70, 0x28},
+	{80, 0xd6, 0x4c, 0x29},
+	{100, 0xba, 0x2b, 0x2e},
+	{130, 0x90, 0x20, 0x47},
+	{175, 0x64, 0x25, 0x60},
+}
+
+// ElevationStyle is the ramp's id: the `styles` value of an elevation
+// tile URL (#860), derived from every stop, so a changed ramp is a new URL
+// that no browser or shared cache holds a tile of.
+var ElevationStyle = rampStyle(ElevationRamp)
+
+// rampStyle is "ramp-" and the first 8 hex digits of the SHA-256 of the
+// stops, in order.
+func rampStyle(ramp []RampStop) string {
+	h := sha256.New()
+	for _, s := range ramp {
+		h.Write([]byte{byte(s.M >> 8), byte(s.M), s.R, s.G, s.B})
+	}
+	return "ramp-" + hex.EncodeToString(h.Sum(nil))[:8]
 }
 
 // elevationPalette is index 0 transparent, then index 1+m the colour of m
 // whole metres, m = 0..ElevationRampMaxM.
-var elevationPalette = func() color.Palette {
-	p := make(color.Palette, ElevationRampMaxM+2)
+var elevationPalette = rampPalette(ElevationRamp)
+
+// rampPalette is the tile palette of ramp: index 0 transparent, then
+// index 1+m the colour of m whole metres, m = 0 up to its top stop.
+// Between stops a colour is the linear mix, rounded per channel.
+func rampPalette(ramp []RampStop) color.Palette {
+	top := ramp[len(ramp)-1].M
+	p := make(color.Palette, top+2)
 	p[0] = color.NRGBA{}
-	for m := 0; m <= ElevationRampMaxM; m++ {
+	for m := 0; m <= top; m++ {
 		i := 1
-		for i < len(ElevationRamp)-1 && ElevationRamp[i].M < m {
+		for i < len(ramp)-1 && ramp[i].M < m {
 			i++
 		}
-		a, b := ElevationRamp[i-1], ElevationRamp[i]
+		a, b := ramp[i-1], ramp[i]
 		t := float64(m-a.M) / float64(b.M-a.M)
 		mix := func(x, y uint8) uint8 { return uint8(math.Round(float64(x) + (float64(y)-float64(x))*t)) }
 		p[1+m] = color.NRGBA{mix(a.R, b.R), mix(a.G, b.G), mix(a.B, b.B), 255}
 	}
 	return p
-}()
+}
 
 // elevationIndex is the palette index of height h in metres.
 func elevationIndex(h float64) uint8 {

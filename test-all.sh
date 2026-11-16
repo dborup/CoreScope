@@ -173,6 +173,7 @@ run test-issue-733-dhm-credit.js
 run test-issue-734-dhm-overlays.js
 run test-issue-734-customizer-overlays.js
 run test-issue-792-elevation-overlay.js
+run test-issue-860-elevation-ramp.js
 run test-issue-738-foreign-fill-ui.js
 run test-issue-730-buildings-ui.js
 run test-issue-752-inset-attribution.js

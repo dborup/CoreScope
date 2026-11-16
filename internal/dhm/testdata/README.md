@@ -17,9 +17,29 @@ foreign fill (#738) depends on against it.
 
 sha256 `2281b1a32b2b02b4ff021480c13e4dd26782ddbf75e3acff95deb7b1d2dbb5cb`.
 
-© DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
+## dk_land_hist_860.txt
+
+The share of Danish land per whole metre of height (0-200 m; 0 holds every
+height at or below 0 m, 200 every height from 200 m), which the #860
+colour-by-elevation stops are chosen from and
+`TestElevation860_BandsShareTheLand` checks them against. It is a
+statistic, not elevation data: 201 numbers.
+
+`TestElevation860_MeasureLandDistribution` wrote it
+(`DHM_860_GLO90_DIR=<dir> DHM_860_WRITE_HIST=1`) from the 20 Copernicus
+DEM GLO-90 tiles over Danish land,
+`Copernicus_DSM_COG_30_N{54..57}_00_E{008..015}_00_DEM.tif`
+(`Last-Modified: Mon, 09 May 2022`), fetched once on 2026-11-16 from the
+public AWS Open Data bucket `copernicus-dem-90m`. A pixel counts as land
+where `Covers` holds (the DHM extent minus foreign land, #692) and its
+height is not exactly 0 (GLO's sea), weighted by its area: 42,650 km² in
+all, against Denmark's 42,951 km². No test fetches anything. GLO-90 is a
+90 m surface model (trees and buildings included), so forests read some
+metres higher than in DHM/Terræn.
+
+Both files: © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
 under COPERNICUS by the European Union and ESA; all rights reserved.
 
 The organisations in charge of the Copernicus programme by law or by
 delegation do not incur any liability for any use of the Copernicus
-WorldDEM-30.
+WorldDEM-30 and WorldDEM-90.

@@ -31,9 +31,11 @@ function test(name, fn) {
 
 const ATTRIBUTION = 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0';
 const DERIVED = ATTRIBUTION + ' — data bearbejdet';
-const LEGEND_M = [0, 25, 50, 75, 100, 125, 150, 175];
+// #860: the stops tuned to Danish land, and the ramp id the tiles carry.
+const LEGEND_M = [0, 2, 5, 10, 15, 20, 25, 30, 40, 50, 65, 80, 100, 130, 175];
+const STYLE = 'ramp-0123abcd';
 const ELEVATION = { id: 'elevation', minZoom: 9, maxZoom: 13, datasetName: 'Danmarks Højdemodel',
-  datasetUrl: 'https://dataforsyningen.dk/data/930', attribution: DERIVED, legendM: LEGEND_M };
+  datasetUrl: 'https://dataforsyningen.dk/data/930', attribution: DERIVED, legendM: LEGEND_M, style: STYLE };
 // The block as cmd/server/dhm_proxy.go sends it since #792.
 const DHM = {
   enabled: true, url: '/api/map/dhm/wms', layer: 'dhm_terraen_skyggekort',
@@ -108,7 +110,7 @@ test('the layer asks for layers=elevation with exactly the allow-listed keys', (
   assert.strictEqual(o.layers, 'elevation');
   assert.deepStrictEqual(Object.keys(o).sort(), ['attribution', 'bounds', 'className', 'crs', 'format', 'layers',
     'maxNativeZoom', 'maxZoom', 'minZoom', 'opacity', 'pane', 'styles', 'tileSize', 'transparent', 'version'].sort());
-  assert.strictEqual(o.styles, '');
+  assert.strictEqual(o.styles, STYLE); // #860: the ramp id
   assert.strictEqual(o.format, 'image/png');
   assert.strictEqual(o.version, '1.3.0');
 });
@@ -184,9 +186,11 @@ test('a toggle writes ?elevation=1 and storage; off drops the parameter', () => 
 
 // ── 4. Legend ──────────────────────────────────────────────────────────────
 
-test('the legend labels: first, every 50 m not crowding the last, last with its unit', () => {
+// #860: one equal step per stop; labels a seventh of the bar apart, none
+// crowding the last (test-issue-860-elevation-ramp.js has the rule).
+test('the legend labels: first, a seventh apart and not crowding the last, last with its unit', () => {
   const { D } = setup();
-  assert.deepStrictEqual(Array.from(D.elevationLegendLabels(LEGEND_M)), [0, 50, 100, 175]);
+  assert.deepStrictEqual(Array.from(D.elevationLegendLabels(LEGEND_M)), [0, 5, 15, 25, 40, 65, 175]);
   assert.deepStrictEqual(Array.from(D.elevationLegendLabels([0, 100])), [0, 100]);
   assert.deepStrictEqual(Array.from(D.elevationLegendLabels([0, 50, 100, 150, 200])), [0, 50, 100, 150, 200]);
 });
@@ -197,14 +201,14 @@ test('the legend: a bar from the CSS variables in order, the metres as text node
   const box = D.buildElevationLegend(doc, LEGEND_M);
   assert.strictEqual(box.className, 'mc-elev-legend');
   assert.strictEqual(box.attrs.role, 'img');
-  assert.strictEqual(box.attrs['aria-label'], 'Elevation colours from 0 to 175 m');
+  assert(box.attrs['aria-label'].startsWith('Elevation colours from 0 to 175 m, stops at 0, 2, 5,'), box.attrs['aria-label']);
   const [bar, scale] = box.children;
   const vars = bar.style.background.match(/var\(--dhm-elevation-(\d+)\)/g).map(v => Number(v.match(/\d+/)[0]));
   assert.deepStrictEqual(vars, LEGEND_M);
   assert(!/#[0-9a-f]{3,8}\b|rgb/i.test(bar.style.background), 'a hardcoded colour: ' + bar.style.background);
   assert(/^linear-gradient\(to right, var\(--dhm-elevation-0\) 0%, /.test(bar.style.background), bar.style.background);
-  assert.deepStrictEqual(scale.children.map(c => c.textContent), ['0', '50', '100', '175 m']);
-  assert.deepStrictEqual(scale.children.map(c => c.style.left), ['0%', (50 / 175 * 100) + '%', (100 / 175 * 100) + '%', '100%']);
+  assert.deepStrictEqual(scale.children.map(c => c.textContent), ['0', '5', '15', '25', '40', '65', '175 m']);
+  assert.deepStrictEqual(scale.children.map(c => c.style.left), [0, 2, 4, 6, 8, 10, 14].map(i => (i / 14 * 100) + '%'));
   // Nothing went through innerHTML.
   const walk = (n) => (n.children || []).every(c => c.nodeType === 3 || (c.nodeType === 1 && walk(c)));
   assert(walk(box));
