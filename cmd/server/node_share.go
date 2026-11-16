@@ -452,20 +452,27 @@ func nodeCardQueryOK(q url.Values) bool {
 	return true
 }
 
-// ShareClientConfig is the `share` block of /api/config/client (#811 M4).
-// Present only while share.nodes.enabled is on: it tells the node page
-// that Copy URL may hand out /p?node= links, for which roles, and how the
-// card looks. Nothing else of the share config reaches the browser.
+// ShareClientConfig is the `share` block of /api/config/client (#811 M4,
+// #812 M4). Present only while share.nodes.enabled or share.packets.enabled
+// is on: it tells the node page that Copy URL may hand out /p?node= links,
+// and for which roles; the packet page and View Path that Copy link may
+// hand out /p?packet= links; and how the card looks. Nothing else of the
+// share config reaches the browser. With node sharing alone it is #811 M4's
+// block: packets is omitted while false, roles while node sharing is off.
 type ShareClientConfig struct {
-	Nodes bool                 `json:"nodes"`
-	Roles []string             `json:"roles"` // nodecard.CardedRoles
-	Card  *DHMCardClientConfig `json:"card"`  // map.dhm.profile.card's theme and names
+	Nodes   bool                 `json:"nodes"`
+	Packets bool                 `json:"packets,omitempty"`
+	Roles   []string             `json:"roles,omitempty"` // nodecard.CardedRoles
+	Card    *DHMCardClientConfig `json:"card"`            // map.dhm.profile.card's theme and names
 }
 
 func (s *Server) shareClientConfig() *ShareClientConfig {
-	c := s.nodeCards
-	if c == nil {
-		return nil
+	n, p := s.nodeCards, s.packetCards
+	switch {
+	case n != nil:
+		return &ShareClientConfig{Nodes: true, Packets: p != nil, Roles: nodecard.CardedRoles(), Card: cardClientConfig(n.look)}
+	case p != nil:
+		return &ShareClientConfig{Packets: true, Card: cardClientConfig(p.look)}
 	}
-	return &ShareClientConfig{Nodes: true, Roles: nodecard.CardedRoles(), Card: cardClientConfig(c.look)}
+	return nil
 }

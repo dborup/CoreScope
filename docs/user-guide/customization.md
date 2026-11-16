@@ -74,6 +74,14 @@ server without the Path profile tool, the switch has a **Share previews**
 section of its own on the Display tab. See
 [Share previews for node links](../node-share-previews.md).
 
+### Share previews for packet links
+
+When the server shares packet cards (`share.packets.enabled`), the same
+switch also decides what **Copy link** on a packet's detail pane, on the
+`#/packet/<id>` page and in the **View Path** modal hands out: a link that
+shows a card of the packet's path in chats, or the plain packet link. See
+[Share previews for packet links](../share-previews.md#packet-links).
+
 ## Live preview
 
 Changes apply instantly as you edit. You see the result in real time without saving.

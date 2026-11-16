@@ -4170,9 +4170,10 @@
     const copyLinkBtn = panel.querySelector('.copy-link-btn');
     if (copyLinkBtn) {
       copyLinkBtn.addEventListener('click', () => {
-        const pktHash = copyLinkBtn.dataset.packetHash;
-        const obsParam = selectedObservationId ? `?obs=${selectedObservationId}` : '';
-        const url = pktHash ? `${location.origin}/#/packets/${pktHash}${obsParam}` : `${location.origin}/#/packets/${copyLinkBtn.dataset.packetId}${obsParam}`;
+        // #812 M4: /p?packet=<hash> when packet sharing is on (a chat
+        // previews it as the packet card), else the plain link of before;
+        // a selected observation keeps the plain ?obs= link.
+        const url = window.PacketShare.copyURL(copyLinkBtn.dataset.packetHash, { obs: selectedObservationId || null, id: copyLinkBtn.dataset.packetId });
         window.copyToClipboard(url, () => {
           copyLinkBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg> Copied!';
           setTimeout(() => { copyLinkBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-link"/></svg> Copy Link'; }, 1500);

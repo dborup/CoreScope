@@ -320,7 +320,10 @@
     var copyLinkBtn = document.getElementById('packetPathCopyLink');
     if (copyLinkBtn) {
       copyLinkBtn.addEventListener('click', function () {
-        var url = options.shareURL || location.origin + '/#/packets/' + encodeURIComponent(hash) + '?viewPath=1';
+        // #812 M4: /p?packet=<hash>&viewPath=1 when packet sharing is on
+        // (public/node-share.js), else this plain link.
+        var url = options.shareURL || (window.PacketShare ? window.PacketShare.copyURL(hash, { viewPath: true })
+          : location.origin + '/#/packets/' + encodeURIComponent(hash) + '?viewPath=1');
         if (typeof window.copyToClipboard === 'function') {
           window.copyToClipboard(url, function () {
             copyLinkBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg>';

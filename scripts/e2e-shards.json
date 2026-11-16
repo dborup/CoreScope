@@ -260,6 +260,18 @@
       "measurementNote": "New suite; #811 M4 node share links end to end on its own Go server (ports from 13950, a migrated copy of the fixture, share.nodes.enabled on, no map.dhm): from cold starts with real clicks at 1440x900, Nodes, search and a repeater's row open the side pane whose Copy URL hands out /p?node=<pk>, Details and the node page's Copy URL hand out the same link, Copy short URL stays a #/nodes/ prefix link, a companion gets the plain link in both places, and the customizer's own Share previews section turns it off and on by a click; the copied link opened cold at 1440 and at 375x560 lands on #/nodes/<pk> with one document request and Back to the page before; a 375x560 touch phone reaches it by taps (More, Nodes, search, row, Copy URL); the og:image card loads at 1200x630 at 1440 and 375 px; with an intercepted dhm block (profile, share, dhm.card) the one switch sits in the Terrain Profile section with the both-card-types hint and the card look, and off makes node Copy URL plain; then a second, real server with share.nodes.enabled off sends no share block, Copy URL is the plain link and the card is 404. About 25s locally; no CI duration measured yet. Assigned to shard 3 next to the other suites that start their own server (#315)."
     },
     {
+      "file": "test-issue-812-m4-packet-share-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "CORESCOPE_SERVER_BIN": "./corescope-server",
+        "CORESCOPE_MIGRATE_BIN": "./corescope-migrate"
+      },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #812 M4 packet share links end to end on its own Go server (ports from 13900, a migrated copy of the fixture, share.packets.enabled on, no node sharing, no map.dhm): at 1440x900 the fixture GRP_TXT's detail Copy Link hands out /p?packet=<hash>, its View Path modal's Copy link /p?packet=<hash>&viewPath=1, a selected observation keeps the plain ?obs= link, the standalone #/packet/<id> page hands out the /p link, and the customizer's own Share previews section turns both off and on by a click; the copied links opened cold at 1440 and at 375x560 land on #/packets/<hash> (View Path: with the modal open) with one document request and Back to the page before; a 375x560 touch phone reaches both by taps from a cold start (Packets, a row, Copy Link, View Path, Copy link); the preview page of the GRP_TXT holds no message text, channel or sender; the og:image card loads at 1200x630 at 1440 and 375 px; then a second, real server with share.packets.enabled off sends no share block, both Copy links are plain, the card is 404 and /p?packet= still lands. About 40s locally; no CI duration measured yet. Assigned to shard 3 next to the #811 M4 suite, which also starts its own server (#315)."
+    },
+    {
       "file": "test-issue-727-share-preview.js",
       "shard": 3,
       "env": {
