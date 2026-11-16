@@ -454,6 +454,15 @@
     return r ? { lat: r.lat, lon: r.lon } : null;
   }
 
+  /* sightLine is a measured profile's line A→B with the antenna heights
+   * it was drawn at, for the oblique photo's line of sight (#737 M3c),
+   * or null. */
+  function sightLine(data) {
+    var a = endPoint(data, 'a'), b = endPoint(data, 'b');
+    if (!a || !b) return null;
+    return { a: a, b: b, ha: clampHeight(data.a.antennaM), hb: clampHeight(data.b.antennaM) };
+  }
+
   /* pointAt is chart sample i as a map point: the #781 cursor's own
    * mapping (its fraction of the path, interpolated as the map draws the
    * line), so the photo is of the point the cursor showed. */
@@ -1942,7 +1951,8 @@
         return function () {
           var p = endPoint(drawn && drawn.data, side);
           var ref = state[side];
-          return p && { lat: p.lat, lon: p.lon, label: label + ': ' + endpointLabel(ref, nodes[side] && nodes[side].name) };
+          return p && { lat: p.lat, lon: p.lon, label: label + ': ' + endpointLabel(ref, nodes[side] && nodes[side].name),
+            line: sightLine(drawn && drawn.data) };
         };
       }
       [['a', 'A'], ['b', 'B']].forEach(function (s) {
@@ -1953,7 +1963,8 @@
       });
       ui.sfPoint = SF.actionButton({ cls: 'tp-seg-btn tp-sf-btn', testid: 'tp-sf-point', text: 'Chart point', icon: false, cfg: opts.skraafoto,
         getPoint: function () {
-          return picked && { lat: picked.lat, lon: picked.lon, label: 'Profile point, ' + fmtDistance(picked.distanceM) + ' from A' };
+          return picked && { lat: picked.lat, lon: picked.lon, label: 'Profile point, ' + fmtDistance(picked.distanceM) + ' from A',
+            line: sightLine(drawn && drawn.data) };
         } });
       ui.sfRow.appendChild(ui.sfPoint);
       setPicked(null);
@@ -2564,6 +2575,7 @@
     // #737 M2: the node-detail fix rule and the photo points.
     hasFix: hasFix,
     endPoint: endPoint,
+    sightLine: sightLine,
     pointAt: pointAt,
     chartIndexAt: chartIndexAt,
     // #772 F4: the fit margin, read back by tests instead of copied in.
