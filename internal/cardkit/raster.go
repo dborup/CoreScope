@@ -12,6 +12,11 @@ import (
 // FracBits fractional bits; coverage is 0..255.
 type Canvas struct {
 	Img *image.RGBA
+
+	// Polyline's per-pixel coverage, allocated on first use and cleared
+	// after every call, and the pixels it touched.
+	mask    []uint8
+	touched []int32
 }
 
 const (

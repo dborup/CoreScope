@@ -261,7 +261,7 @@ func count(p *int) (string, bool) {
 	if p == nil || *p < 0 {
 		return "", false
 	}
-	return fmtCount(*p), true
+	return cardkit.FmtCount(*p), true
 }
 
 func airtimeTile(label string, p *float64) (tile, bool) {
@@ -283,7 +283,7 @@ func airtimeText(pct float64) string {
 	if pct > 0 && pct < 0.1 {
 		return "<0.1%"
 	}
-	s := toFixed1(pct) + "%"
+	s := cardkit.ToFixed1(pct) + "%"
 	if pct > 0 {
 		return "≥" + s
 	}
@@ -294,30 +294,6 @@ func airtimeText(pct float64) string {
 // the one decimal shown, so "10.0%" is never unflagged.
 func airtimeOver(pct float64) bool {
 	return math.Floor(float64(pct*10)+0.5)/10 >= warnPct
-}
-
-// toFixed1 is JS Number.prototype.toFixed(1): the exact binary value
-// rounded to one decimal, an exact tie (x.25, x.75) rounded up, where Go's
-// formatter would round it to even.
-func toFixed1(v float64) string {
-	if q := float64(v * 4); q == math.Trunc(q) && float64(v*2) != math.Trunc(float64(v*2)) {
-		v = math.Ceil(float64(v*10)) / 10
-	}
-	return strconv.FormatFloat(v, 'f', 1, 64)
-}
-
-// fmtCount writes v with a comma between thousands, as toLocaleString does
-// in English.
-func fmtCount(v int) string {
-	s := strconv.Itoa(v)
-	var b strings.Builder
-	for i, c := range s {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			b.WriteByte(',')
-		}
-		b.WriteRune(c)
-	}
-	return b.String()
 }
 
 // RelativeTime is the Go twin of public/app.js timeAgo, measured against
