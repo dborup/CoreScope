@@ -64,8 +64,18 @@ type packetShareEnv struct {
 // the store and the DB.
 func newPacketShareEnv(t testing.TB, enabled bool, edit func(*Config)) *packetShareEnv {
 	t.Helper()
+	return newPacketShareEnvSeeded(t, enabled, edit, nil)
+}
+
+// newPacketShareEnvSeeded runs seed on the DB before the store loads, so
+// the store sees what it writes.
+func newPacketShareEnvSeeded(t testing.TB, enabled bool, edit func(*Config), seed func(*DB)) *packetShareEnv {
+	t.Helper()
 	db := setupTestDB(t)
 	seedPacketShare(t, db)
+	if seed != nil {
+		seed(db)
+	}
 	cfg := &Config{Port: 3000}
 	cfg.Share.Packets.Enabled = enabled
 	cfg.Areas = map[string]AreaEntry{"MJ": {Label: "Midtjylland", LatMin: fptr(55.8), LatMax: fptr(56.6), LonMin: fptr(8.1), LonMax: fptr(10.9)}}
@@ -573,6 +583,29 @@ func TestPacketShare_HiddenFirstObserverFallsBackToCounts(t *testing.T) {
 	}
 }
 
+// #854 review, finding 1: the touched areas come from the visible
+// positions only. One area surrounds only the hidden relay.
+func TestPacketShare_AreasFromVisiblePositionsOnly(t *testing.T) {
+	hidden := func(c *Config) {
+		c.Areas = map[string]AreaEntry{"HID": {Label: "Hidden Valley", LatMin: fptr(56.24), LatMax: fptr(56.26), LonMin: fptr(9.64), LonMax: fptr(9.66)}}
+	}
+	// Unfiltered, the hidden relay's area is touched: the property can fail.
+	if ps := newPacketShareEnv(t, true, hidden).share(t, psFirstUncounted); len(ps.areas) != 1 || ps.areas[0] != "Hidden Valley" || len(ps.in.Areas) != 1 {
+		t.Fatalf("unfiltered: areas %q, %d rings", ps.areas, len(ps.in.Areas))
+	}
+	e := newPacketShareEnv(t, true, func(c *Config) {
+		hidden(c)
+		c.SetHiddenNamePrefixes([]string{"Secret"})
+	})
+	ps := e.share(t, psFirstUncounted)
+	if len(ps.areas) != 0 || len(ps.in.Areas) != 0 {
+		t.Errorf("areas %q / %d rings leak the hidden relay's area", ps.areas, len(ps.in.Areas))
+	}
+	if body := e.get("/p?packet=" + psFirstUncounted).Body.String(); strings.Contains(body, "Hidden Valley") {
+		t.Error("the hidden relay's area is named in the preview")
+	}
+}
+
 // #852 review, finding 5: the first observation is visible but its
 // observer's deepest branch went through a hidden relay. Naming that
 // observer while the count leaves it out would tell that a branch is
@@ -672,14 +705,63 @@ func TestPacketShare_NamesOff(t *testing.T) {
 	}
 }
 
+// #854 review, finding 2: the advert's own decoded name is checked too. A
+// node renamed out of a hidden prefix still hides its old adverts.
+func TestPacketShare_AdvertDecodedNameAlone(t *testing.T) {
+	e := newPacketShareEnv(t, true, func(c *Config) { c.SetHiddenNamePrefixes([]string{"Secret"}) })
+	site := e.siteDocument(t)
+	h := "a900000000000009"
+	seedSharePacket(t, e.srv.db, h, 4, 1, `{"type":"ADVERT","pubKey":"`+psR1+`","name":"Secret Old Name"}`, psT0)
+	seedShareObservation(t, e.srv.db, h, psO2, nil, psT0)
+	if w := e.get("/p?packet=" + h); w.Code != 404 || w.Body.String() != site {
+		t.Errorf("an advert under a hidden old name: %d, site document %t", w.Code, w.Body.String() == site)
+	}
+	if w := e.get("/api/packets/" + h + "/card.png"); w.Code != 404 {
+		t.Errorf("card: %d", w.Code)
+	}
+}
+
+// #854 review, finding 3: an advert whose origin cannot be read fails
+// closed.
+func TestPacketShare_UnreadableAdvertOriginRefused(t *testing.T) {
+	e := newPacketShareEnv(t, true, nil)
+	site := e.siteDocument(t)
+	for h, decoded := range map[string]string{
+		"aa0000000000000a": `{"type":"ADVERT","name":"No Key"}`,
+		"ab0000000000000b": `{"type":"ADVERT","pubKey":"not-hex","name":"Bad Key"}`,
+		"ac0000000000000c": `{"type":"ADVERT","pubKey":42,"name":"Unreadable"}`,
+	} {
+		seedSharePacket(t, e.srv.db, h, 4, 1, decoded, psT0)
+		seedShareObservation(t, e.srv.db, h, psO2, nil, psT0)
+		if w := e.get("/p?packet=" + h); w.Code != 404 || w.Body.String() != site {
+			t.Errorf("%s: %d, site document %t", decoded, w.Code, w.Body.String() == site)
+		}
+		if w := e.get("/api/packets/" + h + "/card.png"); w.Code != 404 {
+			t.Errorf("%s: card %d", decoded, w.Code)
+		}
+	}
+	// A readable advert seeded the same way does get a page.
+	h := "ad0000000000000d"
+	seedSharePacket(t, e.srv.db, h, 4, 1, `{"type":"ADVERT","pubKey":"`+psR1+`","name":"Relay One"}`, psT0)
+	seedShareObservation(t, e.srv.db, h, psO2, nil, psT0)
+	if w := e.get("/p?packet=" + h); w.Code != 200 {
+		t.Errorf("control advert: %d", w.Code)
+	}
+}
+
 func TestPacketShare_XSSNamesAreInert(t *testing.T) {
 	evil := `<script>alert(1)</script>"><img src=x onerror=alert(2)>&amp;`
-	e := newPacketShareEnv(t, true, nil)
-	for _, q := range []string{`UPDATE observers SET name = ? WHERE id = '` + psO1 + `'`,
-		`UPDATE transmissions SET decoded_json = json_set(decoded_json, '$.name', ?) WHERE hash = '` + psAdvert + `'`} {
-		if _, err := e.srv.db.conn.Exec(q, evil); err != nil {
-			t.Fatal(err)
+	// Written before the store loads: the lookup reads the store first.
+	e := newPacketShareEnvSeeded(t, true, nil, func(db *DB) {
+		for _, q := range []string{`UPDATE observers SET name = ? WHERE id = '` + psO1 + `'`,
+			`UPDATE transmissions SET decoded_json = json_set(decoded_json, '$.name', ?) WHERE hash = '` + psAdvert + `'`} {
+			if _, err := db.conn.Exec(q, evil); err != nil {
+				t.Fatal(err)
+			}
 		}
+	})
+	if got := e.share(t, psAdvert).in.AdvertName; got != evil {
+		t.Fatalf("the share sees advert name %q, not the hostile one", got)
 	}
 	for _, h := range []string{psFlood, psAdvert} {
 		body := e.get("/p?packet=" + h).Body.String()
