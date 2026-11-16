@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-839-map-phone-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #839 CS-Macmini rc19 findings 1, 2, 7, 8, 9 with an intercepted client config (staging base maps with a dummy token, DHM overlays with Aerial, monuments, antenna sites), a stubbed /api/masts with one 9-station site, a stubbed monument lookup and 1x1 third-party tiles: at 375x560 (light, dark), 360x640 and 640x360 the open layer list ends above the credit and real touch swipes (no scrollTop fallback) plus a real tap reach Nearby transmitters, and a refit (a row tapped, layers re-added) keeps the list's scroll position; with the antenna site on the left, in the middle and on the right the popup clears every map button (the path-profile ruler included) and the credit, its source link can be swiped to and its close button tapped without arming the ruler; the monument popup on the right, high and low, does the same; the antenna popup stays whole at 1440x900; the tap that closes the layer control asks for no monument info; Reset All forgets the layer control's hillshade and monuments; the customizer logs no colour-format warning. 30 cases, about 110s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-848-node-last-advert-e2e.js",
       "shard": 2,
       "env": {
@@ -238,6 +246,18 @@
       "output": "e2e",
       "meanSeconds": 0,
       "measurementNote": "New suite; #727 M4 share previews in the customizer's Terrain Profile section with an intercepted dhm client-config block (profile, share and dhm.card) and a stubbed /api/terrain/profile: the switch (on by default), the operator's card theme and names (dark/shown and light/hidden) and the one palette line; off is stored as terrain.shareLinks false, survives a reload and makes Copy link hand out the #/map link, on again clears the override and hands out the /p link, all without re-measuring the open profile; resetAll restores it; no switch without dhm.share and none reachable with the Display tab disabled; the phone flow at 375x560 through the bottom nav's More sheet (48px row, a tap toggles and stores, no sideways overflow); axe in light and dark. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other #681/#727 DHM suites."
+    },
+    {
+      "file": "test-issue-811-m4-node-share-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "CORESCOPE_SERVER_BIN": "./corescope-server",
+        "CORESCOPE_MIGRATE_BIN": "./corescope-migrate"
+      },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #811 M4 node share links end to end on its own Go server (ports from 13950, a migrated copy of the fixture, share.nodes.enabled on, no map.dhm): from cold starts with real clicks at 1440x900, Nodes, search and a repeater's row open the side pane whose Copy URL hands out /p?node=<pk>, Details and the node page's Copy URL hand out the same link, Copy short URL stays a #/nodes/ prefix link, a companion gets the plain link in both places, and the customizer's own Share previews section turns it off and on by a click; the copied link opened cold at 1440 and at 375x560 lands on #/nodes/<pk> with one document request and Back to the page before; a 375x560 touch phone reaches it by taps (More, Nodes, search, row, Copy URL); the og:image card loads at 1200x630 at 1440 and 375 px; with an intercepted dhm block (profile, share, dhm.card) the one switch sits in the Terrain Profile section with the both-card-types hint and the card look, and off makes node Copy URL plain; then a second, real server with share.nodes.enabled off sends no share block, Copy URL is the plain link and the card is 404. About 25s locally; no CI duration measured yet. Assigned to shard 3 next to the other suites that start their own server (#315)."
     },
     {
       "file": "test-issue-727-share-preview.js",

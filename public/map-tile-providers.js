@@ -1064,10 +1064,34 @@
       if (on) h.params.set(o.hashParam, _onValues(o)[0]);
       else if (_offInHash(o)) h.params.set(o.hashParam, '0');
       else h.params.delete(o.hashParam);
-      var qs = h.params.toString();
-      // An empty hash gets a bare '#', so the parameter never lands in the
-      // query string (#682 review F4).
-      history.replaceState(history.state, '', location.pathname + location.search + (qs ? (h.base || '#') + '?' + qs : h.base));
+      _writeHash(h);
+    } catch (_) {}
+  }
+
+  // replaceState, so the SPA router does not re-run on the hash rewrite.
+  function _writeHash(h) {
+    var qs = h.params.toString();
+    // An empty hash gets a bare '#', so the parameter never lands in the
+    // query string (#682 review F4).
+    history.replaceState(history.state, '', location.pathname + location.search + (qs ? (h.base || '#') + '?' + qs : h.base));
+  }
+
+  /* #839 finding 8 — Reset All forgets every on/off choice made in a map's
+   * layer control (the overlays and the Aerial base map): the remembered
+   * value, and the parameter the control wrote into the current link, so a
+   * reload of this page starts from the defaults too. The map on screen
+   * keeps its layers until it is next built. */
+  function forgetMapLayerPrefs() {
+    var prefs = OVERLAYS.concat([ORTHO_PREF]);
+    prefs.forEach(function (o) {
+      try { if (window.localStorage) window.localStorage.removeItem(o.storageKey); } catch (_) {}
+    });
+    try {
+      var h = _hashParts(), changed = false;
+      prefs.forEach(function (o) {
+        if (h.params.has(o.hashParam)) { h.params.delete(o.hashParam); changed = true; }
+      });
+      if (changed) _writeHash(h);
     } catch (_) {}
   }
 
@@ -1620,6 +1644,7 @@
   window.MC_resolveOverlayOn            = resolveOverlayOn;
   window.MC_uncheckGroupSiblings        = _uncheckGroupSiblings;
   window.MC_forgetOverlayPref           = forgetOverlayPref;
+  window.MC_forgetMapLayerPrefs         = forgetMapLayerPrefs;
   // #734 — the DHM overlay defaults' one rule, shared with the customizer.
   window.MC_DHMOverlays = {
     SETTING_KEYS: DHM_SETTING_KEYS,
@@ -1778,6 +1803,8 @@
 
       // Use the dynamic controlPosition variable instead of a hardcoded string
       _control = L.control.layers(baseMaps, overlays, { position: controlPosition }).addTo(map);
+      // #839 — the list ends above the attribution and the bottom nav.
+      if (window.MapChromeFit) window.MapChromeFit.fitLayerControl(map, _control);
 
       if (overlayIds.length) {
         try {

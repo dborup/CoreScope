@@ -64,6 +64,16 @@ Shown only where the server offers the Map's Path profile tool:
   with the operator's saved palette, not the colours you set here. See
   [Share previews](../share-previews.md).
 
+### Share previews for node links
+
+When the server shares node cards (`share.nodes.enabled`), the same **Copy
+link shares a preview** switch also decides what **Copy URL** on a node's
+page and in the Nodes side pane hands out: a link that shows a card of the
+node in chats (repeaters, rooms and sensors), or the plain node link. On a
+server without the Path profile tool, the switch has a **Share previews**
+section of its own on the Display tab. See
+[Share previews for node links](../node-share-previews.md).
+
 ## Live preview
 
 Changes apply instantly as you edit. You see the result in real time without saving.

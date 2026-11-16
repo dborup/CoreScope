@@ -12,6 +12,10 @@
  *   location.origin + '<literal>'
  * occurrence in public/nodes.js and asserts each literal begins with '/#/'.
  * Reverting the fix (dropping the leading '/') re-introduces the failure.
+ *
+ * #811 M4 moved the Copy URL link into public/node-share.js (one builder
+ * for the node page and the side pane), so that file is scanned too, for
+ * `origin + '<literal>'`.
  */
 'use strict';
 const fs = require('fs');
@@ -24,26 +28,27 @@ function test(name, fn) {
   catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
 }
 
-const src = fs.readFileSync(path.join(__dirname, 'public/nodes.js'), 'utf8');
-
-// Match: location.origin + '<literal>'  (single or double quotes)
-const re = /location\.origin\s*\+\s*(['"])([^'"]*)\1/g;
+// Match: [location.]origin + '<literal>'  (single or double quotes)
 const sites = [];
-let m;
-while ((m = re.exec(src)) !== null) {
-  const lineNo = src.slice(0, m.index).split('\n').length;
-  sites.push({ literal: m[2], lineNo });
+for (const file of ['public/nodes.js', 'public/node-share.js']) {
+  const src = fs.readFileSync(path.join(__dirname, file), 'utf8');
+  const re = /\borigin\s*\+\s*(['"])([^'"]*)\1/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const lineNo = src.slice(0, m.index).split('\n').length;
+    sites.push({ literal: m[2], lineNo, file });
+  }
 }
 
 console.log('issue-1753 copy-URL slash regression');
 
-test('found at least 3 location.origin + literal sites in public/nodes.js', () => {
+test('found at least 3 origin + literal sites in public/nodes.js and public/node-share.js', () => {
   assert.ok(sites.length >= 3,
     'expected >=3 sites, found ' + sites.length + ': ' + JSON.stringify(sites));
 });
 
 for (const s of sites) {
-  test('public/nodes.js:' + s.lineNo + ' literal starts with "/#/" (got ' + JSON.stringify(s.literal) + ')', () => {
+  test(s.file + ':' + s.lineNo + ' literal starts with "/#/" (got ' + JSON.stringify(s.literal) + ')', () => {
     assert.ok(
       s.literal.startsWith('/#/') || s.literal.startsWith('/'),
       'location.origin + ' + JSON.stringify(s.literal) +
