@@ -18,6 +18,11 @@ package main
 //     the antennas: a straight line lowered by the earth's bulge at the
 //     profile's k-factor, drawn with skraafotoPathPoints points where it
 //     is in the frame. A missing height is the profile's point height.
+//   - With a line, the point's own place on it: the line's point nearest
+//     the point, at the line's height there (beam, #839), for a point on
+//     the line (a profile's end or chart point) only. The point is on the
+//     ground and the line at antenna height, so in an oblique photo they
+//     are apart by that height's image; the viewer draws the drop.
 //   - Per direction the search has up to skraafoto.SearchLimit photos;
 //     the one shown is the one whose image centre is nearest the point,
 //     in front and in frame first, else the API's first.
@@ -39,6 +44,10 @@ const (
 	// skraafotoPathPoints is how many points a line of sight is drawn
 	// with in a photo.
 	skraafotoPathPoints = 32
+	// skraafotoBeamMaxM is how far off the line a point may be and still
+	// have a beam: a chart point is on the line to ~1 m (5 decimals) plus
+	// the gap between the map's straight line and UTM's on a long path.
+	skraafotoBeamMaxM = 25
 	// skraafotoGroundEntries bounds the height cache: 4 bytes a point.
 	skraafotoGroundEntries = 16384
 	skraafotoGroundTTL     = 7 * 24 * time.Hour
@@ -324,6 +333,22 @@ func skraafotoProject(ph *SkraafotoPhoto, c *skraafoto.Camera, e, n float64, g s
 		ph.Path[i] = skraafotoPixel(q)
 	}
 	ph.Approx = ph.Approx || apA || apB
+	// The beam: the line at t, its point nearest (e, n), as Line draws it.
+	l2 := (eb-ea)*(eb-ea) + (nb-na)*(nb-na)
+	if l2 == 0 {
+		return
+	}
+	t := math.Max(0, math.Min(1, ((e-ea)*(eb-ea)+(n-na)*(nb-na))/l2))
+	fe, fn := ea+(eb-ea)*t, na+(nb-na)*t
+	if math.Hypot(e-fe, n-fn) > skraafotoBeamMaxM {
+		return
+	}
+	ha, hb := ga+line.ha, gb+line.hb
+	q, front := c.At(skraafoto.Ground{E: fe, N: fn, H: ha + (hb-ha)*t - sag(t)})
+	if front && !math.IsInf(q.X, 0) && !math.IsInf(q.Y, 0) && !math.IsNaN(q.X) && !math.IsNaN(q.Y) {
+		bp := skraafotoPixel(q)
+		ph.Beam = &bp
+	}
 }
 
 // buildSkraafotoAnswer is the search response for the point at the

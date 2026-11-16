@@ -56,7 +56,13 @@
  *      of sight is drawn through the path's points and the first photo is
  *      the side view of A–B; the layer's aria-label says where the point
  *      is; and, on the phones of 9, the crosshair, the line and a tapped
- *      zoom from a cold start.
+ *      zoom from a cold start;
+ *  13. #839: on a cross-border profile A is offered and B, in the
+ *      Copernicus fill, is not, and Chart point goes with a point picked
+ *      in the fill; a path wholly abroad has no row; an empty answer's
+ *      message is centred with no empty Year box; from a profile a dotted
+ *      drop joins the crosshair to the line (the stub's beam), overview
+ *      and crop, with a note saying the line is at antenna height.
  *
  * The fixture's nodes are in California: the node used here is moved to
  * Aarhus in the stubbed /api/nodes answers (o.abroad keeps it where it is).
@@ -108,11 +114,14 @@ const FRAME = { width: 480, height: 320 };
 const PT = { x: 130.5, y: 210.2 };
 const LINE = [{ x: 20, y: 300 }, { x: 130.5, y: 210.2 }, { x: 470, y: 30 }];
 const CROP_BOX = '70.5,170.2,190.5,250.2';
+// #839: the line's point above the crosshair (the server's beam), on LINE.
+const BEAM = { x: 147.5, y: 201.2 };
 const CROP_MARKER = '240,160';
 const ZOOM = '[data-testid="sf-zoom"]';
 const MARKS = '[data-testid="sf-marks"]';
 const CROSS = '[data-testid="sf-cross"]';
 const LOS = '[data-testid="sf-los"]';
+const LOS_NOTE = '[data-testid="sf-los-note"]';
 // A north–south profile: its side view looks east (or west).
 const P_NS = '56.10000,10.20000,56.20000,10.20000';
 
@@ -183,7 +192,7 @@ function searchAnswer(q, o) {
       previewUrl: PREVIEW_PREFIX + c + '/' + id,
       frame: FRAME, point: PT, inFrame: !o.outOfFrame, approx: !!o.approx,
     };
-    if (q.get('path')) ph.path = LINE; // M3a: only when a path is asked for
+    if (q.get('path')) { ph.path = LINE; ph.beam = BEAM; } // M3a: only when a path is asked for; #839 beam
     return ph;
   });
   return { collection: c, year, years: [2025, 2023, 2021, 2019, 2017], photos, credit: CREDIT };
@@ -227,7 +236,8 @@ function searchAnswer(q, o) {
    * o.holdSearch: the first search waits until rec.release() is called.
    * o.nodeName: name rewrites the moved node's name. o.abroad leaves the
    * moved node at its own (Californian) position. o.firstVisit marks no
-   * gesture hint as seen. */
+   * gesture hint as seen. o.profile(body) rewrites the profile answer
+   * (#839). */
   async function newCtx(o) {
     o = o || {};
     const ctx = await browser.newContext({
@@ -280,7 +290,8 @@ function searchAnswer(q, o) {
     await ctx.route(url => new URL(url).pathname === PROFILE_PATH, async (route) => {
       const u = new URL(route.request().url());
       rec.profile.push(u);
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profileFor(u.searchParams)) });
+      const body = profileFor(u.searchParams);
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(o.profile ? o.profile(body) : body) });
     });
     // The node under test, in every /api/nodes answer (list, detail).
     await ctx.route(url => /^\/api\/nodes(\/|$)/.test(new URL(url).pathname), async (route) => {
@@ -619,6 +630,17 @@ function searchAnswer(q, o) {
       assert(/no oblique photos/i.test(await page.textContent(STATUS)), await page.textContent(STATUS));
       assert(rec.preview.length === 0, 'preview asked');
     });
+    await step('#839 no photos: the message is centred in the stage, with no empty Year box', async () => {
+      const g = await page.evaluate(() => {
+        const st = document.querySelector('[data-testid="sf-stage"]').getBoundingClientRect();
+        const t = document.querySelector('[data-testid="sf-status"]').getBoundingClientRect();
+        const y = document.querySelector('[data-testid="sf-year-wrap"]');
+        return { off: (t.left + t.right) / 2 - (st.left + st.right) / 2, year: y ? getComputedStyle(y).display : 'absent' };
+      });
+      assert(Math.abs(g.off) <= 2, 'the message is ' + g.off.toFixed(1) + ' px off the stage centre');
+      assert(g.year === 'none', 'the Year field shows with no year: ' + g.year);
+    });
+    await shot(page, '839-empty');
     await ctx.close();
   }
   {
@@ -803,6 +825,25 @@ function searchAnswer(q, o) {
   }
   const cropPath = (path) => path.map((p) => ({ x: (p.x - 70.5) * 4, y: (p.y - 170.2) * 4 }));
   const markLabel = (page) => page.getAttribute(MARKS, 'aria-label');
+  /* dropOn: the #839 drop runs from the crosshair at `from` to the beam
+   * at `to` (photo pixels), drawn on screen where the image puts them. */
+  async function dropOn(page, from, to) {
+    const r = await page.evaluate((s) => {
+      const img = document.querySelector(s.IMG), l = document.querySelector('[data-testid="sf-drop"]');
+      if (!l) return null;
+      const box = img.getBoundingClientRect();
+      const ctm = l.getScreenCTM();
+      const at = (x, y) => ({ x: ctm.a * x + ctm.c * y + ctm.e, y: ctm.b * x + ctm.d * y + ctm.f });
+      const m = window.Skraafoto.displayMap({ width: img.naturalWidth, height: img.naturalHeight }, { width: box.width, height: box.height });
+      const want = [s.from, s.to].map((p) => { const q = window.Skraafoto.toDisplay(p, m); return { x: box.x + q.x, y: box.y + q.y }; });
+      return { got: [at(l.x1.baseVal.value, l.y1.baseVal.value), at(l.x2.baseVal.value, l.y2.baseVal.value)], want,
+        dash: getComputedStyle(l).strokeDasharray };
+    }, { IMG, from, to });
+    assert(r, 'no drop line');
+    r.got.forEach((p, i) => assert(Math.abs(p.x - r.want[i].x) <= 1.5 && Math.abs(p.y - r.want[i].y) <= 1.5,
+      'drop end ' + i + ' at ' + JSON.stringify(p) + ', want ' + JSON.stringify(r.want[i])));
+    assert(r.dash && r.dash !== 'none', 'the drop is not dotted: ' + r.dash);
+  }
 
   {
     const { ctx, page, rec } = await newCtx({});
@@ -919,7 +960,12 @@ function searchAnswer(q, o) {
     await step('M3c profile: the line of sight through the path\'s points, the crosshair on the point', async () => {
       await losOnPath(page, LINE);
       await crossOnPoint(page, PT);
-      assert(await markLabel(page) === 'Point marked at the centre-left. Line of sight from A to B drawn on the photo.', await markLabel(page));
+      assert(await markLabel(page) === 'Point marked at the centre-left. Line of sight from A to B drawn on the photo, at antenna height; a dotted line drops from it to the point.', await markLabel(page));
+    });
+    await step('#839 profile: a dotted drop joins the crosshair to the line, and a note says why', async () => {
+      await dropOn(page, PT, BEAM);
+      assert(await page.isVisible(LOS_NOTE), 'no note');
+      assert(/drawn at antenna height/.test(await page.textContent(LOS_NOTE)), await page.textContent(LOS_NOTE));
     });
     await shot(page, '737-m3c-profile-line');
     await step('M3c profile: zoomed, the line is moved into the crop', async () => {
@@ -927,6 +973,7 @@ function searchAnswer(q, o) {
       await waitReady(page);
       await losOnPath(page, cropPath(LINE));
       await crossOnPoint(page, { x: 240, y: 160 });
+      await dropOn(page, { x: 240, y: 160 }, cropPath([BEAM])[0]);
     });
     await step('M3c profile: zoomed in a short window, the line stays on the photo, off the letterbox', async () => {
       const vp = page.viewportSize();
@@ -1244,6 +1291,46 @@ function searchAnswer(q, o) {
       assert(where.includes(evil), 'label: ' + where);
       assert(await page.evaluate(() => window.__sfXss === undefined), 'markup ran');
       assert(await page.$(DIALOG + ' img[src="x"]') === null, 'an <img> from the name');
+    });
+    await ctx.close();
+  }
+
+  // ── 13. #839: the profile's photo buttons only where DHM measured ─────────
+  {
+    // Cross-border: the second half filled from Copernicus (#738).
+    const { ctx, page } = await newCtx({ profile: (b) => Object.assign(b, {
+      coverage: { state: 'full', pct: 100, firstGapM: null, mixed: true, fill: [{ fromM: D / 2, toM: D, source: 'copdem-glo30', resolutionM: 30 }] },
+      attributionFill: 'Copernicus' }) });
+    await gotoProfile(page);
+    await page.waitForSelector(SF_ROW, { timeout: 5000 });
+    await step('#839 cross-border: A is offered, B (in the fill) is not', async () => {
+      assert(await page.isVisible(SF_A), 'A not offered in Denmark');
+      assert(!(await page.isVisible(SF_B)), 'B offered abroad');
+      assert(await page.isVisible(SF_POINT), 'no Chart point on a path partly in Denmark');
+    });
+    await step('#839 cross-border: a chart point in the fill takes Chart point away, one in Denmark brings it back', async () => {
+      const pr = await rect(page, PLOT + ' svg');
+      await page.mouse.click(pr.x + pr.w * sampleX(75) / VIEW_W, pr.y + pr.h / 2);
+      await page.waitForFunction((s) => document.querySelector(s).hidden, SF_POINT, { timeout: 3000 });
+      await page.mouse.click(pr.x + pr.w * sampleX(25) / VIEW_W, pr.y + pr.h / 2);
+      await page.waitForFunction((s) => { const b = document.querySelector(s); return !b.hidden && !b.disabled; }, SF_POINT, { timeout: 3000 });
+      assert(await page.isVisible(SF_ROW), 'the row went');
+    });
+    await shot(page, '839-cross-border');
+    await ctx.close();
+  }
+  {
+    // Wholly abroad: no DHM sample, so no samples at all (the server's shape).
+    const { ctx, page, rec } = await newCtx({ profile: (b) => Object.assign(b, {
+      a: Object.assign(b.a, { groundM: null }), b: Object.assign(b.b, { groundM: null }),
+      coverage: { state: 'none', pct: 0, firstGapM: 0 }, samples: [],
+      verdict: { state: 'unknown', model: 'dtm', criterion: 0.6, worstClearanceM: null, worstAtM: null, worstF1Fraction: null } }) });
+    await page.goto(`${BASE}/#/map?profile=${P}`, { waitUntil: 'domcontentloaded' });
+    await themeSettled(page);
+    await page.waitForSelector(PANEL + '.is-open [data-testid="tp-status"]', { timeout: 30000 });
+    await step('#839 wholly abroad: no oblique photo row, nothing asked', async () => {
+      assert(!(await page.isVisible(SF_ROW)), 'the row is offered on a path wholly abroad');
+      assert(rec.search.length === 0, 'searches ' + rec.search.length);
     });
     await ctx.close();
   }

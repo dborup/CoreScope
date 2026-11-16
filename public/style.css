@@ -6896,6 +6896,7 @@ body.embed #app.app-fixed {
 .sf-dir.active { background: var(--selected-bg); border-color: var(--accent); }
 .sf-dir:disabled { opacity: 0.45; cursor: default; }
 .sf-year-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--text-muted); }
+.sf-year-wrap[hidden] { display: none; }
 .sf-year {
   min-width: 88px;
   min-height: 44px;
@@ -6924,9 +6925,12 @@ body.embed #app.app-fixed {
   outline: 2px solid var(--accent, var(--link-color));
   outline-offset: 2px;
 }
+/* A column: the frame (empty while there is no photo) stacks above the
+   status, which stays centred instead of beside it (#839). */
 .sf-stage {
   flex: 0 0 auto;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: 120px;
@@ -6954,11 +6958,14 @@ body.embed #app.app-fixed {
 .sf-cross-line { stroke: var(--danger); stroke-width: 2.5; }
 .sf-cross-approx .sf-cross-line { stroke-dasharray: 3 3; }
 .sf-los { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 8 5; }
+/* #839: the drop from the crosshair (the ground) up to the line (antenna height). */
+.sf-drop-halo { stroke: var(--card-bg); stroke-width: 4; opacity: 0.85; }
+.sf-drop { stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 1 4; }
 .sf-status { margin: 0; padding: 24px 16px; text-align: center; font-size: var(--fs-sm); color: var(--text-muted); }
 .sf-dialog[data-state="error"] .sf-status { color: var(--danger); }
 .sf-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 12px; margin: 4px 14px 0; font-size: var(--fs-sm); }
 .sf-full { display: inline-flex; align-items: center; min-height: 44px; color: var(--link-color, var(--accent)); font-weight: var(--fw-semibold, 600); }
-.sf-note, .sf-credit { margin: 2px 14px 0; font-size: 12px; line-height: 1.35; color: var(--text-muted); }
+.sf-los-note, .sf-note, .sf-credit { margin: 2px 14px 0; font-size: 12px; line-height: 1.35; color: var(--text-muted); }
 .sf-credit { margin-bottom: 12px; }
 .sf-credit a { color: inherit; text-decoration: underline; }
 /* A touch target of their own on a phone, like the profile's credit links (#711). */

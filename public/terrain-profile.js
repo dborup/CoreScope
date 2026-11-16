@@ -472,6 +472,50 @@
     return { a: a, b: b, ha: clampHeight(data.a.antennaM), hb: clampHeight(data.b.antennaM) };
   }
 
+  /* dhmAt answers whether DHM itself measured the profile at d metres
+   * from A: not in a Copernicus fill range (#738) and not where the
+   * nearest sample has no data. The server decides that per sample with
+   * its foreign-land polygon (internal/dhm boundary.go), which the
+   * Skråfoto block's bounds rectangle cannot: it takes in Skåne and
+   * Flensburg (#839). A profile without samples rests on its coverage. */
+  function dhmAt(data, d) {
+    var cov = (data && data.coverage) || {};
+    if (cov.state === 'none' || !isFinite(d)) return false;
+    var fill = Array.isArray(cov.fill) ? cov.fill : [];
+    for (var i = 0; i < fill.length; i++) {
+      var r = fill[i];
+      if (r && d >= Number(r.fromM) && d <= Number(r.toM)) return false;
+    }
+    var s = data.samples;
+    if (!Array.isArray(s) || !s.length) return true;
+    // The samples run from A to B: the nearest one by bisection.
+    var lo = 0, hi = s.length - 1;
+    while (hi - lo > 1) {
+      var mid = (lo + hi) >> 1;
+      if (Number(s[mid].d) <= d) lo = mid; else hi = mid;
+    }
+    var near = Math.abs(Number(s[hi].d) - d) < Math.abs(d - Number(s[lo].d)) ? s[hi] : s[lo];
+    return near.dtm !== null && near.dtm !== undefined;
+  }
+
+  /* dhmStretch: some sample of the profile was measured by DHM, so a
+   * chart point can have photos. */
+  function dhmStretch(data) {
+    var s = data && data.samples;
+    if (!Array.isArray(s)) return false;
+    for (var i = 0; i < s.length; i++) if (dhmAt(data, Number(s[i].d))) return true;
+    return false;
+  }
+
+  /* photoCovered: the oblique photos have point p, d metres from A along
+   * the measured profile data: inside the Skråfoto block's bounds (the
+   * #818 node-action test, Skraafoto.covered) and measured by DHM there
+   * (dhmAt). Elsewhere the search always answers empty (#839). */
+  function photoCovered(data, cfg, p, d) {
+    var SF = global.Skraafoto;
+    return !!(p && SF && typeof SF.covered === 'function' && SF.covered(cfg, p) && dhmAt(data, d));
+  }
+
   /* pointAt is chart sample i as a map point: the #781 cursor's own
    * mapping (its fraction of the path, interpolated as the map draws the
    * line), so the photo is of the point the cursor showed. */
@@ -761,7 +805,9 @@
     if (cov.state === 'partial') {
       detail = 'No verdict, path leaves Denmark. The profile covers ' + fmtPct(cov.pct) + ' % of the path.';
     } else if (cov.state === 'none') {
-      detail = 'Terrain data is available for Denmark only. This path lies outside coverage.';
+      // #839: a cross-border path gets the Copernicus fill (#738); a path
+      // with no DHM sample gets no data at all (the card's mainChip).
+      detail = 'This path lies entirely outside Denmark, so there is no terrain data for it.';
     } else {
       detail = 'No elevation data for this path, so there is no clearance verdict.';
     }
@@ -1247,9 +1293,12 @@
     var txt = 'Terrain profile from ' + a + ' to ' + b + ', ' + fmtDistance(data.distanceM) + '. ' + chip.label + '. ' + chip.detail;
     var note = mixedNote(data);
     if (note) txt += ' ' + note;
+    // The verdict's worst point is the smallest Fresnel ratio, not
+    // always the least clearance on the path (#839): named for what it
+    // is, as the share card's AltText names it.
     var worst = data.verdict && data.verdict.worstClearanceM;
     if (worst !== null && worst !== undefined && isFinite(Number(worst))) {
-      txt += ' Worst clearance ' + fmtMetres(worst) + ' at ' + fmtDistance(data.verdict.worstAtM) + ' along the path.';
+      txt += ' Tightest point for the Fresnel zone: clearance ' + fmtMetres(worst) + ' at ' + fmtDistance(data.verdict.worstAtM) + ' along the path.';
     }
     if (surf && surf.show) txt += ' ' + surf.label + '. ' + surf.detail + (surf.note ? ' ' + SURFACE_NOTE : '');
     // The note rides with the classified band; an unavailable
@@ -2036,10 +2085,12 @@
             line: sightLine(drawn && drawn.data) };
         };
       }
+      ui.sfEnds = {};
       [['a', 'A'], ['b', 'B']].forEach(function (s) {
         var b = SF.actionButton({ cls: 'tp-seg-btn tp-sf-btn', testid: 'tp-sf-' + s[0], text: s[1], icon: false, cfg: opts.skraafoto,
           title: 'Oblique aerial photo at ' + s[1], getPoint: end(s[0], s[1]) });
         b.setAttribute('aria-label', 'Oblique photo at ' + s[1]);
+        ui.sfEnds[s[0]] = b;
         ui.sfRow.appendChild(b);
       });
       ui.sfPoint = SF.actionButton({ cls: 'tp-seg-btn tp-sf-btn', testid: 'tp-sf-point', text: 'Chart point', icon: false, cfg: opts.skraafoto,
@@ -2077,6 +2128,25 @@
         : 'Click or tap the chart to pick a point; Enter picks the keyboard cursor\'s point.';
       ui.sfPoint.setAttribute('aria-label', picked ? 'Oblique photo at the chart point, ' + fmtDistance(picked.distanceM) + ' from A'
         : 'Oblique photo at a chart point: click or tap the chart first');
+      syncPhotoRow();
+    }
+
+    /* syncPhotoRow offers a photo button only where the photos are
+     * (photoCovered, #839): A and B each by their end, "Chart point" while
+     * DHM measured some of the path and the point picked, if any, is on
+     * it. The row goes with its last button, and with the chart. */
+    function syncPhotoRow() {
+      var data = drawn && drawn.data;
+      var cfg = opts.skraafoto;
+      var a = !!data && photoCovered(data, cfg, endPoint(data, 'a'), 0);
+      var b = !!data && photoCovered(data, cfg, endPoint(data, 'b'), Number(data.distanceM));
+      ui.sfEnds.a.hidden = !a;
+      ui.sfEnds.b.hidden = !b;
+      // dhmStretch walks the samples: once per drawn profile, not per pick.
+      if (data && drawn.stretch === undefined) drawn.stretch = dhmStretch(data);
+      ui.sfPoint.hidden = !data || !(a || b || drawn.stretch)
+        || !!(picked && !photoCovered(data, cfg, picked, picked.distanceM));
+      ui.sfRow.hidden = !data || (!a && !b && ui.sfPoint.hidden);
     }
 
     /* setDrawn records the profile now on the chart (null: none), which
@@ -2085,7 +2155,6 @@
       drawn = data ? { data: data, g: chartGeometry(data) } : null;
       if (!ui.sfRow) return;
       setPicked(null);
-      ui.sfRow.hidden = !drawn;
     }
 
     function swapControl() {
@@ -2374,16 +2443,18 @@
       setMixed(data);
       setClassified(data);
       var names = { nameA: nodes.a && nodes.a.name, nameB: nodes.b && nodes.b.name };
-      var drawn = !!(data.samples && data.samples.length);
+      var hasSamples = !!(data.samples && data.samples.length);
       /* The credit is a licence obligation, so it is one HTML line under
        * the chart rather than text inside the SVG: the chart box is
        * stretched to the panel width and in-SVG text came out ~3 px tall
        * on a 360 px phone, which is not an attribution anybody can read. */
-      ui.credit.hidden = false;
+      // ...and only when DHM data is shown: a path wholly outside Denmark
+      // used none (#839).
+      ui.credit.hidden = !!(data.coverage && data.coverage.state === 'none');
       // Either end on a default height caveats the whole verdict — a
       // customizer default included (#681 M6).
       ui.assumed.hidden = !(assumedHeight(data.a, origin.a) || assumedHeight(data.b, origin.b));
-      if (!drawn) {
+      if (!hasSamples) {
         setStatus(chip.detail, 'tp-empty');
       } else {
         // Sink: one SVG string from buildChart, where every node-controlled
@@ -2393,7 +2464,9 @@
         setDrawn(data);
         attachCursor(data, drawn.g);
       }
-      ui.detail.textContent = chip.detail;
+      // Without a plot the status line or the empty plot already says it
+      // (#839): a path wholly abroad has samples, all without data.
+      ui.detail.textContent = drawn && drawn.g ? chip.detail : '';
       var phys = data.physics || {};
       var parts = [];
       if (isFinite(Number(phys.freqMHz))) {
@@ -2671,6 +2744,10 @@
     // #737 M2: the node-detail fix rule and the photo points.
     hasFix: hasFix,
     endPoint: endPoint,
+    // #839: where the profile's oblique photos are.
+    dhmAt: dhmAt,
+    dhmStretch: dhmStretch,
+    photoCovered: photoCovered,
     sightLine: sightLine,
     pointAt: pointAt,
     chartIndexAt: chartIndexAt,

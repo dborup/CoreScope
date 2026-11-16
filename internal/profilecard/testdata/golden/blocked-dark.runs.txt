@@ -11,5 +11,5 @@ pin           18px bold    x=1152 y=368 w=  13 B
 axis-x        16px regular x=  96 y=524 w=   9 0
 axis-x        16px regular x= 607 y=524 w=  58 4.60 km
 axis-x        16px regular x=1118 y=524 w=  58 9.20 km
-summary       20px regular x=  24 y=574 w= 623 Worst clearance -56.9 m at 5.26 km · heights 12 m / 8 m · terrain only
+summary       20px regular x=  24 y=574 w= 771 Tightest Fresnel point: clearance -56.9 m at 5.26 km · heights 12 m / 8 m · terrain only
 attribution   18px regular x=  24 y=604 w= 760 Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0 — data bearbejdet
