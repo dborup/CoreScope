@@ -5,7 +5,7 @@ value   44px bold    x=  24 y=252 w= 142 2d ago
 detail  20px regular x=  24 y=284 w= 215 2026-11-13 13:20 UTC
 label   22px regular x= 408 y=196 w= 101 Neighbors
 value   44px bold    x= 408 y=252 w=  24 1
-label   22px regular x= 792 y=196 w=  97 First seen
+label   22px regular x= 792 y=196 w= 101 First Seen
 value   44px bold    x= 792 y=252 w= 142 3d ago
 detail  20px regular x= 792 y=284 w= 215 2026-11-12 08:20 UTC
 label   22px regular x=  24 y=366 w=  95 Avg Hops
@@ -13,6 +13,6 @@ value   44px bold    x=  24 y=422 w=  24 1
 label   22px regular x= 408 y=366 w= 110 Own scope
 value   44px bold    x= 408 y=422 w=  25 *
 label   22px regular x= 792 y=366 w= 276 Estimated zero-hop interval
-value   44px bold    x= 792 y=422 w= 213 ≈ 60.5 min
+value   44px bold    x= 792 y=422 w= 201 ≈ 300 min
 detail  20px regular x= 792 y=454 w= 285 outside the settable 60–240 min
 asof    22px regular x=  24 y=594 w= 290 as of 2026-11-15 13:20 UTC

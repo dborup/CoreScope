@@ -63,6 +63,8 @@ func fxSensorFull() NodeCardInput {
 	in.FirstSeen = ago(3*24*time.Hour + 5*time.Hour)
 	in.AvgHops = ip(1)
 	in.OwnScope = sp("*")
-	in.ZeroHopInterval = &AdvertInterval{Seconds: 3630, Confidence: "high", Snapped: false}
+	// 300 min is past the settable 60–240 min (+10 %), so the estimator
+	// leaves it unsnapped (snapAdvertInterval): the note is honest (#861).
+	in.ZeroHopInterval = &AdvertInterval{Seconds: 300 * 60, Confidence: "high", Snapped: false}
 	return in
 }

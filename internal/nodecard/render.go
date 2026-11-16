@@ -258,6 +258,10 @@ type Clause struct {
 	// (last heard, first seen): it follows Value's wording, so the
 	// server's v leaves it out and buckets by the wording (#857).
 	AbsTime bool
+	// Scopes is every transported scope the card may draw (the tile fits
+	// as many as there is room for); Value names at most three. The
+	// server's v hashes them (#861).
+	Scopes []string
 }
 
 // Clauses are the stat clauses Render draws for in, in drawing order.
@@ -265,7 +269,7 @@ func Clauses(in NodeCardInput) []Clause {
 	ts := tiles(in)
 	out := make([]Clause, len(ts))
 	for i, t := range ts {
-		out[i] = Clause{Label: t.label, Value: t.value, Detail: t.detail, Over: t.over, AbsTime: t.absTime}
+		out[i] = Clause{Label: t.label, Value: t.value, Detail: t.detail, Over: t.over, AbsTime: t.absTime, Scopes: t.scopes}
 	}
 	return out
 }
@@ -298,7 +302,7 @@ func tiles(in NodeCardInput) []tile {
 	}
 	// #857, with the node page's labels and its rules for hiding a row.
 	if !in.FirstSeen.IsZero() {
-		ts = append(ts, timeTile("First seen", in.FirstSeen, in.AsOf))
+		ts = append(ts, timeTile("First Seen", in.FirstSeen, in.AsOf))
 	}
 	if p := in.AvgHops; p != nil && *p > 0 { // nodes.js: ${stats.avgHops ? … : ''}
 		ts = append(ts, tile{label: "Avg Hops", value: strconv.Itoa(*p)})
@@ -544,7 +548,10 @@ func (r *renderer) fitScopes(scopes []string, size, minSize, maxW int) (int, str
 			return minSize, s
 		}
 	}
-	rest := " +" + strconv.Itoa(len(scopes)-1)
+	rest := "" // one scope alone has nothing to count: no " +0" (#861)
+	if len(scopes) > 1 {
+		rest = " +" + strconv.Itoa(len(scopes)-1)
+	}
 	return minSize, r.fs.Fit(scopes[0], minSize, true, maxW-r.fs.Measure(rest, minSize, true)) + rest
 }
 

@@ -24,7 +24,7 @@ func fxRepeaterFull() NodeCardInput {
 }
 
 const fullLabels = "Last heard, Relayed 24 h, Relayed 1 h, Seen airtime 24 h, Busiest hour, Neighbors, " +
-	"First seen, Avg Hops, Own scope, Transported scopes, Estimated flood interval, Estimated zero-hop interval"
+	"First Seen, Avg Hops, Own scope, Transported scopes, Estimated flood interval, Estimated zero-hop interval"
 
 func TestTiles857Order(t *testing.T) {
 	if got := labels(tiles(fxRepeaterFull())); got != fullLabels {
@@ -39,7 +39,7 @@ func TestTiles857Order(t *testing.T) {
 	// for repeaters and rooms only), even when it is passed some.
 	sensor := fxRepeaterFull()
 	sensor.Role, sensor.Relay = "sensor", nil
-	want := "Last heard, Neighbors, First seen, Avg Hops, Own scope, Estimated flood interval, Estimated zero-hop interval"
+	want := "Last heard, Neighbors, First Seen, Avg Hops, Own scope, Estimated flood interval, Estimated zero-hop interval"
 	if got := labels(tiles(sensor)); got != want {
 		t.Errorf("sensor tiles %q, want %q", got, want)
 	}
@@ -53,7 +53,7 @@ func TestNew857FieldsAbsentDrop(t *testing.T) {
 		edit func(*NodeCardInput)
 		gone string
 	}{
-		{"no first seen", func(in *NodeCardInput) { in.FirstSeen = time.Time{} }, "First seen"},
+		{"no first seen", func(in *NodeCardInput) { in.FirstSeen = time.Time{} }, "First Seen"},
 		{"no avg hops (empty window)", func(in *NodeCardInput) { in.AvgHops = nil }, "Avg Hops"},
 		{"avg hops 0 (the node page hides a falsy avgHops)", func(in *NodeCardInput) { in.AvgHops = ip(0) }, "Avg Hops"},
 		{"negative avg hops", func(in *NodeCardInput) { in.AvgHops = ip(-2) }, "Avg Hops"},
@@ -133,7 +133,7 @@ func TestIntervalClause(t *testing.T) {
 		{true, AdvertInterval{3*3600 + 180, "high", true}, "≈ 3.1 h", "high confidence"},
 		{false, AdvertInterval{120 * 60, "medium", true}, "≈ 120 min", "medium confidence"},
 		{false, AdvertInterval{120, "high", true}, "≈ 2 min", "high confidence"},
-		{false, AdvertInterval{3630, "high", false}, "≈ 60.5 min", "outside the settable 60–240 min"},
+		{false, AdvertInterval{18030, "high", false}, "≈ 300.5 min", "outside the settable 60–240 min"},
 	} {
 		in := fxSensor()
 		label := "Estimated zero-hop interval"
@@ -155,7 +155,7 @@ func TestIntervalClause(t *testing.T) {
 func TestFirstSeenClause(t *testing.T) {
 	in := fxSensor()
 	in.FirstSeen = ago(412*24*time.Hour + time.Hour)
-	tl, ok := tileByLabel(tiles(in), "First seen")
+	tl, ok := tileByLabel(tiles(in), "First Seen")
 	if !ok || tl.value != "412d ago" || tl.detail != "2025-09-29 12:20 UTC" || !tl.absTime {
 		t.Errorf("first seen tile %+v (present %v)", tl, ok)
 	}
@@ -233,6 +233,44 @@ func TestTransportedScopesDrawn(t *testing.T) {
 	}
 }
 
+// One scope too long for its tile is cut with "…" and has no "+0" after
+// it: there is no other scope to count (#861 review F2). Firmware region
+// names run to 30 characters (RegionEntry.name[31]).
+func TestTransportedScopeSingleLongNoPlusZero(t *testing.T) {
+	in := fxRepeaterFull()
+	in.TransportedScopes = []string{"#dk-sydjylland-vestkyst-esbjerg-nord"}
+	_, runs, err := render(in, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := drawnValue(t, runs, "Transported scopes")
+	if strings.Contains(v, " +") || !strings.HasSuffix(v, "…") || !strings.HasPrefix(v, "#dk-") {
+		t.Errorf("one long scope drawn as %q, want it cut with \"…\" and no \"+N\"", v)
+	}
+	// Two long scopes still count the one not drawn.
+	in.TransportedScopes = append(in.TransportedScopes, "#dk-nordjylland-vendsyssel-hjoerring")
+	_, runs, _ = render(in, Options{})
+	if v := drawnValue(t, runs, "Transported scopes"); !strings.HasSuffix(v, "… +1") {
+		t.Errorf("two long scopes drawn as %q, want a \"… +1\" suffix", v)
+	}
+}
+
+// Clauses carries every scope the card may draw, not only the 3 the text
+// names, so the server's v can hash them (#861 review F1).
+func TestClauseCarriesDrawnScopes(t *testing.T) {
+	in := fxRepeaterFull()
+	in.TransportedScopes = []string{"#a", " ", "#b", "#c", "#d"}
+	for _, cl := range Clauses(in) {
+		if cl.Label == "Transported scopes" {
+			if got := strings.Join(cl.Scopes, ","); got != "#a,#b,#c,#d" {
+				t.Errorf("clause scopes %q, want the sanitised list", got)
+			}
+			return
+		}
+	}
+	t.Fatal("no transported scopes clause")
+}
+
 // Up to six clauses keep the M2 layout (3 columns, two rows, large values),
 // so a card without the new fields is unchanged; seven or eight use four
 // columns on the same rows, more a 4×3 grid, and none is ever dropped for
@@ -282,7 +320,7 @@ func TestLayoutDensity(t *testing.T) {
 // which ones they are.
 func TestClauseAbsTime(t *testing.T) {
 	for _, c := range Clauses(fxRepeaterFull()) {
-		want := c.Label == "Last heard" || c.Label == "First seen"
+		want := c.Label == "Last heard" || c.Label == "First Seen"
 		if c.AbsTime != want {
 			t.Errorf("%s: AbsTime %v", c.Label, c.AbsTime)
 		}

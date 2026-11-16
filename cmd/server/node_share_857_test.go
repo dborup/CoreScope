@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -107,7 +108,7 @@ func TestNodeShare857_Sources(t *testing.T) {
 		t.Errorf("zero-hop interval %+v", z)
 	}
 	desc := strings.Join(clauses(in), " · ")
-	for _, want := range []string{"First seen: 3h ago", "Avg Hops: 2", "Own scope: #dk-midtjylland", "Transported scopes: #dk, #dk-aarhus",
+	for _, want := range []string{"First Seen: 3h ago", "Avg Hops: 2", "Own scope: #dk-midtjylland", "Transported scopes: #dk, #dk-aarhus",
 		"Estimated flood interval: ≈ 47 h", "Estimated zero-hop interval: ≈ 120 min"} {
 		if !strings.Contains(desc, want) {
 			t.Errorf("clauses %q miss %q", desc, want)
@@ -240,6 +241,22 @@ func TestNodeShare857_Version(t *testing.T) {
 	same("own scope", func(in *nodecard.NodeCardInput) { s := "#dk"; in.OwnScope = &s }, false)
 	same("confirmed mark", func(in *nodecard.NodeCardInput) { in.OwnScopeConfirmed = false }, false)
 	same("transported scopes", func(in *nodecard.NodeCardInput) { in.TransportedScopes = append(in.TransportedScopes, "#se") }, false)
+	// The text names 3 scopes, but the tile draws as many as fit: a change
+	// past the third must move v too (#861 review F1).
+	four := func(last string) func(*nodecard.NodeCardInput) {
+		return func(in *nodecard.NodeCardInput) { in.TransportedScopes = []string{"#a", "#b", "#c", last} }
+	}
+	in4 := e.input(t, nsRepeater)
+	four("#d")(&in4)
+	v4 := e.c.version(in4)
+	in4e := e.input(t, nsRepeater)
+	four("#e")(&in4e)
+	if e.c.version(in4e) == v4 {
+		t.Error("a 4th drawn scope changed (#d → #e) but v did not")
+	}
+	if a, b := nodeCardBytes(t, in4), nodeCardBytes(t, in4e); bytes.Equal(a, b) {
+		t.Error("the check is vacuous: the 4th scope is not drawn")
+	}
 	same("flood interval", func(in *nodecard.NodeCardInput) { in.FloodInterval.Seconds = 48 * 3600 }, false)
 	same("flood confidence (drawn detail)", func(in *nodecard.NodeCardInput) { in.FloodInterval.Confidence = "medium" }, false)
 	same("zero-hop interval dropped (low)", func(in *nodecard.NodeCardInput) { in.ZeroHopInterval.Confidence = "low" }, false)
@@ -365,4 +382,14 @@ func BenchmarkNodeShare857_Fields(b *testing.B) {
 			}
 		})
 	}
+}
+
+// nodeCardBytes is the PNG the card renderer draws for in.
+func nodeCardBytes(t *testing.T, in nodecard.NodeCardInput) []byte {
+	t.Helper()
+	b, err := nodecard.Render(in, nodecard.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

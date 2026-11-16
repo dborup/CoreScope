@@ -16,7 +16,7 @@ value   40px bold    x=  24 y=416 w= 113 ≥8.1%
 detail  18px regular x=  24 y=444 w=  99 lower bound
 label   20px regular x= 312 y=366 w=  92 Neighbors
 value   40px bold    x= 312 y=416 w=  45 12
-label   20px regular x= 600 y=366 w=  88 First seen
+label   20px regular x= 600 y=366 w=  92 First Seen
 value   40px bold    x= 600 y=416 w= 173 243d ago
 detail  18px regular x= 600 y=444 w= 194 2026-03-17 08:20 UTC
 label   20px regular x= 888 y=366 w=  87 Avg Hops

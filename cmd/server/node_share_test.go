@@ -363,7 +363,7 @@ func TestNodeShare_Tags(t *testing.T) {
 	}
 	desc := mustMeta(t, body, "og:description")
 	// #857 adds first seen (the fixture nodes have one) after the #811 clauses.
-	want := "Midtjylland · Last heard: 3h ago · Relayed 24 h: 1,234 · Relayed 1 h: 56 · Seen airtime 24 h: ≥2.3% · Busiest hour: ≥12.5% · First seen: 3h ago"
+	want := "Midtjylland · Last heard: 3h ago · Relayed 24 h: 1,234 · Relayed 1 h: 56 · Seen airtime 24 h: ≥2.3% · Busiest hour: ≥12.5% · First Seen: 3h ago"
 	if desc != want {
 		t.Errorf("og:description\n got %q\nwant %q", desc, want)
 	}
@@ -709,8 +709,7 @@ func TestNodeShare_NoInlineSnapshotBuild(t *testing.T) {
 		t.Error("a snapshot was built inline")
 	}
 	desc := mustMeta(t, e.get("/p?node="+nsRepeater).Body.String(), "og:description")
-	if desc != "Midtjylland · Last heard: 3h ago · First seen: 3h ago" { // #857: first seen is in the node row
-
+	if desc != "Midtjylland · Last heard: 3h ago · First Seen: 3h ago" { // #857: first seen is in the node row
 		t.Errorf("og:description %q", desc)
 	}
 }

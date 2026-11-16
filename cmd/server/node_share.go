@@ -377,7 +377,9 @@ func (c *nodeCards) version(in nodecard.NodeCardInput) string {
 		if cl.AbsTime {
 			detail = ""
 		}
-		fmt.Fprintf(h, "%q|%q|%q|%t\n", cl.Label, cl.Value, detail, cl.Over)
+		// Scopes, not Value: the tile draws as many scopes as fit, and
+		// Value names only three (#861).
+		fmt.Fprintf(h, "%q|%q|%q|%t|%q\n", cl.Label, cl.Value, detail, cl.Over, cl.Scopes)
 	}
 	return hex.EncodeToString(h.Sum(nil))[:12]
 }
