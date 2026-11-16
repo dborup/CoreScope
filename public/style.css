@@ -2920,6 +2920,74 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   filter: invert(1);
 }
 
+/* #845 — the Denmark group of the layer control: a full-width disclosure
+   button, two small headings, and a zoom hint right-aligned on its row. */
+.mc-layers-dk[hidden], .mc-layers-dk-body[hidden],
+.mc-layers-dk-head[hidden], .mc-layers-dk-base[hidden], .mc-layers-dk-overlays[hidden] {
+  display: none;
+}
+.mc-layers-dk {
+  border-top: 1px solid var(--border);
+  margin-top: 5px;
+  padding-top: 2px;
+}
+.mc-layers-dk-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.mc-layers-dk-toggle::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid currentColor;
+  transition: transform 0.15s;
+}
+.mc-layers-dk-toggle[aria-expanded="false"]::before {
+  transform: rotate(-90deg);
+}
+.mc-layers-dk-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.mc-layers-dk-body {
+  padding-left: 12px;
+}
+.mc-layers-dk-head {
+  margin: 4px 0 2px;
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+.mc-layers-dk-body label > span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.mc-layers-dk-body label > span > span {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+}
+.mc-layer-hint {
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: 0.8em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 /* #839 — every map credit follows the theme (Leaflet's own is a white bar,
    which stayed light over a dark map). One more class than leaflet.css's
    rule, which loads after this file; the compact inset credit below and the

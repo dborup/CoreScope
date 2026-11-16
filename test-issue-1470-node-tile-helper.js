@@ -99,6 +99,8 @@ function makeSandbox(opts) {
   };
   ctx.window.localStorage = ctx.localStorage;
   ctx.window.document = ctx.document;
+  // #845: CARTO is opt-in now; these cases use its styles as examples.
+  ctx.window.MC_MAP_CFG = { tiles: { providers: { carto: { enabled: true } } } };
   ctx.globalThis = ctx;
   vm.createContext(ctx);
   // After context creation, make the sandbox global object also be `window`

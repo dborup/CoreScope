@@ -399,9 +399,14 @@ test('P a pick shows Natur, unfiltered, and the Auto group leaves the map', () =
 });
 
 test('P in the dark theme a pick stays unfiltered (light only, not inverted)', () => {
-  const ctx = makeSandbox({ theme: 'dark', mapCfg: ON() });
+  // #845: the dark list offers only dark styles, so a light-only map is
+  // picked in the light theme and kept (listed, on the map) in the dark.
+  const ctx = makeSandbox({ mapCfg: ON() });
   const { map } = buildControl(ctx, true);
   pick(map, ID);
+  setTheme(ctx, 'dark');
+  ctx.window.MC_initTileRegistry(true);
+  assert.deepStrictEqual(shown(map), [ID], 'kept in the dark theme');
   assert.strictEqual(map.panes.tilePane.style.filter, '');
   ctx.window.MC_applyTileFilter();
   assert.strictEqual(map.panes.tilePane.style.filter, '', 'the theme filter leaves an explicit pick alone');

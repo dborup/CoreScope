@@ -201,6 +201,7 @@
     listRoom: listRoom,
     popupRoom: popupRoom,
     fitLayerControl: fitLayerControl,
+    fitList: fitList,
     fitPopup: fitPopup
   };
 })(typeof window !== 'undefined' ? window : this);

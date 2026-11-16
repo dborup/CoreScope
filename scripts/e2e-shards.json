@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-845-layer-groups-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #845 the layer control's Denmark group and theme filter, and CARTO off by default, with an intercepted client config (Danish base maps with a dummy token, DHM overlays with Aerial, monuments, antenna sites) and 1x1 third-party tiles: at 375x560, 360x640, 640x360 (real taps) and 1440x900 (real clicks) from a cold start every row of the open control is brought into view inside the list and takes a tap there, no label says (Denmark)/(dark)/(DHM) and the contour zoom hint sits at the row's right; the group starts open over Denmark, its button collapses and opens it (aria-expanded) and a reload keeps the state; exactly one base map stays selected across both groups; the theme switch (the app's own toggle) lists the new theme's variants and moves the pick to its counterpart and back; a reload restores an Aerial pick and the dark list; over Berlin the group starts collapsed; with nothing Danish offered there is no group, with overlays only no Base maps heading; CARTO is not listed and a saved carto-dark pick shows Esri Dark Gray Canvas with no cartocdn request. 21 cases, about 150s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-839-map-phone-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },

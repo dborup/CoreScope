@@ -851,7 +851,9 @@ async function legacyLightTests() {
     for (const stored of ['carto-light', 'osm-standard']) {
       await asyncTest('#364 browser choice ' + stored + ' wins over ' + label, async () => {
         const ctx = await configuredStack(config, 'light', stored);
-        assert.strictEqual(ctx.MC_getTileSpec('light').id, stored);
+        // #845: CARTO is off here, so a saved carto-light is migrated to
+        // OSM Standard — still the browser's choice, still over the URL.
+        assert.strictEqual(ctx.MC_getTileSpec('light').id, stored === 'carto-light' ? 'osm-standard' : stored);
         assert.notStrictEqual(ctx.getTileUrl(), url);
         assert.ok(ctx.getActiveTileProvider());
       });
@@ -885,9 +887,10 @@ async function legacyLightTests() {
   });
   await asyncTest('#364 explicit programmatic server default wins over legacy URL', async () => {
     const ctx = await configuredStack({ tiles: { light: url } });
-    ctx.MC_setServerDefaultLightTileProvider('carto-light');
-    assert.strictEqual(ctx.MC_getTileSpec('light').id, 'carto-light');
-    assert.ok(ctx.getTileUrl().includes('cartocdn.com'));
+    // #845: an enabled style (CARTO is off by default now).
+    ctx.MC_setServerDefaultLightTileProvider('osm-standard');
+    assert.strictEqual(ctx.MC_getTileSpec('light').id, 'osm-standard');
+    assert.ok(ctx.getTileUrl().includes('tile.openstreetmap.org'));
   });
   await asyncTest('#364 custom URL keeps generic attribution even when an unused OSM vendor is configured', async () => {
     const ctx = await configuredStack({ map: { tiles: { lightUrl: url, providers: { osm: { enabled: true, provider: 'maptiler', token: 'synthetic-token' } } } } });

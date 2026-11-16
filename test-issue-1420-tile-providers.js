@@ -69,9 +69,15 @@ function makeSandbox(opts) {
   return ctx;
 }
 
+// #845 — CARTO is opt-in now. The switcher cases below use its ids as
+// examples, so a sandbox without a config of its own has CARTO on; pass
+// null for a truly unconfigured registry.
+const CARTO_ON = { tiles: { providers: { carto: { enabled: true } } } };
+
 function loadProviders(ctx, mapCfg) {
   // Optionally pre-populate MC_MAP_CFG before the IIFE runs
   if (mapCfg !== undefined) ctx.window.MC_MAP_CFG = mapCfg;
+  else if (ctx.window.MC_MAP_CFG === undefined) ctx.window.MC_MAP_CFG = CARTO_ON;
   const src = fs.readFileSync(path.join(__dirname, 'public', 'map-tile-providers.js'), 'utf8');
   vm.runInContext(src, ctx);
 }
@@ -90,12 +96,12 @@ console.log('\u2500\u2500 #1420 Tile provider registry \u2500\u2500');
 
 // ─── Registry shape ──────────────────────────────────────────────────────────
 
-test('Default registry (no MC_MAP_CFG) has Carto plus the #332 fallback defaults', () => {
+test('Default registry (no MC_MAP_CFG) has the #332 fallback defaults and no Carto (#845)', () => {
   const ctx = makeSandbox();
-  loadProviders(ctx);
+  loadProviders(ctx, null);
   const reg = ctx.window.MC_TILE_PROVIDERS;
   assert.ok(reg, 'registry must exist on window');
-  for (const id of ALL_CARTO_IDS) assert.ok(reg[id], 'should have ' + id);
+  for (const id of ALL_CARTO_IDS) assert.ok(!reg[id], 'should NOT have ' + id + ' (#845: CARTO is opt-in)');
   // #332 — 'osm-dark' / 'osm-standard' are the keyless fallback defaults and
   // are registered unconditionally so the active id always resolves (and
   // stays selectable in the layer picker). The token-gated Stamen styles and
@@ -260,20 +266,27 @@ test('Carto absent only when carto.enabled=false', () => {
   for (const id of ALL_CARTO_IDS) assert.ok(!reg[id], id + ' should be absent when carto disabled');
 });
 
-test('Carto present when carto config is missing entirely (default on)', () => {
+test('Carto absent when carto config is missing entirely (#845: default off)', () => {
   const ctx = makeSandbox();
   loadProviders(ctx);
   ctx.window.MC_MAP_CFG = { tiles: { providers: {} } };
   ctx.window.MC_initTileRegistry(false);
   const reg = ctx.window.MC_TILE_PROVIDERS;
-  for (const id of ALL_CARTO_IDS) assert.ok(reg[id], id + ' should exist when carto has no enabled flag');
+  for (const id of ALL_CARTO_IDS) assert.ok(!reg[id], id + ' should be absent when carto has no enabled flag');
+});
+
+test('Carto present only with carto.enabled === true (#845)', () => {
+  const ctx = makeSandbox();
+  loadProviders(ctx, { tiles: { providers: { carto: { enabled: true } } } });
+  const reg = ctx.window.MC_TILE_PROVIDERS;
+  for (const id of ALL_CARTO_IDS) assert.ok(reg[id], id + ' should exist when carto.enabled is true');
 });
 
 // ─── invertFilter ────────────────────────────────────────────────────────────
 
 test('Dark-inverted providers have non-null invertFilter; others have null', () => {
   const ctx = makeSandbox();
-  loadProviders(ctx, { tiles: { providers: { osm: { enabled: true }, stamen: { enabled: true, token: 'x' } } } });
+  loadProviders(ctx, { tiles: { providers: { carto: { enabled: true }, osm: { enabled: true }, stamen: { enabled: true, token: 'x' } } } });
   ctx.window.MC_initTileRegistry(false);
   const reg = ctx.window.MC_TILE_PROVIDERS;
   // Explicit dark (invert) entries
@@ -600,8 +613,11 @@ test('MC_createLayerControl handles Auto mode and explicit layers correctly', ()
     assert.fail('Could not find inverted tile layer to test CSS filter');
   }
 
-  // Simulate Leaflet switching to a non-inverted explicit layer and assert the CSS filter is cleared
-  const lightLayer = ctx._capturedBaseMaps['carto-light'];
+  // Simulate Leaflet switching to a non-inverted explicit layer and assert the CSS filter is cleared.
+  // #845: the sandbox is in the dark theme, which lists only dark styles,
+  // so the non-inverted one is carto-dark (a native dark tile).
+  assert.ok(!ctx._capturedBaseMaps['carto-light'], '#845: a light style is listed in the dark theme');
+  const lightLayer = ctx._capturedBaseMaps['carto-dark'];
   if (lightLayer) {
     lightLayer._events['add']();
     assert.strictEqual(ctx.tilePane.style.filter, '', 'pane.style.filter should be cleared on non-inverted explicit layer add');

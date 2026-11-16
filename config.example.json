@@ -234,9 +234,9 @@
       "darkDefault": "osm-dark",
       "lightDefault": "osm-standard",
       "providers": {
-        "_comment_carto": "Carto styles stay available and selectable, but keyless raster tiles are watermarked 'API KEY REQUIRED' (see _comment_defaults). Optional: specify 'domain' for Carto enterprise (e.g. 'mycompany' for 'https://{s}.mycompany.cartocdn.com').",
+        "_comment_carto": "#845 — Carto is OFF unless enabled is the JSON boolean true: since August 2026 keyless Carto raster tiles are watermarked 'API KEY REQUIRED' (see _comment_defaults) and CoreScope has no Carto basemap-key plumbing. While it is off, a viewer's saved Carto choice (and a Carto darkDefault/lightDefault) is shown as the nearest keyless map: Positron and Voyager as OSM Standard, Carto Dark as Esri Dark Gray Canvas when esri is enabled, otherwise OSM Standard (dark). Set enabled: true only if you have a Carto arrangement; optional: specify 'domain' for Carto enterprise (e.g. 'mycompany' for 'https://{s}.mycompany.cartocdn.com').",
         "carto": {
-          "enabled": true,
+          "enabled": false,
           "domain": ""
         },
         "_comment_osm": "OSM providers: 'mapbox', 'thunderforest', 'maptiler'. WARNING: Tokens are sent to the browser. Apply origin/referrer restrictions in your provider dashboard.",
