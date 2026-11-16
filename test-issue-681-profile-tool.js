@@ -312,10 +312,11 @@ test('unknown on a partial profile says the path leaves Denmark', () => {
   assert.ok(/79\.8\s?%/.test(c.detail), c.detail);
 });
 
-test('unknown with no coverage at all points at the Denmark-only limit', () => {
+test('unknown with no coverage at all says the path is wholly outside Denmark', () => {
   const c = TP.verdictChip(resp({ state: 'unknown' }, { state: 'none', pct: 0 }));
   assert.strictEqual(c.label, 'No verdict');
-  assert.ok(/Denmark only/i.test(c.detail), c.detail);
+  // #839: not "Denmark only" — a cross-border path gets the Copernicus fill.
+  assert.ok(/entirely outside Denmark/i.test(c.detail), c.detail);
 });
 
 test('an unrecognised verdict state degrades to unknown, never to clear', () => {

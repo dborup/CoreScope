@@ -62,7 +62,7 @@ func goldenCases() []goldenCase {
 		{name: "partial-gap", resp: fxPartial(), names: [2]string{"Coast Relay", "Island Relay"}, state: "unknown",
 			want: map[string]string{"badge": "No verdict", "summary": "path leaves Denmark"}},
 		{name: "coverage-none", resp: fxNone(), names: [2]string{"Far Away", ""}, state: "unknown",
-			want: map[string]string{"badge": "No verdict", "message": "Denmark only", "title": "Far Away → 55.1000, 10.1000"}},
+			want: map[string]string{"badge": "No verdict", "message": "entirely outside Denmark", "title": "Far Away → 55.1000, 10.1000"}},
 		{name: "model-dtm", resp: fxDTM(), names: [2]string{"Field Node", "Church Mast"}, state: "clear",
 			want: map[string]string{"badge": "Clear", "subtitle": "k = 1", "summary": "terrain only"}},
 		{name: "short-300m", resp: fxShort(), state: "clear",

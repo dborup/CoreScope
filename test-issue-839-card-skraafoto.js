@@ -142,6 +142,18 @@ test('a Danish path end to end: every point has photos', () => {
   eq(TP.dhmStretch(d), true);
 });
 
+// ── 9. A wholly foreign path ────────────────────────────────────────────────
+
+console.log('\n=== #839 finding 9: a path wholly outside Denmark ===\n');
+
+test('the words are the card\'s, and no longer claim "Denmark only"', () => {
+  const m = /case "none":\s*\n(?:\s*\/\/[^\n]*\n)*\s*detail = "([^"]*)"/.exec(RENDER_GO);
+  assert.ok(m, 'render.go mainChip has no "none" detail');
+  const c = TP.verdictChip(profile({ none: true }));
+  eq(c.detail, m[1]);
+  eq(c.detail, 'This path lies entirely outside Denmark, so there is no terrain data for it.');
+});
+
 (async () => {
   for (const [name, fn] of asyncTests) {
     try { await fn(); passed++; console.log('  ✅ ' + name); }

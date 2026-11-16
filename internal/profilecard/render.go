@@ -282,7 +282,9 @@ func mainChip(resp TerrainProfileResponse) mainChipWords {
 	case "partial":
 		detail = "No verdict, path leaves Denmark. The profile covers " + fmtNum(jsRound(resp.Coverage.Pct, 1)) + " % of the path."
 	case "none":
-		detail = "Terrain data is available for Denmark only. This path lies outside coverage."
+		// #839: a cross-border path gets the Copernicus fill (#738); a
+		// path with no DHM sample gets no data at all.
+		detail = "This path lies entirely outside Denmark, so there is no terrain data for it."
 	case "pending":
 		detail = pendingMessage
 	}

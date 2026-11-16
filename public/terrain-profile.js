@@ -729,7 +729,9 @@
     if (cov.state === 'partial') {
       detail = 'No verdict, path leaves Denmark. The profile covers ' + fmtPct(cov.pct) + ' % of the path.';
     } else if (cov.state === 'none') {
-      detail = 'Terrain data is available for Denmark only. This path lies outside coverage.';
+      // #839: a cross-border path gets the Copernicus fill (#738); a path
+      // with no DHM sample gets no data at all (the card's mainChip).
+      detail = 'This path lies entirely outside Denmark, so there is no terrain data for it.';
     } else {
       detail = 'No elevation data for this path, so there is no clearance verdict.';
     }
@@ -2354,16 +2356,18 @@
       setMixed(data);
       setClassified(data);
       var names = { nameA: nodes.a && nodes.a.name, nameB: nodes.b && nodes.b.name };
-      var drawn = !!(data.samples && data.samples.length);
+      var hasSamples = !!(data.samples && data.samples.length);
       /* The credit is a licence obligation, so it is one HTML line under
        * the chart rather than text inside the SVG: the chart box is
        * stretched to the panel width and in-SVG text came out ~3 px tall
        * on a 360 px phone, which is not an attribution anybody can read. */
-      ui.credit.hidden = false;
+      // ...and only when DHM data is shown: a path wholly outside Denmark
+      // used none (#839).
+      ui.credit.hidden = !!(data.coverage && data.coverage.state === 'none');
       // Either end on a default height caveats the whole verdict — a
       // customizer default included (#681 M6).
       ui.assumed.hidden = !(assumedHeight(data.a, origin.a) || assumedHeight(data.b, origin.b));
-      if (!drawn) {
+      if (!hasSamples) {
         setStatus(chip.detail, 'tp-empty');
       } else {
         // Sink: one SVG string from buildChart, where every node-controlled
@@ -2373,7 +2377,9 @@
         setDrawn(data);
         attachCursor(data, drawn.g);
       }
-      ui.detail.textContent = chip.detail;
+      // Without a plot the status line or the empty plot already says it
+      // (#839): a path wholly abroad has samples, all without data.
+      ui.detail.textContent = drawn && drawn.g ? chip.detail : '';
       var phys = data.physics || {};
       var parts = [];
       if (isFinite(Number(phys.freqMHz))) {

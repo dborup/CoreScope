@@ -34,3 +34,26 @@ func TestWording839_WorstPointIsTheTightestFresnelPoint(t *testing.T) {
 		}
 	}
 }
+
+// #839 finding 9: a path wholly outside Denmark gets no data at all, not
+// even the Copernicus fill a cross-border path gets (#738: a path with no
+// DHM sample makes no upstream call). "Terrain data is available for
+// Denmark only" is no longer true next to that fill; the words say what
+// happens instead, the same in the panel (public/terrain-profile.js).
+func TestWording839_WhollyForeignPath(t *testing.T) {
+	const want = "This path lies entirely outside Denmark, so there is no terrain data for it."
+	c := mainChip(fxNone())
+	if c.detail != want {
+		t.Errorf("detail %q, want %q", c.detail, want)
+	}
+	_, runs, err := render(fxNone(), [2]string{"Malmö", ""}, DefaultPalette(false), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runText(runs, "message"); got != want {
+		t.Errorf("message %q, want %q (not shortened)", got, want)
+	}
+	if alt := AltText(fxNone(), [2]string{"Malmö", ""}, Options{}); !strings.Contains(alt, want) || strings.Contains(alt, "Denmark only") {
+		t.Errorf("alt %q", alt)
+	}
+}
