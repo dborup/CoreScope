@@ -66,6 +66,14 @@
       "measurementNote": "New suite; #733 DHM credit compliance with an intercepted map.dhm client-config block (credit link fields + profile: true), a stubbed /api/map/dhm/wms tile and a stubbed /api/terrain/profile: on Map and Live the hillshade credit names Klimadatastyrelsen, links the Danmarks Hojdemodel dataset and the CC BY 4.0 licence with target=_blank and rel=noopener, renders exactly the server's plain credit text, is visible and uncovered, and goes away with the overlay; a pre-#733 block without the link fields still shows the plain credit with no links; the profile chart footer carries the same two links plus the 'data bearbejdet' derived note, exactly once; and at 360x740 that footer stays inside the panel and the viewport, legible and uncovered, with both links at least 44px and hit by themselves. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds, next to the #728 credit suite."
     },
     {
+      "file": "test-issue-737-customizer-skraafoto-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #737 customizer (AGENTS rule 8) Skraafoto viewer defaults with an intercepted skraafoto client-config block (and dhm with profile: true), stubbed /api/skraafoto/search, previews, the ?zoom=1 crop and /api/terrain/profile in the M1/M3a/M3b shapes, every other host refused: a phone at 375x560 from a cold start sets the first photo, the first view and the line of sight by real taps in the Display tab (48px, on screen, uncovered, no sideways overflow); by taps to the node the viewer opens on that direction's crop; auto from a profile is the side view without the line; a deep link's direction wins; the export carries the section without server keys; Reset All brings M3c back; no section without the block. About 16s locally; no CI duration measured yet. Assigned to shard 2 next to the #737 viewer suite."
+    },
+    {
       "file": "test-issue-737-skraafoto-viewer-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
