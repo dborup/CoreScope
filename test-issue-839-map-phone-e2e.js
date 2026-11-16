@@ -12,13 +12,16 @@
  * Asserts:
  *   1. finding 1 — at 375x560 (light and dark), 360x640 and 640x360, with
  *      three overlay credits on, the open layer list ends above the
- *      attribution and the bottom nav; a swipe brings its last row,
- *      "Nearby transmitters (interference)", into view, a tap there is not
- *      taken by the credit and switches it on; at zoom 12 the antenna
- *      "Zoom in to 13+" line under it can be seen too;
+ *      attribution and the bottom nav; its last row, "Nearby transmitters
+ *      (interference)", brought into view inside the list (touch swipes,
+ *      or the list's own scroll where headless touch does not scroll, see
+ *      bringIntoBox), is not covered by the credit and a real tap there
+ *      switches it on; at zoom 12 the antenna "Zoom in to 13+" line under
+ *      it can be seen too;
  *   2. finding 2 — at the same phone sizes, a tap on the antenna site opens
  *      a popup that overlaps no map button and stops above the credit; its
- *      source link can be swiped to and seen; a tap on its ✕ closes it. At
+ *      source link, brought into view inside the popup, is uncovered; a tap
+ *      on its ✕ closes it. At
  *      1440x900 the same popup shows whole, unscrolled, clear of the Map
  *      Controls panel (no regression);
  *   3. finding 7 — at 375x560 and 640x360 with monuments on, the tap that
@@ -206,14 +209,59 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
   }
   async function tapAt(page, p) { await page.touchscreen.tap(Math.round(p.x), Math.round(p.y)); }
-  // A real touch swipe (Chrome's synthetic gesture), upwards by `dy` px.
-  async function swipeUp(page, at, dy) {
+  // Where `target` sits inside its scroll container `box`: fully inside the
+  // container's visible box, and how far it still is below it.
+  async function placement(page, box, target) {
+    return page.evaluate(({ b, t }) => {
+      const c = document.querySelector(b).getBoundingClientRect();
+      const r = document.querySelector(t).getBoundingClientRect();
+      return { inside: r.top >= c.top - 1 && r.bottom <= c.bottom + 1, below: Math.round(r.bottom - c.bottom), above: Math.round(c.top - r.top) };
+    }, { b: box, t: target });
+  }
+  /* Brings `target` fully into view inside its scroll container `box`, as a
+   * viewer would: real touch swipes (touchStart, ten touchMoves, touchEnd
+   * through CDP), each moving a third of the box, until it is in view.
+   * Whether headless Chromium turns dispatched touches into a scroll differs
+   * by platform (it did not on the Linux CI runner, #841), so when the
+   * swipes have not moved the box at all, the box itself is scrolled by
+   * exactly the missing distance: only that container, never the map or
+   * the page. Either way the caller then asserts the target is uncovered
+   * and taps it. Returns how it got there. */
+  async function bringIntoBox(page, box, target) {
+    let p = await placement(page, box, target);
+    if (p.inside) return 'already';
     const cdp = await page.context().newCDPSession(page);
-    await cdp.send('Input.synthesizeScrollGesture', {
-      x: Math.round(at.x), y: Math.round(at.y), yDistance: -dy, speed: 2000, gestureSourceType: 'touch',
-    });
-    await cdp.detach();
-    await page.waitForTimeout(300);
+    try {
+      // Enough swipes for the whole content, however short the box (63 px
+      // in landscape): each one moves about a third of it.
+      const sh = await page.evaluate((s) => document.querySelector(s).scrollHeight, box);
+      for (let i = 0, n = 2; i < n && !p.inside; i++) {
+        const b = await page.locator(box).boundingBox();
+        const x = Math.round(b.x + b.width / 2), dist = Math.max(30, Math.round(b.height / 3));
+        n = Math.min(60, Math.ceil(sh / dist) + 2);
+        const y0 = Math.round(b.y + b.height / 2 + dist / 2), dir = p.below > 0 ? -1 : 1;
+        const before = await page.evaluate((s) => document.querySelector(s).scrollTop, box);
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y: y0 }] });
+        for (let k = 1; k <= 10; k++) {
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: y0 + Math.round(dir * dist * k / 10) }] });
+        }
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await page.waitForTimeout(150);
+        const after = await page.evaluate((s) => document.querySelector(s).scrollTop, box);
+        p = await placement(page, box, target);
+        if (after === before) break; // touches do not scroll here
+      }
+    } finally { await cdp.detach(); }
+    if (p.inside) return 'swipe';
+    await page.evaluate(({ b, t }) => {
+      const c = document.querySelector(b);
+      const cr = c.getBoundingClientRect(), r = document.querySelector(t).getBoundingClientRect();
+      c.scrollTop += r.bottom > cr.bottom ? r.bottom - cr.bottom : r.top - cr.top;
+    }, { b: box, t: target });
+    await page.waitForTimeout(100);
+    p = await placement(page, box, target);
+    assert(p.inside, `${target} cannot be brought into view inside ${box}: ${JSON.stringify(p)}`);
+    return 'scrollTop';
   }
   // What a tap at the middle of `sel` would land on: inside `sel` or not.
   async function hitsItself(page, sel) {
@@ -244,10 +292,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         const listBottom = await page.evaluate((s) => document.querySelector(s).closest('.leaflet-control-layers').getBoundingClientRect().bottom, LIST);
         const floor = await bottomChromeTop(page);
         assert(listBottom <= floor, `the open list ends at y=${Math.round(listBottom)}, under the credit/nav at y=${Math.round(floor)}`);
-        const sh = await page.evaluate((s) => document.querySelector(s).scrollHeight, LIST);
-        await swipeUp(page, await center(page, LIST), sh + 200);
-        const atEnd = await page.evaluate((s) => { const l = document.querySelector(s); return l.scrollTop + l.clientHeight >= l.scrollHeight - 2; }, LIST);
-        assert(atEnd, 'the swipe did not scroll the list to its end');
+        const how = await bringIntoBox(page, LIST, INT_LABEL);
         const hit = await hitsItself(page, INT_LABEL);
         assert(hit.ok, 'a tap on "Nearby transmitters (interference)" lands on ' + hit.on);
         await tapAt(page, await center(page, INT_LABEL));
@@ -256,6 +301,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         assert(on, 'the tap did not switch the interference layer on');
         assert(/mastsInt=1/.test(await page.evaluate(() => location.hash)), 'the link does not say mastsInt=1');
         assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+        console.log('      (row reached by ' + how + ')');
       } finally { await ctx.close(); }
     });
   }
@@ -266,12 +312,16 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       await gotoMap(page, '&terrain=surface&contours=1&heritage=1', 12);
       await page.tap('.leaflet-control-layers-toggle');
       await page.waitForSelector('.leaflet-control-layers-expanded', { timeout: 3000 });
-      const sh = await page.evaluate((s) => document.querySelector(s).scrollHeight, LIST);
-      await swipeUp(page, await center(page, LIST), sh + 200);
-      const hint = await page.evaluate(() => {
+      const found = await page.evaluate(() => {
         const els = Array.from(document.querySelectorAll('.leaflet-control-layers-overlays *'))
           .filter((e) => !e.children.length && /^Zoom in to 13\+/.test(e.textContent.trim()) && !e.hidden);
-        if (!els.length) return null;
+        if (els.length) els[0].setAttribute('data-test-hint', '');
+        return els.length > 0;
+      });
+      assert(found, 'no "Zoom in to 13+" line in the control');
+      await bringIntoBox(page, LIST, '[data-test-hint]');
+      const hint = await page.evaluate(() => {
+        const els = [document.querySelector('[data-test-hint]')];
         const b = els[0].getBoundingClientRect();
         const top = document.elementFromPoint(b.left + Math.min(20, b.width / 2), b.top + b.height / 2);
         return { ok: !!top && (top === els[0] || els[0].contains(top)), on: top ? top.className : null };
@@ -322,7 +372,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         assert(g.wrap.b <= floor, `the popup ends at y=${Math.round(g.wrap.b)}, under the credit/nav at y=${Math.round(floor)}`);
         const close = await hitsItself(page, '.mc-masts-popup .leaflet-popup-close-button');
         assert(close.ok, 'a tap on the ✕ lands on ' + close.on);
-        if (g.scrolled) await swipeUp(page, await center(page, '.mc-masts-popup .leaflet-popup-content'), 2000);
+        if (g.scrolled) await bringIntoBox(page, '.mc-masts-popup .leaflet-popup-content', '.mc-masts-popup a[href="https://mastedatabasen.dk/"]');
         const link = await hitsItself(page, '.mc-masts-popup a[href="https://mastedatabasen.dk/"]');
         assert(link.ok, 'the source link cannot be reached: a tap lands on ' + link.on);
         await tapAt(page, await center(page, '.mc-masts-popup .leaflet-popup-close-button'));
