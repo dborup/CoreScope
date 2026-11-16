@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/meshcore-analyzer/buildings"
 	"github.com/meshcore-analyzer/cardkit"
 	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dhm"
@@ -47,11 +48,11 @@ const (
 	summaryBaseline = 574
 	creditBaseline  = 604
 
-	// A mixed card (#738) has two credit lines: the footer moves up so
-	// the Copernicus line takes creditBaseline and the DHM line sits
-	// above it, at the same 18 px size.
-	mixedSummaryBaseline = 564
-	mixedCreditBaseline  = 584
+	// A card with more than one credit line (the Copernicus fill, #738;
+	// the building footprints, #846) stacks them up from creditBaseline,
+	// creditLeading apart at the same 18 px size, and the summary sits
+	// one leading above the first.
+	creditLeading = 20
 )
 
 // Options are the operator's display choices. The zero value is the
@@ -94,6 +95,32 @@ const Credit = dhm.AttributionDerived
 // one step away, on the page the card links to.
 const FillCredit = "Outside Denmark: produced using " + copdem.DatasetName +
 	", provided under COPERNICUS by the European Union and ESA"
+
+// buildingsCredited reports whether the card credits the INSPIRE building
+// footprints (#846): the profile's surface was classified with them, full
+// or partial, and the response carries the panel's credit for it, which
+// cmd/server sets exactly when a sample was classified (terrainClasses
+// used). The panel shows that same line on the same condition (#797).
+func buildingsCredited(resp TerrainProfileResponse) bool {
+	c := resp.Classification
+	return c != nil && (c.State == "full" || c.State == "partial") && resp.Attribution == buildings.AttributionDerived
+}
+
+// creditLines is the DHM credit as the card draws it: Credit, or for a
+// classified profile the panel's buildings.AttributionDerived. That line
+// is too wide for the card at the credit size and is never shortened, so
+// it wraps, whole, where the footprints' part begins, after the DHM
+// dataset (#779 keeps the fill credit whole on a line of its own too).
+func creditLines(resp TerrainProfileResponse) []string {
+	if !buildingsCredited(resp) {
+		return []string{Credit}
+	}
+	head, tail, ok := strings.Cut(buildings.AttributionDerived, dhm.DatasetName)
+	if !ok {
+		return []string{buildings.AttributionDerived}
+	}
+	return []string{head + dhm.DatasetName, strings.TrimSpace(tail)}
+}
 
 // Render draws the card for resp and returns it as a PNG. names are the
 // display names of endpoints A and B ("" when unknown); the caller is
@@ -168,6 +195,17 @@ func AltText(resp TerrainProfileResponse, names [2]string, opt Options) string {
 	return txt
 }
 
+// AltCredit is the sentence og:image:alt ends with when the card credits
+// the building footprints (#846), "" otherwise: their dataset, source and
+// licence, from internal/buildings' own parts. It is apart from AltText so
+// the caller can clip AltText and keep the credit whole.
+func AltCredit(resp TerrainProfileResponse, opt Options) string {
+	if opt.Pending || !buildingsCredited(resp) {
+		return ""
+	}
+	return "Buildings told apart from trees with " + buildings.DatasetName + " (" + buildings.Source + "), " + dhm.LicenseName + "."
+}
+
 // pendingResponse is resp without anything measured: no samples, no
 // verdict, no ground heights. What is left (endpoints, distance, radio,
 // antenna heights) needs no elevation.
@@ -176,6 +214,7 @@ func pendingResponse(resp TerrainProfileResponse) TerrainProfileResponse {
 	resp.Verdict = TerrainVerdict{State: "unknown", Model: resp.Verdict.Model, Criterion: resp.Verdict.Criterion}
 	resp.Coverage = TerrainCoverage{State: "pending"}
 	resp.A.GroundM, resp.B.GroundM = nil, nil
+	resp.Classification = nil
 	return resp
 }
 
@@ -626,10 +665,15 @@ func (r *renderer) plot(resp TerrainProfileResponse, g geom) {
 			r.cv.VSpan(plotX+c, g.y(g.terr[c]), base, plotY, plotY+plotH, r.pal.TerrainFill)
 		}
 	}
+	// The band is drawn per class (#846) where the profile has classes,
+	// in the panel's colours; a column without one keeps the clutter
+	// colour, so a card without classes draws what it always drew.
+	var cls []byte
 	if g.hasSurface {
+		cls = columnClasses(resp, g)
 		for c := 0; c < plotW; c++ {
 			if !math.IsNaN(g.surf[c]) && !math.IsNaN(g.terr[c]) {
-				r.cv.VSpan(plotX+c, g.y(g.surf[c]), g.y(g.terr[c]), plotY, plotY+plotH, r.pal.TerrainClutter)
+				r.cv.VSpan(plotX+c, g.y(g.surf[c]), g.y(g.terr[c]), plotY, plotY+plotH, r.bandColor(cls, c))
 			}
 		}
 		r.line(g, g.surf, 0.6, 1, 0, r.pal.TerrainClutter)
@@ -651,7 +695,12 @@ func (r *renderer) plot(resp TerrainProfileResponse, g geom) {
 		r.line(g, f1top, 0.7, 1, 0, r.pal.Fresnel100)
 		r.line(g, f1bot, 0.7, 1, 0, r.pal.Fresnel100)
 	}
-	// 5. Line of sight.
+	// 5. Line of sight. Over a classified band, which is solid, it is
+	// drawn over a casing in the background colour, as the panel does
+	// (#797: the line alone was 1.87:1 against the class colours).
+	if cls != nil {
+		r.line(g, g.los, 2.1, 1, 0, cardkit.Opaque(r.pal.Background))
+	}
 	r.line(g, g.los, 1.1, 1, 0, r.pal.LosLine)
 
 	// 6. Intrusions: only drawn when the verdict already asserts one, so
@@ -723,9 +772,125 @@ func (r *renderer) plot(resp TerrainProfileResponse, g geom) {
 	if g.D >= 1000 && g.D < 2000 { // same unit as the end label
 		mid = strconv.FormatFloat(jsRound(g.D/2000, 2), 'f', 2, 64) + " km"
 	}
-	r.text("axis-x", mid, plotX+plotW/2-r.fs.Measure(mid, axisSize, false)/2, axisBaseline, axisSize, false, muted)
+	midX := plotX + plotW/2 - r.fs.Measure(mid, axisSize, false)/2
+	r.text("axis-x", mid, midX, axisBaseline, axisSize, false, muted)
 	end := r.fs.Fit(fmtDistance(g.D), axisSize, false, plotW/2-40)
 	r.text("axis-x", end, plotX+plotW-r.fs.Measure(end, axisSize, false), axisBaseline, axisSize, false, muted)
+	if cls != nil {
+		r.legend(resp, plotX+r.fs.Measure("0", axisSize, false)+legendGap, midX-legendGap)
+	}
+}
+
+// The panel's words for the band's colours (public/terrain-profile.js
+// CLASSES and CLASS_NONE_LEGEND; TestClassLegend pins them).
+const (
+	legendBuilding   = "Building"
+	legendVegetation = "Trees/other"
+	legendNone       = "Not told apart"
+	legendSwatch     = 12 // px square, then legendGap/4 to its word
+	legendGap        = 24 // px between items, and to the axis labels
+)
+
+// bandColor is the band's colour in column c: its class's, else clutter.
+func (r *renderer) bandColor(cls []byte, c int) color.NRGBA {
+	if cls != nil {
+		switch cls[c] {
+		case 'b':
+			return r.pal.TerrainBuilding
+		case 'v':
+			return r.pal.TerrainVegetation
+		}
+	}
+	return r.pal.TerrainClutter
+}
+
+// legend names the band's colours in the axis row, between x0 and x1:
+// the panel's legend under its chart (#797), with "Not told apart" for
+// the clutter colour a partial classification leaves. The row has room
+// for it on every card (the middle distance label is at least 400 px
+// away); were it ever too narrow, the legend is left out rather than
+// drawn over a label.
+func (r *renderer) legend(resp TerrainProfileResponse, x0, x1 int) {
+	items := []struct {
+		word string
+		c    color.NRGBA
+	}{{legendBuilding, r.pal.TerrainBuilding}, {legendVegetation, r.pal.TerrainVegetation}}
+	if resp.Classification.State == "partial" {
+		items = append(items, struct {
+			word string
+			c    color.NRGBA
+		}{legendNone, r.pal.TerrainClutter})
+	}
+	w := -legendGap
+	for _, it := range items {
+		w += legendSwatch + legendGap/4 + r.fs.Measure(it.word, axisSize, false) + legendGap
+	}
+	if x0+w > x1 {
+		return
+	}
+	x := x0
+	for _, it := range items {
+		r.cv.FillRect(image.Rect(x, axisBaseline-legendSwatch, x+legendSwatch, axisBaseline), it.c)
+		x += legendSwatch + legendGap/4
+		x += r.text("legend", it.word, x, axisBaseline, axisSize, false, cardkit.Opaque(r.pal.TextMuted)) + legendGap
+	}
+}
+
+// sampleClasses is each sample's class as the band may draw it, 'b', 'v'
+// or 0, or nil when it draws none: the panel's rule (chartGeometry), only
+// on a full or partial classification of a fully covered model=both
+// profile, and only when some sample is "b" or "v".
+func sampleClasses(resp TerrainProfileResponse) []byte {
+	c := resp.Classification
+	if resp.Model != "both" || !covered(resp) || c == nil || (c.State != "full" && c.State != "partial") {
+		return nil
+	}
+	out := make([]byte, len(resp.Samples))
+	some := false
+	for i, s := range resp.Samples {
+		if s.Cls == "b" || s.Cls == "v" {
+			out[i], some = s.Cls[0], true
+		}
+	}
+	if !some {
+		return nil
+	}
+	return out
+}
+
+// columnClasses is the class each plot column of the band is drawn in,
+// or nil without classes: the Go twin of the panel's bandRuns. Where a
+// class meets a sample without one, the class claims the slope between
+// them; two classes meet halfway between their samples. A column takes
+// the class at its centre. One pass over the samples and one over the
+// columns, like geometry.
+func columnClasses(resp TerrainProfileResponse, g geom) []byte {
+	cls := sampleClasses(resp)
+	if cls == nil {
+		return nil
+	}
+	smp := resp.Samples
+	// end is where sample i's class gives way to sample i+1's.
+	end := func(i int) float64 {
+		a, b := cls[i], cls[i+1]
+		switch {
+		case a == b || b == 0:
+			return smp[i+1].D
+		case a == 0:
+			return smp[i].D
+		}
+		return (smp[i].D + smp[i+1].D) / 2
+	}
+	out := make([]byte, plotW)
+	i := 0
+	for c := range out {
+		at := g.D * (float64(c) + 0.5) / plotW
+		for i+1 < len(smp) && end(i) <= at {
+			i++
+		}
+		out[c] = cls[i]
+	}
+	return out
 }
 
 // emptyPlot is the plot box when there is nothing to draw: the reason,
@@ -775,24 +940,42 @@ func (r *renderer) footer(resp TerrainProfileResponse, main chip, opt Options, p
 	} else {
 		parts = append(parts, "terrain only")
 	}
-	summaryY, creditY := summaryBaseline, creditBaseline
-	if resp.Coverage.Mixed {
-		summaryY, creditY = mixedSummaryBaseline, mixedCreditBaseline
-	}
-	summary := r.fs.Fit(strings.Join(parts, " · "), summarySize, false, right-safeMargin)
-	r.text("summary", summary, safeMargin, summaryY, summarySize, false, cardkit.Opaque(r.pal.Text))
-
 	// The credits are never shortened and never left out (CC BY 4.0 for
-	// DHM, the Copernicus DEM licence for the fill).
-	muted := cardkit.Opaque(r.pal.TextMuted)
-	w := r.text("attribution", Credit, safeMargin, creditY, attributionSize, false, muted)
+	// DHM and the footprints, the Copernicus DEM licence for the fill):
+	// stacked up from creditBaseline, the DHM credit first.
+	type line struct{ role, text string }
+	var credits []line
+	for _, l := range creditLines(resp) {
+		credits = append(credits, line{"attribution", l})
+	}
 	if resp.Coverage.Mixed {
-		r.text("attributionFill", FillCredit, safeMargin, creditBaseline, attributionSize, false, muted)
+		credits = append(credits, line{"attributionFill", FillCredit})
+	}
+	firstY := creditBaseline - creditLeading*(len(credits)-1)
+	summaryY := summaryBaseline
+	if len(credits) > 1 {
+		summaryY = firstY - creditLeading
+	}
+	// Three credit lines (a classified mixed card, which the server never
+	// draws) leave no room for the summary under the rule: the credits
+	// are obligations, the summary is not.
+	if summaryY-summarySize >= footerRule {
+		summary := r.fs.Fit(strings.Join(parts, " · "), summarySize, false, right-safeMargin)
+		r.text("summary", summary, safeMargin, summaryY, summarySize, false, cardkit.Opaque(r.pal.Text))
+	}
+
+	muted := cardkit.Opaque(r.pal.TextMuted)
+	w := 0
+	for i, l := range credits {
+		lw := r.text(l.role, l.text, safeMargin, firstY+creditLeading*i, attributionSize, false, muted)
+		if i == 0 {
+			w = lw
+		}
 	}
 	if site := cardkit.Sanitize(opt.Site); site != "" {
 		site = r.fs.Fit(site, attributionSize, false, right-(safeMargin+w+32))
 		if site != "" {
-			r.text("site", site, right-r.fs.Measure(site, attributionSize, false), creditY, attributionSize, false, muted)
+			r.text("site", site, right-r.fs.Measure(site, attributionSize, false), firstY, attributionSize, false, muted)
 		}
 	}
 }

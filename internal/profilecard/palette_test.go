@@ -12,7 +12,7 @@ import (
 )
 
 // The shipped palette is not a second copy of the colours: it is pinned to
-// the two files the browser takes them from. The six terrain keys come from
+// the two files the browser takes them from. The eight terrain keys come from
 // public/style.css (:root for light, every dark block for dark), the base
 // keys from the default preset in public/customize-v2.js, which is what a
 // deployment without theme.json shows.
@@ -29,6 +29,7 @@ func TestDefaultPaletteMatchesFrontend(t *testing.T) {
 	terrainVars := map[string]string{
 		"terrainFill": "--terrain-fill", "terrainClutter": "--terrain-clutter", "losLine": "--los-line",
 		"fresnel100": "--fresnel-100", "fresnel60": "--fresnel-60", "profileBlocked": "--profile-blocked",
+		"terrainBuilding": "--terrain-building", "terrainVegetation": "--terrain-vegetation",
 	}
 	preset := regexp.MustCompile(`(?s)\bdefault: \{.*?\btheme: \{(.*?)\},\s*themeDark: \{(.*?)\}`).FindSubmatch(js)
 	if preset == nil {

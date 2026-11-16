@@ -11,7 +11,8 @@ import (
 // comment in go.mod for why v0.23.0. golang.org/x/text comes with it
 // (font/sfnt reads Mac-encoded name tables) and golang.org/x/sync with the
 // shared internal/dhm module; since #811 M1 the drawing primitives come
-// from internal/cardkit, which carries the same pin. Nothing else may appear.
+// from internal/cardkit, which carries the same pin; the INSPIRE buildings
+// credit (#846) from internal/buildings. Nothing else may appear.
 func TestDependencyPin(t *testing.T) {
 	b, err := os.ReadFile("go.mod")
 	if err != nil {
@@ -31,7 +32,7 @@ func TestDependencyPin(t *testing.T) {
 	allowed := map[string]bool{
 		"golang.org/x/image": true, "golang.org/x/text": true, "golang.org/x/sync": true,
 		"github.com/meshcore-analyzer/dhm": true, "github.com/meshcore-analyzer/copdem": true,
-		"github.com/meshcore-analyzer/cardkit": true,
+		"github.com/meshcore-analyzer/cardkit": true, "github.com/meshcore-analyzer/buildings": true,
 	}
 	req := regexp.MustCompile(`(?m)^\s*(?:require\s+)?([a-z0-9.\-]+\.[a-z]{2,}/[^\s]+) v[0-9]`)
 	for _, m := range req.FindAllStringSubmatch(mod, -1) {
