@@ -37,6 +37,7 @@ type stubOGC struct {
 	answer  func(line [4]float64) (status int, body []byte, ok bool)
 	delay   time.Duration
 	hold    chan struct{} // if set, requests wait for it to close
+	arrived chan struct{} // if set, one value per request on arrival, before hold; none when full
 	calls   atomic.Int32
 	running atomic.Int32
 	peak    atomic.Int32
@@ -74,8 +75,14 @@ func (s *stubOGC) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	s.reqs = append(s.reqs, r.Clone(context.Background()))
-	hold := s.hold
+	hold, arrived := s.hold, s.arrived
 	s.mu.Unlock()
+	if arrived != nil {
+		select {
+		case arrived <- struct{}{}:
+		default:
+		}
+	}
 	if hold != nil {
 		select {
 		case <-hold:
@@ -157,6 +164,18 @@ func (s *stubOGC) requests() []*http.Request {
 // the keyless client behind the server's Fetcher.
 func (s *stubOGC) source(set terrainSettings) terrainBuildingSource {
 	return newTerrainBuildingSource(set, s.srv.URL+"/ogcapi/features/building_inspire/collections/building/items")
+}
+
+// untimedSource is source with no timeout in the footprint chain: a held
+// request ends only when the stub answers or its caller leaves.
+func (s *stubOGC) untimedSource(set terrainSettings) terrainBuildingSource {
+	co := buildings.DefaultClientOptions()
+	co.BaseURL = s.srv.URL + "/ogcapi/features/building_inspire/collections/building/items"
+	co.Timeout = 0
+	o := buildings.DefaultFetcherOptions()
+	o.MaxInFlight = set.maxInFlight * terrainBuildingsMaxSegments
+	o.Timeout = 0
+	return buildings.NewFetcher(buildings.NewClient(co), o)
 }
 
 type buildingsEnv struct {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,9 +51,12 @@ func newFillBucket(t *testing.T, l copdemtest.Layout) *copdemtest.Bucket {
 	return b
 }
 
-func fillClient(b *copdemtest.Bucket) *copdem.Client {
+func fillClient(b *copdemtest.Bucket, edit ...func(*copdem.Options)) *copdem.Client {
 	o := copdem.DefaultOptions()
 	o.Transport = b.Transport()
+	for _, e := range edit {
+		e(&o)
+	}
 	return copdem.NewClient(o)
 }
 
@@ -382,22 +386,44 @@ func TestTerrainFill_CacheHit(t *testing.T) {
 }
 
 // Two different profiles that need the same blocks, fetched at once,
-// read each block once.
+// read each block once. The bucket holds every request until all three
+// profiles are in flight, so they provably overlap, and no timeout can
+// end the hold first (#834).
 func TestTerrainFill_ConcurrentProfilesShareBlocks(t *testing.T) {
 	b := newFillBucket(t, fillTenth)
+	release := make(chan struct{})
+	var once sync.Once
+	open := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(open) // before the bucket closes: no handler is left held
+	b.Hook = func(http.ResponseWriter, *http.Request) bool {
+		<-release
+		return false
+	}
 	env, _ := newFillEnv(t, b, dhm.ProfileConfig{})
-	var wg sync.WaitGroup
-	for i, a := range []string{cphPt, "55.68000,12.60000", "55.66000,12.58000"} {
-		wg.Add(1)
+	env.p.fill = fillClient(b, func(o *copdem.Options) { o.Timeout = time.Hour })
+	env.p.deadline = time.Hour
+	starts := []string{cphPt, "55.68000,12.60000", "55.66000,12.58000"}
+	served := make(chan *httptest.ResponseRecorder, len(starts))
+	for i, a := range starts {
 		go func(i int, a string) {
-			defer wg.Done()
-			w := env.get(pathQuery(a, malmoPt), func(r *http.Request) { r.RemoteAddr = "198.51.100." + string(rune('1'+i)) + ":1000" })
-			if resp := decodeProfile(t, w); !resp.Coverage.Mixed {
-				t.Errorf("profile %d not mixed", i)
-			}
+			served <- env.get(pathQuery(a, malmoPt), func(r *http.Request) { r.RemoteAddr = "198.51.100." + string(rune('1'+i)) + ":1000" })
 		}(i, a)
 	}
-	wg.Wait()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for env.p.flight.Pending() != len(starts) {
+		select {
+		case w := <-served:
+			t.Fatalf("a profile was served while the bucket held every request: %d %s", w.Code, w.Body.String())
+		case <-poll.C:
+		}
+	}
+	open()
+	for i := range starts {
+		if resp := decodeProfile(t, <-served); !resp.Coverage.Mixed {
+			t.Errorf("profile %d not mixed: %+v", i, resp.Coverage)
+		}
+	}
 	seen := map[string]int{}
 	for _, r := range b.Log() {
 		seen[r.Path+" "+r.Header.Get("Range")]++
