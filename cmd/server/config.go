@@ -1114,9 +1114,12 @@ func (c *Config) migrateDeprecatedConfig() {
 		migrated = true
 	}
 	if len(c.Tiles) > 0 {
+		// A copy, not the legacy block itself: the two are shipped side by
+		// side, and dropUngatedTileTokens drops the gated tokens from the
+		// legacy one only.
 		for k, v := range c.Tiles {
 			if tilesMap[k] == nil {
-				tilesMap[k] = v
+				tilesMap[k] = cloneJSON(v)
 			}
 		}
 		migrated = true
@@ -1126,33 +1129,168 @@ func (c *Config) migrateDeprecatedConfig() {
 	}
 }
 
+// jsonObject is a JSON object as encoding/json decodes it into
+// interface{}. It is an alias, not a defined type: a decoded object's
+// dynamic type is the unnamed map type, and a type assertion to a defined
+// type would never match it.
+type jsonObject = map[string]interface{}
+
+// jsonObjectAt follows path through nested JSON objects as encoding/json
+// decodes them into interface{}, by exact-case key, and returns the object
+// at its end. Anything that is not an object on the way, or at the end,
+// gives a nil map, which reads as empty.
+func jsonObjectAt(v interface{}, path ...string) (m jsonObject) {
+	for i := 0; ; i++ {
+		m, _ = v.(jsonObject)
+		if i == len(path) {
+			return m
+		}
+		v = m[path[i]]
+	}
+}
+
+// cloneJSON deep-copies a value decoded by encoding/json into interface{}.
+func cloneJSON(v interface{}) interface{} {
+	switch t := v.(type) {
+	case jsonObject:
+		m := make(jsonObject, len(t))
+		for k, e := range t {
+			m[k] = cloneJSON(e)
+		}
+		return m
+	case []interface{}:
+		a := make([]interface{}, len(t))
+		for i, e := range t {
+			a[i] = cloneJSON(e)
+		}
+		return a
+	}
+	return v
+}
+
+// gatedTileProvider is an opt-in tile provider as map-tile-providers.js
+// gates it: its styles share an id prefix, and the provider block must
+// have enabled === true, and with needsToken a non-blank string token.
+type gatedTileProvider struct {
+	key, prefix, warning string
+	needsToken           bool
+}
+
+var gatedTileProviders = []gatedTileProvider{
+	{key: "esri", prefix: "esri-",
+		warning: "Esri styles are opt-in since #728 and map.tiles.providers.esri.enabled is not true: browsers will skip it and show the fallback base map. Set map.tiles.providers.esri.enabled to true to keep it."},
+	{key: "dataforsyningen", prefix: "dataforsyningen-", needsToken: true,
+		warning: "the Dataforsyningen styles are opt-in (#741) and need map.tiles.providers.dataforsyningen.enabled set to true and a non-empty map.tiles.providers.dataforsyningen.token: browsers will skip it and show the fallback base map."},
+}
+
+// on reports whether block switches g on, read as map-tile-providers.js
+// reads it: exact-case keys, enabled the JSON boolean true, and with
+// needsToken a string token that is not blank.
+func (g gatedTileProvider) on(block jsonObject) bool {
+	enabled, _ := block["enabled"].(bool)
+	token, _ := block["token"].(string)
+	return enabled && (!g.needsToken || strings.TrimSpace(token) != "")
+}
+
+// dropUngatedTileTokens keeps a gated provider's token out of
+// /api/config/client unless the browser would use it. The Dataforsyningen
+// base-map token (#741) is client-visible on purpose, but only while
+// map.tiles.providers.dataforsyningen is switched on: an operator who
+// answers misuse with enabled false must stop publishing it. The browser
+// reads that one exact-case path and nothing else, so in every block named
+// like map.tiles, its providers or the provider, in any spelling, and in
+// the legacy top-level tiles, which the browser never reads (what it needs
+// was copied into map.tiles by migrateDeprecatedConfig), every token key
+// of any spelling is deleted; the one exception is the exact-case token at
+// the exact-case path while that block is on. A block on the way that is
+// not an object holds no gate the browser can read, so it is deleted
+// whole. A non-blank value dropped is logged by key, never by value. Runs
+// once, at load, after migrateDeprecatedConfig.
+func (c *Config) dropUngatedTileTokens() {
+	var dropped []string
+	for k, v := range c.Map {
+		if !strings.EqualFold(k, "tiles") {
+			continue
+		}
+		tiles := jsonObjectAt(v)
+		if tiles == nil {
+			delete(c.Map, k)
+			dropped = append(dropped, "map."+k)
+			continue
+		}
+		dropUngatedTokensIn(tiles, "map."+k, k == "tiles", &dropped)
+	}
+	dropUngatedTokensIn(c.Tiles, "tiles", false, &dropped)
+	for _, p := range dropped {
+		log.Printf("[config] %s was removed from the client config: the Dataforsyningen base-map token is shipped to browsers only as map.tiles.providers.dataforsyningen.token, and only while that block's enabled is true and its token is non-empty", p)
+	}
+}
+
+// dropUngatedTokensIn drops the gated tokens from tiles, a map.tiles-like
+// block at path; readable says whether the browser reads that block.
+func dropUngatedTokensIn(tiles jsonObject, path string, readable bool, dropped *[]string) {
+	for pk, p := range tiles {
+		if !strings.EqualFold(pk, "providers") {
+			continue
+		}
+		providers := jsonObjectAt(p)
+		if providers == nil {
+			delete(tiles, pk)
+			*dropped = append(*dropped, path+"."+pk)
+			continue
+		}
+		for k, v := range providers {
+			for _, g := range gatedTileProviders {
+				if !g.needsToken || !strings.EqualFold(k, g.key) {
+					continue
+				}
+				block := jsonObjectAt(v)
+				if block == nil {
+					delete(providers, k)
+					*dropped = append(*dropped, path+"."+pk+"."+k)
+					continue
+				}
+				keep := readable && pk == "providers" && k == g.key && g.on(block)
+				for bk, bv := range block {
+					if !strings.EqualFold(bk, "token") || (keep && bk == "token") {
+						continue
+					}
+					delete(block, bk)
+					if str, isStr := bv.(string); !isStr || strings.TrimSpace(str) != "" {
+						*dropped = append(*dropped, path+"."+pk+"."+k+"."+bk)
+					}
+				}
+			}
+		}
+	}
+}
+
 // warnGatedTileDefaults logs when map.tiles.darkDefault or lightDefault
-// names an Esri style while map.tiles.providers.esri.enabled is not true.
-// Since #728 every esri-* style is opt-in, and the browser then skips that
-// default and shows the fallback base map; an operator who upgraded with
-// Esri Dark Gray as the dark default should find out from the server log,
-// not from a changed map. It runs after migrateDeprecatedConfig, so a
-// legacy top-level mapDarkTileProvider is checked too. map.tiles is passed
-// to the browser as-is; the server only looks, and reads the keys exactly
-// as map-tile-providers.js does: exact-case keys (encoding/json would match
-// them case-insensitively), only the JSON boolean true enables Esri, and a
-// default that is not a string is ignored without hiding the other one.
+// names a style of a gated provider that is not switched on: an Esri style
+// while map.tiles.providers.esri.enabled is not true (#728), or a
+// Dataforsyningen style without enabled true and a token (#741). The
+// browser then skips that default and shows the fallback base map; an
+// operator who upgraded with Esri Dark Gray as the dark default should find
+// out from the server log, not from a changed map. It runs after
+// migrateDeprecatedConfig, so a legacy top-level mapDarkTileProvider is
+// checked too. It only looks (dropUngatedTileTokens edits, later), and
+// reads the keys exactly as map-tile-providers.js does: exact-case keys
+// (encoding/json would match them case-insensitively), only the JSON
+// boolean true enables a provider, and a default that is not a string is
+// ignored without hiding the other one.
 func (c *Config) warnGatedTileDefaults(logf func(string, ...interface{})) {
 	if c == nil {
 		return
 	}
-	tiles, ok := c.Map["tiles"].(map[string]interface{})
-	if !ok {
-		return
-	}
-	providers, _ := tiles["providers"].(map[string]interface{})
-	esri, _ := providers["esri"].(map[string]interface{})
-	if enabled, _ := esri["enabled"].(bool); enabled {
-		return
-	}
-	for _, key := range []string{"darkDefault", "lightDefault"} {
-		if id, _ := tiles[key].(string); strings.HasPrefix(id, "esri-") {
-			logf("[config] map.tiles.%s is %q, but Esri styles are opt-in since #728 and map.tiles.providers.esri.enabled is not true: browsers will skip it and show the fallback base map. Set map.tiles.providers.esri.enabled to true to keep it.", key, id)
+	tiles := jsonObjectAt(c.Map, "tiles")
+	for _, g := range gatedTileProviders {
+		if g.on(jsonObjectAt(tiles, "providers", g.key)) {
+			continue
+		}
+		for _, key := range []string{"darkDefault", "lightDefault"} {
+			if id, _ := tiles[key].(string); strings.HasPrefix(id, g.prefix) {
+				logf("[config] map.tiles.%s is %q, but "+g.warning, key, id)
+			}
 		}
 	}
 }

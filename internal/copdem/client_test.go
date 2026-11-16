@@ -432,6 +432,57 @@ func TestClientCoalescesBlocks(t *testing.T) {
 	}
 }
 
+// A caller that missed the cache just before an equal read stored its
+// bytes reads nothing again (#834): it either joins the running read or
+// finds what that read stored. Here the late caller is held between its
+// miss and its shared read while another read of the same bytes runs to
+// its end.
+func TestClientReadAfterSharedReadEndsIsCached(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		read func(c *Client, h header) error
+		want int64 // requests: the header, and the block if it is read
+	}{
+		{"header", func(c *Client, _ header) error { _, err := c.header(ctx, cph); return err }, 1},
+		{"block", func(c *Client, h header) error { _, err := c.block(ctx, cph, h, 0, 3); return err }, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBucket(t)
+			b.Put(cph.Path(), smallTile(cph))
+			c := newTestClient(t, b)
+			var h header
+			if tc.name == "block" {
+				var err error
+				if h, err = c.header(ctx, cph); err != nil {
+					t.Fatal(err)
+				}
+			}
+			missed, proceed := make(chan struct{}), make(chan struct{})
+			var held atomic.Bool
+			c.afterMiss = func() {
+				if held.CompareAndSwap(false, true) {
+					close(missed)
+					<-proceed
+				}
+			}
+			late := make(chan error, 1)
+			go func() { late <- tc.read(c, h) }()
+			<-missed // the late caller missed the cache
+			if err := tc.read(c, h); err != nil {
+				t.Fatal(err)
+			}
+			close(proceed) // the other read has ended: the late caller goes on
+			if err := <-late; err != nil {
+				t.Fatal(err)
+			}
+			if got := b.Requests.Load(); got != tc.want {
+				t.Fatalf("%d requests, want %d: the late caller read again", got, tc.want)
+			}
+		})
+	}
+}
+
 // gate is a channel that hooks block on until the test opens it. It is
 // also opened on cleanup, before the bucket closes, so a failing test
 // never leaves a handler blocked (httptest.Server.Close waits for them).

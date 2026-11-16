@@ -20,10 +20,22 @@ import (
 const (
 	SurfaceLayer = "dhm_overflade_skyggekort"
 	ContourLayer = "dhm_kurve_traditionel" // 2.5 m interval, made for 1:25,000
-	// ContourMinZoom is the first zoom the contour layer draws at, from
-	// its scale limit (#734 M0, F3); a token check (T3) pins z14 or z15
-	// before the overlay is offered (#734 M2). Below it the upstream
-	// would answer a blank tile, so the proxy refuses the request.
+	// ContourStyle is the contour layer's one accepted style (#734 M2).
+	// The layer lists hvid, gul and roed (white, yellow, red) besides the
+	// unnamed default; only red is a named colour that stands out from
+	// both the light and the dark base maps, and the contour pane
+	// (mc-contour-pane) is outside the dark-theme invert filter, so the
+	// colour is shown as served. The hillshade pane (mcTerrainPane) is not:
+	// it gets --terrain-overlay-filter in dark, so contours must not move
+	// into it (#798 review F3). One
+	// style for both themes keeps one contour cache and no refetch on a
+	// theme switch. Any other style is refused: upstream an unknown style
+	// is a ServiceException with status 200 (owner check T3).
+	ContourStyle = "roed"
+	// ContourMinZoom is the first zoom the contour layer draws at: z13
+	// tiles are empty, z14 tiles carry lines (owner check T3 on staging,
+	// #734). Below it the upstream would answer a blank tile, so the proxy
+	// refuses the request and the page never asks.
 	ContourMinZoom = 14
 
 	// The dataset pages the overlays' credits link (#733, #734 Q5): the
@@ -72,7 +84,7 @@ var (
 		MinZoom: MinZoom, MaxZoom: MaxZoom, DatasetURL: DatasetURL, fallback: &overlayTerrain}
 	overlaySurface = Overlay{ID: "surface", Service: WMSService, Layer: SurfaceLayer,
 		MinZoom: MinZoom, MaxZoom: MaxZoom, DatasetURL: SurfaceDatasetURL}
-	overlayContours = Overlay{ID: "contours", Service: WMSService, Layer: ContourLayer,
+	overlayContours = Overlay{ID: "contours", Service: WMSService, Layer: ContourLayer, Style: ContourStyle,
 		MinZoom: ContourMinZoom, MaxZoom: MaxZoom, DatasetURL: ContourDatasetURL}
 
 	// overlayTable is the browser allow-list, in display order.
@@ -123,16 +135,16 @@ func (o Overlay) Resolve(terrain Hillshade) Overlay {
 	return o
 }
 
-// overlayQuery is the tile's GetMap query for overlay o: #680's upstream
-// query with o's layer and style.
-func (k TileKey) overlayQuery(o Overlay) url.Values {
+// OverlayQuery is the tile's GetMap query for overlay o: #680's upstream
+// query with o's layer and style. The live smoke check (#803) sends it too.
+func (k TileKey) OverlayQuery(o Overlay) url.Values {
 	q := k.upstreamQuery()
 	q.Set("layers", o.Layer)
 	q.Set("styles", o.Style)
 	return q
 }
 
-// overlayQueryCheck accepts q only if it is exactly the overlayQuery of one
+// overlayQueryCheck accepts q only if it is exactly the OverlayQuery of one
 // of service's overlays, for the tile its bbox names, at a zoom inside that
 // overlay's range. So Client.Get cannot send any other request to service:
 // no other layer, style, format, zoom or parameter. A service has at most
@@ -157,7 +169,7 @@ func overlayQueryCheck(service string) func(url.Values) error {
 		if err != nil {
 			return err
 		}
-		if k.Z < o.MinZoom || k.Z > o.MaxZoom || q.Encode() != k.overlayQuery(o).Encode() {
+		if k.Z < o.MinZoom || k.Z > o.MaxZoom || q.Encode() != k.OverlayQuery(o).Encode() {
 			return ErrBadRequest
 		}
 		return nil
@@ -171,7 +183,7 @@ func overlayQueryCheck(service string) func(url.Values) error {
 // (#695). o is not trusted: the service's check refuses any overlay that
 // is not in the table.
 func (c *Client) FetchOverlayAdmitted(ctx context.Context, adm *Admission, o Overlay, k TileKey) ([]byte, error) {
-	data, err := c.get(ctx, adm, o.Service, k.overlayQuery(o), []string{"image/png"})
+	data, err := c.get(ctx, adm, o.Service, k.OverlayQuery(o), []string{"image/png"})
 	if err != nil {
 		return nil, err
 	}

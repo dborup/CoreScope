@@ -478,6 +478,13 @@ func main() {
 	log.Printf("[repeater-enrich-recompute] background recompute enabled (window=%.1fh, interval=%s)",
 		relayWindowHours, cfg.AnalyticsDefaultRecomputeInterval())
 
+	// #807: last known advert hash size per node, read from SQLite (one
+	// indexed statement) so a node keeps its hash_size after its last advert
+	// leaves the packet-store window and right after a restart. Synchronous
+	// prewarm, then a background refresh.
+	stopLastKnownHS := store.StartLastKnownHashSizeRecomputer(lastKnownHashSizeRefreshInterval)
+	defer stopLastKnownHS()
+
 	// Steady-state bridge-centrality recomputer (issue #672 axis 2).
 	// Computes betweenness centrality over the in-memory neighbor
 	// graph and stores the per-pubkey score map atomically. Read by

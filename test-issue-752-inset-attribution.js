@@ -223,6 +223,26 @@ test('I2 a credit swapped in place with MC_setLayerAttribution goes with the lay
 });
 
 // ── I3: one control per map ────────────────────────────────────────────────
+/* #741 M2 — Natur- og Friluftskort is a WMS style like Skærmkort; every
+ * inset builds it from the provider's own descriptor (getTileUrl() has no
+ * template for it) with the inset's own ceiling, and credits it. */
+test('I1 #741 M2: every inset renders Natur- og Friluftskort as the WMS, with its credit', () => {
+  const NATUR = 'Indeholder data fra Klimadatastyrelsen, Natur- og Friluftskort, CC BY 4.0';
+  for (const ins of INSETS) {
+    const ctx = sandbox({ mapCfg: { tiles: { providers: { dataforsyningen: { enabled: true, token: 'tok' } } } },
+      storage: { 'mc-light-tile-provider': 'dataforsyningen-natur-friluft' } });
+    const { map, layer } = inset(ctx, ins.opts);
+    assert.strictEqual(layer.kind, 'wms', ins.name + ': ' + layer.kind + ' ' + layer._url);
+    assert.strictEqual(layer._url, 'https://api.dataforsyningen.dk/wms/natur_friluftskort?token=tok', ins.name);
+    assert.strictEqual(layer.options.layers, 'Natur_Friluft_basis', ins.name);
+    assert.strictEqual(layer.options.maxZoom, 18, ins.name + ': the inset keeps its own ceiling');
+    const shown = credits(map);
+    assert.strictEqual(shown.length, 1, ins.name + ': ' + JSON.stringify(shown));
+    assert.strictEqual(shown[0].replace(/<[^>]+>/g, ''), NATUR, ins.name);
+    assert.strictEqual(map.panes.tilePane.style.filter || '', '', ins.name + ': light only, never inverted');
+  }
+});
+
 console.log('\n── #752 I3: one control per map ──');
 
 test('I3 a second helper call on the same map (a re-render) adds no second control', () => {

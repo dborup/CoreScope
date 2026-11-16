@@ -1,8 +1,9 @@
 'use strict';
-/* Issue #715 — the og:image Denmark outline is generated from Natural Earth
- * (scripts/gen-og-denmark.py) and the nodes/links sit on that land. Static
- * checks on scripts/og-image-meshview.html; the PNG size is covered by
- * test-issue-646-og-meta.js. */
+/* Issue #715 — the og:image Denmark outline is generated from real geodata
+ * (scripts/gen-og-denmark.py; Topografisk Landpolygon since #739 M2, see
+ * test-issue-739-og-outline.js for the source checks) and the nodes/links
+ * sit on that land. Static checks on scripts/og-image-meshview.html; the PNG
+ * size is covered by test-issue-646-og-meta.js. */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -49,7 +50,7 @@ const outlineRings = [].concat(...[...svg.matchAll(/<path class="outline"[^>]*\s
 const nodes = [...svg.matchAll(/<circle class="node" cx="([\d.]+)" cy="([\d.]+)"/g)].map(m => [+m[1], +m[2]]);
 const links = [...svg.matchAll(/<line class="link" x1="([\d.]+)" y1="([\d.]+)" x2="([\d.]+)" y2="([\d.]+)"/g)].map(m => m.slice(1).map(Number));
 
-console.log('\n=== #715: Denmark outline from Natural Earth ===');
+console.log('\n=== #715: Denmark outline from real geodata ===');
 test('outline is real geodata: many vertices, many islands', () => {
   const verts = outlineRings.reduce((n, r) => n + r.length, 0);
   assert.ok(outlineRings.length >= 12, 'rings ' + outlineRings.length);
@@ -89,21 +90,18 @@ test('Jutland, Funen and Zealand each hold nodes', () => {
 });
 
 console.log('\n=== #715: provenance ===');
-test('HTML comment cites Natural Earth as public domain', () => {
+test('HTML comment names the generator', () => {
   const c = src.slice(0, src.indexOf('<html')).concat(src.match(/<!--[\s\S]*?-->/g).join(''));
-  assert.ok(/Natural Earth/.test(c) && /public domain/i.test(c));
   assert.ok(/gen-og-denmark\.py/.test(c));
   assert.ok(!/Hand-drawn/i.test(c), 'stale hand-drawn claim');
 });
-test('generator pins dependencies and cites source + licence', () => {
+test('generator pins dependencies', () => {
   assert.ok(gen, 'scripts/gen-og-denmark.py missing');
-  assert.ok(/pyshp==\d/.test(gen) && /shapely==\d/.test(gen));
-  assert.ok(/naturalearthdata\.com/.test(gen) && /public domain/i.test(gen));
-  assert.ok(/ne_10m_admin_0_countries/.test(gen));
+  assert.ok(/pyproj==\d/.test(gen) && /shapely==\d/.test(gen) && /numpy==\d/.test(gen));
 });
-test('no raw shapefiles are committed', () => {
+test('no raw shapefiles or GeoPackages are committed', () => {
   const files = execSync('git ls-files', { cwd: __dirname }).toString().split('\n');
-  assert.deepStrictEqual(files.filter(f => /\.(shp|shx|dbf|prj|cpg)$/i.test(f)), []);
+  assert.deepStrictEqual(files.filter(f => /\.(shp|shx|dbf|prj|cpg|gpkg)$/i.test(f)), []);
 });
 test('SVG stays small', () => {
   assert.ok(svg.length < 40 * 1024, 'svg bytes ' + svg.length);

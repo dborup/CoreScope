@@ -166,6 +166,12 @@
   let _feedResizeHandlers = null;
   let _moreMenuDocClickHandler = null;
   let _timelineScrubHandlers = null;
+  // #839 — Live's data-theme MutationObserver, the DragManager's media-query
+  // listener and an open feed card's outside-click listener: none of them
+  // go with #app's subtree, so destroy() disconnects/removes them.
+  let _themeObs = null;
+  let _dragMediaHandlers = null;
+  let _feedCardDismiss = null;
   let _navCleanup = null;
   let _timelineRefreshInterval = null;
   let _lcdClockInterval = null;
@@ -1816,10 +1822,11 @@
       // Preferred path: the registry's single resolver. It picks the
       // provider for this theme and invokes lazy `url` functions, so url
       // AND attribution always come from the configured provider.
+      // #741 M1b: a WMS style has no url, only its `wms` descriptor.
       if (typeof window.MC_getTileSpec === 'function') {
         const s = window.MC_getTileSpec(dark ? 'dark' : 'light');
-        if (s && s.url) {
-          return { url: s.url, attribution: s.attribution || '© OpenStreetMap contributors', refUrl: s.refUrl || null };
+        if (s && (s.url || s.wms)) {
+          return { url: s.url, wms: s.wms || null, attribution: s.attribution || '© OpenStreetMap contributors', refUrl: s.refUrl || null };
         }
       }
       // Legacy/partial registry: accessors without getTileSpec.
@@ -1836,8 +1843,11 @@
     const liveAutoLayerGroup = L.layerGroup().addTo(map);
 
     function _liveSyncDarkTiles(dark) {
+      // #839 — never against a map destroy() has removed.
+      if (!map) return;
       const r = _liveResolveTile(dark);
-      tileLayer.setUrl(r.url);
+      // #741 M1b — in place for a template, a swapped layer to or from WMS.
+      tileLayer = window.MC_syncBaseLayer(liveAutoLayerGroup, tileLayer, r, { maxZoom: 19 });
       // The registry swaps the credit in Live's attribution control too.
       if (typeof window.MC_setLayerAttribution === 'function') window.MC_setLayerAttribution(map, tileLayer, r.attribution);
       else if (tileLayer.options) tileLayer.options.attribution = r.attribution;
@@ -1921,7 +1931,9 @@
 
 
     // Swap tiles when theme changes
-    const _themeObs = new MutationObserver(function () {
+    // #839 — stored and disconnected in destroy(): <html> outlives the page.
+    if (_themeObs) _themeObs.disconnect();
+    _themeObs = new MutationObserver(function () {
       const dark = document.documentElement.getAttribute('data-theme') === 'dark' ||
         (document.documentElement.getAttribute('data-theme') !== 'light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
       _liveSyncDarkTiles(dark);
@@ -2591,6 +2603,8 @@
         }
       }
       dragMql.addEventListener('change', onDragMediaChange);
+      // #839 — the MediaQueryList outlives the page; removed in destroy().
+      _dragMediaHandlers = { mql: dragMql, fn: onDragMediaChange };
       // Initial check
       if (!dragMql.matches) dragMgr.disable();
 
@@ -4957,9 +4971,17 @@
       console.log('[replay] hash=' + pkt.hash + ' pkts=' + replayPkts.length + ' uniquePaths=' + uniquePaths.size, [...uniquePaths].slice(0, 3));
       renderPacketTree(replayPkts, true);
     });
-    document.addEventListener('click', function dismiss(e) {
-      if (!card.contains(e.target) && !anchor.contains(e.target)) { card.remove(); document.removeEventListener('click', dismiss); }
-    });
+    // #839 — one open card at a time (the old one is removed above), so one
+    // module ref; destroy() removes it when Live is left with the card open.
+    if (_feedCardDismiss) document.removeEventListener('click', _feedCardDismiss);
+    _feedCardDismiss = function dismiss(e) {
+      if (!card.contains(e.target) && !anchor.contains(e.target)) {
+        card.remove();
+        document.removeEventListener('click', dismiss);
+        if (_feedCardDismiss === dismiss) _feedCardDismiss = null;
+      }
+    };
+    document.addEventListener('click', _feedCardDismiss);
     const feedEl = document.getElementById('liveFeed');
     if (feedEl) feedEl.parentElement.appendChild(card);
     // #1619: register the popup with the live DragManager so users can move
@@ -5030,6 +5052,9 @@
     // can't be discarded with #app's subtree (global events, and drag
     // tracking that must follow the mouse outside its own panel's bounds).
     if (_onTileProviderChanged) { window.removeEventListener('mc-tile-provider-changed', _onTileProviderChanged); _onTileProviderChanged = null; }
+    if (_themeObs) { _themeObs.disconnect(); _themeObs = null; }
+    if (_dragMediaHandlers) { _dragMediaHandlers.mql.removeEventListener('change', _dragMediaHandlers.fn); _dragMediaHandlers = null; }
+    if (_feedCardDismiss) { document.removeEventListener('click', _feedCardDismiss); _feedCardDismiss = null; }
     if (_onDragManagerResize) { window.removeEventListener('resize', _onDragManagerResize); _onDragManagerResize = null; }
     if (_feedResizeHandlers) {
       document.removeEventListener('mousemove', _feedResizeHandlers.mousemove);

@@ -312,10 +312,11 @@ test('unknown on a partial profile says the path leaves Denmark', () => {
   assert.ok(/79\.8\s?%/.test(c.detail), c.detail);
 });
 
-test('unknown with no coverage at all points at the Denmark-only limit', () => {
+test('unknown with no coverage at all says the path is wholly outside Denmark', () => {
   const c = TP.verdictChip(resp({ state: 'unknown' }, { state: 'none', pct: 0 }));
   assert.strictEqual(c.label, 'No verdict');
-  assert.ok(/Denmark only/i.test(c.detail), c.detail);
+  // #839: not "Denmark only" — a cross-border path gets the Copernicus fill.
+  assert.ok(/entirely outside Denmark/i.test(c.detail), c.detail);
 });
 
 test('an unrecognised verdict state degrades to unknown, never to clear', () => {
@@ -1388,6 +1389,51 @@ atest('an operator height is never overruled by the customizer', async () => {
     assert.strictEqual(f.calls.length, 1, source + ' was re-asked with a customizer default');
     assert.strictEqual(live.dom.find('tp-hsrc-a').textContent, 'operator');
   }
+});
+
+// #789 M1: the server floors the estimate at the role height that would
+// otherwise apply (max(role, surface + 2)). The client mirrors that floor
+// for the viewer's customizer role height: a higher customizer height wins
+// (a mast the surface model cannot see), a lower one never replaces the
+// estimate.
+atest('a customizer role height above the estimate replaces it', async () => {
+  const live = loadLive();
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: 25 }) };
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  const data = defaultsAnswer();
+  data.a.antennaSource = 'dsm-estimate';
+  data.a.antennaM = 22;
+  f.calls[0].settle.resolve(data);
+  await sleep(0);
+  eq(askedHeights(f.calls[f.calls.length - 1]), { ha: '25', hb: '25' }, 'a lower estimate overruled the customizer height');
+  const second = defaultsAnswer();
+  second.a = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 25, antennaSource: 'request', assumed: false };
+  second.b = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 25, antennaSource: 'request', assumed: false };
+  f.calls[f.calls.length - 1].settle.resolve(second);
+  await sleep(0);
+  assert.strictEqual(live.dom.find('tp-hsrc-a').textContent, 'default');
+  assert.strictEqual(live.dom.find('tp-h-a').value, '25');
+});
+
+atest('a customizer role height below the estimate never replaces it', async () => {
+  const live = loadLive();
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: 20 }) };
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  const data = defaultsAnswer();
+  data.a.antennaSource = 'dsm-estimate';
+  data.a.antennaM = 22;
+  f.calls[0].settle.resolve(data);
+  await sleep(0);
+  eq(askedHeights(f.calls[f.calls.length - 1]), { ha: null, hb: '20' }, 'the estimate was lowered by a customizer default');
+  const second = defaultsAnswer();
+  second.a = data.a;
+  second.b = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 20, antennaSource: 'request', assumed: false };
+  f.calls[f.calls.length - 1].settle.resolve(second);
+  await sleep(0);
+  assert.strictEqual(live.dom.find('tp-hsrc-a').textContent, 'estimate');
+  assert.strictEqual(live.dom.find('tp-h-a').value, '22');
 });
 
 atest('a remembered height outranks the customizer default', async () => {

@@ -257,14 +257,12 @@
       if (tileLayer) map.removeLayer(tileLayer);
       const theme = document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
       const tile = typeof root.MC_getTileSpec === 'function' ? root.MC_getTileSpec(theme) : null;
-      // #741 M1a — the spec goes to the registry's shared factory whole, so
-      // this site needs no change once a WMS style exists. It cannot see one
-      // yet: MC_getTileSpec() resolves a `url` and drops a `wms` descriptor,
-      // which is M1b's job. The literals stay the fallback for a provider
-      // without a url, and L.tileLayer for a registry that has not loaded at
-      // all — map-tile-providers.js owns the factory, so without it there is
-      // no factory to call (#778 review).
-      const tileSpec = tile && tile.url ? tile : {
+      // #741 — the spec goes to the registry's shared factory whole, a tile
+      // template or (M1b) a `wms` descriptor. The literals stay the fallback
+      // for a provider with neither, and L.tileLayer for a registry that has
+      // not loaded at all — map-tile-providers.js owns the factory, so
+      // without it there is no factory to call (#778 review).
+      const tileSpec = tile && (tile.url || tile.wms) ? tile : {
         url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
         attribution: '© OpenStreetMap contributors',
         maxZoom: 19,

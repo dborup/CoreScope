@@ -235,6 +235,7 @@
     "getHealthThresholds": "readonly",
     "getHealthStatus": "readonly",
     "getHealthLastHeard": "readonly",
+    "getKnownHashSize": "readonly",
     "getNodeFreshness": "readonly",
     "getNodeStatus": "readonly",
     "getParsedDecoded": "readonly",

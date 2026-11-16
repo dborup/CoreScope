@@ -1901,7 +1901,9 @@ body.scroll-locked { overflow: hidden; }
   width: clamp(160px, 18vw, 240px);
   max-width: calc(100vw - 24px);
   font-size: 13px;
-  max-height: calc(100% - 24px); overflow-y: auto;
+  /* #839: and above the map credit (bottom right), which ran under it;
+     map.js publishes the credit's height. */
+  max-height: calc(100% - 24px - var(--map-credit-height, 0px)); overflow-y: auto;
   /* #1236: keep the scrollbar gutter reserved so the scroll affordance is
      visible even when content briefly fits — users get a consistent visual
      cue that the panel is scrollable. */
@@ -2903,6 +2905,18 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 }
 [data-theme="dark"] .leaflet-control-layers-toggle {
   filter: invert(1);
+}
+
+/* #839 — every map credit follows the theme (Leaflet's own is a white bar,
+   which stayed light over a dark map). One more class than leaflet.css's
+   rule, which loads after this file; the compact inset credit below and the
+   Matrix theme still override it. */
+.leaflet-container .leaflet-control.leaflet-control-attribution {
+  background: color-mix(in srgb, var(--surface-1) 85%, transparent);
+  color: var(--text-muted);
+}
+.leaflet-container .leaflet-control.leaflet-control-attribution a {
+  color: var(--link-color);
 }
 
 /* #752 — the inset maps credit the viewer's active base map through the
@@ -4919,6 +4933,19 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
   }
+  /* #839 — a node opens as its own page here, so the empty side pane's
+     "Select a node" placeholder only took height from the list. */
+  .nodes-page .split-layout .panel-right.empty { display: none; }
+}
+
+/* #839 — Nodes in phone landscape (640x360, 568x320): the stacked top bar
+   and region chips fill #app above the bottom nav and left the list's own
+   scroll box ~12px, so no row could be reached. On a short phone the page
+   scrolls as one: the top bar scrolls away and the list follows it. */
+@media (max-width: 640px) and (max-height: 500px) {
+  .nodes-page { overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .nodes-page .split-layout { flex: none; height: auto; overflow: visible; }
+  .nodes-page .panel-left { flex: none; }
 }
 
 /* #630-5: Analytics tabs — horizontal scroll on small screens */
@@ -5281,6 +5308,14 @@ body[data-cb-preset="achromat"] {
 .mc-mb-label.status-confirmed { border-left-color: var(--mc-mb-confirmed); }
 .mc-mb-label.status-suspected { border-left-color: var(--mc-mb-suspected); }
 .mc-mb-label.status-unknown   { border-left-color: var(--mc-mb-unknown);   }
+/* #807: hash size unknown (no advert known) — the label shows the 1-byte
+   prefix plus an ellipsis; a dashed outline in the label's own text colour
+   keeps it from reading as a confirmed 1-byte repeater. */
+.mc-mb-label.hs-unknown {
+  font-style: italic;
+  outline: 1px dashed currentColor;
+  outline-offset: -1px;
+}
 
 /* Forced-colors / Windows High Contrast — degrade gracefully (audit item 7). */
 @media (forced-colors: active) {
@@ -5673,12 +5708,17 @@ body { touch-action: pan-y; }
  * the wrap defaults to block (100% of body width). Combined with
  * .gesture-hint-bottom { left:50%; transform:translateX(-50%) } that
  * pushed the wrap off-screen-left on narrow viewports (#1065 follow-up).
+ * Stacked just under the modal scrim (#818): a hint stays above the
+ * page, the bottom nav and the drawers, but never covers a dialog on the
+ * --z-modal scale (the Skraafoto viewer at 375x560 on a first visit).
+ * The transient status UI at 9000 to 9999 (the warm-up banner, toasts,
+ * the analytics warm-up pill) now lies above a hint, as it should.
  * Comments live ABOVE the rule body, not interleaved, because a stray
  * em-dash or sequence inside the body has historically caused some CSS
  * parsers to drop the entire rule from the CSSOM. */
 .gesture-hint {
   position: fixed;
-  z-index: 9999;
+  z-index: calc(var(--z-modal-backdrop) - 1);
   width: -moz-fit-content;
   width: fit-content;
   max-width: 360px;
@@ -6332,6 +6372,8 @@ body.embed #app.app-fixed {
   text-align: center;
 }
 .map-profile-hint[hidden] { display: none; }
+/* #839 §7: a profile link that could not be read. */
+.map-profile-hint.is-error { border-color: var(--danger); border-left-width: 4px; }
 .leaflet-container.tp-picking { cursor: crosshair; }
 
 .tp-path-line { stroke: var(--los-line); stroke-opacity: 0.95; }
@@ -6376,6 +6418,12 @@ body.embed #app.app-fixed {
   /* The cap is a variable so the Map page can keep a linked path clear of
      the panel before the chart has grown it to the cap (#746). */
   --tp-panel-max-h: 420px;
+  /* #839 §2: the map the open profile always leaves above it, so the path,
+     its ends and the chart cursor's dot can be seen beside the chart. It is
+     the fit's free strip (FIT_MIN_FREE_PX) plus its two margins; map.js
+     reads both variables back for the fit (TerrainProfile.panelCap). */
+  --tp-map-keep: 184px;
+  --tp-panel-min-h: 120px;
   position: absolute;
   left: 0;
   right: 0;
@@ -6385,26 +6433,41 @@ body.embed #app.app-fixed {
   flex-direction: column;
   min-height: 0;
   /* Never taller than the map area minus a strip of map, and never taller
-     than the chart plus its controls need. */
-  max-height: min(var(--tp-panel-max-h), calc(100% - 24px));
+     than the chart plus its controls need; the body scrolls. */
+  max-height: min(var(--tp-panel-max-h), max(var(--tp-panel-min-h), calc(100% - var(--tp-map-keep))));
   background: var(--card-bg);
   color: var(--text);
   border-top: 1px solid var(--border);
   box-shadow: 0 -8px 24px var(--shadow);
 }
 .tp-panel.is-open { display: flex; }
+/* The compact bar and the folded head are short; only the grown panel
+   keeps the strip of map (#790 keeps them whole on any screen). */
+.tp-panel.tp-compact,
+.tp-panel.tp-folded { max-height: min(var(--tp-panel-max-h), calc(100% - 12px)); }
 .tp-head {
   flex: 0 0 auto;
   display: flex;
-  flex-wrap: wrap;
+  /* #796 F5: one line. The chips wrap inside .tp-chips, never the row, so
+     Copy and Close always sit beside the title. */
+  flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
   padding: 4px 8px;
   border-bottom: 1px solid var(--border);
   background: var(--card-bg);
 }
-.tp-title { margin: 0; font-size: var(--fs-sm); font-weight: var(--fw-semibold, 600); }
+.tp-title { flex: 0 0 auto; margin: 0; font-size: var(--fs-sm); font-weight: var(--fw-semibold, 600); white-space: nowrap; }
+.tp-chips {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
 .tp-close {
+  flex: 0 0 auto;
   margin-left: auto;
   min-width: 48px;
   min-height: 48px;
@@ -6628,10 +6691,47 @@ body.embed #app.app-fixed {
 .tp-copy:disabled { opacity: 0.45; cursor: default; }
 /* On a phone the title row cannot hold two chips and two 48 px buttons, and
    the close button used to wrap onto a line of its own. Keep the buttons
-   beside the title and let the chips take the second line instead. */
+   beside the title and let the chip row take the second line instead. */
 @media (max-width: 520px) {
-  .tp-head::after { content: ''; order: 1; flex-basis: 100%; height: 0; }
-  .tp-head .tp-chip { order: 2; }
+  .tp-head { flex-wrap: wrap; }
+  .tp-chips { order: 2; flex-basis: 100%; }
+}
+/* #790: while an end is still to be picked (A, B, or a pending Move A/B) the
+   panel is a compact bar: title, the next step, Cancel and Close. The body
+   and the copy button are [hidden] by terrain-profile.js and the chips
+   leave the bar here, so a phone keeps the map above it free to tap. */
+.tp-cancel { flex: 0 0 auto; margin-left: auto; }
+/* .tp-close makes the copy button inline-flex, which beats [hidden]. */
+.tp-copy[hidden] { display: none; }
+.tp-panel.tp-compact .tp-chips { display: none; }
+/* #790 F4: the title of a finished profile is the ▾/▴ fold toggle. It
+   looks like the title, is 48 px tall, and costs the title row only the
+   glyph. Folded, the body goes and the head keeps the title, the chips
+   and the verdict as the status line. */
+.tp-fold {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 48px;
+  min-height: 48px;
+  margin: 0;
+  padding: 0 4px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.tp-fold[hidden] { display: none; }
+.tp-fold-glyph { font-size: 14px; }
+.tp-fold:hover { background: var(--row-hover); }
+.tp-fold:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.tp-pick-status {
+  margin: 0;
+  padding: 6px 10px calc(8px + env(safe-area-inset-bottom, 0px));
+  font-size: var(--fs-sm);
+  color: var(--text);
 }
 .tp-copy-status { margin: 0; padding: 2px 8px; font-size: var(--fs-sm); color: var(--text-muted); }
 .tp-copy-status:empty { display: none; }
@@ -6674,6 +6774,7 @@ body.embed #app.app-fixed {
 .tp-hbadge[hidden] { display: none; }
 .tp-hbadge-default { border-style: dashed; border-color: var(--warning); color: var(--text); }
 .tp-hbadge-operator { border-color: var(--accent, var(--link-color)); color: var(--text); }
+.tp-hbadge-estimate { border-style: dashed; border-color: var(--accent, var(--link-color)); color: var(--text); }
 .tp-hbadge-yours { border-color: var(--success); color: var(--text); }
 .tp-hbadge-link { border-color: var(--border); color: var(--text); }
 
@@ -6699,6 +6800,176 @@ body.embed #app.app-fixed {
 .node-full-actions .node-terrain-action,
 .node-detail-actions .node-terrain-action { margin-left: 0; }
 .node-terrain-icon { display: inline-flex; }
+
+/* #737 M2 — "Oblique photo": the node-detail button sits beside "Terrain
+   profile to…" with the same 48 px target; in the Path profile a row of
+   its own under the chart (A, B, the clicked chart point). */
+.sf-icon { display: inline-flex; }
+.tp-sf-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 0; }
+.tp-sf-row[hidden] { display: none; }
+.tp-sf-label { font-size: var(--fs-sm); color: var(--text-muted); margin-right: 2px; }
+.tp-sf-btn { min-width: 48px; }
+/* #839 §12: why Chart point is off, visible on a touch screen too. */
+.tp-sf-hint { font-size: var(--fs-sm); color: var(--text-muted); }
+.tp-sf-hint[hidden] { display: none; }
+/* Both open a dialog over themselves: the browser's tap highlight would
+   be painted over the photo until the next touch. */
+.tp-sf-btn, .sf-node-action { -webkit-tap-highlight-color: transparent; }
+
+/* The viewer: a modal on the modal tokens, one step above a SlideOver
+   panel (#180) so a deep link opened on a tablet stacks over it too, and
+   so its scrim covers the bottom nav (1200) and the profile panel. On a phone the dialog stops at
+   the bottom nav's reserve, so the nav never covers any of it; the dialog
+   scrolls inside itself with the head (and Close) pinned. */
+.sf-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-modal) + 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 12px calc(12px + var(--bottom-nav-reserve, 0px));
+  background: var(--shadow);
+}
+@media (max-height: 480px), (max-width: 480px) {
+  .sf-overlay { padding: 4px 4px calc(4px + var(--bottom-nav-reserve, 0px)); }
+}
+.sf-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(100%, 760px);
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 10px);
+  box-shadow: 0 16px 48px var(--shadow);
+}
+.sf-dialog:focus { outline: none; }
+.sf-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 0 0 14px;
+  background: var(--card-bg);
+  border-bottom: 1px solid var(--border);
+}
+.sf-titles { flex: 1 1 auto; min-width: 0; }
+.sf-title { margin: 0; font-size: var(--fs-md); font-weight: var(--fw-semibold, 600); }
+.sf-where { margin: 0; font-size: var(--fs-sm); color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sf-close {
+  flex: 0 0 auto;
+  min-width: 48px;
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+}
+.sf-close:hover { color: var(--text); background: var(--row-hover); }
+.sf-controls { flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 14px; }
+.sf-dirs { display: inline-flex; gap: 4px; }
+.sf-dir {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold, 600);
+  cursor: pointer;
+}
+.sf-dir.active { background: var(--selected-bg); border-color: var(--accent); }
+.sf-dir:disabled { opacity: 0.45; cursor: default; }
+.sf-year-wrap { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--text-muted); }
+.sf-year-wrap[hidden] { display: none; }
+.sf-year {
+  min-width: 88px;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+.sf-zoom {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold, 600);
+  cursor: pointer;
+}
+.sf-zoom[aria-pressed="true"] { background: var(--selected-bg); border-color: var(--accent); }
+.sf-zoom:disabled { opacity: 0.45; cursor: default; }
+.sf-close:focus-visible, .sf-dir:focus-visible, .sf-year:focus-visible, .sf-zoom:focus-visible, .sf-full:focus-visible, .sf-credit a:focus-visible {
+  outline: 2px solid var(--accent, var(--link-color));
+  outline-offset: 2px;
+}
+/* A column: the frame (empty while there is no photo) stacks above the
+   status, which stays centred instead of beside it (#839). */
+.sf-stage {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  margin: 0 14px;
+  border-radius: 6px;
+  background: var(--section-bg);
+  overflow: hidden;
+}
+.sf-img { display: block; width: 100%; height: auto; max-height: min(62vh, 680px); object-fit: contain; }
+/* A short (landscape) screen: the whole photo fits under the head and the
+   controls, so it is seen without scrolling; the rest scrolls below it. */
+@media (max-height: 480px) {
+  .sf-img { max-height: calc(100vh - var(--bottom-nav-reserve, 0px) - 128px); }
+  .sf-controls { padding: 4px 14px; }
+}
+.sf-img[hidden], .sf-status[hidden], .sf-full[hidden] { display: none; }
+/* #737 M3c: the marks layer covers the image element exactly and, with
+   xMidYMid meet, letterboxes as its object-fit: contain does, so the
+   crosshair and the line stay on the photo through any resize. */
+.sf-frame { position: relative; width: 100%; }
+.sf-marks { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: hidden; }
+.sf-marks[hidden] { display: none; }
+.sf-marks line, .sf-marks polyline { fill: none; vector-effect: non-scaling-stroke; stroke-linecap: round; stroke-linejoin: round; }
+.sf-cross-halo, .sf-los-halo { stroke: var(--card-bg); stroke-width: 5; opacity: 0.85; }
+.sf-cross-line { stroke: var(--danger); stroke-width: 2.5; }
+.sf-cross-approx .sf-cross-line { stroke-dasharray: 3 3; }
+.sf-los { stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 8 5; }
+/* #839: the drop from the crosshair (the ground) up to the line (antenna height). */
+.sf-drop-halo { stroke: var(--card-bg); stroke-width: 4; opacity: 0.85; }
+.sf-drop { stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 1 4; }
+.sf-status { margin: 0; padding: 24px 16px; text-align: center; font-size: var(--fs-sm); color: var(--text-muted); }
+.sf-dialog[data-state="error"] .sf-status { color: var(--danger); }
+.sf-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0 12px; margin: 4px 14px 0; font-size: var(--fs-sm); }
+.sf-full { display: inline-flex; align-items: center; min-height: 44px; color: var(--link-color, var(--accent)); font-weight: var(--fw-semibold, 600); }
+.sf-los-note, .sf-note, .sf-credit { margin: 2px 14px 0; font-size: 12px; line-height: 1.35; color: var(--text-muted); }
+.sf-credit { margin-bottom: 12px; }
+.sf-credit a { color: inherit; text-decoration: underline; }
+/* A touch target of their own on a phone, like the profile's credit links (#711). */
+@media (pointer: coarse) { .sf-credit a { display: inline-block; min-width: 44px; padding: 12px 0; text-align: center; } }
 
 .tp-controls {
   display: flex;
@@ -6742,7 +7013,8 @@ body.embed #app.app-fixed {
 .tp-step:hover { background: var(--row-hover); }
 .tp-step:focus-visible,
 .tp-height:focus-visible,
-.tp-seg-btn:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.tp-seg-btn:focus-visible,
+.tp-cancel:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
 .tp-height {
   width: 72px;
   min-height: 48px;
@@ -6755,7 +7027,8 @@ body.embed #app.app-fixed {
   text-align: center;
 }
 .tp-seg { display: flex; gap: 4px; flex-wrap: wrap; }
-.tp-seg-btn {
+.tp-seg-btn,
+.tp-cancel {
   min-height: 48px;
   padding: 0 12px;
   border: 1px solid var(--border);
@@ -6766,16 +7039,16 @@ body.embed #app.app-fixed {
   cursor: pointer;
 }
 .tp-seg-btn.active { background: var(--selected-bg); border-color: var(--los-line); }
+.tp-cancel:hover { background: var(--row-hover); }
 .tp-seg-btn:disabled { opacity: 0.45; cursor: default; }
 /* #721: Move A / Move B sit under their end's name; Swap between the ends. */
 .tp-move { align-self: flex-start; min-width: 48px; }
 .tp-swap-field { min-width: 0; align-self: center; }
 .tp-swap { min-width: 48px; }
 
-/* Short landscape (#666/#672): the chart gives up height first, the panel
-   may take nearly the whole map area, and the body still scrolls. */
+/* Short screens (#666/#672): the chart gives up height first, and the body
+   still scrolls. */
 @media (max-height: 560px) {
-  .tp-panel { max-height: calc(100% - 12px); }
   .tp-chart .tp-svg { height: 108px; }
   .tp-head { padding: 2px 8px; }
 }
@@ -6785,4 +7058,26 @@ body.embed #app.app-fixed {
 }
 @media (max-width: 600px) and (max-height: 560px) {
   .tp-field { min-width: 46%; }
+}
+/* #839 §2: a short landscape screen has no height to spare for a strip of
+   map above the grown panel, so the panel docks at the right, full height,
+   and the path is fitted into the map beside it (--tp-dock, read by
+   map.js). The compact bar and the folded head stay at the bottom (#790). */
+/* Narrower still (568x320): no room to dock and no height for a strip
+   without losing the chart (#723), so the grown panel takes nearly the
+   whole map as before; folding it gives the map back. */
+@media (max-height: 560px) and (orientation: landscape) and (max-width: 599px) {
+  .tp-panel { --tp-map-keep: 12px; }
+}
+@media (max-height: 560px) and (orientation: landscape) and (min-width: 600px) {
+  .tp-panel:not(.tp-compact):not(.tp-folded) {
+    --tp-dock: right;
+    top: 0;
+    left: auto;
+    width: min(60%, 460px);
+    max-height: none;
+    border-top: none;
+    border-left: 1px solid var(--border);
+    box-shadow: -8px 0 24px var(--shadow);
+  }
 }

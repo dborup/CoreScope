@@ -16,9 +16,10 @@ const (
 	// PreviewMaxPx is the long edge of a preview (#737 Q8).
 	PreviewMaxPx = 1024
 
-	// headerBytes is the first read of a photo: the owner's check found
-	// all seven IFDs of a real photo in its first 64 KiB.
-	headerBytes = 64 << 10
+	// HeaderBytes is the first read of a photo: the owner's check found
+	// all seven IFDs of a real photo in its first 64 KiB. The live smoke
+	// check (#803) reads the same range.
+	HeaderBytes = 64 << 10
 	// maxHeaderBytes is a header after its one extension.
 	maxHeaderBytes = 1 << 20
 	// MaxPreviewTiles, MaxPreviewPixels and MaxPreviewBytes bound one
@@ -52,11 +53,15 @@ func (c *CDN) Requests() int64 { return c.lim.sent.Load() }
 
 // readRange reads r of path, a checked CDN path, holding a slot.
 func (c *CDN) readRange(ctx context.Context, path string, r dhm.Range) ([]byte, int64, error) {
+	target, err := CDNURL(path)
+	if err != nil {
+		return nil, 0, err
+	}
 	var body []byte
 	var total int64
-	err := c.lim.do(ctx, func(ctx context.Context) error {
+	err = c.lim.do(ctx, func(ctx context.Context) error {
 		var err error
-		body, total, err = dhm.RangeRead(ctx, c.lim.http, CDNBase+path, r, &c.lim.sent)
+		body, total, err = dhm.RangeRead(ctx, c.lim.http, target, r, &c.lim.sent)
 		return err
 	})
 	return body, total, err
@@ -82,22 +87,42 @@ func (c *CDN) Preview(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	tiles, err := c.tiles(ctx, path, l, size, MaxPreviewBytes-used)
+	all := make([]int, l.NumTiles())
+	for i := range all {
+		all[i] = i
+	}
+	canvas, err := c.draw(ctx, path, l, all, image.Rect(0, 0, l.Width, l.Height), size, MaxPreviewBytes-used)
 	if err != nil {
 		return nil, err
 	}
-	canvas := image.NewRGBA(image.Rect(0, 0, l.Width, l.Height))
-	for i, raw := range tiles {
-		if raw == nil {
-			continue // sparse: left black
+	w, h := previewSize(l.Width, l.Height)
+	return c.encode(downscale(canvas, w, h))
+}
+
+// draw reads tiles of l (indices) within budget bytes and draws them
+// onto a canvas of r, a rectangle of l's pixels; a sparse tile is left
+// black.
+func (c *CDN) draw(ctx context.Context, path string, l *dhm.ImageLevel, tiles []int, r image.Rectangle, size int64, budget int) (*image.RGBA, error) {
+	raw, err := c.tiles(ctx, path, l, tiles, size, budget)
+	if err != nil {
+		return nil, err
+	}
+	canvas := image.NewRGBA(r)
+	for _, i := range tiles {
+		if raw[i] == nil {
+			continue
 		}
-		if err := drawTile(canvas, l, i, raw); err != nil {
+		if err := drawTile(canvas, l, i, raw[i]); err != nil {
 			return nil, err
 		}
 	}
-	w, h := previewSize(l.Width, l.Height)
+	return canvas, nil
+}
+
+// encode is img as the JPEG served, within the output cap.
+func (c *CDN) encode(img image.Image) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, downscale(canvas, w, h), &jpeg.Options{Quality: previewQuality}); err != nil {
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: previewQuality}); err != nil {
 		return nil, dhm.FetchError{Reason: "encode"}
 	}
 	if buf.Len() > c.lim.opts.MaxOutput {
@@ -109,14 +134,14 @@ func (c *CDN) Preview(ctx context.Context, path string) ([]byte, error) {
 // header reads and parses the photo's layout, and returns it, the file's
 // size and the bytes read.
 func (c *CDN) header(ctx context.Context, path string) (*dhm.TiledImage, int64, int, error) {
-	buf, size, err := c.readRange(ctx, path, dhm.Range{From: 0, To: headerBytes - 1, MaxBody: headerBytes})
+	buf, size, err := c.readRange(ctx, path, dhm.Range{From: 0, To: HeaderBytes - 1, MaxBody: HeaderBytes})
 	if err != nil {
 		return nil, 0, 0, err
 	}
 	layout, err := dhm.ParseTiledImage(buf, size)
-	if errors.Is(err, dhm.ErrShortHeader) && len(buf) == headerBytes {
-		more, _, err2 := c.readRange(ctx, path, dhm.Range{From: headerBytes, To: min(maxHeaderBytes, size) - 1,
-			Size: size, MaxBody: maxHeaderBytes - headerBytes})
+	if errors.Is(err, dhm.ErrShortHeader) && len(buf) == HeaderBytes {
+		more, _, err2 := c.readRange(ctx, path, dhm.Range{From: HeaderBytes, To: min(maxHeaderBytes, size) - 1,
+			Size: size, MaxBody: maxHeaderBytes - HeaderBytes})
 		if err2 != nil {
 			return nil, 0, 0, err2
 		}
@@ -139,17 +164,25 @@ var errNoLevel = dhm.FetchError{Reason: "no preview level"}
 // preview bounds, and be at most twice the preview, so a scaled preview
 // never reads more than four times its pixels.
 func previewLevel(t *dhm.TiledImage) (*dhm.ImageLevel, error) {
-	best := 0
-	for i := range t.Levels {
-		if max(t.Levels[i].Width, t.Levels[i].Height) >= PreviewMaxPx {
-			best = i
-		}
-	}
-	l := &t.Levels[best]
+	l := &t.Levels[previewLevelIndex(len(t.Levels), func(i int) (int, int) { return t.Levels[i].Width, t.Levels[i].Height })]
 	if max(l.Width, l.Height) > 2*PreviewMaxPx || l.NumTiles() > MaxPreviewTiles || l.Width*l.Height > MaxPreviewPixels {
 		return nil, errNoLevel
 	}
 	return l, nil
+}
+
+// previewLevelIndex is the level a preview is cut from, of n levels
+// largest first whose sizes size gives: the smallest whose long edge is
+// at least PreviewMaxPx, or the first when none is. PreviewFrame shares
+// it, so a projected point is where Preview puts the pixel.
+func previewLevelIndex(n int, size func(i int) (w, h int)) int {
+	best := 0
+	for i := 0; i < n; i++ {
+		if w, h := size(i); max(w, h) >= PreviewMaxPx {
+			best = i
+		}
+	}
+	return best
 }
 
 // span is one range read covering tiles.
@@ -158,12 +191,12 @@ type span struct {
 	tiles    []int
 }
 
-// tiles reads every stored tile of l, in spans of tiles less than
-// spanGap apart, within budget bytes, and returns them by index; a
-// sparse tile is nil.
-func (c *CDN) tiles(ctx context.Context, path string, l *dhm.ImageLevel, size int64, budget int) ([][]byte, error) {
-	order := make([]int, 0, l.NumTiles())
-	for i := 0; i < l.NumTiles(); i++ {
+// tiles reads the stored tiles of l among want, in spans of tiles less
+// than spanGap apart, within budget bytes, and returns them by index; a
+// sparse tile, or one not wanted, is nil.
+func (c *CDN) tiles(ctx context.Context, path string, l *dhm.ImageLevel, want []int, size int64, budget int) ([][]byte, error) {
+	order := make([]int, 0, len(want))
+	for _, i := range want {
 		if _, n := l.TileRange(i); n > 0 {
 			order = append(order, i)
 		}
@@ -217,20 +250,24 @@ func previewSize(w, h int) (int, int) {
 
 var errBadTile = dhm.FetchError{Reason: "bad tile"}
 
-// drawTile decodes tile i of l from raw and draws its pixels inside the
-// level onto canvas.
+// drawTile decodes tile i of l from raw and draws its pixels inside
+// canvas, whose rectangle is in l's pixels (the level, or a crop of it).
 func drawTile(canvas *image.RGBA, l *dhm.ImageLevel, i int, raw []byte) error {
 	img, err := decodeTile(l, raw)
 	if err != nil {
 		return err
 	}
-	x0, y0 := (i%l.TilesAcross())*l.TileWidth, (i/l.TilesAcross())*l.TileHeight
-	r := image.Rect(x0, y0, x0+l.TileWidth, y0+l.TileHeight).Intersect(canvas.Rect)
+	origin := image.Pt((i%l.TilesAcross())*l.TileWidth, (i/l.TilesAcross())*l.TileHeight)
+	r := image.Rectangle{Min: origin, Max: origin.Add(image.Pt(l.TileWidth, l.TileHeight))}.Intersect(canvas.Rect)
+	if r.Empty() {
+		return nil
+	}
+	sp := r.Min.Sub(origin) // where r starts in the tile
 	switch m := img.(type) {
 	case *image.CMYK:
-		cmykToRGB(canvas, r, m)
+		cmykToRGB(canvas, r, m, sp)
 	case *image.YCbCr, *image.RGBA:
-		draw.Draw(canvas, r, m, image.Point{}, draw.Src)
+		draw.Draw(canvas, r, m, sp, draw.Src)
 	default:
 		return errBadTile
 	}

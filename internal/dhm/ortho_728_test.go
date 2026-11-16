@@ -173,7 +173,7 @@ func TestOrthoQueryCheckRejectsOtherShapes(t *testing.T) {
 	if _, err := c.Get(OrthoWMTSService, someTile().hillshadeQuery(HillshadeTerrain), "image/jpeg"); !errors.Is(err, ErrBadRequest) {
 		t.Errorf("hillshade query accepted by the ortho service: %v", err)
 	}
-	if _, err := c.Get(WMSService, k.orthoQuery(), "image/png"); !errors.Is(err, ErrBadRequest) {
+	if _, err := c.Get(WMSService, k.OrthoQuery(), "image/png"); !errors.Is(err, ErrBadRequest) {
 		t.Errorf("ortho query accepted by the hillshade service: %v", err)
 	}
 	if n := u.hits.Load(); n != 0 {

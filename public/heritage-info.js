@@ -39,6 +39,7 @@
   }
 
   // bounds is the overlay's [[south, west], [north, east]]; none: no limit.
+  // Also the Skråfoto node action's coverage test (skraafoto.js, #818).
   function inBounds(bounds, lat, lon) {
     if (!Array.isArray(bounds) || bounds.length !== 2) return true;
     return lat >= bounds[0][0] && lat <= bounds[1][0] && lon >= bounds[0][1] && lon <= bounds[1][1];
@@ -202,5 +203,5 @@
     };
   }
 
-  global.HeritageInfo = { attach: attach, buildContent: buildContent };
+  global.HeritageInfo = { attach: attach, buildContent: buildContent, inBounds: inBounds };
 })(typeof window !== 'undefined' ? window : this);

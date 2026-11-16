@@ -22,7 +22,10 @@
  *     tile layer has GridLayer's _isValidTile (always true here), which
  *     the #728 ortho layer extends; the tile pane records its attributes;
  *   - the map has a settable view (map.view: zoom and pixel bounds) behind
- *     getZoom and getPixelBounds, and tile layers getTileSize (#728 N3).
+ *     getZoom and getPixelBounds, and tile layers getTileSize (#728 N3);
+ *   - L.stamp, as Leaflet stamps the layer of each control input (#734);
+ *   - like Leaflet, a layer on a map has `_map` (the #839 base-map retry
+ *     reads the map from it), cleared when it is removed.
  */
 'use strict';
 const vm = require('vm');
@@ -134,7 +137,12 @@ function makeLeaflet() {
     latLngBounds: (b) => ({ _bounds: b }),
     // _isValidTile is Leaflet's GridLayer bounds check, which the #728 ortho
     // layer extends; here every tile is valid.
-    tileLayer: (url, opts) => evented({ _url: url, options: opts || {}, kind: 'tile', _isValidTile: () => true, getTileSize: () => ({ x: 256, y: 256 }) }),
+    // setUrl as Leaflet's TileLayer.setUrl: the same layer, a new template.
+    tileLayer: (url, opts) => {
+      const l = evented({ _url: url, options: opts || {}, kind: 'tile', _isValidTile: () => true, getTileSize: () => ({ x: 256, y: 256 }) });
+      l.setUrl = (u) => { l._url = u; return l; };
+      return l;
+    },
     control: {
       layers: (base, overlays, opts) => {
         const overlayLabels = Object.keys(overlays || {}).map(name => {
@@ -156,7 +164,17 @@ function makeLeaflet() {
       },
     },
   };
-  L.tileLayer.wms = (url, opts) => evented({ _url: url, options: opts || {}, kind: 'wms', getTileSize: () => ({ x: 256, y: 256 }) });
+  // Leaflet's L.stamp: the id L.Control.Layers puts on each input as
+  // input.layerId (#734 M2 maps an input back to its overlay by it).
+  let lastId = 0;
+  L.stamp = (o) => o._leaflet_id || (o._leaflet_id = ++lastId);
+  // setOpacity as Leaflet's GridLayer.setOpacity (#723 M4 follows the
+  // customizer's opacity live).
+  L.tileLayer.wms = (url, opts) => {
+    const l = evented({ _url: url, options: opts || {}, kind: 'wms', getTileSize: () => ({ x: 256, y: 256 }) });
+    l.setOpacity = (o) => { l.options.opacity = o; return l; };
+    return l;
+  };
   // #724 — what public/masts-layer.js builds: layer groups of canvas
   // circle markers. A group on a map puts its members on that map.
   L.canvas = (opts) => ({ kind: 'canvas', options: opts || {} });
@@ -248,7 +266,8 @@ function makeMap() {
     addLayer(l) {
       if (layers.has(l)) return map;
       layers.add(l);
-      if (l.kind === 'layerGroup') { l._map = map; l.members.forEach(m => map.addLayer(m)); }
+      l._map = map;
+      if (l.kind === 'layerGroup') l.members.forEach(m => map.addLayer(m));
       if (map._controls.some(c => !c._removed && Object.values(c.overlays || {}).includes(l))) map.fire('overlayadd', { layer: l });
       map.fire('layeradd', { layer: l });
       // Leaflet's Map._layerAdd ends with layer.fire('add').
@@ -258,10 +277,12 @@ function makeMap() {
     removeLayer(l) {
       if (!layers.has(l)) return map;
       layers.delete(l);
-      if (l.kind === 'layerGroup') { l.members.forEach(m => map.removeLayer(m)); l._map = null; }
+      if (l.kind === 'layerGroup') l.members.forEach(m => map.removeLayer(m));
       map.fire('layerremove', { layer: l });
       if (map._controls.some(c => !c._removed && Object.values(c.overlays || {}).includes(l))) map.fire('overlayremove', { layer: l });
       if (l.fire) l.fire('remove');
+      // Leaflet's Map.removeLayer clears _map after the layer's 'remove'.
+      l._map = null;
       return map;
     },
   };
@@ -299,6 +320,7 @@ function makeSandbox(opts) {
   };
   ctx.window = {
     addEventListener: (type, fn) => { (listeners[type] = listeners[type] || []).push(fn); },
+    removeEventListener: (type, fn) => { listeners[type] = (listeners[type] || []).filter(f => f !== fn); },
     dispatchEvent: (ev) => { (listeners[ev.type] || []).slice().forEach(fn => fn(ev)); return true; },
     matchMedia: () => ({ matches: false }),
     localStorage: ctx.localStorage,
