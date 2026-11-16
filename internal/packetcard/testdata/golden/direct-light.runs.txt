@@ -1,0 +1,8 @@
+title   44px bold    x=  44 y= 78 w= 548 TXT_MSG · Direct · 2 hops
+heard   24px regular x=  44 y=114 w= 529 First heard by Randers Obs · heard by 1 observer
+note    18px regular x=  24 y=472 w= 352 Path is a schematic; positions as advertised
+label   20px regular x=  24 y=502 w=  92 Observers
+value   34px bold    x=  24 y=540 w=  19 1
+label   20px regular x= 312 y=502 w= 152 Est. flood airtime
+value   34px bold    x= 312 y=540 w= 125 ≥312ms
+footer  22px regular x=  24 y=596 w= 380 First heard 2026-11-15 13:20:41 UTC

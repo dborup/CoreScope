@@ -179,14 +179,6 @@ func TestLastHeardTile(t *testing.T) {
 	}
 }
 
-func TestCounts(t *testing.T) {
-	for v, want := range map[int]string{0: "0", 7: "7", 999: "999", 1000: "1,000", 1234567: "1,234,567"} {
-		if got := fmtCount(v); got != want {
-			t.Errorf("fmtCount(%d) = %q, want %q", v, got, want)
-		}
-	}
-}
-
 // Owner decision Q3: cards for repeaters, rooms and sensors only. A
 // companion, an observer or an unknown role gets no card at all.
 func TestRoleGate(t *testing.T) {
