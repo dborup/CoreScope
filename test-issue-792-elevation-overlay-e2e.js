@@ -154,7 +154,9 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       const imgs = pane ? Array.from(pane.querySelectorAll('img.leaflet-tile-loaded')) : [];
       const credit = document.querySelector('.leaflet-control-attribution');
       return {
-        ids, label: label ? label.textContent.trim() : null,
+        // #845: the row's name and its zoom hint, shown apart at the right.
+        ids, label: label ? (label.querySelector('.mc-layer-name') || label).textContent.trim() +
+          (label.querySelector('.mc-layer-hint') ? ' | ' + label.querySelector('.mc-layer-hint').textContent.trim() : '') : null,
         checked: input ? input.checked : null, disabled: input ? input.disabled : null,
         hash: location.hash, stored: localStorage.getItem('mc-elevation-dhm'),
         paneZ: pane ? getComputedStyle(pane).zIndex : null,
@@ -227,7 +229,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         let s = await state(page);
         assert(s.ids.join(',') === 'dhm-terrain,dhm-surface,dhm-contours,dhm-elevation', 'order ' + s.ids.join(','));
         assert(await legendHidden(page) === true, 'the legend shows while the overlay is off');
-        assert(s.label === 'Colour by elevation (DHM, zoom 9+)', s.label);
+        assert(s.label === 'Colour by elevation | zoom 9+', s.label);
         assert(s.checked === false, 'on before any tap');
         assert(elevationTiles(rec).length === 0, 'asked for elevation tiles while off');
 

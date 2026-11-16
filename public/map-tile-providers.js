@@ -3,8 +3,8 @@
  * Scope:
  *   - Multiple providers: OSM (default), Carto, Stamen, OpenTopoMap, USGS,
  *     Esri, Dataforsyningen (#741 Skærmkort and Natur- og Friluftskort,
- *     WMS). OpenTopoMap, USGS, Esri and Dataforsyningen are opt-in
- *     (map.tiles.providers.*.enabled).
+ *     WMS). Carto (#845), OpenTopoMap, USGS, Esri and Dataforsyningen are
+ *     opt-in (map.tiles.providers.*.enabled).
  *   - MC_setDarkTileProvider(id) / MC_setLightTileProvider(id) persist per-browser
  *     to localStorage and dispatch `mc-tile-provider-changed`.
  *   - Resolves localStorage → server default → 'osm-dark' / 'osm-standard' (#332).
@@ -187,6 +187,27 @@
     return typeof id === 'string' && Object.prototype.hasOwnProperty.call(REGISTRY, id);
   }
 
+  /* #845 — a CARTO style id saved while CARTO was on (a viewer's pick, a
+   * customizer default, an operator's darkDefault/lightDefault) resolves to
+   * its nearest keyless equivalent while CARTO is off: Positron and Voyager
+   * to OSM Standard (light, or its dark variant), Carto Dark to Esri Dark
+   * Gray Canvas when Esri is enabled, else OSM Standard (dark). The saved
+   * value itself is left alone, so it comes back if the operator turns
+   * CARTO on again. Any other id is returned as it is. */
+  var CARTO_MIGRATION = {
+    'carto-light': ['osm-standard'],
+    'carto-voyager': ['osm-standard'],
+    'positron-dark': ['osm-dark'],
+    'carto-voyager-dark': ['osm-dark'],
+    'carto-dark': ['esri-darkgray-labels', 'osm-dark']
+  };
+  function migrateTileId(id) {
+    if (typeof id !== 'string' || _hasId(id) || !Object.prototype.hasOwnProperty.call(CARTO_MIGRATION, id)) return id;
+    var to = CARTO_MIGRATION[id];
+    for (var i = 0; i < to.length; i++) if (_hasId(to[i])) return to[i];
+    return id;
+  }
+
   /* #728 — a configured default whose provider is not enabled is skipped
    * (the resolvers fall through to the legacy URL or the built-in
    * fallback), so the map still works. Say so once per page, naming the
@@ -214,7 +235,12 @@
   window.MC_initTileRegistry = function(fromAsync) {
     _cfg = (typeof window !== 'undefined' && window.MC_MAP_CFG && window.MC_MAP_CFG.tiles) ? window.MC_MAP_CFG.tiles : null;
 
-    var HAS_CARTO = !_cfg || !_cfg.providers || !_cfg.providers.carto || _cfg.providers.carto.enabled !== false;
+    // #845 — opt-in, like Esri: since August 2026 every keyless CARTO tile
+    // is stamped "API KEY REQUIRED" (#332) and this fork has no key
+    // plumbing, so CARTO is off unless map.tiles.providers.carto.enabled is
+    // the JSON boolean true. Saved picks of a CARTO style are migrated by
+    // migrateTileId() below.
+    var HAS_CARTO = !!(_cfg && _cfg.providers && _cfg.providers.carto && _cfg.providers.carto.enabled === true);
     var HAS_OSM = _cfg && _cfg.providers && _cfg.providers.osm && _cfg.providers.osm.enabled;
     var HAS_OPENTOPOMAP = _cfg && _cfg.providers && _cfg.providers.opentopomap && _cfg.providers.opentopomap.enabled;
     var HAS_USGS = _cfg && _cfg.providers && _cfg.providers.usgs && _cfg.providers.usgs.enabled;
@@ -263,10 +289,10 @@
     // Keep the public reference in sync with the newly rebuilt REGISTRY
     window.MC_TILE_PROVIDERS = REGISTRY;
 
-    if (_cfg && _cfg.darkDefault && _hasId(_cfg.darkDefault)) _serverDefault = _cfg.darkDefault;
-    if (_cfg && _cfg.lightDefault && _hasId(_cfg.lightDefault)) _serverDefaultLight = _cfg.lightDefault;
-    _warnUnavailableDefault('darkDefault', _cfg && _cfg.darkDefault);
-    _warnUnavailableDefault('lightDefault', _cfg && _cfg.lightDefault);
+    if (_hasId(_cfgDefault('darkDefault'))) _serverDefault = _cfgDefault('darkDefault');
+    if (_hasId(_cfgDefault('lightDefault'))) _serverDefaultLight = _cfgDefault('lightDefault');
+    _warnUnavailableDefault('darkDefault', _cfgDefault('darkDefault'));
+    _warnUnavailableDefault('lightDefault', _cfgDefault('lightDefault'));
 
     // When called after async config loads, notify maps to re-sync tiles
     if (fromAsync) {
@@ -292,15 +318,20 @@
   }
 
   
+  // The operator's map.tiles.darkDefault / lightDefault, migrated (#845).
+  function _cfgDefault(key) {
+    return _cfg && _cfg[key] ? migrateTileId(_cfg[key]) : null;
+  }
+
   // #390 — mirror of getSelectedLightId(): a valid explicit choice can
   // itself be the built-in fallback id, so an implicit fallback has to stay
   // distinguishable from one the operator or user actually picked.
   function getSelectedDarkId() {
     try {
-      var stored = window.localStorage && window.localStorage.getItem(STORAGE_KEY);
+      var stored = migrateTileId(window.localStorage && window.localStorage.getItem(STORAGE_KEY));
       if (_hasId(stored) && REGISTRY[stored].type === 'dark') return stored;
     } catch (_) {}
-    if (_cfg && _cfg.darkDefault && _hasId(_cfg.darkDefault)) return _cfg.darkDefault;
+    if (_hasId(_cfgDefault('darkDefault'))) return _cfgDefault('darkDefault');
     if (_hasId(_serverDefault)) return _serverDefault;
     return null;
   }
@@ -313,10 +344,10 @@
   // that separate from an implicit fallback when resolving legacy URLs.
   function getSelectedLightId() {
     try {
-      var stored = window.localStorage && window.localStorage.getItem(STORAGE_KEY_LIGHT);
+      var stored = migrateTileId(window.localStorage && window.localStorage.getItem(STORAGE_KEY_LIGHT));
       if (_hasId(stored) && REGISTRY[stored].type === 'light') return stored;
     } catch (_) {}
-    if (_cfg && _cfg.lightDefault && _hasId(_cfg.lightDefault)) return _cfg.lightDefault;
+    if (_hasId(_cfgDefault('lightDefault'))) return _cfgDefault('lightDefault');
     if (_hasId(_serverDefaultLight)) return _serverDefaultLight;
     return null;
   }
@@ -1461,8 +1492,8 @@
     }
   }
 
-  /* #728 M3 — "Aerial (Denmark)": the Danish spring orthophoto as a base
-   * map, from the server's same-origin proxy (cmd/server/dhm_proxy.go,
+  /* #728 M3 — "Aerial photo" (#845; "Aerial (Denmark)" before): the
+   * Danish spring orthophoto as a base map, from the server's same-origin proxy (cmd/server/dhm_proxy.go,
    * /api/map/dhm/ortho/{z}/{x}/{y}), which adds the token. Offered only
    * while /api/config/client carries dhm.ortho (map.dhm.ortho.enabled).
    *
@@ -1489,7 +1520,7 @@
    *   - Its credit is the block's own, through the #733 walker.
    */
   var ORTHO_ID    = 'dhm-ortho';
-  var ORTHO_LABEL = 'Aerial (Denmark)';
+  var ORTHO_GROUP_LABEL = 'Aerial photo'; // #845: its row in the Denmark group
   var ORTHO_PREF  = { storageKey: 'mc-ortho-base', hashParam: 'ortho' };
   var ORTHO_PANE  = 'mcOrthoPane';
   var ORTHO_PANE_Z = 201;
@@ -1595,24 +1626,91 @@
    * the Aerial entry (which has its own pref) clear it. */
   var _sessionBasePick = null;
 
-  /* #839 — the name of a style in the layer control. Most dark styles are
-   * a light style under the invert filter (or, for Esri World Imagery, the
-   * same photo), with the same label, so the control listed five names
-   * twice and a tap took the first match. A dark style whose label a light
-   * style in the registry also has is listed as "<label> (dark)"; the
-   * customizer keeps the plain label, since it lists the themes apart. */
-  var DARK_SUFFIX = ' (dark)';
-  function baseLayerLabel(id) {
-    var p = _hasId(id) ? REGISTRY[id] : null;
-    if (!p) return id;
-    var label = p.label || id;
-    if (p.type !== 'dark') return label;
-    for (var k in REGISTRY) {
-      if (Object.prototype.hasOwnProperty.call(REGISTRY, k) && REGISTRY[k].type === 'light' && REGISTRY[k].label === label) {
-        return label + DARK_SUFFIX;
-      }
+  /* #845 — the layer control's model, pure so it can be tested alone.
+   *
+   *   - Only the current theme's variants are listed. A style's counterpart
+   *     in the other theme is the style of the same provider and label
+   *     (osm-standard / osm-dark, esri-imagery / esri-imagery-dark, ...),
+   *     which is also how a pick follows a theme switch. An explicit pick
+   *     with no counterpart (a light-only map picked before switching to
+   *     dark) stays listed, so the pick is never lost.
+   *   - The Danish base maps (Dataforsyningen, and Aerial, which lives
+   *     outside the registry) go into the "Denmark" group, as do all the
+   *     overlays, which are all Danish data.
+   *   - Inside the group, "(Denmark)" is dropped from a label and a zoom hint
+   *     ("zoom 14+") is shown apart, as small right-aligned text.
+   *   - With no saved open state, the group starts open while the map
+   *     centre is over Denmark. */
+  var DENMARK_BOUNDS = [[54.5, 8.0], [57.8, 15.2]]; // Jutland to Bornholm
+  var DK_GROUP_PREF = 'mc-layers-denmark-open';
+
+  function counterpartId(id, reg) {
+    reg = reg || REGISTRY;
+    var p = Object.prototype.hasOwnProperty.call(reg, id) ? reg[id] : null;
+    if (!p) return null;
+    for (var k in reg) {
+      if (!Object.prototype.hasOwnProperty.call(reg, k)) continue;
+      var q = reg[k];
+      if (q.type !== p.type && q.provider === p.provider && q.label === p.label) return k;
     }
-    return label;
+    return null;
+  }
+
+  function isDenmarkBase(id, reg) {
+    reg = reg || REGISTRY;
+    if (id === ORTHO_ID) return true;
+    var p = Object.prototype.hasOwnProperty.call(reg, id) ? reg[id] : null;
+    return !!p && p.provider === 'dataforsyningen';
+  }
+
+  // The base-map ids the control lists for one theme, in registry order:
+  // { world: [...], denmark: [...] }. `keepId` is the viewer's explicit pick.
+  function themeBaseIds(reg, isDark, keepId) {
+    reg = reg || REGISTRY;
+    var type = isDark ? 'dark' : 'light';
+    var out = { world: [], denmark: [] };
+    Object.keys(reg).forEach(function (id) {
+      if (reg[id].type !== type && !(id === keepId && !counterpartId(id, reg))) return;
+      out[isDenmarkBase(id, reg) ? 'denmark' : 'world'].push(id);
+    });
+    return out;
+  }
+
+  // The pick a theme switch leads to: its counterpart, or itself.
+  function pickForTheme(id, isDark, reg) {
+    reg = reg || REGISTRY;
+    if (!Object.prototype.hasOwnProperty.call(reg, id)) return id;
+    if (reg[id].type === (isDark ? 'dark' : 'light')) return id;
+    return counterpartId(id, reg) || id;
+  }
+
+  var ZOOM_HINT_RE = /zoom \d+\+/;
+  function layerRowParts(text) {
+    var name = String(text == null ? '' : text);
+    var m = name.match(ZOOM_HINT_RE);
+    var hint = m ? m[0] : '';
+    if (m) name = name.replace(ZOOM_HINT_RE, '');
+    name = name
+      .replace(/\(([^()]*)\)/g, function (_, inner) {
+        var kept = inner.split(',').map(function (t) { return t.trim(); })
+          .filter(function (t) { return t && t !== 'Denmark' && t !== 'DHM'; });
+        return kept.length ? '(' + kept.join(', ') + ')' : '';
+      })
+      .replace(/\s+/g, ' ').trim();
+    return { name: name, hint: hint };
+  }
+
+  function inDenmark(c) {
+    return !!c && typeof c.lat === 'number' && typeof c.lng === 'number' &&
+      c.lat >= DENMARK_BOUNDS[0][0] && c.lat <= DENMARK_BOUNDS[1][0] &&
+      c.lng >= DENMARK_BOUNDS[0][1] && c.lng <= DENMARK_BOUNDS[1][1];
+  }
+
+  // A saved '1' / '0' wins; with none, open while the centre is in Denmark.
+  function denmarkOpenDefault(stored, centre) {
+    if (stored === '1') return true;
+    if (stored === '0') return false;
+    return inDenmark(centre);
   }
 
   // ── Public surface ──────────────────────────────────────────────────────
@@ -1659,7 +1757,13 @@
     buildElevationLegend: buildElevationLegend
   };
   window.MC_setLayerAttribution         = setLayerAttribution;
-  window.MC_baseLayerLabel              = baseLayerLabel;
+  window.MC_migrateTileId               = migrateTileId;
+  window.MC_LayerGroups                 = {
+    DENMARK_BOUNDS: DENMARK_BOUNDS, PREF_KEY: DK_GROUP_PREF,
+    counterpartId: counterpartId, isDenmarkBase: isDenmarkBase, themeBaseIds: themeBaseIds,
+    pickForTheme: pickForTheme, rowParts: layerRowParts, inDenmark: inDenmark,
+    openDefault: denmarkOpenDefault
+  };
   window.MC_CREDIT_COMPACT_CLASS        = CREDIT_COMPACT_CLASS;
   // #733 — exposed so a caller (and the unit tests) build an overlay credit
   // the one way, rather than assembling the links a second time.
@@ -1691,7 +1795,11 @@
     var controlPosition = position || 'topleft';
 
     var AUTO_KEY   = '__auto__';
-    var AUTO_LABEL = ' <span title="Follows the app\'s current light/dark theme">Auto</span>';
+    var AUTO_TITLE = "Follows the app's current light/dark theme";
+    // #845 — the theme the list was built for, and the Denmark group's
+    // open state (null until first read: saved, else the map centre).
+    var _builtDark = _isDark();
+    var _dkOpen    = null;
     var _control   = null;  // current L.control.layers instance
     var _layerMap  = {};    // provider-id → L.tileLayer
     var _isAuto    = !_sessionBasePick;  // true when "Auto" is the active selection
@@ -1721,6 +1829,138 @@
       if (typeof applyTileFilter === 'function') applyTileFilter();
     }
 
+    // #845 — the Denmark group of one control: a real button with
+    // aria-expanded, then "Base maps" and "Layers", each a container with
+    // Leaflet's own list class, so one radio group and every selector of
+    // the rows (data-tile-id, data-overlay-id) stay as they were.
+    function _denmarkGroup(ctl) {
+      if (ctl._mcDk) return ctl._mcDk;
+      var doc = document;
+      var group = doc.createElement('div');
+      group.className = 'mc-layers-dk';
+      group.setAttribute('data-layer-group', 'denmark');
+      var btn = doc.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mc-layers-dk-toggle';
+      var body = doc.createElement('div');
+      body.className = 'mc-layers-dk-body';
+      body.id = 'mc-layers-dk-body-' + L.stamp(ctl);
+      btn.setAttribute('aria-controls', body.id);
+      btn.textContent = 'Denmark';
+      var baseHead = doc.createElement('div');
+      baseHead.className = 'mc-layers-dk-head';
+      baseHead.textContent = 'Base maps';
+      var base = doc.createElement('div');
+      base.className = 'leaflet-control-layers-base mc-layers-dk-base';
+      var layersHead = doc.createElement('div');
+      layersHead.className = 'mc-layers-dk-head';
+      layersHead.textContent = 'Layers';
+      var over = doc.createElement('div');
+      over.className = 'leaflet-control-layers-overlays mc-layers-dk-overlays';
+      body.appendChild(baseHead); body.appendChild(base);
+      body.appendChild(layersHead); body.appendChild(over);
+      group.appendChild(btn); group.appendChild(body);
+      btn.addEventListener('click', function () {
+        _dkOpen = !_dkOpen;
+        try { if (window.localStorage) window.localStorage.setItem(DK_GROUP_PREF, _dkOpen ? '1' : '0'); } catch (_) {}
+        _showDenmark(ctl);
+        if (window.MapChromeFit && window.MapChromeFit.fitList) window.MapChromeFit.fitList(map, ctl);
+      });
+      ctl._mcDk = { group: group, button: btn, body: body, baseHead: baseHead, base: base, layersHead: layersHead, overlays: over };
+      return ctl._mcDk;
+    }
+
+    function _showDenmark(ctl) {
+      var dk = ctl._mcDk;
+      if (!dk) return;
+      dk.button.setAttribute('aria-expanded', _dkOpen ? 'true' : 'false');
+      dk.body.hidden = !_dkOpen;
+    }
+
+    function _emptyEl(el) { while (el.firstChild) el.removeChild(el.firstChild); }
+
+    // The row text: a name, and (inside the group) a zoom hint apart.
+    function _setRowText(span, text, grouped) {
+      _emptyEl(span);
+      var parts = grouped ? layerRowParts(text) : { name: text, hint: '' };
+      var name = document.createElement('span');
+      name.className = 'mc-layer-name';
+      name.textContent = ' ' + parts.name;
+      span.appendChild(name);
+      if (parts.hint) {
+        var hint = document.createElement('span');
+        hint.className = 'mc-layer-hint';
+        hint.textContent = parts.hint;
+        span.appendChild(hint);
+      }
+    }
+
+    // After every render of `ctl`: the rows' ids and names, then the Danish
+    // rows into the Denmark group, then the overlays' own additions.
+    function _layoutRows(ctl, overlayIds) {
+      var c = ctl.getContainer && ctl.getContainer();
+      if (!c) return;
+      var real = !!(ctl._baseLayersList && ctl._baseLayersList.parentNode);
+      var dk = real ? _denmarkGroup(ctl) : null;
+      if (dk) { _emptyEl(dk.base); _emptyEl(dk.overlays); }
+
+      var overlayLabels = [];
+      try { overlayLabels = c.querySelectorAll('.leaflet-control-layers-overlays label'); } catch (_) {}
+      for (var oi = 0; oi < overlayLabels.length && oi < overlayIds.length; oi++) {
+        overlayLabels[oi].setAttribute('data-overlay-id', overlayIds[oi]);
+      }
+      if (!real) {
+        for (var si = 0; si < overlayLabels.length && si < overlayIds.length; si++) {
+          try { _decorateOverlay(map, overlayIds[si], overlayLabels[si]); } catch (_) {}
+        }
+        return;
+      }
+
+      var labels = ctl._baseLayersList.querySelectorAll('label');
+      for (var i = 0; i < labels.length; i++) {
+        var labelEl = labels[i];
+        var spans = labelEl.querySelectorAll('span');
+        if (spans.length === 0) continue;
+        // The last span holds the name; Leaflet's radio input stays.
+        var span = spans[spans.length - 1];
+        var id = span.textContent.trim();
+        labelEl.setAttribute('data-tile-id', id);
+        var grouped = isDenmarkBase(id);
+        if (id === AUTO_KEY) {
+          _setRowText(span, 'Auto', false);
+          span.title = AUTO_TITLE;
+        } else if (id === ORTHO_ID) {
+          _setRowText(span, ORTHO_GROUP_LABEL, true);
+        } else if (REGISTRY[id]) {
+          _setRowText(span, REGISTRY[id].label || id, grouped);
+        }
+        if (grouped) dk.base.appendChild(labelEl);
+      }
+      for (var j = 0; j < overlayLabels.length; j++) {
+        var os = overlayLabels[j].querySelectorAll('span');
+        if (os.length) {
+          var t = os[os.length - 1];
+          _setRowText(t, t.textContent.trim(), true);
+        }
+        dk.overlays.appendChild(overlayLabels[j]);
+      }
+      for (var k = 0; k < overlayLabels.length && k < overlayIds.length; k++) {
+        try { _decorateOverlay(map, overlayIds[k], overlayLabels[k]); } catch (_) {}
+      }
+
+      var hasBase = !!dk.base.firstChild, hasOver = !!dk.overlays.firstChild;
+      dk.baseHead.hidden = dk.base.hidden = !hasBase;
+      dk.layersHead.hidden = dk.overlays.hidden = !hasOver;
+      // An empty Denmark group is not shown at all.
+      dk.group.hidden = !hasBase && !hasOver;
+      if (dk.group.parentNode !== ctl._baseLayersList.parentNode) {
+        ctl._baseLayersList.parentNode.insertBefore(dk.group, ctl._baseLayersList.nextSibling);
+      }
+      // Leaflet's own overlay list is empty now; so is its separator's use.
+      if (ctl._separator) ctl._separator.style.display = 'none';
+      _showDenmark(ctl);
+    }
+
     function _buildControl() {
       // Tear down existing control + explicit tile layers
       if (_control) { try { _control.remove(); } catch (_) {} _control = null; }
@@ -1733,9 +1973,10 @@
         try { map.off('baselayerchange', map._mcBaselayerchangeHandler); } catch (_) {}
       }
 
-      // Light providers first, then dark — natural grouping in the UI
-      var lightIds = Object.keys(REGISTRY).filter(function (id) { return REGISTRY[id].type === 'light'; });
-      var darkIds  = Object.keys(REGISTRY).filter(function (id) { return REGISTRY[id].type === 'dark';  });
+      // #845 — only this theme's variants (and an explicit pick that has
+      // none in it), the Danish ones listed in the Denmark group.
+      _builtDark = _isDark();
+      var listed = themeBaseIds(REGISTRY, _builtDark, _isAuto ? null : _sessionBasePick);
 
       function _makeLayer(id) {
         var p   = REGISTRY[id];
@@ -1761,10 +2002,10 @@
       var baseMaps = {};
       baseMaps[AUTO_KEY] = autoLayerGroup;
 
-      lightIds.forEach(function (id) { baseMaps[id] = _makeLayer(id); });
-      darkIds.forEach(function  (id) { baseMaps[id] = _makeLayer(id); });
+      listed.world.forEach(function (id) { baseMaps[id] = _makeLayer(id); });
+      listed.denmark.forEach(function (id) { baseMaps[id] = _makeLayer(id); });
 
-      // #728 M3 — listed last, under its own separator, on either theme.
+      // #728 M3 — one entry for both themes, last in the Denmark group.
       var orthoCfg = getOrthoConfig();
       if (orthoCfg) {
         var orthoLayer = _createOrthoLayer(map, orthoCfg);
@@ -1792,8 +2033,7 @@
 
       // A restored Aerial pick, or (#741) the session's explicit pick, goes
       // on the map before the control exists, as the overlays do
-      // (_wireOverlay): added later, it would make L.Control.Layers
-      // re-render its labels and undo the surgery below.
+      // (_wireOverlay), so its add is not taken for a toggle.
       var restored = _orthoOn ? _layerMap[ORTHO_ID]
         : (!_isAuto && _sessionBasePick && _layerMap[_sessionBasePick]) || null;
       if (restored) {
@@ -1801,53 +2041,33 @@
         try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
       }
 
-      // Use the dynamic controlPosition variable instead of a hardcoded string
-      _control = L.control.layers(baseMaps, overlays, { position: controlPosition }).addTo(map);
-      // #839 — the list ends above the attribution and the bottom nav.
-      if (window.MapChromeFit) window.MapChromeFit.fitLayerControl(map, _control);
-
-      if (overlayIds.length) {
-        try {
-          var overlayLabels = _control.getContainer().querySelectorAll('.leaflet-control-layers-overlays label');
-          for (var oi = 0; oi < overlayLabels.length && oi < overlayIds.length; oi++) {
-            overlayLabels[oi].setAttribute('data-overlay-id', overlayIds[oi]);
-            try { _decorateOverlay(map, overlayIds[oi], overlayLabels[oi]); } catch (_) {}
-          }
-        } catch (_) {}
-        try { _wireGroupInputs(map, _control); } catch (_) {}
+      if (_dkOpen === null) {
+        var stored = null, centre = null;
+        try { stored = window.localStorage && window.localStorage.getItem(DK_GROUP_PREF); } catch (_) {}
+        try { centre = map.getCenter ? map.getCenter() : null; } catch (_) {}
+        _dkOpen = denmarkOpenDefault(stored, centre);
       }
 
-      // DOM surgery: map IDs to human-readable labels, inject separator, set data attributes.
-      // We pass raw IDs to Leaflet as keys so e.name is the exact ID without label parsing.
-      try {
-        var firstDarkId = darkIds.length > 0 ? darkIds[0] : null;
-        var labels = _control.getContainer().querySelectorAll('.leaflet-control-layers-base label');
-        for (var i = 0; i < labels.length; i++) {
-          var labelEl = labels[i];
-          var spans = labelEl.querySelectorAll('span');
-          if (spans.length === 0) continue;
-
-          // Target the last span to avoid nuking Leaflet's radio <input>
-          var span = spans[spans.length - 1]; 
-
-          var id = span.textContent.trim();
-          labelEl.setAttribute('data-tile-id', id);
-          
-          if (id === AUTO_KEY) {
-            span.innerHTML = AUTO_LABEL;
-          } else if (id === ORTHO_ID) {
-            span.textContent = ' ' + ORTHO_LABEL;
-          } else if (REGISTRY[id]) {
-            span.textContent = ' ' + baseLayerLabel(id);
-          }
-          
-          if ((id === firstDarkId && lightIds.length > 0) || id === ORTHO_ID) {
-            var sep = document.createElement('div');
-            sep.className = 'leaflet-control-layers-separator';
-            labelEl.parentNode.insertBefore(sep, labelEl);
-          }
-        }
-      } catch (_) {}
+      // Use the dynamic controlPosition variable instead of a hardcoded string
+      var ctl = L.control.layers(baseMaps, overlays, { position: controlPosition });
+      // #845 — L.Control.Layers re-renders every row whenever a listed
+      // layer is added or removed (_update), so the labels and the Denmark
+      // group are laid out after each render, not once.
+      var leafletUpdate = ctl._update;
+      if (typeof leafletUpdate === 'function') {
+        ctl._update = function () {
+          var r = leafletUpdate.apply(this, arguments);
+          _layoutRows(this, overlayIds);
+          return r;
+        };
+      }
+      _control = ctl.addTo(map);
+      if (typeof leafletUpdate !== 'function') _layoutRows(_control, overlayIds);
+      // #839 — the list ends above the attribution and the bottom nav.
+      if (window.MapChromeFit) window.MapChromeFit.fitLayerControl(map, _control);
+      if (overlayIds.length) {
+        try { _wireGroupInputs(map, _control); } catch (_) {}
+      }
 
       // Decide initial active layer: a restored pick is already on the map,
       // above; otherwise Auto (also the fallback for a pick that is no
@@ -1910,8 +2130,28 @@
     // stay, one per Live/Map visit).
     var onDHMDefaults = function () { if (!map._mcGone) _buildControl(); };
     window.addEventListener('dhm-defaults-changed', onDHMDefaults);
+    // #845 — the list follows the theme: rebuilt when it flips (never per
+    // map move), an explicit pick moved to its counterpart in the new one.
+    var onTheme = function () {
+      if (map._mcGone || _isDark() === _builtDark) return;
+      if (!_isAuto && _sessionBasePick) _sessionBasePick = pickForTheme(_sessionBasePick, _isDark());
+      _buildControl();
+    };
+    var themeObs = null, themeMq = null;
+    try {
+      if (typeof MutationObserver === 'function' && document.documentElement) {
+        themeObs = new MutationObserver(onTheme);
+        themeObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+      }
+    } catch (_) { themeObs = null; }
+    try {
+      themeMq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+      if (themeMq && themeMq.addEventListener) themeMq.addEventListener('change', onTheme);
+    } catch (_) { themeMq = null; }
     map.on('unload', function () {
       map._mcGone = true;
+      try { if (themeObs) themeObs.disconnect(); } catch (_) {}
+      try { if (themeMq && themeMq.removeEventListener) themeMq.removeEventListener('change', onTheme); } catch (_) {}
       try {
         if (window.removeEventListener) {
           window.removeEventListener('dhm-defaults-changed', onDHMDefaults);

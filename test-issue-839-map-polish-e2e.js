@@ -16,9 +16,9 @@
  *       view ends up drawn (512 px, leaflet-tile-loaded). No tile is fetched
  *       a third time.
  *   F4  The popup's commissioning date in Chromium's Intl: Danish date.
- *   F5  The layer control lists no base-map name twice; the dark twins say
- *       "(dark)", and in the dark theme the "(dark)" Skærmkort grå entry is
- *       the inverted one.
+ *   F5  The layer control lists no base-map name twice: since #845 only the
+ *       current theme's variants, with no "(dark)" suffix; in the dark theme
+ *       the Skærmkort grå entry is the inverted one.
  *   F6  Skærmkort + DHM hillshade + contours at 1440x900: the credit lies
  *       outside the Map Controls panel and is hit by itself at its left,
  *       centre and right. Both DHM credits stay, each linking its own
@@ -220,7 +220,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   });
 
   for (const theme of ['light', 'dark']) {
-    await step(`F5 (${theme}) no base map is listed twice; the dark twins say "(dark)"`, async () => {
+    await step(`F5 (${theme}) no base map is listed twice; only this theme's variants, no "(dark)" (#845)`, async () => {
       const { ctx, page } = await newCtx({ theme });
       try {
         const rows = await page.$$eval('.leaflet-control-layers-base label[data-tile-id]', ls =>
@@ -228,22 +228,22 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         const names = rows.map(r => r.name);
         const dup = names.filter((n, i) => names.indexOf(n) !== i);
         assert(!dup.length, 'listed twice: ' + dup.join(', '));
-        const want = {
-          'carto-voyager-dark': 'Carto Voyager (dark)', 'positron-dark': 'Carto Positron (dark)',
-          'esri-imagery-dark': 'Esri World Imagery (dark)', 'osm-dark': 'OSM Standard (dark)',
-          'dataforsyningen-skaermkort-graa-dark': 'Skærmkort grå (Denmark) (dark)',
-          'dataforsyningen-skaermkort-graa': 'Skærmkort grå (Denmark)',
-        };
+        assert(!names.some(n => /\(dark\)|\(Denmark\)/.test(n)), 'a suffix is left: ' + names.join(', '));
+        const want = theme === 'dark'
+          ? { 'esri-imagery-dark': 'Esri World Imagery', 'osm-dark': 'OSM Standard', 'dataforsyningen-skaermkort-graa-dark': 'Skærmkort grå' }
+          : { 'esri-imagery': 'Esri World Imagery', 'osm-standard': 'OSM Standard', 'dataforsyningen-skaermkort-graa': 'Skærmkort grå' };
         for (const id of Object.keys(want)) {
           const r = rows.find(x => x.id === id);
           assert(r && r.name === want[id], id + ' is listed as ' + (r && r.name));
         }
+        const other = theme === 'dark' ? ['osm-standard', 'esri-imagery', 'dataforsyningen-skaermkort-graa'] : ['osm-dark', 'esri-imagery-dark', 'dataforsyningen-skaermkort-graa-dark'];
+        for (const id of other) assert(!rows.some(x => x.id === id), id + ' listed in the ' + theme + ' theme');
         if (theme === 'dark') {
           await page.click('.leaflet-control-layers-toggle').catch(() => {});
-          await page.getByText('Skærmkort grå (Denmark) (dark)', { exact: true }).click();
+          await page.click('.leaflet-control-layers-base label[data-tile-id="dataforsyningen-skaermkort-graa-dark"]');
           await page.waitForTimeout(900);
           const filter = await page.$eval('.leaflet-tile-pane', el => getComputedStyle(el).filter);
-          assert(filter === INVERT, 'the (dark) entry is not inverted: ' + filter);
+          assert(filter === INVERT, 'the dark Skærmkort grå entry is not inverted: ' + filter);
         }
       } finally { await ctx.close(); }
     });

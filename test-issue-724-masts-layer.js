@@ -561,8 +561,10 @@ test('a theme switch re-reads the CSS variables and restyles every built marker'
   assert(markers.length >= 2, 'markers ' + markers.length);
   vars['--mast-site'] = 'rgb(9, 9, 9)';
   vars['--mast-interference'] = 'rgb(8, 8, 8)';
-  assert.strictEqual(observers.length, 1, 'no data-theme observer');
-  observers[0]();
+  // #845: the layer control watches the theme too (it rebuilds its list
+  // on a real switch); fire every observer, as the browser would.
+  assert(observers.length >= 1, 'no data-theme observer');
+  observers.forEach((cb) => cb([]));
   assert(markers.every((m) => m.options.color === 'rgb(9, 9, 9)' || m.options.color === 'rgb(8, 8, 8)'), 'not restyled');
   assert(markers.some((m) => m.options.radius === 10 && m.options.color === 'rgb(8, 8, 8)'));
 });

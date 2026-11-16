@@ -616,7 +616,9 @@ test('F6 the layer control offers every style with its own credit and ceiling', 
   const { ctl } = buildControl(ctx, true);
   const reg = ctx.window.MC_TILE_PROVIDERS;
   const ids = Object.keys(ctl.base).filter(k => k !== '__auto__');
-  assert.deepStrictEqual(ids.sort(), Object.keys(reg).sort(), 'every offered style is selectable');
+  // #845: the control lists the current (light) theme's styles only.
+  const light = Object.keys(reg).filter(k => reg[k].type === 'light');
+  assert.deepStrictEqual(ids.sort(), light.sort(), 'every offered style of the theme is selectable');
   for (const id of ids) {
     const p = reg[id], layer = ctl.base[id];
     assert.strictEqual(layer.kind, 'tile', id);
@@ -649,9 +651,11 @@ test('F6 an explicit pick in the layer control still locks the pane filter', () 
   assert.strictEqual(explicit, 'true', 'the pane is marked explicit');
   assert.strictEqual(filter, ctx.window.MC_TILE_PROVIDERS['positron-dark'].invertFilter,
     'the style\'s invert filter is applied by the layer\'s own add hook');
-  map.addLayer(ctl.base['carto-light']);
-  ctl.base['carto-light'].fire('add');
-  assert.strictEqual(pane.style.filter, '', 'a light style clears it');
+  // #845: the dark theme lists dark styles only; carto-dark is a native
+  // dark tile with no invert filter, so it clears it, as a light one did.
+  map.addLayer(ctl.base['carto-dark']);
+  ctl.base['carto-dark'].fire('add');
+  assert.strictEqual(pane.style.filter, '', 'a style without an invert filter clears it');
 });
 
 // ── F7: the registry's own invariants ─────────────────────────────────────

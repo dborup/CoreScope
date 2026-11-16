@@ -13,7 +13,7 @@
  *      the select, then the option: a native picker cannot be tapped), tap
  *      "Show contour lines by default", tap the min-zoom field and type 15;
  *      each control is at least 48 px, inside the screen and hit by itself;
- *      the section is stored; the open map's contour label says "zoom 15+"
+ *      the section is stored; the open map's contour zoom hint says "zoom 15+"
  *      at once; nothing overflows sideways;
  *   2. the next map (a reload) starts with surface and contours on, asks no
  *      contour tile at z14 (its checkbox disabled) and does after one tap
@@ -135,7 +135,10 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         const input = label && label.querySelector('input');
         out.checked[id] = input ? input.checked : null;
         out.disabled[id] = input ? input.disabled : null;
-        out.labels[id] = label ? label.textContent.trim() : null;
+        // #845: the row's name and its zoom hint (shown apart, at the right).
+        const name = label && label.querySelector('.mc-layer-name');
+        const hint = label && label.querySelector('.mc-layer-hint');
+        out.labels[id] = label ? (name ? name.textContent.trim() : label.textContent.trim()) + (hint ? ' | ' + hint.textContent.trim() : '') : null;
       }
       return out;
     }, LABEL);
@@ -213,7 +216,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         await dismissTips(page);
         let s = await state(page);
         assert(!s.checked.terrain && !s.checked.surface && !s.checked.contours, 'built-in is not all off: ' + JSON.stringify(s.checked));
-        assert(s.labels.contours === 'Contour lines (DHM, zoom 14+)', s.labels.contours);
+        assert(s.labels.contours === 'Contour lines | zoom 14+', s.labels.contours);
 
         await openDisplayByTaps(page);
         const title = await page.evaluate(() => Array.from(document.querySelectorAll('.cust-section-title')).some(p => p.textContent === 'DHM Map Overlays'));
@@ -243,7 +246,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         assert(over.page <= 0 && over.overlay <= 0, 'horizontal overflow ' + JSON.stringify(over));
         // The open map's control follows the new min-zoom at once.
         s = await state(page);
-        assert(s.labels.contours === 'Contour lines (DHM, zoom 15+)', 'label not live: ' + s.labels.contours);
+        assert(s.labels.contours === 'Contour lines | zoom 15+', 'label not live: ' + s.labels.contours);
         assert(!s.checked.surface && !s.checked.contours, 'a default changed the open map: ' + JSON.stringify(s.checked));
         await page.tap('.cust-close');
         await page.waitForTimeout(400);
