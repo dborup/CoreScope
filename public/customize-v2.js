@@ -1108,9 +1108,13 @@
       }
     }
 
-    // Distance unit → sync to localStorage for all pages
+    // Distance unit → sync to localStorage for all pages. With no unit set
+    // (a reset field, no server default) the mirror goes too, or
+    // getDistanceUnit() keeps the old pick while the dropdown says auto (#839).
     if (typeof effectiveConfig.distanceUnit === 'string' && DISTANCE_UNIT_VALUES.indexOf(effectiveConfig.distanceUnit) >= 0) {
       localStorage.setItem('meshcore-distance-unit', effectiveConfig.distanceUnit);
+    } else {
+      localStorage.removeItem('meshcore-distance-unit');
     }
 
     // Nav gradient
@@ -3776,7 +3780,8 @@
       'meshcore-hide-1byte-hops',  // #1633 hide 1-byte path hops toggle (pre-#674)
       'meshcore-1byte-hops-mode',  // #674 1-byte path hops: show/mark/hide
       'mc-dark-tile-provider',     // #1430 dark-tile provider pick
-      'mc-light-tile-provider'     // light-tile provider pick (#741)
+      'mc-light-tile-provider',    // light-tile provider pick (#741)
+      'meshcore-distance-unit'     // mirror of the Distance unit pick (#839)
     ];
     for (var i = 0; i < CUSTOMIZER_LS_KEYS.length; i++) {
       try { localStorage.removeItem(CUSTOMIZER_LS_KEYS[i]); } catch (_e) { /* ignore */ }
