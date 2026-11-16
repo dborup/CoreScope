@@ -110,14 +110,29 @@ func TestProfileCard846_URLAndCardFollowTheClassification(t *testing.T) {
 }
 
 // A profile the server does not classify keeps its card key without the
-// profile: the card cache is checked before the elevation cache is read,
-// as before #846, so even an entry that no longer decodes serves the hit.
-func TestProfileCard846_UnclassifiedKeyNeedsNoProfile(t *testing.T) {
-	env := newCardEnv(t, dhm.ProfileConfig{})
-	q := pathQuery(shareKeyA, shareKeyB)
+// profile, as before #846: a cached card is served after its elevations
+// have left the cache. A classified one needs them for its key, so it is
+// drawn again from a fresh fetch, and that card is then a hit.
+func TestProfileCard846_KeyNeedsTheProfileOnlyWhenClassified(t *testing.T) {
+	evict := func(env *shareEnv, target string) {
+		req := env.resolveShare(t, target)
+		env.p.cache.PutFor(env.p.elevationKey(req), []byte{0}, env.p.now(), 0)
+	}
+	plain := newCardEnv(t, dhm.ProfileConfig{})
+	q, target := pathQuery(shareKeyA, shareKeyB), shareQ(shareKeyA, shareKeyB)
+	wantCard(t, plain.card(q), "miss")
+	evict(plain, target)
+	calls := plain.src.calls.Load()
+	wantCard(t, plain.card(q), "hit")
+	if plain.src.calls.Load() != calls {
+		t.Fatal("an unclassified card hit went upstream")
+	}
+
+	env := newCardBuildingsEnv(t, newStubOGC(t, dokk1Footprint))
+	q, target = pathQuery(dokk1A, dokk1B, "model=both"), shareQ(dokk1A, dokk1B, "model=both")
 	wantCard(t, env.card(q), "miss")
-	req := env.resolveShare(t, shareQ(shareKeyA, shareKeyB))
-	env.p.cache.Put(env.p.elevationKey(req), []byte("not a profile"), env.p.now())
+	evict(env, target)
+	wantCard(t, env.card(q), "miss")
 	wantCard(t, env.card(q), "hit")
 }
 

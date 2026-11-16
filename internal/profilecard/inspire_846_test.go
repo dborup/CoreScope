@@ -162,8 +162,8 @@ func TestClassifiedAndMixedKeepsEveryCredit(t *testing.T) {
 		t.Errorf("last credit line at y=%d, want %d", lines[len(lines)-1].Y, creditBaseline)
 	}
 	for _, s := range runsOf(runs, "summary") {
-		if s.Y > lines[0].Y-attributionSize {
-			t.Errorf("summary at y=%d overlaps the credits", s.Y)
+		if s.Y > lines[0].Y-attributionSize || s.Y-summarySize < footerRule {
+			t.Errorf("summary at y=%d overlaps the credits or the footer rule", s.Y)
 		}
 	}
 }
