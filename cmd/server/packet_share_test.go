@@ -478,7 +478,6 @@ func TestPacketShare_AdvertOrigin(t *testing.T) {
 	if in := e.share(t, psFlood).in; in.AdvertName != "" {
 		t.Errorf("a GRP_TXT names an origin: %q", in.AdvertName)
 	}
-	site := e.siteDocument(t)
 	for name, edit := range map[string]func(*Config){
 		"hidden name prefix": nil,
 		"node blacklist":     func(c *Config) { c.SetNodeBlacklist([]string{psRH}) },
@@ -489,6 +488,8 @@ func TestPacketShare_AdvertOrigin(t *testing.T) {
 			if edit != nil {
 				e = newPacketShareEnv(t, true, edit)
 			}
+			// From this env: the cache-bust value is the second it was built.
+			site := e.siteDocument(t)
 			w := e.get("/p?packet=" + psHiddenAdvert)
 			if w.Code != 404 || w.Body.String() != site {
 				t.Errorf("/p: %d, site document %t", w.Code, w.Body.String() == site)
