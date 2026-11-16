@@ -154,6 +154,7 @@ run test-issue-721-move-endpoints.js
 run test-issue-727-share-link.js
 run test-issue-727-m4-share-customizer.js
 run test-issue-781-profile-cursor.js
+run test-issue-839-profile-ux.js
 run test-issue-737-skraafoto-viewer.js
 run test-issue-737-m3c-skraafoto-marks.js
 run test-issue-737-customizer-skraafoto.js

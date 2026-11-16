@@ -68,7 +68,7 @@ func goldenCases() []goldenCase {
 		{name: "short-300m", resp: fxShort(), state: "clear",
 			want: map[string]string{"subtitle": "300 m", "title": "55.0000, 10.0000 → 55.1000, 10.1000"}},
 		{name: "long-80km", resp: fxLong(), names: [2]string{"North Hub", "South Hub"}, state: "blocked",
-			want: map[string]string{"subtitle": "80 km"}},
+			want: map[string]string{"subtitle": "80.0 km"}},
 		{name: "danish-name", resp: fxClear(), names: [2]string{"Søby Bakker", "Ørsted Mast — Æblehaven"}, state: "clear",
 			want: map[string]string{"title": "Søby Bakker → Ørsted Mast — Æblehaven"}},
 		{name: "cjk-fallback", resp: fxClear(), names: [2]string{"东京中继站", "Mast 🛰"}, state: "clear",

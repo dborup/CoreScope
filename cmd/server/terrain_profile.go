@@ -61,6 +61,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -631,10 +632,26 @@ func (p *terrainProfiler) elevationKey(req terrainRequest) terrainKey {
 }
 
 // terrainRequestError is a refusal: its status and a fixed message that
-// echoes nothing from the request.
+// echoes nothing from the request. maxPathKm is set on "path too long"
+// only: the limit the path broke, so the panel can name it (#839 §6).
 type terrainRequestError struct {
-	status int
-	msg    string
+	status    int
+	msg       string
+	maxPathKm float64
+}
+
+// terrainRefusal is the JSON body of a refused profile request: the usual
+// {"error": ...}, plus the limit on a path that is too long.
+type terrainRefusal struct {
+	Error     string  `json:"error"`
+	MaxPathKm float64 `json:"maxPathKm,omitempty"`
+}
+
+// writeRefusal writes rerr as writeError would, with its limit.
+func writeRefusal(w http.ResponseWriter, rerr *terrainRequestError) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(rerr.status)
+	json.NewEncoder(w).Encode(terrainRefusal{Error: rerr.msg, MaxPathKm: rerr.maxPathKm})
 }
 
 // resolveTerrainRequest is the shared prelude after parsing: resolve both
@@ -647,7 +664,7 @@ func (s *Server) resolveTerrainRequest(ctx context.Context, p *terrainProfiler, 
 	for i, ref := range [2]terrainRef{tq.a, tq.b} {
 		e, ok := s.resolveTerrainEnd(ctx, ref)
 		if !ok {
-			return req, &terrainRequestError{http.StatusNotFound, "node not found"}
+			return req, &terrainRequestError{status: http.StatusNotFound, msg: "node not found"}
 		}
 		req.ends[i] = e
 	}
@@ -660,10 +677,10 @@ func (s *Server) resolveTerrainRequest(ctx context.Context, p *terrainProfiler, 
 	req.b = dhm.LatLon{Lat: float64(req.kb[0]) / terrainSnap, Lon: float64(req.kb[1]) / terrainSnap}
 	d := dhm.GroundDistance(req.a, req.b)
 	if !(d >= 1) {
-		return req, &terrainRequestError{http.StatusBadRequest, dhm.ErrBadRequest.Error()}
+		return req, &terrainRequestError{status: http.StatusBadRequest, msg: dhm.ErrBadRequest.Error()}
 	}
 	if d > p.set.maxPathM {
-		return req, &terrainRequestError{http.StatusBadRequest, "path too long"}
+		return req, &terrainRequestError{http.StatusBadRequest, "path too long", p.set.maxPathM / 1000}
 	}
 	req.plan = dhm.PlanProfile(req.a, req.b, p.set.plan)
 	return req, nil
@@ -682,7 +699,7 @@ func (s *Server) handleTerrainProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	req, rerr := s.resolveTerrainRequest(r.Context(), p, tq)
 	if rerr != nil {
-		writeError(w, rerr.status, rerr.msg)
+		writeRefusal(w, rerr)
 		return
 	}
 	plan := req.plan
