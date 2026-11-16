@@ -36,8 +36,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts'];
+  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto'];
+  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -540,6 +540,91 @@
     return ML.settings(_mastsCfg(), sec && typeof sec === 'object' ? sec : {});
   }
 
+  // ── #723 M4 — ancient monuments settings ──
+  // Whether the monuments overlay starts on, its opacity, and whether (and
+  // how far out) the Path profile warns about a monument at an end. The
+  // keys, defaults and bounds are the rule in public/map-tile-providers.js
+  // (MC_HERITAGE_SETTINGS), shared with the overlay and the profile, so the
+  // customizer stores exactly what they use. Without the rule on the page no
+  // value is accepted. The server's map.heritage values stay server-only.
+  var _lastHeritage = null;
+
+  function _heritageRule() {
+    var R = window.MC_HERITAGE_SETTINGS;
+    return R && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function _heritageCfg() { return window.MC_getHeritageConfig ? window.MC_getHeritageConfig() : null; }
+
+  function isValidHeritageSetting(key, val) {
+    var R = _heritageRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective monuments settings (this section over the defaults), or
+   *  null without the rule. */
+  function heritageSettings(effectiveConfig) {
+    var R = _heritageRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.heritage;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
+  // ── #737 — the oblique photo (Skråfoto) viewer's defaults ──
+  // The first direction, the first zoom and whether the line of sight is
+  // drawn. The keys, values and defaults are the viewer's own rule
+  // (public/skraafoto.js, Skraafoto.SETTINGS), which the viewer reads from
+  // the effective config when it opens, so the customizer stores exactly
+  // what it uses. The server's map.skraafoto config stays server-only.
+  // Without the viewer on the page no value is accepted.
+  function _skraafotoRule() {
+    var S = window.Skraafoto;
+    var R = S && S.SETTINGS;
+    return R && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function isValidSkraafotoSetting(key, val) {
+    var R = _skraafotoRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective viewer defaults (this section over the built-ins), or
+   *  null without the viewer. */
+  function skraafotoSettings(effectiveConfig) {
+    var R = _skraafotoRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.skraafoto;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
+  // ── #734 — DHM overlay defaults ──
+  // Which hillshade a map starts with, whether the contour lines do, and
+  // the contour min-zoom. The rule, the built-ins and the server's bounds
+  // live in public/map-tile-providers.js (MC_DHMOverlays), which the
+  // overlays use, so the customizer stores exactly what they read. The
+  // server's map.dhm config itself stays server-only (#681 M6): this is a
+  // viewer section, never `dhm`. Without the registry no value is accepted.
+  var _lastDHM = null;
+
+  function _dhmOverlays() {
+    var D = window.MC_DHMOverlays;
+    return D && typeof D.settings === 'function' && typeof D.validSetting === 'function' ? D : null;
+  }
+
+  function isValidDHMOverlaySetting(key, val) {
+    var D = _dhmOverlays();
+    return !!D && D.SETTING_KEYS.indexOf(key) >= 0 && D.validSetting(key, val);
+  }
+
+  /** The effective DHM overlay defaults (this section over the built-ins),
+   *  or null without the registry. */
+  function dhmOverlaySettings(effectiveConfig) {
+    var D = _dhmOverlays();
+    if (!D) return null;
+    var sec = effectiveConfig && effectiveConfig.dhmOverlays;
+    return D.settings(sec && typeof sec === 'object' ? sec : {});
+  }
+
   // ── Validation helpers ──
 
   /* An imported file is plain JSON, so a key may well be "hasOwnProperty";
@@ -753,6 +838,38 @@
           else console.warn('[customizer-v2] Invalid antenna sites setting rejected:', 'masts.' + mk2, mIn[mk2]);
         }
         if (Object.keys(mOut).length) clean[key] = mOut;
+      } else if (key === 'heritage' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #723 M4 — the monuments settings, each by the overlay's rule.
+        var hIn = delta[key], hOut = {}, hRule = _heritageRule(), hKeys = hRule ? hRule.KEYS : [];
+        for (var hki = 0; hki < hKeys.length; hki++) {
+          var hk2 = hKeys[hki];
+          if (!_own(hIn, hk2) || hIn[hk2] == null) continue;
+          if (isValidHeritageSetting(hk2, hIn[hk2])) hOut[hk2] = hIn[hk2];
+          else console.warn('[customizer-v2] Invalid ancient monuments setting rejected:', 'heritage.' + hk2, hIn[hk2]);
+        }
+        if (Object.keys(hOut).length) clean[key] = hOut;
+      } else if (key === 'skraafoto' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #737 — the oblique photo viewer's defaults, by the viewer's rule.
+        var sIn = delta[key], sOut = {}, sRule = _skraafotoRule(), sKeys = sRule ? sRule.KEYS : [];
+        for (var ski = 0; ski < sKeys.length; ski++) {
+          var sk2 = sKeys[ski];
+          if (!_own(sIn, sk2) || sIn[sk2] == null) continue;
+          if (isValidSkraafotoSetting(sk2, sIn[sk2])) sOut[sk2] = sIn[sk2];
+          else console.warn('[customizer-v2] Invalid oblique photo setting rejected:', 'skraafoto.' + sk2, sIn[sk2]);
+        }
+        if (Object.keys(sOut).length) clean[key] = sOut;
+      } else if (key === 'dhmOverlays' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #734 — the DHM overlay defaults, each by the overlays' rule.
+        var dIn = delta[key];
+        var dOut = {};
+        var dKeys = _dhmOverlays() ? _dhmOverlays().SETTING_KEYS : [];
+        for (var dki = 0; dki < dKeys.length; dki++) {
+          var dk = dKeys[dki];
+          if (!_own(dIn, dk) || dIn[dk] == null) continue;
+          if (isValidDHMOverlaySetting(dk, dIn[dk])) dOut[dk] = dIn[dk];
+          else console.warn('[customizer-v2] Invalid DHM overlay setting rejected:', 'dhmOverlays.' + dk, dIn[dk]);
+        }
+        if (Object.keys(dOut).length) clean[key] = dOut;
       } else if (key === 'branding' || key === 'home') {
         // Pass through as-is (object shape)
         if (typeof delta[key] === 'object' && delta[key] !== null) {
@@ -991,9 +1108,13 @@
       }
     }
 
-    // Distance unit → sync to localStorage for all pages
+    // Distance unit → sync to localStorage for all pages. With no unit set
+    // (a reset field, no server default) the mirror goes too, or
+    // getDistanceUnit() keeps the old pick while the dropdown says auto (#839).
     if (typeof effectiveConfig.distanceUnit === 'string' && DISTANCE_UNIT_VALUES.indexOf(effectiveConfig.distanceUnit) >= 0) {
       localStorage.setItem('meshcore-distance-unit', effectiveConfig.distanceUnit);
+    } else {
+      localStorage.removeItem('meshcore-distance-unit');
     }
 
     // Nav gradient
@@ -1044,6 +1165,25 @@
       } catch (_e) { /* no CustomEvent: the next view reads them anyway */ }
     }
     _lastMasts = mastsNow;
+
+    /* #723 M4 — the same for the monuments settings: the overlay re-reads
+     * its opacity and an open Path profile redraws its warning. */
+    var heritageNow = JSON.stringify(heritageSettings(effectiveConfig));
+    if (_lastHeritage !== null && _lastHeritage !== heritageNow) {
+      try {
+        window.dispatchEvent(new CustomEvent('heritage-defaults-changed'));
+      } catch (_e) { /* no CustomEvent: the next map reads them anyway */ }
+    }
+    _lastHeritage = heritageNow;
+    /* #734 — the same for the DHM overlay defaults: an open map's layer
+     * control re-reads the contour min-zoom on this event. */
+    var dhmNow = JSON.stringify(dhmOverlaySettings(effectiveConfig));
+    if (_lastDHM !== null && _lastDHM !== dhmNow) {
+      try {
+        window.dispatchEvent(new CustomEvent('dhm-defaults-changed'));
+      } catch (_e) { /* no CustomEvent: the next map reads them anyway */ }
+    }
+    _lastDHM = dhmNow;
 
     // Dispatch theme-changed event (bare, no payload — matches existing behavior)
     window.dispatchEvent(new CustomEvent('theme-changed'));
@@ -1297,6 +1437,62 @@
           }
         }
       }
+      // #723 M4 — heritage: the monuments settings, two switches and two
+      // bounded whole numbers.
+      if (key === 'heritage' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var hrule = _heritageRule();
+        for (var hsk in obj[key]) {
+          if (!_own(obj[key], hsk)) continue;
+          if (hrule && hrule.KEYS.indexOf(hsk) === -1) {
+            console.warn('[customizer-v2] Unknown heritage key in import:', hsk);
+          } else if (obj[key][hsk] === null && hrule && hrule.DEFAULTS[hsk] === null) {
+            // The documented default written out (warnDistanceM: null) is
+            // the same as leaving the key out; writeOverrides skips it.
+          } else if (!isValidHeritageSetting(hsk, obj[key][hsk])) {
+            var hlim = hrule && hrule.LIMITS[hsk];
+            errors.push('Invalid ancient monuments setting: heritage.' + hsk + ' = "' + obj[key][hsk] + '" \u2014 must be ' +
+              (!hrule ? 'unavailable without the monuments overlay' : hlim ? 'a whole number ' + hlim[0] + '-' + hlim[1] : 'true or false'));
+          }
+        }
+      }
+      // #737 — skraafoto: two lists of values and a boolean.
+      if (key === 'skraafoto' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var srule = _skraafotoRule();
+        var orList = function (l) { return l.slice(0, -1).join(', ') + ' or ' + l[l.length - 1]; };
+        for (var ssk in obj[key]) {
+          if (!_own(obj[key], ssk)) continue;
+          if (!srule) {
+            errors.push('Invalid oblique photo setting: skraafoto.' + ssk + ' \u2014 unavailable without the oblique photo viewer');
+          } else if (srule.KEYS.indexOf(ssk) === -1) {
+            console.warn('[customizer-v2] Unknown skraafoto key in import:', ssk);
+          } else if (!srule.valid(ssk, obj[key][ssk])) {
+            errors.push('Invalid oblique photo setting: skraafoto.' + ssk + ' = "' + obj[key][ssk] + '" \u2014 must be ' +
+              (ssk === 'direction' ? orList(srule.DIRECTIONS) : ssk === 'zoom' ? orList(srule.ZOOMS) : 'true or false'));
+          }
+        }
+      }
+      // #734 — dhmOverlays: the hillshade enum, a boolean, a zoom inside
+      // the server's contour range.
+      if (key === 'dhmOverlays' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var DO = _dhmOverlays();
+        for (var dsk in obj[key]) {
+          if (!_own(obj[key], dsk)) continue;
+          var dv = obj[key][dsk];
+          if (!DO) {
+            errors.push('Invalid DHM overlay setting: dhmOverlays.' + dsk + ' \u2014 unavailable without the map overlays');
+          } else if (DO.SETTING_KEYS.indexOf(dsk) === -1) {
+            console.warn('[customizer-v2] Unknown dhmOverlays key in import:', dsk);
+          } else {
+            var dRange = dsk === 'contourMinZoom' ? DO.contourZoomRange() : null;
+            if (!DO.validSetting(dsk, dv) || (dRange && (dv < dRange[0] || dv > dRange[1]))) {
+              errors.push('Invalid DHM overlay setting: dhmOverlays.' + dsk + ' = "' + dv + '" \u2014 must be ' +
+                (dsk === 'hillshade' ? DO.HILLSHADE_VALUES.slice(0, -1).join(', ') + ' or ' + DO.HILLSHADE_VALUES[DO.HILLSHADE_VALUES.length - 1]
+                  : dsk === 'contours' ? 'true or false'
+                  : dRange ? 'a whole zoom ' + dRange[0] + '-' + dRange[1] : 'a whole zoom'));
+            }
+          }
+        }
+      }
       // Validate distanceUnit
       if (key === 'distanceUnit' && DISTANCE_UNIT_VALUES.indexOf(obj[key]) === -1) {
         errors.push('Invalid distanceUnit: "' + obj[key] + '" — must be km, mi, or auto');
@@ -1489,7 +1685,7 @@
       { id: 'theme', glyph: 'ph:palette', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', glyph: 'ph:target', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'home', glyph: 'ph:house', title: 'Home', badge: _tabBadge('home') },
-      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
+      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', glyph: 'ph:map-trifold', title: 'GeoFilter' },
       { id: 'export', glyph: 'ph:download-simple', title: 'Export' }
     ];
@@ -1968,9 +2164,12 @@
       '<button type="button" class="cust-dl-btn" data-cv2-reset-hints data-reset-gesture-hints>↺ Reset gesture hints</button>' +
       _renderChannelsShowEncryptedToggle() +
       _renderHide1ByteHopsToggle() +
-      _renderTileProviderSelector() +
+      '<div data-cv2-tile-providers>' + (_shownTileSelectorHtml = _renderTileProviderSelector()) + '</div>' +
       _renderTerrainSettings() +
       _renderMastsSettings() +
+      _renderDHMOverlaySettings() +
+      _renderHeritageSettings() +
+      _renderSkraafotoSettings() +
     '</div>';
   }
 
@@ -2071,6 +2270,122 @@
       num('hintStrongM', 'Strong hint within (m)', 'Possibly the same building or mast; 0 turns it off', ML.LIMITS.hintStrongM[0], m.hintDistanceM, 10);
   }
 
+  // ── #734 DHM overlay defaults ──
+  // Shown only where the server offers a DHM overlay, with only the ones it
+  // offers. Every value starts at the built-in; a value back at it is a
+  // cleared override.
+  function _renderDHMOverlaySettings() {
+    var D = _dhmOverlays();
+    if (!D) return '';
+    var offered = D.offered();
+    if (!offered.length) return '';
+    var d = dhmOverlaySettings(_getEffective());
+    var has = function (id) { return offered.indexOf(id) >= 0; };
+    var labels = { off: 'Off', terrain: 'Terrain', surface: 'Surface, buildings and trees' };
+    var opts = D.HILLSHADE_VALUES.filter(function (v) { return v === 'off' || has(v); }).map(function (v) {
+      return '<option value="' + v + '"' + (d.hillshade === v ? ' selected' : '') + '>' + labels[v] + '</option>';
+    }).join('');
+    var html = '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">DHM Map Overlays</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">What the Map and Live pages start with from the Danish elevation model (DHM). A link that says otherwise still wins, and so does a choice you made in the map\u2019s layer control.</p>';
+    if (has('terrain') || has('surface')) {
+      html += '<div class="cust-field"><label for="cv2-overlay-hillshade">Hillshade by default' + _overrideDot('dhmOverlays', 'hillshade') + '</label>' +
+        '<select id="cv2-overlay-hillshade" data-cv2-overlay="hillshade" style="width:100%;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);touch-action:manipulation">' +
+          opts + '</select></div>';
+    }
+    if (has('contours')) {
+      var range = D.contourZoomRange();
+      html += '<div class="cust-field"><label class="cust-check" for="cv2-overlay-contours" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+          '<input type="checkbox" id="cv2-overlay-contours" data-cv2-overlay="contours"' + (d.contours ? ' checked' : '') + ' style="width:20px;height:20px">' +
+          '<span>Show contour lines by default' + _overrideDot('dhmOverlays', 'contours') + '</span></label></div>' +
+        '<div class="cust-terrain-row">' +
+          '<div><label for="cv2-overlay-contourMinZoom">Contour lines from zoom' + _overrideDot('dhmOverlays', 'contourMinZoom') + '</label>' +
+            '<div class="cust-hint">The server draws them from ' + range[0] + '; you can only raise it</div></div>' +
+          '<input type="number" id="cv2-overlay-contourMinZoom" min="' + range[0] + '" max="' + range[1] + '" step="1" ' +
+            'inputmode="numeric" data-cv2-overlay="contourMinZoom" value="' + escAttr(String(d.contourMinZoom)) + '">' +
+        '</div>';
+    }
+    return html;
+  }
+
+  // ── #723 M4 Ancient monuments settings ──
+  // Shown only where the server offers the overlay; the two profile rows
+  // only where the Path profile tool is offered too. A value back at its
+  // default is a cleared override, and an empty warning distance is the
+  // default (everything the server reports).
+  function _renderHeritageSettings() {
+    var R = _heritageRule();
+    if (!R || !_heritageCfg()) return '';
+    var h = heritageSettings(_getEffective());
+    var tp = window.TerrainProfile;
+    var profile = !!(tp && typeof tp.offered === 'function' && tp.offered(window.MC_DHM_CFG));
+    var check = function (key, label, hint) {
+      var id = 'cv2-heritage-' + key;
+      return '<div class="cust-field"><label class="cust-check" for="' + id + '" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+        '<input type="checkbox" id="' + id + '" data-cv2-heritage="' + key + '"' + (h[key] ? ' checked' : '') + ' style="width:20px;height:20px">' +
+        '<span>' + label + _overrideDot('heritage', key) + '</span></label>' +
+        '<div class="cust-hint">' + hint + '</div></div>';
+    };
+    var num = function (key, label, hint, step, value, placeholder) {
+      var id = 'cv2-heritage-' + key, lim = R.LIMITS[key];
+      return '<div class="cust-terrain-row">' +
+        '<div><label for="' + id + '">' + label + _overrideDot('heritage', key) + '</label>' +
+          '<div class="cust-hint">' + hint + '</div></div>' +
+        '<input type="number" id="' + id + '" min="' + lim[0] + '" max="' + lim[1] + '" step="' + step + '" ' +
+          'inputmode="numeric" data-cv2-heritage="' + key + '" value="' + escAttr(value) + '"' +
+          (placeholder ? ' placeholder="' + escAttr(placeholder) + '"' : '') + '>' +
+      '</div>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Ancient Monuments</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">The Map\u2019s protected ancient monuments overlay (Slots- og Kulturstyrelsen, zoom ' + _heritageCfg().minZoom + '+) and its warning in the Path profile.</p>' +
+      check('enabled', 'Show protected ancient monuments on the map by default', 'A link that says otherwise, or your own last choice on the map, still wins.') +
+      num('opacityPct', 'Monuments overlay opacity (%)', 'How strongly the zones and points cover the map', 5, String(h.opacityPct)) +
+      (profile
+        ? check('profileWarning', 'Warn about monuments in the Path profile', 'Off: the profile asks the server nothing and shows no monument note. No note never means there is no monument.') +
+          num('warnDistanceM', 'Warn within (m) of a zone', 'Empty: every zone the server reports (its own radius). An end inside a zone is always shown.', 10,
+            h.warnDistanceM === null ? '' : String(h.warnDistanceM), 'server radius')
+        : '');
+  }
+
+  // ── #737 Oblique photo viewer defaults ──
+  // Shown only while the server offers the photos (its skraafoto block);
+  // the line-of-sight row only where the Path profile tool is offered too.
+  // A value back at its default is a cleared override.
+  function _renderSkraafotoSettings() {
+    var R = _skraafotoRule();
+    var S = window.Skraafoto;
+    if (!R || !S.offered(window.MC_SKRAAFOTO_CFG)) return '';
+    var s = skraafotoSettings(_getEffective());
+    var tp = window.TerrainProfile;
+    var profile = !!(tp && typeof tp.offered === 'function' && tp.offered(window.MC_DHM_CFG));
+    var select = function (key, label, values, hint) {
+      var id = 'cv2-skraafoto-' + key;
+      return '<div class="cust-field"><label for="' + id + '">' + label + _overrideDot('skraafoto', key) + '</label>' +
+        '<select id="' + id + '" data-cv2-skraafoto="' + key + '" style="width:100%;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);touch-action:manipulation">' +
+          values.map(function (v) {
+            return '<option value="' + escAttr(v) + '"' + (s[key] === v ? ' selected' : '') + '>' + escAttr(R.LABELS[key][v]) + '</option>';
+          }).join('') +
+        '</select><div class="cust-hint">' + hint + '</div></div>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Oblique Photos</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">How the oblique aerial photo viewer opens, on a node and in the Path profile.</p>' +
+      select('direction', 'First photo', R.DIRECTIONS, 'A shared link to a photo still opens that direction.') +
+      select('zoom', 'First view', R.ZOOMS, 'Zoomed in only where the point is in the photo; the Zoom button still switches.') +
+      (profile
+        ? '<div class="cust-field"><label class="cust-check" for="cv2-skraafoto-lineOfSight" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+            '<input type="checkbox" id="cv2-skraafoto-lineOfSight" data-cv2-skraafoto="lineOfSight"' + (s.lineOfSight ? ' checked' : '') + ' style="width:20px;height:20px">' +
+            '<span>Draw the line of sight from a Path profile' + _overrideDot('skraafoto', 'lineOfSight') + '</span></label>' +
+            '<div class="cust-hint">Off: the photo shows only the point.</div></div>'
+        : '');
+  }
+
+  /* One monuments input: the checkbox, or a whole number by the rule; an
+   * empty warning distance is null (the default). */
+  function _heritageInputValue(key, inp) {
+    if (key === 'enabled' || key === 'profileWarning') return !!inp.checked;
+    if (key === 'warnDistanceM' && inp.value === '') return null;
+    return /^[0-9]{1,4}$/.test(inp.value) ? Number(inp.value) : undefined;
+  }
+
   /* One antenna sites input: a whole number (or the checkbox) by the
    * layer's rule. A zoom gate below the operator's, or a strong tier past
    * the distance, is not stored; the input shows the effective value. */
@@ -2123,6 +2438,10 @@
   // Persists per-browser via MC_setDarkTileProvider; map.js / live.js
   // listen for `mc-tile-provider-changed` and swap tiles live.
   
+  // The Map Tiles block as last rendered into the panel (see the #741
+  // fromConfig listener, which replaces only that block when it changes).
+  var _shownTileSelectorHtml = null;
+
   function _renderTileProviderSelector() {
     var reg = (typeof window !== 'undefined') && window.MC_TILE_PROVIDERS;
     if (!reg) return '';
@@ -2269,6 +2588,8 @@
     var spec = (typeof window.MC_getTileSpec === 'function') ? window.MC_getTileSpec('light') : null;
     return {
       url: (spec && spec.url) || window.TILE_LIGHT,
+      // #741 M1b — a WMS light style is built from its descriptor.
+      wms: (spec && spec.wms) || null,
       attribution: (spec && spec.attribution) || '© OpenStreetMap contributors',
       maxZoom: (spec && spec.maxZoom) || 19
     };
@@ -2615,10 +2936,23 @@
     if (pruneConfirmBtn) pruneConfirmBtn.addEventListener('click', function () { _gfPruneConfirm(container); });
   }
 
+  // Base-map picks live in their own keys (MC_set*TileProvider), not in the
+  // overrides, but Reset All clears them too (#1430, #741).
+  var TILE_PICK_KEYS = ['mc-light-tile-provider', 'mc-dark-tile-provider'];
+
+  // #741 — is there anything for Reset All to reset? A theme override, or a
+  // base-map choice on its own.
+  function _hasResettableCustomization() {
+    if (Object.keys(readOverrides()).length > 0) return true;
+    try {
+      return TILE_PICK_KEYS.some(function (k) { return localStorage.getItem(k) != null; });
+    } catch (_e) { return false; }
+  }
+
   function _renderExport() {
     var delta = readOverrides();
     var json = JSON.stringify(delta, null, 2);
-    var hasDelta = Object.keys(delta).length > 0;
+    var hasDelta = _hasResettableCustomization();
 
     return '<div class="cust-panel' + (_activeTab === 'export' ? ' active' : '') + '" data-panel="export">' +
       '<p class="cust-section-title">Export / Import</p>' +
@@ -2714,6 +3048,21 @@
     if (inner) _renderPanel(inner);
   }
 
+  // #1420 / #741 — the light and dark base-map dropdowns persist the pick
+  // and fire mc-tile-provider-changed (through MC_set*TileProvider).
+  function _bindTileProviderSelects(container) {
+    container.querySelectorAll('[data-cv2-dark-tile-provider]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        if (typeof window.MC_setDarkTileProvider === 'function') window.MC_setDarkTileProvider(sel.value);
+      });
+    });
+    container.querySelectorAll('[data-cv2-light-tile-provider]').forEach(function (sel) {
+      sel.addEventListener('change', function () {
+        if (typeof window.MC_setLightTileProvider === 'function') window.MC_setLightTileProvider(sel.value);
+      });
+    });
+  }
+
   function _bindEvents(container) {
     // Tab switching
     container.querySelectorAll('.cust-tab').forEach(function (btn) {
@@ -2763,25 +3112,7 @@
       });
     });
 
-    // #1420 Dark-tile provider dropdown — persists + fires mc-tile-provider-changed
-    container.querySelectorAll('[data-cv2-dark-tile-provider]').forEach(function (sel) {
-      sel.addEventListener('change', function () {
-        var id = sel.value;
-        if (typeof window.MC_setDarkTileProvider === 'function') {
-          window.MC_setDarkTileProvider(id);
-        }
-      });
-    });
-
-    // Light-tile provider dropdown — persists + fires mc-tile-provider-changed
-    container.querySelectorAll('[data-cv2-light-tile-provider]').forEach(function (sel) {
-      sel.addEventListener('change', function () {
-        var id = sel.value;
-        if (typeof window.MC_setLightTileProvider === 'function') {
-          window.MC_setLightTileProvider(id);
-        }
-      });
-    });
+    _bindTileProviderSelects(container);
 
     // #1454 Show-encrypted-channels checkbox — persists + fires
     // mc-channels-show-encrypted-changed; channels.js re-fetches live.
@@ -2853,6 +3184,74 @@
         else setOverride('masts', key, v);
         // A new default applies to the next map, not one the viewer chose.
         if (key === 'enabled' && window.MC_forgetOverlayPref) window.MC_forgetOverlayPref('masts-sites');
+      });
+    });
+
+    // #723 M4 — ancient monuments settings. A value back at its default
+    // is a cleared override; a bad one is put back.
+    container.querySelectorAll('[data-cv2-heritage]').forEach(function (inp) {
+      var key = inp.dataset.cv2Heritage;
+      inp.addEventListener('change', function () {
+        var R = _heritageRule();
+        if (!R) return;
+        var v = _heritageInputValue(key, inp);
+        var now = heritageSettings(_getEffective());
+        if (v === undefined || (v !== null && !isValidHeritageSetting(key, v))) {
+          if (inp.type === 'checkbox') inp.checked = !!now[key];
+          else inp.value = now[key] === null ? '' : String(now[key]);
+          return;
+        }
+        if (v === R.DEFAULTS[key]) clearOverride('heritage', key);
+        else setOverride('heritage', key, v);
+        // A new default applies to the next map, not one the viewer chose.
+        if (key === 'enabled' && window.MC_forgetOverlayPref) window.MC_forgetOverlayPref('heritage-monuments');
+      });
+    });
+
+    // #737 — oblique photo viewer defaults. A value back at its default is
+    // a cleared override; a bad one is put back. The next viewer reads it.
+    container.querySelectorAll('[data-cv2-skraafoto]').forEach(function (inp) {
+      var key = inp.dataset.cv2Skraafoto;
+      inp.addEventListener('change', function () {
+        var R = _skraafotoRule();
+        if (!R) return;
+        var v = key === 'lineOfSight' ? !!inp.checked : inp.value;
+        if (!isValidSkraafotoSetting(key, v)) {
+          var now = skraafotoSettings(_getEffective());
+          if (key === 'lineOfSight') inp.checked = now.lineOfSight; else inp.value = now[key];
+          return;
+        }
+        if (v === R.DEFAULTS[key]) clearOverride('skraafoto', key);
+        else setOverride('skraafoto', key, v);
+      });
+    });
+
+    // #734 — DHM overlay defaults. A value back at the built-in is a
+    // cleared override; a new on/off default applies to the next map, so
+    // the remembered choice of that overlay is forgotten (as #724 M5).
+    container.querySelectorAll('[data-cv2-overlay]').forEach(function (inp) {
+      var key = inp.dataset.cv2Overlay;
+      inp.addEventListener('change', function () {
+        var D = _dhmOverlays();
+        if (!D) return;
+        var v = key === 'contours' ? !!inp.checked
+          : key === 'contourMinZoom' ? (/^[0-9]{1,2}$/.test(inp.value) ? Number(inp.value) : null)
+          : inp.value;
+        var now = dhmOverlaySettings(_getEffective());
+        var built = D.settings({});
+        var range = D.contourZoomRange();
+        if (v === null || !isValidDHMOverlaySetting(key, v) ||
+            (key === 'contourMinZoom' && (!range || v < range[0] || v > range[1]))) {
+          // Put the effective value back rather than storing nonsense.
+          if (key === 'contours') inp.checked = now.contours; else inp.value = String(now[key]);
+          return;
+        }
+        if (v === built[key]) clearOverride('dhmOverlays', key);
+        else setOverride('dhmOverlays', key, v);
+        if (window.MC_forgetOverlayPref) {
+          if (key === 'hillshade') window.MC_forgetOverlayPref('dhm-terrain');
+          if (key === 'contours') window.MC_forgetOverlayPref('dhm-contours');
+        }
       });
     });
 
@@ -3228,6 +3627,44 @@
     _updateSaveStatus(_saveStatus);
   }
 
+  // #741 — the base-map lists come from the tile registry, which is rebuilt
+  // when /api/config/client lands. On a cold start (a slow phone) the panel
+  // can already be open by then, listing only the providers known at parse
+  // time, so the operator's gated styles (Dataforsyningen, Esri, ...) must
+  // appear, or vanish, in place. A closed panel re-renders on open.
+  //
+  // Only the Map Tiles block is replaced, and only when its markup changed:
+  // a full panel re-render would destroy whatever input the viewer is typing
+  // in (and collapse the phone keyboard), the case the debounced re-render
+  // above also avoids. If one of the base-map selects itself has the focus,
+  // the block is replaced once the focus leaves it.
+  function _refreshTileProviderBlock() {
+    if (!_panelEl || _panelEl.classList.contains('hidden')) return;
+    var block = _panelEl.querySelector('[data-cv2-tile-providers]');
+    if (!block) return;
+    var html = _renderTileProviderSelector();
+    if (html === _shownTileSelectorHtml) return;
+    if (block.contains(document.activeElement)) {
+      if (block.hasAttribute('data-cv2-refresh-pending')) return;
+      block.setAttribute('data-cv2-refresh-pending', '');
+      block.addEventListener('focusout', function onOut() {
+        block.removeEventListener('focusout', onOut);
+        block.removeAttribute('data-cv2-refresh-pending');
+        // Once the focus has moved on (it may move to the other select).
+        setTimeout(_refreshTileProviderBlock, 0);
+      });
+      return;
+    }
+    block.innerHTML = html;
+    _shownTileSelectorHtml = html;
+    _bindTileProviderSelects(block);
+  }
+  try {
+    window.addEventListener('mc-tile-provider-changed', function (e) {
+      if (e && e.detail && e.detail.fromConfig) _refreshTileProviderBlock();
+    });
+  } catch (_e) { /* no window events (tests) */ }
+
   // ── Initialization (runs immediately on script load) ──
 
   // 1. Migration check
@@ -3342,7 +3779,9 @@
       'channels-show-encrypted',   // #1454 encrypted-channel toggle
       'meshcore-hide-1byte-hops',  // #1633 hide 1-byte path hops toggle (pre-#674)
       'meshcore-1byte-hops-mode',  // #674 1-byte path hops: show/mark/hide
-      'mc-dark-tile-provider'      // #1430 dark-tile provider pick
+      'mc-dark-tile-provider',     // #1430 dark-tile provider pick
+      'mc-light-tile-provider',    // light-tile provider pick (#741)
+      'meshcore-distance-unit'     // mirror of the Distance unit pick (#839)
     ];
     for (var i = 0; i < CUSTOMIZER_LS_KEYS.length; i++) {
       try { localStorage.removeItem(CUSTOMIZER_LS_KEYS[i]); } catch (_e) { /* ignore */ }
@@ -3413,15 +3852,19 @@
     //    default. Re-applying the effective active id achieves that
     //    without forcing a particular value (it falls through to the
     //    server default / DEFAULT_ID inside getActiveId()).
-    try {
-      if (typeof window !== 'undefined' &&
-          typeof window.MC_setDarkTileProvider === 'function' &&
-          typeof window.MC_getDarkTileProvider === 'function') {
-        window.MC_setDarkTileProvider(window.MC_getDarkTileProvider());
-        // Re-clear so we don't re-persist the just-re-applied value.
-        try { localStorage.removeItem('mc-dark-tile-provider'); } catch (_e) {}
-      }
-    } catch (_e) { /* ignore */ }
+    //    #741 — the light pick (e.g. a Dataforsyningen base map) gets the
+    //    same treatment as the dark one.
+    [['Dark', 'mc-dark-tile-provider'], ['Light', 'mc-light-tile-provider']].forEach(function (t) {
+      try {
+        var set = (typeof window !== 'undefined') && window['MC_set' + t[0] + 'TileProvider'];
+        var get = (typeof window !== 'undefined') && window['MC_get' + t[0] + 'TileProvider'];
+        if (typeof set === 'function' && typeof get === 'function') {
+          set(get());
+          // Re-clear so we don't re-persist the just-re-applied value.
+          try { localStorage.removeItem(t[1]); } catch (_e) {}
+        }
+      } catch (_e) { /* ignore */ }
+    });
 
     // 6. Encrypted-channel toggle — removing the LS key (step 1) fixes
     //    persistence, but channels.js subscribes to
@@ -3491,6 +3934,29 @@
     MASTS_SETTING_KEYS: MASTS_SETTING_KEYS,
     isValidMastsSetting: isValidMastsSetting,
     mastsSettings: mastsSettings,
-    renderMastsSettings: _renderMastsSettings
+    renderMastsSettings: _renderMastsSettings,
+    // #734 — exposed for tests; see test-issue-734-customizer-overlays.js.
+    isValidDHMOverlaySetting: isValidDHMOverlaySetting,
+    dhmOverlaySettings: dhmOverlaySettings,
+    renderDHMOverlaySettings: _renderDHMOverlaySettings,
+    // #723 M4 — exposed for tests; see test-issue-723-m4-heritage-customizer.js.
+    HERITAGE_SETTING_KEYS: _heritageRule() ? _heritageRule().KEYS : [],
+    isValidHeritageSetting: isValidHeritageSetting,
+    heritageSettings: heritageSettings,
+    renderHeritageSettings: _renderHeritageSettings,
+    // #737 — exposed for tests; see test-issue-737-customizer-skraafoto.js.
+    // A getter: public/skraafoto.js loads after this file (index.html).
+    get SKRAAFOTO_SETTING_KEYS() { var R = _skraafotoRule(); return R ? R.KEYS.slice() : []; },
+    isValidSkraafotoSetting: isValidSkraafotoSetting,
+    skraafotoSettings: skraafotoSettings,
+    renderSkraafotoSettings: _renderSkraafotoSettings,
+    countOverrides: _countOverrides,
+    // #741 — exposed for tests; see test-issue-741-customizer-base-maps.js.
+    renderTileProviderSelector: _renderTileProviderSelector,
+    hasResettableCustomization: _hasResettableCustomization,
+    // v0.2.9 review nit (#825 N1) — exposed for tests; see
+    // test-issue-734-customizer-overlays.js (Display badge and order).
+    renderTabs: _renderTabs,
+    renderDisplay: _renderDisplay
   };
 })();

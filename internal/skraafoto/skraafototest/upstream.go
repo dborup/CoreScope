@@ -22,7 +22,7 @@ import (
 const (
 	// STACHost and CDNHost are the hosts the Transport serves.
 	STACHost = "api.dataforsyningen.dk"
-	CDNHost  = "cdn.dataforsyningen.dk"
+	CDNHost  = "skraafoto-cdn.dataforsyningen.dk"
 	// STACPrefix is the API root's path.
 	STACPrefix = "/rest/skraafoto_api/v2"
 	// Token is the only token the fake STAC accepts: a sentinel that
@@ -47,6 +47,10 @@ type Upstream struct {
 	// Directions are the directions a search finds a photo for; nil:
 	// all five.
 	Directions []string
+	// Features, when set, are what a search of a direction finds instead
+	// of Feature: raw STAC items, in order, at most the query's limit
+	// (#737 M3a: real items with their camera models).
+	Features map[string][]string
 	// Href makes a photo's asset href; nil: DefaultHref.
 	Href func(id string) string
 	// Files are the CDN objects by path. COG, when set, makes the object
@@ -165,7 +169,13 @@ func (u *Upstream) serveSTAC(w http.ResponseWriter, r *http.Request) {
 		c := itemsPathRe.FindStringSubmatch(p)[1]
 		m := directionRe.FindStringSubmatch(r.URL.Query().Get("filter"))
 		var features []string
-		if m != nil && u.finds(m[1]) {
+		switch {
+		case m != nil && u.Features != nil:
+			features = u.Features[m[1]]
+			if n, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && n < len(features) {
+				features = features[:n]
+			}
+		case m != nil && u.finds(m[1]):
 			features = append(features, u.Feature(c, m[1]))
 		}
 		w.Header().Set("Content-Type", "application/geo+json")

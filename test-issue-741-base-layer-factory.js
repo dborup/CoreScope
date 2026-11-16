@@ -169,7 +169,7 @@ test('F3 the WMS options are the allow-listed set, with the GetMap defaults', ()
     layers: 'stub_layer',
     styles: '',
     format: 'image/png',
-    transparent: false,
+    transparent: 'FALSE',
     version: '1.3.0',
     crs: ctx.L.CRS.EPSG3857,
     tileSize: 512,
@@ -237,7 +237,7 @@ test('F3 the descriptor can override every default', () => {
     transparent: true, version: '1.1.1', crs, tileSize: 1024,
   } });
   sameOptions(layer.options, {
-    layers: 'a', styles: 'fancy', format: 'image/jpeg', transparent: true,
+    layers: 'a', styles: 'fancy', format: 'image/jpeg', transparent: 'TRUE',
     version: '1.1.1', crs, tileSize: 1024,
   });
 });
@@ -705,16 +705,15 @@ test('F7 the credit builder and the compact class are untouched', () => {
     '<a href="https://example.com/l" target="_blank" rel="license">CC BY 4.0</a>');
 });
 
-// ── F8: how far a WMS spec actually gets today ────────────────────────────
-console.log('\n── #741 F8: a WMS spec reaches the factory from the layer control only ──');
+// ── F8: how far a WMS spec gets ───────────────────────────────────────────
+console.log('\n── #741 F8: a WMS spec reaches the factory from the layer control and getTileSpec() ──');
 
 /* The first review of #778 found three comments claiming an inset, the
- * regions map and the Map page already render a WMS provider. They do not:
- * only the layer control hands the factory a registry entry whole. Every
- * other path rebuilds the spec from `url`/`refUrl` and drops `wms`, so
- * carrying it through getTileSpec() and the per-page resolvers is M1b.
- * These two cases pin that, so M1b fails here and has to update the
- * comments with the code. */
+ * regions map and the Map page already render a WMS provider, when only
+ * the layer control handed the factory a registry entry whole. M1b carries
+ * the descriptor through getTileSpec() and every per-page resolver (F10),
+ * so these cases now pin that it does, and that no comment still calls it
+ * a later milestone's job. */
 const STUB_WMS_STYLE = {
   id: 'stub-wms', provider: 'osm', label: 'Stub WMS', type: 'light', invertFilter: null,
   wms: { url: 'https://wms.example.invalid/stub', layers: 'stub_layer', maxZoom: 19 },
@@ -729,15 +728,19 @@ function withStubWms() {
   return ctx;
 }
 
-test('F8 getTileSpec() drops the wms descriptor — the page resolvers are M1b', () => {
+// #741 M1b turned this tripwire around: getTileSpec() now carries the
+// descriptor (test-issue-741-skaermkort.js pins the real provider).
+test('F8 getTileSpec() carries the wms descriptor (M1b)', () => {
   const ctx = withStubWms();
   const spec = ctx.window.MC_getTileSpec('light');
   assert.ok(spec, 'the active style still resolves to a spec');
-  assert.ok(!spec.wms, 'M1b: getTileSpec() must learn to carry the descriptor');
-  assert.ok(!spec.url, 'a WMS style has no tile template, so today the pages get nothing');
+  assert.ok(spec.wms, 'M1b: getTileSpec() carries the descriptor');
+  assert.strictEqual(spec.wms.url, STUB_WMS_STYLE.wms.url);
+  assert.strictEqual(spec.wms.layers, STUB_WMS_STYLE.wms.layers);
+  assert.ok(!spec.url, 'a WMS style has no tile template');
 });
 
-test('F8 the layer control is the one site that hands the factory a wms spec', () => {
+test('F8 the layer control hands the factory a wms spec', () => {
   const ctx = withStubWms();
   const { ctl } = buildControl(ctx, true);
   const layer = ctl.base['stub-wms'];
@@ -746,25 +749,247 @@ test('F8 the layer control is the one site that hands the factory a wms spec', (
   assert.strictEqual(layer._url, STUB_WMS_STYLE.wms.url);
 });
 
-test('F8 no page comment claims a WMS provider renders there today', () => {
-  // Contiguous // blocks, flattened to one line each.
-  for (const file of ['map.js', 'live.js', 'nodes.js', 'regions-map.js', 'home.js', 'customize-v2.js']) {
-    const blocks = [];
-    let cur = null;
-    for (const line of read(file).split('\n')) {
-      const m = line.match(/^\s*\/\/ ?(.*)$/);
-      if (m) { cur = cur ? cur + ' ' + m[1] : m[1]; continue; }
-      if (cur) { blocks.push(cur); cur = null; }
-    }
-    if (cur) blocks.push(cur);
-    for (const b of blocks) {
-      if (!/\bWMS\b/i.test(b)) continue;
-      assert.ok(/M1b/.test(b),
-        file + ': a comment that names WMS must say the pages cannot reach it yet ' +
-        '(M1b), not that it already works:\n    ' + b);
-    }
+test('F8 no page comment still says the WMS route is M1b\'s job', () => {
+  for (const file of ['map.js', 'live.js', 'nodes.js', 'regions-map.js', 'home.js', 'customize-v2.js', 'roles.js']) {
+    const src = read(file);
+    assert.ok(!/M1b's job|does not reach it from here yet|It cannot see one\s*\/\/\s*yet/.test(src),
+      file + ': a comment still says a WMS style cannot reach this page');
   }
 });
+
+// ── F10: every page hands the factory the WMS descriptor (M1b) ────────────
+console.log('\n── #741 F10: every per-page resolver carries the wms descriptor ──');
+
+// What MC_getTileSpec() returns for a WMS style: url null, the descriptor
+// resolved (test-issue-741-skaermkort.js pins the real one).
+const WMS_SPEC = {
+  id: 'stub-wms', url: null, attribution: STUB_CREDIT, refUrl: null, maxZoom: 19, invertFilter: null,
+  wms: { url: STUB_WMS.url, layers: STUB_WMS.layers, tileSize: 512, zoomOffset: -1, minZoom: 6, maxZoom: 19, bounds: STUB_WMS.bounds },
+};
+function wmsOptions(ctx, extra) {
+  return Object.assign({
+    attribution: STUB_CREDIT, maxZoom: 19, styles: '', format: 'image/png', transparent: 'FALSE',
+    version: '1.3.0', crs: ctx.L.CRS.EPSG3857, tileSize: 512, layers: STUB_WMS.layers,
+    zoomOffset: -1, minZoom: 6, bounds: ctx.L.latLngBounds(STUB_WMS.bounds),
+  }, extra || {});
+}
+function only(ctx) {
+  assert.strictEqual(ctx.__layers.length, 1, 'built ' + ctx.__layers.length + ' layers');
+  return ctx.__layers[0];
+}
+
+for (const page of [
+  { file: 'map.js', resolver: '_resolveTileUrl', from: 'const _initTile = _resolveTileUrl(isDark);',
+    locals: () => ({ isDark: false, _darkRefLayer: null, autoLayerGroup: group() }) },
+  { file: 'live.js', resolver: '_liveResolveTile', from: 'const _liveInitTile = _liveResolveTile(isDark);',
+    locals: () => ({ isDark: false, _liveDarkRefLayer: null, liveAutoLayerGroup: group() }) },
+]) {
+  test('F10 ' + page.file + ' builds its initial base layer from a WMS spec as a WMS layer', () => {
+    const ctx = siteCtx(null);
+    ctx.window.MC_getTileSpec = ctx.MC_getTileSpec = () => WMS_SPEC;
+    Object.assign(ctx, page.locals());
+    vm.runInContext(extractFn(page.file, page.resolver) + '\n' +
+      extract(page.file, page.from, 'window.MC_applyTileFilter();'), ctx, { filename: page.file });
+    const l = only(ctx);
+    assert.strictEqual(l.kind, 'wms');
+    assert.strictEqual(l._url, STUB_WMS.url);
+    sameOptions(l.options, wmsOptions(ctx));
+  });
+}
+
+test('F10 the real registry drives map.js to the Skærmkort WMS', () => {
+  const ctx = siteCtx(null, { mapCfg: { tiles: { lightDefault: 'dataforsyningen-skaermkort-daempet',
+    providers: { dataforsyningen: { enabled: true, token: 'tok' } } } } });
+  Object.assign(ctx, { isDark: false, _darkRefLayer: null, autoLayerGroup: group() });
+  vm.runInContext(extractFn('map.js', '_resolveTileUrl') + '\n' +
+    extract('map.js', 'const _initTile = _resolveTileUrl(isDark);', 'window.MC_applyTileFilter();'), ctx, { filename: 'map.js' });
+  const l = only(ctx);
+  assert.strictEqual(l.kind, 'wms');
+  assert.strictEqual(l._url, 'https://api.dataforsyningen.dk/topo_skaermkort_DAF?token=tok');
+  assert.strictEqual(l.options.layers, 'dtk_skaermkort_daempet');
+});
+
+/* #741 M2 — Natur- og Friluftskort reaches every per-page resolver the
+ * Skærmkort styles reach, through the real registry: the same descriptor
+ * shape, so no page needed a change, and these pin that it stays so. */
+const NATUR_ID = 'dataforsyningen-natur-friluft';
+const NATUR_URL = 'https://api.dataforsyningen.dk/wms/natur_friluftskort?token=tok';
+const NATUR_ON = (extra) => ({ tiles: Object.assign({ lightDefault: NATUR_ID,
+  providers: { dataforsyningen: { enabled: true, token: 'tok' } } }, extra || {}) });
+function naturLayer(l, maxZoom) {
+  assert.strictEqual(l.kind, 'wms', 'a WMS layer, not ' + l.kind + ' ' + l._url);
+  assert.strictEqual(l._url, NATUR_URL);
+  assert.strictEqual(l.options.layers, 'Natur_Friluft_basis');
+  assert.strictEqual(l.options.tileSize, 512);
+  assert.strictEqual(l.options.zoomOffset, -1);
+  assert.strictEqual(l.options.maxZoom, maxZoom);
+  assert.strictEqual(String(l.options.attribution).replace(/<[^>]+>/g, ''),
+    'Indeholder data fra Klimadatastyrelsen, Natur- og Friluftskort, CC BY 4.0');
+}
+
+for (const page of [
+  { file: 'map.js', resolver: '_resolveTileUrl', from: 'const _initTile = _resolveTileUrl(isDark);',
+    locals: () => ({ isDark: false, _darkRefLayer: null, autoLayerGroup: group() }) },
+  { file: 'live.js', resolver: '_liveResolveTile', from: 'const _liveInitTile = _liveResolveTile(isDark);',
+    locals: () => ({ isDark: false, _liveDarkRefLayer: null, liveAutoLayerGroup: group() }) },
+]) {
+  test('F10 M2 the real registry drives ' + page.file + ' to the Natur WMS', () => {
+    const ctx = siteCtx(null, { mapCfg: NATUR_ON() });
+    Object.assign(ctx, page.locals());
+    vm.runInContext(extractFn(page.file, page.resolver) + '\n' +
+      extract(page.file, page.from, 'window.MC_applyTileFilter();'), ctx, { filename: page.file });
+    naturLayer(only(ctx), 19);
+  });
+}
+
+for (const page of [
+  { file: 'map.js', resolver: '_resolveTileUrl', sync: '_syncDarkTiles', group: 'autoLayerGroup', locals: () => ({ _darkRefLayer: null }) },
+  { file: 'live.js', resolver: '_liveResolveTile', sync: '_liveSyncDarkTiles', group: 'liveAutoLayerGroup', locals: () => ({ _liveDarkRefLayer: null }) },
+]) {
+  test('F10 M2 ' + page.file + ' Auto swaps Skærmkort for Natur when the customizer picks it', () => {
+    const ctx = siteCtx(null, { mapCfg: NATUR_ON({ lightDefault: 'dataforsyningen-skaermkort' }) });
+    const g = group();
+    ctx[page.group] = g;
+    ctx.map = makeMap();
+    Object.assign(ctx, page.locals());
+    ctx.__l0 = vm.runInContext('window.MC_createBaseLayer(window.MC_getTileSpec("light"), { maxZoom: 19 })', ctx);
+    assert.strictEqual(ctx.__l0.options.layers, 'dtk_skaermkort', 'precondition: Skærmkort first');
+    g.addLayer(ctx.__l0);
+    vm.runInContext('var tileLayer = __l0;\n' + extractFn(page.file, page.resolver) + '\n' + extractFn(page.file, page.sync), ctx);
+    assert.strictEqual(ctx.window.MC_setLightTileProvider(NATUR_ID), true, 'selectable as a light style');
+    vm.runInContext(page.sync + '(false);', ctx);
+    const l = vm.runInContext('tileLayer', ctx);
+    naturLayer(l, 19);
+    assert.deepStrictEqual(Array.from(g._layers), [l], 'the Skærmkort layer left the Auto group');
+    vm.runInContext(page.sync + '(false);', ctx);
+    assert.strictEqual(vm.runInContext('tileLayer', ctx), l, 'the same WMS again rebuilds nothing');
+  });
+}
+
+test('F10 M2 the regions map builds the Natur WMS', () => {
+  const ctx = siteCtx(null, { mapCfg: NATUR_ON() });
+  Object.assign(ctx, { root: ctx.window, map: makeMap(), tileLayer: null });
+  vm.runInContext(extract('regions-map.js',
+    "const theme = document.documentElement.getAttribute('data-theme')",
+    "map.getPane('tilePane').style.filter = tile && tile.invertFilter ? tile.invertFilter : '';"), ctx, { filename: 'regions-map.js' });
+  naturLayer(only(ctx), 19);
+  assert.strictEqual(ctx.map.panes.tilePane.style.filter, '', 'light only: never inverted');
+});
+
+for (const [name, to, nth, mapVar] of [
+  ['geo-filter modal preview', '.addTo(_gfModalMap);', 0, '_gfModalMap'],
+  ['geo-filter tab preview', '.addTo(_gfMap);', 1, '_gfMap'],
+]) {
+  test('F10 M2 the customizer ' + name + ' builds the Natur WMS', () => {
+    const ctx = siteCtx(null, { mapCfg: NATUR_ON() });
+    ctx[mapVar] = makeMap();
+    vm.runInContext(extractFn('customize-v2.js', '_cv2PreviewTile') + '\n' +
+      extract('customize-v2.js', 'var _cv2Tile = _cv2PreviewTile();', to, nth), ctx, { filename: 'customize-v2.js' });
+    naturLayer(only(ctx), 19);
+  });
+}
+
+/* The Auto layer follows the theme and the customizer's provider. A tile
+ * template still changes in place (setUrl), exactly as before; a change to
+ * or from a WMS style, or to another WMS, needs a layer of the other kind,
+ * so MC_syncBaseLayer swaps it inside the Auto group; the same WMS again
+ * (a theme switch between the grey styles) rebuilds nothing. */
+const TILE_A = { url: 'https://a.example/{z}/{x}/{y}.png', attribution: 'A credit', refUrl: null, maxZoom: 18 };
+const TILE_B = { url: 'https://b.example/{z}/{x}/{y}.png', attribution: 'B credit', refUrl: null, maxZoom: 18 };
+const WMS_OTHER = Object.assign({}, WMS_SPEC, { wms: Object.assign({}, WMS_SPEC.wms, { layers: 'other_layer' }) });
+
+for (const page of [
+  { file: 'map.js', resolver: '_resolveTileUrl', sync: '_syncDarkTiles', group: 'autoLayerGroup',
+    locals: () => ({ _darkRefLayer: null }) },
+  { file: 'live.js', resolver: '_liveResolveTile', sync: '_liveSyncDarkTiles', group: 'liveAutoLayerGroup',
+    locals: () => ({ _liveDarkRefLayer: null }) },
+]) {
+  test('F10 ' + page.file + ' ' + page.sync + ' swaps the Auto layer between tile and WMS, in place where it can', () => {
+    const ctx = siteCtx(null);
+    let current = TILE_A;
+    ctx.window.MC_getTileSpec = ctx.MC_getTileSpec = () => current;
+    const g = group();
+    ctx[page.group] = g;
+    ctx.map = makeMap();
+    Object.assign(ctx, page.locals());
+    ctx.__l0 = vm.runInContext('window.MC_createBaseLayer(MC_getTileSpec("light"), { maxZoom: 19 })', ctx);
+    g.addLayer(ctx.__l0);
+    vm.runInContext('var tileLayer = __l0;\n' + extractFn(page.file, page.resolver) + '\n' + extractFn(page.file, page.sync), ctx);
+    const sync = () => { vm.runInContext(page.sync + '(false);', ctx); return vm.runInContext('tileLayer', ctx); };
+    const members = () => Array.from(g._layers);
+
+    current = TILE_B;
+    const t1 = sync();
+    assert.strictEqual(t1, ctx.__l0, 'tile → tile is the same layer, as before');
+    assert.strictEqual(t1._url, TILE_B.url, 'with the new template');
+
+    current = WMS_SPEC;
+    const w1 = sync();
+    assert.strictEqual(w1.kind, 'wms', 'tile → WMS builds a WMS layer');
+    assert.strictEqual(w1._url, STUB_WMS.url);
+    sameOptions(w1.options, wmsOptions(ctx));
+    assert.deepStrictEqual(members(), [w1], 'the tile layer left the Auto group');
+
+    const w2 = sync();
+    assert.strictEqual(w2, w1, 'the same WMS again rebuilds nothing (no tile is fetched twice)');
+
+    current = WMS_OTHER;
+    const w3 = sync();
+    assert.notStrictEqual(w3, w1, 'another WMS layer is a new layer');
+    assert.strictEqual(w3.options.layers, 'other_layer');
+    assert.deepStrictEqual(members(), [w3]);
+
+    current = TILE_A;
+    const t2 = sync();
+    assert.strictEqual(t2.kind, 'tile', 'WMS → tile builds a tile layer again');
+    assert.strictEqual(t2._url, TILE_A.url);
+    sameOptions(t2.options, { attribution: TILE_A.attribution, maxZoom: 19 });
+    assert.deepStrictEqual(members(), [t2]);
+  });
+}
+
+test('F10 nodes.js insets build a WMS provider as a WMS layer, with their own ceiling', () => {
+  const ctx = siteCtx(null);
+  const style = { attribution: STUB_CREDIT, invertFilter: 'invert(1)', wms: Object.assign({}, WMS_SPEC.wms, { url: () => STUB_WMS.url }) };
+  Object.assign(ctx.window, { getTileUrl: () => 'https://fallback.example/{z}/{x}/{y}.png', getActiveTileProvider: () => style });
+  ctx.__insetMap = makeMap();
+  vm.runInContext(extractFn('nodes.js', '_applyTilesToNodeMap') + '\n_applyTilesToNodeMap(__insetMap);\n', ctx, { filename: 'nodes.js' });
+  const l = only(ctx);
+  assert.strictEqual(l.kind, 'wms', 'never the fallback template under the WMS style\'s credit');
+  assert.strictEqual(l._url, STUB_WMS.url);
+  sameOptions(l.options, wmsOptions(ctx, { maxZoom: 18 }));
+  assert.strictEqual(ctx.__insetMap.panes.tilePane.style.filter, 'invert(1)');
+});
+
+test('F10 the regions map builds a WMS spec as a WMS layer', () => {
+  const ctx = siteCtx(null);
+  ctx.window.MC_getTileSpec = ctx.MC_getTileSpec = () => WMS_SPEC;
+  Object.assign(ctx, { root: ctx.window, map: makeMap(), tileLayer: null });
+  vm.runInContext(extract('regions-map.js',
+    "const theme = document.documentElement.getAttribute('data-theme')",
+    "map.getPane('tilePane').style.filter = tile && tile.invertFilter ? tile.invertFilter : '';"), ctx, { filename: 'regions-map.js' });
+  const l = only(ctx);
+  assert.strictEqual(l.kind, 'wms');
+  assert.strictEqual(l._url, STUB_WMS.url);
+  sameOptions(l.options, wmsOptions(ctx));
+});
+
+for (const [name, to, nth, mapVar] of [
+  ['geo-filter modal preview', '.addTo(_gfModalMap);', 0, '_gfModalMap'],
+  ['geo-filter tab preview', '.addTo(_gfMap);', 1, '_gfMap'],
+]) {
+  test('F10 the customizer ' + name + ' builds a WMS light provider as a WMS layer', () => {
+    const ctx = siteCtx(null);
+    ctx.window.MC_getTileSpec = ctx.MC_getTileSpec = () => WMS_SPEC;
+    ctx[mapVar] = makeMap();
+    vm.runInContext(extractFn('customize-v2.js', '_cv2PreviewTile') + '\n' +
+      extract('customize-v2.js', 'var _cv2Tile = _cv2PreviewTile();', to, nth), ctx, { filename: 'customize-v2.js' });
+    const l = only(ctx);
+    assert.strictEqual(l.kind, 'wms');
+    assert.strictEqual(l._url, STUB_WMS.url);
+    sameOptions(l.options, wmsOptions(ctx));
+  });
+}
 
 // ── F9: the fallback without the registry ─────────────────────────────────
 console.log('\n── #741 F9: a page whose registry never loaded still draws tiles ──');

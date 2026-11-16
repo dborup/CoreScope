@@ -1,6 +1,6 @@
 badge         24px bold    x=1097 y= 58 w=  61 Clear
 title         40px bold    x=  44 y= 70 w= 510 Field Node → Church Mast
-subtitle      22px regular x=  44 y=104 w= 421 Path profile · 6400 m · 869.618 MHz · k = 1
+subtitle      22px regular x=  44 y=104 w= 426 Path profile · 6.40 km · 869.618 MHz · k = 1
 axis-y        16px regular x=  52 y=150 w=  36 95 m
 axis-y        16px regular x=  52 y=238 w=  36 74 m
 axis-y        16px regular x=  52 y=326 w=  36 53 m
@@ -9,7 +9,7 @@ axis-y        16px regular x=  52 y=502 w=  36 12 m
 pin           18px bold    x= 106 y=330 w=  13 A
 pin           18px bold    x=1152 y=219 w=  13 B
 axis-x        16px regular x=  96 y=524 w=   9 0
-axis-x        16px regular x= 610 y=524 w=  53 3200 m
-axis-x        16px regular x=1123 y=524 w=  53 6400 m
-summary       20px regular x=  24 y=574 w= 717 Worst clearance 23.3 m at 1380 m · heights assumed (25 m / 40 m) · terrain only
+axis-x        16px regular x= 607 y=524 w=  58 3.20 km
+axis-x        16px regular x=1118 y=524 w=  58 6.40 km
+summary       20px regular x=  24 y=574 w= 871 Tightest Fresnel point: clearance 23.3 m at 1.38 km · heights assumed (25 m / 40 m) · terrain only
 attribution   18px regular x=  24 y=604 w= 760 Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0 — data bearbejdet

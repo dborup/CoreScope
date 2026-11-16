@@ -4,7 +4,7 @@
  *
  * Coverage:
  *   - localStorage keys: cs-theme-overrides, meshcore-cb-preset,
- *     channels-show-encrypted, mc-dark-tile-provider
+ *     channels-show-encrypted, mc-dark-tile-provider, mc-light-tile-provider (#741)
  *   - body attribute: data-cb-preset
  *   - body.style: --mc-role-{role}, --mc-role-{role}-text
  *   - root.style: --mc-role-{role}, --mc-role-{role}-text, --node-{role},
@@ -13,13 +13,19 @@
  *   - #681 M6: the `terrain` override section, and the six path-profile
  *     chart vars (--terrain-fill, --terrain-clutter, --los-line,
  *     --fresnel-100, --fresnel-60, --profile-blocked)
+ *   - #723 M4: the `heritage` override section
+ *   - #734: the `dhmOverlays` section (the DHM overlay defaults), back to
+ *     the built-ins with dhm-defaults-changed after the pipeline re-runs
+ *   - #737: the `skraafoto` section (the oblique photo viewer's defaults),
+ *     back to the built-ins in the effective config the viewer reads
  *
  * Must NOT touch:
  *   - localStorage: meshcore-theme (theme light/dark),
  *     meshcore-gesture-hints-* (own button), meshcore-favorites,
  *     mc-channels-* selection state, mc-terrain-h:* (the viewer's own
  *     per-endpoint antenna heights — the profile panel's data, not the
- *     customizer's, exactly like favorites)
+ *     customizer's, exactly like favorites), mc-terrain-dhm /
+ *     mc-contours-dhm (the viewer's own DHM layer-control choices)
  */
 'use strict';
 
@@ -124,7 +130,13 @@ function makeSandbox() {
   return { ctx, body, rootStyle, bodyStyle, localStorage, bodyAttrs };
 }
 
-function loadCustomizer() {
+// opts.dhm: a dhm client block, which also loads the real
+// public/map-tile-providers.js before the customizer (index.html order), so
+// the #734 DHM overlay defaults have their rule. opts.skraafoto: a
+// skraafoto client block, which also loads the real public/skraafoto.js
+// (the #737 viewer defaults' rule).
+function loadCustomizer(opts) {
+  opts = opts || {};
   const env = makeSandbox();
   // Provide a stub MeshCorePresets.clearPreset so resetAll can call it.
   let clearPresetCalls = 0;
@@ -158,6 +170,14 @@ function loadCustomizer() {
 
   const code = fs.readFileSync(path.join(__dirname, 'public', 'customize-v2.js'), 'utf8');
   vm.createContext(env.ctx);
+  if (opts.dhm) {
+    env.ctx.window.MC_DHM_CFG = opts.dhm;
+    vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'map-tile-providers.js'), 'utf8'), env.ctx, { filename: 'map-tile-providers.js' });
+  }
+  if (opts.skraafoto) {
+    env.ctx.window.MC_SKRAAFOTO_CFG = opts.skraafoto;
+    vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'skraafoto.js'), 'utf8'), env.ctx, { filename: 'skraafoto.js' });
+  }
   vm.runInContext(code, env.ctx, { filename: 'customize-v2.js' });
   env.api = env.ctx.window._customizerV2;
   return env;
@@ -196,6 +216,46 @@ test('clears mc-dark-tile-provider localStorage key', () => {
   env.localStorage.setItem('mc-dark-tile-provider', 'voyager-inverted');
   env.api.resetAll();
   assert.strictEqual(env.localStorage.getItem('mc-dark-tile-provider'), null);
+});
+
+test('clears mc-light-tile-provider localStorage key (#741)', () => {
+  const env = loadCustomizer();
+  env.localStorage.setItem('mc-light-tile-provider', 'dataforsyningen-skaermkort-graa');
+  env.api.resetAll();
+  assert.strictEqual(env.localStorage.getItem('mc-light-tile-provider'), null);
+});
+
+// #839 #3 — the Distance unit pick lives in cs-theme-overrides AND is
+// mirrored to meshcore-distance-unit, which getDistanceUnit() (app.js)
+// reads. Reset All cleared the first but not the mirror, so distances
+// stayed in miles while the dropdown said auto.
+test('#839: clears the meshcore-distance-unit mirror of a picked unit', () => {
+  const env = loadCustomizer();
+  env.localStorage.setItem('cs-theme-overrides', JSON.stringify({ distanceUnit: 'mi' }));
+  env.api.init({});
+  assert.strictEqual(env.localStorage.getItem('meshcore-distance-unit'), 'mi', 'precondition: the pipeline mirrors the pick');
+  env.api.resetAll();
+  assert.strictEqual(env.localStorage.getItem('meshcore-distance-unit'), null);
+});
+
+// Guard for the fix: an operator's server default still reaches the mirror
+// once the Reset All button re-runs the pipeline (init() runs it here).
+test('#839: after Reset All the mirror follows the server default', () => {
+  const env = loadCustomizer();
+  env.localStorage.setItem('cs-theme-overrides', JSON.stringify({ distanceUnit: 'km' }));
+  env.api.init({ distanceUnit: 'mi' });
+  assert.strictEqual(env.localStorage.getItem('meshcore-distance-unit'), 'km');
+  env.api.resetAll();
+  env.api.init({ distanceUnit: 'mi' });
+  assert.strictEqual(env.localStorage.getItem('meshcore-distance-unit'), 'mi');
+});
+
+test('#839: resetting the Distance unit field alone also clears the mirror', () => {
+  const env = loadCustomizer();
+  env.localStorage.setItem('cs-theme-overrides', JSON.stringify({ distanceUnit: 'mi' }));
+  env.api.init({});
+  env.api.clearOverride(null, 'distanceUnit');
+  assert.strictEqual(env.localStorage.getItem('meshcore-distance-unit'), null);
 });
 
 test('removes data-cb-preset body attribute', () => {
@@ -265,6 +325,25 @@ test('clears the terrain override section with cs-theme-overrides', () => {
   assert.strictEqual(env.localStorage.getItem('cs-theme-overrides'), null);
 });
 
+// #723 M4 — the ancient monuments settings live in the same store.
+test('clears the heritage override section with cs-theme-overrides', () => {
+  const env = loadCustomizer();
+  env.localStorage.setItem('cs-theme-overrides', JSON.stringify({
+    heritage: { enabled: true, opacityPct: 40, profileWarning: false, warnDistanceM: 30 },
+  }));
+  env.api.resetAll();
+  assert.strictEqual(env.localStorage.getItem('cs-theme-overrides'), null);
+});
+
+test('does NOT clear the viewer’s own on/off of the monuments overlay', () => {
+  // mc-heritage is the map's remembered toggle (like ?heritage=1 in a
+  // link), the viewer's own choice on the map, not a customizer value.
+  const env = loadCustomizer();
+  env.localStorage.setItem('mc-heritage', '1');
+  env.api.resetAll();
+  assert.strictEqual(env.localStorage.getItem('mc-heritage'), '1');
+});
+
 test('clears the path-profile chart vars from root.style', () => {
   const env = loadCustomizer();
   const vars = ['--terrain-fill', '--terrain-clutter', '--los-line',
@@ -289,6 +368,66 @@ test('every THEME_CSS_MAP variable is covered by reset, terrain included', () =>
   env.api.TERRAIN_COLOR_KEYS.forEach((k) => {
     assert.ok(map[k], k + ' is not in THEME_CSS_MAP, so reset would miss it');
   });
+});
+
+// ── #734 — the DHM overlay defaults ──
+
+const DHM_BLOCK = {
+  enabled: true, url: '/api/map/dhm/wms', layer: 'dhm_terraen_skyggekort',
+  minZoom: 7, maxZoom: 19, bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
+  overlays: [
+    { id: 'terrain', minZoom: 7, maxZoom: 19 },
+    { id: 'surface', minZoom: 7, maxZoom: 19 },
+    { id: 'contours', minZoom: 14, maxZoom: 19 },
+  ],
+};
+
+test('resets the DHM overlay defaults to the built-ins and tells an open map', () => {
+  const env = loadCustomizer({ dhm: DHM_BLOCK });
+  env.api.writeOverrides({ dhmOverlays: { hillshade: 'surface', contours: true, contourMinZoom: 16 } });
+  env.api.init({});
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(env.api.dhmOverlaySettings(env.ctx.window.SITE_CONFIG))),
+    { hillshade: 'surface', contours: true, contourMinZoom: 16 }, 'the section did not apply');
+  env.ctx.window._events.length = 0;
+  env.api.resetAll();
+  env.api.init({}); // the Reset button runs the pipeline next
+  assert.strictEqual(env.localStorage.getItem('cs-theme-overrides'), null);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(env.api.dhmOverlaySettings(env.ctx.window.SITE_CONFIG))),
+    { hillshade: 'off', contours: false, contourMinZoom: 14 });
+  assert.ok(env.ctx.window._events.some(e => e.type === 'dhm-defaults-changed'), 'no dhm-defaults-changed after reset');
+});
+
+test('does NOT clear the viewer’s own DHM layer-control choices', () => {
+  // mc-terrain-dhm / mc-contours-dhm are what the viewer picked in the map's
+  // layer control, like mc-masts: not customizer state.
+  const env = loadCustomizer({ dhm: DHM_BLOCK });
+  env.localStorage.setItem('mc-terrain-dhm', 'surface');
+  env.localStorage.setItem('mc-contours-dhm', '1');
+  env.api.resetAll();
+  assert.strictEqual(env.localStorage.getItem('mc-terrain-dhm'), 'surface');
+  assert.strictEqual(env.localStorage.getItem('mc-contours-dhm'), '1');
+});
+
+// ── #737 — the oblique photo viewer's defaults ──
+
+const SKRAAFOTO_BLOCK = {
+  enabled: true, searchUrl: '/api/skraafoto/search',
+  previewUrl: '/api/skraafoto/preview/{collection}/{item}', maxPx: 1024,
+  bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
+};
+
+test('resets the oblique photo defaults to the built-ins the viewer reads', () => {
+  const env = loadCustomizer({ skraafoto: SKRAAFOTO_BLOCK });
+  env.api.writeOverrides({ skraafoto: { direction: 'west', zoom: 'zoomed', lineOfSight: false } });
+  env.api.init({});
+  const R = env.ctx.window.Skraafoto.SETTINGS;
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(R.resolve())),
+    { direction: 'west', zoom: 'zoomed', lineOfSight: false }, 'the section did not apply');
+  env.api.resetAll();
+  env.api.init({}); // the Reset button runs the pipeline next
+  assert.strictEqual(env.localStorage.getItem('cs-theme-overrides'), null);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(R.resolve())),
+    { direction: 'auto', zoom: 'overview', lineOfSight: true });
 });
 
 test('does NOT clear the viewer’s own remembered antenna heights', () => {

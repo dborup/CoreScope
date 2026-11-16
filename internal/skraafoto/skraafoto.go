@@ -7,7 +7,8 @@
 //     the operator's Dataforsyningen token, the one map.dhm uses, sent in
 //     the `token` header and nowhere else. One query shape only: the
 //     items of one collection that contain one EPSG:25832 point and face
-//     one direction, limit 1, as the official viewer asks.
+//     one direction, as the official viewer asks (limit SearchLimit, not
+//     its 1: the server picks the best-centred, #737 M3a).
 //   - The image CDN (CDN, cdn.go) holds each photo as a Cloud-Optimized
 //     GeoTIFF of about 322 MB. It needs no token, and is never sent one:
 //     CDN has no token to send. A preview reads the file's IFDs with one
@@ -44,7 +45,7 @@ const (
 	stacBase = "https://" + STACHost + "/rest/skraafoto_api/v2"
 
 	// CDNHost is the image CDN's host, fixed in code; CDNBase is its root.
-	CDNHost = "cdn.dataforsyningen.dk"
+	CDNHost = "skraafoto-cdn.dataforsyningen.dk"
 	CDNBase = "https://" + CDNHost
 
 	// viewerURL is the official viewer, the "full resolution" link (#737
@@ -152,6 +153,16 @@ func CDNPath(href, id string) (string, error) {
 		return "", errHref
 	}
 	return u.Path, nil
+}
+
+// CDNURL is the URL of the photo at path on the CDN, for a path cdnPathRe
+// matches (CDNPath returns only such paths): what a preview reads, and
+// what the live smoke check (#803) reads. Any other path is ErrBadRequest.
+func CDNURL(path string) (string, error) {
+	if !cdnPathRe.MatchString(path) {
+		return "", dhm.ErrBadRequest
+	}
+	return CDNBase + path, nil
 }
 
 // ViewerLink is the official viewer opened on photo id.

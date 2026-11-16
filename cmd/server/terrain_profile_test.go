@@ -287,6 +287,41 @@ func TestTerrainProfile_OverLengthIs400WithoutUpstream(t *testing.T) {
 	decodeProfile(t, short.get(pathQuery(aarhusPt, offsetPt(56.1629, 10.2039, 0, -9000))))
 }
 
+// #839 §6: the refusal names the limit the path broke, so the panel can say
+// "up to 10 km" rather than the bare server text. No other refusal carries it.
+func TestTerrainProfile_OverLengthNamesTheLimit(t *testing.T) {
+	src := newFakeElevation(t, flatElev(0))
+	limit := func(w *httptest.ResponseRecorder) (string, float64, bool) {
+		var body map[string]json.RawMessage
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("body %q: %v", w.Body.String(), err)
+		}
+		var msg string
+		json.Unmarshal(body["error"], &msg)
+		raw, ok := body["maxPathKm"]
+		var km float64
+		if ok {
+			json.Unmarshal(raw, &km)
+		}
+		return msg, km, ok
+	}
+	for _, tc := range []struct {
+		cfg  *float64
+		want float64
+	}{{nil, terrainMaxPathKmDefault}, {floatp(10), 10}, {floatp(12.5), 12.5}} {
+		env := newTerrainEnv(t, src, dhm.ProfileConfig{MaxPathKm: tc.cfg}, nil)
+		w := env.get(pathQuery(aarhusPt, offsetPt(56.1629, 10.2039, 0, -81000)))
+		if msg, km, ok := limit(w); w.Code != 400 || msg != "path too long" || !ok || km != tc.want {
+			t.Fatalf("limit %v: status %d, body %s", tc.cfg, w.Code, w.Body.String())
+		}
+	}
+	env := newTerrainEnv(t, src, dhm.ProfileConfig{}, nil)
+	w := env.get(pathQuery(aarhusPt, aarhusPt))
+	if msg, _, ok := limit(w); w.Code != 400 || ok || msg == "path too long" {
+		t.Fatalf("identical ends: status %d, body %s", w.Code, w.Body.String())
+	}
+}
+
 func TestTerrainProfile_BothModel20kmMakesAtMost16Calls(t *testing.T) {
 	src := newFakeElevation(t, flatElev(3))
 	env := newTerrainEnv(t, src, dhm.ProfileConfig{}, nil)

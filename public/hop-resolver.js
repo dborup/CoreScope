@@ -447,13 +447,22 @@ window.HopResolver = (function() {
 
   // Best path cost forward (F) and backward (B) through every (hop, candidate).
   // bans[i] holds pubkeys excluded at hop i, to keep a node to one position.
-  function solvePath(C, steps, start, end, bans) {
+  //
+  // #657 — `probe`, a Set of pubkeys, also prices inserting each of those
+  // nodes where it is banned: Fx/Bx are what F/B would be at that one
+  // position, built from the unbanned paths around it and never fed back into
+  // them. With a node banned everywhere, Fx + Bx at a position is the best
+  // path holding it there and nowhere else.
+  function solvePath(C, steps, start, end, bans, probe) {
     const L = C.length, U = PATH_MODEL.unlistedCost, LONG = longBase();
     const F = C.map(c => new Float64Array(c.length).fill(Infinity));
     const B = C.map(c => new Float64Array(c.length).fill(Infinity));
     const backP = C.map(c => new Int32Array(c.length).fill(-1));
     const backK = C.map(c => new Int32Array(c.length).fill(-1));
     const isBanned = (i, k) => bans[i] != null && bans[i].has(C[i][k].pubkey);
+    const Fx = probe ? C.map(c => new Float64Array(c.length).fill(Infinity)) : null;
+    const Bx = probe ? C.map(c => new Float64Array(c.length).fill(Infinity)) : null;
+    const skip = (i, k) => isBanned(i, k) && !(probe && probe.has(C[i][k].pubkey));
 
     // Forward. longF tracks min(F[p][j] - p*U) over hops more than MAX_GAP back.
     let longF = Infinity, longP = -1, longK = -1;
@@ -467,7 +476,7 @@ window.HopResolver = (function() {
       }
       const K = C[i].length;
       for (let k = 0; k < K; k++) {
-        if (isBanned(i, k)) continue;
+        if (skip(i, k)) continue;
         let best = spanCost(start, C[i][k], i + 1), bp = -1, bk = -1;
         for (let g = 1; g <= MAX_GAP && g <= i; g++) {
           const p = i - g, Fp = F[p], row = steps[p][g];
@@ -478,6 +487,7 @@ window.HopResolver = (function() {
         }
         const vLong = longF + (i - 1) * U + LONG;
         if (vLong < best) { best = vLong; bp = longP; bk = longK; }
+        if (isBanned(i, k)) { Fx[i][k] = best; continue; }
         F[i][k] = best; backP[i][k] = bp; backK[i][k] = bk;
       }
     }
@@ -490,7 +500,7 @@ window.HopResolver = (function() {
         for (let l = 0; l < C[old].length; l++) longB = Math.min(longB, B[old][l] + old * U);
       }
       for (let k = 0; k < C[i].length; k++) {
-        if (isBanned(i, k)) continue;
+        if (skip(i, k)) continue;
         let best = Math.min(spanCost(C[i][k], end, L - i), longB - (i + 1) * U + LONG);
         for (let g = 1; g <= MAX_GAP && i + g < L; g++) {
           const Bq = B[i + g], row = steps[i][g], base = k * Bq.length;
@@ -499,6 +509,7 @@ window.HopResolver = (function() {
             if (v < best) best = v;
           }
         }
+        if (isBanned(i, k)) { Bx[i][k] = best; continue; }
         B[i][k] = best;
       }
     }
@@ -516,7 +527,7 @@ window.HopResolver = (function() {
       const np = backP[p][k], nk = backK[p][k];
       p = np; k = nk;
     }
-    return { F: F, B: B, total: total, assign: assign };
+    return { F: F, B: B, Fx: Fx, Bx: Bx, total: total, assign: assign };
   }
 
   // Lowest total cost of any path leaving hop i unlisted: some span from a
@@ -652,50 +663,127 @@ window.HopResolver = (function() {
       return out;
     }
     const placements = C.reduce((n, c) => n + c.length, 0);
+    const dedupKeys = new Set(); // every node a round below has banned somewhere
     let sol = solvePath(C, steps, start, end, bans);
-    for (let round = 0; round <= placements; round++) {
-      const dups = duplicates(sol.assign);
-      if (!dups.length) break;
-      // #598 r3 — keep the node where GIVING IT UP costs most, and give it up
-      // everywhere else.
-      //
-      // Round 2 compared the min-marginal F+B at each position instead. A
-      // duplicated node lies on the optimal path at every position it holds,
-      // so those sums are mathematically equal and differ only by rounding:
-      // the choice was decided by float noise (measured: 4,091 comparisons
-      // differing by at most 4e-14), and it discarded placements the model
-      // could have made. The cost of loss is a real difference between the
-      // positions: at each one it is the best alternative still available
-      // there, or leaving that hop unlisted, minus the current total.
-      const mu = unlistedMarginals(C, steps, start, end, sol.F, sol.B);
-      const lossAt = (i, key) => {
-        let alt = mu[i];
-        for (let k = 0; k < C[i].length; k++) {
-          if (C[i][k].pubkey === key) continue;
-          // A banned candidate needs no test here: solvePath leaves its F and
-          // B at Infinity, so it never wins this minimum.
-          const v = sol.F[i][k] + sol.B[i][k];
-          if (v < alt) alt = v;
-        }
-        return alt - sol.total;
-      };
-      for (const [key, positions] of dups) {
-        let best = positions[0], bestLoss = lossAt(best, key);
-        for (const i of positions.slice(1)) {
-          const v = lossAt(i, key);
-          // A true tie — within a relative epsilon, which is what rounding
-          // produces — goes to the LATER position: the last hop of a flood is
-          // the relay the observer heard directly (firmware Mesh.cpp:344-350),
-          // and `positions` is ascending, so a tie moves `best` forward.
-          const scale = Math.max(1, Math.abs(bestLoss), Math.abs(v));
-          if (v > bestLoss || Math.abs(v - bestLoss) <= DEDUP_TIE_EPS * scale) {
-            if (v > bestLoss) bestLoss = v;
-            best = i;
+    function converge() {
+      for (let round = 0; round <= placements; round++) {
+        const dups = duplicates(sol.assign);
+        if (!dups.length) break;
+        // #598 r3 — keep the node where GIVING IT UP costs most, and give it up
+        // everywhere else.
+        //
+        // Round 2 compared the min-marginal F+B at each position instead. A
+        // duplicated node lies on the optimal path at every position it holds,
+        // so those sums are mathematically equal and differ only by rounding:
+        // the choice was decided by float noise (measured: 4,091 comparisons
+        // differing by at most 4e-14), and it discarded placements the model
+        // could have made. The cost of loss is a real difference between the
+        // positions: at each one it is the best alternative still available
+        // there, or leaving that hop unlisted, minus the current total.
+        const mu = unlistedMarginals(C, steps, start, end, sol.F, sol.B);
+        const lossAt = (i, key) => {
+          let alt = mu[i];
+          for (let k = 0; k < C[i].length; k++) {
+            if (C[i][k].pubkey === key) continue;
+            // A banned candidate needs no test here: solvePath leaves its F and
+            // B at Infinity, so it never wins this minimum.
+            const v = sol.F[i][k] + sol.B[i][k];
+            if (v < alt) alt = v;
           }
+          return alt - sol.total;
+        };
+        for (const [key, positions] of dups) {
+          let best = positions[0], bestLoss = lossAt(best, key);
+          for (const i of positions.slice(1)) {
+            const v = lossAt(i, key);
+            // A true tie — within a relative epsilon, which is what rounding
+            // produces — goes to the LATER position: the last hop of a flood is
+            // the relay the observer heard directly (firmware Mesh.cpp:344-350),
+            // and `positions` is ascending, so a tie moves `best` forward.
+            const scale = Math.max(1, Math.abs(bestLoss), Math.abs(v));
+            if (v > bestLoss || Math.abs(v - bestLoss) <= DEDUP_TIE_EPS * scale) {
+              if (v > bestLoss) bestLoss = v;
+              best = i;
+            }
+          }
+          for (const i of positions) if (i !== best) addBan(i, key);
+          dedupKeys.add(key);
         }
-        for (const i of positions) if (i !== best) addBan(i, key);
+        sol = solvePath(C, steps, start, end, bans);
       }
+    }
+    converge();
+
+    // #657 — rescue a node the rounds above banned out of the path entirely.
+    // Cost of loss is measured while the node still holds every position it
+    // was duplicated at. When one prefix repeats along a run of hops, every
+    // middle position then ties at the unlisted cost, the tie goes to the
+    // LATER one, and the node may not fit there on its own: the bans at all
+    // other positions are permanent, so it is placed nowhere. Measured: a
+    // node at the sender, nine or more hops carrying its prefix and the
+    // observer over 80 km away placed 0. (Rare by construction: a repeater's
+    // default LOOP_DETECT_MINIMAL drops a 1-byte path that already holds its
+    // own byte 4 times, firmware examples/simple_repeater/MyMesh.cpp:396-411.)
+    //
+    // So for each such node, price inserting it at every position it could
+    // take with it banned everywhere (one probe solve covers them all, see
+    // solvePath), and move its one allowed position to the cheapest insertion
+    // that beats leaving it out. Nodes are taken best-first, one per
+    // position. A rescue can displace another node, so the rounds above run
+    // again, and a further pass rescues what that lost. Each node is rescued
+    // at most once, so the passes are bounded by the number of banned nodes.
+    // A pass is kept only when it lowers the total cost; otherwise its bans
+    // are undone and the answer before it stands, so a rescue can never leave
+    // the path worse by the model's own measure. A path where no node was
+    // lost never gets here, and keeps exactly the assignment it had before.
+    const rescued = new Set();
+    for (let pass = 0; pass < dedupKeys.size; pass++) {
+      const inPath = new Set();
+      sol.assign.forEach((k, i) => { if (k >= 0) inPath.add(C[i][k].pubkey); });
+      const lost = new Set();
+      for (const key of dedupKeys) if (!inPath.has(key) && !rescued.has(key)) lost.add(key);
+      if (!lost.size) break;
+      const before = sol, beforeBans = bans.map(b => (b ? new Set(b) : null));
+      const probeBans = bans.map(b => (b ? new Set(b) : new Set()));
+      C.forEach((c, i) => c.forEach(pt => { if (lost.has(pt.pubkey)) probeBans[i].add(pt.pubkey); }));
+      const probe = solvePath(C, steps, start, end, probeBans, lost);
+      const offers = [];
+      C.forEach((c, i) => c.forEach((pt, k) => {
+        // No hint check needed: a hinted node is banned everywhere but its
+        // own hop before the first solve, so it is never duplicated or lost.
+        if (!lost.has(pt.pubkey)) return;
+        const v = probe.Fx[i][k] + probe.Bx[i][k];
+        const scale = Math.max(1, Math.abs(probe.total));
+        if (v < probe.total - DEDUP_TIE_EPS * scale) offers.push([v, i, pt.pubkey]);
+      }));
+      // Cheapest first. Offers within DEDUP_TIE_EPS of each other are a tie,
+      // which goes to the later position, as in the rounds above.
+      offers.sort((a, b) => a[0] - b[0]);
+      for (let g = 0; g < offers.length;) {
+        let h = g + 1;
+        const lim = offers[g][0] + DEDUP_TIE_EPS * Math.max(1, Math.abs(offers[g][0]));
+        while (h < offers.length && offers[h][0] <= lim) h++;
+        const tie = offers.slice(g, h).sort((a, b) => b[1] - a[1]);
+        for (let t = 0; t < tie.length; t++) offers[g + t] = tie[t];
+        g = h;
+      }
+      const taken = new Set();
+      for (const [, i, key] of offers) {
+        if (rescued.has(key) || taken.has(i)) continue;
+        rescued.add(key); taken.add(i);
+        C.forEach((c, j) => {
+          if (!c.some(pt => pt.pubkey === key)) return;
+          if (j !== i) addBan(j, key);
+          else if (bans[j]) bans[j].delete(key); // null when j held it already
+        });
+      }
+      if (!taken.size) break;
       sol = solvePath(C, steps, start, end, bans);
+      converge();
+      if (!(sol.total < before.total - DEDUP_TIE_EPS * Math.max(1, Math.abs(before.total)))) {
+        beforeBans.forEach((b, i) => { bans[i] = b; });
+        sol = before; // its nodes stay in `rescued`, so the next pass tries others
+      }
     }
     // This assignment is the answer. Nothing below may change it.
     const assign = sol.assign;

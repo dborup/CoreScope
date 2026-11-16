@@ -431,6 +431,11 @@ type PacketStore struct {
 	hashSizeInfoCache map[string]*hashSizeNodeInfo
 	hashSizeInfoAt    time.Time
 
+	// #807: pubkey → hash size of the node's newest size-declaring ADVERT in
+	// SQLite (hash_size_last_known.go). Fills hash_size only when the window
+	// above has none. Replaced wholesale on refresh; bounded by len(nodes).
+	lastKnownHashSizes atomic.Pointer[map[string]int]
+
 	// Cached relay stats batch result — recomputed at most once every 300s
 	// or when byPathHop changes (see invalidateRelayStatsCache).
 	relayStatsCacheMu     sync.Mutex
@@ -10122,32 +10127,13 @@ func (s *PacketStore) computeNodeHashSizeInfo() map[string]*hashSizeNodeInfo {
 		if tx.RawHex == "" || tx.DecodedJSON == "" {
 			continue
 		}
-		// Transport routes (0, 3) have 4 transport code bytes before the path
-		// byte, so the path byte is at offset 5 instead of 1.
-		routeType, pathByte, ok := packetpath.PathByte(tx.RawHex)
+		// Path-byte rules (transport offset, sizeless zero-hop direct, reserved
+		// size 4) live in advertDeclaredHashSize, shared with the #807
+		// last-known snapshot.
+		hs, ok := advertDeclaredHashSize(tx.RawHex)
 		if !ok {
 			continue
 		}
-		// Direct zero-hop adverts carry no path, so the hop count is 0. Whether
-		// the SIZE bits are meaningful depends on the sender: firmware that
-		// predates meshcore-dev/MeshCore#3293 does `path_len = 0`, wiping the
-		// whole byte including the two size bits, so 0x00 says nothing about
-		// the node's path.hash.mode. A sender that writes the size through
-		// setPathHashSizeAndCount() emits 0x40 / 0x80 with a zero hop count —
-		// that is a deliberate declaration and the only way those bits can be
-		// non-zero here. Skip on the byte's content, not on the route type.
-		if (routeType == RouteDirect || routeType == RouteTransportDirect) && pathByte == 0x00 {
-			continue
-		}
-		// NOTE: hash_size 4 is reserved and rejected by the decoder (#1211),
-		// but this function has always reported it (TestHashSizeTransport-
-		// RoutePathByteOffset pins HashSize=4 for path byte 0xC1), unlike
-		// computeAnalyticsHashSizes which drops it. Skipping on byte content
-		// widens that pre-existing gap slightly, from 0xC1 to also 0xC0.
-		// Adding a `hs > 3` guard here would change the behaviour that test
-		// deliberately pins, so reconciling the two sites is left as separate
-		// work rather than smuggled into this fix.
-		hs := int((pathByte>>6)&0x3) + 1
 
 		var d map[string]interface{}
 		if json.Unmarshal([]byte(tx.DecodedJSON), &d) != nil {

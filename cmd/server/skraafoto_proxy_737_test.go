@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,7 +236,8 @@ func TestSkraafoto737_SearchFiveDirections(t *testing.T) {
 		want := SkraafotoPhoto{ID: id, Collection: "skraafotos2025", Direction: d, Datetime: "2025-05-07T10:21:33Z",
 			ViewerURL:  "https://skraafoto.dataforsyningen.dk/?item=" + id,
 			PreviewURL: "/api/skraafoto/preview/skraafotos2025/" + id}
-		if ph != want {
+		// The fake's photos carry no camera model: no M3a fields.
+		if !reflect.DeepEqual(ph, want) {
 			t.Fatalf("photo %d: %+v\nwant %+v", i, ph, want)
 		}
 	}
@@ -243,7 +245,7 @@ func TestSkraafoto737_SearchFiveDirections(t *testing.T) {
 		DatasetName: "Skråfotos", DatasetURL: skraafoto.DatasetURL, LicenseName: "CC BY 4.0", LicenseURL: "https://creativecommons.org/licenses/by/4.0/"}) {
 		t.Fatalf("credit %+v", resp.Credit)
 	}
-	if strings.Contains(w.Body.String(), "cdn.dataforsyningen.dk") || strings.Contains(w.Body.String(), "api.dataforsyningen.dk") {
+	if strings.Contains(w.Body.String(), "skraafoto-cdn.dataforsyningen.dk") || strings.Contains(w.Body.String(), "api.dataforsyningen.dk") {
 		t.Fatal("an upstream URL in the response")
 	}
 	// The collections list and one request per direction.
@@ -665,7 +667,8 @@ func TestSkraafoto737_ClientConfig(t *testing.T) {
 		t.Fatalf("%v %s", err, w.Body.String())
 	}
 	want := SkraafotoClientConfig{Enabled: true, SearchURL: "/api/skraafoto/search", PreviewURL: "/api/skraafoto/preview/{collection}/{item}",
-		MaxPx: 1024, Note: "Public aerial photos from Klimadatastyrelsen, shown at reduced size.", Credit: skraafotoCredit()}
+		MaxPx: 1024, Note: "Public aerial photos from Klimadatastyrelsen, shown at reduced size.", Credit: skraafotoCredit(),
+		Bounds: dhmCoverageBounds()}
 	if *cc.Skraafoto != want {
 		t.Fatalf("%+v", *cc.Skraafoto)
 	}

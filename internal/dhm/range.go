@@ -23,6 +23,11 @@ func (r Range) Valid() bool {
 	return r.From >= 0 && r.To >= r.From && r.To-r.From+1 <= int64(r.MaxBody)
 }
 
+// Header is the Range header value RangeRead sends for r.
+func (r Range) Header() string {
+	return "bytes=" + strconv.FormatInt(r.From, 10) + "-" + strconv.FormatInt(r.To, 10)
+}
+
 // contentRangeRe is the one Content-Range shape accepted: a single
 // satisfied range of a known length.
 var contentRangeRe = regexp.MustCompile(`^bytes ([0-9]{1,15})-([0-9]{1,15})/([0-9]{1,15})$`)
@@ -47,7 +52,7 @@ func RangeRead(ctx context.Context, hc *http.Client, target string, r Range, sen
 	if err != nil {
 		return nil, 0, FetchError{Reason: "request"}
 	}
-	req.Header.Set("Range", "bytes="+strconv.FormatInt(r.From, 10)+"-"+strconv.FormatInt(r.To, 10))
+	req.Header.Set("Range", r.Header())
 	if sent != nil {
 		sent.Add(1)
 	}

@@ -178,6 +178,13 @@ Step descriptions and checklist answers support Markdown (`**bold**`, `*italic*`
 
 User themes take priority over admin themes. Users can reset their personal theme to go back to the admin default.
 
+### Map layer settings
+
+Some of the customizer's Display settings belong to an optional map layer and only appear when the server offers that layer:
+
+- **Ancient Monuments**: the protected ancient monuments overlay and its Path profile warning. See [ancient-monuments.md](ancient-monuments.md).
+- **Oblique Photos**: how the oblique aerial photo (Skråfoto) viewer opens, only while the server offers the photos. `skraafoto.direction` is the first photo: `auto` (the default: across the line when opened from a Path profile, otherwise north), `north`, `east`, `south`, `west` or `nadir`; a shared link's direction still wins. `skraafoto.zoom` is `overview` (the default) or `zoomed` (each new photo opens on the crop around the point, where the point is in the photo). `skraafoto.lineOfSight` (default `true`) draws the line of sight from a Path profile; this row is shown only with the Path profile tool. These are viewer settings; the server's `map.skraafoto` config is not part of the customizer.
+
 ## Full Example
 
 ```json

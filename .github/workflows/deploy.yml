@@ -263,6 +263,10 @@ jobs:
           # and their fakes. Its own module: cmd/server imports it, but the
           # server step does not run its tests.
           (cd internal/skraafoto && go test -race ./...)
+          # cmd/smoke (#803): the unit tests of the manual live smoke check,
+          # against httptest fakes only. The live check itself
+          # (scripts/smoke-upstreams.sh) never runs in CI.
+          (cd cmd/smoke && go vet ./... && go test -race ./...)
           # internal/regions is its own module: the server/ingestor steps
           # above compile it but never run its tests, and it now holds the
           # hashRegions/hashRegionsPath loader both processes share (#360).
