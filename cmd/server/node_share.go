@@ -217,6 +217,9 @@ func (s *Server) resolveNodeShare(ctx context.Context, c *nodeCards, pk string) 
 			in.Area = label
 		}
 	}
+	// A repeater or room missing from a published snapshot relayed nothing
+	// in its window: the card shows 0, as the node page does. Only while no
+	// snapshot exists yet are the relay lines left off (#811).
 	if n.Role == "repeater" || n.Role == "room" {
 		if info, ok := s.store.publishedRelayInfo(pk); ok {
 			in.Relay = &nodecard.RelayStats{
@@ -233,13 +236,19 @@ func (s *Server) resolveNodeShare(ctx context.Context, c *nodeCards, pk string) 
 }
 
 // publishedRelayInfo is pk's entry in the published relay snapshot (the
-// one /api/nodes reads), without ever computing it: before the first
-// snapshot there is none.
-func (s *PacketStore) publishedRelayInfo(pk string) (RepeaterRelayInfo, bool) {
+// one /api/nodes reads), without ever computing it. ok is false only
+// while no snapshot has been published yet; a key the published snapshot
+// does not hold relayed nothing in its window and gets the zero value,
+// which is what /api/nodes and the node page report for it.
+func (s *PacketStore) publishedRelayInfo(pk string) (info RepeaterRelayInfo, ok bool) {
 	s.repeaterEnrichMu.Lock()
-	info, ok := s.repeaterRelayCache[pk]
+	m := s.repeaterRelayCache
 	s.repeaterEnrichMu.Unlock()
-	return info, ok
+	if m == nil {
+		return RepeaterRelayInfo{}, false
+	}
+	info, _ = lookupRelayInfo(m, pk)
+	return info, true
 }
 
 // nodeNeighborCount is the number of rows the node page's neighbour list

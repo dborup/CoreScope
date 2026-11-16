@@ -50,7 +50,10 @@ The card is a 1200×630 PNG drawn on the server,
 - the neighbour count;
 - "as of" with the time the card was drawn, and the site name.
 
-A value the server does not have yet is left off, never drawn as 0. The card
+A value the server does not have yet is left off, never drawn as 0. The
+relay lines of a repeater or room are left off only until the server has
+published its first relay snapshot; after that, a node the snapshot does not
+hold relayed nothing and shows 0, as on its node page. The card
 has **no map, no coordinates and no packet content**. The node's page still
 shows its position to anyone who opens it.
 

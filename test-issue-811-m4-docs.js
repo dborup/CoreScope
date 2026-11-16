@@ -27,6 +27,7 @@ test('docs/node-share-previews.md covers the switches, the roles and the cost', 
     assert.ok(md.includes(s), 'missing ' + JSON.stringify(s));
   });
   assert.ok(/no map, no coordinates/i.test(md), 'does not say the card has no coordinates');
+  assert.ok(/first relay snapshot[\s\S]{0,160}shows 0/i.test(md), 'does not say relays show 0 once a snapshot exists');
 });
 
 test('the terrain share page and the customizer guide link to it', () => {
