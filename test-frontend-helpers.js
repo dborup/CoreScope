@@ -4932,6 +4932,46 @@ console.log('\n=== nodes.js: own advert freshness ===');
     assert.strictEqual(ctx.window._nodesGetStatusInfo(safe).status, 'active');
     assert.strictEqual(ctx.window._nodesGetLastAdvert(node, stats, []), null);
   });
+  // #848: a repeater quiet longer than the packet-store window. The server
+  // now sends its newest own ADVERT from the database (lastAdvertSource
+  // "db"); the node page must read it like any other advert, and its status
+  // must match the nodes list and map, which use the directory last_seen
+  // (here that same advert).
+  test('#848 advert from the database outside the window: status follows thresholds, list agrees', () => {
+    const ctx = makeNodesSandbox();
+    const key = 'aa' + '11'.repeat(31);
+    const cases = [
+      // [hours ago, silent threshold h or null (default 72h), status, explanation]
+      [33, null, 'active', /^Last activity /],
+      [100, null, 'stale', /^No activity for 4d — repeaters typically advertise every 12-24h$/],
+      // getStatusInfo shows whole days from 24h on, so 33h reads "1d".
+      [33, 30, 'stale', /^No activity for 1d — repeaters typically advertise every 12-24h$/],
+    ];
+    for (const [hours, silentH, wantStatus, wantExpl] of cases) {
+      if (silentH) ctx.window.HEALTH_THRESHOLDS.infraSilentMs = silentH * 3600000;
+      else ctx.window.HEALTH_THRESHOLDS.infraSilentMs = 72 * 3600000;
+      const at = new Date(Date.now() - hours * 3600000 - 60000).toISOString();
+      const listNode = { public_key: key, role: 'repeater', last_seen: at, last_heard: at };
+      const stats = { lastAdvert: at, lastHeard: at, lastAdvertSource: 'db' };
+      const pageNode = ctx.window._nodesWithHealthActivity(listNode, stats, []);
+      const info = ctx.window._nodesGetStatusInfo(pageNode);
+      const label = hours + 'h/' + (silentH || 72) + 'h';
+      assert.strictEqual(info.status, wantStatus, label + ' status');
+      assert.ok(wantExpl.test(info.explanation), label + ' explanation: ' + info.explanation);
+      assert.ok(!/unknown/.test(info.explanation), label + ' must not say unknown');
+      assert.strictEqual(ctx.window._nodesGetLastAdvert(pageNode, stats, []), at, label + ' Last Heard (advert)');
+      // Nodes list and map both use getNodeStatus on the /api/nodes row.
+      assert.strictEqual(ctx.window.getNodeStatus(listNode), info.status, label + ' list/map status agrees');
+    }
+  });
+  test('#848 without the database fallback the node page still says unknown (pre-fix response)', () => {
+    const ctx = makeNodesSandbox();
+    const at = new Date(Date.now() - 33 * 3600000).toISOString();
+    const listNode = { public_key: 'aa' + '11'.repeat(31), role: 'repeater', last_seen: at, last_heard: at };
+    const info = ctx.window._nodesGetStatusInfo(ctx.window._nodesWithHealthActivity(listNode, { lastAdvert: null, lastHeard: null }, []));
+    assert.strictEqual(info.explanation, 'Last activity unknown');
+    assert.strictEqual(info.status, 'stale');
+  });
   test('absent or historical relays do not claim the node is alive', () => {
     const ctx = makeNodesSandbox();
     for (const node of [{}, { last_relayed: new Date(Date.now() - 96 * 3600000).toISOString(), relay_active: false }]) {

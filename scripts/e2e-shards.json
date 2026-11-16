@@ -2,6 +2,18 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-848-node-last-advert-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "CORESCOPE_SERVER_BIN": "./corescope-server",
+        "FIXTURE_DB": "test-fixtures/e2e-fixture.db"
+      },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #848 health lastAdvert from the database for a repeater quiet longer than the packet-store window. Starts its own Go server on a copy of the CI fixture with packetStore.retentionHours 24 and three seeded repeaters (own advert 33h and 100h ago, one with only an invalid-signature advert) on key prefixes used by no other key or path: the health and bulk-health APIs report the database advert with lastAdvertSource db and nothing for the forged one; at 1440x900 from a cold start the node page shows Active / Stale with No activity for 4d instead of Last activity unknown, and the nodes list row and the map marker agree with it; at 375x560 with touch, Home, More, Nodes, search, tap the row, and the node page agrees with the list. About 15s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-792-elevation-overlay-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
