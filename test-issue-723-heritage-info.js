@@ -54,6 +54,11 @@ class El {
     return null;
   }
   all() { return [this].concat(...this.children.map(c => c.all())); }
+  // One class selector, as heritage-info asks for the open layer control.
+  querySelector(sel) { return this.all().find(e => e !== this && (e.className || '').split(/\s+/).includes(sel.replace(/^\./, ''))) || null; }
+  addEventListener(t, fn) { (this._l = this._l || []).push([t, fn]); }
+  removeEventListener(t, fn) { this._l = (this._l || []).filter(([u, f]) => !(u === t && f === fn)); }
+  dispatch(t) { (this._l || []).filter(([u]) => u === t).forEach(([, f]) => f({ type: t })); }
   byClass(c) { return this.all().filter(e => (e.className || '').split(/\s+/).includes(c)); }
 }
 function makeDocument() {
@@ -238,6 +243,36 @@ test('one request per click: /api/terrain/heritage with lat and lon only', () =>
   assert(/Looking up/.test(s.map.popups[0]._content.textContent), 'no loading state');
 });
 
+test('the popup is fitted to the map chrome before each layout, loading and answer (#841 F6)', async () => {
+  const map = makeMap();
+  const fetch = makeFetch();
+  const fits = [];
+  const ctx = loadModule({
+    L: makeL(map),
+    MapChromeFit: { fitPopup(m, p, ll) { fits.push({ m, p, ll, content: p._content }); } },
+  });
+  const tile = new El('img'); tile.className = 'leaflet-tile';
+  ctx.HeritageInfo.attach(map, { config: () => CFG, isBusy: () => false, fetch, document: ctx.document });
+  const ll = { lat: 55.7563, lng: 9.4201 };
+  map.fire('preclick', { latlng: ll, originalEvent: { target: tile } });
+  map.fire('click', { latlng: ll, originalEvent: { target: tile } });
+  assert.strictEqual(fits.length, 1, 'not fitted before the loading state');
+  assert.strictEqual(fits[0].m, map);
+  assert.strictEqual(fits[0].p, map.popups[0]);
+  assert.strictEqual(fits[0].ll, ll);
+  assert.strictEqual(fits[0].content, null, 'fitted after the content was laid out');
+  answer(fetch.calls[0], 200, INSIDE);
+  await tick(); await tick();
+  assert.strictEqual(fits.length, 2, 'not fitted again for the answer');
+  assert(/Looking up/.test(fits[1].content.textContent), 'the answer was set before fitting');
+});
+
+test('without MapChromeFit the popup still opens (the module loads on its own)', () => {
+  const s = setup();
+  s.click();
+  assert.strictEqual(s.map.popups.length, 1);
+});
+
 test('a new click aborts the previous request and a stale answer is never shown', async () => {
   const s = setup();
   s.click();
@@ -336,6 +371,52 @@ test('detach removes the listeners', () => {
   s.click();
   assert.strictEqual(s.fetch.calls.length, 0);
   assert(!s.map.listens('click') && !s.map.listens('preclick'));
+});
+
+// ── #839 finding 7: the tap that closes the layer control ───────────────────
+
+function openControl(map) {
+  const c = new El('div'); c.className = 'leaflet-control-layers leaflet-control-layers-expanded';
+  map.container.appendChild(c);
+  return c;
+}
+
+test('a tap that closes the layer control is no lookup; the next tap is (#839 F7)', () => {
+  const s = setup();
+  const c = openControl(s.map);
+  // Leaflet collapses the control on the tap's compatibility mouseleave,
+  // after the finger went down and before preclick.
+  s.map.container.dispatch('pointerdown');
+  c.className = 'leaflet-control-layers';
+  s.click();
+  assert.strictEqual(s.fetch.calls.length, 0, 'the closing tap asked');
+  assert.strictEqual(s.map.popups.length, 0, 'the closing tap opened a popup');
+  s.map.container.dispatch('pointerdown');
+  s.click();
+  assert.strictEqual(s.fetch.calls.length, 1, 'the next tap did not ask');
+});
+
+test('touchstart alone (no pointer events) also marks the closing tap (#839 F7)', () => {
+  const s = setup();
+  const c = openControl(s.map);
+  s.map.container.dispatch('touchstart');
+  c.className = 'leaflet-control-layers';
+  s.click();
+  assert.strictEqual(s.fetch.calls.length, 0);
+});
+
+test('a click while the control is still open at preclick is no lookup (#839 F7)', () => {
+  const s = setup();
+  openControl(s.map);
+  s.click();
+  assert.strictEqual(s.fetch.calls.length, 0);
+});
+
+test('detach removes the pointerdown and touchstart listeners (#839 F7)', () => {
+  const s = setup();
+  assert.strictEqual(s.map.container._l.length, 2);
+  s.ctl.detach();
+  assert.strictEqual(s.map.container._l.length, 0);
 });
 
 // ── Popup ──────────────────────────────────────────────────────────────────

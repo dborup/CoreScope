@@ -469,7 +469,16 @@
     var st = styles();
     var debounceT = null;
 
-    function popupFor(site) { return function () { return popupHTML(site, cfg); }; }
+    // Leaflet asks the content function right before it lays the popup out,
+    // so the popup's room is measured there: on a phone it scrolls inside
+    // the map and pans clear of the buttons over it (#839 finding 2).
+    function popupFor(site) {
+      return function (marker) {
+        var fit = window.MapChromeFit;
+        if (fit && marker && marker.getPopup) fit.fitPopup(map, marker.getPopup(), marker.getLatLng());
+        return popupHTML(site, cfg);
+      };
+    }
 
     function build(key) {
       var data = loader.data(key);
