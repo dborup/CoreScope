@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -636,5 +637,33 @@ func TestDeterministic(t *testing.T) {
 	b, _ := Render(fxFanout(30), Options{Site: "x"})
 	if !bytes.Equal(a, b) {
 		t.Fatal("two renders of the same input differ")
+	}
+}
+
+// Stats and Observers are exported for the share preview's text (#812 M2):
+// they must be exactly what the card draws, tile for tile.
+func TestStatsAreTheDrawnTiles(t *testing.T) {
+	for name, in := range map[string]PacketCardInput{
+		"flood": fxFlood(), "direct": fxDirect(), "fan-out": fxFanout(30), "advert": fxAdvert(), "no positions": fxNoPositions(),
+	} {
+		_, tr, err := render(in, Options{Site: "example.test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var drawn []Stat
+		for _, r := range tr.runs {
+			switch r.Role {
+			case "label":
+				drawn = append(drawn, Stat{Label: r.Text})
+			case "value":
+				drawn[len(drawn)-1].Value = r.Text
+			}
+		}
+		if got := Stats(in); !reflect.DeepEqual(got, drawn) {
+			t.Errorf("%s: Stats %q, drawn %q", name, got, drawn)
+		}
+		if Stats(in)[0].Value != strconv.Itoa(Observers(in)) {
+			t.Errorf("%s: the Observers tile %q is not Observers %d", name, Stats(in)[0].Value, Observers(in))
+		}
 	}
 }

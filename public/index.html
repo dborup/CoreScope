@@ -46,7 +46,10 @@
        would read as another host (defence in depth; the server already
        cleans such paths with a 301). #811: /p?node=<key> is a node share
        link and moves on to #/nodes/<key>, carrying the key only when it is
-       a full 64-hex key (lower-cased), else to the #/nodes list. -->
+       a full 64-hex key (lower-cased), else to the #/nodes list. #812:
+       /p?packet=<hash> is a packet share link and moves on to
+       #/packets/<hash>, carrying the hash only when it is exactly 16 hex
+       characters (lower-cased), else to the #/packets list. -->
   <script data-share-handoff>
     (function () {
       var path = location.pathname;
@@ -56,6 +59,10 @@
         // #811: a node link opens the node page; only a full key is carried.
         var pk = String(src.get('node')).toLowerCase();
         next += /^[0-9a-f]{64}$/.test(pk) ? '#/nodes/' + pk : '#/nodes';
+      } else if (src.has('packet')) {
+        // #812: a packet link opens the packet page; only a full hash is carried.
+        var h = String(src.get('packet')).toLowerCase();
+        next += /^[0-9a-f]{16}$/.test(h) ? '#/packets/' + h : '#/packets';
       } else {
         var keep = ['profile', 'model', 'ha', 'hb', 'k', 'freq'], out = new URLSearchParams();
         keep.forEach(function (k) { if (src.has(k)) out.set(k, src.get(k)); });

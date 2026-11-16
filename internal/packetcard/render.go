@@ -159,7 +159,7 @@ func render(in PacketCardInput, opt Options) (*image.RGBA, *trace, error) {
 	r.cv.FillRect(img.Rect, cardkit.Opaque(pal.Background))
 	r.header(in, opt)
 	r.drawMap(in)
-	r.tiles(tiles(in))
+	r.tiles(Stats(in))
 	r.footer(in, opt)
 	return img, r.tr, nil
 }
@@ -176,9 +176,9 @@ func (r *renderer) text(role, s string, x, y, size int, bold bool, c color.NRGBA
 
 // ── Header ───────────────────────────────────────────────────────────────
 
-// observers is how many visible observers heard the packet: one per
+// Observers is how many visible observers heard the packet: one per
 // branch, or the first alone.
-func observers(in PacketCardInput) int {
+func Observers(in PacketCardInput) int {
 	if len(in.Branches) == 0 && in.First != nil {
 		return 1
 	}
@@ -249,7 +249,7 @@ func (r *renderer) heardLine(in PacketCardInput, opt Options) string {
 			parts = append(parts, "first heard by "+n)
 		}
 	}
-	if n := observers(in); n > 0 {
+	if n := Observers(in); n > 0 {
 		parts = append(parts, "heard by "+plural(n, "observer"))
 	} else {
 		parts = append(parts, "no visible observers")
@@ -443,14 +443,16 @@ func (r *renderer) areas(pr projection, areas []Area) {
 
 // ── Stat tiles ───────────────────────────────────────────────────────────
 
-type tile struct{ label, value string }
+// Stat is one stat tile: its label and its value as drawn ("Spread",
+// "4.2s"). cmd/server words the share preview's text from the same list.
+type Stat struct{ Label, Value string }
 
-// tiles are the stat clauses for in, in drawing order: observers always;
+// Stats are the stat clauses for in, in drawing order: observers always;
 // the spread and the farthest observer only with a visible First, which
 // they are measured from; the airtime estimate when known. An absent or
 // invalid value drops its clause; it is never drawn as 0.
-func tiles(in PacketCardInput) []tile {
-	ts := []tile{{"Observers", cardkit.FmtCount(observers(in))}}
+func Stats(in PacketCardInput) []Stat {
+	ts := []Stat{{"Observers", cardkit.FmtCount(Observers(in))}}
 	if in.First != nil {
 		spread, far := -1.0, -1.0
 		for _, b := range in.Branches {
@@ -462,14 +464,14 @@ func tiles(in PacketCardInput) []tile {
 			}
 		}
 		if spread > 0 {
-			ts = append(ts, tile{"Spread", fmtDuration(spread)})
+			ts = append(ts, Stat{"Spread", fmtDuration(spread)})
 		}
 		if far > 0 {
-			ts = append(ts, tile{"Farthest from first", cardkit.ToFixed1(far) + " km"})
+			ts = append(ts, Stat{"Farthest from first", cardkit.ToFixed1(far) + " km"})
 		}
 	}
 	if v, ok := finite(in.AirtimeMs); ok && v >= 0 {
-		ts = append(ts, tile{"Est. flood airtime", "≥" + fmtAirtime(v)})
+		ts = append(ts, Stat{"Est. flood airtime", "≥" + fmtAirtime(v)})
 	}
 	return ts
 }
@@ -506,18 +508,18 @@ func fmtAirtime(ms float64) string {
 	return cardkit.ToFixed1(ms/1000) + "s"
 }
 
-func (r *renderer) tiles(ts []tile) {
+func (r *renderer) tiles(ts []Stat) {
 	for i, t := range ts {
 		if i >= tileCols {
 			break
 		}
 		x := safeMargin + i*tileW
 		maxW := tileW - tileGap
-		r.text("label", r.fs.Fit(t.label, labelSize, false, maxW), x, labelBase, labelSize, false, cardkit.Opaque(r.pal.TextMuted))
+		r.text("label", r.fs.Fit(t.Label, labelSize, false, maxW), x, labelBase, labelSize, false, cardkit.Opaque(r.pal.TextMuted))
 		size := valueSize
-		for ; size > minValSize && r.fs.Measure(t.value, size, true) > maxW; size -= 4 {
+		for ; size > minValSize && r.fs.Measure(t.Value, size, true) > maxW; size -= 4 {
 		}
-		r.text("value", r.fs.Fit(t.value, size, true, maxW), x, valueBase, size, true, cardkit.Opaque(r.pal.Text))
+		r.text("value", r.fs.Fit(t.Value, size, true, maxW), x, valueBase, size, true, cardkit.Opaque(r.pal.Text))
 	}
 }
 
