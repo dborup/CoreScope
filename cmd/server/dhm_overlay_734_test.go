@@ -173,7 +173,9 @@ func TestDHM734_RejectsUnknownIdsRawNamesAndOffRangeZooms(t *testing.T) {
 		name string
 		q    url.Values
 	}{
-		{"unknown id", withLayers(overlayTile("terrain", 15, 0), set("elevation"))},
+		{"unknown id", withLayers(overlayTile("terrain", 15, 0), set("nosuchid"))},
+		// #792 made elevation an id, z9-13 only.
+		{"elevation above z13", withLayers(overlayTile("terrain", 15, 0), set("elevation"))},
 		{"exaggerated is no id", withLayers(overlayTile("terrain", 15, 0), set("exaggerated"))},
 		{"surface layer name", withLayers(overlayTile("terrain", 15, 0), set(surfaceLayer))},
 		{"contour layer name", withLayers(overlayTile("terrain", 15, 0), set(contourLayer))},
@@ -285,8 +287,8 @@ func TestDHM734_EveryOverlayHasItsOwnProduct(t *testing.T) {
 			}
 		}
 	}
-	if len(seen) != 5 {
-		t.Fatalf("products %v, want terrain, exaggerated, ortho, surface and contours", seen)
+	if len(seen) != 6 { // #792 adds elevation
+		t.Fatalf("products %v, want terrain, exaggerated, ortho, surface, contours and elevation", seen)
 	}
 	// The #687/#728 tests' helper agrees with the table.
 	terrain, _ := dhm.LookupOverlay("terrain")
@@ -554,7 +556,7 @@ func TestDHM734_OpenAPIDocumentsLayersAsOverlayIDs(t *testing.T) {
 			continue
 		}
 		found = true
-		want := []string{"terrain", "surface", "contours", terrainLayer}
+		want := []string{"terrain", "surface", "contours", "elevation", terrainLayer} // #792: elevation
 		if !reflect.DeepEqual(p.Schema.Enum, want) || p.Schema.Type != "string" {
 			t.Errorf("layers schema %+v, want string enum %v", p.Schema, want)
 		}
@@ -568,7 +570,7 @@ func TestDHM734_OpenAPIDocumentsLayersAsOverlayIDs(t *testing.T) {
 		t.Fatal("layers not declared")
 	}
 	for _, s := range []string{
-		"layers=terrain, surface or contours", surfaceLayer + " from dhm_DAF, zoom 7-19",
+		"layers=terrain, surface, contours or elevation", surfaceLayer + " from dhm_DAF, zoom 7-19", // #792: elevation
 		contourLayer + " from dhm_DAF, zoom 14-19", "no fallback", "alias",
 	} {
 		if !strings.Contains(op.Description, s) {
@@ -612,10 +614,12 @@ func TestDHM734_ClientConfigOffersTheOverlays(t *testing.T) {
 		{ID: "surface", MinZoom: 7, MaxZoom: 19, DatasetName: "Danmarks Højdemodel", DatasetURL: "https://dataforsyningen.dk/data/928"},
 		{ID: "contours", MinZoom: 14, MaxZoom: 19, DatasetName: "Danmarks Højdemodel", DatasetURL: "https://dataforsyningen.dk/data/926"},
 	}
-	if len(b.Overlays) != len(want) {
-		t.Fatalf("overlays %s, want %d entries", raw, len(want))
+	// #792 appends elevation, which dhm_overlay_792_test.go pins; the
+	// #734 entries before it are unchanged.
+	if len(b.Overlays) != len(want)+1 || !strings.Contains(string(b.Overlays[len(want)]["id"]), `"elevation"`) {
+		t.Fatalf("overlays %s, want %d entries and elevation", raw, len(want))
 	}
-	for i, entry := range b.Overlays {
+	for i, entry := range b.Overlays[:len(want)] {
 		keys := make([]string, 0, len(entry))
 		for k := range entry {
 			keys = append(keys, k)
@@ -629,7 +633,7 @@ func TestDHM734_ClientConfigOffersTheOverlays(t *testing.T) {
 		if err := json.Unmarshal(buf, &got); err != nil {
 			t.Fatal(err)
 		}
-		if got != want[i] {
+		if !reflect.DeepEqual(got, want[i]) {
 			t.Errorf("overlay %d = %+v, want %+v", i, got, want[i])
 		}
 		// The dataset mark is in the unchanged credit text, so the page

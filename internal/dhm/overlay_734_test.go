@@ -52,6 +52,8 @@ func TestOverlay734_TableIsExact(t *testing.T) {
 		{"surface", "dhm_DAF", "dhm_overflade_skyggekort", "", 7, 19, "https://dataforsyningen.dk/data/928"},
 		// #734 M2: roed, the one named style that reads on both themes.
 		{"contours", "dhm_DAF", "dhm_kurve_traditionel", "roed", 14, 19, "https://dataforsyningen.dk/data/926"},
+		// #792: rendered here from the WCS DTM, z9-13 (elevation_792_test.go).
+		{"elevation", "dhm_wcs_DAF", "dhm_terraen", "", 9, 13, "https://dataforsyningen.dk/data/930"},
 	}
 	ids := make([]string, 0, len(cases))
 	for _, c := range cases {
@@ -74,7 +76,7 @@ func TestOverlay734_TableIsExact(t *testing.T) {
 	// The ids are the only names LookupOverlay knows: no upstream layer,
 	// no case variant, no legacy alias (that is ParseTileRequest's).
 	for _, name := range []string{
-		"", "Terrain", "SURFACE", " surface", "elevation", "exaggerated", "hillshade",
+		"", "Terrain", "SURFACE", " surface", "Elevation", "exaggerated", "hillshade",
 		"dhm_terraen_skyggekort", "dhm_overflade_skyggekort", "dhm_kurve_traditionel",
 		"quickDHM_skyggekort_terraen_overdrevet", "quickDHM_skyggekort_overflade",
 	} {

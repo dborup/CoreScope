@@ -51,11 +51,14 @@ func defaultSettings() settings {
 var errNoCDNPath = skipError("no photo to read: needs the STAC search (" + tokenDHM + ") or -skraafoto-cdn-path")
 
 // siteTile is the Web Mercator tile holding site at siteZoom.
-func siteTile() dhm.TileKey {
-	n := math.Exp2(siteZoom)
+func siteTile() dhm.TileKey { return siteTileAt(siteZoom) }
+
+// siteTileAt is the Web Mercator tile holding site at zoom z.
+func siteTileAt(z int) dhm.TileKey {
+	n := math.Exp2(float64(z))
 	lat := site.Lat * math.Pi / 180
 	return dhm.TileKey{
-		Z: siteZoom,
+		Z: z,
 		X: int((site.Lon + 180) / 360 * n),
 		Y: int((1 - math.Log(math.Tan(lat)+1/math.Cos(lat))/math.Pi) / 2 * n),
 	}
@@ -91,8 +94,12 @@ func buildProbes(s settings) []probe {
 	var ps []probe
 
 	// DHM WMS: every overlay id, as the server fetches it under each
-	// map.dhm.layer value; the terrain id is two upstream layers.
+	// map.dhm.layer value; the terrain id is two upstream layers. A
+	// rendered id (#792) is no WMS layer: its WCS raster is probed below.
 	for _, id := range dhm.OverlayIDs() {
+		if base, _ := dhm.LookupOverlay(id); base.Rendered() {
+			continue
+		}
 		seen := map[string]bool{}
 		for _, h := range []dhm.Hillshade{dhm.HillshadeExaggerated, dhm.HillshadeTerrain} {
 			base, _ := dhm.LookupOverlay(id)
@@ -125,6 +132,21 @@ func buildProbes(s settings) []probe {
 					return "", err
 				}
 				return dhm.RequestURL(dhm.DefaultBaseURL, dhm.WCSService, r.CoverageQuery()), nil
+			},
+			status: http.StatusOK,
+			check:  checkTIFF,
+		})
+	}
+	// #792: the colour-by-elevation tile's raster, at its top zoom.
+	if er, ok := dhm.ElevationRaster(siteTileAt(dhm.ElevationMaxZoom)); ok {
+		ps = append(ps, probe{
+			name:  "dhm-wcs-elevation",
+			token: tokenDHM,
+			url: func() (string, error) {
+				if err := er.Validate(); err != nil {
+					return "", err
+				}
+				return dhm.RequestURL(dhm.DefaultBaseURL, dhm.WCSService, er.CoverageQuery()), nil
 			},
 			status: http.StatusOK,
 			check:  checkTIFF,
