@@ -94,7 +94,8 @@ const (
 
 // packetCards is the packet card's state, built once by initPacketCards.
 type packetCards struct {
-	names bool // map.dhm.profile.card.names
+	names bool         // map.dhm.profile.card.names
+	look  cardSettings // map.dhm.profile.card, published as share.card (#812 M4)
 	pal   packetcard.Palette
 	palFP string
 	site  string // set by registerShareRoutes, before the server serves
@@ -133,6 +134,7 @@ func (s *Server) initPacketCards() {
 	}
 	c := &packetCards{
 		names:  set.card.names,
+		look:   set.card,
 		cards:  dhm.NewCache[packetCardKey](packetCardCacheEntries, packetCardCacheEntries*cardBytesPerEntry, packetCardTTLFinal),
 		paths:  dhm.NewCache[string](packetCardCacheEntries, packetCardCacheEntries*packetPathCacheEntryMax, packetCardTTLFinal),
 		render: packetcard.Render,

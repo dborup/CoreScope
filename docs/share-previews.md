@@ -8,7 +8,8 @@ profile. Opened in a browser, it goes straight to the same profile on the Map.
 Sharing is off by default (#727).
 
 Node pages have share previews too, with their own switch on the server:
-see [Share previews for node links](node-share-previews.md).
+see [Share previews for node links](node-share-previews.md). So do packet
+links: see [Packet links](#packet-links) below.
 
 ## What the card shows
 
@@ -92,6 +93,120 @@ overrides a viewer makes in their own browser.
 ![Share previews in the customizer, light, 360 px](screenshots/727-m4-share-customizer-light-360.jpg)
 ![Share previews in the customizer, dark, 360 px](screenshots/727-m4-share-customizer-dark-360.jpg)
 ![Share previews on a 375×560 phone, reached through More → Customize](screenshots/727-m4-share-customizer-375x560.jpg)
+
+## Packet links
+
+A shared `#/packets/<hash>` link previews only as the site's own card,
+because nothing after `#` reaches the server. When packet sharing is on,
+**Copy link** on a packet's detail pane, on the standalone `#/packet/<id>`
+page and in the **View Path** modal hands out a `/p?packet=<hash>` link
+instead (View Path: `/p?packet=<hash>&viewPath=1`). Pasted into Discord,
+Facebook, Slack or a similar chat, that link shows a card of the packet's
+path. Opened in a browser, it goes straight to the packet page, or to the
+packet page with the View Path modal open, and replaces the address with
+`#/packets/<hash>` (or `#/packets/<hash>?viewPath=1`). No history entry is
+left for `/p`, and only the hash is carried over.
+
+Packet sharing is off by default (#812). It is the third card type, after
+path profiles and node links, and uses the same `/p` route.
+
+Copy link keeps the plain link when:
+
+- an observation is selected (`?obs=<id>`): `/p` does not carry an
+  observation, so the plain `#/packets/<hash>?obs=<id>` link keeps it;
+- the packet has no 16-hex hash (`/p?packet=` takes the hash only, never a
+  numeric id);
+- the Ping scores page's View Path links (`#/ping-scores/…`): they show
+  archived evidence, which the packet card does not draw.
+
+### What the card shows
+
+The card is a 1200×630 PNG drawn on the server,
+`GET /api/packets/{hash}/card.png`. The `/p` page names it as its
+`og:image`. The card shows:
+
+- the firmware payload type, the route type and the hop count, for example
+  *GRP_TXT · Flood · 6 hops*. Every payload type gets a card, direct-routed
+  ones too;
+- "First heard by <observer>" and how many observers heard it. The first
+  observer goes through the same visibility rule as the path; when it is
+  hidden, the card shows the count only, and no other observer is named in
+  its place;
+- the path as a schematic with no basemap: hop points and lines, the
+  observers, and faint outlines of the configured areas it touched;
+- the spread, the farthest observer from the first, and the estimated flood
+  airtime (a lower bound, shown with "≥");
+- when it was first heard, in UTC, and the site name.
+
+With `map.dhm.profile.card.names` set to `false`, the card names no node or
+observer. The `/p` page carries a title such as *GRP_TXT · Flood · 6 hops ·
+heard by 12*, a description with the same values as text and the touched
+area names, `og:url` built from the hash, and `robots noindex`.
+
+### What is never shown
+
+- **No message content, for any payload type.** No `GRP_TXT` message text
+  (also when the server can decrypt it), no channel name (not even a
+  hashtag channel's), no sender name taken from the text, and nothing of a
+  `TXT_MSG`, `REQ`, `RESPONSE` or `ANON_REQ` payload. The card names the
+  payload type only.
+- **Only an `ADVERT` names its origin**, the advertising node. An advert
+  from a hidden node (`nodeBlacklist`, `hiddenNamePrefixes`) has no card:
+  `/p?packet=` answers with the site's own preview and a 404.
+- **Nothing hidden.** A branch through a hidden node or observer
+  (`nodeBlacklist`, `observerBlacklist`, `hiddenNamePrefixes`) is removed
+  whole, approximate (neighbour-estimated) positions are left out while a
+  visibility policy is active, and every count is computed from what is
+  drawn, so no total gives a removed branch away.
+- **No map tiles and no observer list.** The packet page still shows the
+  observers to anyone who opens it.
+
+When no station on the path has a visible position, the card shows the
+type, route and counts without a schematic.
+
+### What it costs
+
+- **No upstream service.** A packet card reads the in-memory packet store
+  and the database only. It needs no DHM token and works without `map.dhm`.
+- **Server.** A card that is not cached costs one path query, the same one
+  the packet's View Path uses, and one render: about 12–17 ms on a fast
+  machine. A cached card costs well under a millisecond. Paths and cards
+  are cached (64 entries each, also bounded by bytes): 2 minutes while the
+  packet was first heard less than 10 minutes ago, because observations
+  still arrive, and 24 hours after that. The card is served with
+  `Cache-Control: public, max-age=120` or `public, max-age=86400` to match.
+  A card that is not cached counts against the per-client
+  `map.dhm.profile.rateLimitPerMin` (429 when spent) and is drawn in the
+  same render slots as the other cards, so every card type shares one
+  budget.
+- **`/p?packet=` itself** uses the same cached path and never draws.
+- A packet that has left both the store and the database (retention) has
+  no card: `/p?packet=` answers with the site's own preview and a 404, and
+  the link still opens the packets page.
+
+### Turning it off
+
+- **Operator.** `share.packets.enabled` in `config.json` is `false` by
+  default. Set it to `true` to turn packet previews on, then restart. With
+  it off, Copy link hands out the plain `#/packets/<hash>` link (View Path:
+  `#/packets/<hash>?viewPath=1`), `/api/packets/{hash}/card.png` answers
+  404, and `/p?packet=` serves the site's own preview. Existing `/p?packet=`
+  links keep opening the packet page either way.
+- **Viewer.** In the customizer, open **Display → Share previews** (inside
+  **Terrain Profile** when the server has the Path profile tool) and turn off
+  **Copy link shares a preview**. It is the same switch as for path profiles
+  and node links; there is no packet-only switch. It is stored as
+  `terrain.shareLinks` (only `false` is stored), and it cannot turn previews
+  on when the server has them off.
+
+`share.packets.enabled` and the card's look (`map.dhm.profile.card.theme`
+and `.names`, the colours from `theme.json`) are server-only. The customizer
+reports that packet links get a card and shows the card look, and stores
+nothing for them.
+
+The `og:image` URL holds the hash, which is already in the link, and `v=`, a
+short content hash of what the card shows. `v` changes when an observation
+arrives that changes the card. It holds no name or position.
 
 ## Privacy: what the image URL carries
 

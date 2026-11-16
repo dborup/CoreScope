@@ -9,6 +9,8 @@ page.
 
 Node sharing is off by default (#811). It is the second card type after
 [terrain profiles](share-previews.md), and it uses the same `/p` route.
+[Packet links](share-previews.md#packet-links) are the third, with their own
+server switch and the same viewer switch.
 
 ## Which nodes get a card
 

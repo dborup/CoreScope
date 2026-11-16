@@ -158,6 +158,9 @@ run test-issue-812-viewpath-share-handoff.js
 run test-issue-811-m4-node-share.js
 run test-issue-811-m4-share-customizer.js
 run test-issue-811-m4-docs.js
+run test-issue-812-m4-packet-share.js
+run test-issue-812-m4-share-customizer.js
+run test-issue-812-m4-docs.js
 run test-issue-727-m4-share-customizer.js
 run test-issue-781-profile-cursor.js
 run test-issue-839-profile-ux.js

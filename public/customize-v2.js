@@ -2222,34 +2222,54 @@
       _renderShareSettings(tp, '<p class="cust-section-title" style="font-size:13px;margin:16px 0 6px">Share previews</p>');
   }
 
-  // ── #727 M4 / #811 M4 Share previews ──
-  // One viewer switch for both card types: terrain profiles (dhm.share) and
-  // node pages (the share block, share.nodes.enabled). Inside the Terrain
-  // Profile section when the profile is offered, else its own section when
-  // only node cards are. Without either route the viewer has nothing to
-  // choose; with one, the switch, and the operator's card look in fixed
-  // words: a server value is only ever compared, never printed.
-  function _nodeShareCfg() {
-    var NS = window.NodeShare, cfg = window.MC_SHARE_CFG;
-    return NS && typeof NS.offered === 'function' && NS.offered(cfg) ? cfg : null;
+  // ── #727 M4 / #811 M4 / #812 M4 Share previews ──
+  // One viewer switch for every card type: terrain profiles (dhm.share),
+  // node pages (share.nodes.enabled) and packet links (share.packets.enabled,
+  // the packet page and View Path); the latter two arrive in the share block.
+  // Inside the Terrain Profile section when the profile is offered, else its
+  // own section when only node or packet cards are. Without any route the
+  // viewer has nothing to choose; with one, the switch, and the operator's
+  // card look in fixed words: a server value is only ever compared, never
+  // printed.
+  function _cardShareCfg() {
+    var NS = window.NodeShare, PS = window.PacketShare, cfg = window.MC_SHARE_CFG;
+    var nodes = !!NS && typeof NS.offered === 'function' && NS.offered(cfg);
+    var packets = !!PS && typeof PS.offered === 'function' && PS.offered(cfg);
+    return nodes || packets ? { nodes: nodes, packets: packets, card: cfg.card } : null;
+  }
+
+  /** The switch's hint, naming exactly the card types the server offers.
+   *  One type keeps its own sentence (#727 M4's and #811 M4's wording);
+   *  several are listed as "a, b or c". */
+  function _shareHint(profiles, share) {
+    var kinds = [];
+    if (profiles) kinds.push(['a profile link', 'map']);
+    if (share && share.nodes) kinds.push(['a node link (repeaters, rooms and sensors)', 'node']);
+    if (share && share.packets) kinds.push(['a packet link (the packet page and View Path)', 'packet']);
+    if (kinds.length === 1) {
+      if (profiles) return 'Pasted into a chat, the link shows a card of the profile. Off: the plain map link, without a card.';
+      if (share.nodes) return 'Pasted into a chat, a node link (repeaters, rooms and sensors) shows a card of the node. Off: the plain node link, without a card.';
+      return 'Pasted into a chat, a packet link (the packet page and View Path) shows a card of the packet\u2019s path. Off: the plain packet link, without a card.';
+    }
+    var list = function (i) {
+      var words = kinds.map(function (k) { return k[i]; });
+      return words.slice(0, -1).join(', ') + ' or ' + words[words.length - 1];
+    };
+    return 'Pasted into a chat, ' + list(0) + ' shows a card. Off: the plain ' + list(1) + ' link, without a card.';
   }
 
   function _renderShareSettings(tp, head) {
     var cfg = window.MC_DHM_CFG;
     var profiles = !!tp && typeof tp.shareOffered === 'function' && tp.shareOffered(cfg);
-    var nodes = _nodeShareCfg();
-    if (!profiles && !nodes) {
+    var share = _cardShareCfg();
+    if (!profiles && !share) {
       return head + '<div class="cust-hint">Link previews are off on this server, so Copy link hands out the plain map link.</div>';
     }
     var on = shareSettings(_getEffective()).shareLinks;
-    // Both cards are drawn with map.dhm.profile.card, so one look is shown.
-    var src = profiles ? cfg.card : nodes.card;
+    // Every card is drawn with map.dhm.profile.card, so one look is shown.
+    var src = profiles ? cfg.card : share.card;
     var card = src && typeof src === 'object' ? src : null;
-    var hint = !nodes
-      ? 'Pasted into a chat, the link shows a card of the profile. Off: the plain map link, without a card.'
-      : profiles
-        ? 'Pasted into a chat, a profile link or a node link (repeaters, rooms and sensors) shows a card. Off: the plain map or node link, without a card.'
-        : 'Pasted into a chat, a node link (repeaters, rooms and sensors) shows a card of the node. Off: the plain node link, without a card.';
+    var hint = _shareHint(profiles, share);
     var shown = function (id, label, value) {
       return '<div class="cust-terrain-row"><div><span style="font-size:12px;font-weight:600">' + label + '</span></div>' +
         '<span id="' + id + '" style="font-size:13px">' + value + '</span></div>';
@@ -2267,12 +2287,13 @@
       '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-top:8px">The card is drawn on the server in the operator\u2019s saved palette, not with the colour overrides in this browser.</p>';
   }
 
-  // #811 M4: node cards without the terrain profile get the switch in a
-  // section of their own; with the profile it lives in that section.
+  // #811 M4 / #812 M4: node and packet cards without the terrain profile
+  // get the switch in a section of their own; with the profile it lives in
+  // that section.
   function _renderShareSection() {
     var tp = window.TerrainProfile;
     if (tp && typeof tp.offered === 'function' && tp.offered(window.MC_DHM_CFG)) return '';
-    if (!_nodeShareCfg()) return '';
+    if (!_cardShareCfg()) return '';
     return _renderShareSettings(null, '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Share previews</p>');
   }
 
