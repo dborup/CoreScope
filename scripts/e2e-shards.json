@@ -10,6 +10,22 @@
       "measurementNote": "New suite; #839 CS-Macmini rc19 findings 1, 2, 7, 8, 9 with an intercepted client config (staging base maps with a dummy token, DHM overlays with Aerial, monuments, antenna sites), a stubbed /api/masts with one 9-station site, a stubbed monument lookup and 1x1 third-party tiles: at 375x560 (light, dark), 360x640 and 640x360 the open layer list ends above the credit and a swipe plus a real tap reaches Nearby transmitters; the antenna popup clears every map button and the credit, its source link can be swiped to and its close button tapped, and stays whole at 1440x900; the tap that closes the layer control asks for no monument info; Reset All forgets the layer control's hillshade and monuments; the customizer logs no colour-format warning. About 60s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
     },
     {
+      "file": "test-issue-839-live-teardown-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #839 finding 1: leaving Live leaves none of its observers or listeners behind. From a cold start with real clicks at 1440x900 (Home, Live, Packets, dark-mode toggle): no TypeError on a theme toggle after Live is left (the rc19 regression from #735), none after two visits and two toggles, and after three visits no Live data-theme MutationObserver, no (pointer: fine) media-query listener and no extra mc-tile-provider-changed listener; leaving with a feed card open by Back leaves no outside-click listener. About 15s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
+      "file": "test-issue-839-nodes-landscape-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #839 finding 2: the Nodes list is reachable in phone landscape. From a cold start with touch at 640x360 and 568x320 (Home, More, Nodes, dismiss tips, one-finger CDP swipes with a wheel fallback): the first row ends fully above the bottom nav, uncovered, a tap opens #/nodes/{pubkey}, no sideways overflow; 375x560 portrait is a guard. About 35s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-734-customizer-overlays-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
@@ -170,6 +186,14 @@
       "output": "e2e",
       "meanSeconds": 0,
       "measurementNote": "New suite; #681 M6 customizer terrain settings with an intercepted dhm client-config block (profile: true) and a stubbed /api/terrain/profile that resolves ha/hb/model the way the server does: the five antenna-height defaults and the elevation-model select on the Display tab, the six chart colours on the Theme tab in light and dark, a changed antenna default re-measuring and redrawing an open profile without overruling an operator-set height or reaching the link, a changed chart colour becoming the chart's computed fill, a terrain-only default opening a terrain-only profile while a link that states the model still wins, 48px touch targets at 360x740 and 740x360, the export carrying the terrain section and no token with nothing under map.dhm in the client, and axe plus measured label contrast in light and dark. Review round 2 (PR#714) adds: a hex antenna height planted in storage is no default in the profile or the customizer, a pick over the translucent clutter colour keeps its alpha, and the Terrain Profile section is hidden with the profile off or no dhm block. About 85s locally; no CI duration measured yet. Assigned to shard 1 next to the other #680/#681 DHM suites."
+    },
+    {
+      "file": "test-issue-839-profile-ux-e2e.js",
+      "shard": 1,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #839 Path profile findings with an intercepted dhm and skraafoto client-config block and a stubbed /api/terrain/profile: at 375x560 and 640x360 with real taps and at 1440x900 with clicks, from a cold start, an A marker after the first pick, both ends and the chart cursor's dot in view once the profile is drawn and after fold/unfold, the distance axis in km, a visible Chart point hint, a too-long refusal with the limit in km, and a malformed /p link with a visible notice and a clean URL. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other profile suites."
     },
     {
       "file": "test-issue-790-profile-mobile-pick-e2e.js",

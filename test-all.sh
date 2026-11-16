@@ -154,9 +154,11 @@ run test-issue-721-move-endpoints.js
 run test-issue-727-share-link.js
 run test-issue-727-m4-share-customizer.js
 run test-issue-781-profile-cursor.js
+run test-issue-839-profile-ux.js
 run test-issue-737-skraafoto-viewer.js
 run test-issue-737-m3c-skraafoto-marks.js
 run test-issue-737-customizer-skraafoto.js
+run test-issue-839-card-skraafoto.js
 run test-issue-390-legacy-tile-followups.js
 run test-issue-728-esri-imagery.js
 run test-issue-728-ortho-base.js

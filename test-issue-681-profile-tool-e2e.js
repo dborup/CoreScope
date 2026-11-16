@@ -17,7 +17,8 @@
  *   3. picking two node markers, and a node plus a free map point;
  *   4. the deep link restores the exact state, and survives a reload;
  *   5. partial coverage draws a gap and shows no verdict;
- *   6. `none` renders the empty state with no console errors;
+ *   6. `none` renders the empty state, said once and without the DHM
+ *      credit (#839), with no console errors;
  *   7. no token in any request the browser issues, and zero requests to
  *      dataforsyningen.dk;
  *   8. exactly one /api/terrain/profile call per profile;
@@ -751,9 +752,16 @@ const VIEW = { lat: 37.62, lon: -122.1, zoom: 10 };
       const st = await panelState(page);
       assert(st.open, 'panel did not open');
       assert(st.chip === 'No verdict', 'chip = ' + st.chip);
-      assert(/Denmark only/i.test(st.status), 'empty state = ' + st.status);
+      assert(/entirely outside Denmark/i.test(st.status), 'empty state = ' + st.status);
       const svgs = await page.evaluate(() => document.querySelectorAll('[data-testid="tp-chart"] svg').length);
       assert(svgs === 0, 'a chart was drawn with no samples');
+      // #839: said once, and no DHM credit for a profile that used no DHM data.
+      assert(st.detail === '', 'the reason is said twice: ' + JSON.stringify(st.detail));
+      const credit = await page.evaluate(() => {
+        const c = document.querySelector('[data-testid="tp-panel"] .tp-credit-line');
+        return c ? getComputedStyle(c).display : 'absent';
+      });
+      assert(credit === 'none', 'the DHM credit is shown with no DHM data: ' + credit);
       assert(rec.consoleErrors.length === 0, rec.consoleErrors.join(' | '));
     });
     await ctx.close();

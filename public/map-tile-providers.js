@@ -1769,19 +1769,26 @@
     _buildControl();
 
     // Re-build when server config arrives async so newly-enabled providers appear
-    window.addEventListener('mc-tile-provider-changed', function (e) {
-      if (e && e.detail && e.detail.fromConfig) _buildControl();
-    });
+    var onConfigProviders = function (e) {
+      if (!map._mcGone && e && e.detail && e.detail.fromConfig) _buildControl();
+    };
+    window.addEventListener('mc-tile-provider-changed', onConfigProviders);
 
     // #734 — the customizer moved a DHM overlay default: rebuild, so the
     // contour label and minZoom follow at once. The on/off defaults apply
     // to the next map; layers and choices survive the rebuild. A removed
-    // map stops listening.
+    // map stops listening — to both events (#839: the config one used to
+    // stay, one per Live/Map visit).
     var onDHMDefaults = function () { if (!map._mcGone) _buildControl(); };
     window.addEventListener('dhm-defaults-changed', onDHMDefaults);
     map.on('unload', function () {
       map._mcGone = true;
-      try { if (window.removeEventListener) window.removeEventListener('dhm-defaults-changed', onDHMDefaults); } catch (_) {}
+      try {
+        if (window.removeEventListener) {
+          window.removeEventListener('dhm-defaults-changed', onDHMDefaults);
+          window.removeEventListener('mc-tile-provider-changed', onConfigProviders);
+        }
+      } catch (_) {}
     });
 
     // When the site theme flips, update the Auto tile via the existing _syncDarkTiles
