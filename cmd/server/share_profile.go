@@ -87,6 +87,9 @@ func (s *Server) registerShareRoutes(router *mux.Router, doc *indexDoc) {
 	if s.nodeCards != nil {
 		s.nodeCards.site = doc.og.publicHost()
 	}
+	if s.packetCards != nil {
+		s.packetCards.site = doc.og.publicHost()
+	}
 	router.HandleFunc(sharePath, s.handleShareProfile(doc)).Methods("GET", "HEAD")
 	router.HandleFunc(sharePath+"/", handleShareSlash).Methods("GET", "HEAD")
 }
@@ -107,6 +110,11 @@ func (s *Server) handleShareProfile(doc *indexDoc) http.HandlerFunc {
 		// profile grammar never sees one.
 		if _, ok := r.URL.Query()["node"]; ok {
 			s.handleShareNode(doc, w, r)
+			return
+		}
+		// #812 M2: a packet hash makes it a packet page (packet_share.go).
+		if _, ok := r.URL.Query()["packet"]; ok {
+			s.handleSharePacket(doc, w, r)
 			return
 		}
 		p := s.terrain

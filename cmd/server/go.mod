@@ -96,6 +96,12 @@ require github.com/meshcore-analyzer/nodecard v0.0.0
 
 replace github.com/meshcore-analyzer/nodecard => ../../internal/nodecard
 
+// internal/packetcard (#812 M1): the packet share-card renderer, served by
+// GET /api/packets/{hash}/card.png since #812 M2.
+require github.com/meshcore-analyzer/packetcard v0.0.0
+
+replace github.com/meshcore-analyzer/packetcard => ../../internal/packetcard
+
 require github.com/meshcore-analyzer/cardkit v0.0.0 // indirect
 
 replace github.com/meshcore-analyzer/cardkit => ../../internal/cardkit

@@ -825,6 +825,16 @@ type ShareConfig struct {
 	// Nodes is the node share card: /p?node=<pubkey> and
 	// GET /api/nodes/{pubkey}/card.png.
 	Nodes ShareNodesConfig `json:"nodes"`
+	// Packets is the packet share card (#812): /p?packet=<hash> and
+	// GET /api/packets/{hash}/card.png.
+	Packets SharePacketsConfig `json:"packets"`
+}
+
+// SharePacketsConfig is config.json `share.packets` (#812 M2). Off unless
+// Enabled (owner decision Q1). The card's theme and names setting are
+// map.dhm.profile.card's, shared with the terrain and node cards.
+type SharePacketsConfig struct {
+	Enabled bool `json:"enabled"`
 }
 
 // ShareNodesConfig is config.json `share.nodes` (#811 M3). Off unless

@@ -33,6 +33,7 @@ COPY internal/mastedb/ ../../internal/mastedb/
 COPY internal/cardkit/ ../../internal/cardkit/
 COPY internal/profilecard/ ../../internal/profilecard/
 COPY internal/nodecard/ ../../internal/nodecard/
+COPY internal/packetcard/ ../../internal/packetcard/
 COPY internal/copdem/ ../../internal/copdem/
 COPY internal/heritage/ ../../internal/heritage/
 COPY internal/buildings/ ../../internal/buildings/

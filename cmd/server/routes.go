@@ -106,6 +106,9 @@ type Server struct {
 	// nodeCards is the node share card (#811 M3); nil unless
 	// share.nodes.enabled.
 	nodeCards *nodeCards
+	// packetCards is the packet share card (#812 M2); nil unless
+	// share.packets.enabled.
+	packetCards *packetCards
 	// masts is the #724 antenna sites proxy; nil while map.masts is off
 	// (the endpoint then answers 404).
 	masts *mastsProxy
@@ -247,6 +250,7 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 	}
 	s.terrain = newTerrainProfilerFromConfig(cfg, s.dhm, db)
 	s.initNodeCards()
+	s.initPacketCards()
 	s.heritage = newHeritageQueryFromConfig(cfg)
 	s.skraafoto = newSkraafotoProxyFromConfig(cfg)
 	return s
@@ -498,6 +502,8 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/observers", s.handleObservers).Methods("GET")
 	r.HandleFunc("/api/traces/{hash}", s.handleTraces).Methods("GET")
 	r.HandleFunc("/api/packets/{hash}/path", s.handlePacketPath).Methods("GET")
+	// #812 M2: the packet share card; 404 unless share.packets.enabled.
+	r.HandleFunc("/api/packets/{hash}/card.png", s.handlePacketCard).Methods("GET")
 	r.HandleFunc("/api/paths/inspect", s.handlePathInspect).Methods("POST")
 	r.HandleFunc("/api/iata-coords", s.handleIATACoords).Methods("GET")
 	r.HandleFunc("/api/audio-lab/buckets", s.handleAudioLabBuckets).Methods("GET")
