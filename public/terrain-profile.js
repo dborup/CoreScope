@@ -1171,9 +1171,12 @@
     var txt = 'Terrain profile from ' + a + ' to ' + b + ', ' + fmtMetres(data.distanceM) + '. ' + chip.label + '. ' + chip.detail;
     var note = mixedNote(data);
     if (note) txt += ' ' + note;
+    // The verdict's worst point is the smallest Fresnel ratio, not
+    // always the least clearance on the path (#839): named for what it
+    // is, as the share card's AltText names it.
     var worst = data.verdict && data.verdict.worstClearanceM;
     if (worst !== null && worst !== undefined && isFinite(Number(worst))) {
-      txt += ' Worst clearance ' + fmtMetres(worst) + ' at ' + fmtMetres(data.verdict.worstAtM) + ' along the path.';
+      txt += ' Tightest point for the Fresnel zone: clearance ' + fmtMetres(worst) + ' at ' + fmtMetres(data.verdict.worstAtM) + ' along the path.';
     }
     if (surf && surf.show) txt += ' ' + surf.label + '. ' + surf.detail + (surf.note ? ' ' + SURFACE_NOTE : '');
     // The note rides with the classified band; an unavailable

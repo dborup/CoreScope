@@ -169,8 +169,10 @@ func AltText(resp TerrainProfileResponse, names [2]string, opt Options) string {
 	txt := "Terrain profile from " + a + " to " + b + ", " + fmtMetres(resp.DistanceM) + ". " + main.label + ". " + main.detail
 	wc, okC := value(resp.Verdict.WorstClearanceM)
 	at, okA := value(resp.Verdict.WorstAtM)
+	// The verdict's worst point is the smallest Fresnel ratio, which need
+	// not be the least clearance on the path (#839): named for what it is.
 	if main.state != "unknown" && okC && okA {
-		txt += " Worst clearance " + fmtMetres(wc) + " at " + fmtMetres(at) + " along the path."
+		txt += " Tightest point for the Fresnel zone: clearance " + fmtMetres(wc) + " at " + fmtMetres(at) + " along the path."
 	}
 	if surf, show := surfaceChip(resp); show {
 		txt += " " + surf.label + "."
@@ -770,7 +772,7 @@ func (r *renderer) footer(resp TerrainProfileResponse, main chip, opt Options, p
 			parts = append(parts, main.detail)
 		}
 	case okC && okA:
-		parts = append(parts, "Worst clearance "+fmtMetres(wc)+" at "+fmtMetres(at))
+		parts = append(parts, "Tightest Fresnel point: clearance "+fmtMetres(wc)+" at "+fmtMetres(at))
 	}
 	heights := fmtMetres(resp.A.AntennaM) + " / " + fmtMetres(resp.B.AntennaM)
 	if resp.A.Assumed || resp.B.Assumed {

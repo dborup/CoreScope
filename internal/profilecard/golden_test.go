@@ -58,7 +58,7 @@ func goldenCases() []goldenCase {
 		{name: "marginal-intrusion", resp: fxMarginal(), names: [2]string{"Ridge North", "Valley Node"}, state: "fresnel60", lightPNG: true,
 			want: map[string]string{"badge": "Terrain: Marginal", "summary": "heights assumed"}},
 		{name: "blocked", resp: fxBlocked(), names: [2]string{"West Tower", "East Tower"}, state: "blocked",
-			want: map[string]string{"badge": "Blocked", "summary": "Worst clearance"}},
+			want: map[string]string{"badge": "Blocked", "summary": "Tightest Fresnel point: clearance"}},
 		{name: "partial-gap", resp: fxPartial(), names: [2]string{"Coast Relay", "Island Relay"}, state: "unknown",
 			want: map[string]string{"badge": "No verdict", "summary": "path leaves Denmark"}},
 		{name: "coverage-none", resp: fxNone(), names: [2]string{"Far Away", ""}, state: "unknown",
