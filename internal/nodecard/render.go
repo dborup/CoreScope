@@ -86,6 +86,12 @@ func Carded(role string) bool {
 	return role == "repeater" || role == "room" || role == "sensor"
 }
 
+// CardedRoles lists the roles Carded accepts, for the client config
+// (#811 M4), so the browser offers /p?node= for exactly these.
+func CardedRoles() []string {
+	return []string{"repeater", "room", "sensor"}
+}
+
 // RoleLabel is the role as the card's badge names it; cmd/server puts the
 // same words in og:title.
 func RoleLabel(role string) string {

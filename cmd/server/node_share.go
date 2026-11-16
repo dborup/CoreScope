@@ -69,7 +69,8 @@ const (
 
 // nodeCards is the node card's state, built once by initNodeCards.
 type nodeCards struct {
-	names bool // map.dhm.profile.card.names
+	look  cardSettings // map.dhm.profile.card, published as share.card
+	names bool         // map.dhm.profile.card.names
 	pal   nodecard.Palette
 	palFP string
 	site  string // set by registerShareRoutes, before the server serves
@@ -107,6 +108,7 @@ func (s *Server) initNodeCards() {
 		set = resolveTerrainSettings(s.cfg.DHM.Profile, log.Printf)
 	}
 	c := &nodeCards{
+		look:   set.card,
 		names:  set.card.names,
 		cache:  dhm.NewCache[nodeCardKey](nodeCardCacheEntries, nodeCardCacheEntries*cardBytesPerEntry, nodeCardCacheTTL),
 		render: nodecard.Render,
@@ -439,4 +441,22 @@ func nodeCardQueryOK(q url.Values) bool {
 		}
 	}
 	return true
+}
+
+// ShareClientConfig is the `share` block of /api/config/client (#811 M4).
+// Present only while share.nodes.enabled is on: it tells the node page
+// that Copy URL may hand out /p?node= links, for which roles, and how the
+// card looks. Nothing else of the share config reaches the browser.
+type ShareClientConfig struct {
+	Nodes bool                 `json:"nodes"`
+	Roles []string             `json:"roles"` // nodecard.CardedRoles
+	Card  *DHMCardClientConfig `json:"card"`  // map.dhm.profile.card's theme and names
+}
+
+func (s *Server) shareClientConfig() *ShareClientConfig {
+	c := s.nodeCards
+	if c == nil {
+		return nil
+	}
+	return &ShareClientConfig{Nodes: true, Roles: nodecard.CardedRoles(), Card: cardClientConfig(c.look)}
 }
