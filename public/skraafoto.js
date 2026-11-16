@@ -46,7 +46,18 @@
  *     A–B, which sees the line from the side; otherwise north, as before;
  *   - the layer's aria-label says where the point is and that a line is
  *     drawn (markText).
- * Later (customizer, AGENTS rule 8): the default direction and zoom.
+ *
+ * #737 customizer (AGENTS rule 8): the viewer's defaults, section
+ * `skraafoto` of the customizer (public/customize-v2.js), by the one rule
+ * here (SETTINGS), read when a viewer opens:
+ *   - direction: 'auto' is the above (perpendicular from a profile,
+ *     otherwise north); a direction is the first photo from anywhere. A
+ *     deep-linked direction still wins;
+ *   - zoom: 'overview', or 'zoomed': each new photo (direction or year)
+ *     opens on its crop when its point is in frame; the button still wins;
+ *   - lineOfSight: false neither asks for the line nor draws it; the side
+ *     view of A–B is still the 'auto' direction.
+ * The server's map.skraafoto config stays server-only.
  *
  * Everything shown is built with createElement(NS) + textContent and
  * setAttribute; nothing from the server or a node passes through an HTML
@@ -76,6 +87,48 @@
   var COORD_RE = /^-?[0-9]{1,3}(\.[0-9]{1,10})?$/;
   // Photos kept as object URLs while a dialog is open: five a year.
   var MAX_KEPT = 10;
+
+  // ── Viewer defaults (#737 customizer) ──────────────────────────────────────
+  // The customizer's section `skraafoto` and the viewer share this rule,
+  // so the customizer stores exactly what the viewer reads. The defaults
+  // are M3c's behaviour.
+  var SETTING_KEYS = ['direction', 'zoom', 'lineOfSight'];
+  var SETTING_DEFAULTS = { direction: 'auto', zoom: 'overview', lineOfSight: true };
+  var DIRECTION_SETTINGS = ['auto'].concat(DIRECTIONS);
+  var ZOOM_SETTINGS = ['overview', 'zoomed'];
+  // What the customizer calls each value.
+  var SETTING_LABELS = {
+    direction: {
+      auto: 'Auto: across the line from a Path profile, otherwise north',
+      north: 'Looking north', east: 'Looking east', south: 'Looking south', west: 'Looking west',
+      nadir: 'Straight down (nadir)'
+    },
+    zoom: { overview: 'The whole photo', zoomed: 'Zoomed in around the point' }
+  };
+
+  /* validSetting: whether v is a usable value of viewer setting key. */
+  function validSetting(key, v) {
+    if (key === 'direction') return typeof v === 'string' && DIRECTION_SETTINGS.indexOf(v) >= 0;
+    if (key === 'zoom') return typeof v === 'string' && ZOOM_SETTINGS.indexOf(v) >= 0;
+    if (key === 'lineOfSight') return typeof v === 'boolean';
+    return false;
+  }
+
+  /* settings is the viewer's defaults: section (default: the live
+   * window.SITE_CONFIG.skraafoto, the customizer's effective config) over
+   * the built-ins, valid values only, key by key. */
+  function settings(section) {
+    var src = section;
+    if (src === undefined) {
+      try { src = global.SITE_CONFIG && global.SITE_CONFIG.skraafoto; } catch (_) { src = null; }
+    }
+    var ok = !!src && typeof src === 'object';
+    var out = {};
+    SETTING_KEYS.forEach(function (k) {
+      out[k] = ok && Object.prototype.hasOwnProperty.call(src, k) && validSetting(k, src[k]) ? src[k] : SETTING_DEFAULTS[k];
+    });
+    return out;
+  }
 
   // ── Pure helpers ───────────────────────────────────────────────────────────
 
@@ -434,10 +487,17 @@
     // element with the same test id, gets the focus back.
     var openerId = opener && opener.getAttribute ? opener.getAttribute('data-testid') : null;
     var line = sightLine(o.line);
-    var state = { year: validYear(o.year) ? o.year : 0, dir: DIRECTIONS.indexOf(o.dir) >= 0 ? o.dir : 'north', resp: null, photos: [], zoom: false };
+    // The customizer's defaults, as they are now (#737 customizer).
+    var pref = settings();
+    var linkDir = DIRECTIONS.indexOf(o.dir) >= 0 ? o.dir : null;
+    var prefDir = pref.direction !== 'auto' ? pref.direction : null;
+    var zoomFirst = pref.zoom === 'zoomed';
+    var drawLine = pref.lineOfSight;
+    // A deep link's direction, then the customizer's, then north.
+    var state = { year: validYear(o.year) ? o.year : 0, dir: linkDir || prefDir || 'north', resp: null, photos: [], zoom: false };
     // From a profile, the first answer picks the side view of the line,
-    // unless a direction was asked for (a deep link).
-    var autoDir = !!line && DIRECTIONS.indexOf(o.dir) < 0;
+    // unless a direction was asked for (a deep link or the customizer).
+    var autoDir = !!line && !linkDir && !prefDir;
     var seq = 0, pseq = 0, previewAbort = null, searchAbort = null;
     var kept = []; // [{ url, objectURL, crop }], newest last; crop: a zoom's headers
     var shown = null; // the object URL that is the image's source
@@ -642,6 +702,7 @@
       var c = crop ? { box: crop.box, marker: crop.marker, width: ui.img.naturalWidth, height: ui.img.naturalHeight } : null;
       var m = marks(p, c);
       if (!m) { hideMarks(); return; }
+      if (!drawLine) m.path = null;
       var root = ui.marks;
       root.textContent = '';
       root.setAttribute('viewBox', '0 0 ' + m.width + ' ' + m.height);
@@ -724,8 +785,8 @@
       ui.date.textContent = '';
       setState('loading', 'Looking up photos…');
       hideMarks();
-      state.zoom = false;
-      var url = searchURL(cfg, at.lat, at.lon, state.year, line);
+      state.zoom = zoomFirst;
+      var url = searchURL(cfg, at.lat, at.lon, state.year, drawLine ? line : null);
       fetcher(url, searchAbort ? { signal: searchAbort.signal } : undefined).then(function (r) {
         if (!r.ok) {
           var err = new Error('status ' + r.status);
@@ -853,7 +914,7 @@
       if (d === state.dir && dialog.getAttribute('data-state') !== 'error') return;
       if (!photoOf(d)) return;
       state.dir = d;
-      state.zoom = false;
+      state.zoom = zoomFirst;
       syncControls();
       writeHash();
       show();
@@ -969,11 +1030,42 @@
     open({ lat: link.lat, lon: link.lon, dir: link.dir, year: link.year, cfg: cfg });
   }
 
+  /* customizerReady resolves once the customizer has applied this
+   * browser's overrides to window.SITE_CONFIG (its pipeline ends with
+   * theme-changed, then initDone), so a cold deep link opens with the
+   * viewer's defaults (#737 customizer). At once without the customizer;
+   * after CUSTOMIZER_WAIT_MS at the latest, so a theme config that never
+   * comes cannot keep the link from opening. */
+  var CUSTOMIZER_WAIT_MS = 4000;
+  function customizerReady() {
+    var c = global._customizerV2;
+    if (!c || c.initDone || !global.addEventListener) return global.Promise.resolve();
+    return new global.Promise(function (resolve) {
+      var timer = null;
+      function done() {
+        global.removeEventListener('theme-changed', onTheme);
+        if (timer !== null) global.clearTimeout(timer);
+        resolve();
+      }
+      // initDone is set right after the pipeline's theme-changed.
+      function onTheme() { global.setTimeout(function () { if (c.initDone) done(); }, 0); }
+      global.addEventListener('theme-changed', onTheme);
+      timer = global.setTimeout(done, CUSTOMIZER_WAIT_MS);
+    });
+  }
+
   if (global.addEventListener) global.addEventListener('hashchange', fromHash);
-  if (global.Promise) global.Promise.resolve(global.MeshConfigReady).catch(function () {}).then(fromHash);
+  if (global.Promise) global.Promise.resolve(global.MeshConfigReady).catch(function () {}).then(customizerReady).then(fromHash);
 
   global.Skraafoto = {
     DIRECTIONS: DIRECTIONS,
+    // #737 customizer — the viewer defaults' one rule, shared with
+    // public/customize-v2.js (section `skraafoto`).
+    SETTINGS: {
+      KEYS: SETTING_KEYS, DEFAULTS: SETTING_DEFAULTS,
+      DIRECTIONS: DIRECTION_SETTINGS, ZOOMS: ZOOM_SETTINGS, LABELS: SETTING_LABELS,
+      valid: validSetting, resolve: settings
+    },
     MIN_YEAR: MIN_YEAR,
     HASH_PARAM: HASH_PARAM,
     offered: offered,
