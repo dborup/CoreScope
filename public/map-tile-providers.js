@@ -587,12 +587,20 @@
    *     checked (_uncheckGroupSiblings); both unchecked is Off.
    *   - contours is a toggle of its own, ?contours=1, above the hillshade
    *     and from the server's minZoom, so no tile is asked for below it.
+   *   - #792: elevation (colour by height) is a toggle of its own,
+   *     ?elevation=1, listed under the contours and drawn under the
+   *     hillshade (pane 245), so the hillshade shades the colours. The server renders it
+   *     from z9 to its maxZoom (13); above that the page upscales the z13
+   *     tiles (maxNativeZoom) up to the block's maxZoom, with no further
+   *     request. Its entry carries its own credit (the derived one, "data
+   *     bearbejdet") and the ramp's metres for the legend.
    * Each credit links its own dataset (#734 Q5). A block without
    * `overlays` comes from a server before #734: terrain only, as #680. */
   var DHM_OVERLAY_LABELS = {
     terrain: function () { return 'Hillshade: terrain (DHM)'; },
     surface: function () { return 'Hillshade: surface, buildings and trees (DHM)'; },
-    contours: function (cfg) { return 'Contour lines (DHM, zoom ' + cfg.minZoom + '+)'; }
+    contours: function (cfg) { return 'Contour lines (DHM, zoom ' + cfg.minZoom + '+)'; },
+    elevation: function (cfg) { return 'Colour by elevation (DHM, zoom ' + cfg.minZoom + '+)'; }
   };
 
   // A path on this server: not protocol-relative ("//host"), and not
@@ -630,10 +638,87 @@
         datasetName: e.datasetName, datasetUrl: e.datasetUrl
       });
       if (id === 'contours') cfg.minZoom = _contourMinZoom(e, _dhmSection());
+      if (id === 'elevation') {
+        // #792: its own credit and legend; a malformed entry is not offered.
+        var legend = _legendM(e.legendM);
+        if (typeof e.attribution !== 'string' || !e.attribution || !legend) return null;
+        cfg.attribution = e.attribution;
+        cfg.legendM = legend;
+        cfg.maxNativeZoom = e.maxZoom;
+        if (_isZoom(c.maxZoom) && c.maxZoom <= 19 && c.maxZoom > e.maxZoom) cfg.maxZoom = c.maxZoom;
+      }
       cfg.label = DHM_OVERLAY_LABELS[id](cfg);
       return cfg;
     }
     return null;
+  }
+
+  // #792: the legend's ramp stops, whole metres rising from 0, 2 to 16 of
+  // them; anything else is null.
+  function _legendM(a) {
+    if (!Array.isArray(a) || a.length < 2 || a.length > 16 || a[0] !== 0) return null;
+    for (var i = 0; i < a.length; i++) {
+      if (typeof a[i] !== 'number' || Math.floor(a[i]) !== a[i] || a[i] > 9000 || (i && a[i] <= a[i - 1])) return null;
+    }
+    return a.slice();
+  }
+
+  /* #792 — the elevation legend under its toggle: a bar of the ramp's
+   * colours, which are CSS variables (--dhm-elevation-<m>, public/
+   * style.css, the server's ramp: TestDHM792_LegendCSSMatchesTheRamp), and
+   * the metres of some stops at their place on it: the first, every 50 m
+   * that is not crowding the last, and the last with its unit. Built with
+   * createElement and textContent only. */
+  function elevationLegendLabels(legendM) {
+    var top = legendM[legendM.length - 1];
+    return legendM.filter(function (m, i) {
+      return i === 0 || i === legendM.length - 1 || (m % 50 === 0 && top - m >= top / 5);
+    });
+  }
+
+  function buildElevationLegend(doc, legendM) {
+    var top = legendM[legendM.length - 1];
+    var box = doc.createElement('div');
+    box.className = 'mc-elev-legend';
+    box.setAttribute('role', 'img');
+    box.setAttribute('aria-label', 'Elevation colours from ' + legendM[0] + ' to ' + top + ' m');
+    var bar = doc.createElement('div');
+    bar.className = 'mc-elev-legend-bar';
+    bar.style.background = 'linear-gradient(to right, ' + legendM.map(function (m) {
+      return 'var(--dhm-elevation-' + m + ') ' + (m / top * 100) + '%';
+    }).join(', ') + ')';
+    box.appendChild(bar);
+    var scale = doc.createElement('div');
+    scale.className = 'mc-elev-legend-scale';
+    var shown = elevationLegendLabels(legendM);
+    shown.forEach(function (m, i) {
+      var t = doc.createElement('span');
+      t.textContent = i === shown.length - 1 ? m + ' m' : String(m);
+      // The first label starts at the bar's left end, the last ends at its
+      // right end, the others are centred on their stop.
+      t.style.left = (m / top * 100) + '%';
+      if (i === shown.length - 1) t.style.transform = 'translateX(-100%)';
+      else if (i > 0) t.style.transform = 'translateX(-50%)';
+      scale.appendChild(t);
+    });
+    box.appendChild(scale);
+    return box;
+  }
+
+  /* #792 (#831 F1) — the legend of this control build shows only while the
+   * elevation layer is on the map: hidden now if it is off, then shown and
+   * hidden with each toggle. One listener per map; each control build
+   * replaces the legend it updates. */
+  function _followElevationLegend(map, legend) {
+    var on = function () { return !!(map._mcElevationLayer && map.hasLayer(map._mcElevationLayer)); };
+    legend.hidden = !on();
+    map._mcElevationLegend = legend;
+    if (map._mcElevationLegendWired) return;
+    map._mcElevationLegendWired = true;
+    map.on('overlayadd overlayremove', function (e) {
+      if (!e.layer || e.layer !== map._mcElevationLayer || !map._mcElevationLegend) return;
+      map._mcElevationLegend.hidden = e.type === 'overlayremove';
+    });
   }
 
   /* #734 (customizer, AGENTS rule 8) — this viewer's DHM overlay defaults,
@@ -647,15 +732,23 @@
    *     server's range (it can only be raised to at most the maximum).
    * Built-ins: off, off and the server's minZoom, so a viewer who sets
    * nothing sees exactly M2. The precedence is that of #724 M5: the link,
-   * then the choice this browser remembers, then this default. #792 (M3)
-   * adds its elevation-colour opacity to these keys. */
-  var DHM_SETTING_KEYS = ['hillshade', 'contours', 'contourMinZoom'];
+   * then the choice this browser remembers, then this default.
+   *   - elevationOpacity (#792): the colour-by-elevation layer's opacity in
+   *     whole percent, 10-100, built-in DHM_ELEVATION_OPACITY. Present in
+   *     the settings only while the server offers that overlay. */
+  var DHM_SETTING_KEYS = ['hillshade', 'contours', 'contourMinZoom', 'elevationOpacity'];
   var DHM_HILLSHADE_VALUES = ['off', 'terrain', 'surface'];
+  var DHM_ELEVATION_OPACITY = 60;
+  var DHM_ELEVATION_OPACITY_RANGE = [10, 100];
 
   function validDHMSetting(key, v) {
     if (key === 'hillshade') return DHM_HILLSHADE_VALUES.indexOf(v) >= 0;
     if (key === 'contours') return typeof v === 'boolean';
     if (key === 'contourMinZoom') return _isZoom(v) && v <= 19;
+    if (key === 'elevationOpacity') {
+      return typeof v === 'number' && Math.floor(v) === v &&
+        v >= DHM_ELEVATION_OPACITY_RANGE[0] && v <= DHM_ELEVATION_OPACITY_RANGE[1];
+    }
     return false;
   }
 
@@ -695,12 +788,15 @@
       contours: validDHMSetting('contours', src.contours) ? src.contours : false,
       contourMinZoom: range ? _contourMinZoom({ minZoom: range[0], maxZoom: range[1] }, src) : null
     };
+    if (getDHMOverlayConfig('elevation')) {
+      out.elevationOpacity = validDHMSetting('elevationOpacity', src.elevationOpacity) ? src.elevationOpacity : DHM_ELEVATION_OPACITY;
+    }
     return out;
   }
 
   // The DHM ids the server offers, in the control's order.
   function offeredDHMOverlays() {
-    return ['terrain', 'surface', 'contours'].filter(function (id) { return !!getDHMOverlayConfig(id); });
+    return ['terrain', 'surface', 'contours', 'elevation'].filter(function (id) { return !!getDHMOverlayConfig(id); });
   }
 
   function getHeritageConfig() {
@@ -768,7 +864,8 @@
     return c;
   }
 
-  // The DHM overlays' opacity is fixed here. Their defaults and the
+  // The DHM overlays' opacity is fixed here, but for the elevation colours'
+  // (#792, the customizer's elevationOpacity). Their defaults and the
   // contour min-zoom come from the customizer (#734), as do the
   // monuments' default and opacity (#723 M4) and the antenna sites'
   // default (#724 M5). An entry's `opacity` may be a function, read
@@ -808,6 +905,29 @@
       config: function () { return getDHMOverlayConfig('contours'); },
       label: function (cfg) { return cfg.label; },
       layers: function (cfg) { return cfg.layers; }
+    },
+    {
+      // #792: colour by elevation, rendered by the server. Listed under the
+      // contour lines (#831 F1: on a 375x560 phone a row above them pushed
+      // them out of the visible list) but drawn under the hillshade (245 <
+      // 250), outside the dark-theme filters: the colours are shown as
+      // served, at this viewer's opacity. Its legend shows only while it
+      // is on, so the off row costs one line.
+      id: 'dhm-elevation', storageKey: 'mc-elevation-dhm', hashParam: 'elevation', layerProp: '_mcElevationLayer',
+      pane: 'mcElevationPane', paneZ: 245, paneClass: 'mc-elevation-pane', className: 'mc-elevation-tiles',
+      opacity: function () { return dhmOverlaySettings().elevationOpacity / 100; },
+      settingsEvent: 'dhm-defaults-changed',
+      retryPlaceholders: true,
+      config: function () { return getDHMOverlayConfig('elevation'); },
+      label: function (cfg) { return cfg.label; },
+      layers: function (cfg) { return cfg.layers; },
+      decorate: function (map, cfg, labelEl) {
+        var doc = labelEl.ownerDocument || document;
+        if (!labelEl.parentNode) return;
+        var legend = buildElevationLegend(doc, cfg.legendM);
+        _followElevationLegend(map, legend);
+        labelEl.parentNode.insertBefore(legend, labelEl.nextSibling);
+      }
     },
     {
       // Protection-zone polygons under the monument points. The WMS draws
@@ -1125,7 +1245,7 @@
     // request, layers, styles, format, transparent, version, width, height,
     // crs and bbox (the DHM proxy accepts nothing else). `bounds` keeps
     // Leaflet from requesting tiles outside the data at all.
-    var layer = L.tileLayer.wms(cfg.url, {
+    var opts = {
       layers: o.layers(cfg),
       styles: '',
       format: 'image/png',
@@ -1140,11 +1260,16 @@
       bounds: L.latLngBounds(cfg.bounds),
       attribution: _overlayCredit(cfg),
       className: o.className
-    });
+    };
+    // #792: a GridLayer option, so never a WMS parameter.
+    if (cfg.maxNativeZoom) opts.maxNativeZoom = cfg.maxNativeZoom;
+    var layer = L.tileLayer.wms(cfg.url, opts);
     if (o.settingsEvent) _followSettings(layer, o);
     return o.retryPlaceholders ? retryPlaceholderTiles(map, layer) : layer;
   }
 
+  // An overlay's opacity: fixed, or this viewer's customizer value
+  // (#723 M4 monuments, #792 elevation colours).
   function _overlayOpacity(o) { return typeof o.opacity === 'function' ? o.opacity() : o.opacity; }
 
   /* #723 M4 — a layer whose opacity the customizer sets reads it each time
@@ -1502,7 +1627,11 @@
     validSetting: validDHMSetting,
     settings: dhmOverlaySettings,
     contourZoomRange: dhmContourZoomRange,
-    offered: offeredDHMOverlays
+    offered: offeredDHMOverlays,
+    // #792
+    ELEVATION_OPACITY_RANGE: DHM_ELEVATION_OPACITY_RANGE,
+    elevationLegendLabels: elevationLegendLabels,
+    buildElevationLegend: buildElevationLegend
   };
   window.MC_setLayerAttribution         = setLayerAttribution;
   window.MC_baseLayerLabel              = baseLayerLabel;

@@ -431,10 +431,11 @@ type PacketStore struct {
 	hashSizeInfoCache map[string]*hashSizeNodeInfo
 	hashSizeInfoAt    time.Time
 
-	// #807: pubkey → hash size of the node's newest size-declaring ADVERT in
-	// SQLite (hash_size_last_known.go). Fills hash_size only when the window
-	// above has none. Replaced wholesale on refresh; bounded by len(nodes).
-	lastKnownHashSizes atomic.Pointer[map[string]int]
+	// #807/#848: pubkey → the node's last known advert facts in SQLite
+	// (hash_size_last_known.go): hash size and newest own ADVERT. Used only
+	// when the window has none. Replaced wholesale on refresh; bounded by
+	// len(nodes).
+	lastKnownAdverts atomic.Pointer[map[string]LastKnownAdvert]
 
 	// Cached relay stats batch result — recomputed at most once every 300s
 	// or when byPathHop changes (see invalidateRelayStatsCache).
@@ -10624,6 +10625,7 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 	}
 
 	todayStart := time.Now().UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
+	lastKnown := s.LastKnownAdverts() // #848: one atomic load for every row
 	results := make([]map[string]interface{}, 0, len(nodes))
 	relaySeen := make(map[int]struct{})    // request-local relay-evidence dedupe scratch
 	heard := newHeardByAccumulator("", pm) // reset per node, storage reused
@@ -10648,6 +10650,7 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 			heard.add(pkt)
 		}
 		s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard, relaySeen)
+		advertSource := applyLastKnownAdvert(&lastHeard, &lastAdvert, lastKnown[n.pk].LastAdvert) // #848
 		direct, relay := heard.lists(nil)
 
 		results = append(results, map[string]interface{}{
@@ -10660,6 +10663,7 @@ func (s *PacketStore) GetBulkHealth(limit int, region, area string) []map[string
 				TotalTransmissions: len(packets), TotalObservations: totalObservations,
 				TotalPackets: len(packets), PacketsToday: packetsToday, AvgSnr: heard.avgSnr(),
 				LastHeard: timestampPointer(lastHeard), LastAdvert: timestampPointer(lastAdvert),
+				LastAdvertSource: advertSource,
 			},
 			"directObservers": direct,
 			"relayObservers":  relay,
@@ -10745,6 +10749,13 @@ func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]in
 		heard.add(pkt)
 	}
 	s.updateIndexedRelayActivityLocked(activityKey, pm, &lastHeard, make(map[int]struct{}))
+	// #848: an advert older than the window comes from SQLite. The snapshot is
+	// keyed by nodes.public_key, which the DB row carries.
+	knownKey := pubkey
+	if pk, _ := node["public_key"].(string); pk != "" {
+		knownKey = pk
+	}
+	advertSource := applyLastKnownAdvert(&lastHeard, &lastAdvert, s.LastKnownAdverts()[knownKey].LastAdvert)
 
 	// Issue #1290: surface listener/repeater hint on node detail by
 	// looking up can_relay for each observer that heard this node.
@@ -10795,6 +10806,7 @@ func (s *PacketStore) GetNodeHealth(pubkey string, now time.Time) (map[string]in
 			TotalTransmissions: len(packets), TotalObservations: totalObservations,
 			TotalPackets: len(packets), PacketsToday: packetsToday, AvgSnr: heard.avgSnr(),
 			AvgHops: &avgHops, LastHeard: timestampPointer(lastHeard), LastAdvert: timestampPointer(lastAdvert),
+			LastAdvertSource: advertSource,
 		},
 		"recentPackets": recentPackets,
 		"activity24h":   activity,

@@ -152,6 +152,7 @@ run test-issue-681-m6-customizer-terrain.js
 run test-issue-790-profile-compact.js
 run test-issue-721-move-endpoints.js
 run test-issue-727-share-link.js
+run test-issue-811-node-share-handoff.js
 run test-issue-727-m4-share-customizer.js
 run test-issue-781-profile-cursor.js
 run test-issue-839-profile-ux.js
@@ -168,6 +169,7 @@ run test-packets-window-pinned.js
 run test-issue-733-dhm-credit.js
 run test-issue-734-dhm-overlays.js
 run test-issue-734-customizer-overlays.js
+run test-issue-792-elevation-overlay.js
 run test-issue-738-foreign-fill-ui.js
 run test-issue-730-buildings-ui.js
 run test-issue-752-inset-attribution.js

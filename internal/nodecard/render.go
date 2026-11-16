@@ -86,7 +86,9 @@ func Carded(role string) bool {
 	return role == "repeater" || role == "room" || role == "sensor"
 }
 
-func roleLabel(role string) string {
+// RoleLabel is the role as the card's badge names it; cmd/server puts the
+// same words in og:title.
+func RoleLabel(role string) string {
 	switch role {
 	case "repeater":
 		return "Repeater"
@@ -166,7 +168,7 @@ func (r *renderer) header(in NodeCardInput, opt Options) {
 	right := Width - safeMargin
 	roleC := cardkit.Opaque(r.pal.roleColor(in.Role))
 
-	label := roleLabel(in.Role)
+	label := RoleLabel(in.Role)
 	bw := r.fs.Measure(label, badgeSize, true) + 2*badgePad
 	badge := image.Rect(right-bw, 34, right, 78)
 	r.cv.Pill(badge, roleC)
@@ -179,7 +181,7 @@ func (r *renderer) header(in NodeCardInput, opt Options) {
 		name = r.fs.DrawableName(in.Name)
 	}
 	if name == "" {
-		name = fallbackTitle(in.PubKey)
+		name = FallbackTitle(in.PubKey)
 	}
 	size, title := r.fit(name, titleSize, minTitleSize, true, badge.Min.X-safeMargin-textX)
 	r.text("title", title, textX, titleBaseline, size, true, cardkit.Opaque(r.pal.Text))
@@ -191,9 +193,9 @@ func (r *renderer) header(in NodeCardInput, opt Options) {
 	r.cv.HLine(safeMargin, right, headerRule, 1, 0, cardkit.Opaque(r.pal.Border))
 }
 
-// fallbackTitle is the title when the name is hidden or cannot be drawn:
+// FallbackTitle is the title when the name is hidden or cannot be drawn:
 // "Node" and the first 8 characters of the key, only when they are hex.
-func fallbackTitle(key string) string {
+func FallbackTitle(key string) string {
 	if len(key) < 8 {
 		return "Node"
 	}
@@ -206,6 +208,26 @@ func fallbackTitle(key string) string {
 }
 
 // ── Stat clauses ─────────────────────────────────────────────────────────
+
+// Clause is one stat clause as the card draws it, for the text of the
+// preview (og:description) and the card's version hash (#811 M3), so the
+// text and the picture can never say different things.
+type Clause struct {
+	Label, Value, Detail string
+	// Over is a seen airtime at or over the duty-cycle limit, drawn in the
+	// warning colour.
+	Over bool
+}
+
+// Clauses are the stat clauses Render draws for in, in drawing order.
+func Clauses(in NodeCardInput) []Clause {
+	ts := tiles(in)
+	out := make([]Clause, len(ts))
+	for i, t := range ts {
+		out[i] = Clause{Label: t.label, Value: t.value, Detail: t.detail, Over: t.over}
+	}
+	return out
+}
 
 // tiles are the stat clauses for in, in drawing order. An absent or
 // invalid value (nil, negative, NaN, an airtime over 100 %) drops its

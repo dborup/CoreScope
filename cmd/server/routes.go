@@ -103,6 +103,9 @@ type Server struct {
 	// terrain is the #681 terrain profile; nil unless the proxy is active
 	// and map.dhm.profile.enabled (the endpoint then answers 404).
 	terrain *terrainProfiler
+	// nodeCards is the node share card (#811 M3); nil unless
+	// share.nodes.enabled.
+	nodeCards *nodeCards
 	// masts is the #724 antenna sites proxy; nil while map.masts is off
 	// (the endpoint then answers 404).
 	masts *mastsProxy
@@ -243,6 +246,7 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 		masts: newMastsProxyFromConfig(cfg),
 	}
 	s.terrain = newTerrainProfilerFromConfig(cfg, s.dhm, db)
+	s.initNodeCards()
 	s.heritage = newHeritageQueryFromConfig(cfg)
 	s.skraafoto = newSkraafotoProxyFromConfig(cfg)
 	return s
@@ -432,6 +436,8 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/nodes/{pubkey}/clock-skew", s.handleNodeClockSkew).Methods("GET")
 	r.HandleFunc("/api/observers/clock-skew", s.handleObserverClockSkew).Methods("GET")
 	r.HandleFunc("/api/nodes/{pubkey}/neighbors", s.handleNodeNeighbors).Methods("GET")
+	// #811 M3: the node share card; 404 unless share.nodes.enabled.
+	r.HandleFunc("/api/nodes/{pubkey}/card.png", s.handleNodeCard).Methods("GET")
 	// Keep specific sub-routes (…/reach, …/rx-coverage) registered BEFORE the
 	// catch-all /api/nodes/{pubkey} — mux matches in registration order, so
 	// reordering these below the catch-all would shadow them and break the route.
@@ -1983,7 +1989,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 
 	if s.store != nil {
 		hashInfo := s.store.GetNodeHashSizeInfo()
-		lastKnownHS := s.store.LastKnownHashSizes() // #807
+		lastKnown := s.store.LastKnownAdverts() // #807
 		relayWindow := s.cfg.GetHealthThresholds().RelayActiveHours
 		// #1257: bulk-compute relay info + usefulness scores ONCE per
 		// request (cached 15s) instead of calling the per-node helpers
@@ -2022,7 +2028,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		for _, node := range nodes {
 			if pk, ok := node["public_key"].(string); ok {
 				EnrichNodeWithHashSize(node, hashInfo[pk])
-				EnrichNodeWithLastKnownHashSize(node, lastKnownHS[pk])
+				EnrichNodeWithLastKnownHashSize(node, lastKnown[pk].HashSize)
 				mbEntry, _ := s.store.GetMultibyteCapFor(pk)
 				EnrichNodeWithMultiByte(node, mbEntry)
 				if role, _ := node["role"].(string); role == "repeater" || role == "room" {
@@ -2156,7 +2162,7 @@ func (s *Server) handleNodeDetail(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		hashInfo := s.store.GetNodeHashSizeInfo()
 		EnrichNodeWithHashSize(node, hashInfo[pubkey])
-		EnrichNodeWithLastKnownHashSize(node, s.store.LastKnownHashSizes()[pubkey]) // #807
+		EnrichNodeWithLastKnownHashSize(node, s.store.LastKnownAdverts()[pubkey].HashSize) // #807
 		mbEntry, _ := s.store.GetMultibyteCapFor(pubkey)
 		EnrichNodeWithMultiByte(node, mbEntry)
 		if role, _ := node["role"].(string); role == "repeater" || role == "room" {

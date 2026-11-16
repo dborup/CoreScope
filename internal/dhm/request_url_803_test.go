@@ -31,6 +31,14 @@ func TestRequestURLIsWhatTheClientSends(t *testing.T) {
 
 	var want []string
 	for _, id := range OverlayIDs() {
+		if o, _ := LookupOverlay(id); o.Rendered() {
+			// #792: one WCS raster for its tile, at its top zoom.
+			ek := TileKey{Z: ElevationMaxZoom, X: k.X >> (k.Z - ElevationMaxZoom), Y: k.Y >> (k.Z - ElevationMaxZoom)}
+			c.FetchOverlayAdmitted(ctx, nil, o, ek)
+			r, _ := ElevationRaster(ek)
+			want = append(want, RequestURL(opts.BaseURL, WCSService, r.CoverageQuery()))
+			continue
+		}
 		for _, h := range []Hillshade{HillshadeExaggerated, HillshadeTerrain} {
 			o, _ := LookupOverlay(id)
 			o = o.Resolve(h)
