@@ -228,6 +228,18 @@
       "measurementNote": "New suite; #727 M4 share previews in the customizer's Terrain Profile section with an intercepted dhm client-config block (profile, share and dhm.card) and a stubbed /api/terrain/profile: the switch (on by default), the operator's card theme and names (dark/shown and light/hidden) and the one palette line; off is stored as terrain.shareLinks false, survives a reload and makes Copy link hand out the #/map link, on again clears the override and hands out the /p link, all without re-measuring the open profile; resetAll restores it; no switch without dhm.share and none reachable with the Display tab disabled; the phone flow at 375x560 through the bottom nav's More sheet (48px row, a tap toggles and stores, no sideways overflow); axe in light and dark. About 60s locally; no CI duration measured yet. Assigned to shard 1 next to the other #681/#727 DHM suites."
     },
     {
+      "file": "test-issue-811-m4-node-share-e2e.js",
+      "shard": 3,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "CORESCOPE_SERVER_BIN": "./corescope-server",
+        "CORESCOPE_MIGRATE_BIN": "./corescope-migrate"
+      },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #811 M4 node share links end to end on its own Go server (ports from 13950, a migrated copy of the fixture, share.nodes.enabled on, no map.dhm): from cold starts with real clicks at 1440x900, Nodes, search and a repeater's row open the side pane whose Copy URL hands out /p?node=<pk>, Details and the node page's Copy URL hand out the same link, Copy short URL stays a #/nodes/ prefix link, a companion gets the plain link in both places, and the customizer's own Share previews section turns it off and on by a click; the copied link opened cold at 1440 and at 375x560 lands on #/nodes/<pk> with one document request and Back to the page before; a 375x560 touch phone reaches it by taps (More, Nodes, search, row, Copy URL); the og:image card loads at 1200x630 at 1440 and 375 px; without the server's share block Copy URL is the plain link. About 20s locally; no CI duration measured yet. Assigned to shard 3 next to the other suites that start their own server (#315)."
+    },
+    {
       "file": "test-issue-727-share-preview.js",
       "shard": 3,
       "env": {
