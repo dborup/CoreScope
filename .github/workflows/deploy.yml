@@ -251,6 +251,9 @@ jobs:
           # budget fails at 50 ms, twice the 25 ms target it logs against,
           # and the geometry ratio is a median of rounds (#759 review).
           (cd internal/profilecard && go test -count=1 -run 'TestRenderWithinBudget|TestRenderTimeIndependentOfSampleCount|TestGeometryLinearInSamples' -v ./... | grep -E '^(=== RUN|--- |ok|FAIL|PASS)|per card|draw:|geometry:')
+          # #792: the colour-by-elevation tile's CPU budget (decode, colour,
+          # encode; 50 ms limit, 25 ms target) skips itself under -race too.
+          (cd internal/dhm && go test -count=1 -run 'TestElevation792_CPUWithinBudget' -v . | grep -E '^(=== RUN|--- |ok|FAIL|PASS)|per tile')
           # internal/nodecard (#811 M2): the node share-card renderer,
           # served by cmd/server since M3; its per-card budget skips under
           # -race and runs once more without it, the same mechanism as the

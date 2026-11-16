@@ -21,6 +21,11 @@ package main
 // overlay keeps its own cache entries and shares the one per-client
 // budget and admission bound.
 //
+// #792: elevation (colour by height, z9–13) is no upstream layer: the
+// server renders it from one WCS DTM raster per tile (internal/dhm/
+// elevation.go), through the same route, gate, budget, admission, flight
+// and cache.
+//
 // Security properties, each pinned by dhm_proxy_test.go and the
 // internal/dhm tests:
 //   - Not an open proxy. The upstream service is a constant, every client
@@ -195,7 +200,7 @@ type DHMFillClientConfig struct {
 // DHMOverlayClientConfig is one entry of `dhm.overlays` in
 // /api/config/client (#734): an overlay id, the zoom range the proxy
 // serves it at, and the dataset its credit links (#733, #734 Q5). The
-// credit text and the licence are the block's own: every overlay is
+// credit text and the licence are the block's own: every WMS overlay is
 // Klimadatastyrelsen's rendering of Danmarks Højdemodel under CC BY 4.0,
 // shown as served.
 type DHMOverlayClientConfig struct {
@@ -204,11 +209,17 @@ type DHMOverlayClientConfig struct {
 	MaxZoom     int    `json:"maxZoom"`
 	DatasetName string `json:"datasetName"`
 	DatasetURL  string `json:"datasetUrl"`
+	// Attribution replaces the block's credit for an overlay CoreScope
+	// renders itself (#792): dhm.AttributionDerived, "data bearbejdet".
+	Attribution string `json:"attribution,omitempty"`
+	// LegendM are the ramp stops in metres of the elevation colours
+	// (#792); the colours are --dhm-elevation-<m> in public/style.css.
+	LegendM []int `json:"legendM,omitempty"`
 }
 
 // dhmClientOverlayIDs are the overlays offered to the page: every id the
-// proxy serves (#734 M2 adds contours, from z14).
-var dhmClientOverlayIDs = []string{"terrain", "surface", "contours"}
+// proxy serves (#734 M2 adds contours, from z14; #792 elevation, z9–13).
+var dhmClientOverlayIDs = []string{"terrain", "surface", "contours", "elevation"}
 
 func dhmOverlayClientConfigs() []DHMOverlayClientConfig {
 	out := make([]DHMOverlayClientConfig, 0, len(dhmClientOverlayIDs))
@@ -217,13 +228,20 @@ func dhmOverlayClientConfigs() []DHMOverlayClientConfig {
 		if !ok {
 			continue // TestDHM734_OfferedOverlaysAreTableIDs pins that none is skipped
 		}
-		out = append(out, DHMOverlayClientConfig{
+		e := DHMOverlayClientConfig{
 			ID:          o.ID,
 			MinZoom:     o.MinZoom,
 			MaxZoom:     o.MaxZoom,
 			DatasetName: dhm.DatasetName,
 			DatasetURL:  o.DatasetURL,
-		})
+		}
+		if o.Rendered() {
+			e.Attribution = dhm.AttributionDerived
+			for _, s := range dhm.ElevationRamp {
+				e.LegendM = append(e.LegendM, s.M)
+			}
+		}
+		out = append(out, e)
 	}
 	return out
 }
@@ -327,7 +345,7 @@ func dhmTileQueryParams() []paramMeta {
 			// TileParams' layers is the #680 value, the terrain alias.
 			out = append(out, paramMeta{Name: k, Type: "string", Required: true,
 				Enum: append(dhm.OverlayIDs(), fixed[k]),
-				Description: "the overlay id: terrain, surface or contours; " + strconv.Quote(fixed[k]) +
+				Description: "the overlay id: terrain, surface, contours or elevation; " + strconv.Quote(fixed[k]) +
 					" is the #680 alias of terrain, accepted for one release"})
 			continue
 		}
@@ -533,6 +551,7 @@ const (
 	dhmProductOrtho                         // #728 orthophoto
 	dhmProductSurface                       // #734 surface hillshade
 	dhmProductContours                      // #734 contour lines
+	dhmProductElevation                     // #792 colour by elevation, rendered here
 )
 
 // overlayProduct is the product an upstream overlay's tiles are, by its
@@ -550,6 +569,8 @@ func overlayProduct(o dhm.Overlay) dhmProduct {
 		return dhmProductSurface
 	case dhm.ContourLayer:
 		return dhmProductContours
+	case dhm.TerrainCoverage:
+		return dhmProductElevation
 	}
 	panic("dhm: overlay without a cache product")
 }
@@ -565,6 +586,8 @@ func (pr dhmProduct) name() string {
 		return "surface"
 	case dhmProductContours:
 		return "contours"
+	case dhmProductElevation:
+		return "elevation"
 	}
 	return "terrain"
 }
@@ -580,6 +603,8 @@ func (pr dhmProduct) tileLabel() string {
 		return "surface hillshade tile"
 	case dhmProductContours:
 		return "contour tile"
+	case dhmProductElevation:
+		return "elevation tile"
 	}
 	return "hillshade tile"
 }
@@ -669,7 +694,7 @@ func (p *dhmProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, dhm.ErrBadRequest.Error())
 		return
 	}
-	if !key.IntersectsCoverage() {
+	if !overlay.Covers(key) {
 		writeDHMTile(w, dhmTransparentPNG, dhmBrowserMaxAge, "outside")
 		return
 	}
