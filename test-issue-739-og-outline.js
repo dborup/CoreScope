@@ -169,7 +169,9 @@ test('both generators read the GeoPackage through one shared reader', () => {
 test('the simplification tolerance in the block is the generator\'s, and documented in metres', () => {
   assert.strictEqual(Number(field('simplify_px')), genConst('SIMPLIFY_PX'));
   assert.strictEqual(Number(field('min_area_px2')), genConst('MIN_AREA_PX2'));
-  assert.ok(/SIMPLIFY_PX[^\n]*\n?[^\n]*\d+ m/.test(gen) || /0\.6 px[^.]*\d+ m/.test(gen), 'tolerance in metres not documented');
+  // On the constant's own line (v0.2.9 review nit, #824 F2: the looser
+  // pattern matched unrelated text and stayed green without the comment).
+  assert.ok(/^SIMPLIFY_PX\s*=\s*[\d.]+\s*#.*\d+ m/m.test(gen), 'tolerance in metres not documented');
 });
 
 console.log('\n=== #739 M2: outline matches the source polygon ===');

@@ -259,6 +259,30 @@ func tileRanges(t *testing.T, file []byte, level int) *dhm.ImageLevel {
 // tile of IFD2 is made undecodable).
 func TestCrop_ReadsOnlyTheBoxTiles(t *testing.T) {
 	b, _ := realZoom.Box(560, 300)
+	cropReadsOnlyBoxTiles(t, b)
+}
+
+// A box whose right edge is a tile edge reads and decodes no tile of the
+// next column: the tile range ends at the box's last pixel, not one past
+// it (v0.2.9 review nit, #829 N1).
+func TestCrop_BoxEndingOnATileEdge(t *testing.T) {
+	var b CropBox
+	found := false
+	for x := 0.0; x <= 1024 && !found; x += 0.5 {
+		b, _ = realZoom.Box(x, 300)
+		found = b.X > 0 && (b.X+b.W)%512 == 0 && b.X+b.W < realZoom.Width
+	}
+	if !found {
+		t.Fatal("no box ends on a tile edge")
+	}
+	if n := realZoom.tilesIn(b); n != 2*2 {
+		t.Fatalf("box %+v: %d tiles, want 2 across × 2 down", b, n)
+	}
+	cropReadsOnlyBoxTiles(t, b)
+}
+
+func cropReadsOnlyBoxTiles(t *testing.T, b CropBox) {
+	t.Helper()
 	inBox := map[int]bool{}
 	for ty := b.Y / 512; ty <= (b.Y+b.H-1)/512; ty++ {
 		for tx := b.X / 512; tx <= (b.X+b.W-1)/512; tx++ {
@@ -371,6 +395,62 @@ func TestCrop_ByteBudget(t *testing.T) {
 	}
 	if n := len(u.Log()); n != 1 {
 		t.Fatalf("%d reads, want the header only", n)
+	}
+}
+
+// The header's bytes count against a crop's budget: tiles that fit
+// MaxPreviewBytes on their own, but not with the header read before
+// them, are refused before they are read (v0.2.9 review nit, #829 N3).
+func TestCrop_ByteBudgetCountsTheHeader(t *testing.T) {
+	b, _ := realZoom.Box(560, 300)
+	x0, x1, y0, y1 := realZoom.tileSpan(b)
+	padded := func(pad int) []byte {
+		return zoomCOG(func(o *dhmtest.ImageCOGOptions) {
+			o.Block = func(level, i int, raw []byte) []byte {
+				if level == 2 {
+					return append(raw, make([]byte, pad)...)
+				}
+				return raw
+			}
+		})
+	}
+	boxBytes := func(file []byte) (n int64) {
+		l2 := tileRanges(t, file, 2)
+		for ty := y0; ty <= y1; ty++ {
+			for tx := x0; tx <= x1; tx++ {
+				_, k := l2.TileRange(ty*l2.TilesAcross() + tx)
+				n += k
+			}
+		}
+		return n
+	}
+	tiles := int64((x1 - x0 + 1) * (y1 - y0 + 1))
+	raw := boxBytes(padded(0))
+	pad := (MaxPreviewBytes - raw) / tiles
+	file := padded(int(pad))
+	u := skraafototest.New()
+	defer u.Close()
+	u.Put(previewPath, file)
+	cdn, z := openZoom(t, u)
+	if got := boxBytes(file); got > MaxPreviewBytes || got <= int64(MaxPreviewBytes-z.used) {
+		t.Fatalf("setup: box tiles %d bytes, want in (%d, %d]", got, MaxPreviewBytes-z.used, MaxPreviewBytes)
+	}
+	if _, err := cdn.Crop(context.Background(), z, b); dhm.FailureReason(err) != "preview too large" {
+		t.Fatalf("%v", err)
+	}
+	if n := len(u.Log()); n != 1 {
+		t.Fatalf("%d reads, want the header only", n)
+	}
+}
+
+// A level only a little larger than a crop has fewer tiles than a crop's
+// size alone suggests: maxTiles is clamped to the level's own tile count,
+// so a 1100 × 700 level on 384 px tiles (3 × 2 tiles) zooms, where the
+// unclamped 4 × 3 would refuse it (v0.2.9 review nit, #829 N4).
+func TestZoomFrame_MaxTilesClampedToTheLevel(t *testing.T) {
+	f := ZoomFrame{PreviewWidth: 1024, PreviewHeight: 652, Width: 1100, Height: 700, TileWidth: 384, TileHeight: 384}
+	if n := f.maxTiles(); n != 3*2 || n > MaxZoomTiles {
+		t.Fatalf("maxTiles %d, want 6 (3 × 2, the whole level)", n)
 	}
 }
 

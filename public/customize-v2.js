@@ -3837,6 +3837,10 @@
     renderHeritageSettings: _renderHeritageSettings,
     // #741 — exposed for tests; see test-issue-741-customizer-base-maps.js.
     renderTileProviderSelector: _renderTileProviderSelector,
-    hasResettableCustomization: _hasResettableCustomization
+    hasResettableCustomization: _hasResettableCustomization,
+    // v0.2.9 review nit (#825 N1) — exposed for tests; see
+    // test-issue-734-customizer-overlays.js (Display badge and order).
+    renderTabs: _renderTabs,
+    renderDisplay: _renderDisplay
   };
 })();

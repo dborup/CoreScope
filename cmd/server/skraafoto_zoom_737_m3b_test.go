@@ -10,8 +10,10 @@ import (
 	"image/jpeg"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/meshcore-analyzer/dhm/dhmtest"
@@ -147,6 +149,60 @@ func TestSkraafoto737M3b_CacheKey(t *testing.T) {
 	}
 	if b2, _ := f.Box(561, 301); skraafotoCropKey(photo, f, b2) != k {
 		t.Error("a point in the same box has another key")
+	}
+}
+
+// Concurrent cold zooms of one photo whose boxes share their X but not
+// their Y are two flights, not one: each gets its own crop, with its
+// marker inside it (v0.2.9 review nit, #829 N2).
+func TestSkraafoto737M3b_ZoomFlightKeyedByTheWholeBox(t *testing.T) {
+	e := newSkraafotoZoomEnv(t, SkraafotoConfig{DailyCap: intPtr(10)})
+	resp := decodeSkraafotoSearch(t, e.search(skraafotoAarhus))
+	ph := resp.Photos[2]
+	if w := e.get(skraafotoZoomURL(ph.Collection, ph.ID, 900, 100)); w.Code != 200 {
+		t.Fatalf("priming zoom: %d", w.Code) // caches how the photo zooms
+	}
+	f, ok := e.p.zoomFrame(skraafotoPhotoKey{ph.Collection, ph.ID})
+	if !ok {
+		t.Fatal("no cached zoom frame")
+	}
+	pts := [2][2]float64{{560, 300}, {560, 100}}
+	b0, _ := f.Box(pts[0][0], pts[0][1])
+	b1, _ := f.Box(pts[1][0], pts[1][1])
+	if b0.X != b1.X || b0.Y == b1.Y {
+		t.Fatalf("setup: boxes %+v and %+v must share X only", b0, b1)
+	}
+	gate, open := skraafotoGate(t)
+	e.up.CDNHook = func(w http.ResponseWriter, r *http.Request) bool {
+		<-gate
+		return false
+	}
+	var wg sync.WaitGroup
+	got := make([]*httptest.ResponseRecorder, 2)
+	for i, pt := range pts {
+		wg.Add(1)
+		go func(i int, x, y float64) {
+			defer wg.Done()
+			got[i] = e.get(skraafotoZoomURL(ph.Collection, ph.ID, x, y), skraafotoFrom(fmt.Sprintf("198.51.100.%d", i+1)))
+		}(i, pt[0], pt[1])
+	}
+	skraafotoWait(t, func() bool { return e.p.flight.Pending() == 2 })
+	open()
+	wg.Wait()
+	for i, w := range got {
+		if w.Code != 200 || w.Header().Get("X-CoreScope-Cache") != "miss" {
+			t.Fatalf("zoom %d: %d %q", i, w.Code, w.Header().Get("X-CoreScope-Cache"))
+		}
+		m := parseSkraafotoFloats(t, w.Header().Get("X-CoreScope-Skraafoto-Marker"), 2)
+		if m[0] < 0 || m[1] < 0 || m[0] > float64(b0.W) || m[1] > float64(b0.H) {
+			t.Fatalf("zoom %d: marker %v outside its crop", i, m)
+		}
+	}
+	if got[0].Header().Get("X-CoreScope-Skraafoto-Crop") == got[1].Header().Get("X-CoreScope-Skraafoto-Crop") {
+		t.Fatal("two boxes answered with one crop")
+	}
+	if n := e.p.previews.Len(); n != 3 {
+		t.Fatalf("%d cache entries, want the priming crop and the two new ones", n)
 	}
 }
 
