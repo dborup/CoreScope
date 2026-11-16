@@ -30,6 +30,7 @@ COPY internal/regions/ ../../internal/regions/
 COPY internal/channelregistry/ ../../internal/channelregistry/
 COPY internal/dhm/ ../../internal/dhm/
 COPY internal/mastedb/ ../../internal/mastedb/
+COPY internal/cardkit/ ../../internal/cardkit/
 COPY internal/profilecard/ ../../internal/profilecard/
 COPY internal/copdem/ ../../internal/copdem/
 COPY internal/heritage/ ../../internal/heritage/

@@ -1,35 +1,10 @@
 package profilecard
 
 import (
-	"strings"
 	"testing"
-)
 
-func TestCardName(t *testing.T) {
-	fonts := mustFonts(t)
-	cases := []struct{ in, want string }{
-		{"Søby Bakker", "Søby Bakker"},
-		{"Ørsted Mast — Æblehaven", "Ørsted Mast — Æblehaven"},
-		{"Łódź · Straße · Žižkov", "Łódź · Straße · Žižkov"},
-		{"Москва α", "Москва α"}, // Cyrillic and Greek are in the Go fonts
-		{"东京中继站", ""},            // CJK: all .notdef → fall back
-		{"🛰🛰🛰 ab", ""},           // mostly unmappable → fall back
-		{"Mast 🛰", "Mast"},       // one stray glyph is dropped, not boxed
-		{"Relay 🛰 North", "Relay North"},
-		{"  spaced \t\n  out  ", "spaced out"},
-		{"ctl\x00\x07\u0085x\u2028y\u202ez", "ctl x yz"},
-		{"", ""},
-		{"   ", ""},
-		{strings.Repeat("a", 100), strings.Repeat("a", maxNameRunes-1) + "…"},
-		{strings.Repeat("ø", 100), strings.Repeat("ø", maxNameRunes-1) + "…"},
-		{"\xff\xfe broken utf8", "broken utf8"},
-	}
-	for _, c := range cases {
-		if got := fonts.cardName(c.in); got != c.want {
-			t.Errorf("cardName(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
+	"github.com/meshcore-analyzer/cardkit"
+)
 
 func TestEndpointLabel(t *testing.T) {
 	fonts := mustFonts(t)
@@ -53,15 +28,15 @@ func TestEndpointLabel(t *testing.T) {
 		{TerrainEndpoint{}, "", 0, false, "Node A"},
 	}
 	for _, c := range cases {
-		if got := fonts.endpointLabel(c.end, c.name, c.i, c.hide); got != c.want {
+		if got := endpointLabel(fonts, c.end, c.name, c.i, c.hide); got != c.want {
 			t.Errorf("endpointLabel(%+v, %q, %d, %v) = %q, want %q", c.end, c.name, c.i, c.hide, got, c.want)
 		}
 	}
 }
 
-func mustFonts(t testing.TB) *fontSet {
+func mustFonts(t testing.TB) *cardkit.Fonts {
 	t.Helper()
-	f, err := loadFonts()
+	f, err := cardkit.LoadFonts()
 	if err != nil {
 		t.Fatal(err)
 	}
