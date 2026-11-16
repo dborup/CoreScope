@@ -96,6 +96,52 @@ test('the chart text names the tightest point of the Fresnel zone, as the card d
     'internal/profilecard/render.go AltText does not use the same words');
 });
 
+// ── 5. Where the photos are ─────────────────────────────────────────────────
+
+console.log('\n=== #839 finding 5: oblique photos only where they are ===\n');
+
+test('Padborg → Flensburg with the fill: A (Danish) has photos, B (in the fill) has none', () => {
+  // The bounds rectangle takes in Flensburg: the fill range is what says it is abroad.
+  const d = profile({ fill: [{ fromM: 3000, toM: 8000, source: 'copdem-glo30', resolutionM: 30 }] });
+  assert.ok(SF.covered(CFG, d.b), 'the #818 bounds alone take in Flensburg (the reason for this fix)');
+  eq(TP.photoCovered(d, CFG, TP.endPoint(d, 'a'), 0), true, 'A');
+  eq(TP.photoCovered(d, CFG, TP.endPoint(d, 'b'), d.distanceM), false, 'B');
+  eq(TP.photoCovered(d, CFG, { lat: 54.82, lon: 9.37 }, 1000), true, 'a chart point in Denmark');
+  eq(TP.photoCovered(d, CFG, { lat: 54.80, lon: 9.41 }, 5000), false, 'a chart point in the fill');
+  eq(TP.photoCovered(d, CFG, { lat: 54.81, lon: 9.39 }, 3000), false, 'the fill range includes its ends');
+  eq(TP.dhmStretch(d), true, 'the Danish stretch is there to pick on');
+});
+
+test('without the fill: the gap is where DHM has no data', () => {
+  const d = profile({ gapFrom: 3000 });
+  eq(TP.photoCovered(d, CFG, TP.endPoint(d, 'a'), 0), true, 'A');
+  eq(TP.photoCovered(d, CFG, TP.endPoint(d, 'b'), d.distanceM), false, 'B');
+  eq(TP.photoCovered(d, CFG, { lat: 54.8, lon: 9.4 }, 2990), false, 'nearest sample in the gap');
+  eq(TP.photoCovered(d, CFG, { lat: 54.82, lon: 9.37 }, 2700), true, 'nearest sample measured');
+});
+
+test('a path wholly in Skåne: no photo point at all', () => {
+  const d = profile({ none: true, a: { lat: 55.605, lon: 13.0, groundM: null }, b: { lat: 55.65, lon: 13.1, groundM: null } });
+  assert.ok(SF.covered(CFG, d.a) && SF.covered(CFG, d.b), 'the #818 bounds alone take in Malmö');
+  eq(TP.photoCovered(d, CFG, TP.endPoint(d, 'a'), 0), false, 'A');
+  eq(TP.photoCovered(d, CFG, TP.endPoint(d, 'b'), d.distanceM), false, 'B');
+  eq(TP.dhmStretch(d), false, 'nothing to pick on');
+});
+
+test('the #818 bounds still apply, and a block without bounds sets no limit', () => {
+  const d = profile({ a: { lat: 53.5, lon: 9.36 } });
+  eq(TP.photoCovered(d, CFG, TP.endPoint(d, 'a'), 0), false, 'outside the bounds');
+  eq(TP.photoCovered(d, Object.assign({}, CFG, { bounds: undefined }), TP.endPoint(d, 'a'), 0), true, 'an older server');
+  eq(TP.photoCovered(d, CFG, null, 0), false, 'no point');
+});
+
+test('a Danish path end to end: every point has photos', () => {
+  const d = profile({ a: { lat: 56.15, lon: 10.2 }, b: { lat: 56.16, lon: 10.1 } });
+  eq(TP.photoCovered(d, CFG, TP.endPoint(d, 'a'), 0), true);
+  eq(TP.photoCovered(d, CFG, TP.endPoint(d, 'b'), d.distanceM), true);
+  eq(TP.dhmStretch(d), true);
+});
+
 (async () => {
   for (const [name, fn] of asyncTests) {
     try { await fn(); passed++; console.log('  ✅ ' + name); }

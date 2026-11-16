@@ -463,6 +463,50 @@
     return { a: a, b: b, ha: clampHeight(data.a.antennaM), hb: clampHeight(data.b.antennaM) };
   }
 
+  /* dhmAt answers whether DHM itself measured the profile at d metres
+   * from A: not in a Copernicus fill range (#738) and not where the
+   * nearest sample has no data. The server decides that per sample with
+   * its foreign-land polygon (internal/dhm boundary.go), which the
+   * Skråfoto block's bounds rectangle cannot: it takes in Skåne and
+   * Flensburg (#839). A profile without samples rests on its coverage. */
+  function dhmAt(data, d) {
+    var cov = (data && data.coverage) || {};
+    if (cov.state === 'none' || !isFinite(d)) return false;
+    var fill = Array.isArray(cov.fill) ? cov.fill : [];
+    for (var i = 0; i < fill.length; i++) {
+      var r = fill[i];
+      if (r && d >= Number(r.fromM) && d <= Number(r.toM)) return false;
+    }
+    var s = data.samples;
+    if (!Array.isArray(s) || !s.length) return true;
+    // The samples run from A to B: the nearest one by bisection.
+    var lo = 0, hi = s.length - 1;
+    while (hi - lo > 1) {
+      var mid = (lo + hi) >> 1;
+      if (Number(s[mid].d) <= d) lo = mid; else hi = mid;
+    }
+    var near = Math.abs(Number(s[hi].d) - d) < Math.abs(d - Number(s[lo].d)) ? s[hi] : s[lo];
+    return near.dtm !== null && near.dtm !== undefined;
+  }
+
+  /* dhmStretch: some sample of the profile was measured by DHM, so a
+   * chart point can have photos. */
+  function dhmStretch(data) {
+    var s = data && data.samples;
+    if (!Array.isArray(s)) return false;
+    for (var i = 0; i < s.length; i++) if (dhmAt(data, Number(s[i].d))) return true;
+    return false;
+  }
+
+  /* photoCovered: the oblique photos have point p, d metres from A along
+   * the measured profile data: inside the Skråfoto block's bounds (the
+   * #818 node-action test, Skraafoto.covered) and measured by DHM there
+   * (dhmAt). Elsewhere the search always answers empty (#839). */
+  function photoCovered(data, cfg, p, d) {
+    var SF = global.Skraafoto;
+    return !!(p && SF && typeof SF.covered === 'function' && SF.covered(cfg, p) && dhmAt(data, d));
+  }
+
   /* pointAt is chart sample i as a map point: the #781 cursor's own
    * mapping (its fraction of the path, interpolated as the map draws the
    * line), so the photo is of the point the cursor showed. */
@@ -1958,10 +2002,12 @@
             line: sightLine(drawn && drawn.data) };
         };
       }
+      ui.sfEnds = {};
       [['a', 'A'], ['b', 'B']].forEach(function (s) {
         var b = SF.actionButton({ cls: 'tp-seg-btn tp-sf-btn', testid: 'tp-sf-' + s[0], text: s[1], icon: false, cfg: opts.skraafoto,
           title: 'Oblique aerial photo at ' + s[1], getPoint: end(s[0], s[1]) });
         b.setAttribute('aria-label', 'Oblique photo at ' + s[1]);
+        ui.sfEnds[s[0]] = b;
         ui.sfRow.appendChild(b);
       });
       ui.sfPoint = SF.actionButton({ cls: 'tp-seg-btn tp-sf-btn', testid: 'tp-sf-point', text: 'Chart point', icon: false, cfg: opts.skraafoto,
@@ -1993,6 +2039,25 @@
         : 'Click or tap the chart to pick a point; Enter picks the keyboard cursor\'s point.';
       ui.sfPoint.setAttribute('aria-label', picked ? 'Oblique photo at the chart point, ' + fmtDistance(picked.distanceM) + ' from A'
         : 'Oblique photo at a chart point: click or tap the chart first');
+      syncPhotoRow();
+    }
+
+    /* syncPhotoRow offers a photo button only where the photos are
+     * (photoCovered, #839): A and B each by their end, "Chart point" while
+     * DHM measured some of the path and the point picked, if any, is on
+     * it. The row goes with its last button, and with the chart. */
+    function syncPhotoRow() {
+      var data = drawn && drawn.data;
+      var cfg = opts.skraafoto;
+      var a = !!data && photoCovered(data, cfg, endPoint(data, 'a'), 0);
+      var b = !!data && photoCovered(data, cfg, endPoint(data, 'b'), Number(data.distanceM));
+      ui.sfEnds.a.hidden = !a;
+      ui.sfEnds.b.hidden = !b;
+      // dhmStretch walks the samples: once per drawn profile, not per pick.
+      if (data && drawn.stretch === undefined) drawn.stretch = dhmStretch(data);
+      ui.sfPoint.hidden = !data || !(a || b || drawn.stretch)
+        || !!(picked && !photoCovered(data, cfg, picked, picked.distanceM));
+      ui.sfRow.hidden = !data || (!a && !b && ui.sfPoint.hidden);
     }
 
     /* setDrawn records the profile now on the chart (null: none), which
@@ -2001,7 +2066,6 @@
       drawn = data ? { data: data, g: chartGeometry(data) } : null;
       if (!ui.sfRow) return;
       setPicked(null);
-      ui.sfRow.hidden = !drawn;
     }
 
     function swapControl() {
@@ -2578,6 +2642,10 @@
     // #737 M2: the node-detail fix rule and the photo points.
     hasFix: hasFix,
     endPoint: endPoint,
+    // #839: where the profile's oblique photos are.
+    dhmAt: dhmAt,
+    dhmStretch: dhmStretch,
+    photoCovered: photoCovered,
     sightLine: sightLine,
     pointAt: pointAt,
     chartIndexAt: chartIndexAt,

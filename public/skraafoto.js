@@ -9,8 +9,8 @@
  *
  * Entry points: a node with a fix inside the block's bounds, Denmark
  * (node page and side pane, nodeAction), and the Path profile's ends and
- * clicked chart point (terrain-profile.js, actionButton). Each opens one
- * dialog:
+ * clicked chart point where DHM measured them (terrain-profile.js,
+ * actionButton, photoCovered, #839). Each opens one dialog:
  *   - one search per point and year (GET searchUrl?lat=&lon=[&year=]),
  *     the newest year first, with a selector for the older ones;
  *   - a direction switcher for the five photos (N, E, S, W, nadir);
@@ -149,7 +149,9 @@
   /* covered: the point is inside the block's bounds, Denmark (#818), by
    * the heritage overlay's bounds test (HeritageInfo.inBounds, loaded on
    * every page). A block without bounds, an older server's, sets no
-   * limit. */
+   * limit. The bounds are a rectangle, so they take in Skåne and northern
+   * Schleswig too: the Path profile adds its own DHM coverage on top
+   * (terrain-profile.js photoCovered, #839). */
   function covered(cfg, p) {
     var hi = global.HeritageInfo;
     return !hi || typeof hi.inBounds !== 'function' || hi.inBounds(cfg && cfg.bounds, p.lat, p.lon);
@@ -1069,6 +1071,7 @@
     MIN_YEAR: MIN_YEAR,
     HASH_PARAM: HASH_PARAM,
     offered: offered,
+    covered: covered,
     nodePoint: nodePoint,
     searchURL: searchURL,
     previewURL: previewURL,

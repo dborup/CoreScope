@@ -227,7 +227,8 @@ function searchAnswer(q, o) {
    * o.holdSearch: the first search waits until rec.release() is called.
    * o.nodeName: name rewrites the moved node's name. o.abroad leaves the
    * moved node at its own (Californian) position. o.firstVisit marks no
-   * gesture hint as seen. */
+   * gesture hint as seen. o.profile(body) rewrites the profile answer
+   * (#839). */
   async function newCtx(o) {
     o = o || {};
     const ctx = await browser.newContext({
@@ -280,7 +281,8 @@ function searchAnswer(q, o) {
     await ctx.route(url => new URL(url).pathname === PROFILE_PATH, async (route) => {
       const u = new URL(route.request().url());
       rec.profile.push(u);
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profileFor(u.searchParams)) });
+      const body = profileFor(u.searchParams);
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(o.profile ? o.profile(body) : body) });
     });
     // The node under test, in every /api/nodes answer (list, detail).
     await ctx.route(url => /^\/api\/nodes(\/|$)/.test(new URL(url).pathname), async (route) => {
@@ -1244,6 +1246,46 @@ function searchAnswer(q, o) {
       assert(where.includes(evil), 'label: ' + where);
       assert(await page.evaluate(() => window.__sfXss === undefined), 'markup ran');
       assert(await page.$(DIALOG + ' img[src="x"]') === null, 'an <img> from the name');
+    });
+    await ctx.close();
+  }
+
+  // ── 13. #839: the profile's photo buttons only where DHM measured ─────────
+  {
+    // Cross-border: the second half filled from Copernicus (#738).
+    const { ctx, page } = await newCtx({ profile: (b) => Object.assign(b, {
+      coverage: { state: 'full', pct: 100, firstGapM: null, mixed: true, fill: [{ fromM: D / 2, toM: D, source: 'copdem-glo30', resolutionM: 30 }] },
+      attributionFill: 'Copernicus' }) });
+    await gotoProfile(page);
+    await page.waitForSelector(SF_ROW, { timeout: 5000 });
+    await step('#839 cross-border: A is offered, B (in the fill) is not', async () => {
+      assert(await page.isVisible(SF_A), 'A not offered in Denmark');
+      assert(!(await page.isVisible(SF_B)), 'B offered abroad');
+      assert(await page.isVisible(SF_POINT), 'no Chart point on a path partly in Denmark');
+    });
+    await step('#839 cross-border: a chart point in the fill takes Chart point away, one in Denmark brings it back', async () => {
+      const pr = await rect(page, PLOT + ' svg');
+      await page.mouse.click(pr.x + pr.w * sampleX(75) / VIEW_W, pr.y + pr.h / 2);
+      await page.waitForFunction((s) => document.querySelector(s).hidden, SF_POINT, { timeout: 3000 });
+      await page.mouse.click(pr.x + pr.w * sampleX(25) / VIEW_W, pr.y + pr.h / 2);
+      await page.waitForFunction((s) => { const b = document.querySelector(s); return !b.hidden && !b.disabled; }, SF_POINT, { timeout: 3000 });
+      assert(await page.isVisible(SF_ROW), 'the row went');
+    });
+    await shot(page, '839-cross-border');
+    await ctx.close();
+  }
+  {
+    // Wholly abroad: no DHM sample, so no samples at all (the server's shape).
+    const { ctx, page, rec } = await newCtx({ profile: (b) => Object.assign(b, {
+      a: Object.assign(b.a, { groundM: null }), b: Object.assign(b.b, { groundM: null }),
+      coverage: { state: 'none', pct: 0, firstGapM: 0 }, samples: [],
+      verdict: { state: 'unknown', model: 'dtm', criterion: 0.6, worstClearanceM: null, worstAtM: null, worstF1Fraction: null } }) });
+    await page.goto(`${BASE}/#/map?profile=${P}`, { waitUntil: 'domcontentloaded' });
+    await themeSettled(page);
+    await page.waitForSelector(PANEL + '.is-open [data-testid="tp-status"]', { timeout: 30000 });
+    await step('#839 wholly abroad: no oblique photo row, nothing asked', async () => {
+      assert(!(await page.isVisible(SF_ROW)), 'the row is offered on a path wholly abroad');
+      assert(rec.search.length === 0, 'searches ' + rec.search.length);
     });
     await ctx.close();
   }
