@@ -1,0 +1,17 @@
+badge   24px bold    x=1055 y= 64 w= 103 Repeater
+title   44px bold    x=  44 y= 78 w= 427 DK_7800_Kjeldbjerg
+area    24px regular x=  44 y=114 w= 117 Midtjylland
+label   22px regular x=  24 y=196 w= 104 Last heard
+value   44px bold    x=  24 y=252 w= 142 3h ago
+detail  20px regular x=  24 y=284 w= 215 2026-11-15 10:08 UTC
+label   22px regular x= 408 y=196 w= 131 Relayed 24 h
+value   44px bold    x= 408 y=252 w= 135 48,211
+label   22px regular x= 792 y=196 w= 174 Seen airtime 24 h
+value   44px bold    x= 792 y=252 w= 124 ≥4.5%
+detail  20px regular x= 792 y=284 w= 110 lower bound
+label   22px regular x=  24 y=366 w= 123 Busiest hour
+value   44px bold    x=  24 y=422 w= 149 ≥10.0%
+detail  20px regular x=  24 y=454 w= 207 at or over the 10% limit
+label   22px regular x= 408 y=366 w= 101 Neighbors
+value   44px bold    x= 408 y=422 w=  49 12
+asof    22px regular x=  24 y=594 w= 290 as of 2026-11-15 13:20 UTC

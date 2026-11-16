@@ -1,4 +1,4 @@
-package profilecard
+package cardkit
 
 import (
 	"fmt"
@@ -30,7 +30,7 @@ import (
 // stay under vector's 512 px floating-point threshold, so it runs its
 // fixed-point path, which is integer throughout.
 
-type fontSet struct {
+type Fonts struct {
 	regular, bold *sfnt.Font
 	buf           sfnt.Buffer
 	glyphs        map[glyphKey]*glyphMask // per render; never shared
@@ -49,21 +49,21 @@ type glyphMask struct {
 	dx, dy int
 }
 
-// loadFonts parses the embedded Go fonts. sfnt parses lazily, so this is
+// LoadFonts parses the embedded Go fonts. sfnt parses lazily, so this is
 // cheap enough to do per render, which keeps Render free of package state.
-func loadFonts() (*fontSet, error) {
+func LoadFonts() (*Fonts, error) {
 	r, err := sfnt.Parse(goregular.TTF)
 	if err != nil {
-		return nil, fmt.Errorf("profilecard: regular font: %w", err)
+		return nil, fmt.Errorf("cardkit: regular font: %w", err)
 	}
 	b, err := sfnt.Parse(gobold.TTF)
 	if err != nil {
-		return nil, fmt.Errorf("profilecard: bold font: %w", err)
+		return nil, fmt.Errorf("cardkit: bold font: %w", err)
 	}
-	return &fontSet{regular: r, bold: b, glyphs: map[glyphKey]*glyphMask{}}, nil
+	return &Fonts{regular: r, bold: b, glyphs: map[glyphKey]*glyphMask{}}, nil
 }
 
-func (fs *fontSet) font(bold bool) *sfnt.Font {
+func (fs *Fonts) font(bold bool) *sfnt.Font {
 	if bold {
 		return fs.bold
 	}
@@ -72,14 +72,14 @@ func (fs *fontSet) font(bold bool) *sfnt.Font {
 
 func ppem(size int) fixed.Int26_6 { return fixed.Int26_6(size << 6) }
 
-// has reports whether the font maps r to a real glyph (not .notdef).
-func (fs *fontSet) has(bold bool, r rune) bool {
+// Has reports whether the font maps r to a real glyph (not .notdef).
+func (fs *Fonts) Has(bold bool, r rune) bool {
 	gi, err := fs.font(bold).GlyphIndex(&fs.buf, r)
 	return err == nil && gi != 0
 }
 
-// measure is the advance width of s in pixels, rounded.
-func (fs *fontSet) measure(s string, size int, bold bool) int {
+// Measure is the advance width of s in pixels, rounded.
+func (fs *Fonts) Measure(s string, size int, bold bool) int {
 	f := fs.font(bold)
 	var w fixed.Int26_6
 	prev := sfnt.GlyphIndex(0)
@@ -101,10 +101,10 @@ func (fs *fontSet) measure(s string, size int, bold bool) int {
 	return w.Round()
 }
 
-// fit returns s, or s cut at a rune boundary with "…" appended, so that it
+// Fit returns s, or s cut at a rune boundary with "…" appended, so that it
 // is at most maxW pixels wide. It may return "" when not even "…" fits.
-func (fs *fontSet) fit(s string, size int, bold bool, maxW int) string {
-	if fs.measure(s, size, bold) <= maxW {
+func (fs *Fonts) Fit(s string, size int, bold bool, maxW int) string {
+	if fs.Measure(s, size, bold) <= maxW {
 		return s
 	}
 	runes := []rune(s)
@@ -112,22 +112,22 @@ func (fs *fontSet) fit(s string, size int, bold bool, maxW int) string {
 	lo, hi := 0, len(runes)
 	for lo < hi {
 		mid := (lo + hi + 1) / 2
-		if fs.measure(strings.TrimRight(string(runes[:mid]), " ")+"…", size, bold) <= maxW {
+		if fs.Measure(strings.TrimRight(string(runes[:mid]), " ")+"…", size, bold) <= maxW {
 			lo = mid
 		} else {
 			hi = mid - 1
 		}
 	}
 	out := strings.TrimRight(string(runes[:lo]), " ") + "…"
-	if fs.measure(out, size, bold) > maxW {
+	if fs.Measure(out, size, bold) > maxW {
 		return ""
 	}
 	return out
 }
 
-// draw paints s with its baseline origin at (x, y) and returns the pixel
+// Draw paints s with its baseline origin at (x, y) and returns the pixel
 // width drawn. Glyph origins snap to whole pixels.
-func (fs *fontSet) draw(cv *canvas, s string, x, y, size int, bold bool, c color.NRGBA) int {
+func (fs *Fonts) Draw(cv *Canvas, s string, x, y, size int, bold bool, c color.NRGBA) int {
 	f := fs.font(bold)
 	pen := fixed.I(x)
 	prev := sfnt.GlyphIndex(0)
@@ -147,7 +147,7 @@ func (fs *fontSet) draw(cv *canvas, s string, x, y, size int, bold bool, c color
 			for my := b.Min.Y; my < b.Max.Y; my++ {
 				for mx := b.Min.X; mx < b.Max.X; mx++ {
 					if a := g.mask.AlphaAt(mx, my).A; a != 0 {
-						cv.blend(ox+mx, oy+my, c, uint32(a))
+						cv.Blend(ox+mx, oy+my, c, uint32(a))
 					}
 				}
 			}
@@ -163,7 +163,7 @@ func (fs *fontSet) draw(cv *canvas, s string, x, y, size int, bold bool, c color
 // glyph rasterises one glyph at the pen origin, or returns it from the
 // per-render cache. nil for an empty glyph (a space) or one too large for
 // the fixed-point rasteriser.
-func (fs *fontSet) glyph(bold bool, size int, gi sfnt.GlyphIndex) *glyphMask {
+func (fs *Fonts) glyph(bold bool, size int, gi sfnt.GlyphIndex) *glyphMask {
 	key := glyphKey{bold, size, gi}
 	if g, ok := fs.glyphs[key]; ok {
 		return g
@@ -173,7 +173,7 @@ func (fs *fontSet) glyph(bold bool, size int, gi sfnt.GlyphIndex) *glyphMask {
 	return g
 }
 
-func (fs *fontSet) rasterise(bold bool, size int, gi sfnt.GlyphIndex) *glyphMask {
+func (fs *Fonts) rasterise(bold bool, size int, gi sfnt.GlyphIndex) *glyphMask {
 	segs, err := fs.font(bold).LoadGlyph(&fs.buf, gi, ppem(size), nil)
 	if err != nil || len(segs) == 0 {
 		return nil
@@ -295,13 +295,13 @@ func flattenCube(z *vector.Rasterizer, p0, p1, p2, p3 fixed.Point26_6, ox, oy fi
 
 // ── Names ────────────────────────────────────────────────────────────────
 
-const maxNameRunes = 48
+const MaxNameRunes = 48
 
-// sanitize drops invalid UTF-8, control and format characters (bidi
+// Sanitize drops invalid UTF-8, control and format characters (bidi
 // overrides, line separators, zero-width joiners) and collapses runs of
 // whitespace. What is left is plain text: the card draws text, never
 // markup, so nothing needs escaping.
-func sanitize(s string) string {
+func Sanitize(s string) string {
 	var b strings.Builder
 	space := false
 	for len(s) > 0 {
@@ -325,7 +325,7 @@ func sanitize(s string) string {
 	return b.String()
 }
 
-// cardName is a node name as the card can draw it, or "" when it cannot:
+// DrawableName is a node name as the card can draw it, or "" when it cannot:
 // a name whose glyphs mostly fall outside the Go fonts (CJK, emoji) would
 // print as a row of boxes, so the caller falls back to "Node A". A few
 // unmappable runes in an otherwise drawable name are dropped instead.
@@ -333,15 +333,15 @@ func sanitize(s string) string {
 // The name is composed (NFC) first: in NFD a letter and its accent are two
 // runes, and the Go fonts have no glyph for most combining marks, so
 // "Åbenrå" typed on a keyboard that decomposes would lose its rings.
-func (fs *fontSet) cardName(name string) string {
-	s := norm.NFC.String(sanitize(name))
+func (fs *Fonts) DrawableName(name string) string {
+	s := norm.NFC.String(Sanitize(name))
 	total, missing := 0, 0
 	for _, r := range s {
 		if r == ' ' {
 			continue
 		}
 		total++
-		if !fs.has(true, r) {
+		if !fs.Has(true, r) {
 			missing++
 		}
 	}
@@ -351,36 +351,14 @@ func (fs *fontSet) cardName(name string) string {
 	if missing > 0 {
 		var b strings.Builder
 		for _, r := range s {
-			if r == ' ' || fs.has(true, r) {
+			if r == ' ' || fs.Has(true, r) {
 				b.WriteRune(r)
 			}
 		}
-		s = sanitize(b.String())
+		s = Sanitize(b.String())
 	}
-	if utf8.RuneCountInString(s) > maxNameRunes {
-		s = strings.TrimRight(string([]rune(s)[:maxNameRunes-1]), " ") + "…"
+	if utf8.RuneCountInString(s) > MaxNameRunes {
+		s = strings.TrimRight(string([]rune(s)[:MaxNameRunes-1]), " ") + "…"
 	}
 	return s
 }
-
-// endpointLabel is what the card calls endpoint i (0 = A): a map point by
-// its coordinates (it has no name, whatever the caller passes), a node by
-// its drawable name, or "Node A"/"Node B" when names are off or the name
-// cannot be drawn.
-func (fs *fontSet) endpointLabel(end TerrainEndpoint, name string, i int, hide bool) string {
-	tag := "AB"[i : i+1]
-	if end.Kind == "point" {
-		if !finite(end.Lat) || !finite(end.Lon) {
-			return "Point " + tag
-		}
-		return fmt.Sprintf("%.4f, %.4f", end.Lat, end.Lon)
-	}
-	if !hide {
-		if n := fs.cardName(name); n != "" {
-			return n
-		}
-	}
-	return "Node " + tag
-}
-
-func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
