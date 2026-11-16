@@ -48,44 +48,63 @@
    *
    * Chrome in the top half of the map pushes the popup down, chrome in the
    * bottom half pushes it up; a column taller than half the map (the
-   * desktop Map Controls panel) is a wall instead and narrows the popup's
-   * horizontal room, so it never squeezes the popup to nothing. Only the
-   * chrome the popup will overlap after Leaflet's horizontal auto-pan
-   * counts, so a button on the far side of a wide map costs nothing. */
+   * desktop Map Controls panel, the zoom/layers column in landscape) is a
+   * wall instead and narrows the popup's horizontal room, so it never
+   * squeezes the popup to nothing. A narrow button the popup would overlap
+   * (the gear and the ruler on the right) becomes a wall too whenever the
+   * popup still fits beside it: in landscape the popup then sits beside the
+   * buttons instead of under them, where the close button of a popup for a
+   * site on the right used to land on the ruler (#841 F1). Only the chrome the
+   * popup will overlap after Leaflet's horizontal auto-pan counts, so a
+   * button on the far side of a wide map costs nothing. */
   function popupRoom(size, chrome, anchorX, boxW) {
-    var mid = size.y / 2, padL = GAP, padR = GAP, i, r;
-    var flat = [];
+    var mid = size.y / 2, walls = [], flat = [], i, r;
     for (i = 0; i < chrome.length; i++) {
       r = chrome[i];
-      if (r.top < mid && r.bottom > mid) {
-        if ((r.left + r.right) / 2 < size.x / 2) padL = Math.max(padL, r.right + GAP);
-        else padR = Math.max(padR, size.x - r.left + GAP);
-      } else {
-        flat.push(r);
-      }
+      if (r.top < mid && r.bottom > mid) walls.push(r); else flat.push(r);
     }
-    var x0 = Math.min(Math.max(anchorX - boxW / 2, padL), size.x - padR - boxW);
-    if (x0 < padL) x0 = padL;
-    var x1 = x0 + boxW;
+    function place(ws) {
+      var padL = GAP, padR = GAP;
+      for (var k = 0; k < ws.length; k++) {
+        var w = ws[k];
+        if ((w.left + w.right) / 2 < size.x / 2) padL = Math.max(padL, w.right + GAP);
+        else padR = Math.max(padR, size.x - w.left + GAP);
+      }
+      var x0 = Math.min(Math.max(anchorX - boxW / 2, padL), size.x - padR - boxW);
+      if (x0 < padL) x0 = padL;
+      return { padL: padL, padR: padR, x0: x0, x1: x0 + boxW };
+    }
+    var p = place(walls);
+    for (i = 0; i < flat.length; i++) {
+      r = flat[i];
+      if (r.right - r.left > size.x / 4 || !overlapsX(r, p.x0, p.x1)) continue;
+      var q = place(walls.concat([r]));
+      if (size.x - q.padL - q.padR < boxW) continue;
+      walls.push(r);
+      flat.splice(i, 1);
+      p = q;
+      i = -1; // the popup moved: look at what it overlaps now
+    }
     var padT = GAP, padB = GAP;
     for (i = 0; i < flat.length; i++) {
       r = flat[i];
-      if (!overlapsX(r, x0, x1)) continue;
+      if (!overlapsX(r, p.x0, p.x1)) continue;
       if (r.bottom <= mid) padT = Math.max(padT, r.bottom + GAP);
       else padB = Math.max(padB, size.y - r.top + GAP);
     }
     return {
-      autoPanPaddingTopLeft: [padL, padT],
-      autoPanPaddingBottomRight: [padR, padB],
+      autoPanPaddingTopLeft: [p.padL, padT],
+      autoPanPaddingBottomRight: [p.padR, padB],
       maxHeight: Math.max(MIN_POPUP, Math.floor(size.y - padT - padB - POPUP_EXTRA_H))
     };
   }
 
   // ── Leaflet glue (browser only) ─────────────────────────────────────────
 
-  // The page's own buttons and panels that float over the map; Leaflet's
-  // controls are found by class.
-  var PAGE_CHROME = '#mapControlsToggle, .map-controls, .bottom-nav';
+  // The page's own buttons and panels that float over the map (the gear,
+  // its panel, the path-profile ruler under the gear, the bottom nav);
+  // Leaflet's controls are found by class.
+  var PAGE_CHROME = '#mapControlsToggle, .map-controls, .map-profile-toggle, .bottom-nav';
 
   /* Map-relative rectangles of every visible piece of chrome over `map`,
    * except `skip` (the element being fitted) and anything inside it. */
@@ -143,7 +162,9 @@
     var t = null;
     function refit() {
       if (!control._map) { map.off('layeradd layerremove moveend', refit); return; }
-      if (t) return;
+      // A closed control has nothing to fit; expand() fits it on opening.
+      var c = control.getContainer && control.getContainer();
+      if (t || !c || c.className.indexOf('leaflet-control-layers-expanded') < 0) return;
       // After the attribution control has redrawn its credits.
       t = setTimeout(function () { t = null; fitList(map, control); }, 0);
     }

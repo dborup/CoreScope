@@ -243,6 +243,36 @@ test('one request per click: /api/terrain/heritage with lat and lon only', () =>
   assert(/Looking up/.test(s.map.popups[0]._content.textContent), 'no loading state');
 });
 
+test('the popup is fitted to the map chrome before each layout, loading and answer (#841 F6)', async () => {
+  const map = makeMap();
+  const fetch = makeFetch();
+  const fits = [];
+  const ctx = loadModule({
+    L: makeL(map),
+    MapChromeFit: { fitPopup(m, p, ll) { fits.push({ m, p, ll, content: p._content }); } },
+  });
+  const tile = new El('img'); tile.className = 'leaflet-tile';
+  ctx.HeritageInfo.attach(map, { config: () => CFG, isBusy: () => false, fetch, document: ctx.document });
+  const ll = { lat: 55.7563, lng: 9.4201 };
+  map.fire('preclick', { latlng: ll, originalEvent: { target: tile } });
+  map.fire('click', { latlng: ll, originalEvent: { target: tile } });
+  assert.strictEqual(fits.length, 1, 'not fitted before the loading state');
+  assert.strictEqual(fits[0].m, map);
+  assert.strictEqual(fits[0].p, map.popups[0]);
+  assert.strictEqual(fits[0].ll, ll);
+  assert.strictEqual(fits[0].content, null, 'fitted after the content was laid out');
+  answer(fetch.calls[0], 200, INSIDE);
+  await tick(); await tick();
+  assert.strictEqual(fits.length, 2, 'not fitted again for the answer');
+  assert(/Looking up/.test(fits[1].content.textContent), 'the answer was set before fitting');
+});
+
+test('without MapChromeFit the popup still opens (the module loads on its own)', () => {
+  const s = setup();
+  s.click();
+  assert.strictEqual(s.map.popups.length, 1);
+});
+
 test('a new click aborts the previous request and a stale answer is never shown', async () => {
   const s = setup();
   s.click();

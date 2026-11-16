@@ -13,17 +13,18 @@
  *   1. finding 1 — at 375x560 (light and dark), 360x640 and 640x360, with
  *      three overlay credits on, the open layer list ends above the
  *      attribution and the bottom nav; its last row, "Nearby transmitters
- *      (interference)", brought into view inside the list (touch swipes,
- *      or the list's own scroll where headless touch does not scroll, see
- *      bringIntoBox), is not covered by the credit and a real tap there
- *      switches it on; at zoom 12 the antenna "Zoom in to 13+" line under
- *      it can be seen too;
- *   2. finding 2 — at the same phone sizes, a tap on the antenna site opens
- *      a popup that overlaps no map button and stops above the credit; its
- *      source link, brought into view inside the popup, is uncovered; a tap
- *      on its ✕ closes it. At
- *      1440x900 the same popup shows whole, unscrolled, clear of the Map
- *      Controls panel (no regression);
+ *      (interference)", brought into view inside the list by real touch
+ *      swipes only (a list a finger cannot scroll fails, #841 F2), is not
+ *      covered by the credit and a real tap there switches it on; at zoom
+ *      12 the antenna "Zoom in to 13+" line under it can be seen too;
+ *   2. finding 2 — at the same phone sizes, with the antenna site on the
+ *      left, in the middle and on the right of the map (#841 F1), a tap on
+ *      it opens a popup that overlaps no map button (the gear and the
+ *      path-profile ruler included) and stops above the credit; its source
+ *      link, swiped into view inside the popup, is uncovered; a tap on its ✕
+ *      closes it and does not arm the ruler. The monument popup on the
+ *      right does the same (#841 F6). At 1440x900 the antenna popup shows
+ *      whole, unscrolled, clear of the Map Controls panel (no regression);
  *   3. finding 7 — at 375x560 and 640x360 with monuments on, the tap that
  *      closes the open layer control asks for no monument info and opens no
  *      popup; the next tap on the map still does;
@@ -219,23 +220,23 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     }, { b: box, t: target });
   }
   /* Brings `target` fully into view inside its scroll container `box`, as a
-   * viewer would: real touch swipes (touchStart, ten touchMoves, touchEnd
-   * through CDP), each moving a third of the box, until it is in view.
-   * Whether headless Chromium turns dispatched touches into a scroll differs
-   * by platform (it did not on the Linux CI runner, #841), so when the
-   * swipes have not moved the box at all, the box itself is scrolled by
-   * exactly the missing distance: only that container, never the map or
-   * the page. Either way the caller then asserts the target is uncovered
-   * and taps it. Returns how it got there. */
+   * viewer would: real touch swipes only (touchStart, ten touchMoves,
+   * touchEnd through CDP), each moving a third of the box, until it is in
+   * view. Nothing scrolls the box for it: a box a finger cannot scroll
+   * (#841 F2: `touch-action: none` on the list) fails here. Stepped
+   * dispatched touches scroll on the Linux runner, where
+   * Input.synthesizeScrollGesture did not (#841). Returns the number of
+   * swipes it took. */
   async function bringIntoBox(page, box, target) {
     let p = await placement(page, box, target);
-    if (p.inside) return 'already';
+    if (p.inside) return 0;
     const cdp = await page.context().newCDPSession(page);
+    let swipes = 0, stuck = 0;
     try {
       // Enough swipes for the whole content, however short the box (63 px
       // in landscape): each one moves about a third of it.
       const sh = await page.evaluate((s) => document.querySelector(s).scrollHeight, box);
-      for (let i = 0, n = 2; i < n && !p.inside; i++) {
+      for (let n = 2; swipes < n && !p.inside;) {
         const b = await page.locator(box).boundingBox();
         const x = Math.round(b.x + b.width / 2), dist = Math.max(30, Math.round(b.height / 3));
         n = Math.min(60, Math.ceil(sh / dist) + 2);
@@ -246,22 +247,16 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
           await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: y0 + Math.round(dir * dist * k / 10) }] });
         }
         await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        swipes++;
         await page.waitForTimeout(150);
         const after = await page.evaluate((s) => document.querySelector(s).scrollTop, box);
         p = await placement(page, box, target);
-        if (after === before) break; // touches do not scroll here
+        stuck = after === before ? stuck + 1 : 0;
+        if (stuck >= 2) break; // two swipes in a row moved nothing
       }
     } finally { await cdp.detach(); }
-    if (p.inside) return 'swipe';
-    await page.evaluate(({ b, t }) => {
-      const c = document.querySelector(b);
-      const cr = c.getBoundingClientRect(), r = document.querySelector(t).getBoundingClientRect();
-      c.scrollTop += r.bottom > cr.bottom ? r.bottom - cr.bottom : r.top - cr.top;
-    }, { b: box, t: target });
-    await page.waitForTimeout(100);
-    p = await placement(page, box, target);
-    assert(p.inside, `${target} cannot be brought into view inside ${box}: ${JSON.stringify(p)}`);
-    return 'scrollTop';
+    assert(p.inside, `${swipes} touch swipe(s) did not bring ${target} into view inside ${box}: ${JSON.stringify(p)}`);
+    return swipes;
   }
   // What a tap at the middle of `sel` would land on: inside `sel` or not.
   async function hitsItself(page, sel) {
@@ -301,7 +296,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         assert(on, 'the tap did not switch the interference layer on');
         assert(/mastsInt=1/.test(await page.evaluate(() => location.hash)), 'the link does not say mastsInt=1');
         assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
-        console.log('      (row reached by ' + how + ')');
+        console.log('      (row reached by ' + how + ' touch swipe(s))');
       } finally { await ctx.close(); }
     });
   }
@@ -346,37 +341,93 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     await page.waitForSelector('.mc-masts-popup', { timeout: 4000 });
     await page.waitForTimeout(700); // the auto-pan
   }
-  // Rectangles of the map's buttons and panels that the popup must not cover.
-  async function popupGeometry(page) {
-    return page.evaluate(() => {
+  // Rectangles of the map's buttons and panels that the popup `pop` must
+  // not cover: Leaflet's controls, the gear and its panel, the ruler.
+  async function popupGeometry(page, pop) {
+    return page.evaluate((pop) => {
       const rect = (el) => { const b = el.getBoundingClientRect(); return { l: b.left, t: b.top, r: b.right, b: b.bottom, w: b.width, h: b.height }; };
-      const wrap = rect(document.querySelector('.mc-masts-popup .leaflet-popup-content-wrapper'));
-      const chrome = Array.from(document.querySelectorAll('.leaflet-control:not(.leaflet-control-attribution), #mapControlsToggle, .map-controls'))
+      const wrap = rect(document.querySelector(pop + ' .leaflet-popup-content-wrapper'));
+      const chrome = Array.from(document.querySelectorAll('.leaflet-control:not(.leaflet-control-attribution), #mapControlsToggle, .map-controls, #mapProfileToggle'))
         .map((el) => ({ el: el.id || el.className.split(' ').slice(0, 2).join('.'), r: rect(el) })).filter((c) => c.r.w && c.r.h);
       const covered = chrome.filter((c) => c.r.l < wrap.r && wrap.l < c.r.r && c.r.t < wrap.b && wrap.t < c.r.b).map((c) => c.el);
       const map = rect(document.querySelector('.leaflet-container'));
-      const scrolled = document.querySelector('.mc-masts-popup .leaflet-popup-content').classList.contains('leaflet-popup-scrolled');
+      const scrolled = document.querySelector(pop + ' .leaflet-popup-content').classList.contains('leaflet-popup-scrolled');
       return { wrap, covered, map, scrolled };
+    }, pop || '.mc-masts-popup');
+  }
+  // The ruler is offered (dhm.profile, as on staging) and not armed.
+  async function rulerState(page) {
+    return page.evaluate(() => {
+      const b = document.querySelector('#mapProfileToggle');
+      const h = document.querySelector('.map-profile-hint');
+      return { shown: !!b && b.getBoundingClientRect().width > 0, pressed: b ? b.getAttribute('aria-pressed') : null, hint: !!h && !h.hidden };
     });
   }
+  // Pans the map, without animation, so the antenna site sits at the
+  // fraction (fx, fy) of the map: a stand-in for a viewer's pan.
+  async function placeSite(page, fx, fy) {
+    await page.evaluate(({ lat, lon, fx, fy }) => {
+      const m = (window.__mcMaps || []).filter((x) => x._mcMasts).pop();
+      const pt = m.latLngToContainerPoint([lat, lon]), sz = m.getSize();
+      m.panBy([pt.x - fx * sz.x, pt.y - fy * sz.y], { animate: false });
+    }, { lat: SITE.lat, lon: SITE.lon, fx, fy });
+    await page.waitForTimeout(600);
+  }
+  const SPOTS = [
+    { name: 'on the left', fx: 0.15, fy: 0.6 },
+    { name: 'in the middle', fx: 0.5, fy: 0.5 },
+    { name: 'on the right', fx: 0.85, fy: 0.6 },
+  ];
   for (const v of PHONES) {
-    await step(`finding 2, ${v.name}: the antenna popup fits, its source link can be reached and its ✕ closes it`, async () => {
-      const { ctx, page, rec } = await newCtx({ viewport: { width: v.width, height: v.height } });
+    for (const spot of SPOTS) {
+      await step(`finding 2, ${v.name}, site ${spot.name}: the antenna popup clears every button, its source link can be reached and its ✕ closes it`, async () => {
+        const { ctx, page, rec } = await newCtx({ viewport: { width: v.width, height: v.height } });
+        try {
+          await gotoMap(page, '');
+          assert((await rulerState(page)).shown, 'the path-profile ruler is not offered, so this case proves nothing');
+          await placeSite(page, spot.fx, spot.fy);
+          await openSite(page, true);
+          const g = await popupGeometry(page);
+          assert(g.covered.length === 0, 'the popup is under ' + g.covered.join(', ') + ': ' + JSON.stringify(g.wrap));
+          assert(g.wrap.t >= g.map.t, 'the popup starts above the map');
+          const floor = await bottomChromeTop(page);
+          assert(g.wrap.b <= floor, `the popup ends at y=${Math.round(g.wrap.b)}, under the credit/nav at y=${Math.round(floor)}`);
+          const close = await hitsItself(page, '.mc-masts-popup .leaflet-popup-close-button');
+          assert(close.ok, 'a tap on the ✕ lands on ' + close.on);
+          if (g.scrolled) await bringIntoBox(page, '.mc-masts-popup .leaflet-popup-content', '.mc-masts-popup a[href="https://mastedatabasen.dk/"]');
+          const link = await hitsItself(page, '.mc-masts-popup a[href="https://mastedatabasen.dk/"]');
+          assert(link.ok, 'the source link cannot be reached: a tap lands on ' + link.on);
+          await tapAt(page, await center(page, '.mc-masts-popup .leaflet-popup-close-button'));
+          await page.waitForSelector('.mc-masts-popup', { state: 'detached', timeout: 3000 });
+          const ruler = await rulerState(page);
+          assert(ruler.pressed !== 'true' && !ruler.hint, 'the tap on ✕ armed the path-profile ruler: ' + JSON.stringify(ruler));
+          assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+        } finally { await ctx.close(); }
+      });
+    }
+  }
+  for (const v of PHONES) {
+    await step(`finding 2, ${v.name}, monument popup on the right (#841 F6): clear of every button, its ✕ closes it`, async () => {
+      const { ctx, page, rec } = await newCtx({ viewport: { width: v.width, height: v.height }, noSites: true });
       try {
-        await gotoMap(page, '');
-        await openSite(page, true);
-        const g = await popupGeometry(page);
+        await gotoMap(page, '&heritage=1');
+        assert((await rulerState(page)).shown, 'the path-profile ruler is not offered, so this case proves nothing');
+        const spot = await page.evaluate(() => {
+          const m = document.querySelector('.leaflet-container').getBoundingClientRect();
+          return { x: Math.round(m.left + m.width * 0.85), y: Math.round(m.top + m.height * 0.6) };
+        });
+        await tapAt(page, spot);
+        await page.waitForSelector('.mc-heritage-popup', { timeout: 4000 });
+        await page.waitForTimeout(700); // the auto-pan
+        const g = await popupGeometry(page, '.mc-heritage-popup');
         assert(g.covered.length === 0, 'the popup is under ' + g.covered.join(', ') + ': ' + JSON.stringify(g.wrap));
         assert(g.wrap.t >= g.map.t, 'the popup starts above the map');
-        const floor = await bottomChromeTop(page);
-        assert(g.wrap.b <= floor, `the popup ends at y=${Math.round(g.wrap.b)}, under the credit/nav at y=${Math.round(floor)}`);
-        const close = await hitsItself(page, '.mc-masts-popup .leaflet-popup-close-button');
+        const close = await hitsItself(page, '.mc-heritage-popup .leaflet-popup-close-button');
         assert(close.ok, 'a tap on the ✕ lands on ' + close.on);
-        if (g.scrolled) await bringIntoBox(page, '.mc-masts-popup .leaflet-popup-content', '.mc-masts-popup a[href="https://mastedatabasen.dk/"]');
-        const link = await hitsItself(page, '.mc-masts-popup a[href="https://mastedatabasen.dk/"]');
-        assert(link.ok, 'the source link cannot be reached: a tap lands on ' + link.on);
-        await tapAt(page, await center(page, '.mc-masts-popup .leaflet-popup-close-button'));
-        await page.waitForSelector('.mc-masts-popup', { state: 'detached', timeout: 3000 });
+        await tapAt(page, await center(page, '.mc-heritage-popup .leaflet-popup-close-button'));
+        await page.waitForSelector('.mc-heritage-popup', { state: 'detached', timeout: 3000 });
+        const ruler = await rulerState(page);
+        assert(ruler.pressed !== 'true' && !ruler.hint, 'the tap on ✕ armed the path-profile ruler: ' + JSON.stringify(ruler));
         assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
       } finally { await ctx.close(); }
     });

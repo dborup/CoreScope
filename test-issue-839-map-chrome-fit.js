@@ -7,8 +7,11 @@
  *      overlaps counts, never below one row;
  *   2. popupRoom: top and bottom chrome the popup would overlap pad it,
  *      chrome beside it does not; a column taller than half the map is a
- *      wall that narrows it instead (the desktop Map Controls panel); the
- *      geometry of the 375x560 and 1440x900 maps of the finding;
+ *      wall that narrows it instead (the desktop Map Controls panel); a
+ *      narrow button it would overlap (the gear, the ruler) is a wall when
+ *      the popup fits beside it (640x360, #841 F1) and not when it does not
+ *      (375x560); the geometry of the 375x560, 640x360 and 1440x900 maps;
+ *      fitLayerControl schedules nothing while the control is closed;
  *   3. MC_forgetMapLayerPrefs (map-tile-providers.js): every overlay and
  *      the Aerial base forgotten, their link parameters dropped, the rest
  *      of the link kept, no history write when there is nothing to drop;
@@ -82,20 +85,71 @@ test('popupRoom 1440x900: the Map Controls panel is a wall on the right, the lef
   assert.strictEqual(near.autoPanPaddingTopLeft[1], F.GAP);
 });
 
-test('popupRoom 640x360: the tall left column is a wall; the gear pads only a popup that reaches it', () => {
-  const size = { x: 640, y: 252 };
-  const chrome = [R(10, 10, 62, 110), R(10, 120, 58, 168), R(594, 10, 630, 46), R(0, 222, 640, 252)];
-  const left = F.popupRoom(size, chrome, 200, 327);
+// The 640x360 map: 640x252, the zoom/layers column on the left, the gear
+// (594..630 x 10..46) and the path-profile ruler under it (582..630 x
+// 54..102) on the right, the credit along the bottom.
+const LAND = { x: 640, y: 252 };
+const LAND_GEAR = R(594, 10, 630, 46);
+const LAND_RULER = R(582, 54, 630, 102);
+const LAND_CHROME = [R(10, 10, 62, 110), R(10, 120, 58, 168), LAND_GEAR, LAND_RULER, R(0, 222, 640, 252)];
+
+test('popupRoom 640x360: the tall left column is a wall; the right buttons cost a popup on the left nothing', () => {
+  const left = F.popupRoom(LAND, LAND_CHROME, 200, 327);
   assert.strictEqual(left.autoPanPaddingTopLeft[0], 58 + F.GAP);
   assert.strictEqual(left.autoPanPaddingTopLeft[1], F.GAP, 'the gear far right padded a popup on the left');
-  const right = F.popupRoom(size, chrome, 560, 327);
-  assert.strictEqual(right.autoPanPaddingTopLeft[1], 46 + F.GAP);
-  assert(right.maxHeight >= F.MIN_POPUP);
+  assert.strictEqual(left.autoPanPaddingBottomRight[0], F.GAP, 'the buttons far right narrowed a popup on the left');
+});
+
+test('popupRoom 640x360, site on the right (#841 F1): the popup sits left of the gear and the ruler, not under them', () => {
+  for (const x of [450, 545, 576]) { // x = 0.70, 0.85, 0.90 of the map
+    const r = F.popupRoom(LAND, LAND_CHROME, x, 327);
+    assert.strictEqual(r.autoPanPaddingBottomRight[0], 640 - 582 + F.GAP, 'x=' + x + ': the ruler is not a wall');
+    assert.strictEqual(r.autoPanPaddingTopLeft[1], F.GAP, 'x=' + x + ': the popup was pushed under the buttons');
+    assert.strictEqual(r.maxHeight, 252 - F.GAP - (30 + F.GAP) - F.POPUP_EXTRA_H);
+    // The box Leaflet pans to: within the padding, so clear of both buttons.
+    const x1 = Math.min(Math.max(x - 327 / 2, r.autoPanPaddingTopLeft[0]), 640 - r.autoPanPaddingBottomRight[0] - 327) + 327;
+    assert(x1 + F.GAP <= LAND_RULER.left, 'x=' + x + ': box ends at ' + x1);
+  }
+});
+
+test('popupRoom 640x360: the ruler alone (no gear) is a wall as well', () => {
+  const r = F.popupRoom(LAND, [LAND_RULER], 560, 327);
+  assert.strictEqual(r.autoPanPaddingBottomRight[0], 640 - 582 + F.GAP);
+  assert.strictEqual(r.autoPanPaddingTopLeft[1], F.GAP);
+});
+
+test('popupRoom 375x560, site on the right: no room beside the buttons, so the popup goes under them', () => {
+  const chrome = [R(10, 10, 62, 110), R(10, 120, 58, 168), R(329, 10, 365, 46), R(317, 54, 365, 102), PHONE_CREDIT];
+  const r = F.popupRoom(PHONE, chrome, 320, 327);
+  assert.deepStrictEqual(Array.from(r.autoPanPaddingTopLeft), [F.GAP, 168 + F.GAP]);
+  assert.strictEqual(r.autoPanPaddingBottomRight[0], F.GAP);
+});
+
+test('popupRoom: a wide piece of chrome (the bottom nav) never becomes a wall', () => {
+  const r = F.popupRoom(LAND, [R(0, 200, 640, 252)], 560, 327);
+  assert.deepStrictEqual(Array.from(r.autoPanPaddingBottomRight), [F.GAP, 52 + F.GAP]);
 });
 
 test('popupRoom: never under MIN_POPUP, and a box wider than the room starts at the left padding', () => {
   const r = F.popupRoom({ x: 300, y: 120 }, [R(0, 0, 300, 50), R(0, 70, 300, 120)], 150, 400);
   assert.strictEqual(r.maxHeight, F.MIN_POPUP);
+});
+
+test('fitLayerControl schedules no refit while the control is closed (#841 F5)', () => {
+  const timers = [];
+  const ctx = { window: {}, Math, Array, setTimeout: (fn) => { timers.push(fn); return timers.length; } };
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'public', 'map-chrome-fit.js'), 'utf8'), ctx);
+  const handlers = [];
+  const map = { on: (ev, fn) => handlers.push(fn), off() {} };
+  const container = { className: 'leaflet-control-layers' };
+  const control = { _map: map, getContainer: () => container, expand() {} };
+  ctx.window.MapChromeFit.fitLayerControl(map, control);
+  handlers.forEach((h) => h()); handlers.forEach((h) => h());
+  assert.strictEqual(timers.length, 0, 'a closed control scheduled ' + timers.length + ' refit(s)');
+  container.className += ' leaflet-control-layers-expanded';
+  handlers.forEach((h) => h()); handlers.forEach((h) => h());
+  assert.strictEqual(timers.length, 1, 'an open control did not coalesce a burst into one refit');
 });
 
 // ── MC_forgetMapLayerPrefs ─────────────────────────────────────────────────

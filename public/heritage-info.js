@@ -159,6 +159,11 @@
         popup = global.L.popup({ className: 'mc-heritage-popup', maxWidth: 260, autoPanPadding: [16, 16] });
         popup.on('remove', abort);
       }
+      // Room measured before every layout, as for the antenna popup: clear
+      // of the zoom/layers column, the gear and the ruler, scrolling inside
+      // the map on a phone (#839 finding 2, #841 F6).
+      var fit = global.MapChromeFit;
+      if (fit) fit.fitPopup(map, popup, latlng);
       popup.setLatLng(latlng).setContent(content);
       if (!popup.isOpen()) popup.openOn(map);
     }
