@@ -29,9 +29,14 @@
  *      → tap Copy URL hands out /p?node=<pk>;
  *   5. the card the /p page names as og:image loads in Chromium at 1200x630,
  *      at 1440 and at 375 px;
- *   6. with the server's share block removed from /api/config/client (as a
- *      server with share.nodes.enabled off sends it), Copy URL hands out the
- *      plain link.
+ *   6. on a second, real server with share.nodes.enabled off: no share
+ *      block in /api/config/client, Copy URL hands out the plain link and
+ *      the card is 404;
+ *   7. 1440, with the profile's dhm block (profile, share and dhm.card)
+ *      added to /api/config/client as a server with map.dhm sends it: the
+ *      switch lives in the Terrain Profile section, once, with the hint for
+ *      both card types and the card look from dhm.card, and no separate
+ *      Share previews section; off by a click, node Copy URL is plain.
  *
  * Usage:
  *   (cd cmd/server && go build -o ../../corescope-server .)
@@ -58,6 +63,9 @@ const REPEATER_NAME = 'KN6PLV-BrkOxfLA-Yebes';
 const COMPANION = '2e0de40ad148de6f86cb11c49eb19a138693b4568a184ab368b2db4e6769606a'; // Crayons
 const COMPANION_NAME = 'Crayons';
 const SHOTS = process.env.SCREENSHOT_DIR || '';
+const PNG_1X1 = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGM4ceIEAAS0AlkWLoFAAAAAAElFTkSuQmCC',
+  'base64');
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 let passed = 0, failed = 0;
@@ -97,13 +105,13 @@ async function stop(child) {
   clearTimeout(timer);
 }
 
-async function startServer(serverBin, dir) {
+async function startServer(serverBin, dir, shareOn) {
   const db = path.join(dir, 'fixture.db');
   fs.copyFileSync(process.env.E2E_FIXTURE_DB || path.join(ROOT, 'test-fixtures/e2e-fixture.db'), db);
   execFileSync(requiredFile('CORESCOPE_MIGRATE_BIN'), ['-db', db], { stdio: 'pipe' });
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     mqtt: { brokers: [] },
-    share: { nodes: { enabled: true } },
+    share: { nodes: { enabled: shareOn } },
   }));
   const port = await freePort();
   const base = 'http://127.0.0.1:' + port;
@@ -139,14 +147,15 @@ async function main() {
   });
   let srv;
   try {
-    srv = await startServer(serverBin, scratch);
+    srv = await startServer(serverBin, scratch, true);
     const BASE = srv.base;
     const SHARE = BASE + '/p?node=' + REPEATER;
     console.log('\n#811 M4 — node share links (' + BASE + ')\n');
 
     /* A cold context: clipboard recorder, tips seen, page errors and
-     * document requests recorded. opts.noShare drops the server's share
-     * block, as a server with share.nodes.enabled off sends the config. */
+     * document requests recorded. opts.dhm adds a dhm block to the client
+     * config, as a server with map.dhm and the profile sends it; nothing
+     * then leaves the machine (other hosts and the WMS proxy get a PNG). */
     async function cold(opts) {
       const phone = !!opts.phone;
       const ctx = await browser.newContext({
@@ -154,13 +163,15 @@ async function main() {
         hasTouch: phone, isMobile: phone,
       });
       const rec = { errors: [], documents: [] };
-      if (opts.noShare) {
+      if (opts.dhm) {
         await ctx.route(url => new URL(url).pathname === '/api/config/client', async (route) => {
           const r = await route.fetch();
           const body = await r.json();
-          delete body.share;
+          body.dhm = opts.dhm;
           await route.fulfill({ response: r, json: body });
         });
+        await ctx.route(/^https?:\/\/(?!localhost|127\.0\.0\.1)/i, route => route.fulfill({ status: 200, contentType: 'image/png', body: PNG_1X1 }));
+        await ctx.route(url => new URL(url).pathname === '/api/map/dhm/wms', route => route.fulfill({ status: 200, contentType: 'image/png', body: PNG_1X1 }));
       }
       await ctx.addInitScript(() => {
         try {
@@ -362,12 +373,62 @@ async function main() {
       });
     }
 
-    // ── 6. Sharing off on the server ─────────────────────────────────────
+    // ── 7. The profile and node sharing on the same server ───────────────
     {
-      const { ctx, page } = await cold({ noShare: true });
+      const dhm = {
+        enabled: true, url: '/api/map/dhm/wms', layer: 'dhm_terraen_skyggekort',
+        minZoom: 7, maxZoom: 19, profile: true, share: true,
+        card: { theme: 'light', names: false },
+        bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
+        attribution: 'Indeholder data fra Klimadatastyrelsen, Danmarks Højdemodel, CC BY 4.0',
+      };
+      const { ctx, page, rec } = await cold({ dhm });
       await page.goto(BASE + '/#/nodes/' + REPEATER);
-      await step('without the server’s share block, Copy URL is the plain link', async () => {
-        assert.equal(await copyWith(page, '#copyUrlBtn', false), BASE + '/#/nodes/' + REPEATER);
+      await page.waitForSelector('#copyUrlBtn', { timeout: 10000 });
+      await step('1440, profile and node cards: one switch in Terrain Profile, both card types, look from dhm.card', async () => {
+        assert.equal(await copyWith(page, '#copyUrlBtn', false), SHARE, 'before the switch');
+        await press(page, '#customizeToggle', false);
+        await page.waitForSelector('.cust-overlay:not(.hidden)', { timeout: 5000 });
+        await press(page, '.cust-tab[data-tab="display"]', false);
+        await page.waitForSelector('.cust-panel[data-panel="display"].active', { timeout: 4000 });
+        const panel = page.locator('.cust-panel[data-panel="display"]');
+        const text = await panel.innerText();
+        assert(/Terrain Profile/.test(text), 'no Terrain Profile section');
+        assert.equal(await page.locator('#cv2-terrain-share').count(), 1, 'switch count');
+        assert.equal((text.match(/Share previews/g) || []).length, 1, 'Share previews appears once (inside Terrain Profile)');
+        assert(text.indexOf('Share previews') > text.indexOf('Terrain Profile'), 'Share previews is not inside Terrain Profile');
+        assert(/a profile link or a node link/.test(text), 'the hint does not name both card types');
+        assert.equal(await page.locator('#cv2-card-theme').innerText(), 'Light');
+        assert.equal(await page.locator('#cv2-card-names').innerText(), 'Hidden');
+        assert(await page.isChecked('#cv2-terrain-share'), 'the switch is off by default');
+        if (SHOTS) await page.screenshot({ path: path.join(SHOTS, '811-m4-customizer-combined-1440.png') });
+        await press(page, 'label[for="cv2-terrain-share"]', false);
+        await page.waitForFunction(() => {
+          try { return JSON.parse(localStorage.getItem('cs-theme-overrides')).terrain.shareLinks === false; } catch (_) { return false; }
+        }, null, { timeout: 4000 });
+        await press(page, '#customizeToggle', false);
+        await page.waitForSelector('.cust-overlay.hidden', { state: 'attached', timeout: 4000 });
+        assert.equal(await copyWith(page, '#copyUrlBtn', false), BASE + '/#/nodes/' + REPEATER, 'switch off');
+      });
+      await step('1440, profile and node cards: no page error', async () => assert.deepEqual(rec.errors, []));
+      await ctx.close();
+    }
+
+    // ── 6. Sharing off on a real server ──────────────────────────────────
+    await stop(srv.child);
+    const offDir = path.join(scratch, 'off');
+    fs.mkdirSync(offDir);
+    srv = await startServer(serverBin, offDir, false);
+    {
+      const OFF = srv.base;
+      const { ctx, page } = await cold({});
+      await page.goto(OFF + '/#/nodes/' + REPEATER);
+      await page.waitForSelector('#copyUrlBtn', { timeout: 10000 });
+      await step('share.nodes.enabled off: no share block, Copy URL is the plain link, the card is 404', async () => {
+        const cfg = await (await fetch(OFF + '/api/config/client')).json();
+        assert.equal(cfg.share, undefined, 'share block on a share-off server');
+        assert.equal(await copyWith(page, '#copyUrlBtn', false), OFF + '/#/nodes/' + REPEATER);
+        assert.equal((await fetch(OFF + '/api/nodes/' + REPEATER + '/card.png')).status, 404);
       });
       await ctx.close();
     }

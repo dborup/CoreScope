@@ -27,9 +27,13 @@ function test(name, fn) {
 }
 
 const SRC = fs.readFileSync(path.join(__dirname, 'public', 'node-share.js'), 'utf8');
-function load(win) {
+// viewerOn reuses TerrainProfile.themeDefaults (one copy of the switch's
+// rule), so the real terrain-profile.js is loaded first, as in index.html.
+const TP_SRC = ['antenna-height.js', 'terrain-profile.js'].map((f) => [f, fs.readFileSync(path.join(__dirname, 'public', f), 'utf8')]);
+function load(win, opts) {
   const window = Object.assign({}, win || {});
   const ctx = vm.createContext({ window, URLSearchParams, encodeURIComponent, console });
+  if (!(opts && opts.noTerrain)) TP_SRC.forEach(([f, src]) => vm.runInContext(src, ctx, { filename: f }));
   vm.runInContext(SRC, ctx, { filename: 'node-share.js' });
   return window;
 }
@@ -108,6 +112,16 @@ test('viewerOn: on unless the customizer stored terrain.shareLinks false', () =>
   assert.strictEqual(NS.viewerOn({ terrain: { shareLinks: true } }), true);
   assert.strictEqual(NS.viewerOn({ terrain: { shareLinks: false } }), false);
   ['false', 0, '', null].forEach((v) => assert.strictEqual(NS.viewerOn({ terrain: { shareLinks: v } }), true, JSON.stringify(v)));
+});
+
+test('viewerOn is the Path profile switch rule, and fails closed without it', () => {
+  const w = load();
+  [undefined, {}, { terrain: null }, { terrain: { shareLinks: false } }, { terrain: { shareLinks: 'false' } }].forEach((c) => {
+    const want = w.TerrainProfile.themeDefaults((c && c.terrain) || null).shareLinks;
+    assert.strictEqual(w.NodeShare.viewerOn(c), want, JSON.stringify(c));
+  });
+  const bare = load({}, { noTerrain: true }).NodeShare;
+  assert.strictEqual(bare.viewerOn({}), false, 'no TerrainProfile: plain link');
 });
 
 test('copyURL reads the server block and the switch at copy time', () => {

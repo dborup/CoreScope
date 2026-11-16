@@ -22,10 +22,13 @@
     return offered(cfg) && Array.isArray(cfg.roles) && typeof role === 'string' && role !== '' && cfg.roles.indexOf(role) >= 0;
   }
 
-  /** viewerOn: the customizer's switch, on unless stored false. */
+  /** viewerOn: the customizer's switch. The rule (on unless stored false)
+   *  is TerrainProfile.themeDefaults', the one the Path profile's Copy link
+   *  reads; without that module there is no preview link (fail closed). */
   function viewerOn(siteConfig) {
-    var t = siteConfig && siteConfig.terrain;
-    return !(t && typeof t === 'object' && t.shareLinks === false);
+    var tp = global.TerrainProfile;
+    if (!tp || typeof tp.themeDefaults !== 'function') return false;
+    return tp.themeDefaults((siteConfig && siteConfig.terrain) || null).shareLinks === true;
   }
 
   function url(loc, pk, role, cfg, viewer) {
