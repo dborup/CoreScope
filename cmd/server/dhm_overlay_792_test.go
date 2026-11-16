@@ -87,8 +87,8 @@ func TestDHM792_ServesElevationRenderedFromTheWCS(t *testing.T) {
 		w.Header().Get("Cache-Control") != ccTile {
 		t.Fatalf("status %d headers %v", w.Code, w.Header())
 	}
-	// 100 m is the ramp's stop #d9a96a.
-	if got := elevationColour(t, w); got != (color.NRGBA{0xd9, 0xa9, 0x6a, 255}) {
+	// 100 m is the ramp's stop #ba2b2e (#860).
+	if got := elevationColour(t, w); got != (color.NRGBA{0xba, 0x2b, 0x2e, 255}) {
 		t.Fatalf("centre %v, want the 100 m colour", got)
 	}
 	if up.hits.Load() != 1 {
@@ -290,7 +290,8 @@ func TestDHM792_ClientConfigOffersElevation(t *testing.T) {
 	}
 	want := DHMOverlayClientConfig{ID: "elevation", MinZoom: 9, MaxZoom: 13,
 		DatasetName: "Danmarks Højdemodel", DatasetURL: "https://dataforsyningen.dk/data/930",
-		Attribution: dhm.AttributionDerived, LegendM: []int{0, 25, 50, 75, 100, 125, 150, 175}}
+		Attribution: dhm.AttributionDerived, LegendM: []int{0, 2, 5, 10, 15, 20, 25, 30, 40, 50, 65, 80, 100, 130, 175}, // #860
+		Style: dhm.ElevationStyle}
 	if !reflect.DeepEqual(*got, want) {
 		t.Fatalf("entry %+v, want %+v", *got, want)
 	}
@@ -317,7 +318,7 @@ func TestDHM792_ClientConfigOffersElevation(t *testing.T) {
 		}
 		want := 5
 		if id == "elevation" {
-			want = 7
+			want = 8 // + attribution, legendM; #860 + style
 		}
 		if len(keys) != want {
 			t.Errorf("%s: keys %v", id, keys)

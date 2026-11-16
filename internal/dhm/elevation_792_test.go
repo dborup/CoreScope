@@ -31,16 +31,25 @@ var (
 )
 
 // The ramp is the documented one, spelled out here: a changed stop fails.
+// #860 replaced the #792 linear 0-175 m ramp with stops chosen from Danish
+// land (elevation_860_test.go says why).
 func TestElevation792_RampIsDocumented(t *testing.T) {
 	want := []RampStop{
-		{0, 0x4a, 0x8c, 0x5c},
-		{25, 0x7f, 0xb0, 0x69},
-		{50, 0xc2, 0xcf, 0x7e},
-		{75, 0xec, 0xd9, 0x8b},
-		{100, 0xd9, 0xa9, 0x6a},
-		{125, 0xb0, 0x7c, 0x4f},
-		{150, 0xa8, 0x90, 0x7e},
-		{175, 0xf2, 0xee, 0xe9},
+		{0, 0x00, 0x79, 0x74},
+		{2, 0x1f, 0x9b, 0x82},
+		{5, 0x4e, 0xa9, 0x54},
+		{10, 0x7a, 0xbd, 0x4f},
+		{15, 0xa6, 0xcf, 0x51},
+		{20, 0xc5, 0xdb, 0x55},
+		{25, 0xed, 0xdf, 0x5c},
+		{30, 0xfe, 0xc9, 0x43},
+		{40, 0xfc, 0xba, 0x43},
+		{50, 0xf8, 0x96, 0x2d},
+		{65, 0xea, 0x70, 0x28},
+		{80, 0xd6, 0x4c, 0x29},
+		{100, 0xba, 0x2b, 0x2e},
+		{130, 0x90, 0x20, 0x47},
+		{175, 0x64, 0x25, 0x60},
 	}
 	if len(ElevationRamp) != len(want) {
 		t.Fatalf("ramp %v, want %v", ElevationRamp, want)
@@ -70,17 +79,17 @@ func TestElevation792_RampGolden(t *testing.T) {
 		{math.NaN(), color.NRGBA{}},
 		{math.Inf(1), color.NRGBA{}},
 		{math.Inf(-1), color.NRGBA{}},
-		{0.3, opaque(0x4a, 0x8c, 0x5c)},   // rounds to 0 m, but is land
-		{-0.3, opaque(0x4a, 0x8c, 0x5c)},  // likewise
-		{-7, opaque(0x4a, 0x8c, 0x5c)},    // Lammefjord: below sea, still land
-		{1, opaque(0x4c, 0x8d, 0x5d)},     // 1/25 of the way to 25 m
-		{12.5, opaque(0x66, 0x9f, 0x63)},  // rounds to 13 m
-		{25, opaque(0x7f, 0xb0, 0x69)},    // a stop
-		{62, opaque(0xd6, 0xd4, 0x84)},    // 12/25 of 50 → 75
-		{100, opaque(0xd9, 0xa9, 0x6a)},   // a stop
-		{170.8, opaque(0xe6, 0xdf, 0xd8)}, // Møllehøj, 171 m
-		{175, opaque(0xf2, 0xee, 0xe9)},
-		{2000, opaque(0xf2, 0xee, 0xe9)}, // clamps to the top
+		{0.3, opaque(0x00, 0x79, 0x74)},   // rounds to 0 m, but is land
+		{-0.3, opaque(0x00, 0x79, 0x74)},  // likewise
+		{-7, opaque(0x00, 0x79, 0x74)},    // Lammefjord: below sea, still land
+		{1, opaque(0x10, 0x8a, 0x7b)},     // half way to 2 m, .5 rounds up
+		{12.5, opaque(0x94, 0xc8, 0x50)},  // rounds to 13 m: 3/5 of 10 → 15
+		{25, opaque(0xed, 0xdf, 0x5c)},    // a stop
+		{62, opaque(0xed, 0x78, 0x29)},    // 12/15 of 50 → 65
+		{100, opaque(0xba, 0x2b, 0x2e)},   // a stop
+		{170.8, opaque(0x68, 0x25, 0x5e)}, // Møllehøj, 171 m: 41/45 of 130 → 175
+		{175, opaque(0x64, 0x25, 0x60)},
+		{2000, opaque(0x64, 0x25, 0x60)}, // clamps to the top
 	}
 	for _, c := range cases {
 		got := elevationPalette[elevationIndex(c.h)]
@@ -162,6 +171,8 @@ func renderElev(t *testing.T, k TileKey, f func(col, row int) float32, noData *f
 // hash of its decoded pixels; the spot checks say what they mean. Since
 // #831 F4 a pixel weighing a 0 m cell is transparent, so the slope's 0 m
 // west column and the half-sea case's coast are clear on the sea side.
+// #860 re-recorded the five coloured cases for its ramp; the three
+// transparent ones did not change.
 func TestElevation792_RenderGolden(t *testing.T) {
 	nd := float32(-9999)
 	type spot struct {
@@ -176,7 +187,7 @@ func TestElevation792_RenderGolden(t *testing.T) {
 		hash  string
 	}{
 		{"flat 40 m", func(int, int) float32 { return 40 }, nil,
-			[]spot{{0, 0, elevationPalette[elevationIndex(40)].(color.NRGBA)}, {255, 255, elevationPalette[elevationIndex(40)].(color.NRGBA)}}, "6df1e9edc40f8249"},
+			[]spot{{0, 0, elevationPalette[elevationIndex(40)].(color.NRGBA)}, {255, 255, elevationPalette[elevationIndex(40)].(color.NRGBA)}}, "cf68ef307ab0e207"},
 		{"sea fill", func(int, int) float32 { return 0 }, nil,
 			[]spot{{0, 0, color.NRGBA{}}, {128, 128, color.NRGBA{}}}, "8a39d2abd3999ab7"},
 		{"nodata", func(int, int) float32 { return nd }, &nd,
@@ -184,17 +195,17 @@ func TestElevation792_RenderGolden(t *testing.T) {
 		{"NaN", func(int, int) float32 { return float32(math.NaN()) }, nil,
 			[]spot{{5, 5, color.NRGBA{}}}, "8a39d2abd3999ab7"},
 		{"extreme high", func(int, int) float32 { return 3.0e38 }, nil,
-			[]spot{{0, 0, color.NRGBA{0xf2, 0xee, 0xe9, 255}}}, "3dda33cc1d973441"},
+			[]spot{{0, 0, color.NRGBA{0x64, 0x25, 0x60, 255}}}, "ab63ff9d12d69eb0"},
 		{"extreme low", func(int, int) float32 { return -3.0e38 }, nil,
-			[]spot{{0, 0, color.NRGBA{0x4a, 0x8c, 0x5c, 255}}}, "c44a814c5340f7ab"},
+			[]spot{{0, 0, color.NRGBA{0x00, 0x79, 0x74, 255}}}, "481762dacbe9bdc0"},
 		{"slope 0-200 m west to east", func(col, _ int) float32 { return float32(col) * 200 / 127 }, nil,
-			[]spot{{255, 128, color.NRGBA{0xf2, 0xee, 0xe9, 255}}}, "371aeccf43789561"},
+			[]spot{{255, 128, color.NRGBA{0x64, 0x25, 0x60, 255}}}, "6161dbc29d400d16"},
 		{"west half sea, east half 60 m", func(col, _ int) float32 {
 			if col < 64 {
 				return 0
 			}
 			return 60
-		}, nil, []spot{{2, 128, color.NRGBA{}}, {253, 128, elevationPalette[elevationIndex(60)].(color.NRGBA)}}, "2681b4766de686eb"},
+		}, nil, []spot{{2, 128, color.NRGBA{}}, {253, 128, elevationPalette[elevationIndex(60)].(color.NRGBA)}}, "a253ffbe6095b816"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

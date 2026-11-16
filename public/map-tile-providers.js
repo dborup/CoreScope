@@ -670,11 +670,14 @@
       });
       if (id === 'contours') cfg.minZoom = _contourMinZoom(e, _dhmSection());
       if (id === 'elevation') {
-        // #792: its own credit and legend; a malformed entry is not offered.
+        // #792: its own credit and legend; #860: its ramp id, sent as the
+        // tile's WMS styles. A malformed entry is not offered.
         var legend = _legendM(e.legendM);
         if (typeof e.attribution !== 'string' || !e.attribution || !legend) return null;
+        if (typeof e.style !== 'string' || !RAMP_STYLE_RE.test(e.style)) return null;
         cfg.attribution = e.attribution;
         cfg.legendM = legend;
+        cfg.style = e.style;
         cfg.maxNativeZoom = e.maxZoom;
         if (_isZoom(c.maxZoom) && c.maxZoom <= 19 && c.maxZoom > e.maxZoom) cfg.maxZoom = c.maxZoom;
       }
@@ -683,6 +686,11 @@
     }
     return null;
   }
+
+  // #860: the ramp id the server renders the tiles with (dhm.ElevationStyle,
+  // "ramp-" and hex digits). It is the tile URL's `styles`, so a new ramp
+  // is a URL no browser or shared cache has a tile of.
+  var RAMP_STYLE_RE = /^[a-z0-9-]{1,32}$/;
 
   // #792: the legend's ramp stops, whole metres rising from 0, 2 to 16 of
   // them; anything else is null.
@@ -697,13 +705,27 @@
   /* #792 — the elevation legend under its toggle: a bar of the ramp's
    * colours, which are CSS variables (--dhm-elevation-<m>, public/
    * style.css, the server's ramp: TestDHM792_LegendCSSMatchesTheRamp), and
-   * the metres of some stops at their place on it: the first, every 50 m
-   * that is not crowding the last, and the last with its unit. Built with
-   * createElement and textContent only. */
+   * the metres of some stops at their place on it. Built with
+   * createElement and textContent only.
+   * #860: the stops are not evenly spaced in metres (most of Denmark lies
+   * below 50 m), so every stop gets an equal step of the bar, as each band
+   * holds a fair share of the land. Labels: the first; then each stop at
+   * least a seventh of the bar after the previous label (about 26 px of
+   * the 180 px bar) and not past four fifths, where it would crowd the
+   * last; and the last with its unit. The aria-label names every stop. */
+  var LEGEND_LABEL_GAP = 1 / 7;
+  var LEGEND_LABEL_END = 4 / 5;
+
+  function _legendPos(legendM, i) { return i / (legendM.length - 1); }
+
   function elevationLegendLabels(legendM) {
-    var top = legendM[legendM.length - 1];
+    var n = legendM.length, prev = 0;
     return legendM.filter(function (m, i) {
-      return i === 0 || i === legendM.length - 1 || (m % 50 === 0 && top - m >= top / 5);
+      var p = _legendPos(legendM, i);
+      if (i === 0 || i === n - 1) return true;
+      if (p - prev < LEGEND_LABEL_GAP - 1e-9 || p > LEGEND_LABEL_END + 1e-9) return false;
+      prev = p;
+      return true;
     });
   }
 
@@ -712,11 +734,12 @@
     var box = doc.createElement('div');
     box.className = 'mc-elev-legend';
     box.setAttribute('role', 'img');
-    box.setAttribute('aria-label', 'Elevation colours from ' + legendM[0] + ' to ' + top + ' m');
+    box.setAttribute('aria-label', 'Elevation colours from ' + legendM[0] + ' to ' + top + ' m, stops at ' +
+      legendM.slice(0, -1).join(', ') + ' and ' + top + ' m');
     var bar = doc.createElement('div');
     bar.className = 'mc-elev-legend-bar';
-    bar.style.background = 'linear-gradient(to right, ' + legendM.map(function (m) {
-      return 'var(--dhm-elevation-' + m + ') ' + (m / top * 100) + '%';
+    bar.style.background = 'linear-gradient(to right, ' + legendM.map(function (m, i) {
+      return 'var(--dhm-elevation-' + m + ') ' + (_legendPos(legendM, i) * 100) + '%';
     }).join(', ') + ')';
     box.appendChild(bar);
     var scale = doc.createElement('div');
@@ -727,7 +750,7 @@
       t.textContent = i === shown.length - 1 ? m + ' m' : String(m);
       // The first label starts at the bar's left end, the last ends at its
       // right end, the others are centred on their stop.
-      t.style.left = (m / top * 100) + '%';
+      t.style.left = (_legendPos(legendM, legendM.indexOf(m)) * 100) + '%';
       if (i === shown.length - 1) t.style.transform = 'translateX(-100%)';
       else if (i > 0) t.style.transform = 'translateX(-50%)';
       scale.appendChild(t);
@@ -952,6 +975,8 @@
       config: function () { return getDHMOverlayConfig('elevation'); },
       label: function (cfg) { return cfg.label; },
       layers: function (cfg) { return cfg.layers; },
+      // #860: the ramp id, so a new ramp is a new tile URL.
+      styles: function (cfg) { return cfg.style; },
       decorate: function (map, cfg, labelEl) {
         var doc = labelEl.ownerDocument || document;
         if (!labelEl.parentNode) return;
@@ -1302,7 +1327,7 @@
     // Leaflet from requesting tiles outside the data at all.
     var opts = {
       layers: o.layers(cfg),
-      styles: '',
+      styles: o.styles ? o.styles(cfg) : '',
       format: 'image/png',
       transparent: true,
       version: '1.3.0',

@@ -212,15 +212,25 @@
      They are the colours the server renders the tiles with
      (internal/dhm.ElevationRamp; cmd/server's
      TestDHM792_LegendCSSMatchesTheRamp pins them), so they are the same in
-     every theme: the tiles are. The legend draws its bar from them. */
-  --dhm-elevation-0: #4a8c5c;
-  --dhm-elevation-25: #7fb069;
-  --dhm-elevation-50: #c2cf7e;
-  --dhm-elevation-75: #ecd98b;
-  --dhm-elevation-100: #d9a96a;
-  --dhm-elevation-125: #b07c4f;
-  --dhm-elevation-150: #a8907e;
-  --dhm-elevation-175: #f2eee9;
+     every theme: the tiles are. The legend draws its bar from them.
+     #860: stops chosen from the heights of Danish land (each band below
+     80 m holds 5-14 % of it): teal low-lying ground, green lowland,
+     yellow and orange, red hills from 80 m. */
+  --dhm-elevation-0: #007974;
+  --dhm-elevation-2: #1f9b82;
+  --dhm-elevation-5: #4ea954;
+  --dhm-elevation-10: #7abd4f;
+  --dhm-elevation-15: #a6cf51;
+  --dhm-elevation-20: #c5db55;
+  --dhm-elevation-25: #eddf5c;
+  --dhm-elevation-30: #fec943;
+  --dhm-elevation-40: #fcba43;
+  --dhm-elevation-50: #f8962d;
+  --dhm-elevation-65: #ea7028;
+  --dhm-elevation-80: #d64c29;
+  --dhm-elevation-100: #ba2b2e;
+  --dhm-elevation-130: #902047;
+  --dhm-elevation-175: #642560;
   /* Node-quality link strength colours (bottleneck tiers). Dark-theme
      overrides live in the [data-theme="dark"] block below (brighter hues). */
   --link-strong: #1a7f37;
