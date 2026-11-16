@@ -130,7 +130,7 @@ func TestLastKnownHashSize807_AdvertOutsideWindow(t *testing.T) {
 	if info := store.GetNodeHashSizeInfo()[pk807]; info != nil {
 		t.Fatalf("precondition: advert must be outside the window, got window info %+v", info)
 	}
-	store.refreshLastKnownHashSizes()
+	store.refreshLastKnownAdverts()
 	list, detail := get807(t, router807(t, db, store))
 	wantSize807(t, "/api/nodes", list, 2)
 	wantSize807(t, "/api/nodes/{pk}", detail, 2)
@@ -143,11 +143,11 @@ func TestLastKnownHashSize807_ColdStart(t *testing.T) {
 	seed807Node(t, db)
 	seed807Advert(t, db, "h807cold", "1180aabbcc", RouteFlood, time.Hour) // 0x80 → 3-byte
 	store := NewPacketStore(db, nil)                                      // never Load()ed
-	stop := store.StartLastKnownHashSizeRecomputer(time.Hour)
+	stop := store.StartLastKnownAdvertRecomputer(time.Hour)
 	defer stop()
 	// The prewarm is synchronous: the snapshot is there when Start returns
 	// (v0.2.9 review nit, #809 GM5).
-	if got := store.LastKnownHashSizes()[pk807]; got != 3 {
+	if got := store.LastKnownAdverts()[pk807].HashSize; got != 3 {
 		t.Fatalf("snapshot right after Start = %d, want 3", got)
 	}
 	list, detail := get807(t, router807(t, db, store))
@@ -161,18 +161,18 @@ func TestLastKnownHashSize807_PeriodicRefresh(t *testing.T) {
 	db := setupTestDB(t)
 	seed807Node(t, db)
 	store := NewPacketStore(db, nil)
-	stop := store.StartLastKnownHashSizeRecomputer(20 * time.Millisecond)
+	stop := store.StartLastKnownAdvertRecomputer(20 * time.Millisecond)
 	defer stop()
-	if got := store.LastKnownHashSizes()[pk807]; got != 0 {
+	if got := store.LastKnownAdverts()[pk807].HashSize; got != 0 {
 		t.Fatalf("size before any advert = %d, want 0", got)
 	}
 	seed807Advert(t, db, "h807tick", "1140aabbcc", RouteFlood, time.Hour) // 0x40 → 2-byte
 	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
-		if store.LastKnownHashSizes()[pk807] == 2 {
+		if store.LastKnownAdverts()[pk807].HashSize == 2 {
 			return
 		}
 	}
-	t.Fatalf("snapshot never refreshed: size %d, want 2", store.LastKnownHashSizes()[pk807])
+	t.Fatalf("snapshot never refreshed: size %d, want 2", store.LastKnownAdverts()[pk807].HashSize)
 }
 
 // A newer zero-hop direct advert whose path byte is 0x00 says nothing about
@@ -184,22 +184,22 @@ func TestLastKnownHashSize807_SkipsSizelessZeroHopAdverts(t *testing.T) {
 	seed807Advert(t, db, "h807a", "1140aabbcc", RouteFlood, 50*time.Hour)                 // 2-byte
 	seed807Advert(t, db, "h807b", "1200aabbcc", RouteDirect, 40*time.Hour)                // direct, 0x00
 	seed807Advert(t, db, "h807c", "13aabbccdd00aabb", RouteTransportDirect, 30*time.Hour) // transport direct, 0x00
-	got, err := db.LoadLastKnownAdvertHashSizes()
+	got, err := db.LoadLastKnownAdverts()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got[pk807] != 2 {
-		t.Fatalf("last known size = %d, want 2 (sizeless zero-hop adverts skipped)", got[pk807])
+	if got[pk807].HashSize != 2 {
+		t.Fatalf("last known size = %d, want 2 (sizeless zero-hop adverts skipped)", got[pk807].HashSize)
 	}
 
 	// A zero-hop direct advert that declares its size (0x80) is used.
 	seed807Advert(t, db, "h807d", "1280aabbcc", RouteDirect, 20*time.Hour)
-	got, err = db.LoadLastKnownAdvertHashSizes()
+	got, err = db.LoadLastKnownAdverts()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got[pk807] != 3 {
-		t.Fatalf("last known size = %d, want 3 (newest size-declaring advert)", got[pk807])
+	if got[pk807].HashSize != 3 {
+		t.Fatalf("last known size = %d, want 3 (newest size-declaring advert)", got[pk807].HashSize)
 	}
 }
 
@@ -210,12 +210,12 @@ func TestLastKnownHashSize807_NewestAdvertWins(t *testing.T) {
 	seed807Node(t, db)
 	seed807Advert(t, db, "h807e", "1180aabbcc", RouteFlood, 50*time.Hour)                // 3-byte
 	seed807Advert(t, db, "h807f", "10aabbccdd40aabb", RouteTransportFlood, 40*time.Hour) // 2-byte at offset 5
-	got, err := db.LoadLastKnownAdvertHashSizes()
+	got, err := db.LoadLastKnownAdverts()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got[pk807] != 2 {
-		t.Fatalf("last known size = %d, want 2", got[pk807])
+	if got[pk807].HashSize != 2 {
+		t.Fatalf("last known size = %d, want 2", got[pk807].HashSize)
 	}
 }
 
@@ -257,12 +257,12 @@ func TestLastKnownHashSize807_NoFromPubkeyColumn(t *testing.T) {
 		t.Fatal(err)
 	}
 	db := &DB{conn: conn}
-	if _, err := db.LoadLastKnownAdvertHashSizes(); err == nil {
+	if _, err := db.LoadLastKnownAdverts(); err == nil {
 		t.Fatal("expected an error without from_pubkey")
 	}
 	store := NewPacketStore(db, nil)
-	store.refreshLastKnownHashSizes()
-	if got := store.LastKnownHashSizes(); len(got) != 0 {
+	store.refreshLastKnownAdverts()
+	if got := store.LastKnownAdverts(); len(got) != 0 {
 		t.Fatalf("snapshot must stay empty, got %v", got)
 	}
 }
@@ -312,7 +312,7 @@ func BenchmarkLoadLastKnownAdvertHashSizes807(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		m, err := db.LoadLastKnownAdvertHashSizes()
+		m, err := db.LoadLastKnownAdverts()
 		if err != nil {
 			b.Fatal(err)
 		}

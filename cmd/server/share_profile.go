@@ -84,6 +84,9 @@ func (s *Server) registerShareRoutes(router *mux.Router, doc *indexDoc) {
 		// request's Host, so one card serves every viewer.
 		p.card.site = doc.og.publicHost()
 	}
+	if s.nodeCards != nil {
+		s.nodeCards.site = doc.og.publicHost()
+	}
 	router.HandleFunc(sharePath, s.handleShareProfile(doc)).Methods("GET", "HEAD")
 	router.HandleFunc(sharePath+"/", handleShareSlash).Methods("GET", "HEAD")
 }
@@ -100,6 +103,12 @@ func handleShareSlash(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleShareProfile(doc *indexDoc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// #811 M3: a node key makes it a node page (node_share.go); the
+		// profile grammar never sees one.
+		if _, ok := r.URL.Query()["node"]; ok {
+			s.handleShareNode(doc, w, r)
+			return
+		}
 		p := s.terrain
 		if p == nil || !p.set.share.enabled {
 			doc.serveSite(w, r, http.StatusOK)
@@ -212,9 +221,11 @@ func (p *terrainProfiler) sharePage(req terrainRequest) ogPage {
 	if p.card == nil {
 		return pg
 	}
-	resp, ready := p.cachedResponse(req)
+	e, ready := p.cachedElevation(req)
+	var resp TerrainProfileResponse
 	opt := p.card.options()
 	if ready {
+		resp = p.buildResponse(req.q, req.ends, req.a, req.b, &req.plan, e)
 		// A path with no verdict (outside DHM, or not covered end to end)
 		// keeps the title plain (#727 plan); the card's badge still says so.
 		if v := profilecard.MainVerdict(resp); v.Known {
@@ -224,8 +235,10 @@ func (p *terrainProfiler) sharePage(req terrainRequest) ogPage {
 		resp = p.pendingResponse(req)
 		opt.Pending = true
 	}
-	pg.Image = p.cardPath(req, ready)
-	pg.ImageAlt = profilecard.AltText(resp, cardNames(req), opt)
+	pg.Image = p.cardPath(req, e.cardClasses(), ready)
+	// Whole sentences within the limit (#846); renderProfile's clip is
+	// only a backstop.
+	pg.ImageAlt = profilecard.AltText(resp, cardNames(req), opt, ogImageAltMaxRunes)
 	return pg
 }
 

@@ -16,7 +16,7 @@ func TestWording839_WorstPointIsTheTightestFresnelPoint(t *testing.T) {
 	wc, at, f := -11.3, 5786.7, -1.267
 	resp.Verdict.WorstClearanceM, resp.Verdict.WorstAtM, resp.Verdict.WorstF1Fraction = &wc, &at, &f
 
-	alt := AltText(resp, [2]string{"Padborg", "Flensburg"}, Options{})
+	alt := AltText(resp, [2]string{"Padborg", "Flensburg"}, Options{}, altMaxRunes)
 	if want := " Tightest point for the Fresnel zone: clearance " + fmtMetres(wc) + " at " + fmtDistance(at) + " along the path."; !strings.Contains(alt, want) {
 		t.Errorf("og:image:alt %q\nlacks %q", alt, want)
 	}
@@ -53,7 +53,7 @@ func TestWording839_WhollyForeignPath(t *testing.T) {
 	if got := runText(runs, "message"); got != want {
 		t.Errorf("message %q, want %q (not shortened)", got, want)
 	}
-	if alt := AltText(fxNone(), [2]string{"Malmö", ""}, Options{}); !strings.Contains(alt, want) || strings.Contains(alt, "Denmark only") {
+	if alt := AltText(fxNone(), [2]string{"Malmö", ""}, Options{}, altMaxRunes); !strings.Contains(alt, want) || strings.Contains(alt, "Denmark only") {
 		t.Errorf("alt %q", alt)
 	}
 }

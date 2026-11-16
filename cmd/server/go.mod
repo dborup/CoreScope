@@ -90,6 +90,12 @@ require github.com/meshcore-analyzer/profilecard v0.0.0
 
 replace github.com/meshcore-analyzer/profilecard => ../../internal/profilecard
 
+// internal/nodecard (#811 M2): the node share-card renderer, served by
+// GET /api/nodes/{pubkey}/card.png since #811 M3.
+require github.com/meshcore-analyzer/nodecard v0.0.0
+
+replace github.com/meshcore-analyzer/nodecard => ../../internal/nodecard
+
 require github.com/meshcore-analyzer/cardkit v0.0.0 // indirect
 
 replace github.com/meshcore-analyzer/cardkit => ../../internal/cardkit

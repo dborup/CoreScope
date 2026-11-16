@@ -164,7 +164,7 @@
           "names": true,
           "_comment_names": "Node names on the card and in its alt text. false draws 'Node A' and 'Node B'. Hidden, blacklisted or unpositioned nodes are never named either way: they are 'not found'.",
           "cacheEntries": 64,
-          "_comment_cacheEntries": "Rendered cards kept in memory (1-1024), for 24 h; a card is 80-95 KB, and the cache is also bounded at 128 KiB per entry (8 MiB at the default). A cached card costs nothing; a card that is not cached is charged to the per-client rateLimitPerMin."
+          "_comment_cacheEntries": "Rendered cards kept in memory (1-1024), for 24 h; a card is 80-100 KB, and the cache is also bounded at 128 KiB per entry (8 MiB at the default). A cached card costs nothing; a card that is not cached is charged to the per-client rateLimitPerMin."
         },
         "foreignFill": {
           "_comment": "#738 - cross-border profiles. DHM covers Denmark only, so a path into Germany or across Øresund is partial with no verdict. With enabled true, the samples DHM does not cover (Swedish, German, Polish and Norwegian land, the 1.25 km off their coasts, and everything outside DHM's raster extent) are filled from Copernicus DEM GLO-30, and the profile gets a verdict on the mixed terrain model. Only a profile with at least one DHM sample is filled. GLO-30 is a ~30 m surface model: forests and towns read high, which can only make a verdict more pessimistic; the surface (DSM) verdict of a mixed profile stays unknown. The response marks it mixed, lists the filled stretches and their resolution, and carries the Copernicus credit. At most 16 upstream calls per profile; a path that needs more at full resolution uses the 1/2 overview (~60 m), and one that needs more still is not filled. If the fill fails, the profile is partial with no verdict, as without it; its DHM part is cached as usual and a later request tries only the fill again. Heights abroad are EGM2008 next to DHM's DVR90 and are not corrected (a sub-metre step). With maxPathKm at most 80, Sweden and Germany are in reach, Norway and Poland in practice not.",
@@ -268,6 +268,12 @@
           "token": ""
         }
       }
+    }
+  },
+  "share": {
+    "nodes": {
+      "_comment": "#811 - shareable node links with link previews. With enabled true, /p?node=<64-hex public key> answers link-preview crawlers with that node's name and role, the configured area it is in (from areas, only when it is in one), when it was last heard, its relays and seen airtime (repeaters and rooms) and its neighbour count, and a 1200x630 card, GET /api/nodes/{pubkey}/card.png, as og:image. Cards exist for repeaters, rooms and sensors only: a companion link gets the plain site preview. No position, map or packet content is shown. Hidden nodes (nodeBlacklist, observerBlacklist, hiddenNamePrefixes), unknown and inactive nodes get the plain site preview with 404. Only full 64-hex keys are accepted. A browser opening /p?node= moves straight on to the node page. The card uses the theme and names settings of map.dhm.profile.card, is cached for 10 minutes (64 cards) and, when not cached, is charged to map.dhm.profile.rateLimitPerMin per client. It needs no upstream service and works without map.dhm. Set branding.publicBaseUrl when you enable this. Off by default.",
+      "enabled": false
     }
   },
   "home": {

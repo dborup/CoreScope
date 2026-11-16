@@ -209,7 +209,7 @@ func TestMainVerdictAgreesWithTheBadge(t *testing.T) {
 // card's own endpoint labels.
 func TestAltText(t *testing.T) {
 	resp := fxMarginal()
-	got := AltText(resp, [2]string{"Søby Bakker", "东京"}, Options{})
+	got := AltText(resp, [2]string{"Søby Bakker", "东京"}, Options{}, altMaxRunes)
 	want := "Terrain profile from Søby Bakker to Node B, 14.6 km. Terrain: Marginal. Line of sight is clear, but less than 60 % of the first Fresnel zone is."
 	if !strings.HasPrefix(got, want) {
 		t.Errorf("alt %q\nwant prefix %q", got, want)
@@ -217,13 +217,13 @@ func TestAltText(t *testing.T) {
 	if !strings.Contains(got, " Tightest point for the Fresnel zone: clearance ") || !strings.Contains(got, " along the path.") {
 		t.Errorf("alt %q lacks the worst point", got)
 	}
-	if got := AltText(resp, [2]string{"Søby Bakker", "X"}, Options{HideNames: true}); !strings.HasPrefix(got, "Terrain profile from Node A to Node B,") {
+	if got := AltText(resp, [2]string{"Søby Bakker", "X"}, Options{HideNames: true}, altMaxRunes); !strings.HasPrefix(got, "Terrain profile from Node A to Node B,") {
 		t.Errorf("names off: %q", got)
 	}
-	if got := AltText(fxPartial(), [2]string{"A", "B"}, Options{}); strings.Contains(got, "Tightest point") || !strings.Contains(got, "No verdict.") {
+	if got := AltText(fxPartial(), [2]string{"A", "B"}, Options{}, altMaxRunes); strings.Contains(got, "Tightest point") || !strings.Contains(got, "No verdict.") {
 		t.Errorf("partial: %q", got)
 	}
-	if got := AltText(fxClear(), [2]string{"A", "B"}, Options{Pending: true}); !strings.Contains(got, pendingMessage) || strings.Contains(got, "Clear") {
+	if got := AltText(fxClear(), [2]string{"A", "B"}, Options{Pending: true}, altMaxRunes); !strings.Contains(got, pendingMessage) || strings.Contains(got, "Clear") {
 		t.Errorf("pending: %q", got)
 	}
 }

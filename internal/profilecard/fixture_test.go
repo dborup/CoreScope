@@ -3,6 +3,7 @@ package profilecard
 import (
 	"math"
 
+	"github.com/meshcore-analyzer/buildings"
 	"github.com/meshcore-analyzer/dhm"
 )
 
@@ -29,6 +30,41 @@ type spec struct {
 	kindA, kindB     string
 	maxReturned      int // 0 = 1024, the server's terrainMaxReturned
 	allSamplesNoData bool
+	// The building classification (#730 M2), as cmd/server's
+	// classifyBuildings leaves it: classState "" is none, else the state
+	// served. On a full or partial one every raised sample (DSM − DTM over
+	// the classifier's threshold) is a building inside a footprint and
+	// trees/other outside, except, on a partial one, those in
+	// [unclassFrom, unclassTo], whose footprints did not come back.
+	classState             string
+	footprints             [][2]float64 // fractions of the path
+	unclassFrom, unclassTo float64
+}
+
+// classes is s's class per computed sample, and whether any sample has
+// one (cmd/server's terrainClasses.used: the footprints are credited).
+func (s spec) classes(dtm, dsm []float32) ([]string, bool) {
+	out := make([]string, len(dtm))
+	if s.classState != "full" && s.classState != "partial" {
+		return out, false
+	}
+	smp := buildings.Samples{DTM: dtm, DSM: dsm}
+	used := false
+	for i := range out {
+		t := float64(i) / float64(len(dtm)-1)
+		if !smp.Elevated(i, buildings.DefaultOptions().ThresholdM) ||
+			(s.classState == "partial" && t >= s.unclassFrom && t <= s.unclassTo) {
+			continue
+		}
+		out[i] = string(rune(buildings.Vegetation))
+		for _, f := range s.footprints {
+			if t >= f[0] && t <= f[1] {
+				out[i] = string(rune(buildings.Building))
+			}
+		}
+		used = true
+	}
+	return out, used
 }
 
 // lerpPoints is the piecewise-linear value of pts at t in [0, 1].
@@ -225,6 +261,15 @@ func build(s spec) TerrainProfileResponse {
 		resp.Verdict.Surface = surfaceInfo(surface)
 		keep = append(keep, surface.WorstIndex)
 	}
+	var cls []string
+	if s.classState != "" {
+		var used bool
+		cls, used = s.classes(dtm, dsm)
+		resp.Classification = &TerrainClassification{State: s.classState}
+		if used {
+			resp.Attribution = buildings.AttributionDerived
+		}
+	}
 	if resp.Coverage.State != "none" {
 		maxRet := s.maxReturned
 		if maxRet == 0 {
@@ -243,6 +288,9 @@ func build(s spec) TerrainProfileResponse {
 			smp := TerrainSample{D: round2(float64(float64(i) * step)), DTM: optional(dtm[i])}
 			if dsm != nil {
 				smp.DSM = optional(dsm[i])
+			}
+			if cls != nil {
+				smp.Cls = cls[i]
 			}
 			resp.Samples[j] = smp
 		}
@@ -300,4 +348,26 @@ func fxMixed() TerrainProfileResponse {
 	r.Coverage.Fill = []TerrainFillRange{{FromM: 4000, ToM: 7000, Source: "copdem-glo30", ResolutionM: 30}}
 	r.AttributionFill = "produced using Copernicus WorldDEM-30 (long Art. 6(b) notice)"
 	return r
+}
+
+// fxTown is a 2.4 km path through a town (#846): trees, a low building,
+// a tall pair that rises through the line of sight, more trees and one
+// more building, over gentle terrain that stays clear. state is the
+// building classification: "full", "partial" (the last 40 % of the path
+// not told apart) or "unavailable" (the lookup failed: no classes).
+func fxTown(state string) TerrainProfileResponse {
+	// 0 is bare ground: the DSM is never below the terrain (build).
+	surface := []float64{
+		0, 0, 0, 0, 32, 35, 34, 0, // trees at 200–350 m
+		0, 44, 44, 0, 0, 0, 0, 0, // a building at 400–550 m
+		36, 38, 37, 39, 36, 0, // trees at 800–1050 m
+		0, 58, 58, 0, 52, 0, // two buildings at 1100–1350 m
+		0, 0, 0, 0, 40, 41, 0, 42, 41, 0, // trees at 1600–1850 m
+		0, 50, 50, 0, // a building at 1900–2050 m
+		0, 0, 0, 0, 0, 0, 0,
+	}
+	return build(spec{distM: 2400, n: 961, terrain: []float64{18, 19, 21, 22, 22, 23, 25, 26, 26, 27, 28, 28, 27},
+		surface: surface, antA: 26, antB: 20, freqMHz: 869.618, classState: state,
+		footprints:  [][2]float64{{400.0 / 2400, 550.0 / 2400}, {1100.0 / 2400, 1350.0 / 2400}, {1900.0 / 2400, 2050.0 / 2400}},
+		unclassFrom: 0.6, unclassTo: 1})
 }

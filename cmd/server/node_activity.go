@@ -8,7 +8,10 @@ import (
 // NodeHealthStats keeps packet analytics separate from identity-safe activity.
 // LastHeard is own advert or unambiguous relay evidence; LastAdvert is strictly
 // the node's own ADVERT. Unknown timestamps serialize as null, never last_seen:
-// the ingestor may refresh last_seen from a safely resolved relay hop. AvgSnr
+// the ingestor may refresh last_seen from a safely resolved relay hop.
+// LastAdvertSource says where LastAdvert came from: "window" (the in-memory
+// packet store) or "db" (the node's newest own ADVERT in SQLite, used when the
+// window has none, #848); omitted when LastAdvert is null. AvgSnr
 // is the mean over the node's direct receptions (Heard By, #76), null without
 // one: other copies carry the SNR of whichever node the observer heard.
 type NodeHealthStats struct {
@@ -20,6 +23,35 @@ type NodeHealthStats struct {
 	AvgHops            *int     `json:"avgHops,omitempty"`
 	LastHeard          *string  `json:"lastHeard"`
 	LastAdvert         *string  `json:"lastAdvert"`
+	LastAdvertSource   string   `json:"lastAdvertSource,omitempty"`
+}
+
+// Values of NodeHealthStats.LastAdvertSource.
+const (
+	lastAdvertSourceWindow = "window"
+	lastAdvertSourceDB     = "db"
+)
+
+// applyLastKnownAdvert completes a node's health activity from its last known
+// advert in SQLite (LastKnownAdvert.LastAdvert, #848) and returns the
+// LastAdvertSource. An advert from the window always wins. Otherwise the
+// known advert fills advert, and heard when it is newer: heard may already
+// hold identity-safe relay evidence from the window, which stays if newer.
+// Nothing else is ever used, so a relay-refreshed last_seen still never poses
+// as an advert (#1855).
+func applyLastKnownAdvert(heard, advert *string, known string) string {
+	if *advert != "" {
+		return lastAdvertSourceWindow
+	}
+	knownAt, ok := parseRelayTS(known)
+	if !ok {
+		return ""
+	}
+	*advert = known
+	if heardAt, _ := parseRelayTS(*heard); knownAt.After(heardAt) {
+		*heard = known
+	}
+	return lastAdvertSourceDB
 }
 
 // confirmedRelayKey deliberately does not use graph/geo/fallback guesses.
@@ -302,11 +334,16 @@ func txIsOwnAdvert(tx *StoreTx, key string) bool {
 		return false
 	}
 	decoded := tx.ParsedDecoded()
-	if valid, ok := decoded["signatureValid"].(bool); ok && !valid {
-		return false
-	}
+	valid, ok := decoded["signatureValid"].(bool)
 	pubkey, _ := decoded["pubKey"].(string)
-	return pubkey != "" && strings.EqualFold(pubkey, key)
+	return ownAdvertMatches(pubkey, ok && !valid, key)
+}
+
+// ownAdvertMatches is the identity rule for a node's own ADVERT, shared by
+// the window (txIsOwnAdvert) and the last-known snapshot (#848): the decoded
+// origin is exactly key and the signature is not known to be invalid.
+func ownAdvertMatches(pubkey string, signatureInvalid bool, key string) bool {
+	return !signatureInvalid && pubkey != "" && strings.EqualFold(pubkey, key)
 }
 
 func txIsInvalidAdvert(tx *StoreTx) bool {

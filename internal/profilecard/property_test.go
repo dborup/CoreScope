@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/meshcore-analyzer/buildings"
 )
 
 // nasty is a list of responses no well-behaved server sends, but which the
@@ -89,6 +91,27 @@ func nasty() map[string]TerrainProfileResponse {
 		}
 		return r
 	}()
+	// #846: a classification the server never sends must still draw a
+	// card with every credit whole.
+	out["classified unsorted"] = func() TerrainProfileResponse {
+		r := fxTown("full")
+		r.Samples[10], r.Samples[500] = r.Samples[500], r.Samples[10]
+		r.Samples[0].D, r.Samples[1].D, r.Samples[2].D = 1e9, -1e9, nan
+		return r
+	}()
+	out["classified unknown classes"] = func() TerrainProfileResponse {
+		r := fxTown("partial")
+		for i := range r.Samples {
+			r.Samples[i].Cls = []string{"x", "", "B", "<b>"}[i%4]
+		}
+		return r
+	}()
+	out["classified and mixed"] = func() TerrainProfileResponse {
+		r := fxTown("full")
+		r.Coverage.Mixed = true
+		r.AttributionFill = "produced using Copernicus WorldDEM-30"
+		return r
+	}()
 	return out
 }
 
@@ -104,17 +127,19 @@ func checkCard(t *testing.T, label string, b []byte, runs []textRun) {
 	if runs == nil {
 		return
 	}
-	attributed := false
+	// The DHM credit, or the buildings one that contains it (#846),
+	// whole and at the credit size, however many lines it takes.
+	var credit []string
 	for _, r := range runs {
-		if r.Role == "attribution" && r.Text == Credit && r.Size == attributionSize {
-			attributed = true
+		if r.Role == "attribution" && r.Size == attributionSize {
+			credit = append(credit, r.Text)
 		}
 		// Safe area: nothing within safeMargin px of an edge.
 		if r.X < safeMargin || r.X+r.W > Width-safeMargin || r.Y > Height-safeMargin || r.Y-r.Size < safeMargin/2 {
 			t.Errorf("%s: %s run %q at x=%d..%d y=%d leaves the safe area", label, r.Role, r.Text, r.X, r.X+r.W, r.Y)
 		}
 	}
-	if !attributed {
+	if c := strings.Join(credit, " "); c != Credit && c != buildings.AttributionDerived {
 		t.Errorf("%s: the DHM credit is missing or shrunk: %s", label, formatRuns(runs))
 	}
 }

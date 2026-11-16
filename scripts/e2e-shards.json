@@ -10,6 +10,18 @@
       "measurementNote": "New suite; #839 CS-Macmini rc19 findings 1, 2, 7, 8, 9 with an intercepted client config (staging base maps with a dummy token, DHM overlays with Aerial, monuments, antenna sites), a stubbed /api/masts with one 9-station site, a stubbed monument lookup and 1x1 third-party tiles: at 375x560 (light, dark), 360x640 and 640x360 the open layer list ends above the credit and real touch swipes (no scrollTop fallback) plus a real tap reach Nearby transmitters, and a refit (a row tapped, layers re-added) keeps the list's scroll position; with the antenna site on the left, in the middle and on the right the popup clears every map button (the path-profile ruler included) and the credit, its source link can be swiped to and its close button tapped without arming the ruler; the monument popup on the right, high and low, does the same; the antenna popup stays whole at 1440x900; the tap that closes the layer control asks for no monument info; Reset All forgets the layer control's hillshade and monuments; the customizer logs no colour-format warning. 30 cases, about 110s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
     },
     {
+      "file": "test-issue-848-node-last-advert-e2e.js",
+      "shard": 2,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "CORESCOPE_SERVER_BIN": "./corescope-server",
+        "FIXTURE_DB": "test-fixtures/e2e-fixture.db"
+      },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #848 health lastAdvert from the database for a repeater quiet longer than the packet-store window. Starts its own Go server on a copy of the CI fixture with packetStore.retentionHours 24 and three seeded repeaters (own advert 33h and 100h ago, one with only an invalid-signature advert) on key prefixes used by no other key or path: the health and bulk-health APIs report the database advert with lastAdvertSource db and nothing for the forged one; at 1440x900 from a cold start the node page shows Active / Stale with No activity for 4d instead of Last activity unknown, and the nodes list row and the map marker agree with it; at 375x560 with touch, Home, More, Nodes, search, tap the row, and the node page agrees with the list. About 15s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-792-elevation-overlay-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },

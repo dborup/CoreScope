@@ -58,9 +58,10 @@ const (
 	// cardRendererVersion is part of every card key and v: bump it when
 	// the renderer draws differently, so no stale card is served or kept
 	// by a crawler.
-	cardRendererVersion = "727m3.3"
+	cardRendererVersion = "846.1"
 	// cardBytesPerEntry is the byte bound per cached card. Real cards are
-	// 80–94 KB (#755 review); 128 KiB leaves room for an unusual one, and
+	// 80–94 KB (#755 review), a classified one up to 100 KB (#846);
+	// 128 KiB leaves room for an unusual one, and
 	// the default 64 entries keep the plan's ~8 MiB (#727 plan §3.2).
 	cardBytesPerEntry       = 128 << 10
 	cardCacheEntriesDefault = 64
@@ -230,11 +231,14 @@ func cardNames(req terrainRequest) [2]string {
 // depends on: the renderer and palette, the display options, both
 // endpoints as drawn, the resolved antenna heights and radio. A cached
 // dsm-estimate (#789) is part of the resolved height, so v changes when
-// the estimate changes what is drawn.
-func (p *terrainProfiler) cardInputs(req terrainRequest, names [2]string) [16]byte {
+// the estimate changes what is drawn. classes is the building
+// classification the card is drawn with (cardClasses, #846): its classes
+// and whether the footprints are credited can change under the same
+// elevation key, when a building retry ends differently (#797).
+func (p *terrainProfiler) cardInputs(req terrainRequest, names [2]string, classes []byte) [16]byte {
 	c := p.card
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%+v|%t\n", cardRendererVersion, c.palFP, c.options(), req.q.both)
+	fmt.Fprintf(h, "%s|%s|%+v|%t|%x\n", cardRendererVersion, c.palFP, c.options(), req.q.both, classes)
 	overrides := [2]*float64{req.q.ha, req.q.hb}
 	for i, e := range req.ends {
 		ant, src, assumed := p.antenna(e, overrides[i])
@@ -264,22 +268,55 @@ func parseCardQuery(q url.Values) (terrainQuery, error) {
 }
 
 // cardKey is the card's identity for a resolved request, so only for
-// ends that passed the visibility gate.
-func (p *terrainProfiler) cardKey(req terrainRequest) cardKey {
-	return cardKey{terrainKey: p.elevationKey(req), Inputs: p.cardInputs(req, cardNames(req))}
+// ends that passed the visibility gate, drawn with classes (cardClasses).
+func (p *terrainProfiler) cardKey(req terrainRequest, classes []byte) cardKey {
+	return cardKey{terrainKey: p.elevationKey(req), Inputs: p.cardInputs(req, cardNames(req), classes)}
+}
+
+// cardClasses is the classification part of a card's identity (#846):
+// the classification as cached (terrainClasses.appendTo: state, flags and
+// one class per sample), nil for a profile without one. Every class and
+// so whether the footprints are credited is in it, and no position.
+func (e terrainElevation) cardClasses() []byte {
+	if e.classes == nil {
+		return nil
+	}
+	return e.classes.appendTo(nil)
+}
+
+// cachedCardClasses is cardClasses of the profile a card for req would be
+// drawn from, read off the elevation cache without decoding it, so the
+// card cache can be asked before any charge. A profile this profiler does
+// not classify needs no read: its classes are nil. known is false when a
+// classified profile is not cached: then the card is drawn from what the
+// fetch returns, and keyed by that.
+func (p *terrainProfiler) cachedCardClasses(req terrainRequest) (classes []byte, known bool) {
+	n, both := len(req.plan.E), req.q.both
+	if !p.classifies(both) || req.plan.Calls() == 0 {
+		return nil, true // cardElevation draws a path outside DHM unclassified
+	}
+	data, ok := p.cache.Get(p.elevationKey(req), p.now())
+	if !ok {
+		return nil, false
+	}
+	if !terrainEntryOK(data, n, both, true) {
+		return nil, true // drawn degraded from none, never cached
+	}
+	return data[len(data)-(2+n):], true
 }
 
 // cardPath is the card's path and query for a resolved request, built
 // from parsed values only. v is a short hash of the card key and the
 // readiness of the profile: it changes whenever the card would be drawn
 // differently under the same query (the renderer, palette and options,
-// a node's name, position, antenna or the radio), so the immutable URL
+// a node's name, position, antenna or the radio, the building classes and
+// credit), so the immutable URL
 // never serves a crawler stale bytes, and a crawler that cached the
 // degraded card sees a new URL once the profile is measured. The key's
 // inputs are hashed, so v carries no name or position.
-func (p *terrainProfiler) cardPath(req terrainRequest, ready bool) string {
+func (p *terrainProfiler) cardPath(req terrainRequest, classes []byte, ready bool) string {
 	q := "a=" + shareRefParam(req.q.a) + "&b=" + shareRefParam(req.q.b) + physicsQuery(req.q)
-	v := ogContentHashHex([]byte(fmt.Sprintf("%s|%t", p.cardKey(req), ready)))
+	v := ogContentHashHex([]byte(fmt.Sprintf("%s|%t", p.cardKey(req, classes), ready)))
 	return cardRoute + "?" + q + "&v=" + v
 }
 
@@ -302,10 +339,11 @@ func (s *Server) handleTerrainProfileCard(w http.ResponseWriter, r *http.Request
 	}
 	c := p.card
 	names := cardNames(req)
-	key := p.cardKey(req)
-	if b, ok := c.cache.Get(key, p.now()); ok {
-		writeCard(w, b, "hit")
-		return
+	if classes, known := p.cachedCardClasses(req); known {
+		if b, ok := c.cache.Get(p.cardKey(req, classes), p.now()); ok {
+			writeCard(w, b, "hit")
+			return
+		}
 	}
 	if ok, retry := p.limiter.allow(r); !ok {
 		markCardRefused(w)
@@ -318,6 +356,7 @@ func (s *Server) handleTerrainProfileCard(w http.ResponseWriter, r *http.Request
 		return
 	}
 	resp := p.buildResponse(tq, req.ends, req.a, req.b, &req.plan, elev)
+	key := p.cardKey(req, elev.cardClasses())
 	opt := c.options()
 	opt.Pending = !ready
 	flightKey := key.String()
@@ -451,15 +490,20 @@ func refuseCard(w http.ResponseWriter, code int, msg string) {
 // writeCard writes a card. A complete card never changes for its URL; a
 // degraded one is re-fetched within a minute.
 func writeCard(w http.ResponseWriter, b []byte, state string) {
+	cc := cardCacheComplete
+	if state == "degraded" {
+		cc = cardCacheDegraded
+	}
+	writeCardAs(w, b, state, cc)
+}
+
+// writeCardAs writes a card of either type with its Cache-Control.
+func writeCardAs(w http.ResponseWriter, b []byte, state, cacheControl string) {
 	h := w.Header()
 	h.Set("Content-Type", "image/png")
 	h.Set("Content-Length", strconv.Itoa(len(b)))
 	h.Set("X-CoreScope-Card", state)
-	if state == "degraded" {
-		h.Set("Cache-Control", cardCacheDegraded)
-	} else {
-		h.Set("Cache-Control", cardCacheComplete)
-	}
+	h.Set("Cache-Control", cacheControl)
 	w.Write(b)
 }
 
@@ -522,27 +566,26 @@ func (b *shareBudget) available(now time.Time) float64 {
 
 // ── What /p reads ──────────────────────────────────────────────────────────
 
-// cachedResponse is the profile for req if it can be built without any
+// cachedElevation is the profile for req if it is to hand without any
 // upstream call: from the elevation cache, or for a path outside DHM.
-func (p *terrainProfiler) cachedResponse(req terrainRequest) (TerrainProfileResponse, bool) {
+func (p *terrainProfiler) cachedElevation(req terrainRequest) (terrainElevation, bool) {
 	n, both := len(req.plan.E), req.q.both
-	var e terrainElevation
 	if req.plan.Calls() == 0 {
-		e = terrainElevation{dtm: nanSlice(n)}
+		e := terrainElevation{dtm: nanSlice(n)}
 		if both {
 			e.dsm = nanSlice(n)
 		}
-	} else {
-		data, ok := p.cache.Get(p.elevationKey(req), p.now())
-		if !ok {
-			return TerrainProfileResponse{}, false
-		}
-		var err error
-		if e, err = decodeTerrainElevation(data, n, both, p.classifies(both)); !cardReady(e, err) {
-			return TerrainProfileResponse{}, false
-		}
+		return e, true
 	}
-	return p.buildResponse(req.q, req.ends, req.a, req.b, &req.plan, e), true
+	data, ok := p.cache.Get(p.elevationKey(req), p.now())
+	if !ok {
+		return terrainElevation{}, false
+	}
+	e, err := decodeTerrainElevation(data, n, both, p.classifies(both))
+	if !cardReady(e, err) {
+		return terrainElevation{}, false
+	}
+	return e, true
 }
 
 // pendingResponse is the profile for req with no elevations: what a

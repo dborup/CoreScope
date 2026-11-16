@@ -99,6 +99,16 @@ func routeDescriptions() map[string]routeMeta {
 				{Status: "429", Description: "Per-client budget of cards not in the cache exceeded (map.dhm.profile.rateLimitPerMin). Retry-After gives the seconds to wait."},
 				{Status: "503", Description: "map.dhm.profile.maxInFlight uncached profiles are already being fetched, or the server is drawing as many cards as it draws at once; nothing was done, and neither the per-client charge nor the share budget is spent. Retry-After gives the seconds to wait."},
 			}},
+		"GET /api/nodes/{pubkey}/card.png": {Summary: "Share card of a node (1200x630 PNG, the og:image of /p?node=)", Description: "The link-preview card of a repeater, room or sensor (#811): name and role, the configured area the node is in when it is in one, when it was last heard, for repeaters and rooms the relays in the last 24 h and 1 h and the seen airtime (a lower bound), the neighbour count, an as-of time and the site name. No position, map or packet content. An absent value drops its clause. The key is exactly 64 hex characters (no short prefixes). Hidden nodes (node or observer blacklist, hidden name prefixes), unknown and inactive nodes and companions are the same 404. The only query key is v, a cache-bust of at most 64 bytes that is accepted and ignored. Values come from the in-memory node, relay and neighbour snapshots, never from a per-request scan. Cards are cached (64 entries, 10 min) by the values they show; a cached card is not charged. A card not in the cache is charged to the per-client budget map.dhm.profile.rateLimitPerMin and drawn in the render slots of the terrain share card. Cache-Control public, max-age=600. X-CoreScope-Card says hit, miss or refused. The card's theme and names setting are map.dhm.profile.card's. 404 unless share.nodes.enabled. (#811)", Tag: "nodes",
+			QueryParams: []paramMeta{
+				{Name: "v", Description: "preview cache-bust, at most 64 bytes; ignored", Type: "string"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "A key that is not exactly 64 hex characters, or a query key other than one v."},
+				{Status: "404", Description: "Node sharing disabled, or a node that is unknown, hidden, inactive or a companion."},
+				{Status: "429", Description: "Per-client budget of cards not in the cache exceeded (map.dhm.profile.rateLimitPerMin, shared with the terrain share card). Retry-After gives the seconds to wait."},
+				{Status: "503", Description: "The server is drawing as many cards as it draws at once; nothing was done and the per-client charge is given back. Retry-After gives the seconds to wait."},
+			}},
 		"GET /api/masts": {Summary: "Antenna sites of one grid cell (Mastedatabasen, Denmark)", Description: "Existing antenna positions from Mastedatabasen (Digitaliseringsstyrelsen, CC0) inside one fixed 2 km x 2 km EPSG:25832 grid cell: cell E,N spans easting [E*2000, (E+1)*2000) and northing [N*2000, (N+1)*2000). Rows at identical coordinates are grouped into one site. Response: {cell: {e, n}, truncated, sites: [{lat, lon, street?, houseNumber?, postcode?, city?, stations[], entries: [{technology, bandMHz?, service?, commissioned?, interference}], interference, likelyMast}]}. interference is set when an entry is in the 700, 800 or 900 MHz band or is GSM-R; likelyMast is a heuristic (a broadcast technology), not a fact from the source. truncated is set when upstream returned its 500-row page limit, so the cell may be missing sites. Only published fields appear: no operator, height or structure type. The server fetches a cell from the Mastedatabasen WFS only when it is requested and not cached (7 days); it never prefetches or walks the grid. X-CoreScope-Cache says hit or miss; responses may be browser-cached for 24 hours. 404 unless map.masts.enabled. (#724)", Tag: "config",
 			QueryParams: []paramMeta{
 				{Name: "cell", Description: "E,N grid cell indexes as plain decimal integers, E 219-462 and N 3017-3209 (the Danish extent); the only accepted key", Type: "string", Required: true},
@@ -426,7 +436,8 @@ func heardBySchemas() map[string]*openAPISchema {
 			"avgSnr":             num("Mean SNR (dB) over the node's direct receptions (HeardDirectObserver); null without one. Other copies carry the SNR of whichever node the observer heard."),
 			"avgHops":            {Type: "integer", Description: "Node health only: rounded mean path length of the node's transmissions."},
 			"lastHeard":          {Type: "string", Nullable: true, Description: "Newest own ADVERT or unambiguous relay evidence (#64)."},
-			"lastAdvert":         {Type: "string", Nullable: true, Description: "Newest own ADVERT."},
+			"lastAdvert":         {Type: "string", Nullable: true, Description: "Newest own ADVERT: from the packet-store window, else the newest own ADVERT in the database (#848)."},
+			"lastAdvertSource":   {Type: "string", Description: "Where lastAdvert came from: window (in-memory packet store) or db (database, outside the window). Omitted when lastAdvert is null (#848)."},
 		},
 	}
 	direct := &openAPISchema{Type: "array", Items: openAPIRef("HeardDirectObserver"), Description: "Observers that received the node's own transmission, most direct receptions first."}
