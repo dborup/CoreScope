@@ -28,7 +28,9 @@
 // Review round 2 (#669):
 //   - overlays that used to be above the panel stay there while it is capped:
 //     the VCR "More" scope menu (320×568, 375×812, 568×320) and node detail
-//     (740×360, 800×400), checked by hit-testing where they overlap
+//     (780×380, 800×400; the #875 legend control narrowed the landscape
+//     header, so 740×360 no longer reaches node detail), checked by
+//     hit-testing where they overlap
 //   - an opened Area menu scrolls into the 43–83px box of 653×320 and 740×360
 //   - a scrolled, capped panel stays capped after a viewport change
 //   - leaving Live disconnects the tracker's observer from the old Live DOM
@@ -501,7 +503,7 @@ async function runTeardown(browser) {
   catch (e) { failed++; console.error('  ✗ [rotate] fatal: ' + e.message); }
   const runs = [
     ...[[320, 568], [375, 812], [568, 320]].map(([w, h]) => ['vcr menu', () => runVcrMenu(browser, w, h)]),
-    ...[[740, 360], [800, 400]].map(([w, h]) => ['node detail', () => runNodeDetail(browser, w, h)]),
+    ...[[780, 380], [800, 400]].map(([w, h]) => ['node detail', () => runNodeDetail(browser, w, h)]),
     ...[[653, 320], [740, 360]].map(([w, h]) => ['menu in box', () => runMenuInBox(browser, w, h)]),
     ['scrolled resize', () => runScrolledResize(browser)],
     ['teardown', () => runTeardown(browser)],

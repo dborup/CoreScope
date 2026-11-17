@@ -310,6 +310,11 @@
   right: 12px;
   height: max-content;
   max-width: 260px;
+  /* #875: the header (corner button + close x) is a fixed row and the content
+   * scrolls, so the panel never outgrows the room between the nav band
+   * (--live-legend-top) and the VCR bar, whatever corner it sits in. */
+  max-height: calc(100% - var(--live-legend-top, 64px) - var(--live-legend-clear, 0px)
+    - var(--vcr-bar-height, 58px) - var(--live-credit-height, 0px) - 20px);
   background: color-mix(in srgb, var(--surface-1) 92%, transparent);
   backdrop-filter: blur(12px);
   padding: 10px 14px;
@@ -339,7 +344,11 @@
  */
 .live-legend { pointer-events: none; }
 .live-legend .panel-header,
-.live-legend .panel-corner-btn { pointer-events: auto; }
+.live-legend .panel-corner-btn,
+.live-legend .feed-hide-btn { pointer-events: auto; }
+/* #875: the scroll box must take the wheel/touch. It cannot reach the control
+ * stack: the right corners are offset past it (below). */
+.live-legend .panel-content { pointer-events: auto; }
 
 .legend-title {
   font-size: 9px;
@@ -968,21 +977,26 @@ body.live-fullscreen #liveFullscreenToggle:hover,
 /* #666 — on a landscape phone the one-column stack (zoom, layers,
    fullscreen, gear) runs from y 74 to 356, so in a ~375px-tall viewport the
    gear ends under the VCR bar or below the .live-page clip. Lay the stack
-   out as one row instead (y 74–174, gear still in the corner), which also
-   keeps the toggles mostly above the legend toggle on the right edge (at
-   720×300 it still reaches 9px into the gear, but both centres stay
-   hit-testable). Short desktop windows (≤ 500px tall) get the row too.
-   The header stops short of the row (4 × 10px Leaflet margin + 52 + 48 +
-   52 + 52px controls + 6px gap) while expanded, so it cannot cover the
-   controls either. */
+   out as one row instead (y 74–174, gear still in the corner). The legend
+   toggle is the last control of that row (#875), so nothing overlaps it. Short desktop windows (≤ 500px tall) get the row too.
+   The header stops short of the row (5 × 10px Leaflet margin + 52 + 48 +
+   52 + 52 + 52px controls + 6px gap: zoom, layers, Fullscreen, Settings,
+   Legend) while expanded, so it cannot cover the controls either. At
+   ≤ 640px wide the legend control is hidden (#875), so the row is four
+   controls (250px) again. */
 @media (orientation: landscape) and (max-height: 500px) {
   .live-page .leaflet-top.leaflet-right {
     display: flex;
     align-items: flex-start;
   }
   body:not(.live-fullscreen) .live-header:has(.live-controls.is-expanded) {
-    --live-ctrl-rail: 250px;
+    --live-ctrl-rail: 312px;
     max-width: calc(100vw - 12px - var(--live-ctrl-rail));
+  }
+}
+@media (orientation: landscape) and (max-height: 500px) and (max-width: 640px) {
+  body:not(.live-fullscreen) .live-header:has(.live-controls.is-expanded) {
+    --live-ctrl-rail: 250px;
   }
 }
 
@@ -1487,6 +1501,20 @@ input.live-node-filter-input:focus {
  * 10px control margin + ~50px control + gap, the same rail .live-header uses. */
 .live-legend[data-position="tr"],
 .live-legend[data-position="br"] { right: var(--live-ctrl-rail-legend, 68px); }
+
+/* #875: in short landscape viewports the control stack is a row across the top
+ * right (see #666), not a column, so the right-hand corners keep below it
+ * (74px start + 100px zoom + 10px margin + 10px gap = 120px under the nav
+ * band) instead of beside it. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .live-legend { --live-legend-clear: 0px; }
+  .live-legend[data-position="tr"],
+  .live-legend[data-position="br"] {
+    --live-legend-clear: 120px;
+    right: 12px;
+  }
+  .live-legend[data-position="tr"] { top: calc(var(--live-legend-top, 64px) + var(--live-legend-clear)); }
+}
 
 /* Corner toggle button */
 .panel-corner-btn {

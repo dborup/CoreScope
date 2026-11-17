@@ -1937,7 +1937,7 @@
         btn.href = 'javascript:void(0)';
         btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg>';
         btn.id = 'legendToggleBtn';
-        btn.title = 'Legend';
+        btn.title = 'Hide legend';
         btn.setAttribute('aria-label', 'Hide legend');
         btn.setAttribute('role', 'button');
         btn.setAttribute('aria-controls', 'liveLegend');
@@ -2574,7 +2574,9 @@
     if (legendToggleBtn && legendEl) {
       const setLegendHidden = (hidden, persist) => {
         legendEl.classList.toggle('hidden', hidden);
-        legendToggleBtn.setAttribute('aria-label', hidden ? 'Show legend' : 'Hide legend');
+        const label = hidden ? 'Show legend' : 'Hide legend';
+        legendToggleBtn.setAttribute('aria-label', label);
+        legendToggleBtn.title = label;
         legendToggleBtn.setAttribute('aria-expanded', String(!hidden));
         if (persist) { try { localStorage.setItem('live-legend-hidden', String(hidden)); } catch (_) { /* ignore */ } }
       };
@@ -2584,7 +2586,8 @@
       } catch (_) { /* private browsing / storage disabled */ }
       legendToggleBtn.addEventListener('click', () => setLegendHidden(!legendEl.classList.contains('hidden'), true));
       const legendCloseBtn = document.getElementById('legendCloseBtn');
-      if (legendCloseBtn) legendCloseBtn.addEventListener('click', () => setLegendHidden(true, true));
+      // The closed panel takes its x with it, so hand the focus to the toggle.
+      if (legendCloseBtn) legendCloseBtn.addEventListener('click', () => { setLegendHidden(true, true); legendToggleBtn.focus(); });
     }
 
     // Populate role legend from shared roles.js

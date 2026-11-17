@@ -63,5 +63,16 @@ step('legend toggle control hidden on phone and in fullscreen like before', () =
   assert(/@media \(max-width: 640px\)[\s\S]*?\.live-legend-toggle-ctl\s*\{\s*display:\s*none/.test(css), 'phone hide missing');
 });
 
+step('legend is height-capped with an internal scroll, and the landscape rail fits five controls', () => {
+  assert(/\.live-legend\s*\{[^}]*max-height:\s*calc\(100%/.test(css), 'no max-height on .live-legend');
+  assert(/--live-ctrl-rail:\s*312px/.test(css), 'landscape rail not sized for five controls');
+});
+
+step('toggle title and aria-expanded follow the state; x hands focus to the toggle', () => {
+  assert(/legendToggleBtn\.title\s*=\s*label/.test(js), 'title not dynamic');
+  assert(/setAttribute\('aria-expanded'/.test(js) && /setAttribute\('aria-controls',\s*'liveLegend'\)/.test(js), 'aria-expanded/controls missing');
+  assert(/legendCloseBtn[\s\S]{0,160}legendToggleBtn\.focus\(\)/.test(js), 'focus not moved on close');
+});
+
 console.log(failed ? '\n' + failed + ' failed' : '\nall passed');
 process.exit(failed ? 1 : 0);

@@ -97,6 +97,72 @@ const STACK = ['.leaflet-control-zoom-in', '#liveFullscreenToggle', '#liveContro
     assert(await page.$eval('#legendToggleBtn', (e) => e.getAttribute('aria-label')) === 'Show legend', 'label not Show legend');
   });
 
+  // Review finding 3: the x (and corner button) must be on screen and hit by
+  // itself at every common height; the legend scrolls inside its own box.
+  const inView = (page, sel) => page.evaluate((q) => {
+    const el = document.querySelector(q), r = el.getBoundingClientRect();
+    const nav = document.querySelector('.top-nav, nav.top-nav');
+    const navB = nav ? nav.getBoundingClientRect().bottom : 0;
+    return { top: r.top, navB, bottom: r.bottom, vh: window.innerHeight };
+  }, sel);
+  const CLOSE_VPS = [[1280, 500], [1024, 600], [1024, 700], [1366, 650], [812, 375], [1024, 768]];
+  for (const [w, h] of CLOSE_VPS) {
+    await page.setViewportSize({ width: w, height: h });
+    await step(`[${w}x${h}] legend x and corner button reachable in the default corner; legend inside the viewport`, async () => {
+      await setup(page, 'br', false);
+      const bad = await hitProbe(page, ['#legendCloseBtn', '#liveLegend .panel-corner-btn']);
+      assert(bad.length === 0, bad.join('; '));
+      const g = await page.$eval('#liveLegend', (e) => { const r = e.getBoundingClientRect(); return [r.top, r.bottom, window.innerHeight]; });
+      assert(g[0] >= 52 && g[1] <= g[2], `legend ${g[0]}..${g[1]} outside 52..${g[2]}`);
+    });
+  }
+
+  // Review finding 4: in every corner the open legend leaves zoom, Fullscreen,
+  // Settings and the legend toggle alone, and its own x stays reachable.
+  const SHORT_VPS = [[812, 375], [667, 375], [1024, 480], [1280, 500], [1024, 600], [1366, 650]];
+  for (const [w, h] of SHORT_VPS) {
+    await page.setViewportSize({ width: w, height: h });
+    for (const corner of ['tl', 'tr', 'br', 'bl']) {
+      await step(`[${w}x${h}] legend open in ${corner}: stack clear and x reachable`, async () => {
+        await setup(page, corner, false);
+        const bad = await hitProbe(page, STACK.concat(['#legendCloseBtn']));
+        assert(bad.length === 0, bad.join('; '));
+        const g = await page.$eval('#liveLegend', (e) => { const r = e.getBoundingClientRect(); return [r.top, r.bottom, window.innerHeight]; });
+        assert(g[0] >= 52 && g[1] <= g[2], `legend ${g[0]}..${g[1]} outside 52..${g[2]}`);
+      });
+    }
+  }
+  // The scroll box really scrolls when the room is short.
+  await page.setViewportSize({ width: 812, height: 375 });
+  await step('[812x375] legend content scrolls inside the panel, header stays put', async () => {
+    await setup(page, 'br', false);
+    const r = await page.$eval('#liveLegend .panel-content', (e) => ({ sh: e.scrollHeight, ch: e.clientHeight, oy: getComputedStyle(e).overflowY }));
+    assert(r.sh > r.ch && r.oy !== 'visible', JSON.stringify(r));
+    const before = await page.$eval('#legendCloseBtn', (e) => e.getBoundingClientRect().top);
+    await page.$eval('#liveLegend .panel-content', (e) => { e.scrollTop = e.scrollHeight; });
+    const after = await page.$eval('#legendCloseBtn', (e) => e.getBoundingClientRect().top);
+    assert(before === after, `x moved from ${before} to ${after}`);
+  });
+
+  // Review findings 5 and 6: aria-expanded, aria-controls, title and label on
+  // load, close, reopen. aria-expanded (not aria-pressed) is deliberate.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await step('toggle aria-expanded, aria-controls, label and title follow the state', async () => {
+    const read = () => page.$eval('#legendToggleBtn', (e) => [e.getAttribute('aria-expanded'), e.getAttribute('aria-label'), e.title, e.getAttribute('aria-controls')].join('|'));
+    await setup(page, 'br', false);
+    assert(await read() === 'true|Hide legend|Hide legend|liveLegend', 'load open: ' + await read());
+    await page.click('#legendCloseBtn');
+    assert(await read() === 'false|Show legend|Show legend|liveLegend', 'after x: ' + await read());
+    assert(await page.evaluate(() => document.activeElement && document.activeElement.id) === 'legendToggleBtn', 'focus not moved to the toggle');
+    await page.click('#legendToggleBtn');
+    assert(await read() === 'true|Hide legend|Hide legend|liveLegend', 'reopened: ' + await read());
+    await page.click('#legendToggleBtn');
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('#legendToggleBtn');
+    await page.waitForTimeout(300);
+    assert(await read() === 'false|Show legend|Show legend|liveLegend', 'load closed: ' + await read());
+  });
+
   await step('corner cycling still works on the legend', async () => {
     await setup(page, 'br', false);
     await page.click('#liveLegend .panel-corner-btn');
