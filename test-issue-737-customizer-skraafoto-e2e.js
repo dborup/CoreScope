@@ -15,18 +15,18 @@
  *   1. a phone at 375x560, cold start (no storage, no deep link, the
  *      gesture hints dismissed by taps), real taps: More, Customize,
  *      Display; the "Oblique Photos" section; the first photo "west", the
- *      first view "zoomed" and the line of sight off, each control at least
+ *      first view "overview" and the line of sight off, each control at least
  *      48 px, inside the screen and hit by itself; the section is stored;
  *      nothing overflows sideways;
  *   2. the same phone, by taps: Nodes, the node, "Oblique photo": the
- *      viewer opens looking west, on the crop (no overview fetched first);
- *      a tap on Zoom out shows the overview;
+ *      viewer opens looking west, on the overview (a stored overview wins
+ *      over the zoomed built-in of #864); a tap on Zoom in shows the crop;
  *   3. back in the customizer by taps, the first photo "auto": from a Path
  *      profile (A, tapped) the viewer shows the side view of A–B, asks the
  *      search for no line and draws none;
  *   4. a deep-linked direction wins over the customizer;
  *   5. the export carries the section and no server key; Reset All
- *      brings M3c back (north, overview, the line asked for);
+ *      brings the built-ins back (north, zoomed, the line asked for);
  *   6. without the server's skraafoto block there is no section;
  *   7. no page errors.
  *
@@ -307,15 +307,15 @@ function searchAnswer(q) {
         assert(await page.evaluate((k) => localStorage.getItem(k), STORE) === null, 'not a cold start');
         await openDisplayByTaps(page);
         assert(await sectionShown(page), 'no Oblique Photos section');
-        assert(await page.inputValue(SEL('direction')) === 'auto' && await page.inputValue(SEL('zoom')) === 'overview', 'built-ins');
+        assert(await page.inputValue(SEL('direction')) === 'auto' && await page.inputValue(SEL('zoom')) === 'zoomed', 'built-ins (#864: zoomed)');
         assert(await page.isChecked(SEL('lineOfSight')), 'line of sight off by default');
         await pick(page, 'direction', 'west');
-        await pick(page, 'zoom', 'zoomed');
+        await pick(page, 'zoom', 'overview');
         await tapControl(page, SEL('lineOfSight'));
         await page.waitForTimeout(500);
         assert(!await page.isChecked(SEL('lineOfSight')), 'the line box still checked after a tap');
         const s = await stored(page);
-        assert(s && s.direction === 'west' && s.zoom === 'zoomed' && s.lineOfSight === false && Object.keys(s).length === 3, 'stored ' + JSON.stringify(s));
+        assert(s && s.direction === 'west' && s.zoom === 'overview' && s.lineOfSight === false && Object.keys(s).length === 3, 'stored ' + JSON.stringify(s));
         const over = await page.evaluate(() => {
           const o = document.querySelector('.cust-overlay');
           return { page: document.documentElement.scrollWidth - document.documentElement.clientWidth, overlay: o ? o.scrollWidth - o.clientWidth : 0 };
@@ -327,7 +327,7 @@ function searchAnswer(q) {
         await page.waitForTimeout(400);
       });
 
-      if (set) await step('375x560: by taps to the node; the viewer opens looking west, on the crop', async () => {
+      if (set) await step('375x560: by taps to the node; the viewer opens looking west, on the stored overview', async () => {
         await page.tap('[data-bottom-nav-tab="more"]');
         await page.tap('[data-bottom-nav-more-route="nodes"]');
         const cell = page.locator(`tr[data-key="${node.pk}"] td:visible`).first();
@@ -339,14 +339,14 @@ function searchAnswer(q) {
         await page.tap(ACTION);
         await waitReady(page);
         assert(await pressed(page, 'west') === 'true', 'not west');
-        assert(rec.zoom.length === 1 && rec.preview.length === 0, 'zoom ' + rec.zoom.length + ', previews ' + rec.preview.length);
-        assert(/_4_0020_/.test(rec.zoom[0].pathname), 'the crop of ' + rec.zoom[0].pathname);
-        assert(await page.getAttribute(ZOOM, 'aria-pressed') === 'true', 'zoom not pressed');
-        await shot(page, '737-customizer-viewer-west-zoomed-375');
+        assert(rec.zoom.length === 0 && rec.preview.length === 1, '#864 a stored overview: zoom ' + rec.zoom.length + ', previews ' + rec.preview.length);
+        assert(await page.getAttribute(ZOOM, 'aria-pressed') === 'false', 'zoom pressed');
         await page.locator(ZOOM).scrollIntoViewIfNeeded();
         await page.tap(ZOOM);
         await waitReady(page);
-        assert(await page.getAttribute(ZOOM, 'aria-pressed') === 'false' && rec.preview.length === 1, 'zoom out: previews ' + rec.preview.length);
+        assert(rec.zoom.length === 1 && /_4_0020_/.test(rec.zoom[0].pathname), 'the crop of ' + (rec.zoom[0] && rec.zoom[0].pathname));
+        assert(await page.getAttribute(ZOOM, 'aria-pressed') === 'true', 'zoom not pressed');
+        await shot(page, '737-customizer-viewer-west-zoomed-375');
         await page.tap(CLOSE);
         await page.waitForSelector(DIALOG, { state: 'detached', timeout: 3000 });
       });
@@ -382,7 +382,7 @@ function searchAnswer(q) {
 
   // ── 4–5. A link wins; export; Reset All ──────────────────────────────────
   {
-    const storage = { [STORE]: JSON.stringify({ skraafoto: { direction: 'west', zoom: 'zoomed', lineOfSight: false } }) };
+    const storage = { [STORE]: JSON.stringify({ skraafoto: { direction: 'west', zoom: 'overview', lineOfSight: false } }) };
     const { ctx, page, rec } = await newCtx({ storage });
     try {
       await step('a deep-linked direction wins over the customizer', async () => {
@@ -390,17 +390,17 @@ function searchAnswer(q) {
         await themeSettled(page);
         await waitReady(page);
         assert(await pressed(page, 'south') === 'true', 'not south');
-        assert(rec.zoom.length >= 1 && rec.zoom.every(u => /_3_0020_/.test(u.pathname)) && rec.preview.length === 0, 'south, zoomed: ' + rec.zoom.map(u => u.pathname).join(' ') + ' / ' + rec.preview.join(' '));
+        assert(rec.zoom.length === 0 && rec.preview.length >= 1 && rec.preview.every(u => /_3_0020_/.test(u)), 'south, overview: ' + rec.zoom.map(u => u.pathname).join(' ') + ' / ' + rec.preview.join(' '));
         await page.click(CLOSE);
         await page.waitForSelector(DIALOG, { state: 'detached', timeout: 3000 });
       });
-      await step('the export carries the section and no server key; Reset All brings M3c back', async () => {
+      await step('the export carries the section and no server key; Reset All brings the built-ins back', async () => {
         await page.click('#customizeToggle');
         await page.waitForSelector('.cust-overlay:not(.hidden)', { timeout: 5000 });
         await page.click('.cust-tab[data-tab="export"]');
         await page.waitForSelector('.cust-panel[data-panel="export"].active', { timeout: 4000 });
         const json = JSON.parse(await page.inputValue('#cv2ExportJson'));
-        assert(JSON.stringify(json.skraafoto) === JSON.stringify({ direction: 'west', zoom: 'zoomed', lineOfSight: false }), 'export ' + JSON.stringify(json.skraafoto));
+        assert(JSON.stringify(json.skraafoto) === JSON.stringify({ direction: 'west', zoom: 'overview', lineOfSight: false }), 'export ' + JSON.stringify(json.skraafoto));
         for (const k of ['searchUrl', 'previewUrl', 'token', 'maxPx', 'enabled']) assert(!(k in json.skraafoto), k + ' in the export');
         page.once('dialog', (d) => d.accept());
         await page.click('#cv2ResetAll');
@@ -415,7 +415,7 @@ function searchAnswer(q) {
         await waitReady(page);
         assert(rec.search[from.s].searchParams.has('path'), 'the line not asked for after reset');
         assert(await pressed(page, 'east') === 'true', 'not the side view after reset');
-        assert(rec.zoom.length === from.z, 'zoomed after reset');
+        assert(rec.zoom.length === from.z + 1, '#864: the crop first after reset, zoom ' + (rec.zoom.length - from.z));
         assert(await page.$(LOS) !== null, 'no line after reset');
         assert(rec.errors.length === 0, rec.errors.join(' | '));
       });

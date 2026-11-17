@@ -321,7 +321,7 @@ function searchAnswer(q, o) {
         await route.abort();
       }
     });
-    await ctx.addInitScript((firstVisit) => {
+    await ctx.addInitScript(([firstVisit, pinOverview]) => {
       // A page load's last theme-refresh comes 300 ms after the theme
       // config lands (app.js, customize-v2.js init); an earlier one, on
       // data-theme, may come first. See themeSettled.
@@ -332,12 +332,15 @@ function searchAnswer(q, o) {
       try {
         localStorage.setItem('meshcore-theme', 'light');
         localStorage.setItem('meshcore-map-clustering', 'false');
+        // #864: the built-in zoom is 'zoomed'. Every suite here but the #864
+        // one pins the viewer's own stored choice to the overview-first path.
+        if (pinOverview) localStorage.setItem('cs-theme-overrides', JSON.stringify({ skraafoto: { zoom: 'overview' } }));
         if (!firstVisit) {
           ['row-swipe', 'tab-swipe', 'edge-drawer', 'pull-refresh']
             .forEach(k => localStorage.setItem('meshcore-gesture-hints-' + k, 'seen'));
         }
       } catch (_) {}
-    }, !!o.firstVisit);
+    }, [!!o.firstVisit, !o.builtinZoom]);
     const page = await ctx.newPage();
     if (THROTTLE > 1) await (await ctx.newCDPSession(page)).send('Emulation.setCPUThrottlingRate', { rate: THROTTLE });
     page.on('pageerror', e => rec.errors.push(String(e)));
@@ -1274,6 +1277,46 @@ function searchAnswer(q, o) {
     await waitReady(page);
     await step('700x700 tablet node page: the dialog sits above the bottom nav', async () => {
       await aboveNav(page);
+    });
+    await ctx.close();
+  }
+
+  // ── 14. #864: the built-in default opens zoomed in around the point ───────
+  for (const [label, o] of [
+    ['desktop', {}],
+    ['375x560 portrait cold start, real taps', { viewport: { width: 375, height: 560 }, touch: true, firstVisit: true }],
+  ]) {
+    const { ctx, page, rec } = await newCtx(Object.assign({ builtinZoom: true }, o));
+    await gotoNode(page, PK);
+    await page.waitForSelector(ACTION, { timeout: 10000 });
+    if (o.touch) { await page.locator(ACTION).scrollIntoViewIfNeeded(); await page.tap(ACTION); } else { await page.click(ACTION); }
+    await waitReady(page);
+    await step('#864 ' + label + ': the first image request is the crop around the point, no overview', async () => {
+      assert(rec.zoom.length === 1, 'crops ' + rec.zoom.length);
+      assert(rec.zoom[0].searchParams.toString() === 'zoom=1&x=130.5&y=210.2', rec.zoom[0].searchParams.toString());
+      assert(rec.preview.length === 0, 'an overview was fetched first: ' + rec.preview.join(' '));
+      assert(await page.getAttribute(ZOOM, 'aria-pressed') === 'true', 'Zoom out not shown');
+      assert(/zoomed in/.test(await page.getAttribute(IMG, 'alt')), await page.getAttribute(IMG, 'alt'));
+    });
+    await step('#864 ' + label + ': Zoom out shows the whole photo', async () => {
+      if (o.touch) await page.tap(ZOOM); else await page.click(ZOOM);
+      await waitReady(page);
+      assert(await page.getAttribute(ZOOM, 'aria-pressed') === 'false', 'still pressed');
+      assert(rec.preview.length === 1 && rec.zoom.length === 1, 'preview/zoom ' + rec.preview.length + '/' + rec.zoom.length);
+      await crossOnPoint(page, PT, 'zoomed out');
+    });
+    await ctx.close();
+  }
+  {
+    // A viewer's stored overview still wins over the built-in default.
+    const { ctx, page, rec } = await newCtx({});
+    await gotoNode(page, PK);
+    await page.waitForSelector(ACTION, { timeout: 10000 });
+    await page.click(ACTION);
+    await waitReady(page);
+    await step('#864: a stored overview opens on the whole photo', async () => {
+      assert(rec.zoom.length === 0 && rec.preview.length === 1, 'zoom/preview ' + rec.zoom.length + '/' + rec.preview.length);
+      assert(await page.getAttribute(ZOOM, 'aria-pressed') === 'false', 'pressed');
     });
     await ctx.close();
   }

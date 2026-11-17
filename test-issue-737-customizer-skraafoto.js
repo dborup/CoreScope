@@ -59,7 +59,7 @@ const CFG = {
   bounds: [[54.4265, 7.99125], [57.778, 15.5995]],
 };
 const FRAME = { width: 1024, height: 765 };
-const DEFAULTS = { direction: 'auto', zoom: 'overview', lineOfSight: true };
+const DEFAULTS = { direction: 'auto', zoom: 'zoomed', lineOfSight: true }; // #864: zoomed is the built-in
 const LINE_NS = { a: { lat: 56.10, lon: 10.20 }, b: { lat: 56.20, lon: 10.20 } };
 
 function rule() {
@@ -110,8 +110,8 @@ test('resolve(): without an argument, the live window.SITE_CONFIG.skraafoto', ()
   try {
     delete win.SITE_CONFIG;
     eq(R.resolve(), DEFAULTS);
-    win.SITE_CONFIG = { skraafoto: { zoom: 'zoomed' } };
-    eq(R.resolve().zoom, 'zoomed');
+    win.SITE_CONFIG = { skraafoto: { zoom: 'overview' } };
+    eq(R.resolve().zoom, 'overview', '#864: a stored overview wins over the zoomed default');
   } finally { win.SITE_CONFIG = saved; }
 });
 
@@ -195,10 +195,18 @@ async function withViewer(o, section, fn, svcOpts) {
   }
 }
 
-test('viewer, no setting: M3c as it was (node north, profile the side view, overview, line drawn)', async () => {
+test('viewer, no setting (#864): node north, profile the side view, the crop first, line drawn', async () => {
   await withViewer({}, undefined, async (t) => {
     eq(t.viewer.state().dir, 'north');
-    eq(t.svc.zoom, [], 'overview first');
+    eq(t.svc.zoom, [photo('north').previewUrl + '?zoom=1&x=300.5&y=400.2'], 'the crop first');
+    eq(t.svc.preview, [], 'no overview fetched first');
+    eq(t.zoom().getAttribute('aria-pressed'), 'true');
+    await t.click('sf-zoom');
+    eq(t.zoom().getAttribute('aria-pressed'), 'false', 'Zoom out shows the overview');
+    eq(t.svc.preview, [photo('north').previewUrl]);
+  });
+  await withViewer({}, { zoom: 'overview' }, async (t) => {
+    eq(t.svc.zoom, [], 'a stored overview still opens on the whole photo');
     eq(t.svc.preview, [photo('north').previewUrl]);
   });
   await withViewer({ line: LINE_NS }, undefined, async (t) => {
@@ -214,7 +222,7 @@ test('direction auto is the same as no setting', () => withViewer({ line: LINE_N
 }));
 
 test('direction west: the first photo from a node and from a profile', async () => {
-  await withViewer({}, { direction: 'west' }, async (t) => {
+  await withViewer({}, { direction: 'west', zoom: 'overview' }, async (t) => {
     eq(t.viewer.state().dir, 'west');
     eq(t.svc.preview, [photo('west').previewUrl], 'only that photo fetched');
   });
@@ -283,7 +291,7 @@ test('zoom zoomed: out of frame there is nothing to zoom on, so the overview', (
   eq(t.zoom().disabled, true);
 }, { extra: { inFrame: false } }));
 
-test('line of sight off: not asked for, not drawn, not named; the side view stays', () => withViewer({ line: LINE_NS }, { lineOfSight: false }, async (t) => {
+test('line of sight off: not asked for, not drawn, not named; the side view stays', () => withViewer({ line: LINE_NS }, { lineOfSight: false, zoom: 'overview' }, async (t) => {
   assert.ok(t.svc.search[0].indexOf('path=') < 0, t.svc.search[0]);
   assert.ok(t.svc.search[0].indexOf('ha=') < 0 && t.svc.search[0].indexOf('hb=') < 0, t.svc.search[0]);
   eq(t.viewer.state().dir, 'east', 'the default direction still sees the line from the side');
