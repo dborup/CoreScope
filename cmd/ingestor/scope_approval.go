@@ -12,6 +12,14 @@ import (
 	"github.com/meshcore-analyzer/regions"
 )
 
+// Result files of the region-scope queue are only polled by the admin who
+// made the decision, so they are kept for an hour and at most this many.
+const (
+	scopeQueueResultTTL  = time.Hour
+	scopeQueueMaxResults = 1024
+	scopeQueuePruneEvery = 10 * time.Minute
+)
+
 type scopeApprovalRunner struct {
 	store *Store
 	keys  *hotKeys
@@ -247,6 +255,14 @@ func (r *scopeApprovalRunner) RunOnce(ctx context.Context) {
 	}
 }
 
+// pruneQueue drops expired and surplus result files and stale temp files.
+// Pending commands are never removed here.
+func (r *scopeApprovalRunner) pruneQueue(now time.Time) {
+	if _, err := r.queue.Prune(now, scopeQueueResultTTL, scopeQueueMaxResults); err != nil {
+		log.Printf("[scope-approval] queue prune failed: %v", err)
+	}
+}
+
 func (r *scopeApprovalRunner) Start() func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -254,8 +270,13 @@ func (r *scopeApprovalRunner) Start() func() {
 		defer close(done)
 		tick := time.NewTicker(2 * time.Second)
 		defer tick.Stop()
+		var lastPrune time.Time
 		for {
 			r.RunOnce(ctx)
+			if time.Since(lastPrune) >= scopeQueuePruneEvery {
+				r.pruneQueue(time.Now())
+				lastPrune = time.Now()
+			}
 			select {
 			case <-ctx.Done():
 				return

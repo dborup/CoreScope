@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -303,5 +304,69 @@ func TestApprovedRegionKeyEqualsConfiguredKey(t *testing.T) {
 		if !bytes.Equal(approved.Regions()[name], configured[name]) || !bytes.Equal(configured[name], regions.Key(name)) {
 			t.Errorf("%s: approved %x, configured %x, regions.Key %x", name, approved.Regions()[name], configured[name], regions.Key(name))
 		}
+	}
+}
+
+// #789 pre-work: the region-scope queue kept every result file forever. Prune
+// must drop results older than the TTL, keep only the newest
+// scopeQueueMaxResults, and leave pending commands alone.
+func TestScopeApprovalQueuePrunedAndBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scope-prune.db")
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	r := newScopeApprovalRunner(store, newHotKeys(nil, nil))
+	dir := r.queue.Dir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	write := func(name string, age time.Duration) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mt := now.Add(-age)
+		if err := os.Chtimes(p, mt, mt); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	old := write("result-"+channelregistry.NewID()+".json", scopeQueueResultTTL+time.Minute)
+	pending := write("cmd-"+channelregistry.NewID()+".json", 48*time.Hour)
+	// TTL on its own, well under the cap.
+	keep := write("result-"+channelregistry.NewID()+".json", time.Minute)
+	r.pruneQueue(now)
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("result older than the TTL survived: %v", err)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("result inside the TTL was pruned: %v", err)
+	}
+	var fresh []string
+	for i := 0; i < scopeQueueMaxResults+10; i++ {
+		fresh = append(fresh, write("result-"+channelregistry.NewID()+".json", time.Duration(i+1)*time.Millisecond))
+	}
+	r.pruneQueue(now)
+	if _, err := os.Stat(pending); err != nil {
+		t.Errorf("pending command was pruned: %v", err)
+	}
+	left := 0
+	for _, p := range fresh {
+		if _, err := os.Stat(p); err == nil {
+			left++
+		}
+	}
+	if left != scopeQueueMaxResults {
+		t.Errorf("%d fresh results kept, want exactly %d", left, scopeQueueMaxResults)
+	}
+	// The newest ones are the ones kept.
+	if _, err := os.Stat(fresh[0]); err != nil {
+		t.Errorf("newest result was evicted: %v", err)
+	}
+	if _, err := os.Stat(fresh[len(fresh)-1]); !os.IsNotExist(err) {
+		t.Errorf("oldest fresh result was kept over newer ones: %v", err)
 	}
 }
