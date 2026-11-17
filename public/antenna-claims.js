@@ -321,6 +321,19 @@
     else if (root.navigator && root.navigator.clipboard) root.navigator.clipboard.writeText(text).then(done, function () {});
   }
 
+  // trackFocus remembers the field in the section that has the focus, so a
+  // re-render that detaches it can give it back. Focus that moves on, or a
+  // blur of a field still in the page, forgets it.
+  function trackFocus(view, section) {
+    if (!section || !section.addEventListener) return;
+    section.addEventListener('focusin', function (e) { view.focused = e.target; });
+    section.addEventListener('focusout', function (e) {
+      var t = e.target;
+      if (e.relatedTarget) { view.focused = null; return; }
+      setTimeout(function () { if (view.focused === t && t.isConnected && document.activeElement !== t) view.focused = null; }, 0);
+    });
+  }
+
   // ── Owner section on the node page ─────────────────────────────────────
   // mountOwnerSection fills `section` (hidden until the feature is known to
   // be on) for node n and returns the view ({ pubkey, destroy }). The node
@@ -332,7 +345,8 @@
     var pubkey = n && n.public_key;
     if (prev && prev.pubkey === pubkey && pubkey && section && prev.adopt(section)) return prev;
     if (prev) prev.destroy();
-    var view = { section: section, poller: null, alive: true, rendered: false };
+    var view = { section: section, poller: null, alive: true, rendered: false, focused: null };
+    trackFocus(view, section);
     var api = {
       pubkey: pubkey,
       destroy: function () { view.alive = false; if (view.poller) view.poller.cancel(); },
@@ -340,10 +354,19 @@
         if (!view.alive) return false;
         var old = view.section;
         view.section = next;
+        trackFocus(view, next);
         if (view.rendered) {
           while (old.firstChild) next.appendChild(old.firstChild);
           next.setAttribute('data-testid', 'antenna-claim');
           next.hidden = false;
+          // The page's re-render detached the focused field, which blurs it:
+          // typing goes nowhere and a phone keyboard closes (#868 N9).
+          var f = view.focused;
+          if (f && next.contains(f) && (!document.activeElement || document.activeElement === document.body)) {
+            var sel = typeof f.selectionStart === 'number' ? [f.selectionStart, f.selectionEnd] : null;
+            f.focus({ preventScroll: true });
+            if (sel) try { f.setSelectionRange(sel[0], sel[1]); } catch (_) {}
+          }
         }
         return true;
       }
@@ -646,10 +669,15 @@
     return s;
   }
 
-  // reveal scrolls a feedback line into view only if it is not already;
-  // its scroll-margin keeps it clear of the fixed top bar and bottom nav.
+  // reveal scrolls a feedback line into view unless it is wholly clear of
+  // the fixed top bar and bottom nav (its scroll-margin). It measures the
+  // line itself: scrollIntoView({block:'nearest'}) leaves a line that is
+  // partly in the viewport but under the bottom nav where it is (#868 F3).
   function reveal(line) {
-    if (line && line.textContent && line.scrollIntoView) line.scrollIntoView({ block: 'nearest' });
+    if (!line || !line.textContent || !line.scrollIntoView) return;
+    var r = line.getBoundingClientRect(), cs = getComputedStyle(line);
+    if (r.bottom > window.innerHeight - (parseFloat(cs.scrollMarginBottom) || 0)) line.scrollIntoView({ block: 'end' });
+    else if (r.top < (parseFloat(cs.scrollMarginTop) || 0)) line.scrollIntoView({ block: 'start' });
   }
 
   function rowOf(id) {

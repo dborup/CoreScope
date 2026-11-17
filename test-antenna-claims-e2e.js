@@ -39,9 +39,10 @@
  *   9. phone, 375x560, cold start, real taps: the whole owner flow and an
  *      admin decision, every control and admin link at least 44 px, no
  *      sideways scroll;
- *  10. with 11 claims in the queue, on a phone and on a desktop, the result
+ *  10. with 11 claims in the queue, on two phones and a desktop, the result
  *      of a decision (the 409 text, "Done.") is on screen where the admin
- *      tapped, not below the whole list.
+ *      tapped, not below the whole list nor under the bottom nav when the
+ *      button was tapped just above it.
  *
  * Usage:
  *   BASE_URL=http://localhost:13700 node test-antenna-claims-e2e.js
@@ -182,21 +183,26 @@ function pathOf(url) { return new URL(url).pathname; }
       await settle(page);
     }
   }
-  // feedback waits for a status line (role=status) whose text matches re
-  // and says whether the admin can see it: inside the viewport and the top
-  // element at its middle, so not under the fixed top bar or bottom nav.
-  async function feedback(page, re) {
+  // feedback waits for a status line (role=status) whose text matches re,
+  // in the claim row `rowId` if given, and says whether the admin can read
+  // it: inside the viewport and the top element at its top, middle and
+  // bottom, so no part of it is under the fixed top bar or bottom nav.
+  async function feedback(page, re, rowId) {
     for (let i = 0; i < 300; i++) {
-      const f = await page.evaluate((src) => {
-        const rx = new RegExp(src);
-        const e = Array.from(document.querySelectorAll('[role="status"]')).find(x => rx.test(x.textContent));
+      const f = await page.evaluate((a) => {
+        const rx = new RegExp(a.src);
+        const scope = a.rowId ? document.querySelector('.ac-item[data-claim-id="' + a.rowId + '"]') : document;
+        const e = scope && Array.from(scope.querySelectorAll('[role="status"]')).find(x => rx.test(x.textContent));
         if (!e) return null;
         const r = e.getBoundingClientRect();
-        const x = r.left + Math.min(r.width / 2, 40), y = r.top + r.height / 2;
-        const top = r.height > 0 && y >= 0 && y <= window.innerHeight ? document.elementFromPoint(x, y) : null;
-        return { text: e.textContent, kind: e.getAttribute('data-kind'), y: Math.round(r.top), vh: window.innerHeight,
-          visible: !!top && (top === e || e.contains(top)) };
-      }, re.source);
+        const x = r.left + Math.min(r.width / 2, 40);
+        const hit = (y) => {
+          const t = y >= 0 && y < window.innerHeight ? document.elementFromPoint(x, y) : null;
+          return !!t && (t === e || e.contains(t));
+        };
+        return { text: e.textContent, kind: e.getAttribute('data-kind'), y: Math.round(r.top), bottom: Math.round(r.bottom),
+          vh: window.innerHeight, visible: r.height > 0 && hit(r.top + 1) && hit(r.top + r.height / 2) && hit(r.bottom - 1) };
+      }, { src: re.source, rowId: rowId || '' });
       if (f) return f;
       await new Promise(r => setTimeout(r, 50));
     }
@@ -276,10 +282,15 @@ function pathOf(url) { return new URL(url).pathname; }
     // The node page rebuilds its sections on a theme refresh; the owner's
     // flow must survive it: same name, same code, one poller. Two pollers
     // would put checks closer together than the first backoff step (2 s).
+    // A refresh while the owner types must not blur the field: that drops
+    // the typing and closes a phone keyboard (#868 N9).
+    await page.focus('[data-testid="ac-name"]');
     await page.evaluate(() => window.dispatchEvent(new CustomEvent('theme-refresh')));
     await page.waitForFunction(() => document.querySelectorAll('#node-antenna').length === 1 &&
       document.querySelector('#nodeFullBody #node-antenna [data-testid="ac-code"]'));
     assert((await page.inputValue('[data-testid="ac-name"]')) === 'A Very Long Repeater Name ' + CODE, 'typed name lost on a re-render');
+    assert(await page.evaluate(() => document.activeElement && document.activeElement.getAttribute('data-testid') === 'ac-name'),
+      'a re-render blurred the name field');
     assert((await page.textContent('[data-testid="ac-code"]')) === CODE, 'code lost on a re-render');
     await waitStatus(page, /Proven/);
     await waitStatus(page, /Approved/);
@@ -520,14 +531,15 @@ function pathOf(url) { return new URL(url).pathname; }
     }
     const store = { claims };
     store.decide = (id, op) => {
-      if (op === 'approve' && id === claims[0].id) return { status: 409, body: { error: 'a newer claim for this node is already approved' } };
+      if (op === 'approve' && (id === claims[0].id || id === claims[1].id)) return { status: 409, body: { error: 'a newer claim for this node is already approved' } };
       const c = claims.find(x => x.id === id);
       if (c) c.status = op === 'approve' ? 'approved' : 'rejected';
       return { status: 202, body: { requestId: 'fedcba9876543210' } };
     };
     return store;
   }
-  for (const vp of [{ width: 375, height: 560, touch: true, name: 'phone 375x560' }, { width: 1280, height: 800, name: 'desktop 1280x800' }]) {
+  for (const vp of [{ width: 375, height: 560, touch: true, name: 'phone 375x560' }, { width: 360, height: 640, touch: true, name: 'phone 360x640' },
+    { width: 1280, height: 800, name: 'desktop 1280x800' }]) {
     await step('admin, 11 claims, ' + vp.name + ': a decision\'s result is on screen', async () => {
       const store = longQueue();
       const { ctx, page, errors } = await newCtx({ viewport: { width: vp.width, height: vp.height }, touch: vp.touch, admin: store, statuses: [404] });
@@ -536,18 +548,38 @@ function pathOf(url) { return new URL(url).pathname; }
       await page.fill('[data-testid="ac-admin-key"]', ADMIN_KEY);
       await page.press('[data-testid="ac-admin-key"]', 'Enter');
       await page.waitForFunction(() => document.querySelectorAll('.ac-item').length === 11);
-      async function decide(id, op) {
-        const loc = page.locator('.ac-item[data-claim-id="' + id + '"] [data-decide="' + op + '"]');
+      // On a phone the thumb taps a button just above the bottom nav, where
+      // a scrolled-down list leaves it (#868 F3): scroll so the button's
+      // bottom is `above` px above the nav, then tap without Playwright
+      // moving it. At 30 px the result line lands wholly inside the
+      // viewport but under the nav, which scrollIntoView 'nearest' ignores.
+      async function decide(id, op, above) {
+        const sel = '.ac-item[data-claim-id="' + id + '"] [data-decide="' + op + '"]';
+        const loc = page.locator(sel);
         await loc.scrollIntoViewIfNeeded();
         if (!vp.touch) return loc.click();
-        const b = await loc.boundingBox();
-        await page.touchscreen.tap(b.x + b.width / 2, b.y + b.height / 2);
+        await page.evaluate((s) => {
+          const e = document.querySelector(s.sel), nav = document.querySelector('.bottom-nav');
+          const d = e.getBoundingClientRect().bottom - (nav.getBoundingClientRect().top - s.above);
+          let sc = e.parentElement;
+          while (sc && !(sc.scrollHeight > sc.clientHeight && /auto|scroll/.test(getComputedStyle(sc).overflowY))) sc = sc.parentElement;
+          (sc || document.scrollingElement).scrollTop += d;
+        }, { sel, above });
+        const p = await loc.evaluate((e) => {
+          const r = e.getBoundingClientRect(), nav = document.querySelector('.bottom-nav').getBoundingClientRect();
+          const x = r.left + r.width / 2, y = r.top + r.height / 2, t = document.elementFromPoint(x, y);
+          return { x, y, gap: Math.round(nav.top - r.bottom), hit: !!t && (t === e || e.contains(t)) };
+        });
+        assert(p.hit && Math.abs(p.gap - above) <= 1, 'the button is not just above the bottom nav: ' + JSON.stringify(p));
+        await page.touchscreen.tap(p.x, p.y);
       }
-      await decide(store.claims[0].id, 'approve');
-      const refused = await feedback(page, /Reject this claim instead/);
-      assert(refused.visible && refused.kind === 'error', 'the 409 text is off screen: ' + JSON.stringify(refused));
+      for (const [i, above] of [[0, 10], [1, 30]]) {
+        await decide(store.claims[i].id, 'approve', above);
+        const refused = await feedback(page, /Reject this claim instead/, store.claims[i].id);
+        assert(refused.visible && refused.kind === 'error', 'the 409 text is off screen (tapped ' + above + ' px above the nav): ' + JSON.stringify(refused));
+      }
       if (SHOT_DIR) await page.screenshot({ path: path.join(SHOT_DIR, 'admin-409-' + vp.width + '.png') });
-      await decide(store.claims[5].id, 'reject');
+      await decide(store.claims[5].id, 'reject', 10);
       await page.waitForFunction((id) => !document.querySelector('.ac-item[data-claim-id="' + id + '"]'), store.claims[5].id, { timeout: 15000 });
       const done = await feedback(page, /^Done/);
       assert(done.visible && done.kind === 'success', '"Done." is off screen: ' + JSON.stringify(done));
