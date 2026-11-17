@@ -19,7 +19,12 @@
  *      screen, inside the list, not covered, and readable (its text colour
  *      differs from its background);
  *   3. zoom 12 still shows the zoom hint, not the source-down text;
- *   4. no console errors.
+ *   4. no console errors;
+ *   5. (owner addition, stale-if-error) with every cell answered 200 from
+ *      the server's stale copy (X-CoreScope-Masts-Stale: 1), the site is
+ *      drawn and the line says "Antenna data may be out of date (source not
+ *      responding)", on desktop and on the 375x560 phone after a real tap,
+ *      light and dark, on screen, uncovered and readable.
  *
  * Usage:
  *   BASE_URL=http://localhost:13872 node test-issue-872-masts-source-down-e2e.js
@@ -39,6 +44,7 @@ const MASTS = {
   sourceUrl: 'https://mastedatabasen.dk/', cellExtent: [219, 3017, 462, 3209],
 };
 const DOWN_TEXT = 'Antenna data source (Mastedatabasen) is not responding — try again later';
+const STALE_TEXT = 'Antenna data may be out of date (source not responding)';
 const VIEW = { lat: 56.43, lon: 9.40 };
 const LIST = '.leaflet-control-layers-list';
 const STATUS = '.mc-masts-status';
@@ -71,7 +77,9 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   });
   console.log(`\n=== #872 antenna sites while the source is down, against ${BASE} ===\n`);
 
-  async function newCtx({ viewport, touch = false, theme = 'light' }) {
+  // mode 'down': the open breaker (one cached cell). mode 'stale': every
+  // cell is the server's stale copy (cmd/server/masts_proxy.go serveStale).
+  async function newCtx({ viewport, touch = false, theme = 'light', mode = 'down' }) {
     const ctx = await browser.newContext({ viewport, hasTouch: touch, isMobile: touch, colorScheme: theme });
     const rec = { masts: [], errors: [] };
     await ctx.route(BASE + '/api/config/client', async (route) => {
@@ -84,7 +92,16 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       const cell = new URL(route.request().url()).searchParams.get('cell') || '';
       rec.masts.push(cell);
       const [e, n] = cell.split(',').map(Number);
-      if (e === CACHED[0] && n === CACHED[1]) {
+      const isCached = e === CACHED[0] && n === CACHED[1];
+      if (mode === 'stale') {
+        await route.fulfill({
+          status: 200,
+          headers: { 'X-CoreScope-Masts-Stale': '1', 'X-CoreScope-Cache': 'stale', 'Cache-Control': 'no-store' },
+          json: { cell: { e, n }, truncated: false, sites: isCached ? [SITE] : [] },
+        });
+        return;
+      }
+      if (isCached) {
         await route.fulfill({ status: 200, json: { cell: { e, n }, truncated: false, sites: [SITE] } });
         return;
       }
@@ -163,15 +180,29 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     } finally { await ctx.close(); }
   });
 
-  for (const theme of ['light', 'dark']) {
-    await step(`phone 375x560 ${theme}: a real tap opens the layers, the source-down line is on screen and readable`, async () => {
-      const { ctx, page, rec } = await newCtx({ viewport: { width: 375, height: 560 }, touch: true, theme });
+  await step('desktop z14 stale: the stale note, the site drawn', async () => {
+    const { ctx, page, rec } = await newCtx({ viewport: { width: 1280, height: 800 }, mode: 'stale' });
+    try {
+      await gotoMap(page, 14);
+      await page.waitForFunction((t) => {
+        const el = document.querySelector('.mc-masts-status');
+        return el && !el.hidden && el.textContent === t;
+      }, STALE_TEXT, { timeout: 10000 });
+      assert((await drawn(page)) === 1, 'the stale cell\'s site is not drawn');
+      assert(new Set(rec.masts).size === rec.masts.length, 'a stale cell was asked twice');
+      assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+    } finally { await ctx.close(); }
+  });
+
+  for (const [mode, want] of [['down', DOWN_TEXT], ['stale', STALE_TEXT]]) for (const theme of ['light', 'dark']) {
+    await step(`phone 375x560 ${theme} ${mode}: a real tap opens the layers, the ${mode} line is on screen and readable`, async () => {
+      const { ctx, page, rec } = await newCtx({ viewport: { width: 375, height: 560 }, touch: true, theme, mode });
       try {
         await gotoMap(page, 14);
         await page.waitForFunction((t) => {
           const el = document.querySelector('.mc-masts-status');
           return el && el.textContent === t;
-        }, DOWN_TEXT, { timeout: 10000 });
+        }, want, { timeout: 10000 });
         await page.tap('.leaflet-control-layers-toggle');
         await page.waitForSelector('.leaflet-control-layers-expanded', { timeout: 3000 });
         await page.waitForTimeout(400);
@@ -194,13 +225,13 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
             color: cs.color, bg, vw: innerWidth, vh: innerHeight,
           };
         }, { s: STATUS, l: LIST });
-        assert(r.text === DOWN_TEXT && !r.hidden, 'status ' + JSON.stringify(r.text));
+        assert(r.text === want && !r.hidden, 'status ' + JSON.stringify(r.text));
         assert(r.left >= 0 && r.right <= r.vw && r.top >= 0 && r.bottom <= r.vh, 'off screen ' + JSON.stringify(r));
         assert(r.inList, 'outside the visible list ' + JSON.stringify(r));
         assert(r.uncovered, 'covered by ' + r.on);
         assert(r.color !== r.bg, `text colour ${r.color} equals its background`);
         if (SHOT_DIR) {
-          await page.screenshot({ path: path.join(SHOT_DIR, `masts-source-down-375x560-${theme}.png`) });
+          await page.screenshot({ path: path.join(SHOT_DIR, `masts-${mode}-375x560-${theme}.png`) });
         }
         console.log(`      line ${Math.round(r.width)} px wide at y=${Math.round(r.top)}, ${r.color} on ${r.bg}`);
         assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));

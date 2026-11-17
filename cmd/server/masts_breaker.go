@@ -3,7 +3,7 @@ package main
 // #872 — circuit breaker in front of Mastedatabasen.
 //
 // When the WFS is down or hangs, every uncached cell used to wait up to
-// mastsDeadline for one of the mastsUpstreamSlots, and each try timed out
+// mastsDeadline for one of the upstream slots, and each try timed out
 // on its own, so viewers saw "Loading antenna sites…" for minutes and the
 // log filled with timeouts. The breaker stops that:
 //

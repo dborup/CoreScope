@@ -489,16 +489,16 @@ func TestMastsBreakerStopsQueuedFetches(t *testing.T) {
 	opts.breakerFailures = 1
 	p := mustMastsProxy(t, opts)
 
-	codes := make(chan int, mastsUpstreamSlots+1)
-	for i := 0; i < mastsUpstreamSlots; i++ {
+	codes := make(chan int, testMastsSlots+1)
+	for i := 0; i < testMastsSlots; i++ {
 		go func(i int) { codes <- mastsGet(p, cellQuery(cellN(i)), clientA).Code }(i)
 	}
-	waitUntil872(t, func() bool { return f.inFlight.Load() == mastsUpstreamSlots })
+	waitUntil872(t, func() bool { return f.inFlight.Load() == testMastsSlots })
 	queued := make(chan *httptest.ResponseRecorder, 1)
 	go func() { queued <- mastsGet(p, cellQuery(cellN(9)), clientA) }()
 	time.Sleep(50 * time.Millisecond) // the third fetch is waiting for a slot
 	close(f.gate)
-	for i := 0; i < mastsUpstreamSlots; i++ {
+	for i := 0; i < testMastsSlots; i++ {
 		if c := <-codes; c != http.StatusBadGateway {
 			t.Fatalf("held fetch: %d", c)
 		}
@@ -507,7 +507,7 @@ func TestMastsBreakerStopsQueuedFetches(t *testing.T) {
 	if w.Code != http.StatusServiceUnavailable || w.Header().Get(mastsSourceHeader) != "down" {
 		t.Fatalf("queued fetch after the breaker opened: %d %q", w.Code, w.Header().Get(mastsSourceHeader))
 	}
-	if n := f.hits.Load(); n != int32(mastsUpstreamSlots) {
-		t.Fatalf("upstream hits %d, want %d (the queued fetch went upstream)", n, mastsUpstreamSlots)
+	if n := f.hits.Load(); n != int32(testMastsSlots) {
+		t.Fatalf("upstream hits %d, want %d (the queued fetch went upstream)", n, testMastsSlots)
 	}
 }

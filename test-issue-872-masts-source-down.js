@@ -11,7 +11,11 @@
  *   3. ask each cell at most once per cool-down: no retry storm;
  *   4. say "Antenna data source (Mastedatabasen) is not responding — try
  *      again later" instead of "Loading antenna sites…", while the zoom
- *      hint, the too-wide hint and the partial-failure text stay.
+ *      hint, the too-wide hint and the partial-failure text stay;
+ *   5. (owner addition, stale-if-error) read a 200 with
+ *      X-CoreScope-Masts-Stale: 1 as a stale cell, show its sites, and say
+ *      "Antenna data may be out of date (source not responding)" while a
+ *      visible cell is stale.
  *
  * vm sandbox, the real file; nothing here contacts any server.
  * Runs via: node test-issue-872-masts-source-down.js
@@ -43,7 +47,9 @@ const MASTS = {
 };
 const ML = makeSandbox({ masts: MASTS }).window.MastsLayer;
 const DOWN_TEXT = 'Antenna data source (Mastedatabasen) is not responding — try again later';
+const STALE_TEXT = 'Antenna data may be out of date (source not responding)';
 const GO = fs.readFileSync(path.join(__dirname, 'cmd', 'server', 'masts_breaker.go'), 'utf8');
+const GO_PROXY = fs.readFileSync(path.join(__dirname, 'cmd', 'server', 'masts_proxy.go'), 'utf8');
 
 function harness(opts) {
   const calls = [];
@@ -164,6 +170,51 @@ test('status line: source down replaces "Loading…"; zoom, too-wide and partial
   assert.strictEqual(st(13, { pending: 2 }), 'Loading antenna sites…');
   assert.strictEqual(st(13, { failed: 1 }), 'Antenna data unavailable for some areas');
   assert.strictEqual(ML.statusText(13, MASTS, false, Object.assign({}, s0, { down: 3 }), false), '');
+});
+
+// ── 5. Stale-if-error ───────────────────────────────────────────────────────
+
+test('the stale header name is the server\'s', () => {
+  const m = /mastsStaleHeader\s*=\s*"([^"]+)"/.exec(GO_PROXY);
+  assert(m, 'mastsStaleHeader not found in masts_proxy.go');
+  assert.strictEqual(ML.STALE_HEADER, m[1]);
+});
+
+test('cellResult: a 200 marked stale is stale; a plain 200 is not', async () => {
+  const s = await ML.cellResult(fakeResponse(200, { 'X-CoreScope-Masts-Stale': '1' }, { sites: [{ id: 1 }] }));
+  assert.strictEqual(s.status, 200);
+  assert.strictEqual(s.stale, true);
+  assert.strictEqual(s.data.sites.length, 1);
+  const f = await ML.cellResult(fakeResponse(200, {}, { sites: [] }));
+  assert(!f.stale, 'a fresh 200 read as stale');
+});
+
+test('a stale cell is loaded (its sites are drawn) and counted as stale in the view only', async () => {
+  const loads = [];
+  const h = harness({ onLoad: (k) => loads.push(k) });
+  h.loader.view(['300,3100', '301,3100']);
+  h.calls[0].resolve({ status: 200, data: { sites: [] }, stale: true });
+  h.calls[1].resolve({ status: 200, data: { sites: [] } });
+  await tick();
+  assert.deepStrictEqual(loads, ['300,3100', '301,3100']);
+  assert.strictEqual(h.loader.state('300,3100'), 'loaded');
+  assert(h.loader.data('300,3100'), 'stale data not handed out');
+  const all = h.loader.stats();
+  assert.strictEqual(all.loaded, 2);
+  assert.strictEqual(all.stale, 1);
+  assert.strictEqual(h.loader.stats(['301,3100']).stale, 0, 'a fresh visible cell counted as stale');
+});
+
+test('status line: the stale note shows while a visible cell is stale; source-down and zoom texts win', () => {
+  const s0 = { loaded: 0, pending: 0, failed: 0, truncated: 0, down: 0, stale: 0 };
+  const st = (z, s, wide) => ML.statusText(z, MASTS, true, Object.assign({}, s0, s), !!wide);
+  assert.strictEqual(st(13, { loaded: 4, stale: 1 }), STALE_TEXT);
+  assert.strictEqual(st(13, { loaded: 4, stale: 1, pending: 2 }), STALE_TEXT);
+  assert.strictEqual(st(13, { loaded: 4, stale: 1, failed: 1 }), STALE_TEXT);
+  assert.strictEqual(st(13, { loaded: 4, stale: 1, truncated: 1 }), STALE_TEXT);
+  assert.strictEqual(st(13, { stale: 1, down: 2 }), DOWN_TEXT);
+  assert.strictEqual(st(12, { stale: 1 }), 'Zoom in to 13+ to see antenna positions');
+  assert.strictEqual(st(13, { loaded: 4 }), '');
 });
 
 Promise.all(pending).then(() => {

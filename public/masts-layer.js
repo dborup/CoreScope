@@ -27,6 +27,9 @@
  *     503 with X-CoreScope-Masts-Source: down), does not ask that cell again
  *     until its Retry-After (the remaining cool-down) has passed, does not
  *     count it as a busy retry, and says the source is not responding;
+ *   - draws a cell the server served from its stale copy (#872 owner
+ *     addition: 200 with X-CoreScope-Masts-Stale: 1, sent when the source
+ *     fails) and says the data may be out of date while one is in view;
  *   - diffs per cell: a cell's markers are built once and attached or
  *     detached as the cell enters or leaves the view; nothing is rebuilt;
  *   - keeps at most KEEP_CELL_CAP cells (LRU, the visible cells never go),
@@ -70,6 +73,9 @@
   var DOWN_MAX_WAIT_MS = 3600000;
   // The header that marks the breaker's 503 (mastsSourceHeader).
   var SOURCE_HEADER = 'X-CoreScope-Masts-Source';
+  // The header that marks a stale copy (cmd/server/masts_proxy.go
+  // mastsStaleHeader).
+  var STALE_HEADER = 'X-CoreScope-Masts-Stale';
   var DEBOUNCE_MS = 250;
   // #724 owner decision 2: the distance a cellular transmitter in these
   // bands may matter at, and the strong tier. Also used by the M4 hint
@@ -216,7 +222,7 @@
    * Loads the cells a view asks for, at most `concurrency` at a time, and
    * keeps at most `keepCap` of them.
    *
-   * opts.fetchCell(key) → Promise<{status, retryAfterS, sourceDown, data}>; onLoad(key,
+   * opts.fetchCell(key) → Promise<{status, retryAfterS, sourceDown, stale, data}>; onLoad(key,
    * data) when a cell arrives that is still kept; onEvict(key, hadData)
    * when a cell is dropped; onChange() after any state change. now,
    * setTimeout and clearTimeout are injectable for tests.
@@ -230,8 +236,9 @@
     var noop = function () {};
     var onLoad = opts.onLoad || noop, onEvict = opts.onEvict || noop, onChange = opts.onChange || noop;
 
-    // key → { state: 'loading'|'loaded'|'waiting'|'down'|'failed', data, retryAt, busy }
-    // ('down': the source is down, #872; asked again at retryAt)
+    // key → { state: 'loading'|'loaded'|'waiting'|'down'|'failed', data, stale, retryAt, busy }
+    // ('down': the source is down, #872; asked again at retryAt. stale: a
+    // loaded cell the server served from its stale copy, kept as it is)
     // in LRU order: the most recently wanted cells are last.
     var entries = new Map();
     var wanted = [];
@@ -306,6 +313,7 @@
       if (res.status === 200 && res.data) {
         e.state = 'loaded';
         e.data = res.data;
+        e.stale = !!res.stale;
         if (kept) onLoad(key, res.data);
       } else if (res.status === 429) {
         e.state = 'waiting';
@@ -346,13 +354,17 @@
       /** Counts over `keys` (default: every wanted cell). */
       stats: function (keys) {
         keys = keys || wanted;
-        var s = { kept: entries.size, inFlight: inFlight, wanted: wanted.length, loaded: 0, pending: 0, failed: 0, truncated: 0, down: 0 };
+        var s = { kept: entries.size, inFlight: inFlight, wanted: wanted.length, loaded: 0, pending: 0, failed: 0, truncated: 0, down: 0, stale: 0 };
         for (var i = 0; i < keys.length; i++) {
           var e = entries.get(keys[i]);
           if (!e || e.state === 'loading' || e.state === 'waiting') s.pending++;
           else if (e.state === 'failed') s.failed++;
           else if (e.state === 'down') s.down++;
-          else { s.loaded++; if (e.data && e.data.truncated) s.truncated++; }
+          else {
+            s.loaded++;
+            if (e.data && e.data.truncated) s.truncated++;
+            if (e.stale) s.stale++;
+          }
         }
         return s;
       },
@@ -452,7 +464,7 @@
 
   /**
    * The loader's view of one /api/masts response (a fetch Response).
-   * @returns {Promise<{status:number, retryAfterS?:string, sourceDown?:boolean, data?:object}>}
+   * @returns {Promise<{status:number, retryAfterS?:string, sourceDown?:boolean, stale?:boolean, data?:object}>}
    */
   function cellResult(r) {
     if (!r.ok) {
@@ -460,7 +472,12 @@
       if (r.status === 503 && r.headers.get(SOURCE_HEADER) === 'down') res.sourceDown = true;
       return Promise.resolve(res);
     }
-    return r.json().then(function (data) { return { status: 200, data: data }; });
+    var stale = r.headers.get(STALE_HEADER) === '1';
+    return r.json().then(function (data) {
+      var res = { status: 200, data: data };
+      if (stale) res.stale = true;
+      return res;
+    });
   }
 
   function statusText(z, cfg, active, stats, tooWide) {
@@ -472,6 +489,8 @@
     if (tooWide) return 'This view is too wide for antenna positions; zoom in one more step';
     // #872: the server's breaker is open; nothing is loading until it ends.
     if (stats.down) return 'Antenna data source (Mastedatabasen) is not responding \u2014 try again later';
+    // #872 stale-if-error: a visible cell is the server's old copy.
+    if (stats.stale) return 'Antenna data may be out of date (source not responding)';
     if (stats.pending) return 'Loading antenna sites…';
     if (stats.failed) return 'Antenna data unavailable for some areas';
     if (stats.truncated) return 'Some areas hit the source\'s 500-row limit; sites may be missing';
@@ -667,6 +686,7 @@
     KEEP_CELL_CAP: KEEP_CELL_CAP,
     CONCURRENCY: CONCURRENCY,
     SOURCE_HEADER: SOURCE_HEADER,
+    STALE_HEADER: STALE_HEADER,
     HINT_DISTANCE_M: HINT_DISTANCE_M,
     HINT_STRONG_M: HINT_STRONG_M,
     MIN_ZOOM: MIN_ZOOM,
