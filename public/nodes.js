@@ -1251,9 +1251,10 @@
 
       mountNodeActions(body.querySelector('.node-full-actions'), n);
 
-      // #789 M2b: shown only while owner claims are open on this site.
-      destroyAntennaClaimView();
-      if (window.AntennaClaims) antennaClaimView = AntennaClaims.mountOwnerSection(document.getElementById('node-antenna'), n);
+      // #789 M2b: shown only while owner claims are open on this site. A
+      // re-render of the same node keeps the owner's flow where it was.
+      if (window.AntennaClaims) antennaClaimView = window.AntennaClaims.mountOwnerSection(document.getElementById('node-antenna'), n, antennaClaimView);
+      else destroyAntennaClaimView();
 
       bindNodeAdverts(document.getElementById('node-packets'));
 

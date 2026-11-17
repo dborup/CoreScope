@@ -308,12 +308,33 @@
 
   // ── Owner section on the node page ─────────────────────────────────────
   // mountOwnerSection fills `section` (hidden until the feature is known to
-  // be on) for node n. Returns { destroy }.
-  function mountOwnerSection(section, n) {
-    var view = { poller: null, alive: true };
-    var api = { destroy: function () { view.alive = false; if (view.poller) view.poller.cancel(); } };
-    if (!section || !n || !CLAIM_ROLES[n.role]) return api;
-    function alive() { return view.alive && section.isConnected; }
+  // be on) for node n and returns the view ({ pubkey, destroy }). The node
+  // page rebuilds all its sections on some events (theme-refresh); passing
+  // the previous view of the same node moves its content — typed values,
+  // the code and the running poller — into the new section instead of
+  // starting over. A view of another node is destroyed.
+  function mountOwnerSection(section, n, prev) {
+    var pubkey = n && n.public_key;
+    if (prev && prev.pubkey === pubkey && pubkey && section && prev.adopt(section)) return prev;
+    if (prev) prev.destroy();
+    var view = { section: section, poller: null, alive: true, rendered: false };
+    var api = {
+      pubkey: pubkey,
+      destroy: function () { view.alive = false; if (view.poller) view.poller.cancel(); },
+      adopt: function (next) {
+        if (!view.alive) return false;
+        var old = view.section;
+        view.section = next;
+        if (view.rendered) {
+          while (old.firstChild) next.appendChild(old.firstChild);
+          next.setAttribute('data-testid', 'antenna-claim');
+          next.hidden = false;
+        }
+        return true;
+      }
+    };
+    if (!section || !n || !CLAIM_ROLES[n.role]) { view.alive = false; return api; }
+    function alive() { return view.alive && view.section.isConnected; }
     view.poller = createStatusPoller({
       fetchStatus: statusOf,
       isAlive: alive,
@@ -322,10 +343,12 @@
     });
     loadConfig().then(function (cfg) {
       if (!alive() || !cfg.enabled) return;
-      renderOwnerSection(section, n, view);
-      section.hidden = false;
+      var target = view.section;
+      renderOwnerSection(target, n, view);
+      view.rendered = true;
+      target.hidden = false;
       if ((hashParams(location.hash) || { get: function () {} }).get('section') === 'node-antenna') {
-        setTimeout(function () { if (alive()) section.scrollIntoView({ block: 'start' }); }, 50);
+        setTimeout(function () { if (alive()) view.section.scrollIntoView({ block: 'start' }); }, 50);
       }
     });
     return api;

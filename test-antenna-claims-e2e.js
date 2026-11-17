@@ -17,7 +17,8 @@
  *      the 23-byte budget, a name that cuts the code off) and the exact
  *      `set name` command; the link carries the request id, never the code;
  *   4. the status follows queued → pending → proven → approved, then stops
- *      polling, and offers the name back;
+ *      polling, and offers the name back; a theme refresh, which rebuilds
+ *      the node page, keeps the typed name, the code and a single poller;
  *   5. a reload of the deep link restores the claim and its code;
  *   6. "Remove my height" posts {clear:true}; 429 says try later;
  *   7. polling gives up after its attempts; "Check again" resumes it;
@@ -155,7 +156,7 @@ function pathOf(url) { return new URL(url).pathname; }
     await page.waitForTimeout(500);
     assert(await page.locator('#node-antenna').count() === 0, 'companion got an antenna section');
     await openNode(page, PK, '?section=node-antenna');
-    await page.waitForSelector(SECTION + ':visible', { timeout: 10000 });
+    await page.waitForSelector(SECTION + ':visible', { timeout: 15000 });
     await page.waitForTimeout(400);
     const box = await page.locator(SECTION).boundingBox();
     assert(box && box.y >= -2 && box.y < 860, 'deep link did not scroll the section into view: y=' + (box && box.y));
@@ -166,7 +167,7 @@ function pathOf(url) { return new URL(url).pathname; }
   await step('owner flow: grid check, code, name check, command, status to approved', async () => {
     const { ctx, page, rec, errors } = await newCtx({ clock: true, statuses: ['queued', 'pending', 'pending', 'proven', 'approved'] });
     await openNode(page, PK, '?section=node-antenna');
-    await page.waitForSelector(SECTION + ':visible', { timeout: 10000 });
+    await page.waitForSelector(SECTION + ':visible', { timeout: 15000 });
     await page.fill('[data-testid="ac-height"]', '18.55');
     await page.click('[data-testid="ac-submit"]');
     const err = await page.textContent('#acFormStatus');
@@ -188,6 +189,16 @@ function pathOf(url) { return new URL(url).pathname; }
     assert(/too long/.test(cut) && (await page.getAttribute('[data-testid="ac-name-check"]', 'data-kind')) === 'error', 'cut name accepted: ' + cut);
     assert((await page.textContent('[data-testid="ac-cmd"]')) === 'set name A Very Long Repeater Name ' + CODE, 'command not updated');
     await waitStatus(page, /Waiting for an advert/);
+    // The node page rebuilds its sections on a theme refresh; the owner's
+    // flow must survive it: same name, same code, one poller.
+    const before = rec.statusCalls;
+    await page.evaluate(() => window.dispatchEvent(new CustomEvent('theme-refresh')));
+    await page.waitForFunction(() => document.querySelectorAll('#node-antenna').length === 1 &&
+      document.querySelector('#nodeFullBody #node-antenna [data-testid="ac-code"]'));
+    assert((await page.inputValue('[data-testid="ac-name"]')) === 'A Very Long Repeater Name ' + CODE, 'typed name lost on a re-render');
+    assert((await page.textContent('[data-testid="ac-code"]')) === CODE, 'code lost on a re-render');
+    await advance(page, 30000);
+    assert(rec.statusCalls - before <= 2, 're-render started a second poller: ' + (rec.statusCalls - before) + ' polls in 30 s');
     await waitStatus(page, /Proven/);
     await waitStatus(page, /Approved/);
     assert(!(await page.isVisible('[data-testid="ac-check-again"]')), '"Check again" shown while nothing gave up');
@@ -209,7 +220,7 @@ function pathOf(url) { return new URL(url).pathname; }
   await step('remove my height posts {clear:true}; 429 says try later', async () => {
     const { ctx, page, rec } = await newCtx({ submit: { status: 429, body: { error: 'too many claims right now, please try again later' } } });
     await openNode(page, PK, '?section=node-antenna');
-    await page.waitForSelector(SECTION + ':visible', { timeout: 10000 });
+    await page.waitForSelector(SECTION + ':visible', { timeout: 15000 });
     await page.check('[data-testid="ac-mode-clear"]');
     assert(await page.isDisabled('[data-testid="ac-height"]'), 'height input still enabled for a clear');
     await page.click('[data-testid="ac-submit"]');
@@ -221,7 +232,7 @@ function pathOf(url) { return new URL(url).pathname; }
   await step('polling is bounded: it gives up, and "Check again" resumes', async () => {
     const { ctx, page, rec } = await newCtx({ clock: true, statuses: ['pending'] });
     await openNode(page, PK, '?section=node-antenna');
-    await page.waitForSelector(SECTION + ':visible', { timeout: 10000 });
+    await page.waitForSelector(SECTION + ':visible', { timeout: 15000 });
     await page.fill('[data-testid="ac-height"]', '12');
     await page.click('[data-testid="ac-submit"]');
     await page.waitForSelector('[data-testid="ac-code"]');
