@@ -84,3 +84,15 @@ func orDefault(v, def int) int {
 	}
 	return v
 }
+
+// ApplyGates sets the enabled switch from on, which reports whether the
+// config value at a path of canonical, exact-case keys is the JSON boolean
+// true (configkey.Doc.On). encoding/json would also take `Enabled`; the
+// server and the ingestor both call this (#888).
+func (c *Config) ApplyGates(on func(path ...string) bool) {
+	if c == nil {
+		return
+	}
+	enabled := on("channelProposals", "enabled")
+	c.Enabled = &enabled
+}

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/meshcore-analyzer/configkey"
 )
 
 // Issue #884: the ingestor reads the antenna-claim gates by their canonical
@@ -46,7 +48,7 @@ func TestAntennaClaimGatesReadOnlyCanonicalKeys884(t *testing.T) {
 			if got := cfg.AntennaClaims.AutoApprove(); got != tc.wantAuto {
 				t.Fatalf("AutoApprove = %v, want %v", got, tc.wantAuto)
 			}
-			if n := strings.Count(buf.String(), "config keys are case-sensitive"); n != tc.warnings {
+			if n := strings.Count(buf.String(), configkey.IgnoredNote); n != tc.warnings {
 				t.Fatalf("%d warnings, want %d:\n%s", n, tc.warnings, buf.String())
 			}
 		})
