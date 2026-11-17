@@ -388,6 +388,42 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     } finally { await ctx.close(); }
   });
 
+  // Review finding 4: a link that cannot be shown is Auto for that open; a
+  // stored Aerial pick is neither restored nor deleted. A phone, cold start.
+  for (const delay of [0, 1500]) {
+    await step(`375x560: a stored Aerial pick plus an unusable link opens on Auto and keeps the pick (config ${delay} ms)`, async () => {
+      for (const id of ['no-such-style', 'dataforsyningen-skaermkort-graa']) {
+        const { ctx, page } = await newCtx({ view: VIEWS[0], providers: NO_DK, configDelayMs: delay, storage: { 'mc-ortho-base': '1' } });
+        try {
+          await gotoMap(page, JELLING, '&base=' + id);
+          await openControl(page, VIEWS[0]);
+          const on = await checkedId(page);
+          assert(on.length === 1 && on[0] === '__auto__', id + ' checked: ' + on);
+          assert(!/base=/.test(await hashOf(page)), id + ' hash: ' + await hashOf(page));
+          assert(await page.evaluate(() => localStorage.getItem('mc-ortho-base')) === '1', id + ': the stored pick was deleted');
+          // The next open without a link brings the stored pick back.
+          await page.goto('about:blank');
+          await gotoMap(page, JELLING, '');
+          await openControl(page, VIEWS[0]);
+          const again = await checkedId(page);
+          assert(again.length === 1 && again[0] === 'dhm-ortho', id + ' next open checked: ' + again);
+        } finally { await ctx.close(); }
+      }
+    });
+  }
+  // N3: an empty base= is dropped without a warning.
+  await step('375x560: an empty base= is removed from the address without a warning', async () => {
+    const { ctx, page, rec } = await newCtx({ view: VIEWS[0] });
+    try {
+      await gotoMap(page, JELLING, '&base=');
+      assert(!/base=/.test(await hashOf(page)), 'hash: ' + await hashOf(page));
+      assert(rec.warnings.length === 0, JSON.stringify(rec.warnings));
+      await openControl(page, VIEWS[0]);
+      const on = await checkedId(page);
+      assert(on.length === 1 && on[0] === '__auto__', 'checked: ' + on);
+    } finally { await ctx.close(); }
+  });
+
   // F2: one console warning per rejected id.
   for (const delay of [0, 1500]) {
     await step(`375x560: a rejected link logs one console warning naming it (config ${delay} ms)`, async () => {

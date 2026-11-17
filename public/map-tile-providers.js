@@ -2186,9 +2186,15 @@
           _writeBaseParam(link.id);
           _warnRejectedBase(link.raw); // only when shown as another map
         } else {
-          _warnRejectedBase(link.raw, linkOrtho
-            ? '[map tiles] ?base=' + ORTHO_ID + ' ignored: the Aerial map is not offered here. Using Auto instead.' : null);
+          // An empty base= is a typo, not a rejected style: no warning.
+          if (link.raw.trim() !== '') {
+            _warnRejectedBase(link.raw, linkOrtho
+              ? '[map tiles] ?base=' + ORTHO_ID + ' ignored: the Aerial map is not offered here. Using Auto instead.' : null);
+          }
           _writeBaseParam(null); // unknown, gated or unlisted: Auto, a clean link
+          // Auto for this open: a stored Aerial pick is not restored (and
+          // not deleted, so the next open without a link brings it back).
+          _orthoOn = false; _isAuto = true; _sessionBasePick = null;
         }
       }
 

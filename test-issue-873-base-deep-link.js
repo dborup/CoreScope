@@ -124,6 +124,61 @@ test('L9 a link with whitespace around the id (%20, +) opens that map', () => {
   assert.deepStrictEqual(open({ hash: '#/map?base=esri-imagery+' }).on(), ['esri-imagery']);
 });
 
+// Review finding 4: a link that cannot be shown is Auto for that open; the
+// stored Aerial choice is neither restored nor deleted.
+test('L10 an unknown link beats a stored Aerial pick: Auto, and the pick is kept', () => {
+  const m = open({ hash: '#/map?base=no-such-style', ortho: true, storage: { 'mc-ortho-base': '1' } });
+  assert.deepStrictEqual(m.on(), ['__auto__']);
+  assert.ok(m.map.hasLayer(m.auto));
+  assert.strictEqual(m.ctx.localStorage.getItem('mc-ortho-base'), '1');
+  assert.ok(!/base=/.test(m.ctx.location.hash), m.ctx.location.hash);
+});
+test('L11 a gated link beats a stored Aerial pick the same way', () => {
+  const m = open({ hash: '#/map?base=dataforsyningen-skaermkort', ortho: true, storage: { 'mc-ortho-base': '1' } });
+  assert.deepStrictEqual(m.on(), ['__auto__']);
+  assert.strictEqual(m.ctx.localStorage.getItem('mc-ortho-base'), '1');
+});
+test('L12 the next open without a link restores the stored Aerial pick', () => {
+  const storage = { 'mc-ortho-base': '1' };
+  open({ hash: '#/map?base=no-such-style', ortho: true, storage });
+  assert.deepStrictEqual(open({ hash: '#/map', ortho: true, storage }).on(), ['dhm-ortho']);
+});
+test('L13 a late-judged unknown link (config pending) also lands on Auto, pick kept', () => {
+  let go; const ready = new Promise(r => { go = r; });
+  const m = open({ hash: '#/map?base=no-such-style', ortho: true, storage: { 'mc-ortho-base': '1' }, configReady: ready });
+  return Promise.resolve().then(() => { go(); return ready; }).then(() => new Promise(r => setTimeout(r, 0))).then(() => {
+    assert.deepStrictEqual(m.on(), ['__auto__']);
+    assert.strictEqual(m.ctx.localStorage.getItem('mc-ortho-base'), '1');
+  });
+});
+// N3: an empty base= is a typo, not a rejected style: dropped without a warning.
+test('L14 an empty or blank base= is removed from the hash without a warning', () => {
+  ['#/map?zoom=5&base=', '#/map?zoom=5&base=%20%20'].forEach(h => {
+    const m = open({ hash: h });
+    assert.deepStrictEqual(m.on(), ['__auto__'], h);
+    assert.strictEqual(m.ctx.location.hash, '#/map?zoom=5', h);
+    assert.deepStrictEqual(m.ctx.warnings, [], h);
+  });
+});
+// N4a: every trim() on the link path is load-bearing.
+test('L15 whitespace around base=dhm-ortho still opens the Aerial map', () => {
+  assert.deepStrictEqual(open({ hash: '#/map?base=%20dhm-ortho%20', ortho: true }).on(), ['dhm-ortho']);
+});
+test('L16 a padded rejected id is warned once, trimmed, and shares the unpadded dedupe key', () => {
+  const m = open({ hash: '#/map?base=%20nope%20' });
+  assert.strictEqual(m.ctx.warnings.length, 1);
+  assert.ok(m.ctx.warnings[0].indexOf('?base=nope ') !== -1, m.ctx.warnings[0]);
+  m.ctx.location.hash = '#/map?base=nope';
+  m.ctx.window.MC_createLayerControl(makeMap(), { _auto: true }, 'topleft');
+  assert.strictEqual(m.ctx.warnings.length, 1, 'same id, same page: no second warning');
+});
+test('L17 a padded wrong-theme link is judged as the trimmed id (counterpart, with a warning)', () => {
+  const m = open({ hash: '#/map?base=%20osm-standard%20', theme: 'dark' });
+  assert.deepStrictEqual(m.on(), ['osm-dark']);
+  assert.strictEqual(m.ctx.warnings.length, 1);
+  assert.ok(m.ctx.warnings[0].indexOf('?base=osm-standard ') !== -1, m.ctx.warnings[0]);
+});
+
 console.log('\n=== #873 H: hash updates ===');
 test('H1 a pick writes base=<id> with replaceState, keeping other params', () => {
   const m = open({ hash: '#/map?zoom=5' });
