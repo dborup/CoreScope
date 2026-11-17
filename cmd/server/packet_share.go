@@ -53,6 +53,12 @@ package main
 //     miss is charged to the per-IP limiter and drawn in the render slots of
 //     the terrain card, or of the node card when only that one is on, so all
 //     card types draw from one budget.
+//   - #885: the budget is checked before the cold path lookup, on the card
+//     and on /p alike. A path-cache miss is charged to the per-IP limiter,
+//     then run once for every identical request in flight, in a render slot;
+//     slots full is a 503 with the charge refunded. The same request's card
+//     render is not charged again. A cached path costs nothing, and the
+//     visibility filter still runs on every request, after the lookup.
 
 import (
 	"context"
@@ -107,6 +113,8 @@ type packetCards struct {
 	limiter *ipRateLimiter
 	render  func(packetcard.PacketCardInput, packetcard.Options) ([]byte, error)
 	now     func() time.Time
+	// coldPath is the one expensive step of a path-cache miss (#885).
+	coldPath func(hash string) (*PacketPathResponse, error)
 }
 
 // packetCardKey is a card's identity: the packet and what the card shows.
@@ -140,6 +148,7 @@ func (s *Server) initPacketCards() {
 		render: packetcard.Render,
 		now:    time.Now,
 	}
+	c.coldPath = s.coldPacketPath
 	switch {
 	case s.terrain != nil && s.terrain.card != nil:
 		c.limiter, c.admit = s.terrain.limiter, s.terrain.card.admit
@@ -272,15 +281,30 @@ type packetShare struct {
 	// areas are the touched areas' labels, from visible positions only.
 	areas []string
 	ttl   time.Duration
+	// charged: this request's share of the per-IP budget was spent on a cold
+	// path lookup, so the card render must not charge it again (#885).
+	charged bool
 }
 
-// resolvePacketShare looks a lower-case 16-hex hash up. found is false for
-// an unknown packet, an advert from a hidden origin, a path that cannot be
-// read, and a failed visibility lookup (fail closed).
-func (s *Server) resolvePacketShare(ctx context.Context, c *packetCards, hash string) (packetShare, bool) {
+// shareRefusal is why a request got no packet: status is 404 for an unknown
+// or hidden packet (and a path that cannot be read, or a failed visibility
+// lookup: fail closed), 429 with retry for a spent budget, 503 with retry
+// for full slots, 0 for a client that left.
+type shareRefusal struct {
+	status int
+	retry  time.Duration
+}
+
+var shareNotFound = &shareRefusal{status: http.StatusNotFound}
+
+// resolvePacketShare looks a lower-case 16-hex hash up. A cold path lookup
+// is charged to r's client and coalesced before it runs (#885); a cached
+// path is free. The visibility filter runs on every request.
+func (s *Server) resolvePacketShare(r *http.Request, c *packetCards, hash string) (packetShare, *shareRefusal) {
+	ctx := r.Context()
 	meta, ok := s.lookupPacketShareMeta(hash)
 	if !ok || s.db == nil {
-		return packetShare{}, false
+		return packetShare{}, shareNotFound
 	}
 	now := c.now()
 	firstHeard, _ := parseObsTimestamp(meta.FirstSeen)
@@ -288,7 +312,7 @@ func (s *Server) resolvePacketShare(ctx context.Context, c *packetCards, hash st
 	if meta.PayloadType == payloadTypeAdvert {
 		var o sharedAdvertOrigin
 		if json.Unmarshal([]byte(meta.Decoded), &o) != nil || !isHexPubkey(strings.ToLower(o.PubKey)) {
-			return packetShare{}, false
+			return packetShare{}, shareNotFound
 		}
 		pk := strings.ToLower(o.PubKey)
 		names, err := s.hiddenIdentityNames(ctx, []string{pk})
@@ -296,52 +320,88 @@ func (s *Server) resolvePacketShare(ctx context.Context, c *packetCards, hash st
 			if err != nil {
 				log.Printf("[share] packet card: origin visibility lookup failed; refused")
 			}
-			return packetShare{}, false
+			return packetShare{}, shareNotFound
 		}
 		if c.names {
 			in.AdvertName = o.Name
 		}
 	}
 	ttl := packetCardTTL(firstHeard, now)
-	path, err := s.sharedPacketPath(c, hash, now, ttl)
-	if err != nil {
-		log.Printf("[share] packet card: path unavailable; refused")
-		return packetShare{}, false
+	path, charged, refused := s.sharedPacketPath(r, c, hash, now, ttl)
+	if refused != nil {
+		return packetShare{}, refused
 	}
 	if _, err := s.filterPingScorePath(ctx, path); err != nil {
 		log.Printf("[share] packet card: path visibility lookup failed; refused")
-		return packetShare{}, false
+		return packetShare{}, shareNotFound
 	}
 	dropUncountedFirst(path)
 	s.annotatePacketPathTouchedAreas(path)
 	fillPacketCardPath(&in, path, c.names)
-	ps := packetShare{in: in, ttl: ttl}
+	ps := packetShare{in: in, ttl: ttl, charged: charged}
 	for _, a := range path.TouchedAreas {
 		ps.areas = append(ps.areas, a.Label)
 	}
-	return ps, true
+	return ps, nil
 }
 
-// sharedPacketPath is hash's path as getPacketPath and the airtime
-// annotation give it, from the path cache when it is there. It returns a
-// private copy: the caller filters it in place.
-func (s *Server) sharedPacketPath(c *packetCards, hash string, now time.Time, ttl time.Duration) (*PacketPathResponse, error) {
-	if b, ok := c.paths.Get(hash, now); ok {
-		var p PacketPathResponse
-		if err := json.Unmarshal(b, &p); err == nil {
-			return &p, nil
-		}
-	}
+// coldPacketPath is hash's path as getPacketPath and the airtime annotation
+// give it, before any filter: the work a path-cache miss costs.
+func (s *Server) coldPacketPath(hash string) (*PacketPathResponse, error) {
 	p, err := s.db.getPacketPath(hash, EstimateMaxEdgeKm, s.estimatedPositionsEnabled())
 	if err != nil {
 		return nil, err
 	}
 	s.annotatePacketPathAirtime(p)
 	p.TouchedAreas = nil // config projections, recomputed after the filter
-	if b, err := json.Marshal(p); err == nil && len(b) <= packetPathCacheEntryMax {
-		c.paths.PutFor(hash, b, now, ttl)
-	}
 	return p, nil
+}
+
+// sharedPacketPath is hash's unfiltered path, from the path cache when it is
+// there. On a miss it first charges r's client and takes a render slot, then
+// runs the lookup once for every identical request in flight (#885), and
+// gives the charge back when no slot is free. It returns a private copy:
+// the caller filters it in place. charged says the request was charged.
+func (s *Server) sharedPacketPath(r *http.Request, c *packetCards, hash string, now time.Time, ttl time.Duration) (path *PacketPathResponse, charged bool, refused *shareRefusal) {
+	b, ok := c.paths.Get(hash, now)
+	if !ok {
+		if allowed, retry := c.limiter.allow(r); !allowed {
+			return nil, false, &shareRefusal{status: http.StatusTooManyRequests, retry: retry}
+		}
+		charged = true
+		var err error
+		b, _, err = c.flight.DoAdmitted(r.Context(), "path|"+hash, 0, c.admit, func(context.Context) ([]byte, error) {
+			if b, ok := c.paths.Get(hash, c.now()); ok { // filled while this call queued
+				return b, nil
+			}
+			p, err := c.coldPath(hash)
+			if err != nil {
+				return nil, err
+			}
+			b, err := json.Marshal(p)
+			if err == nil && len(b) <= packetPathCacheEntryMax {
+				c.paths.PutFor(hash, b, c.now(), ttl)
+			}
+			return b, err
+		})
+		switch {
+		case err == nil:
+		case r.Context().Err() != nil:
+			return nil, charged, &shareRefusal{}
+		case isTerrainBusy(err):
+			c.limiter.refund(r)
+			return nil, false, &shareRefusal{status: http.StatusServiceUnavailable, retry: terrainBusyRetry}
+		default:
+			log.Printf("[share] packet card: path unavailable; refused")
+			return nil, charged, shareNotFound
+		}
+	}
+	var p PacketPathResponse
+	if err := json.Unmarshal(b, &p); err != nil {
+		log.Printf("[share] packet card: path unavailable; refused")
+		return nil, charged, shareNotFound
+	}
+	return &p, charged, nil
 }
 
 // dropUncountedFirst drops First, and the measurements relative to it, when
@@ -575,9 +635,15 @@ func (s *Server) handleSharePacket(doc *indexDoc, w http.ResponseWriter, r *http
 		doc.serveSite(w, r, http.StatusBadRequest)
 		return
 	}
-	ps, found := s.resolvePacketShare(r.Context(), c, sp.Hash)
-	if !found {
-		doc.serveSite(w, r, http.StatusNotFound)
+	ps, refused := s.resolvePacketShare(r, c, sp.Hash)
+	if refused != nil {
+		if refused.status == 0 {
+			return
+		}
+		if refused.retry > 0 {
+			setRetryAfter(w, refused.retry)
+		}
+		doc.serveSite(w, r, refused.status)
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -598,9 +664,19 @@ func (s *Server) handlePacketCard(w http.ResponseWriter, r *http.Request) {
 		refuseCard(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	ps, found := s.resolvePacketShare(r.Context(), c, hash)
-	if !found {
-		refuseCard(w, http.StatusNotFound, "not found")
+	ps, refused := s.resolvePacketShare(r, c, hash)
+	if refused != nil {
+		switch refused.status {
+		case 0:
+		case http.StatusTooManyRequests:
+			markCardRefused(w)
+			writeRateLimited(w, refused.retry)
+		case http.StatusServiceUnavailable:
+			setRetryAfter(w, refused.retry)
+			refuseCard(w, refused.status, "card renders busy")
+		default:
+			refuseCard(w, refused.status, "not found")
+		}
 		return
 	}
 	cc := packetCardCacheControl(ps.ttl)
@@ -609,10 +685,12 @@ func (s *Server) handlePacketCard(w http.ResponseWriter, r *http.Request) {
 		writeCardAs(w, b, "hit", cc)
 		return
 	}
-	if ok, retry := c.limiter.allow(r); !ok {
-		markCardRefused(w)
-		writeRateLimited(w, retry)
-		return
+	if !ps.charged { // a cold path lookup was this request's charge (#885)
+		if ok, retry := c.limiter.allow(r); !ok {
+			markCardRefused(w)
+			writeRateLimited(w, retry)
+			return
+		}
 	}
 	b, _, err := c.flight.DoAdmitted(r.Context(), key.String(), 0, c.admit, func(context.Context) ([]byte, error) {
 		out, err := c.render(ps.in, c.options())
