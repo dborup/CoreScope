@@ -143,6 +143,7 @@ run test-issue-723-heritage-overlay.js
 run test-issue-724-masts-layer.js
 run test-issue-724-masts-hint.js
 run test-issue-724-m5-masts-customizer.js
+run test-issue-872-masts-source-down.js
 run test-issue-723-heritage-info.js
 run test-issue-723-profile-warning.js
 run test-issue-723-m4-heritage-customizer.js

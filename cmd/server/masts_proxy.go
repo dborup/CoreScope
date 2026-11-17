@@ -19,6 +19,12 @@ package main
 //     operator or a client sets can point it elsewhere.
 //   - Bounded LRU cache of encoded responses (entries, bytes, 7-day TTL,
 //     short against the quarterly updates). Only successes are cached.
+//   - Stale-if-error (#872): a cell past its TTL stays in the same LRU,
+//     within its entry and byte bounds, until map.masts.maxStaleDays after
+//     it was fetched. When refreshing it fails with a timeout, transport
+//     error or 5xx, or the breaker is open, that copy is served with 200,
+//     header X-CoreScope-Masts-Stale: 1 and Cache-Control: no-store. Past
+//     maxStaleDays, or on any other failure, the answer is as below.
 //   - Concurrent misses for one cell share one fetch (dhm.Flight), which
 //     stops once every requester has gone or after mastsDeadline.
 //   - A miss is charged to the client's per-IP budget
@@ -26,11 +32,20 @@ package main
 //     free. At most map.masts.maxInFlight distinct cell fetches are
 //     admitted server-wide (dhm.Admission, #744); beyond that a miss is
 //     503 with Retry-After before any upstream work, and its charge is
-//     refunded (#705). Of the admitted fetches, at most mastsUpstreamSlots
+//     refunded (#705). Of the admitted fetches, at most
+//     map.masts.upstreamSlots (default 16, 1-256; maxInFlight is never below it)
 //     talk to the WFS at once; one that gets no slot before mastsDeadline
 //     did no upstream work either, so it is the same refunded 503 (#753
 //     review N2). The browser paces its cell requests (public/masts-layer.js)
 //     so one viewer stays well inside maxInFlight.
+//   - Circuit breaker (#872, masts_breaker.go): after
+//     map.masts.breakerFailures consecutive timeouts, transport errors or
+//     5xx, no fetch goes upstream for map.masts.breakerCooldownSec; an
+//     uncached cell then answers at once with a distinct 503 (header
+//     X-CoreScope-Masts-Source: down, Retry-After = remaining cool-down),
+//     uncharged, unless a stale copy can be served. Cached cells are still
+//     served. One probe after the
+//     cool-down closes it on success or re-opens it on failure.
 //   - Fail closed: an upstream failure or anything but a well-formed
 //     MasteIBrug page is 502 (504 on a timeout) with a fixed body and no
 //     upstream text, logged by category at most once per minute.
@@ -80,9 +95,21 @@ const (
 	mastsCacheTTL = 7 * 24 * time.Hour
 	// mastsBrowserMaxAge is how long a browser may reuse a cell.
 	mastsBrowserMaxAge = 24 * time.Hour
-	// mastsUpstreamSlots is the plan's global cap on requests open towards
-	// the WFS at once. Admitted fetches beyond it wait for a slot.
-	mastsUpstreamSlots = 2
+	// mastsUpstreamSlotsDefault is the global cap on requests open towards
+	// the WFS at once (map.masts.upstreamSlots, 1-mastsUpstreamSlotsMax;
+	// #872 owner decision: a cold z13 view is ~70 cells, the plan's 2 was
+	// too few). Admitted fetches beyond it wait for a slot.
+	mastsUpstreamSlotsDefault = 16
+	mastsUpstreamSlotsMax     = 256
+	// mastsMaxStaleDaysDefault is map.masts.maxStaleDays: how long after it
+	// was fetched a cell may still be served, marked stale, while the
+	// source fails (#872 stale-if-error). At or below the 7-day TTL it
+	// serves nothing stale.
+	mastsMaxStaleDaysDefault = 90
+	mastsMaxStaleDaysMin     = 7
+	mastsMaxStaleDaysMax     = 365
+	// mastsStaleHeader marks a stale answer for the browser.
+	mastsStaleHeader = "X-CoreScope-Masts-Stale"
 	// mastsDeadline bounds one fetch, waiting for an upstream slot
 	// included: a few upstream timeouts (mastedb: 15 s each).
 	mastsDeadline = 30 * time.Second
@@ -101,9 +128,10 @@ const (
 	// mastsMaxInFlightDefault is how many distinct cell fetches may be
 	// admitted (waiting for or holding an upstream slot) server-wide: one
 	// z14 viewport's worth. Each costs a goroutine and at most one parsed
-	// page while it waits.
+	// page while it waits. It is never below the upstream slot count
+	// (mastsConcurrency), so the cap matches mastsUpstreamSlotsMax.
 	mastsMaxInFlightDefault = 16
-	mastsMaxInFlightCap     = 64
+	mastsMaxInFlightCap     = mastsUpstreamSlotsMax
 )
 
 // errMastsBadRequest is the single 400 body. It never carries client input.
@@ -137,6 +165,16 @@ type MastsConfig struct {
 	MinZoom       *int `json:"minZoom,omitempty"`
 	HintDistanceM *int `json:"hintDistanceM,omitempty"`
 	HintStrongM   *int `json:"hintStrongM,omitempty"`
+	// BreakerFailures and BreakerCooldownSec are the circuit breaker's
+	// thresholds (#872); nil is the default. See mastsBreakerSettings.
+	BreakerFailures    *int `json:"breakerFailures,omitempty"`
+	BreakerCooldownSec *int `json:"breakerCooldownSec,omitempty"`
+	// UpstreamSlots is how many requests may be open towards the WFS at
+	// once; MaxStaleDays is how old a cached cell served while the source
+	// fails may be (#872 owner additions). nil is the default. See
+	// mastsConcurrency and mastsMaxStale.
+	UpstreamSlots *int `json:"upstreamSlots,omitempty"`
+	MaxStaleDays  *int `json:"maxStaleDays,omitempty"`
 }
 
 // MastsClientConfig is the `masts` block of /api/config/client. Present
@@ -201,6 +239,30 @@ func mastsMaxInFlight(c MastsConfig, logf func(string, ...interface{})) int {
 	return mastsMaxInFlightDefault
 }
 
+// mastsConcurrency resolves map.masts.upstreamSlots and maxInFlight. Out of
+// range warns and takes the default. maxInFlight admits at least the slot
+// count, or slots would sit idle while fetches are refused: a maxInFlight
+// set below it warns and is raised to it, an unset one follows it.
+func mastsConcurrency(c MastsConfig, logf func(string, ...interface{})) (slots, maxInFlight int) {
+	k := configKnobs{tag: "[masts]", block: "map.masts", logf: logf}
+	slots = k.integer("upstreamSlots", c.UpstreamSlots, mastsUpstreamSlotsDefault, 1, mastsUpstreamSlotsMax)
+	maxInFlight = mastsMaxInFlight(c, logf)
+	if maxInFlight < slots {
+		if c.MaxInFlight != nil {
+			logf("[masts] config map.masts.maxInFlight (%d) is below upstreamSlots (%d); using %d", maxInFlight, slots, slots)
+		}
+		maxInFlight = slots
+	}
+	return slots, maxInFlight
+}
+
+// mastsMaxStale is map.masts.maxStaleDays as a duration.
+func mastsMaxStale(c MastsConfig, logf func(string, ...interface{})) time.Duration {
+	k := configKnobs{tag: "[masts]", block: "map.masts", logf: logf}
+	d := k.integer("maxStaleDays", c.MaxStaleDays, mastsMaxStaleDaysDefault, mastsMaxStaleDaysMin, mastsMaxStaleDaysMax)
+	return time.Duration(d) * 24 * time.Hour
+}
+
 // mastsClientSettings are the browser-side values of map.masts, resolved
 // and bounded: the zoom gate and the profile hint's two distances.
 type mastsClientSettings struct {
@@ -237,6 +299,10 @@ type mastsProxyOptions struct {
 	rateLimitPerMin int // 0: off
 	maxInFlight     int
 	view            mastsClientSettings
+	breakerFailures int
+	breakerCooldown time.Duration
+	upstreamSlots   int
+	maxStale        time.Duration // 0 or at most cacheTTL: no stale serving
 	trustedProxies  []*net.IPNet
 	logf            func(string, ...interface{})
 	now             func() time.Time
@@ -255,6 +321,10 @@ func defaultMastsProxyOptions() mastsProxyOptions {
 		rateLimitPerMin: mastsCellRateLimitDefault,
 		maxInFlight:     mastsMaxInFlightDefault,
 		view:            defaultMastsClientSettings(),
+		breakerFailures: mastsBreakerFailuresDefault,
+		breakerCooldown: mastsBreakerCooldownDefault,
+		upstreamSlots:   mastsUpstreamSlotsDefault,
+		maxStale:        mastsMaxStaleDaysDefault * 24 * time.Hour,
 		logf:            log.Printf,
 		now:             time.Now,
 	}
@@ -266,7 +336,8 @@ type mastsProxy struct {
 	flight   dhm.Flight[[]byte]
 	limiter  *ipRateLimiter // nil: no per-client limit
 	admit    *dhm.Admission // admitted fetches (maxInFlight)
-	upstream chan struct{}  // one token per open upstream request
+	upstream chan struct{}  // one token per open upstream request (upstreamSlots)
+	breaker  *mastsBreaker  // #872
 	deadline time.Duration
 	view     mastsClientSettings
 	now      func() time.Time
@@ -275,8 +346,10 @@ type mastsProxy struct {
 	failLog    logThrottle
 	refuseLog  logThrottle
 	starveLog  logThrottle
+	staleLog   logThrottle
 	refusedAll atomic.Int64 // admission refusals (503) since start
 	starvedAll atomic.Int64 // starved fetches (503) since start
+	staleAll   atomic.Int64 // stale cells served since start (#872)
 }
 
 // newMastsProxy returns nil unless map.masts is enabled: the layer is then
@@ -291,12 +364,17 @@ func newMastsProxy(cfg MastsConfig, opts mastsProxyOptions) *mastsProxy {
 	if opts.now == nil {
 		opts.now = time.Now
 	}
+	if opts.upstreamSlots < 1 {
+		opts.upstreamSlots = mastsUpstreamSlotsDefault
+	}
 	return &mastsProxy{
-		client:   mastedb.NewClient(opts.client),
-		cache:    dhm.NewCache[mastedb.Cell](opts.cacheMaxEntries, opts.cacheMaxBytes, opts.cacheTTL),
+		client: mastedb.NewClient(opts.client),
+		// Stale cells stay inside the same entry and byte bounds (LRU).
+		cache:    dhm.NewCacheStale[mastedb.Cell](opts.cacheMaxEntries, opts.cacheMaxBytes, opts.cacheTTL, opts.maxStale),
 		limiter:  newIPRateLimiter("masts", "map.masts.cellRateLimitPerMin", opts.rateLimitPerMin, opts.trustedProxies, opts.logf),
 		admit:    dhm.NewAdmission(opts.maxInFlight),
-		upstream: make(chan struct{}, mastsUpstreamSlots),
+		upstream: make(chan struct{}, opts.upstreamSlots),
+		breaker:  newMastsBreaker(opts.breakerFailures, opts.breakerCooldown),
 		deadline: mastsDeadline,
 		view:     opts.view,
 		now:      opts.now,
@@ -310,8 +388,10 @@ func newMastsProxyFromConfig(cfg *Config) *mastsProxy {
 	}
 	opts := defaultMastsProxyOptions()
 	opts.rateLimitPerMin = mastsCellRateLimit(cfg.Masts, opts.logf)
-	opts.maxInFlight = mastsMaxInFlight(cfg.Masts, opts.logf)
+	opts.upstreamSlots, opts.maxInFlight = mastsConcurrency(cfg.Masts, opts.logf)
+	opts.maxStale = mastsMaxStale(cfg.Masts, opts.logf)
 	opts.view = resolveMastsClientSettings(cfg.Masts, opts.logf)
+	opts.breakerFailures, opts.breakerCooldown = mastsBreakerSettings(cfg.Masts, opts.logf)
 	opts.trustedProxies = parseCIDRListQuiet(cfg.WSTrustedProxies())
 	return newMastsProxy(cfg.Masts, opts)
 }
@@ -347,6 +427,17 @@ func (p *mastsProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeMastsCell(w, data, "hit")
 		return
 	}
+	// An open breaker answers before the charge, admission or a slot.
+	probe, retry, ok := p.breaker.admit(p.now())
+	if !ok {
+		if !p.serveStale(w, cell) {
+			p.writeSourceDown(w, retry)
+		}
+		return
+	}
+	if probe {
+		defer p.breaker.endProbe()
+	}
 	// Only a cell that will go upstream is charged to the client.
 	if ok, retry := p.limiter.allow(r); !ok {
 		writeRateLimited(w, retry)
@@ -362,7 +453,13 @@ func (p *mastsProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return nil, errMastsStarved
 		}
+		// The breaker may have opened while this fetch waited for a slot.
+		gen, ok := p.breaker.start(probe)
+		if !ok {
+			return nil, errMastsSourceDown
+		}
 		page, err := p.client.FetchCell(ctx, cell)
+		p.noteOutcome(gen, err)
 		if err != nil {
 			return nil, err
 		}
@@ -374,10 +471,42 @@ func (p *mastsProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return enc, nil
 	})
 	if err != nil {
+		if r.Context().Err() == nil && mastsSourceFailed(err) && p.serveStale(w, cell) {
+			return
+		}
 		p.writeFetchError(w, r, err)
 		return
 	}
 	writeMastsCell(w, data, "miss")
+}
+
+// mastsSourceFailed says whether err means Mastedatabasen is failing (a
+// timeout, transport error or 5xx, or the breaker stopped the fetch): the
+// cases that fall back to a stale cell. A malformed page or a busy 503
+// does not.
+func mastsSourceFailed(err error) bool {
+	return errors.Is(err, errMastsSourceDown) || mastsOutcomeOf(err) == mastsOutcomeDown
+}
+
+// serveStale answers with cell's last cached copy past its TTL but within
+// map.masts.maxStaleDays, marked stale (#872), and reports whether it did.
+// The copy is never kept by the browser, so a later view asks again.
+func (p *mastsProxy) serveStale(w http.ResponseWriter, cell mastedb.Cell) bool {
+	data, ok := p.cache.GetStale(cell, p.now())
+	if !ok {
+		return false
+	}
+	h := w.Header()
+	h.Set("Content-Type", "application/json")
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-CoreScope-Cache", "stale")
+	h.Set(mastsStaleHeader, "1")
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
+	if n, ok := p.staleLog.note(p.now(), p.staleAll.Add(1), mastsLogEvery); ok {
+		p.logf("[masts] served %d stale cell(s) since the last report: Mastedatabasen is failing, so cached copies past their 7-day TTL (at most map.masts.maxStaleDays old) were served", n)
+	}
+	return true
 }
 
 func writeMastsCell(w http.ResponseWriter, data []byte, state string) {
@@ -397,6 +526,11 @@ func (p *mastsProxy) writeFetchError(w http.ResponseWriter, r *http.Request, err
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	if errors.Is(err, errMastsSourceDown) {
+		p.limiter.refund(r)
+		p.writeSourceDown(w, p.breaker.retryAfter(p.now()))
+		return
+	}
 	if errors.Is(err, dhm.ErrAdmissionFull) || errors.Is(err, errMastsStarved) {
 		// Neither did upstream work: give the per-IP charge back, so a
 		// client that retries as told never reaches 429 through 503s.
@@ -421,16 +555,47 @@ func (p *mastsProxy) writeFetchError(w http.ResponseWriter, r *http.Request, err
 	writeError(w, http.StatusBadGateway, "antenna data unavailable")
 }
 
+// noteOutcome feeds the outcome of a fetch that went upstream in breaker
+// generation gen to the breaker and logs a state change, once per change.
+func (p *mastsProxy) noteOutcome(gen uint64, err error) {
+	switch p.breaker.record(p.now(), gen, mastsOutcomeOf(err)) {
+	case "open":
+		p.logf("[masts] circuit open: %d consecutive upstream failures (%s); no requests to Mastedatabasen for %s", p.breaker.threshold, mastsFailureCategory(err), p.breaker.cooldown)
+	case "reopen":
+		p.logf("[masts] circuit open again: the probe failed (%s); no requests to Mastedatabasen for %s", mastsFailureCategory(err), p.breaker.cooldown)
+	case "closed":
+		p.logf("[masts] circuit closed: Mastedatabasen answered the probe; requests resumed")
+	}
+}
+
+// mastsFailureCategory is err's fixed category for a log line.
+func mastsFailureCategory(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return dhm.FailureReason(err)
+}
+
+// writeSourceDown is the breaker's 503: distinct header and body, the
+// seconds to wait (rounded up, at least 1), never cached.
+func (p *mastsProxy) writeSourceDown(w http.ResponseWriter, retry time.Duration) {
+	h := w.Header()
+	h.Set("Cache-Control", "no-store")
+	h.Set(mastsSourceHeader, "down")
+	setRetryAfter(w, retry)
+	writeError(w, http.StatusServiceUnavailable, errMastsSourceDown.Error())
+}
+
 // logBusy reports 503s at most once per interval per cause. The two
 // causes have different knobs (#758 review F5): a refusal means
 // map.masts.maxInFlight fetches were admitted; a starved fetch was
 // admitted with room to spare but waited out its deadline behind the
-// mastsUpstreamSlots open WFS requests, which raising maxInFlight would
+// map.masts.upstreamSlots open WFS requests, which raising maxInFlight would
 // only lengthen.
 func (p *mastsProxy) logBusy(starved bool) {
 	if starved {
 		if n, ok := p.starveLog.note(p.now(), p.starvedAll.Add(1), mastsLogEvery); ok {
-			p.logf("[masts] busy: answered %d request(s) with 503 since the last report because admitted fetches waited %s for one of the %d upstream slots; upstream is slow, and raising maxInFlight would not help", n, p.deadline, mastsUpstreamSlots)
+			p.logf("[masts] busy: answered %d request(s) with 503 since the last report because admitted fetches waited %s for one of the %d upstream slots; upstream is slow, and raising maxInFlight would not help", n, p.deadline, cap(p.upstream))
 		}
 		return
 	}
