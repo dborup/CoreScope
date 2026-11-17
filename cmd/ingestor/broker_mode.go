@@ -55,8 +55,12 @@ const brokerProbeTimeout = time.Second
 // addr. It is a variable so tests can pin the answer.
 var brokerListenerProbe = probeBrokerListener
 
+// brokerDial is the dialer the probe uses; a variable so tests can check the
+// timeout it is given.
+var brokerDial = net.DialTimeout
+
 func probeBrokerListener(addr string) bool {
-	conn, err := net.DialTimeout("tcp", addr, brokerProbeTimeout)
+	conn, err := brokerDial("tcp", addr, brokerProbeTimeout)
 	if err != nil {
 		return false
 	}
@@ -64,19 +68,24 @@ func probeBrokerListener(addr string) bool {
 	return true
 }
 
-// brokerDefaultPorts are the ports paho uses when a broker URL has none.
+// brokerDefaultPorts are the ports applied when a broker URL has none. paho
+// applies no default for tcp/mqtt/ssl/tls/mqtts (it passes uri.Host straight to
+// the dialer, so a portless URL fails to connect); ws and wss follow
+// gorilla/websocket and are not verified against paho.
 var brokerDefaultPorts = map[string]string{
-	"mqtt": "1883", "tcp": "1883",
-	"mqtts": "8883", "ssl": "8883", "tls": "8883",
 	"ws": "80", "wss": "443",
 }
 
-// brokerAddr returns the host:port paho would dial for a broker URL, using the
-// scheme's default port when the URL has none.
+// brokerAddr returns the host:port paho would dial for a broker URL. It
+// errors when the URL has no port and the scheme has no default, because paho
+// cannot connect to such a URL either.
 func brokerAddr(broker string) (string, error) {
 	host, port, err := brokerHostPort(broker)
 	if err != nil {
 		return "", err
+	}
+	if port == "" {
+		return "", fmt.Errorf("broker URL has no port and its scheme has no default port")
 	}
 	return net.JoinHostPort(host, port), nil
 }
@@ -173,6 +182,7 @@ func CheckBrokerSources(mode BrokerMode, sources []MQTTSource, sourcesDefaulted 
 	// connect to them at all.
 	loopback, usable := 0, 0
 	var loopbackAddrs []string
+	seenAddr := map[string]bool{}
 	for _, src := range sources {
 		host, err := brokerHost(src.Broker)
 		if err != nil {
@@ -185,7 +195,8 @@ func CheckBrokerSources(mode BrokerMode, sources []MQTTSource, sourcesDefaulted 
 		usable++
 		if isLoopbackHost(host) {
 			loopback++
-			if addr, err := brokerAddr(src.Broker); err == nil {
+			if addr, err := brokerAddr(src.Broker); err == nil && !seenAddr[addr] {
+				seenAddr[addr] = true
 				loopbackAddrs = append(loopbackAddrs, addr)
 			}
 		}

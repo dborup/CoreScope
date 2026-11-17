@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -586,21 +587,76 @@ func TestExternalMode_OnlyLoopbackSourcesAreProbed(t *testing.T) {
 	}
 }
 
-// Default ports per scheme, as paho uses them.
+// Default ports: paho applies none for the tcp/ssl family (it hands uri.Host
+// straight to the dialer), so a portless URL has no address to probe. ws and
+// wss take 80 and 443 from gorilla/websocket (not verified against paho).
 func TestBrokerAddr_DefaultPorts(t *testing.T) {
 	for broker, want := range map[string]string{
-		"mqtt://localhost":              "localhost:1883",
-		"tcp://127.0.0.1":               "127.0.0.1:1883",
-		"mqtts://localhost":             "localhost:8883",
-		"ssl://[::1]":                   "[::1]:8883",
 		"ws://localhost/mqtt":           "localhost:80",
 		"wss://localhost/mqtt":          "localhost:443",
 		"mqtt://user:pw@localhost:1999": "localhost:1999",
+		"ssl://[::1]:8883":              "[::1]:8883",
 	} {
 		got, err := brokerAddr(broker)
 		if err != nil || got != want {
 			t.Errorf("brokerAddr(%q) = %q, %v; want %q", broker, got, err, want)
 		}
+	}
+	for _, broker := range []string{
+		"mqtt://localhost", "tcp://127.0.0.1", "mqtts://localhost", "ssl://[::1]", "tls://localhost",
+	} {
+		if got, err := brokerAddr(broker); err == nil {
+			t.Errorf("brokerAddr(%q) = %q; a portless tcp/ssl-family URL has no address paho can dial", broker, got)
+		}
+	}
+}
+
+// paho cannot connect to a portless tcp/ssl-family URL, so a listener on the
+// conventional port must neither be probed nor turn the error into an info.
+func TestExternalMode_PortlessTCPFamilyIsNotProbedAndStaysAnError(t *testing.T) {
+	var probed []string
+	withProbe(t, func(a string) bool { probed = append(probed, a); return true })
+	for _, broker := range []string{"mqtt://localhost", "tcp://127.0.0.1", "mqtts://localhost", "ssl://[::1]"} {
+		probed = nil
+		diags := CheckBrokerSources(ResolveBrokerMode(externalEnv()), []MQTTSource{{Name: "p", Broker: broker}}, false)
+		if len(probed) != 0 {
+			t.Errorf("%s: a portless URL must not be probed; probed %v", broker, probed)
+		}
+		if WorstBrokerSeverity(diags) != SeverityError || strings.Contains(diagText(diags), "ingest is expected to work") {
+			t.Errorf("%s: must stay an error; got:\n%s", broker, diagText(diags))
+		}
+	}
+}
+
+// A loopback source next to a real one keeps its "cannot connect" warning even
+// when something answers on loopback: that case is deliberately not probed.
+func TestExternalMode_MixedSourcesKeepTheWarningEvenIfALoopbackListenerAnswers(t *testing.T) {
+	var probed []string
+	withProbe(t, func(a string) bool { probed = append(probed, a); return true })
+	diags := CheckBrokerSources(ResolveBrokerMode(externalEnv()), []MQTTSource{
+		{Name: "loop", Broker: "mqtt://127.0.0.1:1884"},
+		{Name: "ext", Broker: "mqtts://broker.example:8883"},
+	}, false)
+	if WorstBrokerSeverity(diags) != SeverityWarn || !strings.Contains(diagText(diags), "cannot connect") {
+		t.Fatalf("the mixed-source warning must stay; got:\n%s", diagText(diags))
+	}
+	if strings.Contains(diagText(diags), "ingest is expected to work") || len(probed) != 0 {
+		t.Fatalf("the mixed case must not be probed or turned into info; probed %v, got:\n%s", probed, diagText(diags))
+	}
+}
+
+// Each distinct loopback address is dialled once, however many sources use it.
+func TestExternalMode_DuplicateLoopbackAddressesAreProbedOnce(t *testing.T) {
+	var probed []string
+	withProbe(t, func(a string) bool { probed = append(probed, a); return false })
+	CheckBrokerSources(ResolveBrokerMode(externalEnv()), []MQTTSource{
+		{Name: "a", Broker: "mqtt://localhost:1883"},
+		{Name: "b", Broker: "tcp://LOCALHOST:1883"},
+		{Name: "c", Broker: "mqtt://user:pw@localhost:1883"},
+		{Name: "d", Broker: "mqtt://127.0.0.1:1883"},
+	}, false)
+	if len(probed) != 2 {
+		t.Fatalf("want 2 distinct dials (localhost:1883, 127.0.0.1:1883); probed %v", probed)
 	}
 }
 
@@ -608,6 +664,27 @@ func TestProbeBrokerListener_IsBounded(t *testing.T) {
 	if brokerProbeTimeout <= 0 || brokerProbeTimeout > 2*time.Second {
 		t.Fatalf("the probe must be short and bounded; got %v", brokerProbeTimeout)
 	}
+	// The dial itself must carry that timeout: an unbounded net.Dial would
+	// bypass the injected dialer and leave this empty.
+	var gotNetwork, gotAddr string
+	var gotTimeout time.Duration
+	calls := 0
+	prev := brokerDial
+	brokerDial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+		calls++
+		gotNetwork, gotAddr, gotTimeout = network, addr, timeout
+		return nil, errors.New("stub: no listener")
+	}
+	t.Cleanup(func() { brokerDial = prev })
+	if probeBrokerListener("127.0.0.1:1884") {
+		t.Fatalf("a failed dial must report no listener")
+	}
+	if calls != 1 || gotNetwork != "tcp" || gotAddr != "127.0.0.1:1884" || gotTimeout != brokerProbeTimeout {
+		t.Fatalf("probe must dial tcp 127.0.0.1:1884 once with timeout %v; got %d call(s): %s %s %v",
+			brokerProbeTimeout, calls, gotNetwork, gotAddr, gotTimeout)
+	}
+	brokerDial = prev
+
 	addr, closeFn := listenLoopback(t)
 	if !probeBrokerListener(addr) {
 		t.Fatalf("probe must report a listener")
