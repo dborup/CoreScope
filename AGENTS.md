@@ -278,6 +278,15 @@ CI runs the `cmd/server` tests (with `-race` and coverage) in three jobs, `go-se
   The script averages each Test's top-level `go test -json` time on the GitHub runners, fills shard 3 with the cheapest entries up to a third of the total and pins the rest longest-first.
 - Each pattern is one argv string for the test binary (`-test.run=…`), and Linux caps one string at 128 KiB (`MAX_ARG_STRLEN`). Only pinned names go into a pattern, and the guard refuses any pattern over 96 KiB.
 
+### Playwright E2E shards (CI)
+`scripts/e2e-shards.json` assigns every E2E suite to exactly one of three shards (`e2e-test-1..3`); `node scripts/run-e2e-shard.js --validate` checks it. A new suite must be added to the manifest (assign it to the lightest shard).
+- **When to rebalance:** when the slowest `Playwright E2E Tests (N/3)` job stays above 1.25× the fastest on two green runs, or after adding several slow suites.
+- **How:** download the shard receipts of several green runs and regenerate and commit the manifest (suites are averaged per run, assigned longest-first to the lightest shard; a suite no run measured keeps its old `meanSeconds`):
+  ```bash
+  gh run download <run-id> -p 'e2e-shard-*' -D /tmp/e2e-run-<run-id>
+  node scripts/rebalance-e2e-shards.js /tmp/e2e-run-<run-id> [/tmp/e2e-run-<other-id> ...]
+  ```
+
 ### What Needs Tests
 - Parsers and decoders (packet-filter, decoder)
 - Threshold/status calculations (aging, health)
