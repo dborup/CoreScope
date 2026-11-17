@@ -364,6 +364,14 @@
       "measurementNote": "New suite; #724 M5 antenna sites settings in the customizer with intercepted dhm and masts client-config blocks (operator minZoom 14), a stubbed /api/terrain/profile and a stubbed /api/masts with fixed synthetic sites (neither the proxy's upstream, Mastedatabasen nor DHM is ever contacted): the Display tab's Antenna Sites section with the four settings at the operator values and server bounds, 48px inputs; changing the hint distance and strong tier updates an open profile's chip and note without a reload and fetches the newly needed cell; out-of-bounds values are put back and never stored; a value back at the operator's is a cleared override; the section survives a reload and reaches the export; a raised zoom gate asks for no cell and says so, and lowering it loads the view at once; the sites-by-default switch starts the next map without them while masts=1 in a link still wins; no section without the masts block. About 10s locally; no CI duration measured yet. Assigned to shard 1 next to the other #724 suites."
     },
     {
+      "file": "test-issue-872-masts-source-down-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #872 antenna sites layer while the server's Mastedatabasen circuit breaker is open, with an intercepted masts client-config block and a stubbed /api/masts answering 503 + X-CoreScope-Masts-Source: down + Retry-After 300 for every cell but one cached cell (neither the proxy nor Mastedatabasen is ever contacted): at 1280x800 z14 the status line says the source is not responding instead of Loading, every cell is asked exactly once over 4 s (no retry storm) and the cached cell's site is drawn; at 375x560 light and dark a real tap opens the layer list and the line is on screen, inside the list, uncovered and readable; at zoom 12 the zoom hint stays. About 20s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-723-heritage-info-e2e.js",
       "shard": 1,
       "env": { "BASE_URL": "$BASE_URL" },

@@ -31,6 +31,13 @@ package main
 //     did no upstream work either, so it is the same refunded 503 (#753
 //     review N2). The browser paces its cell requests (public/masts-layer.js)
 //     so one viewer stays well inside maxInFlight.
+//   - Circuit breaker (#872, masts_breaker.go): after
+//     map.masts.breakerFailures consecutive timeouts, transport errors or
+//     5xx, no fetch goes upstream for map.masts.breakerCooldownSec; an
+//     uncached cell then answers at once with a distinct 503 (header
+//     X-CoreScope-Masts-Source: down, Retry-After = remaining cool-down),
+//     uncharged. Cached cells are still served. One probe after the
+//     cool-down closes it on success or re-opens it on failure.
 //   - Fail closed: an upstream failure or anything but a well-formed
 //     MasteIBrug page is 502 (504 on a timeout) with a fixed body and no
 //     upstream text, logged by category at most once per minute.
@@ -137,6 +144,10 @@ type MastsConfig struct {
 	MinZoom       *int `json:"minZoom,omitempty"`
 	HintDistanceM *int `json:"hintDistanceM,omitempty"`
 	HintStrongM   *int `json:"hintStrongM,omitempty"`
+	// BreakerFailures and BreakerCooldownSec are the circuit breaker's
+	// thresholds (#872); nil is the default. See mastsBreakerSettings.
+	BreakerFailures    *int `json:"breakerFailures,omitempty"`
+	BreakerCooldownSec *int `json:"breakerCooldownSec,omitempty"`
 }
 
 // MastsClientConfig is the `masts` block of /api/config/client. Present
@@ -237,6 +248,8 @@ type mastsProxyOptions struct {
 	rateLimitPerMin int // 0: off
 	maxInFlight     int
 	view            mastsClientSettings
+	breakerFailures int
+	breakerCooldown time.Duration
 	trustedProxies  []*net.IPNet
 	logf            func(string, ...interface{})
 	now             func() time.Time
@@ -255,6 +268,8 @@ func defaultMastsProxyOptions() mastsProxyOptions {
 		rateLimitPerMin: mastsCellRateLimitDefault,
 		maxInFlight:     mastsMaxInFlightDefault,
 		view:            defaultMastsClientSettings(),
+		breakerFailures: mastsBreakerFailuresDefault,
+		breakerCooldown: mastsBreakerCooldownDefault,
 		logf:            log.Printf,
 		now:             time.Now,
 	}
@@ -267,6 +282,7 @@ type mastsProxy struct {
 	limiter  *ipRateLimiter // nil: no per-client limit
 	admit    *dhm.Admission // admitted fetches (maxInFlight)
 	upstream chan struct{}  // one token per open upstream request
+	breaker  *mastsBreaker  // #872
 	deadline time.Duration
 	view     mastsClientSettings
 	now      func() time.Time
@@ -297,6 +313,7 @@ func newMastsProxy(cfg MastsConfig, opts mastsProxyOptions) *mastsProxy {
 		limiter:  newIPRateLimiter("masts", "map.masts.cellRateLimitPerMin", opts.rateLimitPerMin, opts.trustedProxies, opts.logf),
 		admit:    dhm.NewAdmission(opts.maxInFlight),
 		upstream: make(chan struct{}, mastsUpstreamSlots),
+		breaker:  newMastsBreaker(opts.breakerFailures, opts.breakerCooldown),
 		deadline: mastsDeadline,
 		view:     opts.view,
 		now:      opts.now,
@@ -312,6 +329,7 @@ func newMastsProxyFromConfig(cfg *Config) *mastsProxy {
 	opts.rateLimitPerMin = mastsCellRateLimit(cfg.Masts, opts.logf)
 	opts.maxInFlight = mastsMaxInFlight(cfg.Masts, opts.logf)
 	opts.view = resolveMastsClientSettings(cfg.Masts, opts.logf)
+	opts.breakerFailures, opts.breakerCooldown = mastsBreakerSettings(cfg.Masts, opts.logf)
 	opts.trustedProxies = parseCIDRListQuiet(cfg.WSTrustedProxies())
 	return newMastsProxy(cfg.Masts, opts)
 }
@@ -347,6 +365,15 @@ func (p *mastsProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeMastsCell(w, data, "hit")
 		return
 	}
+	// An open breaker answers before the charge, admission or a slot.
+	probe, retry, ok := p.breaker.admit(p.now())
+	if !ok {
+		p.writeSourceDown(w, retry)
+		return
+	}
+	if probe {
+		defer p.breaker.endProbe()
+	}
 	// Only a cell that will go upstream is charged to the client.
 	if ok, retry := p.limiter.allow(r); !ok {
 		writeRateLimited(w, retry)
@@ -362,7 +389,12 @@ func (p *mastsProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return nil, errMastsStarved
 		}
+		// The breaker may have opened while this fetch waited for a slot.
+		if !probe && p.breaker.blocked() {
+			return nil, errMastsSourceDown
+		}
 		page, err := p.client.FetchCell(ctx, cell)
+		p.noteOutcome(err)
 		if err != nil {
 			return nil, err
 		}
@@ -397,6 +429,11 @@ func (p *mastsProxy) writeFetchError(w http.ResponseWriter, r *http.Request, err
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
+	if errors.Is(err, errMastsSourceDown) {
+		p.limiter.refund(r)
+		p.writeSourceDown(w, mastsBusyRetry)
+		return
+	}
 	if errors.Is(err, dhm.ErrAdmissionFull) || errors.Is(err, errMastsStarved) {
 		// Neither did upstream work: give the per-IP charge back, so a
 		// client that retries as told never reaches 429 through 503s.
@@ -419,6 +456,37 @@ func (p *mastsProxy) writeFetchError(w http.ResponseWriter, r *http.Request, err
 		return
 	}
 	writeError(w, http.StatusBadGateway, "antenna data unavailable")
+}
+
+// noteOutcome feeds one upstream outcome to the breaker and logs a state
+// change, once per change.
+func (p *mastsProxy) noteOutcome(err error) {
+	switch p.breaker.record(p.now(), mastsOutcomeOf(err)) {
+	case "open":
+		p.logf("[masts] circuit open: %d consecutive upstream failures (%s); no requests to Mastedatabasen for %s", p.breaker.threshold, mastsFailureCategory(err), p.breaker.cooldown)
+	case "reopen":
+		p.logf("[masts] circuit open again: the probe failed (%s); no requests to Mastedatabasen for %s", mastsFailureCategory(err), p.breaker.cooldown)
+	case "closed":
+		p.logf("[masts] circuit closed: Mastedatabasen answered the probe; requests resumed")
+	}
+}
+
+// mastsFailureCategory is err's fixed category for a log line.
+func mastsFailureCategory(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return dhm.FailureReason(err)
+}
+
+// writeSourceDown is the breaker's 503: distinct header and body, the
+// seconds to wait (rounded up, at least 1), never cached.
+func (p *mastsProxy) writeSourceDown(w http.ResponseWriter, retry time.Duration) {
+	h := w.Header()
+	h.Set("Cache-Control", "no-store")
+	h.Set(mastsSourceHeader, "down")
+	setRetryAfter(w, retry)
+	writeError(w, http.StatusServiceUnavailable, errMastsSourceDown.Error())
 }
 
 // logBusy reports 503s at most once per interval per cause. The two
