@@ -489,8 +489,10 @@
     if (tooWide) return 'This view is too wide for antenna positions; zoom in one more step';
     // #872: the server's breaker is open; nothing is loading until it ends.
     if (stats.down) return 'Antenna data source (Mastedatabasen) is not responding \u2014 try again later';
-    // #872 stale-if-error: a visible cell is the server's old copy.
-    if (stats.stale) return 'Antenna data may be out of date (source not responding)';
+    // #872 stale-if-error: a visible cell is the server's old copy. A
+    // drawn cell is never refetched, so the note says nothing about the
+    // source, which may be back by now (#878 review).
+    if (stats.stale) return 'Antenna data may be out of date';
     if (stats.pending) return 'Loading antenna sites…';
     if (stats.failed) return 'Antenna data unavailable for some areas';
     if (stats.truncated) return 'Some areas hit the source\'s 500-row limit; sites may be missing';

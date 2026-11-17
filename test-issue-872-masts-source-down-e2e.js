@@ -22,8 +22,7 @@
  *   4. no console errors;
  *   5. (owner addition, stale-if-error) with every cell answered 200 from
  *      the server's stale copy (X-CoreScope-Masts-Stale: 1), the site is
- *      drawn and the line says "Antenna data may be out of date (source not
- *      responding)", on desktop and on the 375x560 phone after a real tap,
+ *      drawn and the line says "Antenna data may be out of date", on desktop and on the 375x560 phone after a real tap,
  *      light and dark, on screen, uncovered and readable.
  *
  * Usage:
@@ -44,7 +43,10 @@ const MASTS = {
   sourceUrl: 'https://mastedatabasen.dk/', cellExtent: [219, 3017, 462, 3209],
 };
 const DOWN_TEXT = 'Antenna data source (Mastedatabasen) is not responding — try again later';
-const STALE_TEXT = 'Antenna data may be out of date (source not responding)';
+// #878 review VM3 4: no "(source not responding)". The browser never
+// refetches a stale cell, so the note outlives the outage; the drawn data
+// is the old copy either way, and that is all the note claims.
+const STALE_TEXT = 'Antenna data may be out of date';
 const VIEW = { lat: 56.43, lon: 9.40 };
 const LIST = '.leaflet-control-layers-list';
 const STATUS = '.mc-masts-status';

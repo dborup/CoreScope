@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/meshcore-analyzer/dhm"
 	"github.com/meshcore-analyzer/mastedb"
 	"github.com/meshcore-analyzer/mastedb/mastedbtest"
 )
@@ -302,12 +304,15 @@ func TestMastsBreakerProbeAfterCooldown(t *testing.T) {
 	gate = make(chan struct{})
 	g := gate
 	mu.Unlock()
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(g) }) })
 	probeDone := make(chan int, 1)
 	go func() { probeDone <- mastsGet(p, cellQuery(cellN(23)), clientA).Code }()
 	waitUntil872(t, func() bool { return f.hits.Load() == hits+2 })
 	for i := 0; i < 5; i++ {
 		start := time.Now()
-		w := mastsGet(p, cellQuery(cellN(30+i)), clientA)
+		// Bounded: a second probe would wait on the held gate (VM3 7).
+		w := getWithin(t, p, cellN(30+i), 2*time.Second)
 		if d := time.Since(start); d > 100*time.Millisecond {
 			t.Fatalf("request during the probe waited %s", d)
 		}
@@ -324,9 +329,14 @@ func TestMastsBreakerProbeAfterCooldown(t *testing.T) {
 	mu.Lock()
 	gate = nil
 	mu.Unlock()
-	close(g)
-	if c := <-probeDone; c != http.StatusOK {
-		t.Fatalf("successful probe: %d", c)
+	release.Do(func() { close(g) })
+	select {
+	case c := <-probeDone:
+		if c != http.StatusOK {
+			t.Fatalf("successful probe: %d", c)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the probe did not answer")
 	}
 	// Closed: uncached cells go upstream again.
 	for i := 0; i < 3; i++ {
@@ -369,7 +379,8 @@ func TestMastsBreakerStateIsBounded(t *testing.T) {
 	b := newMastsBreaker(3, time.Minute)
 	now := time.Unix(0, 0)
 	for i := 0; i < 3; i++ {
-		b.record(now, mastsOutcomeDown)
+		gen, _ := b.start(false)
+		b.record(now, gen, mastsOutcomeDown)
 	}
 	for i := 0; i < 100000; i++ {
 		if _, _, ok := b.admit(now); ok {
@@ -504,10 +515,227 @@ func TestMastsBreakerStopsQueuedFetches(t *testing.T) {
 		}
 	}
 	w := <-queued
-	if w.Code != http.StatusServiceUnavailable || w.Header().Get(mastsSourceHeader) != "down" {
-		t.Fatalf("queued fetch after the breaker opened: %d %q", w.Code, w.Header().Get(mastsSourceHeader))
-	}
+	// It waits out the remaining cool-down, not the busy retry (VM3 3).
+	assertSourceDown(t, w.Code, w.Header(), w.Body.String(), "300")
 	if n := f.hits.Load(); n != int32(testMastsSlots) {
 		t.Fatalf("upstream hits %d, want %d (the queued fetch went upstream)", n, testMastsSlots)
+	}
+}
+
+// getWithin runs one request and fails the test if it has not answered
+// within d, so a breaker regression fails fast instead of hanging until
+// go test's own timeout (#878 review VM3 7).
+func getWithin(t *testing.T, p *mastsProxy, c mastedb.Cell, d time.Duration) *httptest.ResponseRecorder {
+	t.Helper()
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- mastsGet(p, cellQuery(c), clientA) }()
+	select {
+	case w := <-done:
+		return w
+	case <-time.After(d):
+		t.Fatalf("request for cell %v did not answer within %s", c, d)
+		return nil
+	}
+}
+
+// heldCellUpstream answers the cells in held only once their channel is
+// closed, with the answer given; every other cell gets a 500.
+func heldCellUpstream(held map[mastedb.Cell]chan struct{}, answer func(http.ResponseWriter, mastedb.Cell)) func(http.ResponseWriter, mastedb.Cell) {
+	return func(w http.ResponseWriter, c mastedb.Cell) {
+		if ch, ok := held[c]; ok {
+			<-ch
+			answer(w, c)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+}
+
+func answerOK(w http.ResponseWriter, c mastedb.Cell) {
+	w.Header().Set("Content-Type", "application/gml+xml; version=3.2")
+	w.Write(okGML(c))
+}
+
+// #878 external review finding 5: a success from a fetch that went
+// upstream before the breaker opened does not close it in the middle of
+// its cool-down. The next cold cell still gets the source-down 503 and
+// upstream is not asked.
+func TestMastsBreakerPreOpenSuccessDoesNotClose(t *testing.T) {
+	f := newFakeWFS(t)
+	early := cellN(100)
+	release := make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	f.respond = heldCellUpstream(map[mastedb.Cell]chan struct{}{early: release}, answerOK)
+	var logs safeLog
+	clk := newBreakerClock()
+	p := breakerProxy(t, f, &logs, clk)
+
+	earlyDone := make(chan int, 1)
+	go func() { earlyDone <- mastsGet(p, cellQuery(early), clientA).Code }()
+	waitUntil872(t, func() bool { return f.hits.Load() == 1 })
+	for i := 0; i < mastsBreakerFailuresDefault; i++ {
+		if w := getWithin(t, p, cellN(i), 5*time.Second); w.Code != http.StatusBadGateway {
+			t.Fatalf("failure %d: status %d, want 502", i, w.Code)
+		}
+	}
+	clk.advance(10 * time.Second)
+	hits := f.hits.Load()
+
+	once.Do(func() { close(release) })
+	select {
+	case c := <-earlyDone:
+		if c != http.StatusOK {
+			t.Fatalf("pre-open fetch: %d, want 200", c)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("pre-open fetch did not answer")
+	}
+
+	w := getWithin(t, p, cellN(50), 5*time.Second)
+	assertSourceDown(t, w.Code, w.Header(), w.Body.String(), "290")
+	if n := f.hits.Load(); n != hits {
+		t.Fatalf("a pre-open success closed the breaker: %d extra upstream hit(s)", n-hits)
+	}
+	if out := logs.String(); strings.Contains(out, "[masts] circuit closed") {
+		t.Fatalf("a pre-open success was logged as a closing probe:\n%s", out)
+	}
+}
+
+// #878 review VM3 5 (mutant M1): a failure from a fetch that went upstream
+// before the breaker opened neither extends the cool-down (it ends when
+// it would have) nor, arriving after the cool-down, re-opens it as if a
+// probe had failed.
+func TestMastsBreakerPreOpenFailureDoesNotExtend(t *testing.T) {
+	f := newFakeWFS(t)
+	during, after := cellN(100), cellN(101)
+	relDuring, relAfter := make(chan struct{}), make(chan struct{})
+	var o1, o2 sync.Once
+	t.Cleanup(func() { o1.Do(func() { close(relDuring) }); o2.Do(func() { close(relAfter) }) })
+	f.respond = heldCellUpstream(map[mastedb.Cell]chan struct{}{during: relDuring, after: relAfter}, fail500)
+	var logs safeLog
+	clk := newBreakerClock()
+	opts := testMastsOptions(f, &logs)
+	opts.rateLimitPerMin = 0
+	opts.now = clk.now
+	opts.upstreamSlots = 4 // two held fetches and room for the failures
+	opts.maxInFlight = 4
+	p := mustMastsProxy(t, opts)
+
+	held := make(chan int, 2)
+	for _, c := range []mastedb.Cell{during, after} {
+		go func(c mastedb.Cell) { held <- mastsGet(p, cellQuery(c), clientA).Code }(c)
+	}
+	waitUntil872(t, func() bool { return f.hits.Load() == 2 })
+	for i := 0; i < mastsBreakerFailuresDefault; i++ {
+		getWithin(t, p, cellN(i), 5*time.Second)
+	}
+	waitHeld := func() {
+		t.Helper()
+		select {
+		case <-held:
+		case <-time.After(5 * time.Second):
+			t.Fatal("held pre-open fetch did not answer")
+		}
+	}
+
+	// A late failure inside the cool-down changes nothing.
+	clk.advance(mastsBreakerCooldownDefault / 2)
+	o1.Do(func() { close(relDuring) })
+	waitHeld()
+	w := getWithin(t, p, cellN(50), 5*time.Second)
+	assertSourceDown(t, w.Code, w.Header(), w.Body.String(), "150")
+
+	// Another one after the cool-down does not re-open it.
+	clk.advance(mastsBreakerCooldownDefault / 2)
+	o2.Do(func() { close(relAfter) })
+	waitHeld()
+	hits := f.hits.Load()
+	if w := getWithin(t, p, cellN(51), 5*time.Second); w.Code != http.StatusBadGateway {
+		t.Fatalf("after the original cool-down: %d (source down %v), want the probe's 502", w.Code, isSourceDown(w))
+	}
+	if n := f.hits.Load(); n != hits+1 {
+		t.Fatalf("probe hits %d, want 1", n-hits)
+	}
+	if c := strings.Count(logs.String(), "[masts] circuit open again"); c != 1 {
+		t.Fatalf("%d re-open lines, want 1 (the probe's):\n%s", c, logs.String())
+	}
+}
+
+// #878 review VM3 6 (mutant M4): clients that leave cannot open the
+// breaker. Their fetch ends "canceled", which says nothing about upstream.
+func TestMastsBreakerClientCancelDoesNotOpen(t *testing.T) {
+	for _, err := range []error{dhm.FetchError{Reason: "canceled"}, context.Canceled} {
+		if o := mastsOutcomeOf(err); o != mastsOutcomeNeutral {
+			t.Fatalf("mastsOutcomeOf(%v) = %d, want neutral", err, o)
+		}
+	}
+	f := newFakeWFS(t)
+	hang := make(chan struct{})
+	t.Cleanup(func() { close(hang) })
+	held := map[mastedb.Cell]chan struct{}{}
+	for i := 0; i < mastsBreakerFailuresDefault+2; i++ {
+		held[cellN(i)] = hang
+	}
+	f.respond = func(w http.ResponseWriter, c mastedb.Cell) {
+		if ch, ok := held[c]; ok {
+			<-ch
+		}
+		answerOK(w, c)
+	}
+	var logs safeLog
+	clk := newBreakerClock()
+	p := breakerProxy(t, f, &logs, clk)
+
+	for i := 0; i < mastsBreakerFailuresDefault+2; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		r := httptest.NewRequest("GET", "/api/masts?"+cellQuery(cellN(i)), nil).WithContext(ctx)
+		r.RemoteAddr = clientA
+		done := make(chan struct{})
+		go func() { p.ServeHTTP(httptest.NewRecorder(), r); close(done) }()
+		waitUntil872(t, func() bool { return f.hits.Load() == int32(i+1) })
+		cancel()
+		<-done
+		// The fetch records its outcome before it frees its slot.
+		waitUntil872(t, func() bool { return len(p.upstream) == 0 })
+	}
+	w := getWithin(t, p, cellN(40), 5*time.Second)
+	if w.Code != http.StatusOK {
+		t.Fatalf("after %d clients left: %d (source down %v), want 200", mastsBreakerFailuresDefault+2, w.Code, isSourceDown(w))
+	}
+	if strings.Contains(logs.String(), "[masts] circuit open") {
+		t.Fatalf("clients that left opened the breaker:\n%s", logs.String())
+	}
+}
+
+// A probe whose client left frees the probe for the next request; if the
+// second probe closes the breaker, the first one's late failure belongs to
+// the half-open generation and does not count against the closed breaker.
+func TestMastsBreakerAbandonedProbeOutcomeIsIgnored(t *testing.T) {
+	b := newMastsBreaker(1, time.Minute)
+	now := time.Unix(0, 0)
+	gen, _ := b.start(false)
+	if b.record(now, gen, mastsOutcomeDown) != "open" {
+		t.Fatal("not open")
+	}
+	now = now.Add(time.Minute)
+	if probe, _, ok := b.admit(now); !probe || !ok {
+		t.Fatal("first probe not admitted")
+	}
+	first, _ := b.start(true)
+	b.endProbe() // its client left; the fetch runs on
+	if probe, _, ok := b.admit(now); !probe || !ok {
+		t.Fatal("second probe not admitted")
+	}
+	second, _ := b.start(true)
+	if s := b.record(now, second, mastsOutcomeOK); s != "closed" {
+		t.Fatalf("second probe's success: %q, want closed", s)
+	}
+	b.endProbe()
+	if s := b.record(now, first, mastsOutcomeDown); s != "" {
+		t.Fatalf("the abandoned probe's late failure: %q, want no change", s)
+	}
+	if _, _, ok := b.admit(now); !ok {
+		t.Fatal("closed breaker refused a fetch")
 	}
 }

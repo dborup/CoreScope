@@ -14,8 +14,7 @@
  *      hint, the too-wide hint and the partial-failure text stay;
  *   5. (owner addition, stale-if-error) read a 200 with
  *      X-CoreScope-Masts-Stale: 1 as a stale cell, show its sites, and say
- *      "Antenna data may be out of date (source not responding)" while a
- *      visible cell is stale.
+ *      "Antenna data may be out of date" while a visible cell is stale.
  *
  * vm sandbox, the real file; nothing here contacts any server.
  * Runs via: node test-issue-872-masts-source-down.js
@@ -47,7 +46,10 @@ const MASTS = {
 };
 const ML = makeSandbox({ masts: MASTS }).window.MastsLayer;
 const DOWN_TEXT = 'Antenna data source (Mastedatabasen) is not responding — try again later';
-const STALE_TEXT = 'Antenna data may be out of date (source not responding)';
+// #878 review VM3 4: no "(source not responding)". The browser never
+// refetches a stale cell, so the note outlives the outage; the drawn data
+// is the old copy either way, and that is all the note claims.
+const STALE_TEXT = 'Antenna data may be out of date';
 const GO = fs.readFileSync(path.join(__dirname, 'cmd', 'server', 'masts_breaker.go'), 'utf8');
 const GO_PROXY = fs.readFileSync(path.join(__dirname, 'cmd', 'server', 'masts_proxy.go'), 'utf8');
 

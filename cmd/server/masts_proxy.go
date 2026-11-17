@@ -454,11 +454,12 @@ func (p *mastsProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return nil, errMastsStarved
 		}
 		// The breaker may have opened while this fetch waited for a slot.
-		if !probe && p.breaker.blocked() {
+		gen, ok := p.breaker.start(probe)
+		if !ok {
 			return nil, errMastsSourceDown
 		}
 		page, err := p.client.FetchCell(ctx, cell)
-		p.noteOutcome(err)
+		p.noteOutcome(gen, err)
 		if err != nil {
 			return nil, err
 		}
@@ -527,7 +528,7 @@ func (p *mastsProxy) writeFetchError(w http.ResponseWriter, r *http.Request, err
 	w.Header().Set("Cache-Control", "no-store")
 	if errors.Is(err, errMastsSourceDown) {
 		p.limiter.refund(r)
-		p.writeSourceDown(w, mastsBusyRetry)
+		p.writeSourceDown(w, p.breaker.retryAfter(p.now()))
 		return
 	}
 	if errors.Is(err, dhm.ErrAdmissionFull) || errors.Is(err, errMastsStarved) {
@@ -554,10 +555,10 @@ func (p *mastsProxy) writeFetchError(w http.ResponseWriter, r *http.Request, err
 	writeError(w, http.StatusBadGateway, "antenna data unavailable")
 }
 
-// noteOutcome feeds one upstream outcome to the breaker and logs a state
-// change, once per change.
-func (p *mastsProxy) noteOutcome(err error) {
-	switch p.breaker.record(p.now(), mastsOutcomeOf(err)) {
+// noteOutcome feeds the outcome of a fetch that went upstream in breaker
+// generation gen to the breaker and logs a state change, once per change.
+func (p *mastsProxy) noteOutcome(gen uint64, err error) {
+	switch p.breaker.record(p.now(), gen, mastsOutcomeOf(err)) {
 	case "open":
 		p.logf("[masts] circuit open: %d consecutive upstream failures (%s); no requests to Mastedatabasen for %s", p.breaker.threshold, mastsFailureCategory(err), p.breaker.cooldown)
 	case "reopen":

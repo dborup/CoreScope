@@ -21,6 +21,12 @@ package main
 //     probe for the next request. While the probe runs, others are refused
 //     with Retry-After mastsBusyRetry.
 //
+// Each state change starts a new generation, and a fetch's outcome counts
+// only in the generation it went upstream in (#878 review). A fetch that
+// went upstream before the breaker opened therefore can neither close it
+// mid cool-down with a late success nor extend or re-open it with a late
+// failure: only the probe speaks for an open breaker.
+//
 // The state is a few scalars under one mutex: no goroutine, no per-request
 // allocation, nothing that grows. Each state change logs one line.
 
@@ -92,6 +98,7 @@ type mastsBreaker struct {
 	cooldown  time.Duration
 
 	mu        sync.Mutex
+	gen       uint64    // bumped on every state change
 	fails     int       // consecutive down outcomes while closed
 	openUntil time.Time // zero: closed
 	probing   bool      // half-open and the probe is out
@@ -120,12 +127,24 @@ func (b *mastsBreaker) admit(now time.Time) (probe bool, retry time.Duration, ok
 	return true, 0, true
 }
 
-// blocked reports whether a non-probe fetch must not go upstream: an
-// admitted fetch that waited for a slot while the breaker opened.
-func (b *mastsBreaker) blocked() bool {
+// start is called as a fetch goes upstream and returns the generation its
+// outcome belongs to. A non-probe fetch that waited for a slot while the
+// breaker opened must not go upstream (ok false).
+func (b *mastsBreaker) start(probe bool) (gen uint64, ok bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return !b.openUntil.IsZero()
+	return b.gen, probe || b.openUntil.IsZero()
+}
+
+// retryAfter is how long a fetch the breaker stopped should wait: the
+// remaining cool-down, or mastsBusyRetry once it is over (the probe is out).
+func (b *mastsBreaker) retryAfter(now time.Time) time.Duration {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if now.Before(b.openUntil) {
+		return b.openUntil.Sub(now)
+	}
+	return mastsBusyRetry
 }
 
 // endProbe frees the probe. If its fetch said nothing (neutral), the
@@ -136,32 +155,34 @@ func (b *mastsBreaker) endProbe() {
 	b.mu.Unlock()
 }
 
-// record notes one fetch outcome and returns the state change to log, if
-// any: "open", "reopen" or "closed".
-func (b *mastsBreaker) record(now time.Time, o mastsOutcome) string {
+// record notes the outcome of a fetch that went upstream in generation
+// gen and returns the state change to log, if any: "open", "reopen" or
+// "closed". An outcome from an earlier generation changes nothing; while
+// open, only the probe went upstream in the current one.
+func (b *mastsBreaker) record(now time.Time, gen uint64, o mastsOutcome) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if gen != b.gen {
+		return ""
+	}
 	open := !b.openUntil.IsZero()
 	switch o {
 	case mastsOutcomeOK:
 		b.fails = 0
 		if open {
+			b.gen++
 			b.openUntil = time.Time{}
 			return "closed"
 		}
 	case mastsOutcomeDown:
 		if open {
-			// Only the probe's failure (after the cool-down) re-opens; a
-			// late failure of a fetch started before opening changes
-			// nothing.
-			if !now.Before(b.openUntil) {
-				b.openUntil = now.Add(b.cooldown)
-				return "reopen"
-			}
-			return ""
+			b.gen++
+			b.openUntil = now.Add(b.cooldown)
+			return "reopen"
 		}
 		b.fails++
 		if b.fails >= b.threshold {
+			b.gen++
 			b.fails = 0
 			b.openUntil = now.Add(b.cooldown)
 			return "open"
