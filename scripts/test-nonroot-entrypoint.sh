@@ -346,17 +346,17 @@ check "on again: data dir set up again" "$H:$G 1775" "$(stat_of "$V" .)"
 echo "# queue: requests the services did not write are set aside"
 V=$(vol queue)
 layout "$V"
-as_root "$V" "cd /app/data && mkdir client-rx-deletes prune-requests channel-proposal-requests mbcap-snapshot &&
+as_root "$V" "cd /app/data && mkdir client-rx-deletes prune-requests channel-proposal-requests region-scope-requests mbcap-snapshot &&
     echo '{}' > client-rx-deletes/request-root.json && chmod 600 client-rx-deletes/request-root.json &&
     echo '{}' > prune-requests/request-root.json && echo '{}' > prune-requests/result-old.json &&
-    echo '{}' > channel-proposal-requests/cmd-root.json && echo '{}' > mbcap-snapshot/snapshot.json &&
+    echo '{}' > channel-proposal-requests/cmd-root.json && echo '{}' > region-scope-requests/cmd-root.json && echo '{}' > mbcap-snapshot/snapshot.json &&
     echo '{}' > prune-requests/request-own.json && chown $U:$G prune-requests/request-own.json"
 start "$V" "${ON[@]}"
 check "queue: exit status" 0 "$RC"
-for q in client-rx-deletes prune-requests channel-proposal-requests mbcap-snapshot; do
+for q in client-rx-deletes prune-requests channel-proposal-requests region-scope-requests mbcap-snapshot; do
     check "queue: $q handed to the services" "$U:$G 755" "$(stat_of "$V" "$q")"
 done
-for r in client-rx-deletes/request-root.json prune-requests/request-root.json channel-proposal-requests/cmd-root.json; do
+for r in client-rx-deletes/request-root.json prune-requests/request-root.json channel-proposal-requests/cmd-root.json region-scope-requests/cmd-root.json; do
     check "queue: root's $r no longer pending" "absent" "$(as_root "$V" "[ -e /app/data/$r ] && echo present || echo absent")"
     check "queue: root's $r kept aside, still root's" "0:0" "$(stat_of "$V" "$r.held" | cut -d' ' -f1)"
     has "queue: $r reported" "$OUT" "^\[nonroot\] WARNING: .*$r"
