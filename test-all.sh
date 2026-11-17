@@ -191,6 +191,7 @@ run test-issue-839-map-chrome-fit.js
 run test-issue-839-map-polish.js
 run test-issue-845-layer-groups.js
 run test-issue-859-layer-control.js
+run test-issue-873-base-deep-link.js
 run test-issue-764-no-osm-fallback.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js
@@ -382,6 +383,7 @@ run test-test-all.js
 run test-ci-parallel-gates.js
 run test-ci-shards.js
 run test-ci-go-shards.js
+run test-ci-shard-rebalance.js
 
 echo ""
 echo "═══════════════════════════════════════"

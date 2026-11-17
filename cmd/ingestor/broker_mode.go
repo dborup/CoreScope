@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"github.com/meshcore-analyzer/brokerurl"
 )
@@ -40,9 +41,54 @@ import (
 type Severity string
 
 const (
+	SeverityInfo  Severity = "info"
 	SeverityWarn  Severity = "warn"
 	SeverityError Severity = "error"
 )
+
+// brokerProbeTimeout bounds the dial that decides whether a loopback source
+// has a listener. Startup waits for it, so it must stay short; a local
+// listener answers (or refuses) in well under a millisecond.
+const brokerProbeTimeout = time.Second
+
+// brokerListenerProbe reports whether something accepts TCP connections at
+// addr. It is a variable so tests can pin the answer.
+var brokerListenerProbe = probeBrokerListener
+
+// brokerDial is the dialer the probe uses; a variable so tests can check the
+// timeout it is given.
+var brokerDial = net.DialTimeout
+
+func probeBrokerListener(addr string) bool {
+	conn, err := brokerDial("tcp", addr, brokerProbeTimeout)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
+// brokerDefaultPorts are the ports applied when a broker URL has none. paho
+// applies no default for tcp/mqtt/ssl/tls/mqtts (it passes uri.Host straight to
+// the dialer, so a portless URL fails to connect); ws and wss follow
+// gorilla/websocket and are not verified against paho.
+var brokerDefaultPorts = map[string]string{
+	"ws": "80", "wss": "443",
+}
+
+// brokerAddr returns the host:port paho would dial for a broker URL. It
+// errors when the URL has no port and the scheme has no default, because paho
+// cannot connect to such a URL either.
+func brokerAddr(broker string) (string, error) {
+	host, port, err := brokerHostPort(broker)
+	if err != nil {
+		return "", err
+	}
+	if port == "" {
+		return "", fmt.Errorf("broker URL has no port and its scheme has no default port")
+	}
+	return net.JoinHostPort(host, port), nil
+}
 
 // BrokerDiagnostic is one operator-facing finding about the broker setup.
 type BrokerDiagnostic struct {
@@ -135,6 +181,8 @@ func CheckBrokerSources(mode BrokerMode, sources []MQTTSource, sourcesDefaulted 
 	// Malformed sources are wrong in either mode: the ingestor cannot
 	// connect to them at all.
 	loopback, usable := 0, 0
+	var loopbackAddrs []string
+	seenAddr := map[string]bool{}
 	for _, src := range sources {
 		host, err := brokerHost(src.Broker)
 		if err != nil {
@@ -147,6 +195,10 @@ func CheckBrokerSources(mode BrokerMode, sources []MQTTSource, sourcesDefaulted 
 		usable++
 		if isLoopbackHost(host) {
 			loopback++
+			if addr, err := brokerAddr(src.Broker); err == nil && !seenAddr[addr] {
+				seenAddr[addr] = true
+				loopbackAddrs = append(loopbackAddrs, addr)
+			}
 		}
 	}
 
@@ -154,6 +206,18 @@ func CheckBrokerSources(mode BrokerMode, sources []MQTTSource, sourcesDefaulted 
 		// The bundled broker listens on loopback inside the container, so
 		// loopback sources are the normal shape and say nothing.
 		return diags
+	}
+
+	// "Nothing is listening" is a claim about this network namespace, and it
+	// is false under host networking, where loopback reaches a broker on the
+	// host (#870). Dial before making it. Only reached for the two
+	// all-loopback cases below, and only loopback addresses are dialled.
+	if (sourcesDefaulted || (usable > 0 && loopback == usable)) && anyBrokerListens(loopbackAddrs) {
+		return append(diags, BrokerDiagnostic{
+			Severity: SeverityInfo,
+			Message: fmt.Sprintf("%s disables the bundled broker and the mqtt source(s) point at loopback (%s); a listener answers there "+
+				"(for example a broker on the host network), so ingest is expected to work.", mode.setting(), maskedBrokerList(sources)),
+		})
 	}
 
 	switch {
@@ -184,13 +248,27 @@ func CheckBrokerSources(mode BrokerMode, sources []MQTTSource, sourcesDefaulted 
 	return diags
 }
 
+// anyBrokerListens reports whether any of addrs accepts a connection.
+func anyBrokerListens(addrs []string) bool {
+	for _, a := range addrs {
+		if brokerListenerProbe(a) {
+			return true
+		}
+	}
+	return false
+}
+
 // WorstBrokerSeverity returns SeverityError when any diagnostic is an
-// error, SeverityWarn when at least one is a warning, and "" for none.
+// error, SeverityWarn when at least one is a warning, and "" for none (info
+// diagnostics do not count).
 func WorstBrokerSeverity(diags []BrokerDiagnostic) Severity {
 	worst := Severity("")
 	for _, d := range diags {
 		if d.Severity == SeverityError {
 			return SeverityError
+		}
+		if d.Severity == SeverityInfo {
+			continue
 		}
 		worst = SeverityWarn
 	}
@@ -217,16 +295,23 @@ func maskedBrokerList(sources []MQTTSource) string {
 // input can carry a credential. An error here means paho could not use the
 // URL either.
 func brokerHost(broker string) (string, error) {
+	host, _, err := brokerHostPort(broker)
+	return host, err
+}
+
+// brokerHostPort is brokerHost plus the port, defaulted by scheme.
+func brokerHostPort(broker string) (host, port string, err error) {
 	masked := strings.TrimSpace(brokerurl.Mask(strings.TrimSpace(broker)))
 	if masked == "" {
-		return "", fmt.Errorf("broker URL is empty")
+		return "", "", fmt.Errorf("broker URL is empty")
 	}
 	scheme, rest, ok := strings.Cut(masked, "://")
 	if !ok {
-		return "", fmt.Errorf("broker URL has no scheme (want one of mqtt, mqtts, tcp, ssl, ws or wss)")
+		return "", "", fmt.Errorf("broker URL has no scheme (want one of mqtt, mqtts, tcp, ssl, ws or wss)")
 	}
-	if !brokerSchemes[strings.ToLower(scheme)] {
-		return "", fmt.Errorf("broker scheme %q is not an MQTT scheme (want one of mqtt, mqtts, tcp, ssl, ws or wss)", scheme)
+	scheme = strings.ToLower(scheme)
+	if !brokerSchemes[scheme] {
+		return "", "", fmt.Errorf("broker scheme %q is not an MQTT scheme (want one of mqtt, mqtts, tcp, ssl, ws or wss)", scheme)
 	}
 	// Mask drops the query and fragment but keeps a path, and replaces
 	// user-info with its marker.
@@ -236,15 +321,18 @@ func brokerHost(broker string) (string, error) {
 	if i := strings.IndexAny(rest, "/"); i >= 0 {
 		rest = rest[:i]
 	}
-	host := rest
-	if h, _, err := net.SplitHostPort(rest); err == nil {
+	host, port = rest, brokerDefaultPorts[scheme]
+	if h, p, err := net.SplitHostPort(rest); err == nil {
 		host = h
+		if p != "" {
+			port = p
+		}
 	}
 	host = strings.Trim(host, "[]")
 	if host == "" {
-		return "", fmt.Errorf("broker URL has no host")
+		return "", "", fmt.Errorf("broker URL has no host")
 	}
-	return strings.ToLower(host), nil
+	return strings.ToLower(host), port, nil
 }
 
 // isLoopbackHost reports whether a host can only be reached from inside the
