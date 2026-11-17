@@ -3,12 +3,20 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
+
+// The diagnostics dial loopback sources (#870). Tests that are not about the
+// dial must not depend on what happens to listen on the machine running them,
+// so the probe defaults to "nothing answers"; the #870 tests below use the
+// real probe or their own stub.
+func init() { brokerListenerProbe = func(string) bool { return false } }
 
 func brokerEnv(kv map[string]string) func(string) string {
 	return func(k string) string { return kv[k] }
@@ -444,5 +452,201 @@ func TestEmptyBrokerEnvironmentIsTheExternalDefault(t *testing.T) {
 	joined := strings.Join(lines, "\n")
 	if !strings.Contains(joined, "no mqttSources are configured") || !strings.Contains(joined, "DISABLE_MOSQUITTO=false") {
 		t.Errorf("the missing source must be reported, with the opt-in back to the bundled broker; got:\n%s", joined)
+	}
+}
+
+// --- #870: do not claim "nothing is listening" when something is ---------
+
+// withRealProbe runs a test against the production probe.
+func withRealProbe(t *testing.T) {
+	t.Helper()
+	prev := brokerListenerProbe
+	brokerListenerProbe = probeBrokerListener
+	t.Cleanup(func() { brokerListenerProbe = prev })
+}
+
+func withProbe(t *testing.T, fn func(string) bool) {
+	t.Helper()
+	prev := brokerListenerProbe
+	brokerListenerProbe = fn
+	t.Cleanup(func() { brokerListenerProbe = prev })
+}
+
+func listenLoopback(t *testing.T) (addr string, closeFn func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	return ln.Addr().String(), func() { ln.Close() }
+}
+
+// A port that was free a moment ago and has no listener now.
+func closedLoopbackAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
+func externalEnv() func(string) string {
+	return brokerEnv(map[string]string{"DISABLE_MOSQUITTO": "true"})
+}
+
+// Host networking: the broker runs on the host, the container's "loopback"
+// is the host's. A listener answers, so there must be no error.
+func TestExternalMode_LoopbackListenerAnswersIsNotAnError(t *testing.T) {
+	withRealProbe(t)
+	addr, _ := listenLoopback(t)
+	src := []MQTTSource{{Name: "host", Broker: "mqtt://" + addr}}
+	diags := CheckBrokerSources(ResolveBrokerMode(externalEnv()), src, false)
+	if WorstBrokerSeverity(diags) == SeverityError {
+		t.Fatalf("a loopback source with a listener must not be an error; got:\n%s", diagText(diags))
+	}
+	if strings.Contains(diagText(diags), "nothing is listening") {
+		t.Fatalf("must not claim nothing is listening; got:\n%s", diagText(diags))
+	}
+	if !strings.Contains(diagText(diags), "info") {
+		t.Errorf("the answered loopback source should be noted at info level; got:\n%s", diagText(diags))
+	}
+}
+
+func TestExternalMode_LoopbackNoListenerIsStillAnError(t *testing.T) {
+	withRealProbe(t)
+	src := []MQTTSource{{Name: "dead", Broker: "mqtt://" + closedLoopbackAddr(t)}}
+	diags := CheckBrokerSources(ResolveBrokerMode(externalEnv()), src, false)
+	if WorstBrokerSeverity(diags) != SeverityError || !strings.Contains(diagText(diags), "nothing is listening") {
+		t.Fatalf("no listener must keep today's error; got:\n%s", diagText(diags))
+	}
+}
+
+func TestExternalMode_DefaultedSourceWithListenerIsNotAnError(t *testing.T) {
+	withProbe(t, func(string) bool { return true })
+	src := []MQTTSource{{Name: "local", Broker: "mqtt://localhost:1883"}}
+	if diags := CheckBrokerSources(ResolveBrokerMode(externalEnv()), src, true); WorstBrokerSeverity(diags) == SeverityError {
+		t.Fatalf("a defaulted localhost source that answers must not be an error; got:\n%s", diagText(diags))
+	}
+	withProbe(t, func(string) bool { return false })
+	if diags := CheckBrokerSources(ResolveBrokerMode(externalEnv()), src, true); WorstBrokerSeverity(diags) != SeverityError {
+		t.Fatalf("a defaulted localhost source with no listener stays an error; got:\n%s", diagText(diags))
+	}
+}
+
+func TestExternalMode_AnyAnsweringLoopbackSourceSuppressesTheError(t *testing.T) {
+	up, _ := listenLoopback(t)
+	withRealProbe(t)
+	src := []MQTTSource{
+		{Name: "dead", Broker: "mqtt://" + closedLoopbackAddr(t)},
+		{Name: "up", Broker: "mqtt://" + up},
+	}
+	if diags := CheckBrokerSources(ResolveBrokerMode(externalEnv()), src, false); WorstBrokerSeverity(diags) == SeverityError {
+		t.Fatalf("one answering loopback source means ingest works; got:\n%s", diagText(diags))
+	}
+}
+
+// Only loopback addresses are dialled: the check must never connect out.
+func TestExternalMode_OnlyLoopbackSourcesAreProbed(t *testing.T) {
+	var probed []string
+	withProbe(t, func(a string) bool { probed = append(probed, a); return false })
+	CheckBrokerSources(ResolveBrokerMode(externalEnv()), []MQTTSource{{Name: "loop", Broker: "mqtt://127.0.0.1:1884"}}, false)
+	if len(probed) != 1 || probed[0] != "127.0.0.1:1884" {
+		t.Fatalf("the loopback source must be dialled; probed %v", probed)
+	}
+	// A real external source is never dialled, even next to a loopback one.
+	probed = nil
+	CheckBrokerSources(ResolveBrokerMode(externalEnv()), []MQTTSource{
+		{Name: "loop", Broker: "mqtt://127.0.0.1:1884"},
+		{Name: "ext", Broker: "mqtts://broker.example:8883"},
+	}, false)
+	for _, a := range probed {
+		if strings.Contains(a, "broker.example") {
+			t.Fatalf("an external source must never be dialled; probed %v", probed)
+		}
+	}
+	// Bundled mode never needed a verdict, so it must not dial either.
+	probed = nil
+	CheckBrokerSources(ResolveBrokerMode(brokerEnv(map[string]string{"DISABLE_MOSQUITTO": "false"})),
+		[]MQTTSource{{Name: "loop", Broker: "mqtt://localhost:1883"}}, false)
+	if len(probed) != 0 {
+		t.Fatalf("bundled mode must not dial; probed %v", probed)
+	}
+}
+
+// Default ports per scheme, as paho uses them.
+func TestBrokerAddr_DefaultPorts(t *testing.T) {
+	for broker, want := range map[string]string{
+		"mqtt://localhost":              "localhost:1883",
+		"tcp://127.0.0.1":               "127.0.0.1:1883",
+		"mqtts://localhost":             "localhost:8883",
+		"ssl://[::1]":                   "[::1]:8883",
+		"ws://localhost/mqtt":           "localhost:80",
+		"wss://localhost/mqtt":          "localhost:443",
+		"mqtt://user:pw@localhost:1999": "localhost:1999",
+	} {
+		got, err := brokerAddr(broker)
+		if err != nil || got != want {
+			t.Errorf("brokerAddr(%q) = %q, %v; want %q", broker, got, err, want)
+		}
+	}
+}
+
+func TestProbeBrokerListener_IsBounded(t *testing.T) {
+	if brokerProbeTimeout <= 0 || brokerProbeTimeout > 2*time.Second {
+		t.Fatalf("the probe must be short and bounded; got %v", brokerProbeTimeout)
+	}
+	addr, closeFn := listenLoopback(t)
+	if !probeBrokerListener(addr) {
+		t.Fatalf("probe must report a listener")
+	}
+	closeFn()
+	if probeBrokerListener(closedLoopbackAddr(t)) {
+		t.Fatalf("probe must report no listener on a closed port")
+	}
+}
+
+func TestReportBrokerSetup_StrictOnlyRefusesWhenNothingListens(t *testing.T) {
+	strict := brokerEnv(map[string]string{"DISABLE_MOSQUITTO": "true", "MQTT_SOURCE_STRICT": "true"})
+	var lines []string
+	logf := func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) }
+	withRealProbe(t)
+
+	addr, _ := listenLoopback(t)
+	if fatal, msg := ReportBrokerSetup(strict, []MQTTSource{{Name: "host", Broker: "mqtt://" + addr}}, false, logf); fatal {
+		t.Fatalf("strict mode must not refuse when a listener answers; got %q", msg)
+	}
+	for _, l := range lines {
+		if strings.Contains(l, "error") || strings.Contains(l, "nothing is listening") {
+			t.Fatalf("no error may be logged when a listener answers; got %q", l)
+		}
+	}
+
+	lines = nil
+	fatal, _ := ReportBrokerSetup(strict, []MQTTSource{{Name: "dead", Broker: "mqtt://" + closedLoopbackAddr(t)}}, false, logf)
+	if !fatal {
+		t.Fatalf("strict mode must still refuse when nothing listens")
+	}
+}
+
+func TestWorstBrokerSeverity_InfoIsNotAWarning(t *testing.T) {
+	info := BrokerDiagnostic{Severity: SeverityInfo, Message: "x"}
+	if got := WorstBrokerSeverity([]BrokerDiagnostic{info}); got != "" {
+		t.Fatalf("info alone must rank as none; got %q", got)
+	}
+	if got := WorstBrokerSeverity([]BrokerDiagnostic{info, {Severity: SeverityWarn}}); got != SeverityWarn {
+		t.Fatalf("warn must outrank info; got %q", got)
 	}
 }
