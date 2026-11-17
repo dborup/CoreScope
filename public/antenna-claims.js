@@ -32,6 +32,7 @@
   var NAME_BUDGET = 23;
   var CODE_RE = /^[0-9A-HJKMNP-TV-Z]{6}$/;
   var ID_RE = /^[0-9a-f]{16,64}$/;
+  var PUBKEY_RE = /^[0-9a-f]{64}$/;
   // The firmware's CLI `set name` refuses these (AdvertDataParser::isValidName).
   var CLI_BAD_RE = /[\[\]\\:,?*]/;
   var CLAIM_ROLES = { repeater: true, room: true };
@@ -692,10 +693,12 @@
     li.setAttribute('data-claim-id', String(c.id || ''));
     li.setAttribute('data-status', String(c.status || ''));
     var main = el('div', 'ac-item-main');
-    var who = el('a', 'ac-item-name', c.name || String(c.pubkey || '').slice(0, 12));
-    who.setAttribute('href', claimHash(String(c.pubkey || ''), null));
+    // Only a well-formed key becomes a link (the server sends lowercase hex).
+    var key = PUBKEY_RE.test(c.pubkey) ? c.pubkey : '';
+    var who = el(key ? 'a' : 'span', 'ac-item-name', c.name || key.slice(0, 12) || '(unknown node)');
+    if (key) who.setAttribute('href', claimHash(key, null));
     main.appendChild(who);
-    main.appendChild(el('span', 'ac-item-meta mono', String(c.pubkey || '').slice(0, 8) + (c.role ? ' · ' + c.role : '')));
+    main.appendChild(el('span', 'ac-item-meta mono', key.slice(0, 8) + (c.role ? ' · ' + c.role : '')));
     main.appendChild(el('span', 'ac-item-height', c.heightM == null ? 'Remove the owner height' : fmtHeight(c.heightM)));
     var chip = el('span', 'ac-chip', String(c.status || ''));
     chip.setAttribute('data-state', String(c.status || ''));

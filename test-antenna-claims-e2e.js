@@ -22,7 +22,7 @@
  *   6. "Remove my height" posts {clear:true}; 429 says try later;
  *   7. polling gives up after its attempts; "Check again" resumes it;
  *   8. admin: the key is asked for, sent as X-API-Key and kept out of the
- *      URL and storage; a name with markup stays text; approve answered with
+ *      URL and storage; a name with markup stays text and a malformed key is no link; approve answered with
  *      the 409 "newer approved claim" says to reject instead; reject goes
  *      through and refreshes; revoke needs a confirm; the filter deep link
  *      survives a reload; a 401 drops the key;
@@ -248,6 +248,8 @@ function pathOf(url) { return new URL(url).pathname; }
           proofHash: 'abcdef12', proofLat: 37.6, proofLon: -122.1, movedM: 0 },
         { id: '2222222222222222', pubkey: PK, name: repeater.name, role: 'repeater', heightM: 22, status: 'proven',
           createdAt: Date.now() - 7200000, expiresAt: Date.now() + 3600000, provenAt: Date.now() - 900000, proofHash: 'abcdef13' },
+        { id: '4444444444444444', pubkey: 'javascript:window.__xss=2', name: '', role: 'repeater', heightM: 9, status: 'proven',
+          createdAt: Date.now() - 7200000, expiresAt: Date.now() + 3600000, provenAt: Date.now() - 900000 },
         { id: '3333333333333333', pubkey: PK, name: repeater.name, role: 'repeater', heightM: null, status: 'approved',
           createdAt: Date.now() - 7200000, expiresAt: Date.now(), provenAt: Date.now() - 800000, reviewedAt: Date.now() - 800000, approvedBy: 'owner' },
       ],
@@ -281,6 +283,11 @@ function pathOf(url) { return new URL(url).pathname; }
     const nameText = await page.textContent('.ac-item[data-claim-id="1111111111111111"] .ac-item-name');
     assert(nameText === XSS_NAME, 'name not shown as text: ' + nameText);
     assert(await page.evaluate(() => window.__xss === undefined && !document.querySelector('.ac-list img')), 'markup in a name ran');
+    const bad = await page.evaluate(() => {
+      const n = document.querySelector('.ac-item[data-claim-id="4444444444444444"] .ac-item-name');
+      return n && { tag: n.tagName, href: n.getAttribute('href'), text: n.textContent };
+    });
+    assert(bad && bad.tag === 'SPAN' && bad.href === null && bad.text === '(unknown node)', 'a malformed key became a link: ' + JSON.stringify(bad));
     assert(/far from the surface/.test(await page.textContent('.ac-item[data-claim-id="1111111111111111"]')), 'review flag not shown');
 
     await page.click('.ac-item[data-claim-id="1111111111111111"] [data-decide="approve"]');
