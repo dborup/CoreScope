@@ -1740,6 +1740,34 @@
     return counterpartId(id, reg) || id;
   }
 
+  /* #873 — the base map deep link, #/map?base=<style id> (Live shares the
+   * control, so #/live?base= too). resolveBase answers the style id a link
+   * stands for in this theme, or null when there is none: not a string, or
+   * an id that is not in the registry (unknown, or its provider is gated
+   * off). A retired CARTO id is migrated (#845); a style of the other theme
+   * becomes its counterpart (#845). */
+  function resolveBase(value, isDark, reg) {
+    reg = reg || REGISTRY;
+    if (typeof value !== 'string') return null;
+    var id = migrateTileId(value.trim());
+    if (!Object.prototype.hasOwnProperty.call(reg, id)) return null;
+    return pickForTheme(id, isDark, reg); // always one the control lists (#859)
+  }
+
+  var BASE_PARAM = 'base';
+  function _readBaseParam() {
+    try { return _hashParts().params.get(BASE_PARAM); } catch (_) { return null; }
+  }
+  // Writes (or, with null, removes) base= in the hash. replaceState, so a
+  // pick is no history entry and the SPA router does not re-run.
+  function _writeBaseParam(id) {
+    try {
+      var h = _hashParts();
+      if (id) h.params.set(BASE_PARAM, id); else h.params.delete(BASE_PARAM);
+      _writeHash(h);
+    } catch (_) {}
+  }
+
   var ZOOM_HINT_RE = /zoom \d+\+/;
   function layerRowParts(text) {
     var name = String(text == null ? '' : text);
@@ -1817,7 +1845,7 @@
   window.MC_LayerGroups                 = {
     DENMARK_BOUNDS: DENMARK_BOUNDS, PREF_KEY: DK_GROUP_PREF,
     counterpartId: counterpartId, isDenmarkBase: isDenmarkBase, themeBaseIds: themeBaseIds,
-    pickForTheme: pickForTheme, rowParts: layerRowParts, inDenmark: inDenmark,
+    pickForTheme: pickForTheme, resolveBase: resolveBase, rowParts: layerRowParts, inDenmark: inDenmark,
     openDefault: denmarkOpenDefault
   };
   window.MC_CREDIT_COMPACT_CLASS        = CREDIT_COMPACT_CLASS;
@@ -1863,6 +1891,7 @@
     // viewer's stored or linked choice is read once, when it is first offered.
     var _orthoOn         = false;
     var _orthoPrefRead   = false;
+    var _baseLinkRead    = false;  // #873 — the base= link is read once per control
 
     _ensureAttribution(map);
 
@@ -2063,6 +2092,15 @@
       listed.world.forEach(function (id) { baseMaps[id] = _makeLayer(id); });
       listed.denmark.forEach(function (id) { baseMaps[id] = _makeLayer(id); });
 
+      // #873 — a base= link, read once per control, wins over what is
+      // stored. A value that is not a listed style is dropped from the hash.
+      var link = null;
+      if (!_baseLinkRead) {
+        _baseLinkRead = true;
+        var rawLink = _readBaseParam();
+        if (rawLink != null) link = { raw: rawLink, id: rawLink.trim() === ORTHO_ID ? null : resolveBase(rawLink, _isDark()) };
+      }
+
       // #728 M3 — one entry for both themes, last in the Denmark group.
       var orthoCfg = getOrthoConfig();
       if (orthoCfg) {
@@ -2077,11 +2115,27 @@
         _layerMap[ORTHO_ID] = baseMaps[ORTHO_ID] = orthoLayer;
         if (!_orthoPrefRead) {
           _orthoPrefRead = true;
-          if (_readOverlayPref(ORTHO_PREF)) { _orthoOn = true; _isAuto = false; }
+          if (link && link.raw.trim() === ORTHO_ID) {
+            _orthoOn = true; _isAuto = false; _sessionBasePick = null;
+            _saveOverlayPref(ORTHO_PREF, true);
+            link.used = true;
+          } else if (link && link.id && _layerMap[link.id]) {
+            // The link wins: a stored or linked Aerial pick is switched off.
+            if (_readOverlayPref(ORTHO_PREF)) _saveOverlayPref(ORTHO_PREF, false);
+          } else if (_readOverlayPref(ORTHO_PREF)) { _orthoOn = true; _isAuto = false; }
         }
       } else if (_orthoOn) {
         _orthoOn = false; // no longer offered: back to Auto, the stored choice kept
         _isAuto = true;
+      }
+
+      if (link) {
+        if (link.id && _layerMap[link.id] && !_orthoOn) {
+          _sessionBasePick = link.id; _isAuto = false;
+          _writeBaseParam(link.id);
+        } else {
+          _writeBaseParam(null); // unknown, gated or unlisted: Auto, a clean link
+        }
       }
 
       // #680/#723 — optional overlays; null keeps the overlay section out.
@@ -2095,6 +2149,7 @@
       var restored = _orthoOn ? _layerMap[ORTHO_ID]
         : (!_isAuto && _sessionBasePick && _layerMap[_sessionBasePick]) || null;
       if (restored) {
+        if (!link && _sessionBasePick && !_orthoOn) _writeBaseParam(_sessionBasePick); // #873
         map.addLayer(restored);
         try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
       }
@@ -2136,6 +2191,7 @@
         if (e.name === ORTHO_ID) {
           _isAuto = false;
           _sessionBasePick = null;
+          _writeBaseParam(null);
           if (!_orthoOn) { _orthoOn = true; _saveOverlayPref(ORTHO_PREF, true); }
           try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
           return;
@@ -2144,6 +2200,7 @@
 
         if (e.name === AUTO_KEY) {
           _sessionBasePick = null;
+          _writeBaseParam(null);
           _activateAuto();
           return;
         }
@@ -2163,6 +2220,7 @@
         try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
 
         _sessionBasePick = selectedId;
+        _writeBaseParam(selectedId);
 
         // CSS invert filter is handled by the layer's own add/remove events above
       };

@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-issue-873-base-deep-link-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #873 the base map deep link (?base=<style id>) on Map and Live at 375x560 (real taps) and 1440x900 (real clicks), from a cold start with an intercepted client config: a linked style is the selected base map and stays in the address bar; a gated or unknown id opens on Auto with base= removed; a tap on a base map writes base= with no new history entry and Auto removes it; the link wins over a stored Aerial pick. 10 cases, about 40s locally; no CI duration measured yet. Assigned to shard 2."
+    },
+    {
       "file": "test-issue-845-layer-groups-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },
