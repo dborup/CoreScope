@@ -121,3 +121,7 @@ replace github.com/meshcore-analyzer/buildings => ../../internal/buildings
 require github.com/meshcore-analyzer/skraafoto v0.0.0
 
 replace github.com/meshcore-analyzer/skraafoto => ../../internal/skraafoto
+
+require github.com/meshcore-analyzer/configkey v0.0.0
+
+replace github.com/meshcore-analyzer/configkey => ../../internal/configkey

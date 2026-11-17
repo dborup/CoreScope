@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"image/png"
@@ -10,6 +9,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -207,8 +207,10 @@ func (e *packetShareEnv) siteDocument(t *testing.T) string {
 
 func (e *packetShareEnv) share(t *testing.T, hash string) packetShare {
 	t.Helper()
-	ps, ok := e.srv.resolvePacketShare(context.Background(), e.c, hash)
-	if !ok {
+	req := httptest.NewRequest("GET", "http://example.test/p", nil)
+	req.RemoteAddr = "192.0.2.10:1234"
+	ps, refused := e.srv.resolvePacketShare(req, e.c, hash)
+	if refused != nil {
 		t.Fatalf("%s: not found", hash)
 	}
 	return ps
@@ -1073,5 +1075,173 @@ func BenchmarkPacketShare_Page(b *testing.B) {
 		if w := e.get("/p?packet=" + h); w.Code != 200 {
 			b.Fatal(w.Code)
 		}
+	}
+}
+
+// ── #885: the budget is checked before the cold path lookup ───────────────
+
+// countColdPaths replaces the cold lookup with a counting wrapper of the real
+// one; gate, when set, holds every lookup until it is closed.
+func countColdPaths(e *packetShareEnv, gate chan struct{}) *atomic.Int32 {
+	var n atomic.Int32
+	real := e.c.coldPath
+	e.c.coldPath = func(hash string) (*PacketPathResponse, error) {
+		n.Add(1)
+		if gate != nil {
+			<-gate
+		}
+		return real(hash)
+	}
+	return &n
+}
+
+func stubCardRender(e *packetShareEnv) {
+	e.c.render = func(packetcard.PacketCardInput, packetcard.Options) ([]byte, error) { return []byte("png"), nil }
+}
+
+// A spent budget refuses a cold lookup before it runs, on the card and on /p.
+func TestPacketShare_SpentBudgetRefusesBeforeTheColdLookup(t *testing.T) {
+	for _, target := range []string{"/api/packets/%s/card.png", "/p?packet=%s"} {
+		one := 1
+		e := newPacketShareEnv(t, true, func(c *Config) { c.DHM.Profile.RateLimitPerMin = &one })
+		stubCardRender(e)
+		n := countColdPaths(e, nil)
+		if w := e.get(fmt.Sprintf(target, psFlood)); w.Code != 200 {
+			t.Fatalf("%s first: %d", target, w.Code)
+		}
+		w := e.get(fmt.Sprintf(target, psAdvert))
+		if w.Code != 429 || w.Header().Get("Retry-After") == "" {
+			t.Errorf("%s over budget: %d", target, w.Code)
+		}
+		if n.Load() != 1 || e.c.paths.Len() != 1 {
+			t.Errorf("%s: %d cold lookups, %d cached paths; the refused request did the lookup", target, n.Load(), e.c.paths.Len())
+		}
+	}
+}
+
+// One charge per request: the path lookup and the card render are one miss.
+func TestPacketShare_ColdLookupAndRenderChargeOnce(t *testing.T) {
+	two := 2
+	e := newPacketShareEnv(t, true, func(c *Config) { c.DHM.Profile.RateLimitPerMin = &two })
+	stubCardRender(e)
+	for _, h := range []string{psFlood, psAdvert} {
+		if w := e.get("/api/packets/" + h + "/card.png"); w.Code != 200 {
+			t.Fatalf("%s: %d; a cold card was charged twice", h, w.Code)
+		}
+	}
+}
+
+// A warm path is free: nothing is charged and nothing is looked up.
+func TestPacketShare_WarmPathIsNotCharged(t *testing.T) {
+	one := 1
+	e := newPacketShareEnv(t, true, func(c *Config) { c.DHM.Profile.RateLimitPerMin = &one })
+	stubCardRender(e)
+	if w := e.get("/p?packet=" + psFlood); w.Code != 200 {
+		t.Fatalf("cold /p: %d", w.Code)
+	}
+	n := countColdPaths(e, nil)
+	for i := 0; i < 5; i++ {
+		if w := e.get("/p?packet=" + psFlood); w.Code != 200 {
+			t.Fatalf("warm /p %d: %d", i, w.Code)
+		}
+	}
+	if n.Load() != 0 {
+		t.Errorf("%d cold lookups for a cached path", n.Load())
+	}
+}
+
+// Identical cold lookups run once, whoever asks and whichever route.
+func TestPacketShare_ColdLookupsCoalesce(t *testing.T) {
+	big := 1000
+	e := newPacketShareEnv(t, true, func(c *Config) { c.DHM.Profile.RateLimitPerMin = &big })
+	stubCardRender(e)
+	gate := make(chan struct{})
+	n := countColdPaths(e, gate)
+	const callers = 6
+	var wg sync.WaitGroup
+	codes := make([]int, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			target := "/p?packet=" + psFlood
+			if i%2 == 0 {
+				target = "/api/packets/" + psFlood + "/card.png"
+			}
+			req := httptest.NewRequest("GET", "http://example.test"+target, nil)
+			req.RemoteAddr = fmt.Sprintf("192.0.2.%d:1", 20+i)
+			w := httptest.NewRecorder()
+			e.router.ServeHTTP(w, req)
+			codes[i] = w.Code
+		}(i)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for e.c.flight.Pending() < callers && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	close(gate)
+	wg.Wait()
+	if n.Load() != 1 {
+		t.Errorf("%d cold lookups for one packet", n.Load())
+	}
+	for i, c := range codes {
+		if c != 200 {
+			t.Errorf("caller %d: %d", i, c)
+		}
+	}
+}
+
+// Every caller of a shared lookup filters its own private copy.
+func TestPacketShare_CoalescedCallersGetPrivateCopies(t *testing.T) {
+	e := newPacketShareEnv(t, true, nil)
+	a, b := e.share(t, psFlood), e.share(t, psFlood)
+	if len(a.in.Branches) == 0 || &a.in.Branches[0] == &b.in.Branches[0] {
+		t.Error("two shares alias one path")
+	}
+}
+
+// Slots full on a cold lookup is a 503 and the charge is given back.
+func TestPacketShare_ColdLookupBusyIs503AndRefunded(t *testing.T) {
+	one := 1
+	e := newPacketShareEnv(t, true, func(c *Config) { c.DHM.Profile.RateLimitPerMin = &one })
+	stubCardRender(e)
+	e.c.admit = dhm.NewAdmission(1)
+	gate := make(chan struct{})
+	n := countColdPaths(e, gate)
+	done := make(chan int)
+	go func() {
+		req := httptest.NewRequest("GET", "/p?packet="+psAdvert, nil)
+		req.RemoteAddr = "192.0.2.99:1"
+		w := httptest.NewRecorder()
+		e.router.ServeHTTP(w, req)
+		done <- w.Code
+	}()
+	for n.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	for _, target := range []string{"/p?packet=" + psFlood, "/api/packets/" + psFlood + "/card.png"} {
+		if w := e.get(target); w.Code != 503 || w.Header().Get("Retry-After") == "" {
+			t.Errorf("%s with slots full: %d", target, w.Code)
+		}
+	}
+	close(gate)
+	if code := <-done; code != 200 {
+		t.Errorf("the running lookup: %d", code)
+	}
+	if w := e.get("/p?packet=" + psFlood); w.Code != 200 {
+		t.Errorf("after refused lookups: %d, the charge was not refunded", w.Code)
+	}
+}
+
+// The visibility filter is not in the cached or coalesced work: a relay
+// hidden after the path is cached is removed from the next request.
+func TestPacketShare_FilterStillRunsOnEveryRequest(t *testing.T) {
+	e := newPacketShareEnv(t, true, nil)
+	if got := len(e.share(t, psFlood).in.Branches); got != 3 {
+		t.Fatalf("before: %d branches", got)
+	}
+	e.srv.cfg.SetNodeBlacklist([]string{psR2})
+	if got := len(e.share(t, psFlood).in.Branches); got != 2 {
+		t.Errorf("after hiding a relay: %d branches; the cached path skipped the filter", got)
 	}
 }

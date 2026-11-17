@@ -90,5 +90,5 @@ func (s *Server) heritageClientConfig() *HeritageClientConfig {
 // the same way extractDHMConfig handles map.dhm, so the browser receives
 // only the fixed client block and never the raw config.
 func (c *Config) extractHeritageConfig() {
-	liftMapBlock(c, "heritage", "heritage overlay", &c.Heritage)
+	liftMapBlock(c, "heritage", "heritage overlay", &c.Heritage, func(h *HeritageConfig) *bool { return &h.Enabled })
 }

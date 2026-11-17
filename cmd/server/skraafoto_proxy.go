@@ -122,7 +122,7 @@ type SkraafotoConfig struct {
 
 // extractSkraafotoConfig moves map.skraafoto into the typed field.
 func (c *Config) extractSkraafotoConfig() {
-	liftMapBlock(c, "skraafoto", "skraafoto", &c.Skraafoto)
+	liftMapBlock(c, "skraafoto", "skraafoto", &c.Skraafoto, func(s *SkraafotoConfig) *bool { return &s.Enabled })
 }
 
 // skraafotoSettings are map.skraafoto, resolved and bounded.

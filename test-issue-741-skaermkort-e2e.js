@@ -34,7 +34,8 @@
  *   8. A real phone flow at 375x560: tap the layer control, tap a Skærmkort
  *      style; the pick survives a theme switch from the More sheet, a
  *      rebuild of the control and SPA navigation through the bottom nav;
- *      a reload starts from Auto again (no new persistence).
+ *      a reload of the address (base=, #873) keeps it, a reload of the bare
+ *      #/map starts from Auto again (no new persistence).
  *   9. Perf: a full 1920x1080 view is at most 20 GetMap requests (512 px
  *      tiles; 256 px tiles would need up to 54).
  *  10. Outside the layers' bounds (Berlin) nothing is requested.
@@ -575,7 +576,7 @@ function checkGetMap(url, layer, base = WMS_BASE) {
   });
 
   // 8 — the phone flow
-  await step('Phone 375x560: pick Skærmkort in the layer control; it survives a theme switch, a rebuild and SPA navigation; a reload is Auto', async () => {
+  await step('Phone 375x560: pick Skærmkort in the layer control; it survives a theme switch, a rebuild and SPA navigation; a reload of the bare #/map is Auto', async () => {
     const { ctx, page, rec } = await newCtx({ tiles: { providers: { dataforsyningen: ON } }, viewport: { width: 375, height: 560 }, phone: true });
     try {
       await gotoMap(page, '#/map');
@@ -644,9 +645,17 @@ function checkGetMap(url, layer, base = WMS_BASE) {
       checkCredit(s, 'SPA navigation');
       await shot(page, '741-phone-after-nav.jpg');
 
-      // A reload: the layer control's pick is not persisted.
-      rec.wms.length = 0;
+      // A reload: since #873 the pick rides in the address bar (base=), so
+      // a reload of that address keeps it; nothing is written to storage.
+      assert(/[?&]base=dataforsyningen-skaermkort-daempet(&|$)/.test(await page.evaluate(() => location.hash)),
+        'the pick is not in the address: ' + await page.evaluate(() => location.hash));
       await page.reload({ waitUntil: 'domcontentloaded' });
+      await settle(page);
+      assert(await checkedId(page) === 'dataforsyningen-skaermkort-daempet', 'reload of the linked address: ' + await checkedId(page));
+      // The same page without the link starts from Auto: the pick is not persisted.
+      await page.evaluate(() => { location.hash = '#/map'; });
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      rec.wms.length = 0; // requests of the linked page are over; count this page's
       await settle(page);
       assert(await checkedId(page) === '__auto__', 'reload: ' + await checkedId(page));
       assert(rec.wms.length === 0, 'reload: Skærmkort requested ' + rec.wms.length + ' times');
