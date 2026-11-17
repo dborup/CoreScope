@@ -535,7 +535,7 @@ body.live-fullscreen .vcr-bar { display: none !important; }
 body.live-fullscreen .bottom-nav { display: none !important; }
 body.live-fullscreen .live-feed,
 body.live-fullscreen .live-legend,
-body.live-fullscreen .legend-toggle-btn,
+body.live-fullscreen .live-legend-toggle-ctl,
 body.live-fullscreen .feed-show-btn { display: none !important; }
 
 /* Collapse the header chrome to just the floating stats row pinned
@@ -633,7 +633,7 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
   .live-feed { display: none !important; }
   .feed-show-btn { display: none !important; }
   .live-legend { display: none !important; }
-  .legend-toggle-btn { display: none !important; }
+  .live-legend-toggle-ctl { display: none !important; }
   .live-header {
     gap: 6px; padding: 6px 10px;
     top: 56px; left: 8px; right: 8px; max-width: calc(100vw - 16px);
@@ -775,7 +775,6 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
   /* Touch targets */
   .feed-hide-btn { width: 36px; height: 36px; font-size: 16px; }
   .feed-show-btn { padding: 10px 12px; min-width: 44px; min-height: 44px; }
-  .legend-toggle-btn { min-width: 44px; min-height: 44px; }
   /* Feed resize handle: disable on mobile (can't drag easily) */
   .feed-resize-handle { display: none; }
   /* Leaflet zoom controls */
@@ -1430,29 +1429,6 @@ input.live-node-filter-input:focus {
   border: 0;
 }
 
-/* Legend toggle button — visible at all sizes (#60, #279).
- * #1107: pinned bottom-right so the activate/hide button group
- * docks consistently (with .feed-show-btn) instead of floating loose
- * inside the map container.
- * #1833 round 2: anchor to .live-page, like .vcr-bar, so the mobile bottom
- * navigation reserve cannot move this button underneath the VCR bar. */
-.legend-toggle-btn {
-  position: absolute;
-  bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
-  right: 1rem;
-  z-index: 500;
-  background: color-mix(in srgb, var(--surface-1) 92%, transparent);
-  backdrop-filter: blur(8px);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--text-muted);
-  font-size: 18px;
-  padding: 8px 10px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.legend-toggle-btn:hover { color: var(--text); border-color: rgba(59,130,246,0.4); }
-
 /* Feed resize handle (#27) */
 .feed-resize-handle {
   position: absolute;
@@ -1505,6 +1481,12 @@ input.live-node-filter-input:focus {
 .live-overlay[data-position="tr"].hidden,
 .live-overlay[data-position="br"].hidden { transform: translateX(100%); }
 .live-overlay[data-position].hidden { opacity: 0; pointer-events: none; visibility: hidden; }
+
+/* #875: the legend panel keeps clear of the right-hand Leaflet control stack
+ * (zoom, layers, Fullscreen, Settings, Legend) in the right corners. 68px =
+ * 10px control margin + ~50px control + gap, the same rail .live-header uses. */
+.live-legend[data-position="tr"],
+.live-legend[data-position="br"] { right: var(--live-ctrl-rail-legend, 68px); }
 
 /* Corner toggle button */
 .panel-corner-btn {

@@ -1800,6 +1800,19 @@
       ]
     },
     {
+      "file": "test-issue-875-legend-toggle-e2e.js",
+      "shard": 1,
+      "env": {
+        "CHROMIUM_REQUIRE": "1",
+        "BASE_URL": "$BASE_URL"
+      },
+      "output": "e2e",
+      "meanSeconds": 12,
+      "secondsByExecution": [
+        12
+      ]
+    },
+    {
       "file": "test-issue-1833-legend-toggle-clickable-e2e.js",
       "shard": 1,
       "env": {

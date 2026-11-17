@@ -45,7 +45,7 @@ async function step(name, fn) {
 async function gotoLive(page) {
   await page.goto(BASE + '/#/live', { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('#vcrBar');
-  await page.waitForSelector('#legendToggleBtn');
+  await page.waitForSelector('#feedShowBtn', { state: 'attached' });
   await page.waitForFunction(() => {
     const livePage = document.querySelector('.live-page');
     if (!livePage) return false;
@@ -173,27 +173,6 @@ async function launchBrowser() {
   await page.setViewportSize({ width: 720, height: 900 });
   await gotoLive(page);
 
-  const narrowLegend = await probe(page, 'legendToggleBtn');
-  await step('[720px] reserve band and legend geometry are active', async () => {
-    assert(narrowLegend, 'legend button, VCR bar, or live page missing');
-    assert(narrowLegend.gapBelowLivePage > 0,
-      '.live-page is not shortened by the mobile bottom navigation');
-    assert(narrowLegend.position === 'absolute',
-      'legend button must be absolute, got ' + narrowLegend.position);
-    assert(narrowLegend.visible, 'legend button is not visible');
-    assert(narrowLegend.bottom <= narrowLegend.barTop + 0.5,
-      'legend button overlaps VCR bar by ' + (narrowLegend.bottom - narrowLegend.barTop) + 'px');
-    assert(narrowLegend.hitIsSelf,
-      'legend button is covered by ' + narrowLegend.hitName);
-  });
-
-  await step('[720px] a real hit-tested click toggles the legend', async () => {
-    const before = await page.$eval('#liveLegend', (el) => el.classList.contains('hidden'));
-    await page.click('#legendToggleBtn');
-    const after = await page.$eval('#liveLegend', (el) => el.classList.contains('hidden'));
-    assert(before !== after, 'legend hidden state did not change');
-  });
-
   let narrowFeed = null;
   await step('[720px] feed show button clears the bar and restores the feed', async () => {
     assert(await revealFeedShowButton(page), 'could not reveal feed show button');
@@ -219,14 +198,6 @@ async function launchBrowser() {
   // through the whole sequence. No artificial waits.
   await page.setViewportSize({ width: 720, height: 300 });
   await gotoLive(page);
-
-  const shortLegend = await probe(page, 'legendToggleBtn');
-  await step('[720x300] legend toggle still clears the VCR bar at a short viewport', async () => {
-    assert(shortLegend && shortLegend.visible, 'legend button missing or not visible');
-    assert(shortLegend.bottom <= shortLegend.barTop + 0.5,
-      'legend button overlaps VCR bar by ' + (shortLegend.bottom - shortLegend.barTop) + 'px');
-    assert(shortLegend.hitIsSelf, 'legend button is covered by ' + shortLegend.hitName);
-  });
 
   // page.goto() to the same #/live hash is a same-document no-op in this SPA
   // (verified: in-memory state and DOM survive it, only a full navigation
@@ -269,12 +240,11 @@ async function launchBrowser() {
 
   await page.setViewportSize({ width: 1440, height: 900 });
   await gotoLive(page);
-  const wideLegend = await probe(page, 'legendToggleBtn');
   await revealFeedShowButton(page);
   const wideFeed = await probe(page, 'feedShowBtn');
 
   await step('[1440px] desktop remains clickable and uses the same anchor geometry', async () => {
-    for (const pair of [[narrowLegend, wideLegend], [narrowFeed, wideFeed]]) {
+    for (const pair of [[narrowFeed, wideFeed]]) {
       const narrow = pair[0];
       const wide = pair[1];
       assert(narrow && wide, 'missing narrow or wide probe');

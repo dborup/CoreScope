@@ -1590,10 +1590,10 @@
           </div>
           <div class="panel-content" id="nodeDetailContent"></div>
         </div>
-        <button class="legend-toggle-btn" id="legendToggleBtn" aria-label="Show legend" title="Show legend"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg></button>
         <div class="live-overlay live-legend" id="liveLegend" role="region" aria-label="Map legend">
           <div class="panel-header">
             <button class="panel-corner-btn" data-panel="liveLegend" title="Move panel to next corner" aria-label="Move panel to next corner">◫</button>
+            <button class="feed-hide-btn" id="legendCloseBtn" title="Hide legend" aria-label="Hide legend"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
           </div>
           <div class="panel-content">
           <h3 class="legend-title">PACKET TYPES</h3>
@@ -1927,6 +1927,26 @@
       }
     });
     map.addControl(new LiveSettingsControl());
+
+    // #875: legend toggle lives in the same stack, under Fullscreen and Settings.
+    const LiveLegendControl = L.Control.extend({
+      options: { position: 'topright' },
+      onAdd: function() {
+        const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control live-leaflet-toggle live-legend-toggle-ctl');
+        const btn = L.DomUtil.create('a', '', container);
+        btn.href = 'javascript:void(0)';
+        btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg>';
+        btn.id = 'legendToggleBtn';
+        btn.title = 'Legend';
+        btn.setAttribute('aria-label', 'Hide legend');
+        btn.setAttribute('role', 'button');
+        btn.setAttribute('aria-controls', 'liveLegend');
+        btn.setAttribute('aria-expanded', 'true');
+        L.DomEvent.disableClickPropagation(btn);
+        return container;
+      }
+    });
+    map.addControl(new LiveLegendControl());
 
 
 
@@ -2552,20 +2572,19 @@
     // ───────────────────────────────────────────────────────────────────────
 
     if (legendToggleBtn && legendEl) {
+      const setLegendHidden = (hidden, persist) => {
+        legendEl.classList.toggle('hidden', hidden);
+        legendToggleBtn.setAttribute('aria-label', hidden ? 'Show legend' : 'Hide legend');
+        legendToggleBtn.setAttribute('aria-expanded', String(!hidden));
+        if (persist) { try { localStorage.setItem('live-legend-hidden', String(hidden)); } catch (_) { /* ignore */ } }
+      };
       // Restore legend collapsed state from localStorage (#279)
       try {
-        if (localStorage.getItem('live-legend-hidden') === 'true') {
-          legendEl.classList.add('hidden');
-          legendToggleBtn.setAttribute('aria-label', 'Show legend');
-          legendToggleBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg>';
-        }
+        if (localStorage.getItem('live-legend-hidden') === 'true') setLegendHidden(true, false);
       } catch (_) { /* private browsing / storage disabled */ }
-      legendToggleBtn.addEventListener('click', () => {
-        const nowHidden = legendEl.classList.toggle('hidden');
-        legendToggleBtn.setAttribute('aria-label', nowHidden ? 'Show legend' : 'Hide legend');
-        legendToggleBtn.innerHTML = nowHidden ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg>' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg>';
-        try { localStorage.setItem('live-legend-hidden', String(nowHidden)); } catch (_) { /* ignore */ }
-      });
+      legendToggleBtn.addEventListener('click', () => setLegendHidden(!legendEl.classList.contains('hidden'), true));
+      const legendCloseBtn = document.getElementById('legendCloseBtn');
+      if (legendCloseBtn) legendCloseBtn.addEventListener('click', () => setLegendHidden(true, true));
     }
 
     // Populate role legend from shared roles.js
