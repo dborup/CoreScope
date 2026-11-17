@@ -213,9 +213,10 @@ func nodeTableWritePattern(verb, trailer string) *regexp.Regexp {
 
 // txTableWritePattern matches DML against the ingestor-owned packet tables
 // (transmissions, observations, observers, dropped_packets) and the tables
-// hung off them, in the shapes nodeTableWritePattern covers.
+// hung off them, in the shapes nodeTableWritePattern covers, plus the owner
+// antenna-height claims (#789 M2a), which only the ingestor writes.
 func txTableWritePattern(verb string) *regexp.Regexp {
-	const table = "[\"`\\[]?(transmissions|observations|observers|dropped_packets|ping_triggers|route_mask_changes)[\"`\\]]?"
+	const table = "[\"`\\[]?(transmissions|observations|observers|dropped_packets|ping_triggers|route_mask_changes|node_antenna_claims)[\"`\\]]?"
 	return regexp.MustCompile(`(?i)` + verb + `\s+` + table + `\b`)
 }
 
@@ -303,6 +304,9 @@ func TestServerHasNoPacketTableWritesIsSensitive(t *testing.T) {
 		"insert into\n\t\"observations\" (x) values (1)",
 		`REPLACE INTO dropped_packets (id) VALUES (1)`,
 		`DELETE FROM route_mask_changes`,
+		`UPDATE node_antenna_claims SET status = 'approved'`,
+		`INSERT INTO node_antenna_claims (request_id) VALUES (?)`,
+		`DELETE FROM node_antenna_claims WHERE status = 'expired'`,
 	} {
 		if !matches(stmt) {
 			t.Errorf("the guard does not match %q", stmt)
@@ -313,6 +317,7 @@ func TestServerHasNoPacketTableWritesIsSensitive(t *testing.T) {
 		`SELECT COUNT(*) FROM observations`,
 		`INSERT INTO observations_archive (a) VALUES (1)`,
 		`INSERT INTO observer_neighbors (a) VALUES (1)`,
+		`SELECT pubkey FROM node_antenna_claims WHERE status = 'approved'`,
 		`tx_inserted`,
 	} {
 		if matches(stmt) {

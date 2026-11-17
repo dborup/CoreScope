@@ -140,6 +140,18 @@ func (q *Queue) Enqueue(cmd Command, maxQueued int) error {
 	default:
 		return ErrInvalidCommand
 	}
+	return q.EnqueueValue(cmd.RequestID, cmd, maxQueued)
+}
+
+// EnqueueValue writes v as the command file of request id, atomically,
+// refusing when maxQueued commands are already waiting. It is the core of
+// Enqueue for queues with their own command type (#789 M2a): the caller
+// validates v; v must marshal with "requestId" equal to id and a numeric
+// "createdAt", which PendingValues sorts and checks by.
+func (q *Queue) EnqueueValue(id string, v interface{}, maxQueued int) error {
+	if !ValidID(id) {
+		return ErrInvalidID
+	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if err := os.MkdirAll(q.dir, 0o755); err != nil {
@@ -152,38 +164,74 @@ func (q *Queue) Enqueue(cmd Command, maxQueued int) error {
 	if len(names) >= maxQueued {
 		return ErrQueueFull
 	}
-	return q.writeAtomic(q.cmdPath(cmd.RequestID), cmd)
+	return q.writeAtomic(q.cmdPath(id), v)
+}
+
+// RawCommand is one command file as bytes, for PendingValues. Err is set when
+// the file could not be read, is not JSON, or its requestId does not match
+// its name; such files are to be discarded.
+type RawCommand struct {
+	Path      string
+	RequestID string
+	CreatedAt int64
+	Data      []byte
+	Err       error
+}
+
+// PendingValues returns the waiting command files in submission order
+// (createdAt, then request id), undecoded.
+func (q *Queue) PendingValues() ([]RawCommand, error) {
+	names, err := q.listNames(cmdPrefix)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RawCommand, 0, len(names))
+	for _, name := range names {
+		p := filepath.Join(q.dir, name)
+		rc := RawCommand{Path: p}
+		var head struct {
+			RequestID string `json:"requestId"`
+			CreatedAt int64  `json:"createdAt"`
+		}
+		b, err := os.ReadFile(p)
+		switch {
+		case err != nil:
+			rc.Err = err
+		case json.Unmarshal(b, &head) != nil:
+			rc.Err = ErrInvalidCommand
+		case !ValidID(head.RequestID) || p != q.cmdPath(head.RequestID):
+			rc.Err = ErrInvalidID
+		}
+		rc.RequestID, rc.CreatedAt = head.RequestID, head.CreatedAt
+		if rc.Err == nil {
+			rc.Data = b
+		}
+		out = append(out, rc)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].CreatedAt != out[j].CreatedAt {
+			return out[i].CreatedAt < out[j].CreatedAt
+		}
+		return out[i].RequestID < out[j].RequestID
+	})
+	return out, nil
 }
 
 // Pending returns the waiting commands in submission order (createdAt, then
 // request id).
 func (q *Queue) Pending() ([]QueuedCommand, error) {
-	names, err := q.listNames(cmdPrefix)
+	raw, err := q.PendingValues()
 	if err != nil {
 		return nil, err
 	}
-	out := make([]QueuedCommand, 0, len(names))
-	for _, name := range names {
-		p := filepath.Join(q.dir, name)
-		qc := QueuedCommand{Path: p}
-		b, err := os.ReadFile(p)
-		switch {
-		case err != nil:
-			qc.Err = err
-		case json.Unmarshal(b, &qc.Command) != nil:
+	out := make([]QueuedCommand, 0, len(raw))
+	for _, rc := range raw {
+		qc := QueuedCommand{Path: rc.Path, Err: rc.Err}
+		if qc.Err == nil && json.Unmarshal(rc.Data, &qc.Command) != nil {
 			qc.Err = ErrInvalidCommand
-		case !ValidID(qc.Command.RequestID) || p != q.cmdPath(qc.Command.RequestID):
-			qc.Err = ErrInvalidID
 		}
 		out = append(out, qc)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		a, b := out[i].Command, out[j].Command
-		if a.CreatedAt != b.CreatedAt {
-			return a.CreatedAt < b.CreatedAt
-		}
-		return a.RequestID < b.RequestID
-	})
 	return out, nil
 }
 
@@ -192,7 +240,13 @@ func (q *Queue) Pending() ([]QueuedCommand, error) {
 // files, and the command is simply applied again, which the ingestor makes
 // idempotent.
 func (q *Queue) Complete(res Result) error {
-	if !ValidID(res.RequestID) {
+	return q.CompleteValue(res.RequestID, res)
+}
+
+// CompleteValue is Complete for any result type: it writes v as the result
+// of request id, then removes the command file.
+func (q *Queue) CompleteValue(id string, v interface{}) error {
+	if !ValidID(id) {
 		return ErrInvalidID
 	}
 	q.mu.Lock()
@@ -200,10 +254,10 @@ func (q *Queue) Complete(res Result) error {
 	if err := os.MkdirAll(q.dir, 0o755); err != nil {
 		return err
 	}
-	if err := q.writeAtomic(q.resultPath(res.RequestID), res); err != nil {
+	if err := q.writeAtomic(q.resultPath(id), v); err != nil {
 		return err
 	}
-	if err := os.Remove(q.cmdPath(res.RequestID)); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(q.cmdPath(id)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
@@ -222,26 +276,37 @@ func (q *Queue) Discard(path string) error {
 
 // Lookup returns the public state of a request.
 func (q *Queue) Lookup(id string) (RequestStatus, error) {
+	var res Result
+	queued, err := q.LookupValue(id, &res)
+	if err != nil {
+		return RequestStatus{}, err
+	}
+	if queued {
+		return RequestStatus{Status: RequestQueued}, nil
+	}
+	return RequestStatus{Status: res.Status, Proposal: res.Proposal, Error: res.Error, CompletedAt: res.CompletedAt}, nil
+}
+
+// LookupValue decodes the result of request id into v. queued is true, and v
+// untouched, while only the command file exists; ErrUnknownRequest means
+// neither file does.
+func (q *Queue) LookupValue(id string, v interface{}) (queued bool, err error) {
 	if !ValidID(id) {
-		return RequestStatus{}, ErrInvalidID
+		return false, ErrInvalidID
 	}
 	b, err := os.ReadFile(q.resultPath(id))
 	if err == nil {
-		var res Result
-		if err := json.Unmarshal(b, &res); err != nil {
-			return RequestStatus{}, err
-		}
-		return RequestStatus{Status: res.Status, Proposal: res.Proposal, Error: res.Error, CompletedAt: res.CompletedAt}, nil
+		return false, json.Unmarshal(b, v)
 	}
 	if !os.IsNotExist(err) {
-		return RequestStatus{}, err
+		return false, err
 	}
 	if _, err := os.Stat(q.cmdPath(id)); err == nil {
-		return RequestStatus{Status: RequestQueued}, nil
+		return true, nil
 	} else if !os.IsNotExist(err) {
-		return RequestStatus{}, err
+		return false, err
 	}
-	return RequestStatus{}, ErrUnknownRequest
+	return false, ErrUnknownRequest
 }
 
 // Prune removes result files older than ttl, the oldest results beyond

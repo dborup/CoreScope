@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/meshcore-analyzer/channelregistry"
+	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
 )
@@ -136,6 +137,10 @@ type Config struct {
 	// (internal/channelregistry). Approved channels are always loaded into
 	// the channel keys, whether or not new submissions are enabled.
 	ChannelProposals *channelregistry.Config `json:"channelProposals,omitempty"`
+
+	// AntennaClaims: limits and the auto-approval switch for owner
+	// antenna-height claims (#789 M2a). The same block is read by the server.
+	AntennaClaims *antennaclaim.Config `json:"antennaClaims,omitempty"`
 
 	// ResolvedPathBackfill tunes the start-up re-resolution of NULL
 	// observations.resolved_path rows (#188, resolved_path_backfill.go).

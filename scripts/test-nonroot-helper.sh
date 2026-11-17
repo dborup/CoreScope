@@ -133,7 +133,8 @@ for spec in cmd/ingestor/client_rx_delete.go:clientRxSaltFileName \
     internal/prunequeue/prunequeue.go:QueueDirName \
     internal/mbcapqueue/mbcapqueue.go:QueueDirName \
     internal/channelregistry/queue.go:QueueDirName \
-    internal/channelregistry/queue.go:ScopeQueueDirName; do
+    internal/channelregistry/queue.go:ScopeQueueDirName \
+    internal/channelregistry/antennaclaim/antennaclaim.go:QueueDirName; do
     v=$(go_const "${spec%%:*}" "${spec#*:}")
     if [ -n "$v" ]; then ok; else bad "could not read ${spec#*:} from ${spec%%:*}"; fi
     expect_paths="$expect_paths $v"

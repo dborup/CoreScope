@@ -79,6 +79,7 @@ import (
 	"time"
 
 	"github.com/meshcore-analyzer/buildings"
+	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
 	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dhm"
 	"github.com/meshcore-analyzer/profilecard"
@@ -109,8 +110,9 @@ const (
 	// terrainSnap is the coordinate snap of the cache key: 5 decimals,
 	// about a metre, so advert jitter still hits the cache (plan §7).
 	terrainSnap = 1e5
-	// terrainMaxAntennaM bounds an antenna height above ground.
-	terrainMaxAntennaM = 100
+	// terrainMaxAntennaM bounds an antenna height above ground: one rule
+	// with the owner claims (#789 M2a, owner decision 2).
+	terrainMaxAntennaM = antennaclaim.MaxHeightM
 	// terrainMaxPathKmDefault is map.dhm.profile.maxPathKm's default.
 	terrainMaxPathKmDefault = 80
 )
@@ -610,6 +612,9 @@ type terrainEnd struct {
 	// surfaceM is the surface above the ground at the node (#789), set by
 	// estimateEnds; nil when not measured or unknown.
 	surfaceM *float64
+	// owner is the node's approved owner height (#789 M2a), set by
+	// attachOwnerHeights; nil when there is none or it is stale.
+	owner *float64
 }
 
 // terrainRequest is a validated, resolved profile request: everything a
@@ -668,8 +673,11 @@ func (s *Server) resolveTerrainRequest(ctx context.Context, p *terrainProfiler, 
 		}
 		req.ends[i] = e
 	}
-	// The antenna estimate, from its cache only (#789): every route then
-	// draws the same heights; only the profile route measures a miss.
+	// The owner heights (#789 M2a), then the antenna estimate from its
+	// cache only (#789): every route then draws the same heights; only the
+	// profile route measures a miss, and never for a node with an owner
+	// height.
+	s.attachOwnerHeights(ctx, &req.ends)
 	req.estimatePending = p.cachedEstimates(&req.ends, [2]*float64{tq.ha, tq.hb})
 	req.ka = [2]int64{terrainSnapCoord(req.ends[0].pt.Lat), terrainSnapCoord(req.ends[0].pt.Lon)}
 	req.kb = [2]int64{terrainSnapCoord(req.ends[1].pt.Lat), terrainSnapCoord(req.ends[1].pt.Lon)}
@@ -1424,8 +1432,8 @@ func (p *terrainProfiler) kFactor(req *float64) (float64, string) {
 }
 
 // antenna is the antenna height above ground for an endpoint, most
-// specific first: the request, the operator's per-node value, (#789 M2:
-// the owner's proven value), the estimate from the surface model, the
+// specific first: the request, the operator's per-node value, the owner's
+// proven and approved value (#789 M2a), the estimate from the surface model, the
 // operator's role value, the built-in role default. The estimate applies
 // only where it is above the role height it would replace (#789 research
 // §3: masts are invisible in the DSM), so it never lowers one.
@@ -1438,7 +1446,9 @@ func (p *terrainProfiler) antenna(e terrainEnd, override *float64) (h float64, s
 			return v, "operator-node", false
 		}
 	}
-	// #789 M2: the owner-submitted, proven height goes here.
+	if e.owner != nil {
+		return *e.owner, "owner", false
+	}
 	h, source, assumed = p.roleAntenna(e)
 	if e.surfaceM != nil && e.kind == "node" && terrainEstimateRoles[e.role] {
 		if est := estimatedAntennaM(*e.surfaceM); est > h {

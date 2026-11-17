@@ -46,9 +46,11 @@ type TerrainEndpoint struct {
 	GroundM  *float64 `json:"groundM"` // DTM; null outside coverage
 	AntennaM float64  `json:"antennaM"`
 	// AntennaSource is where AntennaM came from, in precedence order:
-	// request, operator-node, dsm-estimate (#789: the role default raised
-	// to the surface model around the node plus a roof offset, still
-	// Assumed), operator-role, role-default, point-default.
+	// request, operator-node, owner (#789 M2a: a height the node's owner
+	// proved with a code in a signed advert and that was approved; not
+	// Assumed), dsm-estimate (#789: the role default raised to the surface
+	// model around the node plus a roof offset, still Assumed),
+	// operator-role, role-default, point-default.
 	AntennaSource string `json:"antennaSource"`
 	Assumed       bool   `json:"assumed"` // the height is a default, not a known value
 }
