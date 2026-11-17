@@ -144,6 +144,7 @@ run test-issue-723-heritage-overlay.js
 run test-issue-724-masts-layer.js
 run test-issue-724-masts-hint.js
 run test-issue-724-m5-masts-customizer.js
+run test-issue-872-masts-source-down.js
 run test-issue-723-heritage-info.js
 run test-issue-723-profile-warning.js
 run test-issue-723-m4-heritage-customizer.js
@@ -191,6 +192,7 @@ run test-issue-839-map-chrome-fit.js
 run test-issue-839-map-polish.js
 run test-issue-845-layer-groups.js
 run test-issue-859-layer-control.js
+run test-issue-873-base-deep-link.js
 run test-issue-764-no-osm-fallback.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js
@@ -208,6 +210,7 @@ run test-issue-1485-live-anim-z.js
 run test-live-anims.js
 run test-issue-1532-live-fullscreen.js
 run test-issue-1833-legend-toggle-vcr-offset.js
+run test-issue-875-legend-toggle-control.js
 run test-naive-banner-tone.js
 run test-issue-1473-reserved-prefixes.js
 run test-issue-1473-prefix-generator.js
@@ -382,6 +385,7 @@ run test-test-all.js
 run test-ci-parallel-gates.js
 run test-ci-shards.js
 run test-ci-go-shards.js
+run test-ci-shard-rebalance.js
 
 echo ""
 echo "═══════════════════════════════════════"

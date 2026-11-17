@@ -73,7 +73,7 @@ function gearState(page) {
         .some((r) => r.left < h.right && h.left < r.right && r.top < h.bottom && h.top < r.bottom),
       others,
       // Height of each top-right control box, in DOM order (zoom, layers,
-      // fullscreen, gear). In the landscape row only zoom may be ~100px.
+      // fullscreen, gear, legend). In the landscape row only zoom may be ~100px.
       ctrlHeights: [...document.querySelectorAll('#liveMap .leaflet-top.leaflet-right > .leaflet-control')]
         .map((c) => Math.round(c.getBoundingClientRect().height)),
       hScroll: document.documentElement.scrollWidth > document.documentElement.clientWidth,
@@ -132,7 +132,11 @@ async function runLandscape(browser, w, h, touch = true) {
   });
   await step(`${tag} collapsed: controls form one row with only zoom taller than a toggle`, async () => {
     const [zoom, ...rest] = s.ctrlHeights;
-    assert(s.ctrlHeights.length === 4, `controls ${s.ctrlHeights}`);
+    // zoom, layers, fullscreen, gear, plus the #875 legend control; the legend
+    // (and its control) is display:none up to 640px wide, where it measures 0.
+    const legendShown = w > 640;
+    assert(s.ctrlHeights.length === 5, `controls ${s.ctrlHeights}`);
+    assert(legendShown ? rest[3] >= 44 : rest[3] === 0, `legend control height ${rest[3]} at ${w}px wide (${s.ctrlHeights})`);
     assert(s.gear[1] < 100, `gear top ${s.gear[1]}, expected the row at the top`);
     assert(zoom >= 90 && rest.every((x) => x <= 56), `control heights ${s.ctrlHeights} (layers/fullscreen/gear stretched?)`);
   });
@@ -190,8 +194,8 @@ async function runUnchanged(browser, w, h, touch) {
   await ctx.close();
 }
 
-// #666 F5: at 720×300 the legend toggle reaches 9px into the row's right
-// end; both must still answer at their own centres.
+// #666 F5 / #875: the legend toggle is the last control of the row; it and
+// the gear must both answer at their own centres.
 async function runLegendToggle(browser, w, h) {
   const tag = `[${w}x${h} desktop]`;
   const { ctx, page } = await openLive(browser, w, h, false);

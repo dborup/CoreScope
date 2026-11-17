@@ -28,6 +28,7 @@ COPY internal/mbcapqueue/ ../../internal/mbcapqueue/
 COPY internal/lora/ ../../internal/lora/
 COPY internal/regions/ ../../internal/regions/
 COPY internal/channelregistry/ ../../internal/channelregistry/
+COPY internal/configkey/ ../../internal/configkey/
 COPY internal/dhm/ ../../internal/dhm/
 COPY internal/mastedb/ ../../internal/mastedb/
 COPY internal/cardkit/ ../../internal/cardkit/
@@ -58,6 +59,7 @@ COPY internal/pprofbind/ ../../internal/pprofbind/
 COPY internal/mbcapqueue/ ../../internal/mbcapqueue/
 COPY internal/regions/ ../../internal/regions/
 COPY internal/channelregistry/ ../../internal/channelregistry/
+COPY internal/configkey/ ../../internal/configkey/
 RUN go mod download
 COPY cmd/ingestor/ ./
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \

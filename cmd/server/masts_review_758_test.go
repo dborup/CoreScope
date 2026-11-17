@@ -22,18 +22,18 @@ func TestMastsStarvedAndRefusedLogsDiffer(t *testing.T) {
 	f.gate = make(chan struct{})
 	var logs safeLog
 	opts := testMastsOptions(f, &logs)
-	opts.maxInFlight = mastsUpstreamSlots + 1
+	opts.maxInFlight = testMastsSlots + 1
 	p := mustMastsProxy(t, opts)
 
 	var wg sync.WaitGroup
-	for i := 0; i < mastsUpstreamSlots; i++ {
+	for i := 0; i < testMastsSlots; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			mastsGet(p, cellQuery(mastedb.Cell{E: 263 + i, N: 3127}), fmt.Sprintf("198.51.100.%d:40000", 30+i))
 		}(i)
 	}
-	waitMasts(t, func() bool { return f.inFlight.Load() == mastsUpstreamSlots })
+	waitMasts(t, func() bool { return f.inFlight.Load() == testMastsSlots })
 	p.deadline = 150 * time.Millisecond
 
 	// Starved: admission has room (one slot left), the upstream slots do not.

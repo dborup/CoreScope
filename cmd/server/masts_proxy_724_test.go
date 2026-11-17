@@ -106,8 +106,14 @@ func testMastsOptions(f *fakeWFS, logs *safeLog) mastsProxyOptions {
 	opts.client.BaseURL = f.srv.URL
 	opts.client.Timeout = 5 * time.Second
 	opts.logf = logs.printf
+	// A small slot count keeps the slot tests cheap; the production
+	// default (16) is pinned by TestMastsUpstreamSlotsSetting.
+	opts.upstreamSlots = testMastsSlots
 	return opts
 }
+
+// testMastsSlots is testMastsOptions' upstream slot count.
+const testMastsSlots = 2
 
 type safeLog struct {
 	mu  sync.Mutex
@@ -526,7 +532,7 @@ func TestMastsRateLimitSetting(t *testing.T) {
 
 // ── Global upstream bound and admission ────────────────────────────────────
 
-// However many distinct cells are wanted at once, at most mastsUpstreamSlots
+// However many distinct cells are wanted at once, at most testMastsSlots
 // requests are open towards the WFS.
 func TestMastsGlobalUpstreamBound(t *testing.T) {
 	f := newFakeWFS(t)
@@ -545,10 +551,10 @@ func TestMastsGlobalUpstreamBound(t *testing.T) {
 			codes[i] = mastsGet(p, cellQuery(mastedb.Cell{E: 263 + i, N: 3127}), clientA).Code
 		}(i)
 	}
-	waitMasts(t, func() bool { return f.inFlight.Load() == mastsUpstreamSlots && p.flight.Pending() == n })
+	waitMasts(t, func() bool { return f.inFlight.Load() == testMastsSlots && p.flight.Pending() == n })
 	time.Sleep(50 * time.Millisecond) // give a leaking request time to show
-	if m := f.maxSeen.Load(); m != mastsUpstreamSlots {
-		t.Fatalf("%d upstream requests open at once, want %d", m, mastsUpstreamSlots)
+	if m := f.maxSeen.Load(); m != testMastsSlots {
+		t.Fatalf("%d upstream requests open at once, want %d", m, testMastsSlots)
 	}
 	close(f.gate)
 	wg.Wait()
@@ -557,11 +563,11 @@ func TestMastsGlobalUpstreamBound(t *testing.T) {
 			t.Fatalf("request %d: status %d", i, c)
 		}
 	}
-	if m := f.maxSeen.Load(); m > mastsUpstreamSlots {
-		t.Fatalf("%d upstream requests open at once, want at most %d", m, mastsUpstreamSlots)
+	if m := f.maxSeen.Load(); m > testMastsSlots {
+		t.Fatalf("%d upstream requests open at once, want at most %d", m, testMastsSlots)
 	}
-	if mastsUpstreamSlots != 2 {
-		t.Fatalf("upstream slots %d, want the plan's 2", mastsUpstreamSlots)
+	if testMastsSlots != 2 {
+		t.Fatalf("upstream slots %d, want the plan's 2", testMastsSlots)
 	}
 }
 
@@ -867,7 +873,7 @@ func writeMastsConfig(t *testing.T, cfgJSON string) *Config {
 }
 
 func TestMastsConfigLoadedAndStripped(t *testing.T) {
-	cfg := writeMastsConfig(t, `{"map":{"tiles":{"darkDefault":"osm-dark"},"masts":{"enabled":true,"cellRateLimitPerMin":60,"maxInFlight":4}}}`)
+	cfg := writeMastsConfig(t, `{"map":{"tiles":{"darkDefault":"osm-dark"},"masts":{"enabled":true,"cellRateLimitPerMin":60,"maxInFlight":4,"upstreamSlots":3,"maxStaleDays":30}}}`)
 	if !cfg.Masts.Enabled || cfg.Masts.CellRateLimitPerMin == nil || *cfg.Masts.CellRateLimitPerMin != 60 ||
 		cfg.Masts.MaxInFlight == nil || *cfg.Masts.MaxInFlight != 4 {
 		t.Fatalf("map.masts not loaded: %+v", cfg.Masts)
@@ -879,8 +885,18 @@ func TestMastsConfigLoadedAndStripped(t *testing.T) {
 		t.Fatal("map.tiles lost while extracting masts")
 	}
 	p := newMastsProxyFromConfig(cfg)
-	if p == nil || p.admit.Cap() != 4 {
+	if p == nil || p.admit.Cap() != 4 || cap(p.upstream) != 3 {
 		t.Fatalf("proxy from config: %+v", p)
+	}
+	// #872: maxStaleDays reaches the cache: a 29-day-old cell is served
+	// stale, a 30-day-old one is gone.
+	t0 := time.Now()
+	p.cache.Put(mastedb.Cell{E: 263, N: 3127}, []byte("{}"), t0)
+	if _, ok := p.cache.GetStale(mastedb.Cell{E: 263, N: 3127}, t0.Add(29*24*time.Hour)); !ok {
+		t.Fatal("maxStaleDays 30: a 29-day-old cell is not kept")
+	}
+	if _, ok := p.cache.GetStale(mastedb.Cell{E: 263, N: 3127}, t0.Add(30*24*time.Hour)); ok {
+		t.Fatal("maxStaleDays 30: a 30-day-old cell is still kept")
 	}
 }
 

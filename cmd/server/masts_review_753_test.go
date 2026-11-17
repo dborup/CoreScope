@@ -66,14 +66,14 @@ func TestMastsStarvedFetchIsBusyAndRefunded(t *testing.T) {
 	// from one client on a budget of exactly 2 can race inside the limiter
 	// (it reads the clock before its lock), which is not what this tests.
 	var wg sync.WaitGroup
-	for i := 0; i < mastsUpstreamSlots; i++ {
+	for i := 0; i < testMastsSlots; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			mastsGet(p, cellQuery(mastedb.Cell{E: 263 + i, N: 3127}), fmt.Sprintf("198.51.100.%d:40000", 20+i))
 		}(i)
 	}
-	waitMasts(t, func() bool { return f.inFlight.Load() == mastsUpstreamSlots })
+	waitMasts(t, func() bool { return f.inFlight.Load() == testMastsSlots })
 	// The two held fetches keep the default deadline; only the third, which
 	// can never get a slot, runs out.
 	p.deadline = 150 * time.Millisecond
@@ -88,8 +88,8 @@ func TestMastsStarvedFetchIsBusyAndRefunded(t *testing.T) {
 	if got := logs.String(); strings.Contains(got, "upstream cell failed") || !strings.Contains(got, "upstream slots") {
 		t.Fatalf("starved fetch logged as %q, want the busy line and no upstream failure", got)
 	}
-	if n := f.hits.Load(); int(n) != mastsUpstreamSlots {
-		t.Fatalf("upstream hits %d, want %d (the starved fetch reached upstream)", n, mastsUpstreamSlots)
+	if n := f.hits.Load(); int(n) != testMastsSlots {
+		t.Fatalf("upstream hits %d, want %d (the starved fetch reached upstream)", n, testMastsSlots)
 	}
 	close(f.gate)
 	wg.Wait()

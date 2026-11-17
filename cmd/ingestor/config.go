@@ -11,6 +11,7 @@ import (
 
 	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
+	"github.com/meshcore-analyzer/configkey"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
 )
@@ -502,6 +503,17 @@ func LoadConfig(path string) (*Config, error) {
 	} else {
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parsing config %s: %w", path, err)
+		}
+		// The opt-in gates take their canonical, exact-case keys only,
+		// read the same way as the server reads them (#884, #888).
+		keys := configkey.New(data, log.Printf)
+		cfg.AntennaClaims.ApplyGates(keys.On)
+		cfg.ChannelProposals.ApplyGates(keys.On)
+		if cfg.ClientRxCoverage != nil {
+			cfg.ClientRxCoverage.Enabled = keys.On("clientRxCoverage", "enabled")
+		}
+		if cfg.ClientRegions != nil {
+			cfg.ClientRegions.Enabled = keys.On("clientRegions", "enabled")
 		}
 	}
 

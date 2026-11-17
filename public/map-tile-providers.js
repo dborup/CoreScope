@@ -244,6 +244,11 @@
     } catch (_) {}
   }
 
+  // #873 — true once /api/config/client has fed the registry (or failed):
+  // until then a base= link is only kept, not judged (it may name a style
+  // the config is about to enable).
+  var _configSettled = false;
+
   window.MC_initTileRegistry = function(fromAsync) {
     _cfg = (typeof window !== 'undefined' && window.MC_MAP_CFG && window.MC_MAP_CFG.tiles) ? window.MC_MAP_CFG.tiles : null;
 
@@ -309,6 +314,7 @@
 
     // When called after async config loads, notify maps to re-sync tiles
     if (fromAsync) {
+      _configSettled = true; // #873 — a base= link can now be judged
       try {
         var ev = (typeof CustomEvent === 'function')
           ? new CustomEvent('mc-tile-provider-changed', { detail: { fromConfig: true } })
@@ -1740,6 +1746,60 @@
     return counterpartId(id, reg) || id;
   }
 
+  /* #873 — the base map deep link, #/map?base=<style id> (Live shares the
+   * control, so #/live?base= too). resolveBase answers the style id a link
+   * stands for in this theme, or null when there is none: not a string, or
+   * an id that is not in the registry (unknown, or its provider is gated
+   * off). A retired CARTO id is migrated (#845); a style of the other theme
+   * becomes its counterpart (#845). */
+  function resolveBase(value, isDark, reg) {
+    reg = reg || REGISTRY;
+    if (typeof value !== 'string') return null;
+    var id = migrateTileId(value.trim());
+    if (!Object.prototype.hasOwnProperty.call(reg, id)) return null;
+    return pickForTheme(id, isDark, reg); // always one the control lists (#859)
+  }
+
+  /* Why a link is not shown as written, or null when it is: unknown,
+   * gated off, a retired CARTO id, or a style of the other theme. */
+  function rejectedBaseMessage(value, isDark, reg) {
+    reg = reg || REGISTRY;
+    var raw = String(value).trim();
+    var head = '[map tiles] ?base=' + raw + ' ';
+    var shown = resolveBase(raw, isDark, reg);
+    if (shown === raw) return null;
+    if (shown) {
+      return head + (_hasId(raw) ? 'is a style of the other theme' : 'is a retired style') +
+        '; showing "' + shown + '" instead.';
+    }
+    var style = Object.prototype.hasOwnProperty.call(BASE_STYLES, raw) ? BASE_STYLES[raw] : null;
+    return head + 'ignored: ' + (style
+      ? 'its provider is not enabled (' + (GATE_HINT[style.provider] || 'set map.tiles.providers.' + style.provider + '.enabled: true') + ')'
+      : 'it is not a known tile style') + '. Using Auto instead.';
+  }
+  // One warning per rejected id and page (the same dedupe as the defaults).
+  function _warnRejectedBase(value, msg) {
+    var key = 'base=' + String(value).trim();
+    msg = msg || rejectedBaseMessage(value, _isDark());
+    if (!msg || _warnedDefaults[key]) return;
+    _warnedDefaults[key] = true;
+    try { if (typeof console !== 'undefined' && console.warn) console.warn(msg); } catch (_) {}
+  }
+
+  var BASE_PARAM = 'base';
+  function _readBaseParam() {
+    try { return _hashParts().params.get(BASE_PARAM); } catch (_) { return null; }
+  }
+  // Writes (or, with null, removes) base= in the hash. replaceState, so a
+  // pick is no history entry and the SPA router does not re-run.
+  function _writeBaseParam(id) {
+    try {
+      var h = _hashParts();
+      if (id) h.params.set(BASE_PARAM, id); else h.params.delete(BASE_PARAM);
+      _writeHash(h);
+    } catch (_) {}
+  }
+
   var ZOOM_HINT_RE = /zoom \d+\+/;
   function layerRowParts(text) {
     var name = String(text == null ? '' : text);
@@ -1817,7 +1877,7 @@
   window.MC_LayerGroups                 = {
     DENMARK_BOUNDS: DENMARK_BOUNDS, PREF_KEY: DK_GROUP_PREF,
     counterpartId: counterpartId, isDenmarkBase: isDenmarkBase, themeBaseIds: themeBaseIds,
-    pickForTheme: pickForTheme, rowParts: layerRowParts, inDenmark: inDenmark,
+    pickForTheme: pickForTheme, resolveBase: resolveBase, rowParts: layerRowParts, inDenmark: inDenmark,
     openDefault: denmarkOpenDefault
   };
   window.MC_CREDIT_COMPACT_CLASS        = CREDIT_COMPACT_CLASS;
@@ -1863,6 +1923,9 @@
     // viewer's stored or linked choice is read once, when it is first offered.
     var _orthoOn         = false;
     var _orthoPrefRead   = false;
+    var _baseLinkRead    = false;  // #873 — the base= link is read once per control
+    var _linkRaw         = null;   // #873 — the link not yet judged (config pending)
+    var _linkWatching    = false;
 
     _ensureAttribution(map);
 
@@ -2063,6 +2126,32 @@
       listed.world.forEach(function (id) { baseMaps[id] = _makeLayer(id); });
       listed.denmark.forEach(function (id) { baseMaps[id] = _makeLayer(id); });
 
+      // #873 — a base= link, read once per control, wins over what is
+      // stored. Until /api/config/client has fed the registry it is only
+      // kept (hash and all): the style it names may be one the config is
+      // about to enable. It is judged on the config's rebuild, or when the
+      // request has failed; a value that is then not a listed style is
+      // dropped from the hash, with a warning.
+      var link = null;
+      if (!_baseLinkRead) {
+        _baseLinkRead = true;
+        _linkRaw = _readBaseParam();
+      }
+      if (_linkRaw != null) {
+        var cfgReady = window.MeshConfigReady;
+        if (_configSettled || !(cfgReady && typeof cfgReady.then === 'function')) {
+          link = { raw: _linkRaw, id: _linkRaw.trim() === ORTHO_ID ? null : resolveBase(_linkRaw, _isDark()) };
+          _linkRaw = null;
+        } else if (!_linkWatching) {
+          _linkWatching = true;
+          var settle = function () {
+            _configSettled = true;
+            if (!map._mcGone && _linkRaw != null) _buildControl();
+          };
+          try { cfgReady.then(settle, settle); } catch (_) { settle(); }
+        }
+      }
+
       // #728 M3 — one entry for both themes, last in the Denmark group.
       var orthoCfg = getOrthoConfig();
       if (orthoCfg) {
@@ -2084,6 +2173,31 @@
         _isAuto = true;
       }
 
+      // The judged link wins over a stored Aerial pick, whenever it is judged.
+      if (link) {
+        var linkOrtho = link.raw.trim() === ORTHO_ID;
+        if (linkOrtho && _layerMap[ORTHO_ID]) {
+          _orthoOn = true; _isAuto = false; _sessionBasePick = null;
+          _saveOverlayPref(ORTHO_PREF, true);
+          _writeBaseParam(null); // the Aerial map rides on its own parameter
+        } else if (!linkOrtho && link.id && _layerMap[link.id]) {
+          if (_orthoOn) { _orthoOn = false; _saveOverlayPref(ORTHO_PREF, false); }
+          _sessionBasePick = link.id; _isAuto = false;
+          _writeBaseParam(link.id);
+          _warnRejectedBase(link.raw); // only when shown as another map
+        } else {
+          // An empty base= is a typo, not a rejected style: no warning.
+          if (link.raw.trim() !== '') {
+            _warnRejectedBase(link.raw, linkOrtho
+              ? '[map tiles] ?base=' + ORTHO_ID + ' ignored: the Aerial map is not offered here. Using Auto instead.' : null);
+          }
+          _writeBaseParam(null); // unknown, gated or unlisted: Auto, a clean link
+          // Auto for this open: a stored Aerial pick is not restored (and
+          // not deleted, so the next open without a link brings it back).
+          _orthoOn = false; _isAuto = true; _sessionBasePick = null;
+        }
+      }
+
       // #680/#723 — optional overlays; null keeps the overlay section out.
       var overlays = {};
       var overlayIds = _collectOverlays(map, overlays);
@@ -2095,6 +2209,7 @@
       var restored = _orthoOn ? _layerMap[ORTHO_ID]
         : (!_isAuto && _sessionBasePick && _layerMap[_sessionBasePick]) || null;
       if (restored) {
+        if (!link && _linkRaw == null && _sessionBasePick && !_orthoOn) _writeBaseParam(_sessionBasePick); // #873
         map.addLayer(restored);
         try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
       }
@@ -2133,9 +2248,11 @@
       if (!restored) _activateAuto();
 
       map._mcBaselayerchangeHandler = function (e) {
+        _linkRaw = null; // #873 — a pick made while config is pending beats the link
         if (e.name === ORTHO_ID) {
           _isAuto = false;
           _sessionBasePick = null;
+          _writeBaseParam(null);
           if (!_orthoOn) { _orthoOn = true; _saveOverlayPref(ORTHO_PREF, true); }
           try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
           return;
@@ -2144,6 +2261,7 @@
 
         if (e.name === AUTO_KEY) {
           _sessionBasePick = null;
+          _writeBaseParam(null);
           _activateAuto();
           return;
         }
@@ -2163,6 +2281,7 @@
         try { if (autoLayerGroup && map.hasLayer(autoLayerGroup)) map.removeLayer(autoLayerGroup); } catch (_) {}
 
         _sessionBasePick = selectedId;
+        _writeBaseParam(selectedId);
 
         // CSS invert filter is handled by the layer's own add/remove events above
       };

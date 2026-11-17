@@ -344,6 +344,20 @@ func (c *Config) SubmissionsRequested() bool {
 // an administrator.
 func (c *Config) AutoApprove() bool { return c != nil && c.AutoApproveProven }
 
+// ApplyGates sets both switches from on, which reports whether the config
+// value at a path of canonical, exact-case keys is the JSON boolean true
+// (configkey.Doc.On). encoding/json would also take `Enabled` or
+// `AutoApproveProven`; the server and the ingestor both call this, so they
+// agree on what is switched on (#884).
+func (c *Config) ApplyGates(on func(path ...string) bool) {
+	if c == nil {
+		return
+	}
+	enabled := on("antennaClaims", "enabled")
+	c.Enabled = &enabled
+	c.AutoApproveProven = on("antennaClaims", "autoApproveProven")
+}
+
 // Limits are the resolved limits.
 type Limits struct {
 	MaxPending         int

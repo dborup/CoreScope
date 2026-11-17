@@ -466,6 +466,42 @@
   // the viewport bottom is taken (VCR bar, bottom-nav) so CSS can cap the
   // body there, and set `.is-capped` only while the content does not fit:
   // a panel that fits keeps overflow visible and its dropdown overlays.
+  // #875: the legend body is click-through (map, markers and the node-filter
+  // list stay reachable under it), so it cannot take the wheel itself. When the
+  // content outgrows the capped panel, a narrow rail at its edge takes the
+  // scroll and drives the body; the rail is the only part that catches input.
+  var _legendScrollCleanup = null;
+  function initLegendScrollRail() {
+    if (_legendScrollCleanup) { try { _legendScrollCleanup(); } catch (_) {} _legendScrollCleanup = null; }
+    var legend = document.getElementById('liveLegend');
+    if (!legend) return;
+    var body = legend.querySelector('.panel-content');
+    var rail = legend.querySelector('.legend-scroll-rail');
+    var spacer = rail && rail.firstElementChild;
+    if (!body || !rail || !spacer) return;
+    function fit() {
+      var over = body.scrollHeight > body.clientHeight + 1;
+      legend.classList.toggle('is-scrollable', over);
+      if (over) spacer.style.height = body.scrollHeight + 'px';
+    }
+    function railToBody() { if (body.scrollTop !== rail.scrollTop) body.scrollTop = rail.scrollTop; }
+    function bodyToRail() { if (rail.scrollTop !== body.scrollTop) rail.scrollTop = body.scrollTop; }
+    rail.addEventListener('scroll', railToBody);
+    body.addEventListener('scroll', bodyToRail);
+    var ro = null;
+    if (typeof ResizeObserver === 'function') {
+      try { ro = new ResizeObserver(fit); ro.observe(body); [].slice.call(body.children).forEach(function(el) { ro.observe(el); }); } catch (_) { ro = null; }
+    }
+    window.addEventListener('resize', fit);
+    fit();
+    _legendScrollCleanup = function() {
+      if (ro) { try { ro.disconnect(); } catch (_) {} ro = null; }
+      window.removeEventListener('resize', fit);
+      rail.removeEventListener('scroll', railToBody);
+      body.removeEventListener('scroll', bodyToRail);
+    };
+  }
+
   var _controlsFitCleanup = null;
   function initControlsFitTracker() {
     if (_controlsFitCleanup) { try { _controlsFitCleanup(); } catch (_) {} _controlsFitCleanup = null; }
@@ -1590,11 +1626,12 @@
           </div>
           <div class="panel-content" id="nodeDetailContent"></div>
         </div>
-        <button class="legend-toggle-btn" id="legendToggleBtn" aria-label="Show legend" title="Show legend"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg></button>
         <div class="live-overlay live-legend" id="liveLegend" role="region" aria-label="Map legend">
           <div class="panel-header">
             <button class="panel-corner-btn" data-panel="liveLegend" title="Move panel to next corner" aria-label="Move panel to next corner">◫</button>
+            <button class="feed-hide-btn" id="legendCloseBtn" title="Hide legend" aria-label="Hide legend"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
           </div>
+          <div class="legend-body">
           <div class="panel-content">
           <h3 class="legend-title">PACKET TYPES</h3>
           <ul class="legend-list">
@@ -1608,6 +1645,8 @@
             <li><span class="live-ring live-ring--other" aria-hidden="true"></span> Faded ring — companion / sensor / room</li>
             <li><span class="live-foreign-swatch" aria-hidden="true"></span> Red route — foreign-origin packet (darker = more hops)</li>
           </ul>
+          </div>
+          <div class="legend-scroll-rail" aria-hidden="true"><div class="legend-scroll-spacer"></div></div>
           </div>
         </div>
 
@@ -1928,6 +1967,26 @@
     });
     map.addControl(new LiveSettingsControl());
 
+    // #875: legend toggle lives in the same stack, under Fullscreen and Settings.
+    const LiveLegendControl = L.Control.extend({
+      options: { position: 'topright' },
+      onAdd: function() {
+        const container = L.DomUtil.create('div', 'leaflet-bar leaflet-control live-leaflet-toggle live-legend-toggle-ctl');
+        const btn = L.DomUtil.create('a', '', container);
+        btn.href = 'javascript:void(0)';
+        btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg>';
+        btn.id = 'legendToggleBtn';
+        btn.title = 'Hide legend';
+        btn.setAttribute('aria-label', 'Hide legend');
+        btn.setAttribute('role', 'button');
+        btn.setAttribute('aria-controls', 'liveLegend');
+        btn.setAttribute('aria-expanded', 'true');
+        L.DomEvent.disableClickPropagation(btn);
+        return container;
+      }
+    });
+    map.addControl(new LiveLegendControl());
+
 
 
     // Swap tiles when theme changes
@@ -1975,6 +2034,7 @@
     connectWS();
     initResizeHandler();
     initVCRHeightTracker();
+    initLegendScrollRail();
     startRateCounter();
 
     // Check for packet replay from packets page (single or array of observations)
@@ -2552,20 +2612,22 @@
     // ───────────────────────────────────────────────────────────────────────
 
     if (legendToggleBtn && legendEl) {
+      const setLegendHidden = (hidden, persist) => {
+        legendEl.classList.toggle('hidden', hidden);
+        const label = hidden ? 'Show legend' : 'Hide legend';
+        legendToggleBtn.setAttribute('aria-label', label);
+        legendToggleBtn.title = label;
+        legendToggleBtn.setAttribute('aria-expanded', String(!hidden));
+        if (persist) { try { localStorage.setItem('live-legend-hidden', String(hidden)); } catch (_) { /* ignore */ } }
+      };
       // Restore legend collapsed state from localStorage (#279)
       try {
-        if (localStorage.getItem('live-legend-hidden') === 'true') {
-          legendEl.classList.add('hidden');
-          legendToggleBtn.setAttribute('aria-label', 'Show legend');
-          legendToggleBtn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg>';
-        }
+        if (localStorage.getItem('live-legend-hidden') === 'true') setLegendHidden(true, false);
       } catch (_) { /* private browsing / storage disabled */ }
-      legendToggleBtn.addEventListener('click', () => {
-        const nowHidden = legendEl.classList.toggle('hidden');
-        legendToggleBtn.setAttribute('aria-label', nowHidden ? 'Show legend' : 'Hide legend');
-        legendToggleBtn.innerHTML = nowHidden ? '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-palette"/></svg>' : '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg>';
-        try { localStorage.setItem('live-legend-hidden', String(nowHidden)); } catch (_) { /* ignore */ }
-      });
+      legendToggleBtn.addEventListener('click', () => setLegendHidden(!legendEl.classList.contains('hidden'), true));
+      const legendCloseBtn = document.getElementById('legendCloseBtn');
+      // The closed panel takes its x with it, so hand the focus to the toggle.
+      if (legendCloseBtn) legendCloseBtn.addEventListener('click', () => { setLegendHidden(true, true); legendToggleBtn.focus(); });
     }
 
     // Populate role legend from shared roles.js
@@ -5069,6 +5131,7 @@
     }
     if (_vcrHeightCleanup) { try { _vcrHeightCleanup(); } catch (_) {} _vcrHeightCleanup = null; }
     if (_controlsFitCleanup) { try { _controlsFitCleanup(); } catch (_) {} _controlsFitCleanup = null; }
+    if (_legendScrollCleanup) { try { _legendScrollCleanup(); } catch (_) {} _legendScrollCleanup = null; }
     // Restore #app height to CSS default
     const appEl = document.getElementById('app');
     if (appEl) appEl.style.height = '';

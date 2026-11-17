@@ -10,10 +10,10 @@
 // 769–1024px half that had no test.
 //
 // Region groups are answered in the browser, as in the #667/#672 E2Es. 16
-// groups cap the panel up to 800×400; 1024×500 needs 40. Taps are real
+// groups cap the panel up to 820×400; 1024×500 needs 40. Taps are real
 // touch taps (mouse clicks on the 1024×500 desktop window) at the centre.
 //
-// Steps per capped size (641×360, 653×320, 740×360, 768×360, 800×400 touch,
+// Steps per capped size (641×360, 653×320, 740×360, 768×360, 820×400 touch,
 // 1024×500 mouse):
 //   - the panel is capped and the feed (shown, bottom-left) overlaps it
 //   - #feedHideBtn, the feed's corner button and #liveFeed .panel-content are
@@ -212,7 +212,7 @@ async function runFits(browser) {
   });
   console.log(`\n=== #670 Live feed under a capped controls panel E2E against ${BASE} ===`);
   const runs = [
-    ...[[641, 360], [653, 320], [740, 360], [768, 360], [800, 400]].map(([w, h]) =>
+    ...[[641, 360], [653, 320], [740, 360], [768, 360], [820, 400]].map(([w, h]) =>
       [`${w}x${h}`, () => runCapped(browser, w, h, true, 16)]),
     ['1024x500', () => runCapped(browser, 1024, 500, false, 40)],
     ['fits', () => runFits(browser)],
