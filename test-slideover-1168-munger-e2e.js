@@ -128,7 +128,10 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     // rows age out of that window ~15 minutes after freshen-fixture.sh runs.
     // Must be > 0: packets.js reads the param only under `_urlTimeWindow > 0`,
     // so `timeWindow=0` silently keeps the default.
-    await page.goto(BASE + '/#/packets?timeWindow=1440', { waitUntil: 'domcontentloaded' });
+    // #869: 180 is the largest window the mobile limit accepts (this 800 px
+    // viewport counts as mobile; 1440 fell back to the 15 min default), and the
+    // fixture spans about 2 h, so it still holds rows ~40 min after freshening.
+    await page.goto(BASE + '/#/packets?timeWindow=180', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#pktTable tbody tr[data-action]', { timeout: 8000 });
 
     await step('hashchange: navigating away closes slide-over + releases scroll-lock', async () => {
