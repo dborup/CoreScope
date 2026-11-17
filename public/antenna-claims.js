@@ -97,6 +97,14 @@
     chars: 'The node’s CLI refuses names with [ ] \\ : , ? or *.'
   };
 
+  // nameCheckText is the line under the name field for a checkName result.
+  // Words after the code may run past the budget; the code still goes on
+  // air, so that is said plainly instead of "38 / 23 bytes" in green.
+  function nameCheckText(r) {
+    if (r.ok && r.bytes > r.budget) return r.bytes + ' bytes; only the first ' + r.budget + ' go on air — the code is inside them.';
+    return r.bytes + ' / ' + r.budget + ' bytes — ' + (r.ok ? 'the code fits.' : NAME_PROBLEMS[r.reason]);
+  }
+
   // statusInfo is the owner-facing line for a request status. `done` stops
   // polling; `kind` styles the line.
   function statusInfo(st, opts) {
@@ -114,6 +122,13 @@
       case 'gone': return { text: 'This claim is no longer known here (expired or removed). Ask for a new code.', kind: 'warn', done: true };
       default: return { text: (st && st.error) || 'The claim could not be processed.', kind: 'error', done: true };
     }
+  }
+
+  // giveUpText replaces the status line when the poller stops on its own.
+  // After `proven` the advert is done and an administrator decides next.
+  function giveUpText(last) {
+    if (last && last.status === 'proven') return 'Proven; waiting for review. Check again later.';
+    return 'Stopped checking automatically. The claim keeps waiting; check again after sending the advert.';
   }
 
   // Bounded backoff: 2 s, 3 s, 4.5 s … capped at 30 s, at most
@@ -492,7 +507,9 @@
     wrap.appendChild(restore);
 
     setStatus(status, statusInfo({ status: 'queued' }));
+    var last = null;
     view.onUpdate = function (st) {
+      last = st;
       var si = statusInfo(st, info);
       setStatus(status, si);
       again.hidden = true;
@@ -503,7 +520,7 @@
       }
     };
     view.onGiveUp = function () {
-      setStatus(status, { text: 'Stopped checking automatically. The claim keeps waiting; check again after sending the advert.', kind: 'info' });
+      setStatus(status, { text: giveUpText(last), kind: 'info' });
       again.hidden = false;
     };
     again.addEventListener('click', function () {
@@ -561,7 +578,7 @@
       'Until you change it back, the code is part of the node’s public name.'));
     function update() {
       var r = checkName(name.value, info.code, info.budget);
-      check.textContent = r.bytes + ' / ' + r.budget + ' bytes' + (r.ok ? ' — the code fits.' : ' — ' + NAME_PROBLEMS[r.reason]);
+      check.textContent = nameCheckText(r);
       check.setAttribute('data-kind', r.ok ? 'success' : 'error');
       cmd.textContent = 'set name ' + name.value;
     }
@@ -572,37 +589,46 @@
   }
 
   // ── Admin queue: #/tools/antenna-claims[?filter=…] ──────────────────────
-  var admin = null; // { container, filter, poller }
+  var admin = null; // { container, filter, poller, deciding: {id, text} }
 
   function adminInit(container) {
-    admin = { container: container, filter: parseFilter((hashParams(location.hash) || { get: function () {} }).get('filter')) };
+    admin = { container: container, filter: parseFilter((hashParams(location.hash) || { get: function () {} }).get('filter')), deciding: null };
     admin.poller = createStatusPoller({
       fetchStatus: statusOf,
       isAlive: function () { return !!admin && admin.container.isConnected; },
       // A decision is done once it has left the queue.
       keepGoing: function (st) { return !!st && st.status === 'queued'; },
+      // The status route knows only the owner's claim requests: once the
+      // ingestor has taken a decision off the queue it answers 404, which
+      // the poller reports as `gone`. So `gone` means "applied" here (a
+      // console 404 per decision is expected); a refused decision comes
+      // back first as `error` with the ingestor's reason (#868 review N5).
       onUpdate: function (st) {
         if (!admin) return;
-        if (st && (st.status === 'error')) adminStatus(decisionError({ message: st.error }), 'error');
-        else adminStatus('Done.', 'success');
-        loadAdminList();
+        var d = admin.deciding || {};
+        var failed = st && st.status === 'error';
+        loadAdminList().then(function () {
+          showDecision(d.id, failed ? decisionError({ message: st.error }) : 'Done: ' + d.text + '.', failed ? 'error' : 'success');
+        });
       },
-      onGiveUp: function () { if (admin) { adminStatus('The decision is still queued. Refresh in a moment.', 'info'); } }
+      onGiveUp: function () { if (admin) showDecision((admin.deciding || {}).id, 'The decision is still queued. Refresh in a moment.', 'info'); }
     });
     container.textContent = '';
     var page = el('div', 'tools-landing ac-admin');
     page.appendChild(el('h2', null, 'Antenna Height Claims'));
     page.appendChild(el('p', 'help-text', 'Node owners claim an antenna height by putting a code into the node’s name and sending an advert. ' +
       'Review proven heights here. Each node can have at most 3 claims waiting for an advert; if unproven claims block the real owner, reject them under “Waiting for advert”.'));
-    var bodyEl = el('div', 'ac-admin-body');
-    bodyEl.id = 'acAdminBody';
-    page.appendChild(bodyEl);
-    var st = el('div', 'ac-status');
+    // List-level messages sit above the list, where a long queue cannot push
+    // them out of sight; a decision's result goes into its row (#868 F2).
+    var st = el('div', 'ac-status ac-admin-status');
     st.id = 'acAdminStatus';
     st.setAttribute('role', 'status');
     st.setAttribute('aria-live', 'polite');
     st.setAttribute('data-testid', 'ac-admin-status');
     page.appendChild(st);
+    var bodyEl = el('div', 'ac-admin-body');
+    bodyEl.id = 'acAdminBody';
+    page.appendChild(bodyEl);
     container.appendChild(page);
     renderAdminBody();
   }
@@ -614,9 +640,38 @@
 
   function adminStatus(text, kind) {
     var s = document.getElementById('acAdminStatus');
-    if (!s) return;
+    if (!s) return null;
     s.textContent = text || '';
     s.setAttribute('data-kind', kind || 'info');
+    return s;
+  }
+
+  // reveal scrolls a feedback line into view only if it is not already;
+  // its scroll-margin keeps it clear of the fixed top bar and bottom nav.
+  function reveal(line) {
+    if (line && line.textContent && line.scrollIntoView) line.scrollIntoView({ block: 'nearest' });
+  }
+
+  function rowOf(id) {
+    var rows = document.querySelectorAll('#acAdminList .ac-item');
+    for (var i = 0; i < rows.length; i++) if (id && rows[i].getAttribute('data-claim-id') === String(id)) return rows[i];
+    return null;
+  }
+
+  // showDecision puts a decision's result in the row it was taken on, or,
+  // once that row has left the list, in the line above the list. Nothing is
+  // shown once the key was dropped (a 401 on the refresh says why).
+  function showDecision(id, text, kind) {
+    if (!admin || !adminKey) return;
+    var row = rowOf(id);
+    var line = row && row.querySelector('.ac-item-status');
+    if (line) {
+      adminStatus('', 'info');
+      setStatus(line, { text: text, kind: kind });
+    } else {
+      line = adminStatus(text, kind);
+    }
+    reveal(line);
   }
 
   function renderAdminBody() {
@@ -681,10 +736,10 @@
 
   function loadAdminList() {
     var list = document.getElementById('acAdminList');
-    if (!list || !admin) return;
+    if (!list || !admin) return Promise.resolve();
     var filter = admin.filter;
     list.setAttribute('aria-busy', 'true');
-    request('GET', '/admin/antenna-claims?status=' + encodeURIComponent(filter), { admin: true }).then(function (data) {
+    return request('GET', '/admin/antenna-claims?status=' + encodeURIComponent(filter), { admin: true }).then(function (data) {
       if (!admin || admin.filter !== filter || !list.isConnected) return;
       var claims = data && Array.isArray(data.claims) ? data.claims : [];
       list.textContent = '';
@@ -710,6 +765,7 @@
   }
 
   var DECISION_LABEL = { approve: 'Approve', reject: 'Reject', revoke: 'Revoke' };
+  var DECISION_DONE = { approve: 'approved', reject: 'rejected', revoke: 'revoked' };
 
   function renderAdminRow(c) {
     var li = el('li', 'ac-item');
@@ -753,21 +809,31 @@
       actions.appendChild(b);
     });
     li.appendChild(actions);
+    var status = el('div', 'ac-status ac-item-status');
+    status.setAttribute('role', 'status');
+    status.setAttribute('aria-live', 'polite');
+    li.appendChild(status);
     return li;
   }
 
   function decide(c, op, li) {
     var buttons = li.querySelectorAll('button');
     Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
-    adminStatus(DECISION_LABEL[op] + ' ' + (c.name || '') + '…', 'info');
+    var who = c.name || 'the claim';
+    admin.deciding = { id: c.id, text: who + ' ' + DECISION_DONE[op] };
+    showDecision(c.id, DECISION_LABEL[op] + ' ' + who + '…', 'info');
     request('POST', '/admin/antenna-claims/' + encodeURIComponent(c.id) + '/' + op, { admin: true }).then(function (res) {
       if (!admin) return;
       admin.poller.start(res.requestId);
     }, function (err) {
       Array.prototype.forEach.call(buttons, function (b) { b.disabled = false; });
       if (err && (err.status === 401 || err.status === 403)) { onAdminError(err); return; }
-      adminStatus(decisionError(err), 'error');
-      if (err && (err.status === 409 || err.status === 404) && err.message !== NEWER_APPROVED) loadAdminList();
+      var text = decisionError(err);
+      if (err && (err.status === 409 || err.status === 404) && err.message !== NEWER_APPROVED) {
+        loadAdminList().then(function () { showDecision(c.id, text, 'error'); });
+      } else {
+        showDecision(c.id, text, 'error');
+      }
     });
   }
 
@@ -780,6 +846,8 @@
     parseHeight: parseHeight,
     utf8Length: utf8Length,
     checkName: checkName,
+    nameCheckText: nameCheckText,
+    giveUpText: giveUpText,
     statusInfo: statusInfo,
     pollDelay: pollDelay,
     createStatusPoller: createStatusPoller,

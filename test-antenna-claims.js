@@ -89,6 +89,17 @@ test('checkName: characters the CLI refuses are pointed out', () => {
   }
 });
 
+test('nameCheckText: bytes against the budget, and over it only when the code is still on air', () => {
+  assert.strictEqual(AC.nameCheckText(AC.checkName('Roof Repeater ' + CODE, CODE, 23)), '20 / 23 bytes — the code fits.');
+  // Words after the code run past the budget, but the code is in the first 23 bytes.
+  const over = AC.checkName('Roof Repeater ' + CODE + ' and more words', CODE, 23);
+  assert.strictEqual(over.ok, true);
+  assert.strictEqual(AC.nameCheckText(over), '35 bytes; only the first 23 go on air — the code is inside them.');
+  const cut = AC.nameCheckText(AC.checkName('Kirkebakken Repeater ' + CODE, CODE, 23));
+  assert.ok(/^27 \/ 23 bytes — The name is too long/.test(cut), cut);
+  assert.ok(/^5 \/ 23 bytes — The code must appear/.test(AC.nameCheckText(AC.checkName('Roof!', CODE, 23))));
+});
+
 // ── Status lines ──────────────────────────────────────────────────────────
 test('statusInfo: queued, pending and proven keep polling; the rest are final', () => {
   const live = ['queued', 'pending', 'proven'];
@@ -99,6 +110,14 @@ test('statusInfo: queued, pending and proven keep polling; the rest are final', 
   assert.ok(/removed/.test(AC.statusInfo({ status: 'approved' }, { clear: true }).text));
   assert.ok(/use your antenna height/.test(AC.statusInfo({ status: 'approved' }, { clear: false }).text));
   assert.strictEqual(AC.statusInfo({ status: 'error', error: 'claim refused' }).text, 'claim refused');
+});
+
+test('giveUpText fits the last status the owner saw', () => {
+  // Proven: the advert is done, an administrator decides next (#868 review N1).
+  assert.strictEqual(AC.giveUpText({ status: 'proven' }), 'Proven; waiting for review. Check again later.');
+  for (const st of [{ status: 'pending' }, { status: 'queued' }, null, undefined]) {
+    assert.ok(/check again after sending the advert/.test(AC.giveUpText(st)), JSON.stringify(st));
+  }
 });
 
 // ── Bounded polling ───────────────────────────────────────────────────────

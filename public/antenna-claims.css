@@ -65,6 +65,15 @@
 }
 .ac-item-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 240px; font-size: 13px; }
 .ac-item-name { font-weight: 600; overflow-wrap: anywhere; }
+/* The node and proof links are touch targets (44 px). */
+a.ac-item-name, .ac-item-proof { display: flex; align-items: center; align-self: flex-start; min-height: 44px; }
+.ac-item-status { flex-basis: 100%; margin-top: 0; }
+.ac-item-status:empty, .ac-admin-status:empty { display: none; }
+/* A decision's result is scrolled into view clear of the fixed bars. */
+.ac-item-status, .ac-admin-status {
+  scroll-margin-top: 64px;
+  scroll-margin-bottom: calc(12px + var(--bottom-nav-reserve, 0px));
+}
 .ac-item-meta { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
 .ac-item-height { font-weight: 600; }
 .ac-item-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; }

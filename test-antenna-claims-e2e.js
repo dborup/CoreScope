@@ -6,7 +6,11 @@
  * so the antenna-claim routes are answered by Playwright in the shapes of
  * cmd/server/antenna_claims.go; nothing is written anywhere. The page timers
  * run on Playwright's clock so the bounded status polling can be walked
- * through without waiting for it.
+ * through without waiting for it. The poller only schedules its next check
+ * once a status answer is handled, and that answer arrives on real time, so
+ * the clock moves in 1 s steps and each step waits for every status fetch
+ * to settle (advance()). Leaping the clock past an unsettled fetch is what
+ * made this suite fail on a loaded machine (#868 review F1).
  *
  * Asserts:
  *   1. feature off (the real server): no section on a repeater's page;
@@ -18,17 +22,26 @@
  *      `set name` command; the link carries the request id, never the code;
  *   4. the status follows queued → pending → proven → approved, then stops
  *      polling, and offers the name back; a theme refresh, which rebuilds
- *      the node page, keeps the typed name, the code and a single poller;
+ *      the node page, keeps the typed name, the code and a single poller
+ *      (no two checks closer than the first backoff step, 2 s); a name
+ *      longer than the budget with the code inside it says so;
  *   5. a reload of the deep link restores the claim and its code;
  *   6. "Remove my height" posts {clear:true}; 429 says try later;
- *   7. polling gives up after its attempts; "Check again" resumes it;
+ *   7. polling gives up after its attempts, with a text that fits the last
+ *      status (proven: waiting for review); "Check again" resumes it;
+ *   7b. leaving the node page stops the view; coming back to the claim's
+ *      link starts a live one instead of a stale copy;
  *   8. admin: the key is asked for, sent as X-API-Key and kept out of the
  *      URL and storage; a name with markup stays text and a malformed key is no link; approve answered with
  *      the 409 "newer approved claim" says to reject instead; reject goes
  *      through and refreshes; revoke needs a confirm; the filter deep link
  *      survives a reload; a 401 drops the key;
  *   9. phone, 375x560, cold start, real taps: the whole owner flow and an
- *      admin decision, every control at least 44 px, no sideways scroll.
+ *      admin decision, every control and admin link at least 44 px, no
+ *      sideways scroll;
+ *  10. with 11 claims in the queue, on a phone and on a desktop, the result
+ *      of a decision (the 409 text, "Done.") is on screen where the admin
+ *      tapped, not below the whole list.
  *
  * Usage:
  *   BASE_URL=http://localhost:13700 node test-antenna-claims-e2e.js
@@ -113,6 +126,30 @@ function pathOf(url) { return new URL(url).pathname; }
       await r.fulfill({ status: ans.status, contentType: 'application/json', body: JSON.stringify(ans.body) });
     });
     await ctx.addInitScript(() => {
+      // Record each status check at the page's (fake) time, and count the
+      // checks whose answer the page has fully handled: the counter moves
+      // in a MessageChannel task, which runs after the promise chain that
+      // handles the answer (MessageChannel is not on Playwright's clock).
+      window.__acPolls = [];
+      window.__acIssued = 0;
+      window.__acSettled = 0;
+      const origFetch = window.fetch;
+      window.fetch = function (input) {
+        const p = origFetch.apply(this, arguments);
+        if (!/\/api\/antenna-claims\/requests\//.test(String((input && input.url) || input))) return p;
+        window.__acIssued++;
+        window.__acPolls.push(Date.now());
+        const settled = () => {
+          const ch = new MessageChannel();
+          ch.port1.onmessage = () => { window.__acSettled++; };
+          ch.port2.postMessage(0);
+        };
+        return p.then((res) => {
+          const text = res.text.bind(res);
+          res.text = () => { const q = text(); q.then(settled, settled); return q; };
+          return res;
+        }, (e) => { settled(); throw e; });
+      };
       try {
         localStorage.setItem('meshcore-theme', 'light');
         ['row-swipe', 'tab-swipe', 'edge-drawer', 'pull-refresh']
@@ -130,7 +167,48 @@ function pathOf(url) { return new URL(url).pathname; }
     await page.goto(BASE + '/#/nodes/' + pk + (extra || ''), { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('#nodeFullBody .node-full-card', { timeout: 15000 });
   }
-  async function advance(page, ms) { await page.clock.runFor(ms); }
+  // advance moves the page clock in 1 s steps (below the 2 s first backoff)
+  // and lets every status check settle before the next step.
+  async function settle(page) {
+    for (let i = 0; i < 400; i++) {
+      if (await page.evaluate(() => window.__acIssued === window.__acSettled)) return;
+      await new Promise(r => setTimeout(r, 25));
+    }
+    throw new Error('a status check never settled');
+  }
+  async function advance(page, ms) {
+    for (let t = 0; t < ms; t += 1000) {
+      await page.clock.runFor(Math.min(1000, ms - t));
+      await settle(page);
+    }
+  }
+  // feedback waits for a status line (role=status) whose text matches re
+  // and says whether the admin can see it: inside the viewport and the top
+  // element at its middle, so not under the fixed top bar or bottom nav.
+  async function feedback(page, re) {
+    for (let i = 0; i < 300; i++) {
+      const f = await page.evaluate((src) => {
+        const rx = new RegExp(src);
+        const e = Array.from(document.querySelectorAll('[role="status"]')).find(x => rx.test(x.textContent));
+        if (!e) return null;
+        const r = e.getBoundingClientRect();
+        const x = r.left + Math.min(r.width / 2, 40), y = r.top + r.height / 2;
+        const top = r.height > 0 && y >= 0 && y <= window.innerHeight ? document.elementFromPoint(x, y) : null;
+        return { text: e.textContent, kind: e.getAttribute('data-kind'), y: Math.round(r.top), vh: window.innerHeight,
+          visible: !!top && (top === e || e.contains(top)) };
+      }, re.source);
+      if (f) return f;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    throw new Error('no status line matched ' + re);
+  }
+  async function pollTimes(page) { return page.evaluate(() => window.__acPolls.slice()); }
+  // closestGap is the smallest time between two consecutive status checks.
+  function closestGap(times) {
+    let min = Infinity;
+    for (let i = 1; i < times.length; i++) min = Math.min(min, times[i] - times[i - 1]);
+    return min;
+  }
   async function statusText(page) { return (await page.textContent('[data-testid="ac-status"]')) || ''; }
   async function waitStatus(page, re, maxMs) {
     for (let t = 0; t <= (maxMs || 60000); t += 1000) {
@@ -188,19 +266,26 @@ function pathOf(url) { return new URL(url).pathname; }
     const cut = await page.textContent('[data-testid="ac-name-check"]');
     assert(/too long/.test(cut) && (await page.getAttribute('[data-testid="ac-name-check"]', 'data-kind')) === 'error', 'cut name accepted: ' + cut);
     assert((await page.textContent('[data-testid="ac-cmd"]')) === 'set name A Very Long Repeater Name ' + CODE, 'command not updated');
+    // Words after the code may run past the budget: the code is still on air.
+    await page.fill('[data-testid="ac-name"]', 'Roof ' + CODE + ' and a few more words');
+    const over = await page.textContent('[data-testid="ac-name-check"]');
+    assert(/^32 bytes; only the first 23 go on air — the code is inside them\.$/.test(over) &&
+      (await page.getAttribute('[data-testid="ac-name-check"]', 'data-kind')) === 'success', 'over-budget name with the code inside: ' + over);
+    await page.fill('[data-testid="ac-name"]', 'A Very Long Repeater Name ' + CODE);
     await waitStatus(page, /Waiting for an advert/);
     // The node page rebuilds its sections on a theme refresh; the owner's
-    // flow must survive it: same name, same code, one poller.
-    const before = rec.statusCalls;
+    // flow must survive it: same name, same code, one poller. Two pollers
+    // would put checks closer together than the first backoff step (2 s).
     await page.evaluate(() => window.dispatchEvent(new CustomEvent('theme-refresh')));
     await page.waitForFunction(() => document.querySelectorAll('#node-antenna').length === 1 &&
       document.querySelector('#nodeFullBody #node-antenna [data-testid="ac-code"]'));
     assert((await page.inputValue('[data-testid="ac-name"]')) === 'A Very Long Repeater Name ' + CODE, 'typed name lost on a re-render');
     assert((await page.textContent('[data-testid="ac-code"]')) === CODE, 'code lost on a re-render');
-    await advance(page, 30000);
-    assert(rec.statusCalls - before <= 2, 're-render started a second poller: ' + (rec.statusCalls - before) + ' polls in 30 s');
     await waitStatus(page, /Proven/);
     await waitStatus(page, /Approved/);
+    const times = await pollTimes(page);
+    assert(times.length === rec.statusCalls && closestGap(times) >= 2000,
+      're-render started a second poller: checks at ' + JSON.stringify(times.map(t => t - times[0])));
     assert(!(await page.isVisible('[data-testid="ac-check-again"]')), '"Check again" shown while nothing gave up');
     const calls = rec.statusCalls;
     await advance(page, 120000);
@@ -229,8 +314,8 @@ function pathOf(url) { return new URL(url).pathname; }
     await ctx.close();
   });
 
-  await step('polling is bounded: it gives up, and "Check again" resumes', async () => {
-    const { ctx, page, rec } = await newCtx({ clock: true, statuses: ['pending'] });
+  await step('polling is bounded: it gives up with a fitting text, and "Check again" resumes', async () => {
+    const { ctx, page, rec } = await newCtx({ clock: true, statuses: ['pending', 'pending', 'proven'] });
     await openNode(page, PK, '?section=node-antenna');
     await page.waitForSelector(SECTION + ':visible', { timeout: 15000 });
     await page.fill('[data-testid="ac-height"]', '12');
@@ -238,15 +323,40 @@ function pathOf(url) { return new URL(url).pathname; }
     await page.waitForSelector('[data-testid="ac-code"]');
     await advance(page, 10 * 60 * 1000);
     assert(!(await page.isVisible('[data-testid="ac-check-again"]')), '"Check again" shown while still polling');
-    await advance(page, 30 * 60 * 1000);
-    await page.waitForSelector('[data-testid="ac-check-again"]:visible', { timeout: 10000 });
+    await advance(page, 20 * 60 * 1000);
+    assert(await page.isVisible('[data-testid="ac-check-again"]'), '"Check again" not shown after the attempts ran out');
     const calls = rec.statusCalls;
     assert(calls === 60, 'polled ' + calls + ' times before giving up, want 60');
+    const gaveUp = await statusText(page);
+    assert(/^Proven; waiting for review\. Check again later\.$/.test(gaveUp), 'give-up text after proven: ' + gaveUp);
     await advance(page, 10 * 60 * 1000);
     assert(rec.statusCalls === calls, 'polled after giving up');
     await page.click('[data-testid="ac-check-again"]');
-    for (let i = 0; i < 20 && rec.statusCalls === calls; i++) { await advance(page, 500); await page.waitForTimeout(50); }
+    await advance(page, 2000);
     assert(rec.statusCalls === calls + 1, 'Check again did not poll');
+    await ctx.close();
+  });
+
+  await step('leaving the node page stops the claim view; coming back starts a live one', async () => {
+    const { ctx, page, rec } = await newCtx({ clock: true, statuses: ['pending', 'pending', 'pending', 'pending', 'proven'] });
+    await openNode(page, PK, '?section=node-antenna');
+    await page.waitForSelector(SECTION + ':visible', { timeout: 15000 });
+    await page.fill('[data-testid="ac-height"]', '12');
+    await page.click('[data-testid="ac-submit"]');
+    await page.waitForSelector('[data-testid="ac-code"]');
+    await waitStatus(page, /Waiting for an advert/);
+    const claimUrl = page.url();
+    await page.evaluate(() => { location.hash = '#/packets'; });
+    await page.waitForFunction(() => !document.querySelector('#node-antenna'));
+    const left = rec.statusCalls;
+    await advance(page, 65000);
+    assert(rec.statusCalls === left, 'polled ' + (rec.statusCalls - left) + ' times after leaving the node page');
+    // Back on the claim's link: a live view polls again and reaches proven,
+    // not the stopped view of the earlier visit.
+    await page.evaluate((h) => { location.hash = h; }, new URL(claimUrl).hash);
+    await page.waitForSelector('[data-testid="ac-code"]', { timeout: 15000 });
+    await waitStatus(page, /Proven/, 30000);
+    assert(rec.statusCalls > left, 'no check after coming back');
     await ctx.close();
   });
 
@@ -302,13 +412,13 @@ function pathOf(url) { return new URL(url).pathname; }
     assert(/far from the surface/.test(await page.textContent('.ac-item[data-claim-id="1111111111111111"]')), 'review flag not shown');
 
     await page.click('.ac-item[data-claim-id="1111111111111111"] [data-decide="approve"]');
-    await page.waitForFunction(() => /Reject this claim instead/.test(document.getElementById('acAdminStatus').textContent));
-    assert((await page.getAttribute('[data-testid="ac-admin-status"]', 'data-kind')) === 'error', '409 not shown as an error');
+    const refused = await feedback(page, /Reject this claim instead/);
+    assert(refused.kind === 'error', '409 not shown as an error: ' + JSON.stringify(refused));
     assert(store.claims[0].status === 'proven', 'refused approval changed the claim');
 
     await page.click('.ac-item[data-claim-id="2222222222222222"] [data-decide="reject"]');
     await page.waitForFunction(() => !document.querySelector('.ac-item[data-claim-id="2222222222222222"]'), null, { timeout: 15000 });
-    assert(/Done/.test(await page.textContent('[data-testid="ac-admin-status"]')), 'reject not confirmed');
+    assert((await feedback(page, /^Done/)).kind === 'success', 'reject not confirmed');
 
     await page.click('[data-filter="approved"]');
     await page.waitForSelector('.ac-item[data-claim-id="3333333333333333"]');
@@ -362,15 +472,72 @@ function pathOf(url) { return new URL(url).pathname; }
     await page.keyboard.type(ADMIN_KEY);
     await page.keyboard.press('Enter');
     await page.waitForSelector('.ac-item[data-claim-id="2222222222222222"]');
+    // The node and proof links in a row are touch targets too.
+    for (const link of ['.ac-item-name', '.ac-item-proof']) {
+      const loc = page.locator('.ac-item[data-claim-id="2222222222222222"] ' + link);
+      await loc.scrollIntoViewIfNeeded();
+      const b = await loc.boundingBox();
+      assert(b && b.height >= 44 && b.x >= 0 && b.x + b.width <= 375 + 0.5, link + ' box ' + JSON.stringify(b));
+    }
     await tapTarget('.ac-item[data-claim-id="2222222222222222"] [data-decide="approve"]');
     for (let i = 0; i < 20 && !rec.decisions.length; i++) await advance(page, 500);
     assert(rec.decisions.length === 1 && rec.decisions[0].op === 'approve', 'tap did not approve: ' + JSON.stringify(rec.decisions));
     const sideways2 = await page.evaluate(() => document.scrollingElement.scrollWidth - window.innerWidth);
     assert(sideways2 <= 0, 'the admin page scrolls sideways by ' + sideways2 + ' px');
     if (SHOT_DIR) await page.screenshot({ path: path.join(SHOT_DIR, 'admin-phone.png'), fullPage: false });
+    await tapTarget('.ac-item[data-claim-id="1111111111111111"] .ac-item-proof');
+    await page.waitForFunction(() => location.hash === '#/packets/abcdef12');
     assert(errors.length === 0, errors.join('; '));
     await ctx.close();
   });
+
+  // F2 of the #868 review: with a realistic queue, a line under the list is
+  // far below the fold, so a decision's result must show where the admin is.
+  function longQueue() {
+    const claims = [];
+    for (let i = 0; i < 11; i++) {
+      claims.push({ id: 'c0000000000000' + String(i).padStart(2, '0'), pubkey: PK, name: repeater.name + ' ' + i, role: 'repeater',
+        heightM: 10 + i, status: 'proven', createdAt: Date.now() - 7200000, expiresAt: Date.now() + 3600000,
+        provenAt: Date.now() - 900000, proofHash: 'abcdef' + String(i).padStart(2, '0') });
+    }
+    const store = { claims };
+    store.decide = (id, op) => {
+      if (op === 'approve' && id === claims[0].id) return { status: 409, body: { error: 'a newer claim for this node is already approved' } };
+      const c = claims.find(x => x.id === id);
+      if (c) c.status = op === 'approve' ? 'approved' : 'rejected';
+      return { status: 202, body: { requestId: 'fedcba9876543210' } };
+    };
+    return store;
+  }
+  for (const vp of [{ width: 375, height: 560, touch: true, name: 'phone 375x560' }, { width: 1280, height: 800, name: 'desktop 1280x800' }]) {
+    await step('admin, 11 claims, ' + vp.name + ': a decision\'s result is on screen', async () => {
+      const store = longQueue();
+      const { ctx, page, errors } = await newCtx({ viewport: { width: vp.width, height: vp.height }, touch: vp.touch, admin: store, statuses: [404] });
+      await page.goto(BASE + '/#/tools/antenna-claims', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('[data-testid="ac-admin-key"]', { timeout: 15000 });
+      await page.fill('[data-testid="ac-admin-key"]', ADMIN_KEY);
+      await page.press('[data-testid="ac-admin-key"]', 'Enter');
+      await page.waitForFunction(() => document.querySelectorAll('.ac-item').length === 11);
+      async function decide(id, op) {
+        const loc = page.locator('.ac-item[data-claim-id="' + id + '"] [data-decide="' + op + '"]');
+        await loc.scrollIntoViewIfNeeded();
+        if (!vp.touch) return loc.click();
+        const b = await loc.boundingBox();
+        await page.touchscreen.tap(b.x + b.width / 2, b.y + b.height / 2);
+      }
+      await decide(store.claims[0].id, 'approve');
+      const refused = await feedback(page, /Reject this claim instead/);
+      assert(refused.visible && refused.kind === 'error', 'the 409 text is off screen: ' + JSON.stringify(refused));
+      if (SHOT_DIR) await page.screenshot({ path: path.join(SHOT_DIR, 'admin-409-' + vp.width + '.png') });
+      await decide(store.claims[5].id, 'reject');
+      await page.waitForFunction((id) => !document.querySelector('.ac-item[data-claim-id="' + id + '"]'), store.claims[5].id, { timeout: 15000 });
+      const done = await feedback(page, /^Done/);
+      assert(done.visible && done.kind === 'success', '"Done." is off screen: ' + JSON.stringify(done));
+      if (SHOT_DIR) await page.screenshot({ path: path.join(SHOT_DIR, 'admin-done-' + vp.width + '.png') });
+      assert(errors.length === 0, errors.join('; '));
+      await ctx.close();
+    });
+  }
 
   await browser.close();
   console.log(`\n${passed} passed, ${failed} failed`);
