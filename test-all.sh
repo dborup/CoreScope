@@ -209,6 +209,7 @@ run test-issue-1485-live-anim-z.js
 run test-live-anims.js
 run test-issue-1532-live-fullscreen.js
 run test-issue-1833-legend-toggle-vcr-offset.js
+run test-issue-875-legend-toggle-control.js
 run test-naive-banner-tone.js
 run test-issue-1473-reserved-prefixes.js
 run test-issue-1473-prefix-generator.js
