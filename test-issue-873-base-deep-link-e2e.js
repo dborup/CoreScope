@@ -13,7 +13,12 @@
  *   3. a real tap on a base map writes base=<id> into the address bar with
  *      no new history entry; a tap on Auto takes it out again;
  *   4. the link wins over a stored Aerial pick;
- *   5. #/live?base=<id> opens the Live map on that base map.
+ *   5. #/live?base=<id> opens the Live map on that base map;
+ *   6. the client config answering late (400 ms and 1500 ms, on Map and on
+ *      Live): the link still wins and stays in the address bar;
+ *   7. a rejected link (unknown, gated) logs exactly one console warning
+ *      naming it, and a valid link logs none; a late config does not
+ *      change that.
  *
  * Usage:  BASE_URL=http://localhost:13873 node test-issue-873-base-deep-link-e2e.js
  *         (E2E_873_ONLY=<regex> runs only the cases whose name matches.)
@@ -99,8 +104,9 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     const ctx = await browser.newContext({
       viewport: { width: v.width, height: v.height }, hasTouch: v.touch, isMobile: v.touch, colorScheme: 'light',
     });
-    const rec = { errors: [], carto: 0 };
+    const rec = { errors: [], warnings: [], carto: 0 };
     await ctx.route(BASE + '/api/config/client', async (route) => {
+      if (o.configDelayMs) await new Promise((r) => setTimeout(r, o.configDelayMs));
       const response = await route.fetch();
       const config = await response.json();
       const providers = o.providers || PROVIDERS;
@@ -148,7 +154,10 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       } catch (_) {}
     }, o.storage || {});
     const page = await ctx.newPage();
-    page.on('console', (m) => { if (m.type() === 'error') rec.errors.push(m.text()); });
+    page.on('console', (m) => {
+      if (m.type() === 'error') rec.errors.push(m.text());
+      if (m.type() === 'warning' && /\[map tiles\] \?base=/.test(m.text())) rec.warnings.push(m.text());
+    });
     page.on('pageerror', (e) => rec.errors.push(String(e)));
     page.on('dialog', (d) => d.accept());
     return { ctx, page, rec, view: v };
@@ -324,6 +333,81 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       } finally { await ctx.close(); }
     });
   }
+
+  // F1: /api/config/client answers after the control is built. Both a phone
+  // from a cold start (real taps) and a desktop, on Map and on Live.
+  for (const view of [VIEWS[0], VIEWS[3]]) {
+    for (const delay of [400, 1500]) {
+      for (const page_ of ['map', 'live']) {
+        await step(`${view.name}: config ${delay} ms late, #/${page_}?base=esri-imagery still wins and stays in the address`, async () => {
+          const { ctx, page, rec } = await newCtx({ view, configDelayMs: delay });
+          try {
+            if (page_ === 'map') await gotoMap(page, JELLING, '&base=esri-imagery');
+            else {
+              await page.goto(`${BASE}/#/live?base=esri-imagery`, { waitUntil: 'domcontentloaded' });
+              await page.waitForSelector('.leaflet-control-layers-toggle', { timeout: 20000 });
+              await page.evaluate(() => window.MeshConfigReady).catch(() => {});
+              await page.waitForTimeout(1200);
+            }
+            await openControl(page, view);
+            const on = await checkedId(page);
+            assert(on.length === 1 && on[0] === 'esri-imagery', 'checked: ' + on);
+            assert(/[?&]base=esri-imagery(&|$)/.test(await hashOf(page)), 'hash: ' + await hashOf(page));
+            if (page_ === 'map') assert(/lat=/.test(await hashOf(page)), 'the other parameters were lost: ' + await hashOf(page));
+            assert(rec.warnings.length === 0, 'warned about a valid link: ' + rec.warnings.join(' | '));
+            assert(rec.errors.length === 0, 'console errors: ' + rec.errors.join(' | '));
+          } finally { await ctx.close(); }
+        });
+      }
+    }
+  }
+
+  await step('375x560: config 1500 ms late, the Aerial link (base=dhm-ortho) is honoured too', async () => {
+    const { ctx, page } = await newCtx({ view: VIEWS[0], configDelayMs: 1500 });
+    try {
+      await gotoMap(page, JELLING, '&base=dhm-ortho');
+      await openControl(page, VIEWS[0]);
+      const on = await checkedId(page);
+      assert(on.length === 1 && on[0] === 'dhm-ortho', 'checked: ' + on);
+    } finally { await ctx.close(); }
+  });
+
+  await step('375x560: config 1500 ms late, a pick made before it arrives is not undone by the link', async () => {
+    const { ctx, page } = await newCtx({ view: VIEWS[0], configDelayMs: 1500 });
+    try {
+      await page.goto(`${BASE}/#/map?lat=${JELLING.lat}&lon=${JELLING.lon}&zoom=15&base=esri-imagery`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('.leaflet-control-layers-toggle', { timeout: 20000 });
+      await openControl(page, VIEWS[0]);
+      await pickBase(page, VIEWS[0], 'osm-standard');
+      await page.evaluate(() => window.MeshConfigReady).catch(() => {});
+      await page.waitForTimeout(1200);
+      await openControl(page, VIEWS[0]);
+      const on = await checkedId(page);
+      assert(on.length === 1 && on[0] === 'osm-standard', 'checked: ' + on);
+      assert(/[?&]base=osm-standard(&|$)/.test(await hashOf(page)), 'hash: ' + await hashOf(page));
+    } finally { await ctx.close(); }
+  });
+
+  // F2: one console warning per rejected id.
+  for (const delay of [0, 1500]) {
+    await step(`375x560: a rejected link logs one console warning naming it (config ${delay} ms)`, async () => {
+      for (const id of ['no-such-style', 'dataforsyningen-skaermkort-graa']) {
+        const { ctx, page, rec } = await newCtx({ view: VIEWS[0], providers: NO_DK, configDelayMs: delay });
+        try {
+          await gotoMap(page, JELLING, '&base=' + id);
+          assert(rec.warnings.length === 1 && rec.warnings[0].indexOf(id) >= 0, id + ' warnings: ' + JSON.stringify(rec.warnings));
+          assert(!/base=/.test(await hashOf(page)), id + ' hash: ' + await hashOf(page));
+        } finally { await ctx.close(); }
+      }
+    });
+  }
+  await step('375x560: a valid link logs no warning', async () => {
+    const { ctx, page, rec } = await newCtx({ view: VIEWS[0] });
+    try {
+      await gotoMap(page, JELLING, '&base=esri-imagery');
+      assert(rec.warnings.length === 0, JSON.stringify(rec.warnings));
+    } finally { await ctx.close(); }
+  });
 
   await browser.close();
   console.log(`\n${passed} passed, ${failed} failed`);
