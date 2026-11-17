@@ -447,15 +447,33 @@ function pathOf(url) { return new URL(url).pathname; }
       statuses: ['queued', 'pending', 'proven'], admin: store });
     await openNode(page, PK, '?section=node-antenna');
     await page.waitForSelector(SECTION + ':visible', { timeout: 15000 });
+    // Let the page's start-up timers run first: the deep link's smooth
+    // scroll (300 ms) and the theme refresh would move the target under a
+    // tap on a slow machine.
+    await advance(page, 1000);
+    // tapTarget taps the middle of a control once it has stopped moving and
+    // is the element a finger there would hit.
     async function tapTarget(sel) {
       const loc = page.locator(sel).first();
-      await loc.scrollIntoViewIfNeeded();
-      const b = await loc.boundingBox();
-      assert(b && b.height >= 44 && b.x >= 0 && b.x + b.width <= 375 + 0.5, sel + ' box ' + JSON.stringify(b));
-      await page.touchscreen.tap(b.x + b.width / 2, b.y + b.height / 2);
+      let prev = null;
+      for (let i = 0; i < 50; i++) {
+        await loc.scrollIntoViewIfNeeded();
+        const b = await loc.boundingBox();
+        assert(b && b.height >= 44 && b.x >= 0 && b.x + b.width <= 375 + 0.5, sel + ' box ' + JSON.stringify(b));
+        const x = b.x + b.width / 2, y = b.y + b.height / 2;
+        const still = prev && prev.x === b.x && prev.y === b.y;
+        if (still && await loc.evaluate((e, p) => { const t = document.elementFromPoint(p.x, p.y); return !!t && (t === e || e.contains(t)); }, { x, y })) {
+          await page.touchscreen.tap(x, y);
+          return;
+        }
+        prev = b;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      throw new Error(sel + ' never settled under a tap');
     }
     await tapTarget('[data-testid="ac-height"]');
     await page.keyboard.type('18.5');
+    assert((await page.inputValue('[data-testid="ac-height"]')) === '18.5', 'the tap did not focus the height field');
     await tapTarget('[data-testid="ac-submit"]');
     await page.waitForSelector('[data-testid="ac-code"]', { timeout: 10000 });
     assert(JSON.stringify(rec.posts) === '[{"heightM":18.5}]', 'posted ' + JSON.stringify(rec.posts));
