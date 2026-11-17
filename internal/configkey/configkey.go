@@ -52,6 +52,21 @@ func (d *Doc) On(path ...string) bool {
 	return json.Unmarshal(d.Get(path...), &on) == nil && on
 }
 
+// Bool returns the JSON boolean at path, or nil when the key is missing or
+// the value is not a boolean. For a gate that is on by default, where a
+// missing key must stay distinguishable from false.
+func (d *Doc) Bool(path ...string) *bool {
+	var b bool
+	if json.Unmarshal(d.Get(path...), &b) != nil {
+		return nil
+	}
+	return &b
+}
+
+// Reported marks the key at path (a full dotted path, as in the warning) as
+// already reported by the caller, so the Doc does not log it again.
+func (d *Doc) Reported(path ...string) { d.warned[strings.Join(path, ".")] = true }
+
 // warnVariants reports each key of obj that matches want only
 // case-insensitively, in a stable order, once per Doc.
 func (d *Doc) warnVariants(obj map[string]json.RawMessage, parent []string, want string) {

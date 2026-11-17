@@ -383,6 +383,8 @@ func (c *Config) extractTypedMapBlocks() {
 	c.extractHeritageConfig()
 	c.extractMastsConfig()
 	c.extractSkraafotoConfig()
+	// The exact-key reader has done its job; do not keep the document.
+	c.keys = nil
 }
 
 // dropDHMTokenFromTiles keeps the DHM token out of the tile config, which
