@@ -379,6 +379,14 @@
    * one path segment next to index.html, so its relative assets resolve. */
   var SHARE_PATH = 'p';
 
+  /* #873 — the page's base map rides on the #/map link: "?base=<id>" when
+   * the address bar holds a plain style id, else nothing. */
+  function baseQuery(hash) {
+    var h = String(hash || ''), qi = h.indexOf('?');
+    var v = qi >= 0 ? new URLSearchParams(h.slice(qi + 1)).get('base') : null;
+    return v && /^[A-Za-z0-9_-]{1,64}$/.test(v) ? '?base=' + v : '';
+  }
+
   /* shareURL is the link the panel's copy button hands out: built from the
    * state, not read off the address bar, so it is the same whether or not
    * the host lets the panel write the hash. With `route` (the server serves
@@ -389,7 +397,7 @@
   function shareURL(state, loc, route) {
     if (!state || !state.a || !state.b || !loc) return null;
     var ser = serializeState(state);
-    if (route !== true) return profileURL(loc, '#/map', ser, true);
+    if (route !== true) return profileURL(loc, '#/map' + baseQuery(loc.hash), ser, true);
     var p = new URLSearchParams();
     Object.keys(ser).forEach(function (key) { p.set(key, ser[key]); });
     var path = String(loc.pathname || '/');

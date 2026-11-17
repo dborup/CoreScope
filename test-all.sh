@@ -190,6 +190,7 @@ run test-issue-839-map-chrome-fit.js
 run test-issue-839-map-polish.js
 run test-issue-845-layer-groups.js
 run test-issue-859-layer-control.js
+run test-issue-873-base-deep-link.js
 run test-issue-764-no-osm-fallback.js
 run test-issue-1438-marker-css-vars.js
 run test-issue-1438-customizer-mcrole.js
