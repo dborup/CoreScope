@@ -466,6 +466,42 @@
   // the viewport bottom is taken (VCR bar, bottom-nav) so CSS can cap the
   // body there, and set `.is-capped` only while the content does not fit:
   // a panel that fits keeps overflow visible and its dropdown overlays.
+  // #875: the legend body is click-through (map, markers and the node-filter
+  // list stay reachable under it), so it cannot take the wheel itself. When the
+  // content outgrows the capped panel, a narrow rail at its edge takes the
+  // scroll and drives the body; the rail is the only part that catches input.
+  var _legendScrollCleanup = null;
+  function initLegendScrollRail() {
+    if (_legendScrollCleanup) { try { _legendScrollCleanup(); } catch (_) {} _legendScrollCleanup = null; }
+    var legend = document.getElementById('liveLegend');
+    if (!legend) return;
+    var body = legend.querySelector('.panel-content');
+    var rail = legend.querySelector('.legend-scroll-rail');
+    var spacer = rail && rail.firstElementChild;
+    if (!body || !rail || !spacer) return;
+    function fit() {
+      var over = body.scrollHeight > body.clientHeight + 1;
+      legend.classList.toggle('is-scrollable', over);
+      if (over) spacer.style.height = body.scrollHeight + 'px';
+    }
+    function railToBody() { if (body.scrollTop !== rail.scrollTop) body.scrollTop = rail.scrollTop; }
+    function bodyToRail() { if (rail.scrollTop !== body.scrollTop) rail.scrollTop = body.scrollTop; }
+    rail.addEventListener('scroll', railToBody);
+    body.addEventListener('scroll', bodyToRail);
+    var ro = null;
+    if (typeof ResizeObserver === 'function') {
+      try { ro = new ResizeObserver(fit); ro.observe(body); [].slice.call(body.children).forEach(function(el) { ro.observe(el); }); } catch (_) { ro = null; }
+    }
+    window.addEventListener('resize', fit);
+    fit();
+    _legendScrollCleanup = function() {
+      if (ro) { try { ro.disconnect(); } catch (_) {} ro = null; }
+      window.removeEventListener('resize', fit);
+      rail.removeEventListener('scroll', railToBody);
+      body.removeEventListener('scroll', bodyToRail);
+    };
+  }
+
   var _controlsFitCleanup = null;
   function initControlsFitTracker() {
     if (_controlsFitCleanup) { try { _controlsFitCleanup(); } catch (_) {} _controlsFitCleanup = null; }
@@ -1595,6 +1631,7 @@
             <button class="panel-corner-btn" data-panel="liveLegend" title="Move panel to next corner" aria-label="Move panel to next corner">◫</button>
             <button class="feed-hide-btn" id="legendCloseBtn" title="Hide legend" aria-label="Hide legend"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
           </div>
+          <div class="legend-body">
           <div class="panel-content">
           <h3 class="legend-title">PACKET TYPES</h3>
           <ul class="legend-list">
@@ -1608,6 +1645,8 @@
             <li><span class="live-ring live-ring--other" aria-hidden="true"></span> Faded ring — companion / sensor / room</li>
             <li><span class="live-foreign-swatch" aria-hidden="true"></span> Red route — foreign-origin packet (darker = more hops)</li>
           </ul>
+          </div>
+          <div class="legend-scroll-rail" aria-hidden="true"><div class="legend-scroll-spacer"></div></div>
           </div>
         </div>
 
@@ -1995,6 +2034,7 @@
     connectWS();
     initResizeHandler();
     initVCRHeightTracker();
+    initLegendScrollRail();
     startRateCounter();
 
     // Check for packet replay from packets page (single or array of observations)
@@ -5091,6 +5131,7 @@
     }
     if (_vcrHeightCleanup) { try { _vcrHeightCleanup(); } catch (_) {} _vcrHeightCleanup = null; }
     if (_controlsFitCleanup) { try { _controlsFitCleanup(); } catch (_) {} _controlsFitCleanup = null; }
+    if (_legendScrollCleanup) { try { _legendScrollCleanup(); } catch (_) {} _legendScrollCleanup = null; }
     // Restore #app height to CSS default
     const appEl = document.getElementById('app');
     if (appEl) appEl.style.height = '';

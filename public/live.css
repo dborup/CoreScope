@@ -352,9 +352,32 @@
 /* #875: the close x is part of the header row (not pinned 6px below the panel's
  * top edge), so a short panel can never leave it hanging under the VCR bar. */
 .live-legend .feed-hide-btn { position: static; flex-shrink: 0; }
-/* #875: the scroll box must take the wheel/touch. It cannot reach the control
- * stack: the right corners are offset past it (below). */
-.live-legend .panel-content { pointer-events: auto; }
+/* #875: the legend body stays click-through (map clicks, marker taps, popups,
+ * drags and the node-filter list all work under it, as on master). A long
+ * legend scrolls through a narrow rail on its right edge instead: the rail is
+ * the only part of the body that catches input, and only while it overflows. */
+.live-legend .legend-body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.live-legend .panel-content { scrollbar-width: none; }
+.live-legend .panel-content::-webkit-scrollbar { display: none; }
+.live-legend .legend-scroll-rail {
+  display: none;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -12px;
+  width: 12px;
+  overflow-y: scroll;
+  scrollbar-width: thin;
+  pointer-events: auto;
+}
+.live-legend.is-scrollable .legend-scroll-rail { display: block; }
+.live-legend .legend-scroll-spacer { width: 1px; }
 
 .legend-title {
   font-size: 9px;

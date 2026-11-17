@@ -144,6 +144,54 @@ const STACK = ['.leaflet-control-zoom-in', '#liveFullscreenToggle', '#liveContro
     assert(before === after, `x moved from ${before} to ${after}`);
   });
 
+  // Review F1/F2/F3: the body of an open legend is click-through; only the
+  // header buttons and, when the content overflows, the scroll rail catch input.
+  const inLegend = (page, x, y) => page.evaluate(([px, py]) => {
+    const hit = document.elementFromPoint(px, py);
+    return hit ? { in: !!hit.closest('#liveLegend'), cls: hit.className, tag: hit.tagName } : null;
+  }, [x, y]);
+  const centre = (page, sel) => page.$eval(sel, (e) => { const r = e.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; });
+  for (const vp of [{ width: 1280, height: 720 }, { width: 812, height: 375 }]) {
+    await page.setViewportSize(vp);
+    await step(`[${vp.width}x${vp.height}] clicks under the legend body reach the map`, async () => {
+      await setup(page, 'br', false);
+      const [x, y] = await centre(page, '#liveLegend .panel-content');
+      const hit = await inLegend(page, x, y);
+      assert(hit && !hit.in, 'legend body swallows the click: ' + JSON.stringify(hit));
+      // the legend's own header buttons stay clickable
+      const [cx, cy] = await centre(page, '#legendCloseBtn');
+      const close = await page.evaluate(([px, py]) => document.elementFromPoint(px, py).closest('#legendCloseBtn') !== null, [cx, cy]);
+      assert(close, 'x not hit-testable');
+    });
+  }
+  await step('[1280x720] a real click on the map under the open legend lands on the map', async () => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await setup(page, 'br', false);
+    const [x, y] = await centre(page, '#liveLegend .panel-content');
+    const hit = await page.evaluate(([px, py]) => { const e = document.elementFromPoint(px, py); return !!(e && e.closest('#liveMap')); }, [x, y]);
+    assert(hit, 'point under the legend body is not on the map');
+  });
+  await page.setViewportSize({ width: 812, height: 375 });
+  await step('[812x375] a real wheel on the scroll rail scrolls a long legend', async () => {
+    await setup(page, 'br', false);
+    const r = await page.$eval('#liveLegend', (e) => ({ cls: e.classList.contains('is-scrollable'), rail: getComputedStyle(e.querySelector('.legend-scroll-rail')).display }));
+    assert(r.cls && r.rail !== 'none', 'rail not active on an overflowing legend: ' + JSON.stringify(r));
+    const [rx, ry] = await centre(page, '#liveLegend .legend-scroll-rail');
+    const onRail = await page.evaluate(([px, py]) => { const e = document.elementFromPoint(px, py); return !!(e && e.closest('.legend-scroll-rail')); }, [rx, ry]);
+    assert(onRail, 'rail is not hit-testable');
+    await page.mouse.move(rx, ry);
+    await page.mouse.wheel(0, 400);
+    await page.waitForTimeout(300);
+    const top = await page.$eval('#liveLegend .panel-content', (e) => e.scrollTop);
+    assert(top > 0, 'wheel on the rail did not scroll the legend (scrollTop ' + top + ')');
+  });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await step('[1440x900] a legend that fits has no scroll rail', async () => {
+    await setup(page, 'br', false);
+    const d = await page.$eval('#liveLegend', (e) => getComputedStyle(e.querySelector('.legend-scroll-rail')).display);
+    assert(d === 'none', 'rail shown: ' + d);
+  });
+
   // Review findings 5 and 6: aria-expanded, aria-controls, title and label on
   // load, close, reopen. aria-expanded (not aria-pressed) is deliberate.
   await page.setViewportSize({ width: 1440, height: 900 });
