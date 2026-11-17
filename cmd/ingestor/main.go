@@ -152,6 +152,16 @@ func main() {
 	stopProposals := proposals.Start(2*time.Second, time.Hour)
 	defer stopProposals()
 
+	// Owner antenna-height claims (#789 M2a): the server queues claims and
+	// admin decisions; this process stores them and proves claims at advert
+	// ingest. Runs whether or not public claims are enabled, so decisions on
+	// existing claims still apply.
+	antennaClaims := newAntennaClaimRunner(store, cfg.AntennaClaims)
+	antennaClaims.RunOnce(context.Background())
+	store.antennaClaims = antennaClaims
+	stopAntennaClaims := antennaClaims.Start(2*time.Second, time.Hour)
+	defer stopAntennaClaims()
+
 	// Admin-approved region scopes are a persistent overlay on the inline and
 	// external hashRegions lists. The server only queues decisions; this
 	// process remains the sole database writer.
@@ -1105,6 +1115,9 @@ func handleMessage(store *Store, tag string, source MQTTSource, m mqtt.Message, 
 					log.Printf("MQTT [%s] mark foreign error: %v", tag, err)
 				}
 			}
+			// #789 M2a: a new advert with a verified signature may prove
+			// an owner antenna-height claim.
+			store.antennaClaims.observeAdvert(&decoded.Payload, pktData.Hash, isNew && err == nil)
 			if isNew {
 				if err := store.IncrementAdvertCount(decoded.Payload.PubKey); err != nil {
 					log.Printf("MQTT [%s] advert count error: %v", tag, err)

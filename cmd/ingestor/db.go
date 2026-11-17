@@ -96,6 +96,10 @@ type Store struct {
 	sampleIntervalSec int
 	backfillWg        sync.WaitGroup
 
+	// antennaClaims proves owner antenna-height claims at advert ingest
+	// (#789 M2a); nil: no claims are matched. Set before ingest starts.
+	antennaClaims *antennaClaimRunner
+
 	// pruneMu serialises the channelDays prunes of PruneTransmissions.
 	// packetPruneFloor is the packet cutoff of the last completed one (""
 	// before the first), where the next one starts its walk (#296).

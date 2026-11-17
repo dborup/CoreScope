@@ -109,9 +109,9 @@ func (p *terrainProfiler) wantsEstimate(e terrainEnd, override *float64) bool {
 	if _, ok := p.radio.heights[e.pubkey]; ok {
 		return false
 	}
-	// #789 M2: a proven owner height ranks above the estimate; skip the
+	// #789 M2a: an approved owner height ranks above the estimate; no
 	// measurement for a node that has one.
-	return true
+	return e.owner == nil
 }
 
 // estimateKey is e's estimate cache key: its public key and its position

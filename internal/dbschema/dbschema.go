@@ -141,6 +141,9 @@ func Apply(rw *sql.DB, logf Logger) error {
 	)`); err != nil {
 		return fmt.Errorf("ensure region_scope_audit: %w", err)
 	}
+	if err := ensureNodeAntennaClaimsTable(rw); err != nil {
+		return fmt.Errorf("ensure node_antenna_claims: %w", err)
+	}
 	if err := ensureTransmissionsRouteMaskColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure transmissions.route_mask: %w", err)
 	}
@@ -1379,4 +1382,35 @@ func upgradeChannelProposalsStatusCheck(rw *sql.DB, logf Logger) error {
 	}
 	logf("[dbschema] rebuilt channel_proposals so status CHECK allows 'revoked' (%d row(s) kept)", n)
 	return nil
+}
+
+// ensureNodeAntennaClaimsTable creates the owner antenna-height claims (#789
+// M2a). The ingestor is the only writer: it inserts claims from the server's
+// queue, proves them at advert ingest and applies admin decisions; the server
+// reads approved rows. height_m is NULL for a clear claim (the owner
+// withdraws their height). No IP, user agent or free text is stored.
+func ensureNodeAntennaClaimsTable(rw *sql.DB) error {
+	if _, err := rw.Exec(`CREATE TABLE IF NOT EXISTS node_antenna_claims (
+		request_id TEXT PRIMARY KEY,
+		pubkey TEXT NOT NULL,
+		height_m REAL NULL CHECK(height_m IS NULL OR (height_m >= 0 AND height_m <= 100)),
+		code TEXT NOT NULL,
+		status TEXT NOT NULL CHECK(status IN ('pending','proven','approved','rejected','revoked','expired','superseded')),
+		needs_review INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		expires_at INTEGER NOT NULL,
+		proven_at INTEGER NULL,
+		proof_hash TEXT NULL,
+		proof_lat REAL NULL,
+		proof_lon REAL NULL,
+		reviewed_at INTEGER NULL,
+		approved_by TEXT NULL CHECK(approved_by IS NULL OR approved_by IN ('auto','admin','owner'))
+	)`); err != nil {
+		return err
+	}
+	if _, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_node_antenna_claims_pubkey_status ON node_antenna_claims(pubkey, status)`); err != nil {
+		return err
+	}
+	_, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_node_antenna_claims_status ON node_antenna_claims(status, created_at)`)
+	return err
 }

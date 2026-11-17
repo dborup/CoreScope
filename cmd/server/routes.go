@@ -20,6 +20,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/meshcore-analyzer/channelregistry"
+	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
 	"github.com/meshcore-analyzer/geofilter"
 	"github.com/meshcore-analyzer/prunequeue"
 	"golang.org/x/sync/singleflight"
@@ -66,6 +67,10 @@ type Server struct {
 	// Shared channel proposals; built lazily from cfg/db (tests may preset).
 	proposals     *channelProposalService
 	proposalsOnce sync.Once
+
+	// Owner antenna-height claims (#789 M2a); built lazily (tests may preset).
+	claims     *antennaClaimService
+	claimsOnce sync.Once
 
 	// Guards s.cfg.GeoFilter — read by ingest/handler goroutines, written by PUT handler
 	cfgMu sync.RWMutex
@@ -405,6 +410,10 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.Handle("/api/admin/channel-proposals/{id}/approve", s.requireAPIKey(s.handleAdminChannelProposalDecision(channelregistry.OpApprove))).Methods("POST")
 	r.Handle("/api/admin/channel-proposals/{id}/reject", s.requireAPIKey(s.handleAdminChannelProposalDecision(channelregistry.OpReject))).Methods("POST")
 	r.Handle("/api/admin/channel-proposals/{id}/revoke", s.requireAPIKey(http.HandlerFunc(s.handleAdminChannelProposalRevoke))).Methods("POST")
+	r.Handle("/api/admin/antenna-claims", s.requireAPIKey(http.HandlerFunc(s.handleAdminAntennaClaims))).Methods("GET")
+	r.Handle("/api/admin/antenna-claims/{id}/approve", s.requireAPIKey(s.handleAdminAntennaClaimDecision(antennaclaim.OpApprove))).Methods("POST")
+	r.Handle("/api/admin/antenna-claims/{id}/reject", s.requireAPIKey(s.handleAdminAntennaClaimDecision(antennaclaim.OpReject))).Methods("POST")
+	r.Handle("/api/admin/antenna-claims/{id}/revoke", s.requireAPIKey(s.handleAdminAntennaClaimDecision(antennaclaim.OpRevoke))).Methods("POST")
 	// Admin decisions on OTA-observed region scopes use an ingestor-owned
 	// queue; no SQLite write occurs in this process.
 	r.Handle("/api/admin/region-scopes", s.requireAPIKey(http.HandlerFunc(s.handleRegionScopeDecisions))).Methods("GET")
@@ -484,6 +493,8 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/channel-proposals/config", s.handleChannelProposalConfig).Methods("GET")
 	r.HandleFunc("/api/channel-proposals", s.handleChannelProposalSubmit).Methods("POST")
 	r.HandleFunc("/api/channel-proposals/requests/{requestId}", s.handleChannelProposalRequest).Methods("GET")
+	r.HandleFunc("/api/nodes/{pubkey}/antenna-claims", s.handleAntennaClaimSubmit).Methods("POST")
+	r.HandleFunc("/api/antenna-claims/requests/{requestId}", s.handleAntennaClaimRequest).Methods("GET")
 	r.HandleFunc("/api/known-channels", s.handleKnownChannels).Methods("GET")
 	r.HandleFunc("/api/observers/metrics/summary", s.handleMetricsSummary).Methods("GET")
 	r.HandleFunc("/api/observers/{id}/metrics", s.handleObserverMetrics).Methods("GET")

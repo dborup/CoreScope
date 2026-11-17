@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/meshcore-analyzer/channelregistry"
+	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
 	regionutil "github.com/meshcore-analyzer/regions"
@@ -162,6 +163,11 @@ type Config struct {
 	// (internal/channelregistry). Submissions open only when enabled AND a
 	// strong apiKey is set; the same block is read by the ingestor.
 	ChannelProposals *channelregistry.Config `json:"channelProposals,omitempty"`
+
+	// AntennaClaims configures owner antenna-height claims (#789 M2a,
+	// internal/channelregistry/antennaclaim). Public claims open only when
+	// enabled AND a strong apiKey is set; the ingestor reads the same block.
+	AntennaClaims *antennaclaim.Config `json:"antennaClaims,omitempty"`
 
 	// HashRegions mirrors the ingestor's region-scope config (same
 	// config.json key). The server never derives HMAC keys from it — it

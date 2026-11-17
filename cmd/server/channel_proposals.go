@@ -117,8 +117,7 @@ type channelProposalService struct {
 	// (#616): the server's self-healing schema flag, nil without a database.
 	hasApprovedBy func() bool
 
-	rateMu sync.Mutex
-	recent []time.Time // accepted submissions in the last hour, oldest first
+	submissionWindow
 
 	approvedMu sync.Mutex
 	approved   *approvedSnapshot
@@ -182,30 +181,11 @@ func (s *Server) channelProposals() *channelProposalService {
 // allowSubmission records a submission if the hourly budget allows it, or
 // reports how long until it does.
 func (p *channelProposalService) allowSubmission() (bool, time.Duration) {
-	p.rateMu.Lock()
-	defer p.rateMu.Unlock()
-	now := p.now()
-	cutoff := now.Add(-time.Hour)
-	i := 0
-	for i < len(p.recent) && !p.recent[i].After(cutoff) {
-		i++
-	}
-	p.recent = p.recent[i:]
-	if len(p.recent) >= p.limits.SubmissionsPerHour {
-		return false, p.recent[0].Add(time.Hour).Sub(now)
-	}
-	p.recent = append(p.recent, now)
-	return true, 0
+	return p.allow(p.now(), p.limits.SubmissionsPerHour)
 }
 
 // refundSubmission gives back the budget of a submission that was not queued.
-func (p *channelProposalService) refundSubmission() {
-	p.rateMu.Lock()
-	defer p.rateMu.Unlock()
-	if n := len(p.recent); n > 0 {
-		p.recent = p.recent[:n-1]
-	}
-}
+func (p *channelProposalService) refundSubmission() { p.refund() }
 
 // snapshot returns the current approved/hidden snapshot, refreshing it when
 // the TTL ran out. The snapshot is immutable once built: callers may read it
