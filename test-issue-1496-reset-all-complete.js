@@ -424,7 +424,7 @@ test('resets the oblique photo defaults to the built-ins the viewer reads', () =
   env.api.init({}); // the Reset button runs the pipeline next
   assert.strictEqual(env.localStorage.getItem('cs-theme-overrides'), null);
   assert.deepStrictEqual(JSON.parse(JSON.stringify(R.resolve())),
-    { direction: 'auto', zoom: 'overview', lineOfSight: true });
+    { direction: 'auto', zoom: 'zoomed', lineOfSight: true });
 });
 
 test('does NOT clear the viewer’s own remembered antenna heights', () => {

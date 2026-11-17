@@ -53,8 +53,9 @@
  *   - direction: 'auto' is the above (perpendicular from a profile,
  *     otherwise north); a direction is the first photo from anywhere. A
  *     deep-linked direction still wins;
- *   - zoom: 'overview', or 'zoomed': each new photo (direction or year)
- *     opens on its crop when its point is in frame; the button still wins;
+ *   - zoom: 'zoomed' (the default, #864) or 'overview': each new photo
+ *     (direction or year) opens on its crop when its point is in frame,
+ *     otherwise on the whole photo; the button still wins;
  *   - lineOfSight: false neither asks for the line nor draws it; the side
  *     view of A–B is still the 'auto' direction.
  * The server's map.skraafoto config stays server-only.
@@ -93,7 +94,7 @@
   // so the customizer stores exactly what the viewer reads. The defaults
   // are M3c's behaviour.
   var SETTING_KEYS = ['direction', 'zoom', 'lineOfSight'];
-  var SETTING_DEFAULTS = { direction: 'auto', zoom: 'overview', lineOfSight: true };
+  var SETTING_DEFAULTS = { direction: 'auto', zoom: 'zoomed', lineOfSight: true };
   var DIRECTION_SETTINGS = ['auto'].concat(DIRECTIONS);
   var ZOOM_SETTINGS = ['overview', 'zoomed'];
   // What the customizer calls each value.

@@ -41,6 +41,10 @@ function eq(actual, expected, msg) {
 
 const { TP, win } = loadTerrainProfile(['terrain-profile-cursor.js', 'skraafoto.js', 'heritage-info.js']);
 const SF = win.Skraafoto;
+// #864: the built-in is now 'zoomed'. These suites pin the overview-first path
+// (zoom is its own opt-in click); the zoomed default is tested in
+// test-issue-737-customizer-skraafoto.js.
+win.SITE_CONFIG = { skraafoto: { zoom: 'overview' } };
 assert.ok(SF, 'public/skraafoto.js must define window.Skraafoto');
 
 const RENDER_GO = fs.readFileSync(path.join(__dirname, 'internal', 'profilecard', 'render.go'), 'utf8');
