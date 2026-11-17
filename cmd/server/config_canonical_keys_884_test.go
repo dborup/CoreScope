@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/meshcore-analyzer/configkey"
 )
 
 // Issue #884: encoding/json matches object keys case-insensitively, so a
@@ -35,7 +37,7 @@ func loadConfigLogged(t *testing.T, cfgJSON string) (*Config, string) {
 
 // ignoredWarnings counts the #884 warnings in a log.
 func ignoredWarnings(logged string) int {
-	return strings.Count(logged, "config keys are case-sensitive")
+	return strings.Count(logged, configkey.IgnoredNote)
 }
 
 func TestShareGatesReadOnlyCanonicalKeys884(t *testing.T) {

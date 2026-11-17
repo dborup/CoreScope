@@ -12,12 +12,17 @@ import (
 	"strings"
 )
 
+// IgnoredNote is the part of every ignored-key warning that does not depend
+// on the key; tests count warnings by it instead of by the whole line.
+const IgnoredNote = "config keys are case-sensitive"
+
 // Doc is a JSON document read by exact keys. Every key that matches a
 // requested key only case-insensitively is ignored and reported once.
 type Doc struct {
-	raw    []byte
-	warn   func(format string, args ...interface{})
-	warned map[string]bool
+	raw     []byte
+	warn    func(format string, args ...interface{})
+	warned  map[string]bool
+	ignored int
 }
 
 // New returns a Doc over raw. warn (log.Printf or similar) receives one
@@ -63,6 +68,9 @@ func (d *Doc) Bool(path ...string) *bool {
 	return &b
 }
 
+// Ignored counts the case-variant keys this Doc has ignored so far.
+func (d *Doc) Ignored() int { return d.ignored }
+
 // Reported marks the key at path (a full dotted path, as in the warning) as
 // already reported by the caller, so the Doc does not log it again.
 func (d *Doc) Reported(path ...string) { d.warned[strings.Join(path, ".")] = true }
@@ -86,8 +94,9 @@ func (d *Doc) warnVariants(obj map[string]json.RawMessage, parent []string, want
 			continue
 		}
 		d.warned[prefix+k] = true
+		d.ignored++
 		if d.warn != nil {
-			d.warn("[config] %s%s is ignored: config keys are case-sensitive, the key is %s%s", prefix, k, prefix, want)
+			d.warn("[config] %s%s is ignored: "+IgnoredNote+", the key is %s%s", prefix, k, prefix, want)
 		}
 	}
 }

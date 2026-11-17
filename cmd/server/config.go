@@ -1215,7 +1215,13 @@ func (c *Config) applyCanonicalKeys(keys *configkey.Doc) error {
 	// On by default: only a canonical boolean decides, a missing key keeps
 	// the default.
 	if c.EstimatedPositions != nil {
+		before := keys.Ignored()
 		c.EstimatedPositions.Enabled = keys.Bool("estimatedPositions", "enabled")
+		if c.EstimatedPositions.Enabled == nil && keys.Ignored() > before {
+			// A variant used to switch this default-on feature off; now it
+			// is ignored, so say that the feature stays on.
+			log.Printf("[config] estimatedPositions: no canonical boolean \"estimatedPositions.enabled\" found, the ignored key above has no effect and estimated positions stay ON; set \"estimatedPositions\": {\"enabled\": false} to turn them off")
+		}
 	}
 	return nil
 }
@@ -2148,10 +2154,10 @@ func (c *Config) RegionPlacementSettings() regionPlacementSettings {
 // decoded, it is set from map.<key>.enabled read by its exact-case key
 // (#884), so `Enabled` cannot switch the feature on. A Config that did not
 // come from LoadConfig has no c.keys and keeps the decoded value.
-func liftMapBlock[T any](c *Config, key, feature string, dst *T, gate func(*T) *bool) {
+func liftMapBlock[T any](c *Config, key, feature string, dst *T, gate func(*T) *bool) bool {
 	m := c.Map
 	if m == nil {
-		return
+		return false
 	}
 	for k := range m {
 		if k != key && strings.EqualFold(k, key) {
@@ -2166,7 +2172,7 @@ func liftMapBlock[T any](c *Config, key, feature string, dst *T, gate func(*T) *
 	}
 	raw, ok := m[key]
 	if !ok {
-		return
+		return false
 	}
 	delete(m, key)
 	var zero T
@@ -2178,9 +2184,10 @@ func liftMapBlock[T any](c *Config, key, feature string, dst *T, gate func(*T) *
 	if err != nil {
 		*dst = zero
 		log.Printf("[%s] config map.%s is malformed; %s disabled", key, key, feature)
-		return
+		return false
 	}
 	if gate != nil && c.keys != nil {
 		*gate(dst) = c.keys.On("map", key, "enabled")
 	}
+	return true
 }

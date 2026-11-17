@@ -370,7 +370,22 @@ func dhmTileQueryParams() []paramMeta {
 // free-form Map block is shipped verbatim by /api/config/client. The raw
 // block is deleted even when it is malformed: it must never reach clients.
 func (c *Config) extractDHMConfig() {
-	liftMapBlock(c, "dhm", "terrain overlay", &c.DHM, nil)
+	if !liftMapBlock(c, "dhm", "terrain overlay", &c.DHM, nil) {
+		return
+	}
+	// Every opt-in gate reads only its canonical, exact-case key (#888):
+	// encoding/json matched "Enabled" case-insensitively, and a canonical
+	// false must win over it.
+	if c.keys == nil {
+		return
+	}
+	d, p := &c.DHM, &c.DHM.Profile
+	d.Enabled = c.keys.On("map", "dhm", "enabled")
+	d.Ortho.Enabled = c.keys.On("map", "dhm", "ortho", "enabled")
+	p.Enabled = c.keys.On("map", "dhm", "profile", "enabled")
+	p.Share.Enabled = c.keys.On("map", "dhm", "profile", "share", "enabled")
+	p.ForeignFill.Enabled = c.keys.On("map", "dhm", "profile", "foreignFill", "enabled")
+	p.Buildings.Enabled = c.keys.On("map", "dhm", "profile", "buildings", "enabled")
 }
 
 // extractTypedMapBlocks lifts every typed block out of the client-visible

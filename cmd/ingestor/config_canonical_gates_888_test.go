@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/meshcore-analyzer/configkey"
 )
 
 // Issue #888: the ingestor reads clientRxCoverage.enabled,
@@ -49,7 +51,7 @@ func TestIngestorRemainingGatesReadOnlyCanonicalKeys888(t *testing.T) {
 				if got := g.on(cfg); got != tc.want {
 					t.Fatalf("%s on = %v, want %v", g.block, got, tc.want)
 				}
-				if n := strings.Count(buf.String(), "config keys are case-sensitive"); n != tc.warnings {
+				if n := strings.Count(buf.String(), configkey.IgnoredNote); n != tc.warnings {
 					t.Fatalf("%d warnings, want %d:\n%s", n, tc.warnings, buf.String())
 				}
 			})
@@ -66,7 +68,7 @@ func TestIngestorExampleConfigLoadsIdentically888(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(buf.String(), "config keys are case-sensitive") {
+	if strings.Contains(buf.String(), configkey.IgnoredNote) {
 		t.Fatalf("example config logged an ignored-key warning:\n%s", buf.String())
 	}
 	if cfg.ClientRxCoverageEnabled() || cfg.ClientRegionsEnabled() || cfg.ChannelProposals.SubmissionsRequested() {
