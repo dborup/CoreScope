@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -552,5 +553,223 @@ func TestAntennaClaim789_ProveGuardsInTheTable(t *testing.T) {
 	}
 	if row := r.row(claimB); row.status != antennaclaim.StatusPending {
 		t.Fatalf("expired claim proven: %+v", row)
+	}
+}
+
+// ── Review round 1 (F1–F4, F7) ────────────────────────────────────────────
+
+// restart replaces the runner, as an ingestor restart does: the in-memory
+// map starts empty and is loaded from the table.
+func (r *claimRig) restart() {
+	r.runner = newAntennaClaimRunner(r.store, nil)
+	r.runner.now = func() time.Time { return r.clock }
+	r.store.antennaClaims = r.runner
+}
+
+func (r *claimRig) statusCount(status string) int {
+	r.t.Helper()
+	var n int
+	if err := r.store.db.QueryRow(`SELECT COUNT(*) FROM node_antenna_claims WHERE status = ?`, status).Scan(&n); err != nil {
+		r.t.Fatal(err)
+	}
+	return n
+}
+
+// F1: claims that expire while the ingestor is down must not stay pending
+// (nor fill the node's cap) after a restart.
+func TestAntennaClaim789_ExpiredWhileDown(t *testing.T) {
+	t.Run("restart expires them", func(t *testing.T) {
+		r := newClaimRig(t, nil)
+		r.claim(claimA, 18.5, claimCode)
+		r.claim(claimB, 20, "BBBBBB")
+		r.claim(claimC, 30, "CCCCCC")
+		r.clock = r.clock.Add(25 * time.Hour)
+		r.restart()
+		r.runner.RunOnce(context.Background())
+		r.runner.RunOnce(context.Background())
+		for _, id := range []string{claimA, claimB, claimC} {
+			if row := r.row(id); row.status != antennaclaim.StatusExpired {
+				t.Fatalf("claim %s after a restart past expiry: %+v", id, row)
+			}
+		}
+		r.claim(claimD, 40, "DDDDDD")
+		if res := r.result(claimD); res.Status != antennaclaim.StatusPending {
+			t.Fatalf("fourth claim after the others expired: %+v", res)
+		}
+	})
+	t.Run("cap ignores expired rows", func(t *testing.T) {
+		// The fourth claim is already queued when the new runner first
+		// runs: commands are applied before the expiry sweep, so the cap
+		// itself must not count expired rows.
+		r := newClaimRig(t, &antennaclaim.Config{MaxPending: 3})
+		r.claim(claimA, 18.5, claimCode)
+		r.claim(claimB, 20, "BBBBBB")
+		r.claim(claimC, 30, "CCCCCC")
+		r.clock = r.clock.Add(25 * time.Hour)
+		r.restart()
+		h := 40.0
+		r.enqueue(antennaclaim.Command{RequestID: claimD, Op: antennaclaim.OpClaim, PubKey: r.pk, HeightM: &h, Code: "DDDDDD"})
+		r.runner.RunOnce(context.Background())
+		if res := r.result(claimD); res.Status != antennaclaim.StatusPending {
+			t.Fatalf("fourth claim counted expired rows against the cap: %+v", res)
+		}
+		if n := r.statusCount(antennaclaim.StatusPending); n != 1 {
+			t.Fatalf("%d pending, want only the new claim", n)
+		}
+	})
+}
+
+// F2: an administrator approving an older proof must not override a newer
+// approved claim, in either order.
+func TestAntennaClaim789_ApproveOlderProofRefused(t *testing.T) {
+	t.Run("owner clear stays in force", func(t *testing.T) {
+		r := newClaimRig(t, nil)
+		r.claim(claimA, 18.5, claimCode)
+		r.advert(r.pub, r.priv, "Roof "+claimCode, true) // A proven, waits for review
+		r.clock = r.clock.Add(time.Minute)
+		r.enqueue(antennaclaim.Command{RequestID: claimB, Op: antennaclaim.OpClaim, PubKey: r.pk, Clear: true, Code: "BBBBBB"})
+		r.runner.RunOnce(context.Background())
+		r.advert(r.pub, r.priv, "Roof BBBBBB", false) // B: the owner's clear, approved at once
+		r.clock = r.clock.Add(time.Minute)
+		res := r.decide("e000000000000001", antennaclaim.OpApprove, claimA)
+		if res.Status != antennaclaim.RequestError || res.Error != antennaclaim.ErrNewerApproved.Error() {
+			t.Fatalf("approving the older proof: %+v", res)
+		}
+		if row := r.row(claimA); row.status != antennaclaim.StatusProven {
+			t.Fatalf("older proof: %+v", row)
+		}
+		if row := r.row(claimB); row.status != antennaclaim.StatusApproved || row.approvedBy != antennaclaim.ApprovedByOwner {
+			t.Fatalf("owner clear overridden: %+v", row)
+		}
+	})
+	t.Run("newer height approved first", func(t *testing.T) {
+		r := newClaimRig(t, nil)
+		r.claim(claimA, 18.5, claimCode)
+		r.advert(r.pub, r.priv, "Roof "+claimCode, true)
+		r.clock = r.clock.Add(time.Minute)
+		r.claim(claimB, 25, "BBBBBB")
+		r.advert(r.pub, r.priv, "Roof BBBBBB", true)
+		if res := r.decide("e000000000000001", antennaclaim.OpApprove, claimB); res.Status != antennaclaim.StatusApproved {
+			t.Fatalf("approve newer: %+v", res)
+		}
+		if res := r.decide("e000000000000002", antennaclaim.OpApprove, claimA); res.Status != antennaclaim.RequestError || res.Error != antennaclaim.ErrNewerApproved.Error() {
+			t.Fatalf("approving the older proof after the newer: %+v", res)
+		}
+		if row := r.row(claimB); row.status != antennaclaim.StatusApproved {
+			t.Fatalf("newer claim overridden: %+v", row)
+		}
+	})
+	t.Run("older height approved first", func(t *testing.T) {
+		// The right order still works: the newer approval supersedes.
+		r := newClaimRig(t, nil)
+		r.claim(claimA, 18.5, claimCode)
+		r.advert(r.pub, r.priv, "Roof "+claimCode, true)
+		r.clock = r.clock.Add(time.Minute)
+		r.claim(claimB, 25, "BBBBBB")
+		r.advert(r.pub, r.priv, "Roof BBBBBB", true)
+		r.decide("e000000000000001", antennaclaim.OpApprove, claimA)
+		if res := r.decide("e000000000000002", antennaclaim.OpApprove, claimB); res.Status != antennaclaim.StatusApproved {
+			t.Fatalf("approve newer: %+v", res)
+		}
+		if row := r.row(claimA); row.status != antennaclaim.StatusSuperseded {
+			t.Fatalf("older claim: %+v", row)
+		}
+	})
+}
+
+// F3: the ingestor re-validates every queue file with the shared rules,
+// including commands the table itself would accept.
+func TestAntennaClaim789_QueueFileRevalidated(t *testing.T) {
+	h := 18.5
+	cases := []struct {
+		name string
+		cmd  antennaclaim.Command
+	}{
+		{"height and clear", antennaclaim.Command{Op: antennaclaim.OpClaim, HeightM: &h, Clear: true, Code: claimCode}},
+		{"neither height nor clear", antennaclaim.Command{Op: antennaclaim.OpClaim, Code: claimCode}},
+		{"invalid code", antennaclaim.Command{Op: antennaclaim.OpClaim, HeightM: &h, Code: "ILOU12"}},
+		{"upper-case pubkey", antennaclaim.Command{Op: antennaclaim.OpClaim, HeightM: &h, Code: claimCode, PubKey: "UPPER"}},
+		{"height off the 0.1 m grid", antennaclaim.Command{Op: antennaclaim.OpClaim, HeightM: func() *float64 { v := 18.55; return &v }(), Code: claimCode}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newClaimRig(t, nil)
+			cmd := c.cmd
+			cmd.RequestID = claimA
+			switch cmd.PubKey {
+			case "":
+				cmd.PubKey = r.pk
+			case "UPPER":
+				cmd.PubKey = strings.ToUpper(r.pk)
+			}
+			r.enqueue(cmd)
+			r.runner.RunOnce(context.Background())
+			if res := r.result(claimA); res.Status != antennaclaim.RequestError || res.Error != antennaclaim.ErrInvalidCommand.Error() {
+				t.Fatalf("accepted: %+v", res)
+			}
+			var n int
+			r.store.db.QueryRow(`SELECT COUNT(*) FROM node_antenna_claims`).Scan(&n)
+			if n != 0 {
+				t.Fatal("row inserted")
+			}
+		})
+	}
+}
+
+// F4: a different key that shares the first byte(s) of the claimed key
+// proves nothing; only the full public key binds.
+func TestAntennaClaim789_PrefixCollisionProvesNothing(t *testing.T) {
+	r := newClaimRig(t, nil)
+	var otherPub ed25519.PublicKey
+	var otherPriv ed25519.PrivateKey
+	for s := 2; s < 1<<16; s++ {
+		seed := sha256.Sum256([]byte{'p', 'r', 'e', 'f', 'i', 'x', byte(s), byte(s >> 8)})
+		priv := ed25519.NewKeyFromSeed(seed[:])
+		pub := priv.Public().(ed25519.PublicKey)
+		if pub[0] == r.pub[0] && !pub.Equal(r.pub) {
+			otherPub, otherPriv = pub, priv
+			break
+		}
+	}
+	if otherPub == nil {
+		t.Fatal("no colliding test key found")
+	}
+	r.claim(claimA, 18.5, claimCode)
+	r.advert(otherPub, otherPriv, "Roof "+claimCode, true)
+	if row := r.row(claimA); row.status != antennaclaim.StatusPending {
+		t.Fatalf("a key sharing the first byte proved the claim: %+v", row)
+	}
+	r.advert(r.pub, r.priv, "Roof "+claimCode, true)
+	if row := r.row(claimA); row.status != antennaclaim.StatusProven {
+		t.Fatalf("genuine advert after the collision: %+v", row)
+	}
+}
+
+// F7: when recording a proof fails, the code stays matchable, so a re-sent
+// advert still proves the claim.
+func TestAntennaClaim789_ProveFailureKeepsCode(t *testing.T) {
+	r := newClaimRig(t, nil)
+	r.claim(claimA, 18.5, claimCode)
+	// Inject a write failure into the proof transaction only.
+	if _, err := r.store.db.Exec(`CREATE TRIGGER fail_prove BEFORE UPDATE OF status ON node_antenna_claims
+		WHEN NEW.status != 'pending' BEGIN SELECT RAISE(ABORT, 'injected write failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	r.advert(r.pub, r.priv, "Roof "+claimCode, true)
+	if row := r.row(claimA); row.status != antennaclaim.StatusPending {
+		t.Fatalf("the injected failure did not stop the proof: %+v", row)
+	}
+	if n := r.runner.pendingCount(); n != 1 {
+		t.Fatalf("code dropped from memory after a failed proof: %d pending", n)
+	}
+	if _, err := r.store.db.Exec(`DROP TRIGGER fail_prove`); err != nil {
+		t.Fatal(err)
+	}
+	r.advert(r.pub, r.priv, "Roof "+claimCode, true) // re-sent, no runner tick in between
+	if row := r.row(claimA); row.status != antennaclaim.StatusProven {
+		t.Fatalf("re-sent advert after a failed proof: %+v", row)
+	}
+	if n := r.runner.pendingCount(); n != 0 {
+		t.Fatalf("code not consumed after the proof: %d pending", n)
 	}
 }

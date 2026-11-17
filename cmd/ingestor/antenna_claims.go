@@ -136,12 +136,29 @@ func (r *antennaClaimRunner) observeAdvert(p *Payload, hash string, isNew bool) 
 	}
 	status, err := r.store.proveAntennaClaim(context.Background(), pc.id, hash, p.Lat, p.Lon, r.autoApprove, r.now().UnixMilli())
 	if err != nil {
+		// The row is still pending: put the code back so a re-sent advert
+		// proves it without waiting for the next reload.
+		r.restore(pubkey, pc)
 		log.Printf("[antenna-claims] proving %s failed: %v", pc.id, err)
 		return
 	}
 	if status != "" {
 		log.Printf("[antenna-claims] claim %s for %s… is now %s", pc.id, pubkey[:16], status)
 	}
+}
+
+// restore puts back a claim match took out, unless a reload in between
+// already brought it back. The slot it left is still free: nothing else adds
+// to the map outside reload, which is bounded by the table.
+func (r *antennaClaimRunner) restore(pubkey string, pc pendingClaim) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, have := range r.pending[pubkey] {
+		if have.id == pc.id {
+			return
+		}
+	}
+	r.pending[pubkey] = append(r.pending[pubkey], pc)
 }
 
 // proveAntennaClaim records the proof of a pending claim. A clear claim takes
@@ -217,8 +234,11 @@ func (s *Store) insertAntennaClaim(ctx context.Context, cmd antennaclaim.Command
 	if err != sql.ErrNoRows {
 		return "", err
 	}
+	// Only live claims count: one that expired while the ingestor was down
+	// is still 'pending' until the expiry sweep, and must not hold a slot.
 	var total, forKey int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(pubkey = ?), 0) FROM node_antenna_claims WHERE status = 'pending'`, cmd.PubKey).Scan(&total, &forKey); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(pubkey = ?), 0) FROM node_antenna_claims
+		WHERE status = 'pending' AND expires_at >= ?`, cmd.PubKey, nowMs).Scan(&total, &forKey); err != nil {
 		return "", err
 	}
 	if total >= l.MaxPending {
@@ -241,7 +261,10 @@ func (s *Store) insertAntennaClaim(ctx context.Context, cmd antennaclaim.Command
 }
 
 // reviewAntennaClaim applies an administrator's decision: a claim in one of
-// sources moves to target. Repeating a decision is idempotent.
+// sources moves to target. Repeating a decision is idempotent. An approval
+// whose proof is older than the key's claim in force is refused
+// (ErrNewerApproved): the newest proof by the key holder wins, whatever order
+// an administrator reviews them in.
 func (s *Store) reviewAntennaClaim(ctx context.Context, id string, sources []string, target string, nowMs int64) (string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -249,7 +272,8 @@ func (s *Store) reviewAntennaClaim(ctx context.Context, id string, sources []str
 	}
 	defer tx.Rollback()
 	var status, pubkey string
-	err = tx.QueryRowContext(ctx, `SELECT status, pubkey FROM node_antenna_claims WHERE request_id = ?`, id).Scan(&status, &pubkey)
+	var provenAt sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT status, pubkey, proven_at FROM node_antenna_claims WHERE request_id = ?`, id).Scan(&status, &pubkey, &provenAt)
 	if err == sql.ErrNoRows {
 		return "", errClaimNotFound
 	}
@@ -269,6 +293,13 @@ func (s *Store) reviewAntennaClaim(ctx context.Context, id string, sources []str
 	var approvedBy sql.NullString
 	if target == antennaclaim.StatusApproved {
 		approvedBy = sql.NullString{String: antennaclaim.ApprovedByAdmin, Valid: true}
+		var newer bool
+		if err := tx.QueryRowContext(ctx, antennaclaim.NewerApprovedQuery, pubkey, id, provenAt.Int64).Scan(&newer); err != nil {
+			return "", err
+		}
+		if newer {
+			return status, antennaclaim.ErrNewerApproved
+		}
 		if err := supersedeApproved(ctx, tx, pubkey, id, nowMs); err != nil {
 			return "", err
 		}
@@ -294,8 +325,10 @@ func (s *Store) PruneAntennaClaims(ctx context.Context, cutoffMs int64) (int64, 
 }
 
 // RunOnce applies the waiting commands, expires claims whose code ran out,
-// and rebuilds the pending map after any change. With nothing to do it
-// lists the queue directory and writes nothing.
+// and rebuilds the pending map after any change. The first run after a start
+// always sweeps: claims that expired while the ingestor was down are in no
+// map yet. With nothing to do it lists the queue directory and writes
+// nothing.
 func (r *antennaClaimRunner) RunOnce(ctx context.Context) {
 	changed := !r.loaded
 	cmds, err := r.queue.PendingValues()
@@ -318,7 +351,7 @@ func (r *antennaClaimRunner) RunOnce(ctx context.Context) {
 		changed = true
 	}
 	nowMs := r.now().UnixMilli()
-	if r.hasExpired(nowMs) {
+	if !r.loaded || r.hasExpired(nowMs) {
 		if _, err := r.store.db.ExecContext(ctx, `UPDATE node_antenna_claims SET status = 'expired'
 			WHERE status = 'pending' AND expires_at < ?`, nowMs); err != nil {
 			log.Printf("[antenna-claims] expiry failed: %v", err)
@@ -424,7 +457,8 @@ func userFacingClaimError(err error) string {
 	var conflict errClaimConflict
 	switch {
 	case errors.As(err, &conflict), errors.Is(err, errTooManyClaims), errors.Is(err, errTooManyNodeClaims),
-		errors.Is(err, errClaimNotFound), errors.Is(err, errClaimExpired), errors.Is(err, antennaclaim.ErrInvalidCommand):
+		errors.Is(err, errClaimNotFound), errors.Is(err, errClaimExpired), errors.Is(err, antennaclaim.ErrInvalidCommand),
+		errors.Is(err, antennaclaim.ErrNewerApproved):
 		return err.Error()
 	}
 	log.Printf("[antenna-claims] command failed: %v", err)

@@ -576,3 +576,35 @@ func TestAntennaClaims789_HeightCapIsTheProfileCap(t *testing.T) {
 		t.Fatalf("claim cap %v != profile cap %v", antennaclaim.MaxHeightM, terrainMaxAntennaM)
 	}
 }
+
+// F2: the server refuses at once (409) to approve a proof older than the
+// claim already in force for the key; an equal or newer proof is accepted.
+func TestAntennaClaims789_ApproveOlderProofConflict(t *testing.T) {
+	env := newClaim789Env(t, claimAdminKey, nil, nil)
+	pk, other := pk789("a"), pk789("c")
+	env.addNode(t, pk, "Roof", "repeater", est789Lat, est789Lon)
+	env.addNode(t, other, "Mast", "repeater", est789Lat, est789Lon)
+	h := 18.0
+	env.insertClaim(t, "a000000000000001", pk, &h, antennaclaim.StatusProven, est789Lat, est789Lon)
+	env.insertClaim(t, "a000000000000002", pk, nil, antennaclaim.StatusApproved, est789Lat, est789Lon) // the owner's clear
+	env.insertClaim(t, "a000000000000003", pk, &h, antennaclaim.StatusProven, est789Lat, est789Lon)
+	env.insertClaim(t, "a000000000000004", other, &h, antennaclaim.StatusProven, est789Lat, est789Lon)
+	base := env.now.UnixMilli()
+	for id, at := range map[string]int64{"a000000000000001": base - 60_000, "a000000000000002": base, "a000000000000003": base + 60_000, "a000000000000004": base - 120_000} {
+		if _, err := env.srv.db.conn.Exec(`UPDATE node_antenna_claims SET proven_at = ? WHERE request_id = ?`, at, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := env.do("POST", "/api/admin/antenna-claims/a000000000000001/approve", "", claimAdminKey)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), antennaclaim.ErrNewerApproved.Error()) {
+		t.Fatalf("older proof: %d %s", w.Code, w.Body)
+	}
+	for _, id := range []string{"a000000000000003", "a000000000000004"} { // newer proof; another key
+		if w := env.do("POST", "/api/admin/antenna-claims/"+id+"/approve", "", claimAdminKey); w.Code != http.StatusAccepted {
+			t.Fatalf("approve %s: %d %s", id, w.Code, w.Body)
+		}
+	}
+	if cmds := env.queued(t); len(cmds) != 2 {
+		t.Fatalf("%d decisions queued, want 2", len(cmds))
+	}
+}

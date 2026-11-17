@@ -246,6 +246,18 @@ type Command struct {
 // ErrInvalidCommand is a command that breaks the shared rules.
 var ErrInvalidCommand = errors.New("invalid antenna claim command")
 
+// ErrNewerApproved refuses an approval whose proof is older than the claim
+// already in force for the same key: a late review must never undo a newer
+// decision, such as the owner's proven clear (owner decision 4). The server
+// answers it with 409; the ingestor checks again and is the source of truth.
+var ErrNewerApproved = errors.New("a newer claim for this node is already approved")
+
+// NewerApprovedQuery reports whether pubkey has an approved claim, other than
+// request id, proven after provenAt. Args: pubkey, request id, provenAt (ms).
+// Server and ingestor share it so their 409 and refusal agree.
+const NewerApprovedQuery = `SELECT EXISTS(SELECT 1 FROM node_antenna_claims
+	WHERE pubkey = ? AND status = 'approved' AND request_id != ? AND proven_at > ?)`
+
 // Validate checks c against the shared rules. The ingestor runs it again on
 // every file it reads: it never trusts the queue.
 func (c Command) Validate() error {

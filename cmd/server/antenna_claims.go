@@ -551,8 +551,9 @@ func (s *Server) handleAdminAntennaClaims(w http.ResponseWriter, r *http.Request
 }
 
 // claimDecisionSources are the statuses each admin decision applies to. The
-// check here answers 409 at once; the ingestor checks again in its own
-// transaction and is the source of truth.
+// check here (and, for an approval, the newer-approved check) answers 409 at
+// once; the ingestor checks again in its own transaction and is the source
+// of truth.
 var claimDecisionSources = map[string][]string{
 	antennaclaim.OpApprove: {antennaclaim.StatusProven},
 	antennaclaim.OpReject:  {antennaclaim.StatusPending, antennaclaim.StatusProven},
@@ -586,6 +587,18 @@ func (s *Server) handleAdminAntennaClaimDecision(op string) http.HandlerFunc {
 		if !allowed {
 			writeError(w, http.StatusConflict, "claim is "+row.Status)
 			return
+		}
+		if op == antennaclaim.OpApprove && row.ProvenAt != nil {
+			var newer bool
+			if err := c.db.QueryRowContext(r.Context(), antennaclaim.NewerApprovedQuery, row.PubKey, id, *row.ProvenAt).Scan(&newer); err != nil {
+				log.Printf("[antenna-claims] newer-claim check %s failed: %v", id, err)
+				writeError(w, http.StatusInternalServerError, "could not read the claim")
+				return
+			}
+			if newer {
+				writeError(w, http.StatusConflict, antennaclaim.ErrNewerApproved.Error())
+				return
+			}
 		}
 		cmd := antennaclaim.Command{RequestID: channelregistry.NewID(), Op: op, ClaimID: id, CreatedAt: c.now().UnixMilli()}
 		if !c.enqueue(w, cmd) {
