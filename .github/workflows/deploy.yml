@@ -229,6 +229,8 @@ jobs:
           (cd internal/channelregistry && go test ./...)
           (cd internal/dbschema && go test ./...)
           (cd internal/brokerurl && go test ./...)
+          # internal/configkey (#884): exact-case config gate reader.
+          (cd internal/configkey && go test ./...)
           (cd internal/pprofbind && go test ./...)
           # internal/dhm (#680): shared DHM upstream client, allow-list and cache.
           (cd internal/dhm && go test -race ./...)

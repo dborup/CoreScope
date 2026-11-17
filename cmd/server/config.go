@@ -18,6 +18,7 @@ import (
 
 	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
+	"github.com/meshcore-analyzer/configkey"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
 	regionutil "github.com/meshcore-analyzer/regions"
@@ -309,6 +310,10 @@ type Config struct {
 	// Skraafoto is map.skraafoto (#737), lifted out of Map the same way;
 	// the browser receives only the fixed `skraafoto` client block.
 	Skraafoto SkraafotoConfig `json:"-"`
+
+	// keys reads the loaded file by exact-case keys (#884); nil for a
+	// Config that did not come from LoadConfig.
+	keys *configkey.Doc
 
 	// Radio holds the link-physics defaults of the terrain profile (#681).
 	Radio *RadioConfig `json:"radio,omitempty"`
@@ -924,6 +929,11 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		}
 		// Committed: everything below runs on the accepted candidate only.
 		cfg = candidate
+		if err := cfg.applyCanonicalKeys(configkey.New(data, log.Printf)); err != nil {
+			log.Printf("[config] %s ignored: %v", p, err)
+			cfg = newDefaultConfig()
+			continue
+		}
 		cfg.NormalizeTimestampConfig()
 		cfg.migrateDeprecatedConfig()
 		cfg.warnGatedTileDefaults(log.Printf)
@@ -1161,6 +1171,34 @@ func (c *Config) migrateDeprecatedConfig() {
 	if migrated {
 		fmt.Fprintf(os.Stderr, "[deprecated] Top-level 'mapDarkTileProvider' and 'tiles' keys in config.json are deprecated and will be ignored in v3.5.0 (see #1165). Please move them into 'map': { 'tiles': { ... } }.\n")
 	}
+}
+
+// applyCanonicalKeys re-reads what encoding/json matched case-insensitively
+// but must only take its canonical, exact-case key (#884): the free-form
+// top-level map and legacy tiles blocks, which /api/config/client ships
+// (a top-level `Map` could publish the base-map token past a canonical
+// gate that is off), and the share and antennaClaims gates. The gates of
+// the lifted map blocks are read the same way by liftMapBlock, through
+// c.keys. Every ignored spelling logs one warning. Runs once, at load,
+// right after the decode.
+func (c *Config) applyCanonicalKeys(keys *configkey.Doc) error {
+	c.keys = keys
+	// The whole document already decoded, so an exact member decodes too.
+	c.Map, c.Tiles = nil, nil
+	for _, b := range []struct {
+		key string
+		dst *jsonObject
+	}{{"map", &c.Map}, {"tiles", &c.Tiles}} {
+		if raw := keys.Get(b.key); raw != nil {
+			if err := json.Unmarshal(raw, b.dst); err != nil {
+				return err
+			}
+		}
+	}
+	c.Share.Nodes.Enabled = keys.On("share", "nodes", "enabled")
+	c.Share.Packets.Enabled = keys.On("share", "packets", "enabled")
+	c.AntennaClaims.ApplyGates(keys.On)
+	return nil
 }
 
 // jsonObject is a JSON object as encoding/json decodes it into
@@ -2086,7 +2124,12 @@ func (c *Config) RegionPlacementSettings() regionPlacementSettings {
 // is removed too, with a warning, but it does not fill *dst: only the
 // documented spelling does, so the result never depends on which of several
 // spellings map iteration meets first.
-func liftMapBlock[T any](c *Config, key, feature string, dst *T) {
+//
+// gate, when not nil, returns *dst's enabled switch: once the block is
+// decoded, it is set from map.<key>.enabled read by its exact-case key
+// (#884), so `Enabled` cannot switch the feature on. A Config that did not
+// come from LoadConfig has no c.keys and keeps the decoded value.
+func liftMapBlock[T any](c *Config, key, feature string, dst *T, gate func(*T) *bool) {
 	m := c.Map
 	if m == nil {
 		return
@@ -2111,5 +2154,9 @@ func liftMapBlock[T any](c *Config, key, feature string, dst *T) {
 	if err != nil {
 		*dst = zero
 		log.Printf("[%s] config map.%s is malformed; %s disabled", key, key, feature)
+		return
+	}
+	if gate != nil && c.keys != nil {
+		*gate(dst) = c.keys.On("map", key, "enabled")
 	}
 }

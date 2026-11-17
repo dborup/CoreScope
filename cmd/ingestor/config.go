@@ -11,6 +11,7 @@ import (
 
 	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
+	"github.com/meshcore-analyzer/configkey"
 	"github.com/meshcore-analyzer/dbconfig"
 	"github.com/meshcore-analyzer/geofilter"
 )
@@ -503,6 +504,9 @@ func LoadConfig(path string) (*Config, error) {
 		if err := json.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("parsing config %s: %w", path, err)
 		}
+		// The antenna-claim gates take their canonical, exact-case keys
+		// only, read the same way as the server reads them (#884).
+		cfg.AntennaClaims.ApplyGates(configkey.New(data, log.Printf).On)
 	}
 
 	// Env var overrides

@@ -370,7 +370,7 @@ func dhmTileQueryParams() []paramMeta {
 // free-form Map block is shipped verbatim by /api/config/client. The raw
 // block is deleted even when it is malformed: it must never reach clients.
 func (c *Config) extractDHMConfig() {
-	liftMapBlock(c, "dhm", "terrain overlay", &c.DHM)
+	liftMapBlock(c, "dhm", "terrain overlay", &c.DHM, nil)
 }
 
 // extractTypedMapBlocks lifts every typed block out of the client-visible

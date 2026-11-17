@@ -172,7 +172,7 @@ type MastsCellResponse struct {
 // map.dhm and map.heritage, so the browser receives only the fixed client
 // block and never the raw config.
 func (c *Config) extractMastsConfig() {
-	liftMapBlock(c, "masts", "antenna sites layer", &c.Masts)
+	liftMapBlock(c, "masts", "antenna sites layer", &c.Masts, func(m *MastsConfig) *bool { return &m.Enabled })
 }
 
 // mastsCellRateLimit is map.masts.cellRateLimitPerMin: unset is the
