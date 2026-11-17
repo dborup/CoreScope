@@ -64,7 +64,7 @@ step('legend toggle control hidden on phone and in fullscreen like before', () =
 });
 
 step('legend is height-capped with an internal scroll, and the landscape rail fits five controls', () => {
-  assert(/\.live-legend\s*\{[^}]*max-height:\s*calc\(100%/.test(css), 'no max-height on .live-legend');
+  assert(/\.live-legend\s*\{[^}]*max-height:\s*max\([^;]*calc\(100%/.test(css), 'no max-height on .live-legend');
   assert(/--live-ctrl-rail:\s*312px/.test(css), 'landscape rail not sized for five controls');
 });
 

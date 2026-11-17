@@ -312,9 +312,12 @@
   max-width: 260px;
   /* #875: the header (corner button + close x) is a fixed row and the content
    * scrolls, so the panel never outgrows the room between the nav band
-   * (--live-legend-top) and the VCR bar, whatever corner it sits in. */
-  max-height: calc(100% - var(--live-legend-top, 64px) - var(--live-legend-clear, 0px)
-    - var(--vcr-bar-height, 58px) - var(--live-credit-height, 0px) - 20px);
+   * (--live-legend-top) and the VCR bar, whatever corner it sits in. The floor
+   * is the header row alone, so on a viewport too short for the panel the
+   * header still fits inside the box instead of spilling over the credit. */
+  max-height: max(var(--live-legend-min-h, 58px),
+    calc(100% - var(--live-legend-top, 64px) - var(--live-legend-clear, 0px)
+    - var(--vcr-bar-height, 58px) - var(--live-credit-height, 0px) - 20px));
   background: color-mix(in srgb, var(--surface-1) 92%, transparent);
   backdrop-filter: blur(12px);
   padding: 10px 14px;
@@ -346,6 +349,9 @@
 .live-legend .panel-header,
 .live-legend .panel-corner-btn,
 .live-legend .feed-hide-btn { pointer-events: auto; }
+/* #875: the close x is part of the header row (not pinned 6px below the panel's
+ * top edge), so a short panel can never leave it hanging under the VCR bar. */
+.live-legend .feed-hide-btn { position: static; flex-shrink: 0; }
 /* #875: the scroll box must take the wheel/touch. It cannot reach the control
  * stack: the right corners are offset past it (below). */
 .live-legend .panel-content { pointer-events: auto; }
@@ -994,10 +1000,26 @@ body.live-fullscreen #liveFullscreenToggle:hover,
     max-width: calc(100vw - 12px - var(--live-ctrl-rail));
   }
 }
+/* #875: a narrow window (the bottom navigation takes 58px) 501-620px tall has
+ * no room for the five-control column: its last control, Legend, would run
+ * under the VCR bar and the credit. The legend goes the way it does on a
+ * phone: panel and toggle are hidden. */
+@media (max-width: 768px) and (min-height: 501px) and (max-height: 620px) {
+  .live-legend, .live-legend-toggle-ctl { display: none !important; }
+}
 @media (orientation: landscape) and (max-height: 500px) and (max-width: 640px) {
   body:not(.live-fullscreen) .live-header:has(.live-controls.is-expanded) {
     --live-ctrl-rail: 250px;
   }
+}
+
+/* #875: just above the row breakpoint (501–540px) the five-control column is
+ * 418px tall and its last control, Legend, ends under the credit that sits on
+ * the VCR bar. Closing Legend's 10px gap and trimming it to the 44px touch
+ * target lifts it clear; the controls above keep their place (#666). */
+@media (min-height: 501px) and (max-height: 540px) {
+  .live-page .leaflet-top.leaflet-right .live-legend-toggle-ctl { margin-top: 0; }
+  .live-page .live-legend-toggle-ctl a { height: 44px !important; line-height: 44px !important; }
 }
 
 /* #667 — the expanded panel is an overlay in the `overflow: hidden`
@@ -1507,13 +1529,24 @@ input.live-node-filter-input:focus {
  * (74px start + 100px zoom + 10px margin + 10px gap = 120px under the nav
  * band) instead of beside it. */
 @media (orientation: landscape) and (max-height: 500px) {
-  .live-legend { --live-legend-clear: 0px; }
+  .live-legend { --live-legend-clear: 0px; --live-legend-min-h: 34px; padding: 2px 8px; }
+  .live-legend .panel-header { padding: 0; }
+  .live-legend .feed-hide-btn { width: 28px; height: 28px; }
   .live-legend[data-position="tr"],
   .live-legend[data-position="br"] {
     --live-legend-clear: 120px;
     right: 12px;
   }
   .live-legend[data-position="tr"] { top: calc(var(--live-legend-top, 64px) + var(--live-legend-clear)); }
+}
+/* #875: at 350px and under the panel is a header row only; the top-right
+ * corner would put its x under the VCR bar, so it sits on the bottom edge
+ * like the bottom-right one. */
+@media (orientation: landscape) and (max-height: 350px) {
+  .live-legend[data-position="tr"] {
+    top: auto;
+    bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
+  }
 }
 
 /* Corner toggle button */

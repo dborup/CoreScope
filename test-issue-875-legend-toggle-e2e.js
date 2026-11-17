@@ -172,6 +172,28 @@ const STACK = ['.leaflet-control-zoom-in', '#liveFullscreenToggle', '#liveContro
   });
   await ctx.close();
 
+  // Review round 2: on short viewports nothing the legend adds may cover the
+  // map credit, the toggle may not sit under the credit (N2: 501-502px tall),
+  // and the x may not end under the VCR bar (N3).
+  const overlap = (a, b) => a && b && a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+  for (const [w, h] of [[740, 360], [740, 300], [900, 501], [900, 502], [900, 520]]) {
+    for (const corner of ['tr', 'br']) {
+      await step(`[${w}x${h}] ${corner}: credit, toggle, x and VCR bar do not overlap`, async () => {
+        const c = await browser.newContext({ viewport: { width: w, height: h } });
+        const pg = await c.newPage();
+        try {
+          await setup(pg, corner, false);
+          const r = await pg.evaluate(() => {
+            const q = (s) => { const e = document.querySelector(s); const b = e && e.getBoundingClientRect(); return b && b.width && b.height ? { left: b.left, top: b.top, right: b.right, bottom: b.bottom } : null; };
+            return { attr: q('.leaflet-control-attribution'), toggle: q('#legendToggleBtn'), header: q('#liveLegend .panel-header'), close: q('#legendCloseBtn'), vcr: q('.vcr-bar') };
+          });
+          assert(!overlap(r.attr, r.toggle), 'credit overlaps the legend toggle');
+          assert(!overlap(r.attr, r.header), 'legend header covers the credit');
+          assert(!(r.close && r.vcr && r.close.bottom > r.vcr.top + 1), 'x ends under the VCR bar');
+        } finally { await c.close(); }
+      });
+    }
+  }
   // Phone: cold start (fresh context), real taps.
   const phone = await browser.newContext({ viewport: { width: 375, height: 560 }, hasTouch: true, isMobile: true });
   const pp = await phone.newPage();
