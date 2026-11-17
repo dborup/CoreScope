@@ -122,6 +122,7 @@ run test-rx-coverage-escape.js
 run test-issue-125-live-toggles-wiring.js
 run test-issue-2052-touch-target-css.js
 run test-channel-proposals.js
+run test-antenna-claims.js
 run test-packet-detail-channel-xss.js
 run test-channels-name-escaping.js
 

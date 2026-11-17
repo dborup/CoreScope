@@ -2,6 +2,14 @@
   "version": 1,
   "suites": [
     {
+      "file": "test-antenna-claims-e2e.js",
+      "shard": 2,
+      "env": { "BASE_URL": "$BASE_URL" },
+      "output": "e2e",
+      "meanSeconds": 0,
+      "measurementNote": "New suite; #789 M2b owner antenna-height claim flow on the node page and the admin queue (Tools > Antenna Height Claims) with the antenna-claim API answered by Playwright routes (the CI server runs with the feature off) and the page timers on Playwright's clock: feature off shows no section, a repeater gets the section (deep link scrolls to it) and a companion never, a height off the 0.1 m grid is refused before any request, the code, the 23-byte name check and the set name command, status queued to pending to proven to approved then no more polling, the deep link restores the claim after a reload, the clear path and a 429, bounded polling with Check again, the admin key kept in memory only, markup in a node name kept as text, the 409 newer-approved refusal, reject, revoke with a confirm, the filter deep link, and the owner flow plus an admin decision with real taps at 375x560 from a cold start. 7 cases, about 13s locally; no CI duration measured yet. Assigned to shard 2, the lightest by meanSeconds."
+    },
+    {
       "file": "test-issue-845-layer-groups-e2e.js",
       "shard": 2,
       "env": { "BASE_URL": "$BASE_URL" },

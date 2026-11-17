@@ -1,0 +1,81 @@
+/* #789 M2b owner antenna-height claims (antenna-claims.js). Colors come only
+ * from the theme variables in style.css so the customizer and dark mode
+ * apply. */
+
+/* A .btn's display would otherwise beat the hidden attribute. */
+.ac-body [hidden] { display: none !important; }
+.ac-hint, .ac-what { margin: 0 0 8px; font-size: 13px; }
+.ac-expiry { margin: 4px 0 0; font-size: 12px; }
+.ac-form, .ac-key-form { margin: 0; }
+.ac-modes { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 8px; }
+.ac-mode { display: inline-flex; align-items: center; min-height: 44px; gap: 6px; cursor: pointer; font-size: 13px; }
+.ac-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0; }
+.ac-label { font-size: 13px; font-weight: 600; flex-basis: 100%; }
+.ac-label.ac-disabled { color: var(--text-muted); }
+.ac-row .input { min-height: 44px; min-width: 0; flex: 1 1 140px; max-width: 320px; box-sizing: border-box; font-size: 16px; }
+
+.ac-status, .ac-name-check {
+  font-size: 13px;
+  margin-top: 6px;
+  min-height: 1em;
+  color: var(--text-muted);
+}
+.ac-status[data-kind="success"], .ac-name-check[data-kind="success"] { color: var(--status-green-text); }
+.ac-status[data-kind="warn"] { color: var(--status-amber-text); }
+.ac-status[data-kind="error"], .ac-name-check[data-kind="error"] { color: var(--danger); }
+
+.ac-code-row { margin: 4px 0 8px; font-size: 13px; }
+.ac-code {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text);
+}
+.ac-steps { margin: 0 0 8px; padding-left: 20px; font-size: 13px; }
+.ac-steps li { margin-bottom: 8px; }
+.ac-cmd-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 6px; }
+.ac-cmd {
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.ac-cmd-row .ac-cmd { flex: 1 1 180px; min-width: 0; }
+.ac-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.ac-restore { font-size: 13px; margin: 8px 0 0; }
+
+/* Admin queue. */
+.ac-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.ac-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.ac-filter[aria-pressed="true"] { border-color: var(--accent); color: var(--text); font-weight: 600; }
+.ac-list { list-style: none; margin: 0; padding: 0; }
+.ac-item {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.ac-item-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 240px; font-size: 13px; }
+.ac-item-name { font-weight: 600; overflow-wrap: anywhere; }
+.ac-item-meta { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.ac-item-height { font-weight: 600; }
+.ac-item-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; }
+.ac-chip, .ac-flag {
+  align-self: flex-start;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text);
+}
+.ac-flag { border-color: var(--warning); }
+.ac-empty { padding: 12px 0; color: var(--text-muted); font-size: 13px; }

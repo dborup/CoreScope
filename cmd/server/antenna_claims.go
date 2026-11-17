@@ -58,6 +58,12 @@ type AntennaClaimRequest struct {
 	Clear   bool     `json:"clear,omitempty"`
 }
 
+// AntennaClaimConfigResponse is GET /api/antenna-claims/config: whether
+// owners can claim a height right now (the submit route's own gate).
+type AntennaClaimConfigResponse struct {
+	Enabled bool `json:"enabled"`
+}
+
 // AntennaClaimIssuedResponse is the 202 body of a queued claim. The code is
 // shown only here, to the requester.
 type AntennaClaimIssuedResponse struct {
@@ -273,6 +279,12 @@ func (s *Server) attachOwnerHeights(ctx context.Context, ends *[2]terrainEnd) {
 }
 
 // ── Public routes ─────────────────────────────────────────────────────────
+
+// GET /api/antenna-claims/config
+func (s *Server) handleAntennaClaimConfig(w http.ResponseWriter, r *http.Request) {
+	noStore(w)
+	writeJSON(w, AntennaClaimConfigResponse{Enabled: s.antennaClaims().enabled})
+}
 
 // POST /api/nodes/{pubkey}/antenna-claims
 func (s *Server) handleAntennaClaimSubmit(w http.ResponseWriter, r *http.Request) {

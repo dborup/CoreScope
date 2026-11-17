@@ -81,7 +81,8 @@
   var THEME_POINT_KEY = 'heightPoint';
   var DEFAULT_MODEL = 'both';
   /* The antenna sources the server reports when it had nothing but its own
-   * built-in default — the only ones a customizer default may replace. */
+   * built-in default — the only ones a customizer default may replace.
+   * An owner height (#789 M2) is a proven measurement, never replaced. */
   var PROMOTABLE_SOURCES = { 'role-default': true, 'point-default': true };
   /* #789 M1: the server floors its surface-model estimate at the role
    * height that would otherwise apply, max(role, surface + 2). The
@@ -1547,6 +1548,9 @@
   var SOURCE_LABELS = {
     request: 'from this link',
     'operator-node': 'set by the operator for this node',
+    /* #789 M2 — a height the node's owner proved (a code in the node's
+     * signed advert name) and this site approved. */
+    owner: 'set by the node owner',
     /* #789 M1 — the server's estimate: the surface (roof, treetop) around
      * a repeater or room plus 2 m, never below the role default. */
     'dsm-estimate': 'estimated from surface model',
@@ -1586,6 +1590,7 @@
   var HEIGHT_BADGES = {
     default: { label: 'default', title: 'A built-in default for this kind of endpoint, not a measured height.' },
     operator: { label: 'operator', title: 'Set by the operator of this instance (radio.antennaHeightsM).' },
+    owner: { label: 'owner', title: 'Set by the node\u2019s owner, who proved control of the node with a code in its advert name; approved by this site.' },
     estimate: { label: 'estimate', title: 'Estimated from the surface model: the roof or treetop around the node plus 2 m, never below the role default. A mast does not show in the surface model.' },
     yours: { label: 'yours', title: 'Your own height for this endpoint, remembered in this browser.' },
     link: { label: 'link', title: 'Taken from the link you opened.' },
@@ -1599,6 +1604,7 @@
     'point-default': 'default',
     'operator-node': 'operator',
     'operator-role': 'operator',
+    owner: 'owner',
     'dsm-estimate': 'estimate'
   };
 
