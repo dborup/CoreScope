@@ -13,9 +13,10 @@
  * Asserts:
  *   1. the real config route carries the operator settings with the M2
  *      constants as defaults;
- *   2. node page: the current height and its source (owner, operator,
- *      estimate, default with a pending estimate) above the claim, with the
- *      profile's badge; the owner badge is drawn in --owner-badge, which is
+ *   2. node page: the site's current height and its source (owner,
+ *      operator, estimate, default with a pending estimate) above the
+ *      claim, with the profile's badge, and a note where the viewer's own
+ *      settings can change it (review PR#893 F7); the owner badge is drawn in --owner-badge, which is
  *      --success in light and dark until the customizer sets ownerBadge;
  *      without an answer (the real server's 503) there is no line;
  *   3. operator settings reach the page: the status polling follows
@@ -25,9 +26,12 @@
  *   4. Prefer owner heights: the Display tab switch is on by default; off,
  *      an open Path profile re-asks with the viewer's role height for an
  *      owner end, and the choice survives a reload; on again, the owner
- *      height is back;
+ *      height is back and the override is cleared, not stored true; with
+ *      the role heights untouched, off re-asks with the built-in role
+ *      height (review PR#893 F1, F4);
  *   5. a11y: axe is clean on the node section (form and claim) and the
- *      admin queue; the section is a labelled region; the focus goes on
+ *      admin queue; the section is a labelled region, still after a theme
+ *      toggle rebuilds the node page (review PR#893 F2); the focus goes on
  *      from the claim after Get code, to the height field after Start over,
  *      to the active filter after Unlock and a filter change, and to the
  *      key field after Lock;
@@ -175,7 +179,8 @@ function profileFor(q) {
       const l = document.querySelector('[data-testid="ac-current"]');
       const b = l.querySelector('[data-testid="ac-current-badge"]');
       const cs = getComputedStyle(document.documentElement);
-      return { text: l.textContent, source: l.getAttribute('data-source'), badge: b && b.textContent, badgeClass: b && b.className,
+      const v = l.querySelector('[data-testid="ac-current-viewer"]');
+      return { text: l.textContent, source: l.getAttribute('data-source'), badge: b && b.textContent, badgeClass: b && b.className, viewer: v && v.textContent,
         badgeColor: b && getComputedStyle(b).borderTopColor, ownerVar: cs.getPropertyValue('--owner-badge').trim(),
         successVar: cs.getPropertyValue('--success').trim() };
     });
@@ -201,7 +206,8 @@ function profileFor(q) {
       const { ctx, page, errors } = await newCtx({ theme });
       await openNode(page, PK);
       const c = await currentLine(page);
-      assert(/Current height: 18\.5 m/.test(c.text) && /set by the node owner/.test(c.text), c.text);
+      assert(/This site\u2019s height: 18\.5 m/.test(c.text) && /set by the node owner/.test(c.text), c.text);
+      assert(/role heights and Prefer owner heights in Customize/.test(c.viewer || ''), 'no viewer note: ' + c.viewer);
       assert(c.source === 'owner' && c.badge === 'owner' && /tp-hbadge-owner/.test(c.badgeClass), JSON.stringify(c));
       assert(c.ownerVar && c.badgeColor === await rgbOf(page, c.successVar), 'badge ' + c.badgeColor + ' vs --success ' + c.successVar);
       assert(errors.length === 0, errors.join('; '));
@@ -219,6 +225,7 @@ function profileFor(q) {
       await openNode(page, PK);
       const c = await currentLine(page);
       assert(c.badge === badge && re.test(c.text), ans.antennaSource + ': ' + JSON.stringify(c));
+      assert(!!c.viewer === (ans.antennaSource !== 'operator-node'), ans.antennaSource + ' viewer note: ' + c.viewer);
       await ctx.close();
     }
   });
@@ -301,6 +308,38 @@ function profileFor(q) {
     assert(!(await page.locator('#cv2-terrain-owner').isChecked()), 'the switch did not survive the reload');
     await page.locator('#cv2-terrain-owner').evaluate(e => e.click());
     await page.waitForFunction(() => document.querySelector('[data-testid="tp-hsrc-a"]').textContent === 'owner', null, { timeout: 8000 });
+    // Review PR#893 F4: on is the default, so on again clears the override
+    // instead of storing true; the viewer's role height stays.
+    await page.waitForFunction(() => {
+      const t = JSON.parse(localStorage.getItem('cs-theme-overrides') || '{}').terrain || {};
+      return !('preferOwnerHeights' in t);
+    }, null, { timeout: 5000 });
+    await page.waitForTimeout(600);
+    const terrain = JSON.parse(await page.evaluate(() => localStorage.getItem('cs-theme-overrides')) || '{}').terrain;
+    assert(JSON.stringify(terrain) === JSON.stringify({ heightRepeater: 30 }), 'stored terrain after on again: ' + JSON.stringify(terrain));
+    assert(errors.length === 0, errors.join('; '));
+    await ctx.close();
+  });
+
+  // Review PR#893 F1: with the role heights untouched nothing of them is
+  // stored, and off must still replace the owner height, with the built-in
+  // repeater height the customizer shows (10 m).
+  await step('Prefer owner heights off with untouched role heights re-asks with the built-in role height', async () => {
+    const { ctx, page, rec, errors } = await newCtx({ dhm: true, config: null, antenna: null });
+    await page.goto(`${BASE}/#/map?lat=56.16&lon=10.2&zoom=10&profile=${PK_A},${PK_B}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('[data-testid="tp-chart"] svg.tp-svg', { timeout: 20000 });
+    await page.waitForFunction(() => window._customizerV2 && window._customizerV2.initDone, null, { timeout: 15000 });
+    assert(await page.textContent('[data-testid="tp-hsrc-a"]') === 'owner', 'owner not shown by default');
+    await page.click('#customizeToggle');
+    await page.click('.cust-tab[data-tab="display"]');
+    assert(await page.inputValue('#cv2-terrain-heightRepeater') === '10', 'the customizer does not show the built-in 10 m');
+    await page.locator('#cv2-terrain-owner').evaluate(e => e.click());
+    await page.waitForFunction(() => document.querySelector('[data-testid="tp-hsrc-a"]').textContent === 'default', null, { timeout: 8000 });
+    const last = rec.profile[rec.profile.length - 1];
+    assert(last.get('ha') === '10' && last.get('hb') === '10', 'asked ' + last.toString());
+    assert(await page.inputValue('[data-testid="tp-h-a"]') === '10', 'the profile shows ' + await page.inputValue('[data-testid="tp-h-a"]'));
+    const terrain = JSON.parse(await page.evaluate(() => localStorage.getItem('cs-theme-overrides')) || '{}').terrain;
+    assert(JSON.stringify(terrain) === JSON.stringify({ preferOwnerHeights: false }), 'stored ' + JSON.stringify(terrain));
     assert(errors.length === 0, errors.join('; '));
     await ctx.close();
   });
@@ -336,6 +375,25 @@ function profileFor(q) {
       assert(await focused(page) === 'acName', 'Tab from the claim went to ' + await focused(page));
       await page.click('[data-testid="ac-new"]');
       assert(await focused(page) === 'acHeight', 'focus after Start over: ' + await focused(page));
+      await ctx.close();
+    });
+
+    // Review PR#893 F2: the node page rebuilds its sections on a theme
+    // change and adopt() moves the content into a bare element, which must
+    // still be the labelled region.
+    await step(theme + ': the section is still a labelled region after a theme toggle re-renders it', async () => {
+      const { ctx, page, errors } = await newCtx({ theme });
+      await openNode(page, PK);
+      await currentLine(page);
+      await page.evaluate((s) => { document.querySelector(s).__e2eOld = true; }, SECTION);
+      const before = await page.evaluate(() => document.documentElement.getAttribute('data-theme'));
+      await page.click('#darkModeToggle');
+      await page.waitForFunction((s) => { const e = document.querySelector(s); return e && !e.__e2eOld && !e.hidden; }, SECTION, { timeout: 8000 });
+      assert(await page.evaluate(() => document.documentElement.getAttribute('data-theme')) !== before, 'the toggle did not change the theme');
+      const region = await page.evaluate((s) => { const e = document.querySelector(s); const l = document.getElementById(e.getAttribute('aria-labelledby')); return [e.getAttribute('role'), l && l.textContent, document.querySelectorAll(s).length]; }, SECTION);
+      assert(region[0] === 'region' && region[1] === 'Antenna height (owner)' && region[2] === 1, 'after the re-render: ' + JSON.stringify(region));
+      assert((await axe(page, SECTION)).length === 0, 'axe after the re-render');
+      assert(errors.length === 0, errors.join('; '));
       await ctx.close();
     });
 

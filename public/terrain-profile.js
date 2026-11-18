@@ -166,12 +166,27 @@
    * height, exactly as cmd/server/terrain_profile.go does. */
   function themeHeight(end, defaults) {
     if (!end || !defaults || !defaults.heights) return null;
-    var role = POINT_STORAGE_KEY;
-    if (end.kind === 'node') {
-      role = Object.prototype.hasOwnProperty.call(THEME_HEIGHT_KEYS, end.role) ? end.role : 'companion';
-    }
-    var v = defaults.heights[role];
+    var v = defaults.heights[heightKey(end)];
     return v === undefined ? null : v;
+  }
+
+  /* heightKey is the role an endpoint's height is looked up under. */
+  function heightKey(end) {
+    if (end.kind !== 'node') return POINT_STORAGE_KEY;
+    return Object.prototype.hasOwnProperty.call(THEME_HEIGHT_KEYS, end.role) ? end.role : 'companion';
+  }
+
+  /* roleHeight is the role height that replaces an owner height when the
+   * viewer turned "Prefer owner heights" off (#789 M3): the customizer's
+   * role height, else the built-in one the customizer shows for it
+   * (MCAntennaHeight.ROLE_DEFAULTS). An untouched role height is not
+   * stored, so themeHeight alone has nothing to offer there. */
+  function roleHeight(end, defaults) {
+    var h = themeHeight(end, defaults);
+    if (h !== null || !end) return h;
+    var builtIn = global.MCAntennaHeight && global.MCAntennaHeight.ROLE_DEFAULTS;
+    var v = builtIn ? builtIn[heightKey(end)] : undefined;
+    return typeof v === 'number' ? v : null;
   }
 
   function boundedNumber(v, lo, hi, places) {
@@ -1747,8 +1762,11 @@
       if ((side === 'a' ? state.ha : state.hb) !== null) return false;
       var floored = FLOORED_SOURCES[end.antennaSource];
       if (!promotable(end.antennaSource, defs) && !floored) return false;
-      var h = themeHeight(end, defs);
-      if (h === null || h === clampHeight(end.antennaM)) return false;
+      /* An owner height the viewer set aside takes the role height even
+       * when the two are equal: the badge must not say "owner" (#789 M3). */
+      var owner = end.antennaSource === 'owner';
+      var h = owner ? roleHeight(end, defs) : themeHeight(end, defs);
+      if (h === null || (!owner && h === clampHeight(end.antennaM))) return false;
       if (floored && !(h > clampHeight(end.antennaM))) return false;
       themeH[side] = h;
       origin[side] = 'theme';
@@ -2786,6 +2804,7 @@
     themeDefaults: themeDefaults,
     promotable: promotable,
     themeHeight: themeHeight,
+    roleHeight: roleHeight,
     sourceLabel: sourceLabel,
     assumedHeight: assumedHeight,
     recallHeight: recallHeight,

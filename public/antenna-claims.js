@@ -355,6 +355,15 @@
     });
   }
 
+  // markSection makes `section` the owner section: its test id and a region
+  // landmark named by the title. Both the first render and adopt() set it,
+  // since the page's re-render hands over a bare element (review PR#893 F2).
+  function markSection(section) {
+    section.setAttribute('data-testid', 'antenna-claim');
+    section.setAttribute('role', 'region');
+    section.setAttribute('aria-labelledby', 'antennaClaimTitle');
+  }
+
   // ── Owner section on the node page ─────────────────────────────────────
   // mountOwnerSection fills `section` (hidden until the feature is known to
   // be on) for node n and returns the view ({ pubkey, destroy }). The node
@@ -378,7 +387,7 @@
         trackFocus(view, next);
         if (view.rendered) {
           while (old.firstChild) next.appendChild(old.firstChild);
-          next.setAttribute('data-testid', 'antenna-claim');
+          markSection(next);
           next.hidden = false;
           // The page's re-render detached the focused field, which blurs it:
           // typing goes nowhere and a phone keyboard closes (#868 N9).
@@ -413,9 +422,18 @@
     return api;
   }
 
+  // The sources a viewer's own Customize settings can replace in their
+  // own path profiles (terrain-profile.js promotable, FLOORED_SOURCES): an
+  // owner height through "Prefer owner heights", an estimate and a role
+  // default through their role heights. Operator heights stay.
+  var VIEWER_NOTE = 'Your own path profiles may use another height: your role heights and Prefer owner heights in Customize \u2192 Display apply there.';
+  var VIEWER_SOURCES = { owner: true, 'dsm-estimate': true, 'role-default': true };
+  var CURRENT_LABEL = 'This site\u2019s height: ';
+
   // currentHeight is the node page's line for GET /api/nodes/{pk}/antenna:
-  // the height, the profile's badge for its source (owner, estimate,
-  // operator, default) and the profile's wording for it. tp is
+  // the height this site uses, the profile's badge for its source (owner,
+  // estimate, operator, default), the profile's wording for it and, where
+  // the viewer's settings can change it, a note saying so. tp is
   // TerrainProfile (heightBadge, sourceLabel); null without an answer.
   function currentHeight(r, tp) {
     if (!r || typeof r.antennaM !== 'number' || !isFinite(r.antennaM) || typeof r.antennaSource !== 'string') return null;
@@ -423,21 +441,22 @@
       height: fmtHeight(r.antennaM),
       label: (tp && tp.sourceLabel ? tp.sourceLabel(r.antennaSource) : '') || r.antennaSource,
       note: r.estimatePending ? 'A path profile may still raise it to a surface estimate.' : '',
+      viewer: VIEWER_SOURCES[r.antennaSource] ? VIEWER_NOTE : '',
       badge: tp && tp.heightBadge ? tp.heightBadge(r.antennaSource) : null,
       source: r.antennaSource
     };
-    out.text = out.height + ', ' + out.label + '.' + (out.note ? ' ' + out.note : '');
+    out.text = CURRENT_LABEL + out.height + ', ' + out.label + '.' + (out.note ? ' ' + out.note : '') + (out.viewer ? ' ' + out.viewer : '');
     return out;
   }
 
-  // renderCurrent fills the "Current height" line once the server answers;
+  // renderCurrent fills the site's height line once the server answers;
   // without an answer (terrain profile off, an error) the line stays out.
   function renderCurrent(line, n, view) {
     request('GET', '/nodes/' + encodeURIComponent(n.public_key) + '/antenna').then(function (r) {
       var cur = currentHeight(r, root.TerrainProfile);
       if (!cur || !view.alive) return;
       line.textContent = '';
-      line.appendChild(el('span', 'ac-current-label', 'Current height: '));
+      line.appendChild(el('span', 'ac-current-label', CURRENT_LABEL));
       line.appendChild(el('strong', 'ac-current-value', cur.height));
       if (cur.badge) {
         var b = el('span', 'tp-hbadge tp-hbadge-' + cur.badge.key, cur.badge.label);
@@ -447,6 +466,11 @@
         line.appendChild(b);
       }
       line.appendChild(el('span', 'ac-current-source', ' ' + cur.label + '.' + (cur.note ? ' ' + cur.note : '')));
+      if (cur.viewer) {
+        var v = el('span', 'ac-current-viewer', cur.viewer);
+        v.setAttribute('data-testid', 'ac-current-viewer');
+        line.appendChild(v);
+      }
       line.setAttribute('data-source', cur.source);
       line.hidden = false;
     }, function () { /* no line */ });
@@ -454,11 +478,9 @@
 
   function renderOwnerSection(section, n, view) {
     section.textContent = '';
-    section.setAttribute('data-testid', 'antenna-claim');
+    markSection(section);
     var title = el('h4', null, 'Antenna height (owner)');
     title.id = 'antennaClaimTitle';
-    section.setAttribute('role', 'region');
-    section.setAttribute('aria-labelledby', 'antennaClaimTitle');
     section.appendChild(title);
     var current = el('p', 'ac-current');
     current.setAttribute('data-testid', 'ac-current');

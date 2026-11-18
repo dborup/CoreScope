@@ -8,6 +8,7 @@
 /* #789 M3 — the node's current antenna height, above the claim. */
 .ac-current { margin: 0 0 8px; font-size: 13px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .ac-current-source { color: var(--text-muted); }
+.ac-current-viewer { flex-basis: 100%; color: var(--text-muted); font-size: 12px; }
 /* A line focused from code (focusQuietly) after the control that had the
    focus was replaced; keyboard focus still shows its ring. */
 .ac-body [tabindex="-1"]:focus:not(:focus-visible), .ac-status[tabindex="-1"]:focus:not(:focus-visible) { outline: none; }

@@ -68,6 +68,25 @@ test('the built-in defaults are the server’s own role heights', () => {
   assert.strictEqual(ctx.window.MCAntennaHeight.MAX_M, 100);
 });
 
+// Review PR#893 F1: the Path profile falls back to MCAntennaHeight's
+// built-in heights where an untouched role height is not stored. They are
+// the server's terrainRoleAntennaM and what the customizer shows.
+test('MCAntennaHeight.ROLE_DEFAULTS mirror the server and the customizer', () => {
+  const { api, ctx } = load();
+  const go = fs.readFileSync(path.join(__dirname, 'cmd', 'server', 'terrain_profile.go'), 'utf8');
+  const block = go.match(/var terrainRoleAntennaM = map\[string\]float64\{([\s\S]*?)\n\}/);
+  assert.ok(block, 'terrainRoleAntennaM not found');
+  const server = {};
+  block[1].replace(/"?(\w+)"?:\s*([0-9.]+)/g, (_, k, v) => { server[k === 'terrainPointKey' ? 'point' : k] = Number(v); });
+  const shared = Object.assign({}, ctx.window.MCAntennaHeight.ROLE_DEFAULTS);
+  assert.deepStrictEqual(shared, server);
+  assert.deepStrictEqual(shared, {
+    repeater: api.TERRAIN_DEFAULTS.heightRepeater, room: api.TERRAIN_DEFAULTS.heightRoom,
+    companion: api.TERRAIN_DEFAULTS.heightCompanion, sensor: api.TERRAIN_DEFAULTS.heightSensor,
+    point: api.TERRAIN_DEFAULTS.heightPoint,
+  });
+});
+
 test('the profile colours map onto the documented CSS variables', () => {
   const { api } = load();
   const want = {

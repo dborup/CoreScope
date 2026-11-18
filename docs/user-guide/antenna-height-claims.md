@@ -16,7 +16,7 @@ This page is for node owners. Operators: see [Configuration → Owner antenna he
 ## Steps
 
 1. Open the node's page and go to **Antenna height (owner)**. Use the link `#/nodes/<public key>?section=node-antenna` to jump there.
-2. The section shows the **current height** and where it comes from (see [Sources](#where-the-current-height-comes-from)).
+2. The section shows **this site's height** for the node and where it comes from (see [Sources](#where-the-current-height-comes-from)).
 3. Choose **Set the height**, enter the antenna height above the ground in metres (0–100 m, in steps of 0.1 m, for example `18.5`), and press **Get code**.
    - To remove a height you set before, choose **Remove my height** instead.
 4. The page shows a 6-character code, such as `7KX9QM`, and a suggested name: your current name with the code added at the end.
@@ -68,26 +68,28 @@ The suggested name already follows these rules.
 | Revoked | An administrator withdrew an approved height. |
 | Expired | No advert with the code arrived within 24 hours. Ask for a new code. |
 | Superseded | A newer claim for the node replaced this one. |
+| Error (the page shows the reason) | The site could not carry out the request, for example because the node already has too many claims waiting or a newer height is already approved. Nothing changed. Ask for a new code later, or ask the site's operator. |
 | Stopped checking automatically | The page stopped checking after a while. The claim keeps waiting; press **Check again** after sending the advert. |
 
 An administrator may look closer at a height that is very far above the surface estimate, or below the surface.
 
 ## Where the current height comes from
 
-The section shows the height a path profile uses for the node, with a badge:
+The section shows the height this site uses for the node in path profiles, with a badge. The first of these that exists is used:
 
 | Badge | Source |
 |---|---|
-| **operator** | The site's operator set a height for this node, or for its role. It wins over yours. |
-| **owner** | Your approved height. |
-| **estimate** | The surface model: roof or treetop plus 2 m, never below the role default. |
-| **default** | A default for the node type. |
+| **operator** | The site's operator set a height for this node. It wins over yours. |
+| **owner** | Your approved height. It wins over everything below. |
+| **estimate** | The surface model: roof or treetop plus 2 m, used only where it is above the role height below. |
+| **operator** | The site's operator set a height for this node type (role). |
+| **default** | The built-in default for the node type. |
 
 A height that a viewer types into a path profile, or that comes from a shared link, wins for that viewer only.
 
 If the node moves more than 50 m (the site may set another distance) from where you proved the height, the site stops using your height until you claim it again.
 
-Viewers can turn **Prefer owner heights** off in Customize → Display → Terrain Profile. Their own default heights then replace owner heights in their profiles. This changes nothing for anyone else.
+Viewers can turn **Prefer owner heights** off in Customize → Display → Terrain Profile. Their own role heights there (the built-in defaults unless they changed them) then replace owner heights in their profiles. Their role heights can also replace a **default** height. This changes nothing for anyone else, and the section keeps showing the site's height.
 
 ## How to clear your height
 

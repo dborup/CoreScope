@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
@@ -140,5 +141,21 @@ func TestAntennaClaims789M3_NodeAntennaTerrainOff(t *testing.T) {
 	env.srv.terrain = nil
 	if w := env.do("GET", "/api/nodes/"+pk+"/antenna", "", ""); w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("terrain off: %d %s", w.Code, w.Body)
+	}
+}
+
+// Review PR#893 F6: the thresholds are operator settings since M3, so the
+// API description names them instead of their default values.
+func TestAntennaClaims789M3_OpenAPINamesThresholdSettings(t *testing.T) {
+	d := routeDescriptions()["GET /api/admin/antenna-claims"].Description
+	for _, want := range []string{"antennaClaims.reviewDeltaM", "antennaClaims.staleMoveM"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("description does not name %s: %s", want, d)
+		}
+	}
+	for _, stale := range []string{"60 m", "50 m"} {
+		if strings.Contains(d, stale) {
+			t.Errorf("description still hardcodes %q: %s", stale, d)
+		}
 	}
 }

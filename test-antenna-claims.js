@@ -167,14 +167,27 @@ test('currentHeight: the profile badge and wording for each source', () => {
   const TP = { heightBadge: (s) => ({ owner: { key: 'owner', label: 'owner' }, 'dsm-estimate': { key: 'estimate', label: 'estimate' } })[s] || null,
     sourceLabel: (s) => ({ owner: 'set by the node owner', 'dsm-estimate': 'estimated from surface model' })[s] || '' };
   const o = AC.currentHeight({ antennaM: 18.5, antennaSource: 'owner', assumed: false }, TP);
-  eq([o.height, o.label, o.badge.key, o.text], ['18.5 m', 'set by the node owner', 'owner', '18.5 m, set by the node owner.']);
+  eq([o.height, o.label, o.badge.key], ['18.5 m', 'set by the node owner', 'owner']);
+  assert.ok(o.text.startsWith('This site\u2019s height: 18.5 m, set by the node owner. Your own path profiles may use another height'), o.text);
   const e = AC.currentHeight({ antennaM: 22, antennaSource: 'dsm-estimate', assumed: true }, TP);
   eq([e.height, e.badge.key], ['22 m', 'estimate']);
   const p = AC.currentHeight({ antennaM: 10, antennaSource: 'role-default', assumed: true, estimatePending: true }, null);
-  assert.ok(/^10 m, role-default\. A path profile may still raise it/.test(p.text), p.text);
+  assert.ok(/^This site\u2019s height: 10 m, role-default\. A path profile may still raise it/.test(p.text), p.text);
   for (const bad of [null, {}, { antennaM: '18', antennaSource: 'owner' }, { antennaM: 18 }, { antennaM: NaN, antennaSource: 'owner' }]) {
     assert.strictEqual(AC.currentHeight(bad, TP), null, JSON.stringify(bad));
   }
+});
+
+// Review PR#893 F7: the line is the site's height; where the viewer's own
+// role heights or "Prefer owner heights" can replace it in their profiles,
+// a note says so. Operator heights are not theirs to replace.
+test('currentHeight: a viewer note for owner, estimate and default heights only', () => {
+  const at = (source) => AC.currentHeight({ antennaM: 12, antennaSource: source }, null).viewer;
+  for (const s of ['owner', 'dsm-estimate', 'role-default']) {
+    const v = at(s);
+    assert.ok(/role heights/.test(v) && /Prefer owner heights/.test(v) && /Customize/.test(v), s + ': ' + v);
+  }
+  for (const s of ['operator-node', 'operator-role']) assert.strictEqual(at(s), '', s);
 });
 
 function fakeTimers() {

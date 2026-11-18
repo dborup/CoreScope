@@ -213,7 +213,7 @@ An administrator can also revoke a previously approved channel (see [Channels](c
 
 A value outside its range falls back to its default. The page reads the last five from `GET /api/antenna-claims/config`, so they need only a server restart.
 
-An approved height ranks below `radio.antennaHeightsM` for the node and above the surface estimate. A height a viewer types or opens from a link still wins for that viewer, and each viewer can turn **Prefer owner heights** off in the customizer (see [Customization](customization.md#terrain-profile-display-tab)).
+An approved height ranks below a per-node height in `radio.antennaHeightsM` and above the surface estimate and the role heights in `radio.antennaHeightsM`. In full, a profile takes the first of: the request (a typed height or a link), the operator's height for the node, the owner's approved height, the surface estimate (only where it is above the role height), the operator's height for the role, the built-in role default. A height a viewer types or opens from a link still wins for that viewer, and each viewer can turn **Prefer owner heights** off in the customizer (see [Customization](customization.md#terrain-profile-display-tab)).
 
 ## Map defaults
 
