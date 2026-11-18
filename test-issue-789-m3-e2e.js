@@ -367,7 +367,9 @@ function profileFor(q) {
       const loc = page.locator(sel).first();
       let prev = null;
       for (let i = 0; i < 50; i++) {
-        await loc.scrollIntoViewIfNeeded();
+        // Centre it: at the viewport's edge the fixed top bar or bottom nav
+        // would take the tap (a finger scrolls a control into the open).
+        await loc.evaluate(e => e.scrollIntoView({ block: 'center', inline: 'nearest' }));
         const b = await loc.boundingBox();
         assert(b && b.height >= (minH || 44) && b.x >= 0 && b.x + b.width <= 375 + 0.5, sel + ' box ' + JSON.stringify(b));
         const x = b.x + b.width / 2, y = b.y + b.height / 2;
