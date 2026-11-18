@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"image/png"
@@ -1200,15 +1201,20 @@ func TestPacketShare_CoalescedCallersGetPrivateCopies(t *testing.T) {
 	}
 }
 
-// Slots full on a cold lookup is a 503 and the charge is given back.
+// Slots full on a cold lookup is a 503 and the charge is given back. Every
+// wait has a deadline (#890), so a regression fails the test instead of
+// hanging until go test's own timeout.
 func TestPacketShare_ColdLookupBusyIs503AndRefunded(t *testing.T) {
 	one := 1
 	e := newPacketShareEnv(t, true, func(c *Config) { c.DHM.Profile.RateLimitPerMin = &one })
 	stubCardRender(e)
 	e.c.admit = dhm.NewAdmission(1)
 	gate := make(chan struct{})
+	var release sync.Once
+	open := func() { release.Do(func() { close(gate) }) }
+	t.Cleanup(open) // never leave the gated lookup running on a failed test
 	n := countColdPaths(e, gate)
-	done := make(chan int)
+	done := make(chan int, 1)
 	go func() {
 		req := httptest.NewRequest("GET", "/p?packet="+psAdvert, nil)
 		req.RemoteAddr = "192.0.2.99:1"
@@ -1216,7 +1222,11 @@ func TestPacketShare_ColdLookupBusyIs503AndRefunded(t *testing.T) {
 		e.router.ServeHTTP(w, req)
 		done <- w.Code
 	}()
+	deadline := time.Now().Add(5 * time.Second)
 	for n.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the first cold lookup did not start within 5s")
+		}
 		time.Sleep(time.Millisecond)
 	}
 	for _, target := range []string{"/p?packet=" + psFlood, "/api/packets/" + psFlood + "/card.png"} {
@@ -1224,12 +1234,69 @@ func TestPacketShare_ColdLookupBusyIs503AndRefunded(t *testing.T) {
 			t.Errorf("%s with slots full: %d", target, w.Code)
 		}
 	}
-	close(gate)
-	if code := <-done; code != 200 {
-		t.Errorf("the running lookup: %d", code)
+	open()
+	select {
+	case code := <-done:
+		if code != 200 {
+			t.Errorf("the running lookup: %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the running lookup did not answer within 5s")
 	}
 	if w := e.get("/p?packet=" + psFlood); w.Code != 200 {
 		t.Errorf("after refused lookups: %d, the charge was not refunded", w.Code)
+	}
+}
+
+// #887 review: a client that leaves while its cold lookup runs is neither
+// a 404 nor a 503: the refusal has status 0 (the handlers write nothing),
+// and the charge stays spent, since the work was started on its account.
+// Mutant: dropping the r.Context().Err() case of sharedPacketPath sends
+// that client to the default branch, a shareNotFound (404).
+func TestPacketShare_ClientLeftIsStatusZeroAndStaysCharged(t *testing.T) {
+	big := 1000
+	e := newPacketShareEnv(t, true, func(c *Config) { c.DHM.Profile.RateLimitPerMin = &big })
+	stubCardRender(e)
+	gate := make(chan struct{})
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(gate) }) })
+	n := countColdPaths(e, gate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest("GET", "http://example.test/p", nil).WithContext(ctx)
+	req.RemoteAddr = "192.0.2.10:1234"
+	type result struct {
+		path    *PacketPathResponse
+		charged bool
+		refused *shareRefusal
+	}
+	out := make(chan result, 1)
+	go func() {
+		p, charged, refused := e.srv.sharedPacketPath(req, e.c, psFlood, e.c.now(), time.Hour)
+		out <- result{p, charged, refused}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for n.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the cold lookup did not start within 5s")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel() // the client leaves while the lookup is still running
+	select {
+	case r := <-out:
+		if r.refused == nil || r.refused.status != 0 {
+			t.Fatalf("refusal %+v, want status 0 for a client that left", r.refused)
+		}
+		if r.path != nil {
+			t.Errorf("a path came back for a client that left")
+		}
+		if !r.charged {
+			t.Errorf("charged = false: the lookup was started on this client's account")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("sharedPacketPath did not return within 5s of the client leaving")
 	}
 }
 
