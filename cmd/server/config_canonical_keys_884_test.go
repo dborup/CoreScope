@@ -170,3 +170,40 @@ func TestNonCanonicalTopLevelMapIsWarnedOnce884(t *testing.T) {
 		t.Fatalf("map.tiles.providers = %v, want nothing from the top-level Map", got)
 	}
 }
+
+// #898 M3: antennaClaims.detailsEnabled is a gate like enabled, so it takes
+// its canonical, exact-case key only and is off by default. Clearing details
+// does not depend on it, so the gate is read apart from enabled.
+func TestAntennaClaimDetailsGateReadsOnlyCanonicalKey898(t *testing.T) {
+	cases := []struct {
+		name        string
+		cfg         string
+		wantDetails bool
+		wantEnabled bool
+		warnings    int
+	}{
+		{"absent is off", `{"antennaClaims":{"enabled":true}}`, false, true, 0},
+		{"canonical on", `{"antennaClaims":{"enabled":true,"detailsEnabled":true}}`, true, true, 0},
+		{"canonical false", `{"antennaClaims":{"enabled":true,"detailsEnabled":false}}`, false, true, 0},
+		{"on without enabled is read, applied later", `{"antennaClaims":{"detailsEnabled":true}}`, true, false, 0},
+		{"DetailsEnabled alone", `{"antennaClaims":{"enabled":true,"DetailsEnabled":true}}`, false, true, 1},
+		{"DetailsEnabled after canonical false", `{"antennaClaims":{"detailsEnabled":false,"DetailsEnabled":true}}`, false, false, 1},
+		{"DETAILSENABLED before canonical false", `{"antennaClaims":{"DETAILSENABLED":true,"detailsEnabled":false}}`, false, false, 1},
+		{"detailsenabled alone", `{"antennaClaims":{"detailsenabled":true}}`, false, false, 1},
+		{"top-level AntennaClaims", `{"AntennaClaims":{"enabled":true,"detailsEnabled":true}}`, false, false, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, logged := loadConfigLogged(t, tc.cfg)
+			if got := cfg.AntennaClaims.DetailsRequested(); got != tc.wantDetails {
+				t.Fatalf("DetailsRequested = %v, want %v", got, tc.wantDetails)
+			}
+			if got := cfg.AntennaClaims.SubmissionsRequested(); got != tc.wantEnabled {
+				t.Fatalf("SubmissionsRequested = %v, want %v", got, tc.wantEnabled)
+			}
+			if n := ignoredWarnings(logged); n != tc.warnings {
+				t.Fatalf("%d warnings, want %d:\n%s", n, tc.warnings, logged)
+			}
+		})
+	}
+}
