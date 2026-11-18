@@ -5867,13 +5867,16 @@ body { touch-action: pan-y; }
  * the analytics warm-up pill) now lies above a hint, as it should.
  * Comments live ABOVE the rule body, not interleaved, because a stray
  * em-dash or sequence inside the body has historically caused some CSS
- * parsers to drop the entire rule from the CSSOM. */
+ * parsers to drop the entire rule from the CSSOM.
+ * #911: only the Got it button takes taps. The pill body and its text are
+ * pointer-events none, so a tap on them reaches the control underneath. */
 .gesture-hint {
   position: fixed;
   z-index: calc(var(--z-modal-backdrop) - 1);
   width: -moz-fit-content;
   width: fit-content;
   max-width: 360px;
+  max-width: min(360px, calc(100vw - 32px));
   pointer-events: none !important;
   opacity: 1;
   animation-name: gesture-hint-slide-in;
@@ -5897,7 +5900,7 @@ body { touch-action: pan-y; }
   top: 80px;
 }
 .gesture-hint-inner {
-  pointer-events: auto;
+  pointer-events: none;
   display: flex;
   align-items: center;
   gap: 12px;

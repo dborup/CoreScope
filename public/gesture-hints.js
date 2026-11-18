@@ -6,6 +6,9 @@
  *   value: "seen"
  * - Show hint 800ms after page settle; auto-fade 8s; "Got it" dismisses.
  * - aria-live=polite, role=status, no focus stealing, pointer-events:none.
+ * - #911: only "Got it" takes taps. A tap anywhere else dismisses the hint
+ *   and still reaches the control underneath. Hints show on top-level pages
+ *   only, never on a detail page such as #/nodes/<key>.
  * - prefers-reduced-motion: animation-name: none (style.css handles via media query).
  * - Singleton + cleanup: module-scoped guard; SPA re-mount must not re-show dismissed.
  * - Pull-to-refresh hint only when .pull-to-reconnect element exists in DOM.
@@ -32,9 +35,9 @@
     var h = location.hash || '';
     return /^#\/live(\/|$|\?)/.test(h);
   }
-  // #911: row and tab swipes apply on a page's list or tab level, not on a
-  // detail page (#/nodes/<key>, #/packets/<hash>), where the bottom pill sat
-  // on top of the page's own controls (the owner antenna-claim form).
+  // #911: hints belong on a page's list or tab level, not on a detail page
+  // (#/nodes/<key>, #/packets/<hash>), where a pill sat on top of the page's
+  // own controls (Back to nodes, the owner antenna-claim form).
   function onListRoute() {
     return /^#\/(packets|nodes|channels|observers)\/?(\?|$)/.test(location.hash || '');
   }
@@ -81,6 +84,7 @@
       relevant: function () {
         if (!hasTouchCapability()) return false;
         if (onLiveRoute()) return false; // #1244
+        if (!onTopLevelRoute()) return false; // #911
         // nav-drawer.js: NARROW_MAX=768; "narrow" is inclusive — narrow when
         // width <= NARROW_MAX (nav-drawer treats width > NARROW_MAX as the
         // non-narrow / sidebar layout). The edge-swipe drawer is the MOBILE
@@ -96,6 +100,7 @@
       relevant: function () {
         if (!hasTouchCapability()) return false;
         if (onLiveRoute()) return false; // #1244
+        if (!onTopLevelRoute()) return false; // #911
         return !!document.querySelector('.pull-to-reconnect');
       },
       position: 'top',
@@ -128,7 +133,8 @@
     wrap.className = 'gesture-hint gesture-hint-' + def.position;
     // Belt-and-suspenders: inline style guarantees pointer-events:none
     // regardless of CSS load order or cascade collisions. The hint must
-    // never capture clicks; only the inner button does (via .gesture-hint-inner).
+    // never capture clicks; only the "Got it" button does (#911: the pill
+    // body and text are pointer-events:none too, see style.css).
     wrap.style.pointerEvents = 'none';
     wrap.setAttribute('data-gesture-hint', id);
     wrap.setAttribute('role', 'status');
@@ -147,7 +153,8 @@
     btn.type = 'button';
     btn.className = 'gesture-hint-dismiss';
     btn.setAttribute('data-gesture-hint-dismiss', '');
-    btn.setAttribute('aria-label', 'Dismiss hint');
+    // The accessible name starts with the visible text (WCAG 2.5.3).
+    btn.setAttribute('aria-label', 'Got it, dismiss hint');
     btn.textContent = 'Got it';
     btn.addEventListener('click', function (e) {
       e.preventDefault();
@@ -191,6 +198,15 @@
     el._gestureHintFadeTimer = fadeTimer;
   }
 
+  // #911: a tap outside "Got it" dismisses every shown hint. The hint is not
+  // the event target (pointer-events:none), so the same tap still reaches the
+  // control underneath; nothing here prevents or stops the event.
+  function onPointerDown(e) {
+    var t = e.target;
+    if (t && t.closest && t.closest('[data-gesture-hint-dismiss]')) return;
+    Object.keys(_shown).forEach(dismiss);
+  }
+
   function dismiss(id) {
     var el = _shown[id];
     markSeen(id);
@@ -230,6 +246,7 @@
     if (!_routeChangeBound) {
       _routeChangeBound = true;
       window.addEventListener('hashchange', onRouteChange);
+      document.addEventListener('pointerdown', onPointerDown, { capture: true, passive: true });
     }
     scheduleHints();
   }
