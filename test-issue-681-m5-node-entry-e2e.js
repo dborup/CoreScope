@@ -1,5 +1,5 @@
 /**
- * E2E (#681 M5): "Terrain profile to…" on node detail, into the Map page
+ * E2E (#681 M5): "Terrain profile" on node detail, into the Map page
  * Path profile tool with A filled in and the picker armed for B.
  *
  * Same harness as test-issue-681-profile-tool-e2e.js: the CI server has no

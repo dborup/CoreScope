@@ -16,7 +16,12 @@
  *      button for the photo, the same data-testids, the same gates;
  *   4. the chip rule is compact (no 48 px box outside the phone query),
  *      keeps a 44 px target on phones, and uses CSS variables only;
- *   5. the old 48 px rule is gone.
+ *   5. the old 48 px rule is gone;
+ *   6. every built-in action in both rows (page: Copy URL, Copy short URL,
+ *      Analytics, Reach, Observer →; pane: Details, Analytics, Reach)
+ *      carries the same class and sets no size of its own inline, so the
+ *      whole row shares one height on desktop and on phones; the rows do
+ *      not stretch their chips, so a drifting chip cannot hide.
  *
  * Usage: node test-issue-920-node-action-chips.js
  */
@@ -48,6 +53,21 @@ const SKF = {
 };
 
 const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
+const nodesJs = fs.readFileSync(path.join(__dirname, 'public', 'nodes.js'), 'utf8');
+
+/* The <a>/<button> opening tags inside the first <div> whose class attribute
+ * starts with `cls` in public/nodes.js, up to that div's closing tag (the
+ * rows hold no nested divs). */
+function actionTags(cls) {
+  const start = nodesJs.indexOf('<div class="' + cls + '"');
+  assert.ok(start !== -1, 'no ' + cls + ' row in nodes.js');
+  const end = nodesJs.indexOf('</div>', start);
+  return nodesJs.slice(start, end).match(/<(?:a|button)\b[^>]*>/g) || [];
+}
+const attr = (tag, name) => {
+  const m = new RegExp('\\s' + name + '="([^"]*)"').exec(tag);
+  return m ? m[1] : '';
+};
 
 /* The declaration blocks of every rule whose selector list names `cls`,
  * with the at-rule (if any) each sits in. Brace-aware, one level of @media. */
@@ -158,6 +178,32 @@ test('the chip rule uses CSS variables only: no hex or rgb colours', () => {
 
 test('the old 48 px node-terrain-action rule is gone', () => {
   assert.strictEqual(rulesFor('node-terrain-action').length, 0);
+});
+
+for (const [row, n] of [['node-full-actions', 5], ['node-detail-role', 3]]) {
+  test(`${row}: all ${n} built-in actions carry node-action-chip`, () => {
+    const tags = actionTags(row);
+    assert.strictEqual(tags.length, n, tags.join('\n'));
+    tags.forEach(t => assert.ok(attr(t, 'class').split(/\s+/).includes('node-action-chip'), t));
+  });
+  test(`${row}: no action sets its own size inline (font-size, padding, display)`, () => {
+    actionTags(row).forEach(t => {
+      assert.ok(!/font-size|padding|display/.test(attr(t, 'style')), t);
+    });
+  });
+}
+
+test('both rows align chips to the top, so a drifting chip is not stretched to match', () => {
+  for (const row of ['node-full-actions', 'node-detail-actions']) {
+    const rules = rulesFor(row).filter(r => !r.media && r.sel === '.' + row);
+    assert.ok(rules.some(r => /align-items\s*:\s*flex-start/.test(r.body)), row + ' stretches its chips');
+  }
+});
+
+test('the pane chip size applies to the whole pane, not only the module row', () => {
+  const pane = rulesFor('node-action-chip').filter(r => !r.media && /\.node-detail\s/.test(r.sel));
+  assert.ok(pane.length, 'no .node-detail .node-action-chip rule');
+  assert.ok(pane.some(r => px(r.body, 'font-size') === 11), 'pane chips are not 11 px');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

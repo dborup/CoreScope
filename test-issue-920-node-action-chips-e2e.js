@@ -9,17 +9,24 @@
  * /api/skraafoto/search is answered with an empty result. Nothing reaches a
  * real network.
  *
- * Asserts, at 1280x860 and at 375x560 on a touch device:
- *   1. page and pane: both actions exist, carry node-action-chip and are not
- *      the old node-terrain-action, with the labels "Terrain profile" and
- *      "Oblique photo";
- *   2. desktop: each chip is as tall as the Analytics chip beside it (not a
- *      48 px button), with the same font size and background;
- *   3. phone: each chip is at least 44 px tall and wide, inside the screen,
- *      and the element at its centre is the chip itself;
- *   4. real taps (touchscreen) on the phone: "Oblique photo" opens its
- *      dialog, "Terrain profile" opens #/map?profile=<key>;
- *   5. no page errors.
+ * Asserts, at 1280x860 and at 375x560 and 360x640 on a touch device:
+ *   1. page and pane: both module actions exist, carry node-action-chip and
+ *      are not the old node-terrain-action, with the labels "Terrain
+ *      profile" and "Oblique photo";
+ *   2. parity: every action in the page row (Copy URL, Copy short URL,
+ *      Analytics, Reach, Observer →, the two module chips) and in the pane
+ *      rows (Details, Analytics, Reach, the two module chips) carries
+ *      node-action-chip and has the same rendered height, ±1 px;
+ *   3. desktop: the chips are compact (under 44 px), with one font size and
+ *      background across the row;
+ *   4. phone: every action in the row is at least 44 px tall and wide,
+ *      inside the screen, hit by itself at its centre, and the row has no
+ *      horizontal overflow;
+ *   5. phone, cold start with real taps: Home → bottom-nav More → Nodes →
+ *      tap the node's row → its node page (at ≤640 px a row opens the page,
+ *      not the side pane); there the parity above holds, "Oblique photo"
+ *      opens its dialog and "Terrain profile" opens #/map?profile=<key>;
+ *   6. no page errors.
  *
  * Usage:
  *   BASE_URL=http://localhost:13700 node test-issue-920-node-action-chips-e2e.js
@@ -113,117 +120,162 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   assert(node, 'the fixture needs a node with a fix');
   const PK = node.pk.toLowerCase();
 
-  // What a chip looks like and where it is, read in one go.
-  async function measure(page, sel) {
-    return page.$eval(sel, (e) => {
-      e.scrollIntoView({ block: 'center' });
-      const r = e.getBoundingClientRect();
-      const cs = getComputedStyle(e);
-      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-      return {
-        x: r.x, y: r.y, w: r.width, h: r.height, cls: e.className,
-        label: (e.lastElementChild || e).textContent.trim(),
-        fontSize: cs.fontSize, bg: cs.backgroundColor,
-        selfHit: !!hit && (hit === e || e.contains(hit)),
-      };
+  // Every action in a row, measured in one go, after the row is in view.
+  async function measureRow(page, sel) {
+    return page.$$eval(sel, (els) => {
+      els[0].scrollIntoView({ block: 'center' });
+      return els.map((e) => {
+        const r = e.getBoundingClientRect();
+        const cs = getComputedStyle(e);
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+        return {
+          x: r.x, y: r.y, w: r.width, h: r.height, cls: String(e.className),
+          label: e.textContent.replace(/\s+/g, ' ').trim(),
+          fontSize: cs.fontSize, bg: cs.backgroundColor,
+          selfHit: !!hit && (hit === e || e.contains(hit)),
+        };
+      });
     });
   }
+  const show = (items) => items.map(i => `${i.label}=${i.h}`).join(', ');
 
-  async function check(label, page, scope, ref, o) {
+  // `sel` matches every action of the row(s); `scope` holds the two module chips.
+  async function check(label, page, scope, sel, o) {
     const phone = o.viewport.width <= 768;
     const width = o.viewport.width;
-    for (const [sel, text] of [[TP, 'Terrain profile'], [SF, 'Oblique photo']]) {
-      await page.waitForSelector(`${scope} ${sel}`, { timeout: 10000 });
-      const m = await measure(page, `${scope} ${sel}`);
+    for (const [mod, text] of [[TP, 'Terrain profile'], [SF, 'Oblique photo']]) {
+      await page.waitForSelector(`${scope} ${mod}`, { timeout: 10000 });
+      const cls = await page.$eval(`${scope} ${mod}`, e => String(e.className));
+      const lbl = await page.$eval(`${scope} ${mod}`, e => (e.lastElementChild || e).textContent.trim());
       await step(`${label}: ${text}: one shared chip class, new label`, async () => {
-        assert(/\bnode-action-chip\b/.test(m.cls), 'class = ' + m.cls);
-        assert(!/\bnode-terrain-action\b/.test(m.cls), 'old class kept: ' + m.cls);
-        assert(m.label === text, 'label = ' + m.label);
+        assert(/\bnode-action-chip\b/.test(cls), 'class = ' + cls);
+        assert(!/\bnode-terrain-action\b/.test(cls), 'old class kept: ' + cls);
+        assert(lbl === text, 'label = ' + lbl);
       });
-      const r = await measure(page, ref);
-      if (phone) {
-        await step(`${label}: ${text}: a 44 px tap target inside the screen, hit by itself`, async () => {
-          assert(m.h >= 44 && m.w >= 44, `target ${m.w}x${m.h}`);
-          assert(m.x >= 0 && m.x + m.w <= width, 'off screen: ' + JSON.stringify(m));
-          assert(m.selfHit, 'the element at its centre is not the chip');
-        });
-      } else {
-        await step(`${label}: ${text}: as compact as Analytics beside it`, async () => {
-          assert(Math.abs(m.h - r.h) <= 2, `chip ${m.h}px vs Analytics ${r.h}px`);
-          assert(m.h < 44, `chip is ${m.h}px, still a button`);
-          assert(m.fontSize === r.fontSize, `font ${m.fontSize} vs ${r.fontSize}`);
-          assert(m.bg === r.bg, `background ${m.bg} vs ${r.bg}`);
-        });
-      }
+    }
+    const items = await measureRow(page, sel);
+    await step(`${label}: all ${items.length} actions carry node-action-chip`, async () => {
+      assert(items.length >= 5, 'only ' + items.length + ' actions: ' + show(items));
+      const off = items.filter(i => !/\bnode-action-chip\b/.test(i.cls));
+      assert(!off.length, 'without the class: ' + off.map(i => i.label).join(', '));
+    });
+    await step(`${label}: every action has the same height (±1 px)`, async () => {
+      const hs = items.map(i => i.h);
+      assert(Math.max(...hs) - Math.min(...hs) <= 1, show(items));
+    });
+    if (phone) {
+      await step(`${label}: every action is a 44 px tap target inside the screen, hit by itself`, async () => {
+        for (const m of items) {
+          assert(m.h >= 44 && m.w >= 44, `${m.label}: target ${m.w}x${m.h}`);
+          assert(m.x >= 0 && m.x + m.w <= width, `${m.label}: off screen ${m.x}+${m.w}`);
+          assert(m.selfHit, `${m.label}: the element at its centre is not the action`);
+        }
+        const overflow = await page.$eval(scope, e => e.scrollWidth - e.clientWidth);
+        assert(overflow <= 0, 'the row overflows by ' + overflow + ' px');
+      });
+    } else {
+      await step(`${label}: compact, one font size and background across the row`, async () => {
+        for (const m of items) assert(m.h < 44, `${m.label} is ${m.h}px, still a button`);
+        const fonts = new Set(items.map(i => i.fontSize)), bgs = new Set(items.map(i => i.bg));
+        assert(fonts.size === 1, 'fonts ' + [...fonts].join(' / '));
+        assert(bgs.size === 1, 'backgrounds ' + [...bgs].join(' / '));
+      });
     }
   }
 
-  async function gotoNode(page) {
-    await page.goto(`${BASE}/#/nodes/${PK}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForSelector('.node-full-card', { timeout: 30000 });
+  const PAGE_ROW = '.node-full-actions';
+  const PANE_ROWS = '#nodesRight .node-detail-role > .btn-primary, #nodesRight .node-detail-actions > *';
+
+  async function waitConfig(page) {
     await page.waitForFunction(() => window.MeshConfigReady !== undefined, null, { timeout: 15000 });
     await page.evaluate(() => window.MeshConfigReady);
-    await page.waitForTimeout(300);
+  }
+
+  // A real touchscreen tap at the element's centre, once it is visible and
+  // has stopped moving (the More sheet slides in).
+  async function tapOn(page, sel) {
+    await page.locator(sel).first().tap({ timeout: 10000 });
   }
 
   const modes = [
     { name: 'desktop', viewport: { width: 1280, height: 860 }, shot: 'desktop' },
     { name: '375x560 touch', viewport: { width: 375, height: 560 }, touch: true, shot: '375' },
+    { name: '360x640 touch', viewport: { width: 360, height: 640 }, touch: true, shot: '360' },
   ];
 
   for (const o of modes) {
-    // ── The full node page ────────────────────────────────────────────────
-    {
-      const { ctx, page, rec } = await newCtx(o);
-      await gotoNode(page);
-      await check(`${o.name} node page`, page, '.node-full-actions', '.node-full-actions a[href$="/analytics"]', o);
-      if (SHOT_DIR) await page.screenshot({ path: path.join(SHOT_DIR, `920-${o.shot}-detail.png`) });
-
-      if (o.touch) {
-        // Real taps, from a cold start of the page.
-        await step(`${o.name} node page: a real tap on "Oblique photo" opens the viewer`, async () => {
-          const m = await measure(page, `.node-full-actions ${SF}`);
-          await page.touchscreen.tap(m.x + m.w / 2, m.y + m.h / 2);
-          await page.waitForSelector(DIALOG, { timeout: 5000 });
-          await page.keyboard.press('Escape');
-          await page.waitForSelector(DIALOG, { state: 'detached', timeout: 5000 }).catch(() => {});
+    if (!o.touch) {
+      // ── Desktop: the full node page by deep link ────────────────────────
+      {
+        const { ctx, page, rec } = await newCtx(o);
+        await page.goto(`${BASE}/#/nodes/${PK}`, { waitUntil: 'domcontentloaded' });
+        await page.waitForSelector('.node-full-card', { timeout: 30000 });
+        await waitConfig(page);
+        await page.waitForTimeout(300);
+        await check(`${o.name} node page`, page, PAGE_ROW, `${PAGE_ROW} > *`, o);
+        if (SHOT_DIR) await page.screenshot({ path: path.join(SHOT_DIR, `920-${o.shot}-detail.png`) });
+        await step(`${o.name} node page: no page errors`, async () => {
+          assert(rec.errors.length === 0, rec.errors.join(' | '));
         });
-        await step(`${o.name} node page: a real tap on "Terrain profile" opens the Path profile`, async () => {
-          const m = await measure(page, `.node-full-actions ${TP}`);
-          await page.touchscreen.tap(m.x + m.w / 2, m.y + m.h / 2);
-          await page.waitForFunction((pk) => location.hash.indexOf('#/map?profile=' + pk) === 0, PK, { timeout: 5000 });
-        });
+        await ctx.close();
       }
-      await step(`${o.name} node page: no page errors`, async () => {
-        assert(rec.errors.length === 0, rec.errors.join(' | '));
-      });
-      await ctx.close();
+      // ── Desktop: the side pane ──────────────────────────────────────────
+      {
+        const { ctx, page, rec } = await newCtx(o);
+        await page.goto(`${BASE}/#/nodes`, { waitUntil: 'domcontentloaded' });
+        const row = `tr[data-key="${node.pk}"]`;
+        await page.waitForSelector(row, { timeout: 30000 });
+        await page.locator(row + ' td:visible').first().click();
+        await page.waitForSelector('#nodesRight .node-detail-actions ' + SF, { timeout: 10000 });
+        await page.waitForTimeout(300);
+        await check(`${o.name} side pane`, page, '#nodesRight .node-detail-actions', PANE_ROWS, o);
+        if (SHOT_DIR) await page.screenshot({ path: path.join(SHOT_DIR, `920-${o.shot}-pane.png`) });
+        await step(`${o.name} side pane: no page errors`, async () => {
+          assert(rec.errors.length === 0, rec.errors.join(' | '));
+        });
+        await ctx.close();
+      }
+      continue;
     }
 
-    // ── The side pane ─────────────────────────────────────────────────────
-    {
-      const { ctx, page, rec } = await newCtx(o);
-      await page.goto(`${BASE}/#/nodes`, { waitUntil: 'domcontentloaded' });
+    // ── Phone: cold start, real taps all the way to the node page ─────────
+    const { ctx, page, rec } = await newCtx(o);
+    await page.goto(BASE + '/', { waitUntil: 'domcontentloaded' });
+    await waitConfig(page);
+    let reached = false;
+    await step(`${o.name}: cold start, Home → More → Nodes → row tap opens the node page`, async () => {
+      await tapOn(page, '[data-bottom-nav-tab="more"]');
+      await tapOn(page, '[data-bottom-nav-more-route="nodes"]');
+      await page.waitForFunction(() => location.hash.indexOf('#/nodes') === 0, null, { timeout: 10000 });
+      // The pubkey column is hidden at phone width: tap the first visible cell.
       const row = `tr[data-key="${node.pk}"]`;
       await page.waitForSelector(row, { timeout: 30000 });
-      // The pubkey column is hidden at phone width: use the first visible cell.
-      const cell = page.locator(row + ' td:visible').first();
-      if (o.touch) await cell.tap(); else await cell.click();
-      await page.waitForSelector('#nodesRight .node-detail-actions ' + TP, { timeout: 10000 }).catch(() => {});
-      const inPane = await page.$('#nodesRight .node-detail-actions ' + TP);
-      if (!inPane && o.touch) {
-        // At phone width the list opens the node's own page, which the
-        // section above already covered; the pane is a desktop layout.
-        console.log(`  - ${o.name} side pane: not shown at this width, the node page covers it`);
-      } else {
-        await check(`${o.name} side pane`, page, '#nodesRight .node-detail-actions', '#nodesRight .node-detail-role a[href$="/analytics"]', o);
-      }
-      if (SHOT_DIR) await page.screenshot({ path: path.join(SHOT_DIR, `920-${o.shot}-pane.png`) });
-      await step(`${o.name} side pane: no page errors`, async () => {
-        assert(rec.errors.length === 0, rec.errors.join(' | '));
+      await tapOn(page, row + ' td:visible');
+      await page.waitForSelector('.node-full-card', { timeout: 30000 });
+      const hash = await page.evaluate(() => location.hash);
+      assert(hash.toLowerCase().indexOf('#/nodes/' + PK) === 0, 'hash = ' + hash);
+      assert(await page.$('#nodesRight .node-detail-actions') === null, 'a side pane opened at phone width');
+      reached = true;
+    });
+    if (reached) {
+      await page.waitForTimeout(300);
+      await check(`${o.name} node page`, page, PAGE_ROW, `${PAGE_ROW} > *`, o);
+      if (SHOT_DIR) await page.screenshot({ path: path.join(SHOT_DIR, `920-${o.shot}-detail.png`) });
+      await step(`${o.name} node page: a real tap on "Oblique photo" opens the viewer`, async () => {
+        await tapOn(page, `${PAGE_ROW} ${SF}`);
+        await page.waitForSelector(DIALOG, { timeout: 5000 });
+        await page.keyboard.press('Escape');
+        await page.waitForSelector(DIALOG, { state: 'detached', timeout: 5000 }).catch(() => {});
       });
-      await ctx.close();
+      await step(`${o.name} node page: a real tap on "Terrain profile" opens the Path profile`, async () => {
+        await tapOn(page, `${PAGE_ROW} ${TP}`);
+        await page.waitForFunction((pk) => location.hash.indexOf('#/map?profile=' + pk) === 0, PK, { timeout: 5000 });
+      });
     }
+    await step(`${o.name}: no page errors`, async () => {
+      assert(rec.errors.length === 0, rec.errors.join(' | '));
+    });
+    await ctx.close();
   }
 
   await browser.close();
