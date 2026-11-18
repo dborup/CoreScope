@@ -101,7 +101,7 @@ function harness(opts) {
   const root = new El('div');
   const media = Object.assign({ '(max-width: 640px)': false, '(max-height: 419px)': false, '(prefers-reduced-motion: reduce)': false }, opts.media || {});
   const listeners = [];
-  const h = { clock, doc, root, media, listeners, flights: [], nav: [], mode: 'LIVE', suppressed: false, fetchResolve: null };
+  const h = { clock, doc, root, media, listeners, flights: [], nav: [], mode: 'LIVE', suppressed: false, fetchResolve: null, settings: opts.settings || null };
   const fetchJSON = opts.fetch === false ? null : () => new Promise((res) => { h.fetchResolve = res; });
   h.c = LM.create({
     doc, root,
@@ -112,6 +112,7 @@ function harness(opts) {
     matchMedia: (q) => ({ matches: !!media[q] }),
     getMode: () => h.mode,
     getZoom: () => 9,
+    getSettings: () => h.settings,
     isSuppressed: () => h.suppressed,
     profileOffered: () => !!opts.profile,
     navigate: (href) => h.nav.push(href),
@@ -470,6 +471,129 @@ test('100 mount/destroy cycles leave nothing behind', () => {
     assert.strictEqual(h.listeners.length, 0);
   }
   assert.strictEqual(LM.liveCount(), base);
+});
+
+section('=== live-moments: viewer settings (#881 M3) ===');
+
+test('SETTINGS: keys, defaults = the M2 constants, bounds, valid, resolve', () => {
+  const R = LM.SETTINGS;
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(R.KEYS)), ['enabled', 'visibleCards', 'dwellSeconds', 'showNewNode', 'showBackOnline', 'showRecordLink', 'showBusiest']);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(R.DEFAULTS)),
+    { enabled: true, visibleCards: 3, dwellSeconds: 8, showNewNode: true, showBackOnline: true, showRecordLink: true, showBusiest: true });
+  assert.strictEqual(LM.DWELL_MS, 8000);
+  [['visibleCards', [1, 5]], ['dwellSeconds', [3, 30]]].forEach(([k, [lo, hi]]) => {
+    [lo, hi, lo + 1].forEach((v) => assert.strictEqual(R.valid(k, v), true, k + ' ' + v));
+    [lo - 1, hi + 1, 0, -1, 2.5, '4', NaN, Infinity, null, true].forEach((v) => assert.strictEqual(R.valid(k, v), false, k + ' ' + String(v)));
+  });
+  ['enabled', 'showNewNode', 'showBusiest'].forEach((k) => {
+    assert.strictEqual(R.valid(k, false), true);
+    [0, 1, 'true', null, undefined].forEach((v) => assert.strictEqual(R.valid(k, v), false, k + ' ' + String(v)));
+  });
+  ['hasOwnProperty', 'constructor', '__proto__', 'maxPerMinute', 'historySize'].forEach((k) => assert.strictEqual(R.valid(k, 1), false, k));
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(R.resolve(null))), JSON.parse(JSON.stringify(R.DEFAULTS)));
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(R.resolve({ visibleCards: 9, dwellSeconds: '5', enabled: 'no', junk: 1 }))), JSON.parse(JSON.stringify(R.DEFAULTS)));
+  assert.strictEqual(R.resolve({ visibleCards: 2 }).visibleCards, 2);
+});
+
+test('every kind has its own show switch', () => {
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(Object.keys(LM.KIND_SETTING).sort())), ['back_online', 'busiest_repeater', 'new_node', 'record_link']);
+  Object.values(LM.KIND_SETTING).forEach((k) => assert.ok(LM.SETTINGS.KEYS.includes(k), k));
+});
+
+test('resolveInitialEnabled: hash > saved choice > customizer default > on', () => {
+  assert.strictEqual(LM.resolveInitialEnabled(null, null, false), false, 'default off');
+  assert.strictEqual(LM.resolveInitialEnabled(null, null, true), true);
+  assert.strictEqual(LM.resolveInitialEnabled(null, null, undefined), true, 'no setting: on');
+  assert.strictEqual(LM.resolveInitialEnabled(null, 'true', false), true, 'saved on beats default off');
+  assert.strictEqual(LM.resolveInitialEnabled(null, 'false', true), false, 'saved off beats default on');
+  assert.strictEqual(LM.resolveInitialEnabled('1', 'false', false), true);
+  assert.strictEqual(LM.resolveInitialEnabled('0', 'true', true), false);
+});
+
+test('visibleCap: the desktop setting, a phone always one', () => {
+  assert.strictEqual(LM.visibleCap(false), 3);
+  assert.strictEqual(LM.visibleCap(false, { visibleCards: 5 }), 5);
+  assert.strictEqual(LM.visibleCap(true, { visibleCards: 5 }), 1);
+});
+
+test('visibleCards: the stack takes the setting, the rest queue', () => {
+  const h = harness({ settings: { visibleCards: 2 } });
+  for (let i = 0; i < 4; i++) h.send(nodeM('v' + i));
+  h.tick();
+  assert.strictEqual(h.cards().length, 2);
+  assert.strictEqual(h.c.stats().queued, 2);
+});
+
+test('visibleCards: a phone ignores a larger setting', () => {
+  const h = harness({ settings: { visibleCards: 5 }, media: { '(max-width: 640px)': true } });
+  h.send(nodeM('a')); h.send(nodeM('b')); h.tick();
+  assert.strictEqual(h.cards().length, 1);
+});
+
+test('dwellSeconds: a card fades after the setting, not before', () => {
+  const h = harness({ settings: { dwellSeconds: 3 } });
+  h.send(nodeM('d')); h.tick();
+  h.tick(2900);
+  assert.strictEqual(h.cards().length, 1, 'still up at 2.9 s');
+  h.tick(200);
+  assert.strictEqual(h.cards().length, 0, 'gone after 3 s');
+  const slow = harness({ settings: { dwellSeconds: 20 } });
+  slow.send(nodeM('d')); slow.tick();
+  slow.tick(19000);
+  assert.strictEqual(slow.cards().length, 1);
+});
+
+test('a bad setting is the default, never a broken stack', () => {
+  const h = harness({ settings: { visibleCards: 99, dwellSeconds: -4 } });
+  for (let i = 0; i < 4; i++) h.send(nodeM('b' + i));
+  h.tick();
+  assert.strictEqual(h.cards().length, 3);
+  h.tick(7900);
+  assert.strictEqual(h.cards().length, 3, '8 s dwell');
+});
+
+test('per-kind switch: a hidden kind gets no card, no history, no queue slot', () => {
+  const h = harness({ settings: { showRecordLink: false } });
+  assert.strictEqual(h.c.ingest(linkM('l1')), false);
+  h.send(nodeM('n1')); h.tick();
+  assert.strictEqual(h.cards().length, 1);
+  assert.strictEqual(h.cards()[0].attrs['data-kind'], 'new_node');
+  assert.strictEqual(h.c.stats().history, 1);
+  h.c.openDrawer();
+  assert.strictEqual(h.root.find('live-moment-row').length, 1);
+});
+
+test('per-kind switch: the REST history skips a hidden kind too', () => {
+  const h = harness({ settings: { showNewNode: false } });
+  h.c.seed([nodeM('s1'), linkM('s2')]);
+  assert.strictEqual(h.c.stats().history, 1);
+});
+
+test('onSettingsChanged: hidden kinds leave, the cap re-fits, the drawer re-lists', () => {
+  const h = harness();
+  h.send(nodeM('a')); h.send(linkM('b')); h.send(nodeM('c')); h.send(nodeM('d')); h.tick();
+  assert.strictEqual(h.cards().length, 3);
+  assert.strictEqual(h.c.stats().queued, 1);
+  h.settings = { visibleCards: 1, showRecordLink: false };
+  h.c.onSettingsChanged(); h.tick();
+  assert.strictEqual(h.cards().every((c) => c.attrs['data-kind'] === 'new_node'), true, 'the record link card is gone');
+  assert.strictEqual(h.cards().length, 1, 'cap 1');
+  h.c.openDrawer();
+  assert.strictEqual(h.root.find('live-moment-row').filter((r) => r.attrs['data-kind'] === 'record_link').length, 0);
+  assert.strictEqual(h.root.find('live-moment-row').length, 3, 'the three node moments');
+  h.settings = null; h.c.onSettingsChanged();
+  assert.strictEqual(h.root.find('live-moment-row').length, 4, 'back to defaults: the history is whole again');
+});
+
+test('all kinds hidden: the drawer says there is nothing, no error', () => {
+  const h = harness({ settings: { showNewNode: false, showBackOnline: false, showRecordLink: false, showBusiest: false } });
+  h.send(nodeM('a')); h.tick(); h.c.openDrawer();
+  assert.strictEqual(h.cards().length, 0);
+  assert.strictEqual(h.root.find('live-moments-empty').length, 1);
+});
+
+test('onSettingsChanged after destroy is a no-op', () => {
+  const h = harness(); h.c.destroy(); h.c.onSettingsChanged();
 });
 
 (async () => {

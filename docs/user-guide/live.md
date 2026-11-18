@@ -70,6 +70,8 @@ Each packet type has a color and icon:
 - **Multibyte only** — show only multibyte (≥2-byte path-hash) packets and hide single-byte traffic. Single-byte path hashes collide heavily at scale, so their paths are unreliable; enable this for a cleaner, more trustworthy live picture. Off by default; the choice is remembered.
 - **Matrix mode** — visual effect overlay (just for fun)
 
+- **Moments** — short cards for a new node, a repeater back online, a record link or the busiest repeater, when the operator has turned them on. See [Live Moments](../moments.md).
+
 ## Tips
 
 - Use VCR pause when you spot something interesting — then step through packet by packet

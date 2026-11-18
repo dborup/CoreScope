@@ -36,8 +36,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto'];
+  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments'];
+  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -66,6 +66,11 @@
     ownerBadge: '--owner-badge',
     // #724 M3 — the antenna sites map layer (canvas markers + popup).
     mastSite: '--mast-site', mastInterference: '--mast-interference',
+    // #881 M3 — the Live "Moments" cards: the card fill and one icon /
+    // stripe accent per kind.
+    momentCardBg: '--moment-card-bg', momentNewNode: '--moment-new-node',
+    momentBackOnline: '--moment-back-online', momentRecordLink: '--moment-record-link',
+    momentBusiest: '--moment-busiest',
     font: '--font', mono: '--mono'
   };
 
@@ -76,9 +81,13 @@
     'terrainBuilding', 'terrainVegetation', 'ownerBadge'];
   // #724 M3 — likewise outside preset detection: no preset defines them.
   var MASTS_COLOR_KEYS = ['mastSite', 'mastInterference'];
+  // #881 M3 — likewise: the kind accents follow the colourblind preset
+  // (cb-presets.js momentAccents), not the theme preset.
+  var MOMENTS_COLOR_KEYS = ['momentCardBg', 'momentNewNode', 'momentBackOnline', 'momentRecordLink', 'momentBusiest'];
 
   var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) {
-    return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1 && MASTS_COLOR_KEYS.indexOf(k) === -1;
+    return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1 && MASTS_COLOR_KEYS.indexOf(k) === -1 &&
+      MOMENTS_COLOR_KEYS.indexOf(k) === -1;
   });
 
   // ── Brand logo swap helper (PR #1137) ──
@@ -344,6 +353,8 @@
     terrainBuilding: 'Buildings (DSM)', terrainVegetation: 'Trees/other (DSM)',
     ownerBadge: 'Owner Height Badge',
     mastSite: 'Antenna Site', mastInterference: 'Interference Ring',
+    momentCardBg: 'Card Fill', momentNewNode: 'New Node', momentBackOnline: 'Back Online',
+    momentRecordLink: 'Record Link', momentBusiest: 'Busiest Repeater',
     font: 'Body Font', mono: 'Mono Font'
   };
 
@@ -373,6 +384,11 @@
     ownerBadge: 'Path profile and node page: the badge on an antenna height the node\u2019s owner set',
     mastSite: 'Map: every Mastedatabasen antenna site (mast, tower or rooftop)',
     mastInterference: 'Map: the ring around sites with a 700/800/900 MHz transmitter',
+    momentCardBg: 'Live: the background of a Moments card and of its drawer rows',
+    momentNewNode: 'Live: the icon and stripe of a new-node moment',
+    momentBackOnline: 'Live: the icon and stripe of a back-online moment',
+    momentRecordLink: 'Live: the icon and stripe of a record-link moment',
+    momentBusiest: 'Live: the icon and stripe of a busiest-repeater moment',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
   };
 
@@ -590,6 +606,34 @@
     var R = _heritageRule();
     if (!R) return null;
     var sec = effectiveConfig && effectiveConfig.heritage;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
+  // ── #881 M3 — Live Moments viewer settings ──
+  // On/off default, visible cards, dwell and one switch per kind. The keys,
+  // defaults and bounds are the rule in public/live-moments.js
+  // (LiveMoments.SETTINGS), which the Live page reads back, so the
+  // customizer stores exactly what is used. That file loads after this one,
+  // hence the lazy lookup; without it no value is accepted. The operator's
+  // thresholds and rate stay in config.json.
+  var _lastMoments = null;
+
+  function _momentsRule() {
+    var R = window.LiveMoments && window.LiveMoments.SETTINGS;
+    return R && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function isValidMomentsSetting(key, val) {
+    var R = _momentsRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective Moments settings (this section over the defaults), or
+   *  null without the rule. */
+  function momentsSettings(effectiveConfig) {
+    var R = _momentsRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.moments;
     return R.resolve(sec && typeof sec === 'object' ? sec : {});
   }
 
@@ -879,6 +923,16 @@
           else console.warn('[customizer-v2] Invalid ancient monuments setting rejected:', 'heritage.' + hk2, hIn[hk2]);
         }
         if (Object.keys(hOut).length) clean[key] = hOut;
+      } else if (key === 'moments' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #881 M3 — the Live Moments settings, each by the module's rule.
+        var moIn = delta[key], moOut = {}, moRule = _momentsRule(), moKeys = moRule ? moRule.KEYS : [];
+        for (var moi = 0; moi < moKeys.length; moi++) {
+          var mok = moKeys[moi];
+          if (!_own(moIn, mok) || moIn[mok] == null) continue;
+          if (isValidMomentsSetting(mok, moIn[mok])) moOut[mok] = moIn[mok];
+          else console.warn('[customizer-v2] Invalid Moments setting rejected:', 'moments.' + mok, moIn[mok]);
+        }
+        if (Object.keys(moOut).length) clean[key] = moOut;
       } else if (key === 'skraafoto' && typeof delta[key] === 'object' && delta[key] !== null) {
         // #737 — the oblique photo viewer's defaults, by the viewer's rule.
         var sIn = delta[key], sOut = {}, sRule = _skraafotoRule(), sKeys = sRule ? sRule.KEYS : [];
@@ -1206,6 +1260,15 @@
       } catch (_e) { /* no CustomEvent: the next map reads them anyway */ }
     }
     _lastHeritage = heritageNow;
+    /* #881 M3 — the Live page re-fits its Moments stack and, when the
+     * on/off default moved, its checkbox. */
+    var momentsNow = JSON.stringify(momentsSettings(effectiveConfig));
+    if (_lastMoments !== null && _lastMoments !== momentsNow) {
+      try {
+        window.dispatchEvent(new CustomEvent('moments-defaults-changed'));
+      } catch (_e) { /* no CustomEvent: the next Live page reads them anyway */ }
+    }
+    _lastMoments = momentsNow;
     /* #734 — the same for the DHM overlay defaults: an open map's layer
      * control re-reads the contour min-zoom on this event. */
     var dhmNow = JSON.stringify(dhmOverlaySettings(effectiveConfig));
@@ -1486,6 +1549,20 @@
           }
         }
       }
+      // #881 M3 — moments: switches and two bounded whole numbers.
+      if (key === 'moments' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var morule = _momentsRule();
+        for (var mosk in obj[key]) {
+          if (!_own(obj[key], mosk)) continue;
+          if (morule && morule.KEYS.indexOf(mosk) === -1) {
+            console.warn('[customizer-v2] Unknown moments key in import:', mosk);
+          } else if (!isValidMomentsSetting(mosk, obj[key][mosk])) {
+            var molim = morule && morule.LIMITS[mosk];
+            errors.push('Invalid Moments setting: moments.' + mosk + ' = "' + obj[key][mosk] + '" \u2014 must be ' +
+              (!morule ? 'unavailable without the Live page' : molim ? 'a whole number ' + molim[0] + '-' + molim[1] : 'true or false'));
+          }
+        }
+      }
       // #737 — skraafoto: two lists of values and a boolean.
       if (key === 'skraafoto' && typeof obj[key] === 'object' && obj[key] !== null) {
         var srule = _skraafotoRule();
@@ -1717,7 +1794,7 @@
       { id: 'theme', glyph: 'ph:palette', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', glyph: 'ph:target', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'home', glyph: 'ph:house', title: 'Home', badge: _tabBadge('home') },
-      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
+      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + _countOverrides('moments') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', glyph: 'ph:map-trifold', title: 'GeoFilter' },
       { id: 'export', glyph: 'ph:download-simple', title: 'Export' }
     ];
@@ -1939,6 +2016,12 @@
       mastsRows += _renderColorRow(mk, section, current[mk] || _cssVarValue(mk), serverCurrent[mk]);
     }
 
+    var momentsRows = '';
+    for (var moci = 0; moci < MOMENTS_COLOR_KEYS.length; moci++) {
+      var mock = MOMENTS_COLOR_KEYS[moci];
+      momentsRows += _renderColorRow(mock, section, current[mock] || _cssVarValue(mock), serverCurrent[mock]);
+    }
+
     return '<div class="cust-panel' + (_activeTab === 'theme' ? ' active' : '') + '" data-panel="theme">' +
       _renderPresets() +
       '<p class="cust-section-title">' + modeLabel + '</p>' +
@@ -1947,6 +2030,7 @@
       '<details class="cust-advanced"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Advanced (' + ADVANCED_KEYS.length + ' options)</summary>' + advancedRows + '</details>' +
       '<details class="cust-terrain-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Terrain profile chart (' + TERRAIN_COLOR_KEYS.length + ' options)</summary>' + terrainRows + '</details>' +
       '<details class="cust-masts-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Antenna sites map layer (' + MASTS_COLOR_KEYS.length + ' options)</summary>' + mastsRows + '</details>' +
+      '<details class="cust-moments-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live moments cards (' + MOMENTS_COLOR_KEYS.length + ' options)</summary>' + momentsRows + '</details>' +
       '<details class="cust-fonts" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Fonts</summary>' + fontRows + '</details>' +
     '</div>';
   }
@@ -2211,6 +2295,7 @@
       _renderDHMOverlaySettings() +
       _renderHeritageSettings() +
       _renderSkraafotoSettings() +
+      _renderMomentsSettings() +
     '</div>';
   }
 
@@ -2449,6 +2534,41 @@
           num('warnDistanceM', 'Warn within (m) of a zone', 'Empty: every zone the server reports (its own radius). An end inside a zone is always shown.', 10,
             h.warnDistanceM === null ? '' : String(h.warnDistanceM), 'server radius')
         : '');
+  }
+
+  // ── #881 M3 Live Moments ──
+  // Shown only where the server has Moments on (/api/config/client). The
+  // on/off here is the default; a ?moments= link, or the checkbox on the
+  // Live page, still wins until Reset All.
+  function _renderMomentsSettings() {
+    var R = _momentsRule();
+    if (!R || !window.MC_MOMENTS_CFG) return '';
+    var m = momentsSettings(_getEffective());
+    var check = function (key, label, hint) {
+      var id = 'cv2-moments-' + key;
+      return '<div class="cust-field"><label class="cust-check" for="' + id + '" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+        '<input type="checkbox" id="' + id + '" data-cv2-moments="' + key + '"' + (m[key] ? ' checked' : '') + ' style="width:20px;height:20px">' +
+        '<span>' + label + _overrideDot('moments', key) + '</span></label>' +
+        (hint ? '<div class="cust-hint">' + hint + '</div>' : '') + '</div>';
+    };
+    var num = function (key, label, hint) {
+      var id = 'cv2-moments-' + key, lim = R.LIMITS[key];
+      return '<div class="cust-terrain-row">' +
+        '<div><label for="' + id + '">' + label + _overrideDot('moments', key) + '</label>' +
+          '<div class="cust-hint">' + hint + '</div></div>' +
+        '<input type="number" id="' + id + '" min="' + lim[0] + '" max="' + lim[1] + '" step="1" ' +
+          'inputmode="numeric" data-cv2-moments="' + key + '" value="' + escAttr(String(m[key])) + '">' +
+      '</div>';
+    };
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Live Moments</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Short cards on the Live map for new nodes, repeaters back online, record links and the busiest repeater. Which events count is the operator\u2019s setting.</p>' +
+      check('enabled', 'Show Moments on the Live page by default', 'A link that says otherwise, or your own last choice on the Live page, still wins, until Reset All.') +
+      num('visibleCards', 'Cards shown at once (desktop)', 'A phone always shows one; the rest wait their turn and stay in the list') +
+      num('dwellSeconds', 'Seconds before a card fades', 'A card you hover or focus stays until you leave it') +
+      check('showNewNode', 'New node', '') +
+      check('showBackOnline', 'Back online', '') +
+      check('showRecordLink', 'Record link', '') +
+      check('showBusiest', 'Busiest repeater', '');
   }
 
   // ── #737 Oblique photo viewer defaults ──
@@ -3321,6 +3441,29 @@
       });
     });
 
+    // #881 M3 — Live Moments settings. A value back at its default is a
+    // cleared override; a bad one is put back. A new on/off default makes the
+    // viewer's saved Live choice forgotten, so it applies.
+    container.querySelectorAll('[data-cv2-moments]').forEach(function (inp) {
+      var key = inp.dataset.cv2Moments;
+      inp.addEventListener('change', function () {
+        var R = _momentsRule();
+        if (!R) return;
+        var v = inp.type === 'checkbox' ? !!inp.checked : (/^[0-9]{1,3}$/.test(inp.value) ? Number(inp.value) : undefined);
+        var now = momentsSettings(_getEffective());
+        if (v === undefined || !isValidMomentsSetting(key, v)) {
+          if (inp.type === 'checkbox') inp.checked = !!now[key];
+          else inp.value = String(now[key]);
+          return;
+        }
+        if (key === 'enabled') {
+          try { localStorage.removeItem(window.LiveMoments.STORAGE_KEY); } catch (_e) { /* private mode */ }
+        }
+        if (v === R.DEFAULTS[key]) clearOverride('moments', key);
+        else setOverride('moments', key, v);
+      });
+    });
+
     // #737 — oblique photo viewer defaults. A value back at its default is
     // a cleared override; a bad one is put back. The next viewer reads it.
     container.querySelectorAll('[data-cv2-skraafoto]').forEach(function (inp) {
@@ -3895,6 +4038,7 @@
       'meshcore-1byte-hops-mode',  // #674 1-byte path hops: show/mark/hide
       'mc-dark-tile-provider',     // #1430 dark-tile provider pick
       'mc-light-tile-provider',    // light-tile provider pick (#741)
+      'live-moments',              // the Live page's Moments choice (#881 M3)
       'meshcore-distance-unit'     // mirror of the Distance unit pick (#839)
     ];
     for (var i = 0; i < CUSTOMIZER_LS_KEYS.length; i++) {
@@ -3955,6 +4099,7 @@
           rs.removeProperty('--mc-mb-' + k);
         });
         for (var ri = 0; ri < 5; ri++) rs.removeProperty('--mc-rt-ramp-' + ri);
+        ['new-node', 'back-online', 'record-link', 'busiest'].forEach(function (k) { rs.removeProperty('--mc-moment-' + k); });
         // Theme vars the customizer might have stamped onto :root via
         // applyCSS (logo accents + every entry in THEME_CSS_MAP).
         rs.removeProperty('--logo-accent');
@@ -4076,6 +4221,11 @@
     isValidSkraafotoSetting: isValidSkraafotoSetting,
     skraafotoSettings: skraafotoSettings,
     renderSkraafotoSettings: _renderSkraafotoSettings,
+    // #881 M3 — exposed for tests; see test-881-m3-customizer-moments.js.
+    MOMENTS_COLOR_KEYS: MOMENTS_COLOR_KEYS,
+    isValidMomentsSetting: isValidMomentsSetting,
+    momentsSettings: momentsSettings,
+    renderMomentsSettings: _renderMomentsSettings,
     countOverrides: _countOverrides,
     // #741 — exposed for tests; see test-issue-741-customizer-base-maps.js.
     renderTileProviderSelector: _renderTileProviderSelector,
