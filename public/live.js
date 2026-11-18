@@ -3016,13 +3016,13 @@
 
   // #901: pure view model for the node popup's health. getHealthLastHeard
   // never falls back from an explicit stats.lastHeard null to relay-touched
-  // directory timestamps; a null status is "Unknown" (as in Favorites and
-  // My Mesh), not a red "Offline".
+  // directory timestamps. A null status is painted red like silent, the
+  // shared convention (Favorites status-err, My Mesh and Analytics count it
+  // as silent), but labelled "Unknown" as Favorites does, not "Offline".
   function liveNodeHealthView(n, stats, nowMs) {
     const heardAt = getHealthLastHeard(n, stats);
     const status = getHealthStatus(n && n.role, heardAt, nowMs);
-    const dotClass = status === 'healthy' ? 'health-green' : status === 'degraded' ? 'health-yellow'
-      : status === 'silent' ? 'health-red' : 'status-muted';
+    const dotClass = status === 'healthy' ? 'health-green' : status === 'degraded' ? 'health-yellow' : 'health-red';
     const label = status === 'healthy' ? 'Online' : status === 'degraded' ? 'Degraded'
       : status === 'silent' ? 'Offline' : 'Unknown';
     return { status, heardAt, dotClass, label };
@@ -3063,7 +3063,7 @@
           </div>
           <div style="margin-bottom:12px;">
             <span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600;background:${roleColor};color:#fff;">${roleLabel.toUpperCase()}</span>
-            <span style="color:var(--text-muted);font-size:12px;margin-left:8px;" aria-label="Status: ${statusLabel}">${statusLabel}</span>
+            <span style="color:var(--text-muted);font-size:12px;margin-left:8px;"><span class="sr-only">Status: </span>${statusLabel}</span>
           </div>
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
             <code style="font-size:10px;word-break:break-all;">${escapeHtml(n.public_key)}</code>

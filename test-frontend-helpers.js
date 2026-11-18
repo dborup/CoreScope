@@ -1785,8 +1785,12 @@ console.log('\n=== live.js: pruneStaleNodes ===');
     const { view } = popupHealth(n, { lastHeard: null });
     assert.strictEqual(view.status, null);
     assert.strictEqual(view.heardAt, null);
-    assert.strictEqual(view.label, 'Unknown');
-    assert.strictEqual(view.dotClass, 'status-muted', 'null status is muted, never red');
+    assert.strictEqual(view.label, 'Unknown', 'labelled Unknown like Favorites, never Offline');
+    // Shared convention: Favorites paints null status-err, My Mesh and
+    // Analytics count it as silent, so the popup uses its silent (red) class.
+    const silent = popupHealth({ role: 'repeater', last_seen: agoIso(100) }, null).view;
+    assert.strictEqual(view.dotClass, 'health-red');
+    assert.strictEqual(view.dotClass, silent.dotClass, 'null status paints like silent');
   });
 
   test('live popup health: missing stats falls back to last_heard then last_seen', () => {

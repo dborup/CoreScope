@@ -107,9 +107,10 @@ function check(label, fn) {
     }
   });
   check('real health decision blocks preserve confirmed relays and explicit null', () => {
-    for (const [name, block] of blocks.filter(([name]) => name !== 'Live')) {
+    const nullWant = { Favorites: 'unknown', Live: null };
+    for (const [name, block] of blocks) {
       const node = { role: 'repeater', last_seen: Date.now() };
-      for (const [heard, want] of [[Date.now() - HOUR / 2, 'healthy'], [null, name === 'Favorites' ? 'unknown' : 'silent']]) {
+      for (const [heard, want] of [[Date.now() - HOUR / 2, 'healthy'], [null, name in nullWant ? nullWant[name] : 'silent']]) {
         const stats = { lastHeard: heard, lastAdvert: null };
         assert.equal(block(node, stats, { node, stats }, node, r.getHealthLastHeard, r.getHealthStatus), want, name);
       }

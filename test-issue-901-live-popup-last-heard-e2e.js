@@ -2,6 +2,7 @@
 // evidence (stats.lastHeard), not from last_seen. Synthetic local API; no
 // mesh database. 375x560 touch phone, cold start, real taps.
 'use strict';
+const { AxeBuilder } = require('@axe-core/playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -15,7 +16,7 @@ const iso = hours => new Date(NOW - hours * HOUR).toISOString();
 // last_seen and the health API disagree in both directions.
 const fixtures = [
   { name: 'Stale seen fresh heard', seen: 100, heard: 2, want: 'Online', cls: 'health-green' },
-  { name: 'Fresh seen never heard', seen: 1, heard: null, want: 'Unknown', cls: 'status-muted' },
+  { name: 'Fresh seen never heard', seen: 1, heard: null, want: 'Unknown', cls: 'health-red' },
   { name: 'Fresh seen old heard', seen: 1, heard: 100, want: 'Offline', cls: 'health-red' },
 ].map((f, i) => ({ ...f, key: (i + 1).toString(16).padStart(2, '0') + '34'.repeat(31) }));
 const byKey = new Map(fixtures.map(f => [f.key, f]));
@@ -84,8 +85,17 @@ const server = http.createServer((req, res) => {
       await panel.getByText(f.name, { exact: true }).waitFor();
       const dot = panel.locator('span[aria-hidden="true"]').first();
       assert.ok((await dot.getAttribute('class')).split(/\s+/).includes(f.cls), f.name + ': dot class ' + f.cls); checks++;
-      assert.equal(await panel.locator('[aria-label^="Status:"]').getAttribute('aria-label'), 'Status: ' + f.want); checks++;
-      assert.equal(await panel.locator('[aria-label^="Status:"]').innerText(), f.want, f.name + ': status text'); checks++;
+      // The accessible name is what the browser exposes, not an attribute
+      // string: "Status: X" in the accessibility tree, "X" on screen.
+      const aria = await panel.ariaSnapshot();
+      assert.ok(aria.includes('Status: ' + f.want), f.name + ': accessible status text in ' + aria); checks++;
+      const status = panel.getByText('Status: ' + f.want, { exact: true });
+      const prefix = status.locator('.sr-only');
+      assert.equal(await prefix.textContent(), 'Status: ');
+      assert.ok((await prefix.boundingBox()).width <= 1, f.name + ': "Status:" prefix is visually hidden');
+      assert.equal(await status.evaluate(el => el.lastChild.textContent), f.want, f.name + ': visible status text'); checks++;
+      const axe = await new AxeBuilder({ page }).include('#nodeDetailContent').withRules(['aria-prohibited-attr']).analyze();
+      assert.deepEqual(axe.violations.concat(axe.incomplete).map(v => v.id), [], f.name + ': axe aria-prohibited-attr'); checks++;
       const row = panel.locator('tr', { hasText: 'Last Heard' });
       const rowText = await row.innerText();
       if (f.heard == null) {
