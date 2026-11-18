@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -105,7 +107,7 @@ func TestTouchRelayNodes_Debounces(t *testing.T) {
 }
 
 // TestTouchRelayNodes_IgnoresEmptyAndUnknown covers the unresolved-hop case:
-// resolvePathWithContext yields nil for ambiguous or unknown prefixes, and
+// resolvePath yields nil for ambiguous or unknown prefixes, and
 // unknown pubkeys must not create rows.
 func TestTouchRelayNodes_IgnoresEmptyAndUnknown(t *testing.T) {
 	store := newTestStore(t)
@@ -243,5 +245,165 @@ func TestInsertTransmission_TouchesOnlyFloodRelays(t *testing.T) {
 				t.Errorf("resolved_path = %q, want the resolved hop regardless of route", resolved)
 			}
 		})
+	}
+}
+
+// floodACK builds one observation of a FLOOD ACK (header 0x0d) whose path
+// holds hops of width bytes each, followed by the 4-byte ACK payload.
+func floodACK(hash, observer, rxTime string, width int, hops ...string) *PacketData {
+	pathByte := byte(width-1)<<6 | byte(len(hops))
+	quoted := make([]string, len(hops))
+	for i, h := range hops {
+		quoted[i] = `"` + h + `"`
+	}
+	return &PacketData{
+		Hash: hash, RouteType: 1, PayloadType: 3,
+		RawHex:     fmt.Sprintf("0d%02x%s11223344", pathByte, strings.Join(hops, "")),
+		PathJSON:   "[" + strings.Join(quoted, ",") + "]",
+		ObserverID: observer, Timestamp: rxTime,
+	}
+}
+
+func storedResolvedPath(t *testing.T, s *Store, hash string) string {
+	t.Helper()
+	var rp string
+	if err := s.db.QueryRow(
+		`SELECT COALESCE(o.resolved_path,'') FROM observations o
+		 JOIN transmissions t ON t.id = o.transmission_id
+		 WHERE t.hash = ?`, hash,
+	).Scan(&rp); err != nil {
+		t.Fatal(err)
+	}
+	return rp
+}
+
+// TestInsertTransmission_AdjacencyDoesNotRefreshCollidingRelays (#897,
+// upstream 2334/2329): adjacency settles a colliding prefix for the displayed
+// path, but it does not prove which of the colliding relays transmitted. The
+// touch takes the server's rule (confirmedRelayKey in
+// cmd/server/node_activity.go): only a prefix that names one relay refreshes
+// last_seen. The path mixes a unique hop with a colliding one, at every wire
+// hash size.
+func TestInsertTransmission_AdjacencyDoesNotRefreshCollidingRelays(t *testing.T) {
+	for width := 1; width <= 3; width++ {
+		t.Run(fmt.Sprintf("%d-byte hops", width), func(t *testing.T) {
+			store := newTestStore(t)
+			uniquePfx := strings.Repeat("aa", width)
+			collidingPfx := strings.Repeat("bb", width)
+			unique := uniquePfx + strings.Repeat("11", 32-width)
+			adjacent := collidingPfx + strings.Repeat("22", 32-width)
+			other := collidingPfx + strings.Repeat("33", 32-width)
+			const before = "2026-07-01T00:00:00Z"
+			const rxTime = "2026-07-10T12:00:00Z"
+			for _, pk := range []string{unique, adjacent, other} {
+				seedRelayNode(t, store, pk, "Fixture relay", before)
+			}
+			if err := store.RefreshPrefixIndex(); err != nil {
+				t.Fatal(err)
+			}
+			graph := NewNeighborGraph()
+			graph.AddEdge(unique, adjacent)
+			store.neighborGraph.store(graph)
+			if err := store.UpsertObserver("fixture-observer", "Fixture observer", "", nil); err != nil {
+				t.Fatal(err)
+			}
+
+			data := floodACK("relay-certainty", "fixture-observer", rxTime, width, uniquePfx, collidingPfx)
+			if _, err := store.InsertTransmission(data); err != nil {
+				t.Fatal(err)
+			}
+
+			// The displayed path keeps the contextual resolution.
+			if got, want := storedResolvedPath(t, store, data.Hash), `["`+unique+`","`+adjacent+`"]`; got != want {
+				t.Fatalf("resolved_path = %s, want %s", got, want)
+			}
+			if got := nodeLastSeen(t, store, unique); got != rxTime {
+				t.Errorf("unique relay last_seen = %q, want %q", got, rxTime)
+			}
+			for _, pk := range []string{adjacent, other} {
+				if got := nodeLastSeen(t, store, pk); got != before {
+					t.Errorf("colliding relay %s last_seen = %q, want unchanged %q", pk[:8], got, before)
+				}
+			}
+			if got := store.Stats.RelayTouches.Load(); got != 1 {
+				t.Errorf("RelayTouches = %d, want 1 (the unique hop only)", got)
+			}
+		})
+	}
+}
+
+// TestInsertTransmission_ObserverAnchorDoesNotRefreshCollidingRelay covers
+// the other contextual resolution in this fork: a flood path's last hop is
+// settled backwards from the observer (#188, resolveObservationPath). That
+// is display evidence too, not proof of who transmitted.
+func TestInsertTransmission_ObserverAnchorDoesNotRefreshCollidingRelay(t *testing.T) {
+	store := newTestStore(t)
+	adjacent := "bb" + strings.Repeat("22", 31)
+	other := "bb" + strings.Repeat("33", 31)
+	observer := "cc" + strings.Repeat("44", 31)
+	const before = "2026-07-01T00:00:00Z"
+	const rxTime = "2026-07-10T12:00:00Z"
+	for _, pk := range []string{adjacent, other} {
+		seedRelayNode(t, store, pk, "Fixture relay", before)
+	}
+	if err := store.RefreshPrefixIndex(); err != nil {
+		t.Fatal(err)
+	}
+	graph := NewNeighborGraph()
+	graph.AddEdge(observer, adjacent)
+	store.neighborGraph.store(graph)
+	if err := store.UpsertObserver(observer, "Fixture observer", "", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	data := floodACK("observer-anchor", observer, rxTime, 1, "bb")
+	if _, err := store.InsertTransmission(data); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := storedResolvedPath(t, store, data.Hash), `["`+adjacent+`"]`; got != want {
+		t.Fatalf("resolved_path = %s, want %s", got, want)
+	}
+	for _, pk := range []string{adjacent, other} {
+		if got := nodeLastSeen(t, store, pk); got != before {
+			t.Errorf("colliding relay %s last_seen = %q, want unchanged %q", pk[:8], got, before)
+		}
+	}
+	if got := store.Stats.RelayTouches.Load(); got != 0 {
+		t.Errorf("RelayTouches = %d, want 0", got)
+	}
+}
+
+// TestInsertTransmission_ListenerRoleDoesNotMakePrefixAmbiguous pins the
+// candidate set the touch shares with the server: only relay roles are prefix
+// candidates (isRelayRole here, canAppearInPath in buildPrefixMap there), so
+// a companion sharing a repeater's prefix leaves that prefix unique and the
+// repeater is refreshed, as the server's uniqueResolve would confirm it.
+func TestInsertTransmission_ListenerRoleDoesNotMakePrefixAmbiguous(t *testing.T) {
+	store := newTestStore(t)
+	repeater := "dd" + strings.Repeat("55", 31)
+	companion := "dd" + strings.Repeat("66", 31)
+	const before = "2026-07-01T00:00:00Z"
+	const rxTime = "2026-07-10T12:00:00Z"
+	seedRelayNode(t, store, repeater, "Fixture relay", before)
+	if err := store.UpsertNode(companion, "Fixture companion", "companion", nil, nil, before); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RefreshPrefixIndex(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertObserver("fixture-observer", "Fixture observer", "", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := store.InsertTransmission(floodACK("listener-role", "fixture-observer", rxTime, 1, "dd")); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := nodeLastSeen(t, store, repeater); got != rxTime {
+		t.Errorf("repeater last_seen = %q, want %q", got, rxTime)
+	}
+	if got := nodeLastSeen(t, store, companion); got != before {
+		t.Errorf("companion last_seen = %q, want unchanged %q", got, before)
 	}
 }
