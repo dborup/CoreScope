@@ -297,6 +297,7 @@ run test-issue-1668-m3-typography.js
 run test-mqtt-status-panel.js
 run test-issue-1697-mqtt-mobile-e2e.js
 run test-warmup-banner.js
+run test-warmup-banner-stale-pill-894.js
 run test-issue-1633-hide-1byte-hops.js
 run test-issue-673-map-hide-inferred.js
 run test-issue-674-1byte-hop-modes.js

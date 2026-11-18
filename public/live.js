@@ -382,7 +382,9 @@
           probe.remove();
           return px;
         })();
-        const h = Math.max(0, window.innerHeight - reserve);
+        // #894: the stale-source pill row (in flow above the page) too.
+        const pills = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--warmup-pills-h')) || 0;
+        const h = Math.max(0, window.innerHeight - reserve - pills);
         if (page) page.style.height = h + 'px';
         if (appEl) appEl.style.height = h + 'px';
         if (map) {
@@ -402,6 +404,7 @@
       [50, 200, 500, 1000, 2000].forEach(ms => setTimeout(_onResize, ms));
     };
     window.addEventListener('orientationchange', _onOrientationChange);
+    window.addEventListener('warmup-pills-resize', _onResize);
     if (window.visualViewport) {
       window.visualViewport.addEventListener('resize', _onResize);
     }
@@ -5107,6 +5110,7 @@
     if (map) { map.remove(); map = null; }
     if (_onResize) {
       window.removeEventListener('resize', _onResize);
+      window.removeEventListener('warmup-pills-resize', _onResize);
       if (window.visualViewport) window.visualViewport.removeEventListener('resize', _onResize);
     }
     if (_onOrientationChange) { window.removeEventListener('orientationchange', _onOrientationChange); _onOrientationChange = null; }
