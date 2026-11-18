@@ -811,7 +811,8 @@
     const chain = (hopNames || []).map(escapeHtml).join(' → ');
     const link = hash ? `<a class="lc-path-link" href="#/packets/${hash}" style="color:${color}">full detail →</a>` : '';
     // #880 — only a valid 16-hex hash reaches the markup (and the button).
-    const followHash = typeof LiveFollow !== 'undefined' ? LiveFollow.parseFollowParam(hash) : null;
+    const LF = typeof window !== 'undefined' ? window.LiveFollow : null;
+    const followHash = LF ? LF.parseFollowParam(hash) : null;
     const follow = followHash ? `<button type="button" class="lc-follow-btn" data-follow-hash="${followHash}">Follow ▶</button>` : '';
     return `<div class="lc-path-popup">
       <span class="lc-path-badge" style="background:${color}">${typeName}</span>
@@ -2108,7 +2109,7 @@
     _observerRosterPromise = fetch('/api/observers').then(function(r) { return r.json(); }).then(function(data) {
       if (generation !== liveGeneration) return;
       setObserverIataMap(buildObserverIataMap(data));
-      if (window.LiveFollow) observerRoster = LiveFollow.buildObserverRoster(data);
+      if (window.LiveFollow) observerRoster = window.LiveFollow.buildObserverRoster(data);
     }).catch(function() { /* leave maps empty; filter will hide all when active */ });
     // #880 — deep link #/live?follow=<hash>; its fetch waits for the roster.
     startFollowFromHash();
@@ -3883,7 +3884,7 @@
     // #880 — "Follow next packet": the first group that passed every filter
     // above, i.e. the next one the viewer can see.
     if (followArmed && !isReplay) {
-      const nextHash = window.LiveFollow && LiveFollow.parseFollowParam(first.hash);
+      const nextHash = window.LiveFollow && window.LiveFollow.parseFollowParam(first.hash);
       if (nextHash) startFollow(nextHash, { settleMs: followSettleMs(first._ts) });
     }
 
@@ -5073,7 +5074,7 @@
     const rssi = pkt.RSSI ?? pkt.rssi ?? null;
     const observer = pkt.observer_name || pkt.observer || '';
     const pktId = pkt.id || '';
-    const followHash = window.LiveFollow ? LiveFollow.parseFollowParam(pkt.hash) : null;
+    const followHash = window.LiveFollow ? window.LiveFollow.parseFollowParam(pkt.hash) : null;
 
     const card = document.createElement('div');
     card.className = 'feed-detail-card';
@@ -5214,9 +5215,9 @@
   // Deep link #/live?follow=<hash>, read once per init after loadNodes().
   function startFollowFromHash() {
     if (!window.LiveFollow || !getHashParams) return;
-    const raw = getHashParams().get(LiveFollow.HASH_PARAM);
+    const raw = getHashParams().get(window.LiveFollow.HASH_PARAM);
     if (raw == null) return;
-    const h = LiveFollow.parseFollowParam(raw);
+    const h = window.LiveFollow.parseFollowParam(raw);
     if (h) startFollow(h, { settleMs: 0 });
     else showFollowToast('Not a packet hash: cannot follow this link.');
   }
@@ -5305,7 +5306,7 @@
       return;
     }
     if (st !== followState) return;
-    const labels = window.PayloadLabels && PayloadLabels.api;
+    const labels = window.PayloadLabels && window.PayloadLabels.api;
     st.model = LF.reduceFollow(detail, {
       roster: observerRoster,
       skew: LF.buildSkewMap(skewList),
@@ -5470,7 +5471,7 @@
       if (r.pos) followMarker(r.pos, 'lf-relay', null).addTo(st.layer);
     } else if (e.kind === 'observer') {
       const o = m.observers[e.index];
-      if (o.pos) followMarker(o.pos, 'lf-observer' + (o.late ? ' lf-late' : ''), o.name + ' ' + LiveFollow.formatOffset(o), !!o.clock).addTo(st.layer);
+      if (o.pos) followMarker(o.pos, 'lf-observer' + (o.late ? ' lf-late' : ''), o.name + ' ' + window.LiveFollow.formatOffset(o), !!o.clock).addTo(st.layer);
     } else if (e.kind === 'summary') {
       st.done = true;
       renderFollowSummary(st);
@@ -5556,7 +5557,7 @@
     if (st.keyHandler) { document.removeEventListener('keydown', st.keyHandler); st.keyHandler = null; }
     if (st.layer) { try { st.layer.remove(); } catch (_) {} st.layer = null; }
     if (st.card) { st.card.remove(); st.card = null; }
-    if (!(opts && opts.keepUrl) && window.LiveFollow) setLiveHashParam(LiveFollow.HASH_PARAM, '');
+    if (!(opts && opts.keepUrl) && window.LiveFollow) setLiveHashParam(window.LiveFollow.HASH_PARAM, '');
   }
 
   function destroy() {
