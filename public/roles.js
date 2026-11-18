@@ -477,6 +477,58 @@
     return node && _healthTimestamp(node.last_seen) !== null ? node.last_seen : null;
   };
 
+  // ─── #902: observer reporting and per-role wording ───
+  // A node whose public key is also an observer that reported within
+  // healthThresholds.observerOnlineMinutes (sent to the client as
+  // observerOnlineMs) is running right now: that report is direct evidence,
+  // so three-state health classifies it as healthy whatever its role. The
+  // 30 s tolerance and the 60 min default match the Observers page's own
+  // "Online" classifier (observers.js healthStatus), so both pages agree.
+  var OBSERVER_REPORT_TOLERANCE_MS = 30000;
+  var OBSERVER_ONLINE_DEFAULT_MS = 3600000;
+
+  window.getObserverReportCredit = function (reportedAt, nowMs) {
+    var stamp = _healthTimestamp(reportedAt);
+    if (stamp === null) return null;
+    var now = _resolveNow(nowMs);
+    if (stamp > now + NODE_FRESHNESS_FUTURE_TOLERANCE_MS) return null;
+    var onlineMs = Number(HEALTH_THRESHOLDS.observerOnlineMs);
+    if (!(onlineMs > 0)) onlineMs = OBSERVER_ONLINE_DEFAULT_MS;
+    return now - stamp < onlineMs + OBSERVER_REPORT_TOLERANCE_MS ? reportedAt : null;
+  };
+
+  // The single entry point for three-state health. `heard` is the node's own
+  // radio evidence (getHealthLastHeard); `observerReportedAt` is the matching
+  // observer's last_seen, or null when the node is not an observer.
+  // Returns { status, source: 'heard' | 'observer' | null, at }.
+  window.getNodeHealth = function (role, heard, observerReportedAt, nowMs) {
+    var status = getHealthStatus(role, heard, nowMs);
+    if (status !== 'healthy') {
+      var credit = getObserverReportCredit(observerReportedAt, nowMs);
+      if (credit !== null) return { status: 'healthy', source: 'observer', at: credit };
+    }
+    return status ? { status: status, source: 'heard', at: heard } : { status: null, source: null, at: null };
+  };
+
+  // Companions and sensors are not expected to transmit continuously, so
+  // their middle state reads "Quiet" in a neutral colour instead of the
+  // "Degraded" warning. Thresholds are unchanged; only wording and colour.
+  var QUIET_HEALTH_ROLES = { companion: true, sensor: true };
+  window.isQuietHealthRole = function (role) {
+    return typeof role === 'string' && QUIET_HEALTH_ROLES.hasOwnProperty(role);
+  };
+  window.getHealthLabel = function (role, status) {
+    if (status === 'healthy') return 'Active';
+    if (status === 'degraded') return isQuietHealthRole(role) ? 'Quiet' : 'Degraded';
+    if (status === 'silent') return 'Silent';
+    return null;
+  };
+  window.getHealthStatusClass = function (role, status) {
+    if (status === 'healthy') return 'status-ok';
+    if (status === 'degraded') return isQuietHealthRole(role) ? 'status-muted' : 'status-warn';
+    return 'status-err';
+  };
+
   function _nodeStaleMs(role) {
     var isInfra = role === 'repeater' || role === 'room';
     return isInfra ? HEALTH_THRESHOLDS.infraSilentMs : HEALTH_THRESHOLDS.nodeSilentMs;

@@ -39,6 +39,7 @@ run test-aging.js
 run test-issue-1065-gesture-hints-gates.js
 run test-frontend-helpers.js
 run test-health-status.js
+run test-issue-902-observer-credit.js
 run test-bottom-nav-route-coverage.js
 run test-app-api-inflight-cleanup-rejection.js
 run test-app-api-bust-inflight-243.js

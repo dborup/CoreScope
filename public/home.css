@@ -142,6 +142,8 @@
 .health-banner.green { background: var(--status-green); }
 .health-banner.yellow { background: var(--status-yellow); color: #1a1a2e; }
 .health-banner.red { background: var(--status-red); }
+/* #902: Quiet (companion/sensor middle state) is neutral, not a warning. */
+.health-banner.muted { background: var(--border); color: var(--text); }
 
 .health-body {
   background: var(--surface-1);
@@ -444,6 +446,7 @@
 .my-node-card.healthy { border-left: 4px solid var(--status-green); }
 .my-node-card.degraded { border-left: 4px solid var(--status-yellow); }
 .my-node-card.silent { border-left: 4px solid var(--status-red); }
+.my-node-card.degraded.quiet { border-left-color: var(--text-muted); }
 
 .mnc-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
 .mnc-status { font-size: 1rem; flex-shrink: 0; }

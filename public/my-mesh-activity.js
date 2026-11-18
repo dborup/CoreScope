@@ -49,12 +49,22 @@
   var RELAY_NONE_NEWER = 'none newer than the last own advert';
   var RELAY_NONE = 'none attributed';
   var ATTRIBUTED_SUFFIX = 'relay-attributed';
+  // Fallback only: the per-role wording lives in roles.js getHealthLabel.
   var STATUS_LABELS = { healthy: 'Active', degraded: 'Degraded', silent: 'Silent' };
+  // #902: an observer report is a separate evidence row, never an advert.
+  var OBSERVER_ROW_LABEL = 'Observer reporting';
+  var OBSERVER_SUFFIX = 'observer reporting';
+  var OBSERVER_NOT_COUNTED = 'not within the observer online threshold, not counted';
   var EXPLAIN_ADVERT = 'The badge follows this node’s own advert, the only direct evidence that it transmitted, ' +
     'aged with the shared role thresholds. A recent advert is not proof of continuous uptime or of a device that is online right now.';
   var EXPLAIN_RELAY = 'No own advert is recent enough to carry this badge. The newest evidence is other traffic whose observed path ' +
     'was attributed to this node by a short wire hash prefix that no other known relay shares — an unknown relay can share it, ' +
     'so the match is not proof and this is deliberately not a confident green status.';
+  var EXPLAIN_OBSERVER = 'This node’s public key is also an observer, and that observer sent its own status report over MQTT ' +
+    'within the observer online threshold. That report is direct evidence that the device is running now, so it carries this badge. ' +
+    'It is not a radio transmission heard from this node.';
+  var EXPLAIN_QUIET = ' Companions and sensors are not expected to transmit continuously, so this middle state reads Quiet rather than Degraded; ' +
+    'it is not a fault.';
   var EXPLAIN_NONE = 'No identity-safe activity was observed in the window, so there is nothing to classify. ' +
     'That is missing evidence, not proof that the node is off.';
 
@@ -123,6 +133,12 @@
    * rule of its own. source is 'advert' only when the node's OWN advert
    * alone already supports the badge; otherwise the badge rests on relay
    * attribution and is reported as not confident.
+   *
+   * #902: observerReportedAt is the matching observer's last_seen
+   * (MyMeshObservers.reportedAt), or undefined when the node is not an
+   * observer. A report within the observer online threshold carries the
+   * badge as source 'observer' through roles.js getNodeHealth, the same
+   * entry point every other three-state view uses.
    */
   function statusEvidence(opts) {
     opts = opts || {};
@@ -145,27 +161,51 @@
 
     var source = 'none';
     if (classified) source = advertAt && advertStatus === classified ? 'advert' : (relayAt ? 'relay' : 'advert');
+    var isObserver = ms(opts.observerReportedAt) !== null;
+    var nodeHealth = root && typeof root.getNodeHealth === 'function' ? root.getNodeHealth : null;
+    var observerAt = null;
+    if (isObserver && nodeHealth && classified !== 'healthy') {
+      var combined = nodeHealth(node.role, heardAt, opts.observerReportedAt, opts.nowMs);
+      if (combined && combined.source === 'observer') {
+        observerAt = combined.at;
+        classified = combined.status;
+        source = 'observer';
+      }
+    }
     var status = classified || 'silent';
-    var statusCls = status === 'healthy' ? 'status-ok' : status === 'degraded' ? 'status-warn' : 'status-err';
+    var labelOf = root && typeof root.getHealthLabel === 'function' ? root.getHealthLabel : null;
+    var clsOf = root && typeof root.getHealthStatusClass === 'function' ? root.getHealthStatusClass : null;
+    var quiet = status === 'degraded' && !!(root && typeof root.isQuietHealthRole === 'function' && root.isQuietHealthRole(node.role));
+    var statusCls = clsOf ? clsOf(node.role, status)
+      : status === 'healthy' ? 'status-ok' : status === 'degraded' ? 'status-warn' : 'status-err';
     var attributed = source === 'relay';
-    var label = STATUS_LABELS[status] || STATUS_LABELS.silent;
+    var label = (labelOf && labelOf(node.role, status)) || STATUS_LABELS[status] || STATUS_LABELS.silent;
+    var explanation = source === 'observer' ? EXPLAIN_OBSERVER : source === 'advert' ? EXPLAIN_ADVERT : source === 'relay' ? EXPLAIN_RELAY : EXPLAIN_NONE;
     return {
       status: status,
       classified: classified || null,
       source: source,
-      confident: source === 'advert',
+      confident: source === 'advert' || source === 'observer',
+      quiet: quiet,
       // An attributed match must never read as a confident green dot, so a
       // healthy status drops to the provisional colour and a hollow glyph.
       cls: attributed && status === 'healthy' ? 'status-warn' : statusCls,
       glyph: attributed ? 'ph-circle' : 'ph-circle-fill',
       label: label,
-      text: attributed ? label + ' · ' + ATTRIBUTED_SUFFIX : label,
+      text: attributed ? label + ' · ' + ATTRIBUTED_SUFFIX : source === 'observer' ? label + ' · ' + OBSERVER_SUFFIX : label,
       heardAt: heardAt,
+      // The time that belongs to the badge: the observer report when that
+      // carries it, otherwise the radio evidence.
+      statusAt: source === 'observer' ? observerAt : heardAt,
       advertAt: advertAt,
       relayAt: relayAt,
+      isObserver: isObserver,
+      observerAt: observerAt,
+      observerReportedAt: isObserver ? opts.observerReportedAt : null,
+      observerText: isObserver && !observerAt ? OBSERVER_NOT_COUNTED : null,
       advertText: advertAt ? null : ADVERT_NONE,
       relayText: relayAt ? null : (advertAt ? RELAY_NONE_NEWER : RELAY_NONE),
-      explanation: source === 'advert' ? EXPLAIN_ADVERT : source === 'relay' ? EXPLAIN_RELAY : EXPLAIN_NONE
+      explanation: quiet ? explanation + EXPLAIN_QUIET : explanation
     };
   }
 
@@ -299,6 +339,10 @@
     RELAY_NONE_NEWER: RELAY_NONE_NEWER,
     RELAY_NONE: RELAY_NONE,
     ATTRIBUTED_SUFFIX: ATTRIBUTED_SUFFIX,
+    OBSERVER_ROW_LABEL: OBSERVER_ROW_LABEL,
+    OBSERVER_SUFFIX: OBSERVER_SUFFIX,
+    OBSERVER_NOT_COUNTED: OBSERVER_NOT_COUNTED,
+    EXPLAIN_OBSERVER: EXPLAIN_OBSERVER,
     SNR_LABEL: SNR_LABEL,
     SNR_TIP: SNR_TIP,
     TRAFFIC_LABEL: TRAFFIC_LABEL,

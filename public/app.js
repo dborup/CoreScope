@@ -2202,13 +2202,16 @@ window.addEventListener('DOMContentLoaded', () => {
       return;
     }
     favDropdown.innerHTML = '<div class="fav-dd-loading">Loading...</div>';
+    // #902: one cached bulk roster for the whole list, so a favorite that is
+    // also a reporting observer is credited. A failure only drops the credit.
+    const observerIdx = MyMeshObservers.index(await api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null));
     const items = await Promise.all(favs.map(async (pk) => {
       try {
         const h = await api('/nodes/' + pk + '/health', { ttl: CLIENT_TTL.nodeHealth });
         const heardAt = getHealthLastHeard(h.node, h.stats);
-        const status = getHealthStatus(h.node.role, heardAt);
-        const statusCls = status === 'healthy' ? 'status-ok' : status === 'degraded' ? 'status-warn' : 'status-err';
-        const statusLabel = status || 'unknown';
+        const status = getNodeHealth(h.node.role, heardAt, MyMeshObservers.reportedAt(observerIdx, pk)).status;
+        const statusCls = getHealthStatusClass(h.node.role, status);
+        const statusLabel = getHealthLabel(h.node.role, status) || 'unknown';
         return '<a href="#/nodes/' + pk + '" class="fav-dd-item" data-key="' + pk + '">'
           + '<span class="fav-dd-status ' + statusCls + '" title="' + statusLabel + '" aria-label="' + statusLabel + '"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span>'
           + '<span class="fav-dd-name">' + escapeHtml(h.node.name || truncate(pk, 12)) + '</span>'
