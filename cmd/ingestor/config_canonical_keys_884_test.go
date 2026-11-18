@@ -54,3 +54,43 @@ func TestAntennaClaimGatesReadOnlyCanonicalKeys884(t *testing.T) {
 		})
 	}
 }
+
+// #898 M3: the ingestor reads antennaClaims.detailsEnabled by its canonical
+// spelling only, like the server, and it is off by default.
+func TestAntennaClaimDetailsGateReadsOnlyCanonicalKey898(t *testing.T) {
+	cases := []struct {
+		name        string
+		cfg         string
+		wantDetails bool
+		warnings    int
+	}{
+		{"absent is off", `{"antennaClaims":{"enabled":true}}`, false, 0},
+		{"canonical on", `{"antennaClaims":{"enabled":true,"detailsEnabled":true}}`, true, 0},
+		{"canonical false", `{"antennaClaims":{"enabled":true,"detailsEnabled":false}}`, false, 0},
+		{"DetailsEnabled alone", `{"antennaClaims":{"enabled":true,"DetailsEnabled":true}}`, false, 1},
+		{"DetailsEnabled after canonical false", `{"antennaClaims":{"detailsEnabled":false,"DetailsEnabled":true}}`, false, 1},
+		{"DETAILSENABLED before canonical false", `{"antennaClaims":{"DETAILSENABLED":true,"detailsEnabled":false}}`, false, 1},
+		{"top-level AntennaClaims", `{"AntennaClaims":{"enabled":true,"detailsEnabled":true}}`, false, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(tc.cfg), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var buf bytes.Buffer
+			log.SetOutput(&buf)
+			cfg, err := LoadConfig(path)
+			log.SetOutput(os.Stderr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.AntennaClaims.DetailsRequested(); got != tc.wantDetails {
+				t.Fatalf("DetailsRequested = %v, want %v", got, tc.wantDetails)
+			}
+			if n := strings.Count(buf.String(), configkey.IgnoredNote); n != tc.warnings {
+				t.Fatalf("%d warnings, want %d:\n%s", n, tc.warnings, buf.String())
+			}
+		})
+	}
+}
