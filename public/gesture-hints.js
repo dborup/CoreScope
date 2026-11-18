@@ -32,6 +32,15 @@
     var h = location.hash || '';
     return /^#\/live(\/|$|\?)/.test(h);
   }
+  // #911: row and tab swipes apply on a page's list or tab level, not on a
+  // detail page (#/nodes/<key>, #/packets/<hash>), where the bottom pill sat
+  // on top of the page's own controls (the owner antenna-claim form).
+  function onListRoute() {
+    return /^#\/(packets|nodes|channels|observers)\/?(\?|$)/.test(location.hash || '');
+  }
+  function onTopLevelRoute() {
+    return /^#\/[^/?]*\/?(\?|$)/.test(location.hash || '') || !(location.hash || '').replace('#', '');
+  }
   // #1065 follow-up: hints must only appear on touch-capable viewports.
   // Mouse-only desktops (e.g. analyzer.00id.net opened in Chrome on a
   // workstation) were getting "swipe a row left" tips that make no sense.
@@ -51,8 +60,7 @@
       relevant: function () {
         if (!hasTouchCapability()) return false;
         if (onLiveRoute()) return false; // #1244
-        var h = location.hash || '';
-        return /^#\/(packets|nodes|channels|observers)/.test(h);
+        return onListRoute();
       },
       position: 'bottom',
     },
@@ -62,6 +70,7 @@
       relevant: function () {
         if (!hasTouchCapability()) return false;
         if (onLiveRoute()) return false; // #1244
+        if (!onTopLevelRoute()) return false; // #911
         return !!document.querySelector('[data-bottom-nav]');
       },
       position: 'bottom',
@@ -151,11 +160,18 @@
     return wrap;
   }
 
+  // #911: one hint per screen slot. Two pills in the same slot sat on top of
+  // each other and the upper one took the tap meant for the other's "Got it".
+  function slotTaken(position) {
+    return Object.keys(_shown).some(function (k) { return HINTS[k].position === position; });
+  }
+
   function show(id) {
     if (_shown[id]) return;
     if (isSeen(id)) return;
     var def = HINTS[id];
     if (!def || !def.relevant()) return;
+    if (slotTaken(def.position)) return;
 
     var el = buildHintEl(id);
     document.body.appendChild(el);
