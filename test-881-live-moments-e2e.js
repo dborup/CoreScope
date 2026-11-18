@@ -20,7 +20,8 @@
  *      is static.
  *   6. ?moments=0 starts off and is saved; the toggle turns it back on.
  *   7. Teardown: Live → Packets → Live three times leaves one controller,
- *      one moments root and the same number of WS listeners; Packets'
+ *      one moments root and the same number of WS listeners; leaving
+ *      Live within 200 ms of a resize raises no page error; Packets'
  *      pause badge does not count a moment frame.
  *   8. Phone real taps from a cold start at 375x560 with touch: one card
  *      and a +1 chip; tap the card (map moves), tap the drawer button
@@ -264,6 +265,20 @@ async function fillCards(h, n) {
       assert(after.live === 1 && after.roots === 1, JSON.stringify(after));
       assert(h.momentsRequests === base.requests + 3, 'one history fetch per entry: ' + base.requests + ' → ' + h.momentsRequests);
       assert(!h.errors.length, h.errors.join('; '));
+    });
+
+    await step('leaving Live within 200 ms of a resize raises no page error', async () => {
+      // Leaflet's remove() keeps invalidateSize's debounced moveend timer, so
+      // Live's moveend handler ran after destroy() with map === null (found
+      // while hit-testing at two viewport sizes).
+      const before = h.errors.length;
+      await h.page.setViewportSize({ width: 1300, height: 850 });
+      // Let Leaflet's resize frame run invalidateSize (which arms the timer).
+      await h.page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+      await h.page.evaluate(() => { location.hash = '#/packets'; });
+      await h.page.waitForTimeout(400);
+      await h.page.setViewportSize({ width: 1440, height: 900 });
+      assert(h.errors.length === before, h.errors.slice(before).join('; '));
     });
 
     await step('Packets pause badge ignores moment frames', async () => {

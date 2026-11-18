@@ -2756,6 +2756,9 @@
       }
     }
     map.on('moveend', () => {
+      // Leaflet's remove() leaves invalidateSize's debounced moveend timer
+      // armed, so this can run after destroy() has nulled the map.
+      if (!map) return;
       const c = map.getCenter();
       localStorage.setItem('live-map-view', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
     });
