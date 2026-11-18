@@ -456,6 +456,9 @@ test('stationView: public values only, in order; nothing for null, stale or empt
   eq(v.rows, [['Antenna', 'Omni'], ['Gain', '6.0 dBi'], ['Power', 'Solar + Battery'], ['Installation', 'Mast'], ['Owner contact', 'OZ1ABC']]);
   assert.strictEqual(v.approvedAt, 1700000000000);
   assert.strictEqual(AC.stationView({ details: null, stale: true }), null);
+  // A stale answer shows nothing even if it carries details (F4).
+  assert.strictEqual(AC.stationView({ details: { antennaType: 'omni', contactPublic: 'OZ1ABC' }, stale: true, approvedAt: 1 }), null);
+  assert.notStrictEqual(AC.stationView({ details: { antennaType: 'omni' }, stale: false, approvedAt: 1 }), null);
   assert.strictEqual(AC.stationView({ details: null }), null);
   assert.strictEqual(AC.stationView(null), null);
   assert.strictEqual(AC.stationView({ details: {} }), null);
@@ -470,6 +473,18 @@ test('stationView and stationPrefill never carry contactAdmin, even if a respons
   const pf = AC.stationPrefill(leaked);
   assert.ok(!/ZZADMIN9/.test(JSON.stringify(pf)) && !('contactAdmin' in pf), JSON.stringify(pf));
   eq(AC.stationPrefill(leaked), { antennaType: 'omni', gainRaw: '', power: {}, installation: '', contactPublic: 'ZZPUBLIC7' });
+  // The public contact empty or missing: no `contactPublic || contactAdmin`
+  // fallback, in the block or in the pre-fill (which would then publish the
+  // admin contact). Review PR#908 F2.
+  for (const pub of [{ contactPublic: '' }, {}]) {
+    const r = { details: Object.assign({ antennaType: 'omni', contactAdmin: 'ZZADMIN9' }, pub), approvedAt: 1 };
+    const sv = AC.stationView(r);
+    eq(sv.rows, [['Antenna', 'Omni']]);
+    assert.ok(!/ZZADMIN9/.test(JSON.stringify(sv)), JSON.stringify(sv));
+    eq(AC.stationPrefill(r), { antennaType: 'omni', gainRaw: '', power: {}, installation: '', contactPublic: '' });
+    // Only the admin contact: nothing to show at all.
+    assert.strictEqual(AC.stationView({ details: Object.assign({ contactAdmin: 'ZZADMIN9' }, pub) }), null);
+  }
   eq(AC.stationPrefill({ details: { gainDbi: 6, power: ['mains', 'wind'] } }).gainRaw, '6.0');
   eq(AC.stationPrefill({ details: { power: ['mains', 'wind'] } }).power, { mains: true });
   eq(AC.stationPrefill(null), { antennaType: '', gainRaw: '', power: {}, installation: '', contactPublic: '' });
@@ -510,7 +525,11 @@ test('adminParts: per-part lines from the ops, the replaced marker, contactAdmin
 test('reviewReasons: the one needsReview flag explained by height or gain', () => {
   eq(AC.reviewReasons({ needsReview: false, heightOp: 'set' }), []);
   eq(AC.reviewReasons({ needsReview: true, heightOp: 'set' }), ['Check: far from the surface estimate']);
-  eq(AC.reviewReasons({ needsReview: true, heightOp: 'set', detailsOp: 'set', details: { gainDbi: 18 } }), ['Check: gain outside the usual 0–15 dBi']);
+  // Both reasons for a combined claim with an unusual gain: the one flag may
+  // also come from the height (review PR#908 F3).
+  eq(AC.reviewReasons({ needsReview: true, heightOp: 'set', detailsOp: 'set', details: { gainDbi: 18 } }),
+    ['Check: gain outside the usual 0–15 dBi', 'Check: the height may also be far from the surface estimate']);
+  eq(AC.reviewReasons({ needsReview: true, heightOp: 'clear', detailsOp: 'set', details: { gainDbi: 18 } }), ['Check: gain outside the usual 0–15 dBi']);
   eq(AC.reviewReasons({ needsReview: true, detailsOp: 'set', details: { gainDbi: -1 } }), ['Check: gain outside the usual 0–15 dBi']);
   eq(AC.reviewReasons({ needsReview: true, detailsOp: 'set', details: { gainDbi: 6 } }), ['Check: flagged for review']);
 });

@@ -17,8 +17,10 @@
  *      across a theme re-render and Start over (U6); stale or no details
  *      show nothing;
  *   3. contactAdmin is never shown publicly: a /station answer that leaked
- *      one (a broken server) shows it nowhere and does not pre-fill the
- *      admin field (U3); the public fields are pre-filled;
+ *      one (a broken server) shows it nowhere, does not pre-fill the admin
+ *      field and is not sent (U3), next to a public contact and with the
+ *      public contact empty (no fallback, F2); the public fields are
+ *      pre-filled;
  *   4. the owner form: Keep + Keep cannot be sent (U7); a combined claim
  *      posts exactly {heightM, details{…, contactAdmin}}, the claim line
  *      names both parts and no contact or detail reaches the URL,
@@ -243,37 +245,52 @@ const json = (body, status) => ({ status: status || 200, contentType: 'applicati
   }
 
   // ── 3. contactAdmin is never public ─────────────────────────────────────
-  await step('a /station answer that leaked contactAdmin shows it nowhere and never pre-fills it (U3)', async () => {
-    const { ctx, page } = await newCtx({ station: { details: Object.assign({}, DETAILS, { contactAdmin: ADMIN_LEAK }), approvedAt: 1 } });
-    await openNode(page, PK);
-    await page.waitForSelector(STATION + ':visible');
-    await page.check('[data-testid="ac-details-set"]');
-    await page.waitForFunction(() => document.querySelector('[data-testid="ac-antenna-type"]').value === 'yagi');
-    const form = await page.evaluate(() => ({
-      type: document.querySelector('[data-testid="ac-antenna-type"]').value,
-      gain: document.querySelector('[data-testid="ac-gain"]').value,
-      solar: document.querySelector('[data-testid="ac-power-solar"]').checked,
-      battery: document.querySelector('[data-testid="ac-power-battery"]').checked,
-      mains: document.querySelector('[data-testid="ac-power-mains"]').checked,
-      inst: document.querySelector('[data-testid="ac-installation"]').value,
-      pub: document.querySelector('[data-testid="ac-contact-public"]').value,
-      adm: document.querySelector('[data-testid="ac-contact-admin"]').value,
-      values: Array.from(document.querySelectorAll('input, select, textarea')).map(e => e.value).join('|'),
-    }));
-    assert(form.type === 'yagi' && form.gain === '6.5' && form.solar && form.battery && !form.mains && form.inst === 'mast' && form.pub === 'OZ1ABC',
-      'public values not pre-filled: ' + JSON.stringify(form));
-    assert(form.adm === '', 'the admin contact was pre-filled: ' + form.adm);
-    const scan = await leakScan(page);
-    for (const where of ['url', 'session', 'local', 'text']) assert(scan[where].indexOf(ADMIN_LEAK) < 0, ADMIN_LEAK + ' in ' + where);
-    assert(form.values.indexOf(ADMIN_LEAK) < 0, ADMIN_LEAK + ' in a form value');
-    const labels = await page.evaluate(() => [
-      document.querySelector('label[for="acContactPublic"]').textContent,
-      document.querySelector('label[for="acContactAdmin"]').textContent,
-      document.getElementById('acContactAdminHint').textContent,
-    ]);
-    assert(/Shown publicly/.test(labels[0]) && /Admin only/.test(labels[1]) && /never shown publicly/.test(labels[2]), JSON.stringify(labels));
-    await ctx.close();
-  });
+  // Twice: next to a public contact, and with the public contact empty, so
+  // that a `contactPublic || contactAdmin` fallback (in the Station block or
+  // in the pre-fill, which would then publish the admin contact) is caught
+  // too (review PR#908 F2).
+  for (const pub of ['OZ1ABC', '']) {
+    await step('a /station answer that leaked contactAdmin shows it nowhere and never pre-fills it (U3), public contact ' + (pub ? 'set' : 'empty'), async () => {
+      const { ctx, page, rec } = await newCtx({ station: { details: Object.assign({}, DETAILS, { contactPublic: pub, contactAdmin: ADMIN_LEAK }), approvedAt: 1 } });
+      await openNode(page, PK);
+      await page.waitForSelector(STATION + ':visible');
+      await page.check('[data-testid="ac-details-set"]');
+      await page.waitForFunction(() => document.querySelector('[data-testid="ac-antenna-type"]').value === 'yagi');
+      const form = await page.evaluate(() => ({
+        type: document.querySelector('[data-testid="ac-antenna-type"]').value,
+        gain: document.querySelector('[data-testid="ac-gain"]').value,
+        solar: document.querySelector('[data-testid="ac-power-solar"]').checked,
+        battery: document.querySelector('[data-testid="ac-power-battery"]').checked,
+        mains: document.querySelector('[data-testid="ac-power-mains"]').checked,
+        inst: document.querySelector('[data-testid="ac-installation"]').value,
+        pub: document.querySelector('[data-testid="ac-contact-public"]').value,
+        adm: document.querySelector('[data-testid="ac-contact-admin"]').value,
+        values: Array.from(document.querySelectorAll('input, select, textarea')).map(e => e.value).join('|'),
+      }));
+      assert(form.type === 'yagi' && form.gain === '6.5' && form.solar && form.battery && !form.mains && form.inst === 'mast' && form.pub === pub,
+        'public values not pre-filled: ' + JSON.stringify(form));
+      const block = await page.textContent(STATION);
+      assert(block.indexOf(ADMIN_LEAK) < 0, ADMIN_LEAK + ' in the Station block: ' + block);
+      assert(/Owner contact/.test(block) === !!pub, 'Owner contact row with public contact ' + JSON.stringify(pub) + ': ' + block);
+      assert(form.adm === '', 'the admin contact was pre-filled: ' + form.adm);
+      const scan = await leakScan(page);
+      for (const where of ['url', 'session', 'local', 'text']) assert(scan[where].indexOf(ADMIN_LEAK) < 0, ADMIN_LEAK + ' in ' + where);
+      assert(form.values.indexOf(ADMIN_LEAK) < 0, ADMIN_LEAK + ' in a form value');
+      const labels = await page.evaluate(() => [
+        document.querySelector('label[for="acContactPublic"]').textContent,
+        document.querySelector('label[for="acContactAdmin"]').textContent,
+        document.getElementById('acContactAdminHint').textContent,
+      ]);
+      assert(/Shown publicly/.test(labels[0]) && /Admin only/.test(labels[1]) && /never shown publicly/.test(labels[2]), JSON.stringify(labels));
+      // Sending the pre-filled details as they stand never carries the leak,
+      // in either contact.
+      await page.click('[data-testid="ac-submit"]');
+      await page.waitForSelector('[data-testid="ac-code"]', { timeout: 10000 });
+      assert(rec.posts.length === 1 && JSON.stringify(rec.posts[0]).indexOf(ADMIN_LEAK) < 0, 'posted ' + JSON.stringify(rec.posts));
+      assert((rec.posts[0].details.contactPublic || '') === pub, 'posted public contact ' + JSON.stringify(rec.posts[0].details));
+      await ctx.close();
+    });
+  }
 
   // ── 4. The owner form ───────────────────────────────────────────────────
   await step('Keep + Keep cannot be sent (U7)', async () => {
@@ -282,6 +299,8 @@ const json = (body, status) => ({ status: status || 200, contentType: 'applicati
     await page.waitForSelector('[data-testid="ac-details-keep"]');
     assert(await page.isChecked('[data-testid="ac-mode-keep"]') && await page.isChecked('[data-testid="ac-details-keep"]'), 'not Keep + Keep at the start');
     assert(await page.isDisabled('[data-testid="ac-submit"]'), 'Get code enabled on Keep + Keep');
+    const dim = await page.$eval('[data-testid="ac-submit"]', b => getComputedStyle(b).opacity);
+    assert(dim === '0.5', 'a disabled Get code is not dimmed: ' + dim);
     assert(/Choose what to change/.test(await page.textContent('[data-testid="ac-form-status"]')), 'no hint on Keep + Keep');
     await page.evaluate(() => document.querySelector('.ac-form').requestSubmit());
     await page.waitForTimeout(300);
@@ -394,6 +413,12 @@ const json = (body, status) => ({ status: status || 200, contentType: 'applicati
     assert(combined.indexOf('Station details: Omni · 17.0 dBi · Solar + Battery · Mast · public contact ' + XSS + 'P') >= 0, combined);
     assert(combined.indexOf('Contact (admin only): ' + XSS + 'A') >= 0, combined);
     assert(/Check: gain outside the usual 0–15 dBi/.test(combined), combined);
+    // The disabled style is the owner form's only (F7): a disabled Approve
+    // keeps its look.
+    const approveDim = await page.$eval(row('5555555555555555') + ' [data-decide="approve"]', b => { b.disabled = true; const o = getComputedStyle(b).opacity; b.disabled = false; return o; });
+    assert(approveDim === '1', 'a disabled Approve is dimmed: ' + approveDim);
+    // One flag, two possible reasons: both are listed (F3).
+    assert(/Check: the height may also be far from the surface estimate/.test(combined), combined);
     assert(await page.locator('.ac-admin img').count() === 0 && await page.evaluate(() => window.__xss) === undefined, 'markup ran in the admin queue');
     const detailsOnly = await page.textContent(row('6666666666666666'));
     assert(/Station details: Roof/.test(detailsOnly) && !/Height/.test(detailsOnly), 'details-only row: ' + detailsOnly);

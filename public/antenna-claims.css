@@ -126,5 +126,7 @@ a.ac-item-name, .ac-item-proof { display: flex; align-items: center; align-self:
    Approve) on --accent-strong, as #1668 M2 does for white-on-blue. */
 .ac-body .btn-primary, .ac-admin .btn-primary { background: var(--accent-strong); color: var(--text-on-accent); }
 .ac-body .btn-primary:hover:not(:disabled), .ac-admin .btn-primary:hover:not(:disabled) { background: var(--accent-strong); filter: brightness(0.9); }
-/* #898 — Get code is disabled while both parts are on Keep: show it. */
-.ac-body .btn-primary:disabled, .ac-admin .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+/* #898 — Get code is disabled while both parts are on Keep: show it. Owner
+   form only; the admin Approve and Unlock buttons keep their look while a
+   request is in flight, as before #898 (review PR#908 F7). */
+.ac-form .ac-submit:disabled { opacity: 0.5; cursor: not-allowed; }

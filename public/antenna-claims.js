@@ -212,7 +212,9 @@
   // there is nothing to show (no details, stale, cleared, feature off).
   function stationView(r) {
     var d = r && r.details;
-    if (!d || typeof d !== 'object') return null;
+    // The server answers details:null when stale; the guard holds even if a
+    // stale answer ever carries them (review PR#908 F4).
+    if (!d || typeof d !== 'object' || r.stale) return null;
     var rows = detailValues(d);
     var contact = typeof d.contactPublic === 'string' && d.contactPublic ? d.contactPublic : '';
     if (contact) rows.push(['Owner contact', contact]);
@@ -260,15 +262,18 @@
     return { lines: lines, contactAdmin: contact };
   }
 
-  // reviewReasons says why the server flagged a claim (one needsReview flag
-  // covers an unusual height and an unusual gain).
+  // reviewReasons says why the server flagged a claim. One needsReview flag
+  // covers an unusual height and an unusual gain, and only the server knows
+  // the surface estimate: so every reason that can apply is listed, and with
+  // an unusual gain the height reason says it may also apply (review PR#908
+  // F3) instead of being dropped.
   function reviewReasons(c) {
     if (!c || !c.needsReview) return [];
     var g = c.details && c.details.gainDbi;
     var gainOdd = c.detailsOp === 'set' && typeof g === 'number' && (g < GAIN_REVIEW_MIN || g > GAIN_REVIEW_MAX);
     var out = [];
-    if (c.heightOp === 'set' && !gainOdd) out.push('Check: far from the surface estimate');
     if (gainOdd) out.push('Check: gain outside the usual ' + GAIN_REVIEW_MIN + '\u2013' + GAIN_REVIEW_MAX + ' dBi');
+    if (c.heightOp === 'set') out.push(gainOdd ? 'Check: the height may also be far from the surface estimate' : 'Check: far from the surface estimate');
     if (!out.length) out.push('Check: flagged for review');
     return out;
   }
