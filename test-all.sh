@@ -119,6 +119,7 @@ run test-issue-646-og-meta.js
 run test-traces.js
 run test-live-multibyte-filter.js
 run test-live-heard-filter.js
+run test-live-scope-color.js
 run test-881-live-moments.js
 run test-881-m3-customizer-moments.js
 run test-live-follow.js
