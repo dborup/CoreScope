@@ -87,6 +87,24 @@ test('MCAntennaHeight.ROLE_DEFAULTS mirror the server and the customizer', () =>
   });
 });
 
+// #913: one source of truth. The customizer's built-in heights are read from
+// MCAntennaHeight.ROLE_DEFAULTS, not typed a second time.
+test('TERRAIN_DEFAULTS heights follow MCAntennaHeight.ROLE_DEFAULTS (#913)', () => {
+  const { api } = load({
+    afterHeight: (ctx) => {
+      Object.assign(ctx.window.MCAntennaHeight.ROLE_DEFAULTS,
+        { repeater: 31, room: 32, companion: 33, sensor: 34, point: 35 });
+    },
+  });
+  assert.strictEqual(api.TERRAIN_DEFAULTS.heightRepeater, 31);
+  assert.strictEqual(api.TERRAIN_DEFAULTS.heightRoom, 32);
+  assert.strictEqual(api.TERRAIN_DEFAULTS.heightCompanion, 33);
+  assert.strictEqual(api.TERRAIN_DEFAULTS.heightSensor, 34);
+  assert.strictEqual(api.TERRAIN_DEFAULTS.heightPoint, 35);
+  assert.strictEqual(api.TERRAIN_DEFAULTS.model, 'both');
+  assert.strictEqual(api.terrainSettings({}).heightRepeater, 31);
+});
+
 test('the profile colours map onto the documented CSS variables', () => {
   const { api } = load();
   const want = {

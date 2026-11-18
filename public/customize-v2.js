@@ -461,12 +461,16 @@
     { key: 'heightPoint', label: 'Map point', hint: 'A spot picked on the map, not a node' }
   ];
   var TERRAIN_MODELS = ['dtm', 'both'];
-  // Mirrors terrainRoleAntennaM and the model default in
-  // cmd/server/terrain_profile.go: the customizer starts from exactly what
-  // the server would have answered, so an untouched section changes nothing.
+  /* The heights are read from MCAntennaHeight.ROLE_DEFAULTS (antenna-height.js,
+   * loaded first), the one client copy of terrainRoleAntennaM in
+   * cmd/server/terrain_profile.go: the customizer starts from exactly what
+   * the server would have answered, so an untouched section changes nothing.
+   * The model default mirrors the server's too. */
+  var _roleHeights = (window.MCAntennaHeight && window.MCAntennaHeight.ROLE_DEFAULTS) || {};
   var TERRAIN_DEFAULTS = {
-    heightRepeater: 10, heightRoom: 5, heightCompanion: 2, heightSensor: 2,
-    heightPoint: 2, model: 'both'
+    heightRepeater: _roleHeights.repeater, heightRoom: _roleHeights.room,
+    heightCompanion: _roleHeights.companion, heightSensor: _roleHeights.sensor,
+    heightPoint: _roleHeights.point, model: 'both'
   };
 
   /* Antenna height above ground, in metres, or null when `val` is not one.
