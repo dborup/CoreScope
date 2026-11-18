@@ -523,6 +523,55 @@ func TestMomentsBusiestLeaderCooldownAndKindCap_881(t *testing.T) {
 	wantKinds(t, h.relay(map[string]int{momentPK(1): 90}), "busiest_repeater:0001")
 }
 
+// ── panics ────────────────────────────────────────────────────────────────
+
+// A panic inside a detector must not leave d.mu held: the hooks' callers
+// (refreshNeighborGraphFromSnapshot, the node ticker) recover and carry on,
+// so a held mu would block every later node tick, graph swap and relay
+// recompute. The panic comes from the geo dependency, which visible() calls
+// under d.mu from all three detectors.
+func TestMomentsPanicReleasesLock_881(t *testing.T) {
+	hooks := map[string]func(h *momentsHarness){
+		"tickNodes": func(h *momentsHarness) {
+			h.now = h.now.Add(15 * time.Second)
+			h.tick(nodeRow(momentPK(9), "repeater", h.now, h.now.Add(-time.Minute)))
+		},
+		"onGraph": func(h *momentsHarness) {
+			h.graph(linkEdge(momentPK(1), momentPK(2), 3, momentsT0))
+		},
+		"onRelay": func(h *momentsHarness) {
+			h.relay(map[string]int{momentPK(1): 30})
+		},
+	}
+	for name, hook := range hooks {
+		t.Run(name, func(t *testing.T) {
+			h := recordHarness(t, nil)
+			h.d.geo = func() *GeoFilterConfig { panic("injected") }
+			func() {
+				defer func() {
+					if r := recover(); r != "injected" {
+						t.Errorf("recovered %v, want the injected panic", r)
+					}
+				}()
+				hook(h)
+			}()
+			h.d.geo = nil
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				for _, next := range hooks {
+					next(h)
+				}
+			}()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("detector blocked after a recovered panic in %s: d.mu still held", name)
+			}
+		})
+	}
+}
+
 // ── limiter ───────────────────────────────────────────────────────────────
 
 func TestMomentsLimiter_881(t *testing.T) {

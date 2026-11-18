@@ -245,9 +245,12 @@ type momentCandidate struct {
 // reads every node and emits nothing.
 func (d *momentsDetector) tickNodes(ctx context.Context) {
 	now := d.now()
-	d.mu.Lock()
-	seeded, since := d.nodesSeeded, d.lastTick.Add(-momentsDeltaOverlap)
-	d.mu.Unlock()
+	var seeded bool
+	var since time.Time
+	d.locked(func() []Moment {
+		seeded, since = d.nodesSeeded, d.lastTick.Add(-momentsDeltaOverlap)
+		return nil
+	})
 	if !seeded && d.storeReady != nil && !d.storeReady() {
 		return
 	}
@@ -256,7 +259,12 @@ func (d *momentsDetector) tickNodes(ctx context.Context) {
 		log.Printf("[moments] node delta: %v", err)
 		return
 	}
-	d.mu.Lock()
+	d.publish(d.locked(func() []Moment { return d.applyNodes(rows, now, seeded) }))
+}
+
+// applyNodes folds one node delta into the state and returns the node-kind
+// moments. Must hold d.mu.
+func (d *momentsDetector) applyNodes(rows []momentNodeRow, now time.Time, seeded bool) []Moment {
 	if !seeded {
 		if c := 2 * len(rows); c > d.nodeCap {
 			d.nodeCap = c
@@ -274,9 +282,16 @@ func (d *momentsDetector) tickNodes(ctx context.Context) {
 	}
 	d.nodesSeeded, d.lastTick = true, now
 	out := d.emitNodeKind(MomentKindNewNode, fresh, now)
-	out = append(out, d.emitNodeKind(MomentKindBackOnline, back, now)...)
-	d.mu.Unlock()
-	d.publish(out)
+	return append(out, d.emitNodeKind(MomentKindBackOnline, back, now)...)
+}
+
+// locked runs f under d.mu. The deferred unlock matters: the hooks' callers
+// recover from panics, and a panic in f that left d.mu held would block
+// every later node tick, graph swap and relay recompute.
+func (d *momentsDetector) locked(f func() []Moment) []Moment {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return f()
 }
 
 func absDuration(x time.Duration) time.Duration {
@@ -405,10 +420,7 @@ func (d *momentsDetector) onGraph(g *NeighborGraph) {
 	}
 	edges := g.AllEdges()
 	now := d.now()
-	d.mu.Lock()
-	out := d.checkRecord(edges, now)
-	d.mu.Unlock()
-	d.publish(out)
+	d.publish(d.locked(func() []Moment { return d.checkRecord(edges, now) }))
 }
 
 // checkRecord must hold d.mu.
@@ -500,10 +512,7 @@ func (d *momentsDetector) onRelay(snap *repeaterRelaySnapshot) {
 		return
 	}
 	now := d.now()
-	d.mu.Lock()
-	out := d.checkBusiest(snap.info, now)
-	d.mu.Unlock()
-	d.publish(out)
+	d.publish(d.locked(func() []Moment { return d.checkBusiest(snap.info, now) }))
 }
 
 // checkBusiest must hold d.mu.
