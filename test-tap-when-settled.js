@@ -15,14 +15,18 @@
  *   - the tap waits until the box holds still and is the hit element;
  *   - a control that settles too short or wider than the viewport still
  *     fails with its box, and a covered one fails at the bound, naming what
- *     covers it. Nothing is tapped in those cases.
+ *     covers it. Nothing is tapped in those cases;
+ *   - a tap at (nearly) the point of the page's previous tap waits out the
+ *     double-tap window, so Chromium does not read the pair as a double tap
+ *     and drop the text typed next (review PR#908 F1); a tap elsewhere, or
+ *     on another page, does not wait.
  *
  * Run: node test-tap-when-settled.js
  */
 'use strict';
 
 const assert = require('assert');
-const { tapWhenSettled } = require('./tests/e2e-tap');
+const { tapWhenSettled, doubleTapWait, DOUBLE_TAP_MS, DOUBLE_TAP_SLOP_PX } = require('./tests/e2e-tap');
 
 const NAV = { tagName: 'BUTTON', id: '', className: 'bottom-nav-tab active' };
 
@@ -32,7 +36,7 @@ const NAV = { tagName: 'BUTTON', id: '', className: 'bottom-nav-tab active' };
 // read from which on the control is only uncovered once it was centred.
 function fakePage(reads, opts) {
   opts = opts || {};
-  const rec = { taps: [], centred: [], reads: 0 };
+  const rec = { taps: [], at: [], centred: [], reads: 0 };
   const el = {
     tagName: 'BUTTON', id: '', className: 'btn ac-copy',
     scrollIntoView(o) { rec.centred.push(o); },
@@ -63,7 +67,7 @@ function fakePage(reads, opts) {
   const page = {
     viewportSize() { return { width: 375, height: 560 }; },
     locator() { return loc; },
-    touchscreen: { async tap(x, y) { rec.taps.push([x, y]); } },
+    touchscreen: { async tap(x, y) { rec.taps.push([x, y]); rec.at.push(Date.now()); } },
   };
   return { page, rec };
 }
@@ -137,6 +141,39 @@ async function test(name, fn) {
     f = fakePage([{ box: { x: -1, y: 100, width: 60, height: 48 } }]);
     await assert.rejects(tapWhenSettled(f.page, '.ac-copy', FAST), /375 px viewport/);
     assert.strictEqual(f.rec.taps.length, 0);
+  });
+
+  await test('doubleTapWait: only a nearby tap inside the window waits, for the rest of it', async () => {
+    const prev = { x: 100, y: 200, t: 1000 };
+    assert.strictEqual(doubleTapWait(null, 100, 200, 1000), 0);
+    assert.strictEqual(doubleTapWait(prev, 100, 200, 1000), DOUBLE_TAP_MS);
+    assert.strictEqual(doubleTapWait(prev, 100 + DOUBLE_TAP_SLOP_PX, 200, 1100), DOUBLE_TAP_MS - 100);
+    assert.strictEqual(doubleTapWait(prev, 100 + DOUBLE_TAP_SLOP_PX + 1, 200, 1000), 0);
+    assert.strictEqual(doubleTapWait(prev, 100, 200, 1000 + DOUBLE_TAP_MS), 0);
+    // The measured window is ~30 px and ~300 ms: the bounds keep a margin.
+    assert.ok(DOUBLE_TAP_SLOP_PX >= 40 && DOUBLE_TAP_MS >= 400);
+  });
+
+  await test('two taps at the same point are spaced past the double-tap window (F1)', async () => {
+    const { page, rec } = fakePage([{ box: BOX }]);
+    await tapWhenSettled(page, '#acHeight', FAST);
+    await tapWhenSettled(page, '#acGain', Object.assign({}, FAST, { timeoutMs: 2000 }));
+    assert.strictEqual(rec.taps.length, 2);
+    assert.ok(rec.at[1] - rec.at[0] >= DOUBLE_TAP_MS, 'second tap after ' + (rec.at[1] - rec.at[0]) + ' ms');
+  });
+
+  await test('a tap far from the previous one, or on another page, does not wait', async () => {
+    const FAR = { x: 10, y: 100, width: 60, height: 48 };
+    // Two reads settle the first tap on BOX; every later read is FAR.
+    const f = fakePage([{ box: BOX }, { box: BOX }, { box: FAR }]);
+    await tapWhenSettled(f.page, '.a', FAST);
+    await tapWhenSettled(f.page, '.b', FAST);
+    assert.deepStrictEqual(f.rec.taps, [[312, 472], [40, 124]]);
+    assert.ok(f.rec.at[1] - f.rec.at[0] < DOUBLE_TAP_MS, 'a far tap waited ' + (f.rec.at[1] - f.rec.at[0]) + ' ms');
+    const other = fakePage([{ box: BOX }]);
+    const t0 = Date.now();
+    await tapWhenSettled(other.page, '.c', FAST);
+    assert.ok(Date.now() - t0 < DOUBLE_TAP_MS, 'a tap on another page waited');
   });
 
   console.log(`\ntests/e2e-tap.js: ${passed} passed, 0 failed`);

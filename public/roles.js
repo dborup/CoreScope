@@ -898,6 +898,8 @@
     // #737 — oblique aerial photos (public/skraafoto.js); absent unless the
     // server's Skråfoto proxy is on. Never carries the token.
     window.MC_SKRAAFOTO_CFG = cfg.skraafoto || null;
+    // #881 — Live moments; absent unless the server's moments.enabled is on.
+    window.MC_MOMENTS_CFG = (cfg.moments && cfg.moments.enabled === true) ? cfg.moments : null;
     if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);
     if (cfg.snrThresholds) Object.assign(SNR_THRESHOLDS, cfg.snrThresholds);
     if (cfg.distThresholds) Object.assign(DIST_THRESHOLDS, cfg.distThresholds);

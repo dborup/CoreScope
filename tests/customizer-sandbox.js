@@ -9,6 +9,8 @@
  *   scripts  public/ files to run between antenna-height.js and
  *            customize-v2.js (index.html order), e.g. ['masts-layer.js']
  *   setup    fn(ctx) run before any script, for globals the page would set
+ *   afterHeight  fn(ctx) run right after antenna-height.js, to alter the shared
+ *            rule before the customizer reads it
  *   server   passed to api.init() once loaded
  * Returns { api, ctx, localStorage, rootStyle, warnings, events }: warnings
  * are console.warn lines, events the types of dispatched events.
@@ -100,6 +102,7 @@ function loadCustomizer(opts) {
   vm.createContext(ctx);
   // index.html order: the shared height rule first, then the customizer.
   run(ctx, 'antenna-height.js');
+  if (opts.afterHeight) opts.afterHeight(ctx);
   (opts.scripts || []).forEach((f) => run(ctx, f));
   run(ctx, 'customize-v2.js');
   const api = ctx.window._customizerV2;

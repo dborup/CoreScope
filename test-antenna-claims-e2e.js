@@ -376,14 +376,14 @@ function pathOf(url) { return new URL(url).pathname; }
   function adminStore() {
     const store = {
       claims: [
-        { id: '1111111111111111', pubkey: PK, name: XSS_NAME, role: 'repeater', heightM: 18.5, status: 'proven',
+        { id: '1111111111111111', pubkey: PK, name: XSS_NAME, role: 'repeater', heightM: 18.5, heightOp: 'set', status: 'proven',
           needsReview: true, createdAt: Date.now() - 3600000, expiresAt: Date.now() + 3600000, provenAt: Date.now() - 600000,
           proofHash: 'abcdef12', proofLat: 37.6, proofLon: -122.1, movedM: 0 },
-        { id: '2222222222222222', pubkey: PK, name: repeater.name, role: 'repeater', heightM: 22, status: 'proven',
+        { id: '2222222222222222', pubkey: PK, name: repeater.name, role: 'repeater', heightM: 22, heightOp: 'set', status: 'proven',
           createdAt: Date.now() - 7200000, expiresAt: Date.now() + 3600000, provenAt: Date.now() - 900000, proofHash: 'abcdef13' },
-        { id: '4444444444444444', pubkey: 'javascript:window.__xss=2', name: '', role: 'repeater', heightM: 9, status: 'proven',
+        { id: '4444444444444444', pubkey: 'javascript:window.__xss=2', name: '', role: 'repeater', heightM: 9, heightOp: 'set', status: 'proven',
           createdAt: Date.now() - 7200000, expiresAt: Date.now() + 3600000, provenAt: Date.now() - 900000 },
-        { id: '3333333333333333', pubkey: PK, name: repeater.name, role: 'repeater', heightM: null, status: 'approved',
+        { id: '3333333333333333', pubkey: PK, name: repeater.name, role: 'repeater', heightM: null, heightOp: 'clear', heightInForce: true, status: 'approved',
           createdAt: Date.now() - 7200000, expiresAt: Date.now(), provenAt: Date.now() - 800000, reviewedAt: Date.now() - 800000, approvedBy: 'owner' },
       ],
     };
@@ -435,7 +435,7 @@ function pathOf(url) { return new URL(url).pathname; }
     await page.click('[data-filter="approved"]');
     await page.waitForSelector('.ac-item[data-claim-id="3333333333333333"]');
     assert(page.url().endsWith('#/tools/antenna-claims?filter=approved'), 'filter not in the link: ' + page.url());
-    assert(/Remove the owner height/.test(await page.textContent('.ac-item[data-claim-id="3333333333333333"]')), 'clear claim not labelled');
+    assert(/Height: remove/.test(await page.textContent('.ac-item[data-claim-id="3333333333333333"]')), 'clear claim not labelled');
     const revoke = '.ac-item[data-claim-id="3333333333333333"] [data-decide="revoke"]';
     await page.click(revoke);
     assert((await page.textContent(revoke)) === 'Confirm revoke' && rec.decisions.filter(d => d.op === 'revoke').length === 0, 'revoke sent without a confirm');
@@ -510,7 +510,7 @@ function pathOf(url) { return new URL(url).pathname; }
     const claims = [];
     for (let i = 0; i < 11; i++) {
       claims.push({ id: 'c0000000000000' + String(i).padStart(2, '0'), pubkey: PK, name: repeater.name + ' ' + i, role: 'repeater',
-        heightM: 10 + i, status: 'proven', createdAt: Date.now() - 7200000, expiresAt: Date.now() + 3600000,
+        heightM: 10 + i, heightOp: 'set', status: 'proven', createdAt: Date.now() - 7200000, expiresAt: Date.now() + 3600000,
         provenAt: Date.now() - 900000, proofHash: 'abcdef' + String(i).padStart(2, '0') });
     }
     const store = { claims };
