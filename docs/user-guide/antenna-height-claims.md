@@ -68,7 +68,7 @@ The suggested name already follows these rules.
 | Revoked | An administrator withdrew an approved height. |
 | Expired | No advert with the code arrived within 24 hours. Ask for a new code. |
 | Superseded | A newer claim for the node replaced this one. |
-| Error (the page shows the reason) | The site could not carry out the request, for example because the node already has too many claims waiting or a newer height is already approved. Nothing changed. Ask for a new code later, or ask the site's operator. |
+| Error (the page shows the reason) | The site could not carry out the request, for example because the node already has too many claims waiting, too many claims are waiting on the whole site, or the claim could not be saved. Nothing changed. Ask for a new code later, or ask the site's operator. |
 | Stopped checking automatically | The page stopped checking after a while. The claim keeps waiting; press **Check again** after sending the advert. |
 
 An administrator may look closer at a height that is very far above the surface estimate, or below the surface.
