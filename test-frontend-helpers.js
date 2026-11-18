@@ -1758,6 +1758,49 @@ console.log('\n=== live.js: pruneStaleNodes ===');
     assert.strictEqual(activity['existingNode'], 2, 'existing node activity preserved');
     assert.ok(!activity['ghostNode'], 'orphaned activity entry removed');
   });
+
+  // #901: the Live node popup takes its health from the shared last-heard
+  // evidence, not from last_seen alone.
+  const H = 3600000;
+  const agoIso = h => new Date(Date.now() - h * H).toISOString();
+  function popupHealth(n, stats) {
+    const { ctx } = makeLiveSandbox();
+    const fn = ctx.window._liveNodeHealthView;
+    assert.ok(fn, '_liveNodeHealthView must be exposed');
+    return { view: fn(n, stats), ctx };
+  }
+
+  test('live popup health: stats.lastHeard newer than last_seen wins', () => {
+    const n = { role: 'repeater', last_seen: agoIso(100) };
+    const stats = { lastHeard: agoIso(2) };
+    const { view, ctx } = popupHealth(n, stats);
+    assert.strictEqual(view.status, 'healthy');
+    assert.strictEqual(view.status, ctx.getHealthStatus(n.role, ctx.getHealthLastHeard(n, stats)));
+    assert.strictEqual(view.heardAt, stats.lastHeard, 'last heard shown is the timestamp the status uses');
+    assert.strictEqual(view.label, 'Online');
+  });
+
+  test('live popup health: explicit lastHeard null is unknown, not last_seen', () => {
+    const n = { role: 'repeater', last_seen: agoIso(1), last_heard: agoIso(1) };
+    const { view } = popupHealth(n, { lastHeard: null });
+    assert.strictEqual(view.status, null);
+    assert.strictEqual(view.heardAt, null);
+    assert.strictEqual(view.label, 'Unknown');
+    assert.strictEqual(view.dotClass, 'status-muted', 'null status is muted, never red');
+  });
+
+  test('live popup health: missing stats falls back to last_heard then last_seen', () => {
+    let r = popupHealth({ role: 'repeater', last_seen: agoIso(100), last_heard: agoIso(2) }, undefined).view;
+    assert.strictEqual(r.status, 'healthy');
+    r = popupHealth({ role: 'repeater', last_seen: agoIso(30) }, {}).view;
+    assert.strictEqual(r.status, 'degraded');
+    assert.strictEqual(r.label, 'Degraded');
+    assert.strictEqual(r.dotClass, 'health-yellow');
+    r = popupHealth({ role: 'repeater', last_seen: agoIso(100) }, null).view;
+    assert.strictEqual(r.status, 'silent');
+    assert.strictEqual(r.label, 'Offline');
+    assert.strictEqual(r.dotClass, 'health-red');
+  });
 }
 
 // ===== live.js: vcrFormatTime respects UTC/local setting =====
