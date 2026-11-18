@@ -3455,10 +3455,7 @@
       heatLayer.setLatLngs(points);
       return;
     }
-    heatLayer = L.heatLayer(points, {
-      radius: 25, blur: 15, maxZoom: 14, minOpacity: 0.05,
-      gradient: { 0.2: '#0d47a1', 0.4: '#1565c0', 0.6: '#42a5f5', 0.8: '#ffca28', 1.0: '#ff5722' }
-    });
+    heatLayer = L.heatLayer(points, HeatGradient.options());
     // Set opacity on canvas BEFORE it's visible — hook the 'add' event
     heatLayer.on('add', function() {
       var canvas = heatLayer._canvas || (heatLayer.getContainer && heatLayer.getContainer());
@@ -3469,6 +3466,7 @@
   }
 
   let _themeRefreshHandler = null;
+  let _heatUnwatch = null;
 
   // ─── Affinity Debug Overlay ────────────────────────────────────────────────
   function clearAffinityOverlay() {
@@ -3713,10 +3711,18 @@
         if (topRoutesEdges && document.getElementById('mcTopRoutes')?.checked) renderTopRoutes();
       };
       window.addEventListener('theme-refresh', _themeRefreshHandler);
+      // #914: a theme, customizer or colour-blind preset change that moves
+      // the heat gradient rebuilds the layer; no reload.
+      _heatUnwatch = HeatGradient.watch(function () {
+        if (!heatLayer || !map) return;
+        map.removeLayer(heatLayer); heatLayer = null; window._meshcoreHeatLayer = null;
+        toggleHeatmap(true);
+      });
       return init(app, routeParam);
     },
     destroy: function() {
       if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; }
+      if (_heatUnwatch) { _heatUnwatch(); _heatUnwatch = null; }
       return destroy();
     }
   });

@@ -66,6 +66,8 @@
     ownerBadge: '--owner-badge',
     // #724 M3 — the antenna sites map layer (canvas markers + popup).
     mastSite: '--mast-site', mastInterference: '--mast-interference',
+    // #914 — the node heat map's five-stop gradient (violet -> magenta).
+    heat1: '--heat-1', heat2: '--heat-2', heat3: '--heat-3', heat4: '--heat-4', heat5: '--heat-5',
     font: '--font', mono: '--mono'
   };
 
@@ -76,9 +78,13 @@
     'terrainBuilding', 'terrainVegetation', 'ownerBadge'];
   // #724 M3 — likewise outside preset detection: no preset defines them.
   var MASTS_COLOR_KEYS = ['mastSite', 'mastInterference'];
+  // #914 — likewise: the heat map gradient; colour-blind presets set it
+  // through --mc-heat-N, not through these keys.
+  var HEAT_COLOR_KEYS = ['heat1', 'heat2', 'heat3', 'heat4', 'heat5'];
 
   var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) {
-    return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1 && MASTS_COLOR_KEYS.indexOf(k) === -1;
+    return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1 && MASTS_COLOR_KEYS.indexOf(k) === -1 &&
+      HEAT_COLOR_KEYS.indexOf(k) === -1;
   });
 
   // ── Brand logo swap helper (PR #1137) ──
@@ -344,6 +350,7 @@
     terrainBuilding: 'Buildings (DSM)', terrainVegetation: 'Trees/other (DSM)',
     ownerBadge: 'Owner Height Badge',
     mastSite: 'Antenna Site', mastInterference: 'Interference Ring',
+    heat1: 'Heat: low', heat2: 'Heat: low-mid', heat3: 'Heat: mid', heat4: 'Heat: high', heat5: 'Heat: peak',
     font: 'Body Font', mono: 'Mono Font'
   };
 
@@ -373,6 +380,10 @@
     ownerBadge: 'Path profile and node page: the badge on an antenna height the node\u2019s owner set',
     mastSite: 'Map: every Mastedatabasen antenna site (mast, tower or rooftop)',
     mastInterference: 'Map: the ring around sites with a 700/800/900 MHz transmitter',
+    heat1: 'Map and Live heat map: the faintest areas (violet by default)',
+    heat2: 'Map and Live heat map: low density', heat3: 'Map and Live heat map: medium density',
+    heat4: 'Map and Live heat map: high density',
+    heat5: 'Map and Live heat map: the densest areas (magenta by default)',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
   };
 
@@ -1006,6 +1017,11 @@
     for (var key in THEME_CSS_MAP) {
       if (themeSection[key]) {
         root.setProperty(THEME_CSS_MAP[key], themeSection[key]);
+      } else if (HEAT_COLOR_KEYS.indexOf(key) !== -1) {
+        // #914 — no server default behind these: a cleared override (or the
+        // other mode's) must fall back to style.css, not stay on the old
+        // inline value until a reload.
+        root.removeProperty(THEME_CSS_MAP[key]);
       }
     }
 
@@ -1935,6 +1951,12 @@
       mastsRows += _renderColorRow(mk, section, current[mk] || _cssVarValue(mk), serverCurrent[mk]);
     }
 
+    var heatRows = '';
+    for (var hi = 0; hi < HEAT_COLOR_KEYS.length; hi++) {
+      var hk = HEAT_COLOR_KEYS[hi];
+      heatRows += _renderColorRow(hk, section, current[hk] || _cssVarValue(hk), serverCurrent[hk]);
+    }
+
     return '<div class="cust-panel' + (_activeTab === 'theme' ? ' active' : '') + '" data-panel="theme">' +
       _renderPresets() +
       '<p class="cust-section-title">' + modeLabel + '</p>' +
@@ -1943,6 +1965,7 @@
       '<details class="cust-advanced"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Advanced (' + ADVANCED_KEYS.length + ' options)</summary>' + advancedRows + '</details>' +
       '<details class="cust-terrain-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Terrain profile chart (' + TERRAIN_COLOR_KEYS.length + ' options)</summary>' + terrainRows + '</details>' +
       '<details class="cust-masts-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Antenna sites map layer (' + MASTS_COLOR_KEYS.length + ' options)</summary>' + mastsRows + '</details>' +
+      '<details class="cust-heat-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Heat map (' + HEAT_COLOR_KEYS.length + ' options)</summary>' + heatRows + '</details>' +
       '<details class="cust-fonts" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Fonts</summary>' + fontRows + '</details>' +
     '</div>';
   }
@@ -4049,6 +4072,7 @@
     TERRAIN_OWNER_KEY: TERRAIN_OWNER_KEY,
     ownerSettings: ownerSettings,
     MASTS_COLOR_KEYS: MASTS_COLOR_KEYS,
+    HEAT_COLOR_KEYS: HEAT_COLOR_KEYS,
     VALID_SECTIONS: VALID_SECTIONS,
     isValidAntennaHeight: isValidAntennaHeight,
     terrainSettings: terrainSettings,

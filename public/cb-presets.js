@@ -76,6 +76,7 @@
         unknown:   '#DC267F'
       }
     ,
+      heatRamp: ['#3b1d8f', '#5b3fd0', '#785EF0', '#a98bff', '#d9c8ff'],
       routeRamp: ['#0d0887', '#7e03a8', '#cc4778', '#f89540', '#f0f921']
     },
     {
@@ -100,6 +101,7 @@
         unknown:   '#DC267F'
       }
     ,
+      heatRamp: ['#3d1a78', '#6a2fb0', '#9a4fd6', '#c58af0', '#ebd0ff'],
       routeRamp: ['#0d0887', '#7e03a8', '#cc4778', '#f89540', '#f0f921']
     },
     {
@@ -132,6 +134,7 @@
         unknown:   '#CC6677'
       }
     ,
+      heatRamp: ['#5a1f3f', '#8a2f63', '#b5447f', '#d878a3', '#f3b8cf'],
       routeRamp: ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725']
     },
     {
@@ -167,6 +170,7 @@
         unknown:   '#595959'
       }
     ,
+      heatRamp: ['#333333', '#666666', '#999999', '#cccccc', '#ffffff'],
       routeRamp: ['#222222', '#555555', '#888888', '#bbbbbb', '#eeeeee']
     }
   ];
@@ -258,6 +262,13 @@
       for (var ri = 0; ri < 5; ri++) {
         style.setProperty('--mc-rt-ramp-' + ri, rr[ri] || rr[rr.length - 1]);
       }
+      // #914 — heat map gradient (5 stops). heat-gradient.js reads
+      // --mc-heat-N over the theme's --heat-N; the default preset sets none,
+      // so the theme's violet -> magenta shows.
+      for (var hi = 1; hi <= 5; hi++) {
+        if (p.heatRamp) style.setProperty('--mc-heat-' + hi, p.heatRamp[hi - 1]);
+        else style.removeProperty('--mc-heat-' + hi);
+      }
       // #1407 — ROLE_COLORS / ROLE_STYLE are now live getters in roles.js
       // that read --mc-role-* directly, so no explicit sync is needed. The
       // pre-#1407 code path kept them in sync as a workaround for the static
@@ -305,6 +316,7 @@
         style.removeProperty('--mc-mb-' + k);
       });
       for (var ri = 0; ri < 5; ri++) style.removeProperty('--mc-rt-ramp-' + ri);
+      for (var hj = 1; hj <= 5; hj++) style.removeProperty('--mc-heat-' + hj);
     }
     if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof window.CustomEvent === 'function') {
       try { window.dispatchEvent(new window.CustomEvent('cb-preset-changed', { detail: { id: null } })); } catch (e) {}
