@@ -13,8 +13,9 @@
  * Auto-dismisses (fades out) once ready=true AND from_pubkey_backfill.done=true.
  *
  * #894: a silent MQTT source is operator information, not a warm-up state. It
- * is shown as a compact dismissible pill (#warmup-stale-pills); polling
- * continues while one is shown so it updates and clears by itself.
+ * is shown as a compact dismissible pill in its own row right after the top
+ * nav (#warmup-stale-pills, normal flow: it never overlays page content);
+ * polling continues while one is shown so it updates and clears by itself.
  */
 (function () {
   'use strict';
@@ -95,8 +96,9 @@
     return msgs;
   }
 
+  /** True when the full-width banner is shown: warm-up only (#894 F5). */
   function shouldShowBanner(healthz, loadStatus, nowMs) {
-    return getWarmupMessages(healthz, loadStatus, nowMs).length > 0;
+    return getWarmupOnlyMessages(healthz, loadStatus, nowMs).length > 0;
   }
 
   /**
@@ -141,6 +143,8 @@
     inflight: false,
     mounted: false,
     pillsEl: null,   // #894 container for stale-source pills
+    announceEl: null, // #894 live region: announces a pill being added only
+    reservePx: 0,     // last --warmup-pills-h written
     pills: {},       // source -> { el, textEl }
     moreEl: null,    // "+N more" overflow note
     dismissed: null, // source -> true; lazily loaded from sessionStorage
@@ -189,14 +193,43 @@
     state.el = el;
     state.listEl = list;
     // #894: stale sources get compact dismissible pills, not the banner.
+    // The row sits in normal flow right after the top nav, so it takes its
+    // own row and never overlays page content.
     var pills = document.createElement('div');
     pills.id = 'warmup-stale-pills';
-    pills.setAttribute('role', 'status');
-    pills.setAttribute('aria-live', 'polite');
     pills.className = 'warmup-pills warmup-pills--hidden';
-    body.appendChild(pills);
+    var nav = null;
+    try { nav = document.querySelector('.top-nav'); } catch (e) { /* minimal DOM */ }
+    if (nav && nav.parentNode) nav.parentNode.insertBefore(pills, nav.nextSibling);
+    else body.appendChild(pills);
     state.pillsEl = pills;
+    // The pills are not a live region: their minute count changes on every
+    // poll. Only a newly added pill is announced, through this element.
+    var announce = document.createElement('div');
+    announce.id = 'warmup-stale-announce';
+    announce.className = 'sr-only';
+    announce.setAttribute('role', 'status');
+    announce.setAttribute('aria-live', 'polite');
+    body.appendChild(announce);
+    state.announceEl = announce;
+    if (typeof ResizeObserver === 'function') {
+      // border-box: the /live nav clearance is padding (live.css).
+      try { new ResizeObserver(syncPillsReserve).observe(pills, { box: 'border-box' }); } catch (e) { /* render-time sync only */ }
+    }
     state.mounted = true;
+  }
+
+  // Fixed-height pages (#app.app-fixed, /live) subtract the row's height via
+  // --warmup-pills-h so the row never pushes them under the bottom nav.
+  // live.js sizes its page in JS, so a change is also announced as an event.
+  function syncPillsReserve() {
+    try {
+      var h = state.pillsEl ? Math.ceil(state.pillsEl.offsetHeight || 0) : 0;
+      if (h === state.reservePx) return;
+      state.reservePx = h;
+      document.documentElement.style.setProperty('--warmup-pills-h', h + 'px');
+      window.dispatchEvent(new CustomEvent('warmup-pills-resize'));
+    } catch (e) { /* no layout (tests) */ }
   }
 
   function dismissSource(source) {
@@ -219,15 +252,6 @@
     el.appendChild(textEl);
     el.appendChild(btn);
     return { el: el, textEl: textEl };
-  }
-
-  // Keep the pills just under the top nav (never over it), wherever the
-  // nav sits (a visible warm-up banner pushes it down).
-  function positionPills() {
-    try {
-      var nav = document.querySelector('.top-nav');
-      if (nav) state.pillsEl.style.top = (Math.round(nav.getBoundingClientRect().bottom) + 8) + 'px';
-    } catch (e) { /* cosmetic only */ }
   }
 
   function renderPills() {
@@ -255,12 +279,14 @@
       if (p.el.parentNode) p.el.parentNode.removeChild(p.el);
       delete state.pills[src];
     });
+    var added = [];
     for (var k = 0; k < shown.length; k++) {
       var s = shown[k];
       var pill = state.pills[s.source];
       if (!pill) {
         pill = state.pills[s.source] = makePill(s.source);
         state.pillsEl.appendChild(pill.el);
+        added.push(s.text);
       }
       if (pill.text !== s.text) { pill.textEl.textContent = s.text; pill.text = s.text; }
     }
@@ -280,9 +306,10 @@
     if (shown.length === 0) {
       state.pillsEl.classList.add('warmup-pills--hidden');
     } else {
-      positionPills();
       state.pillsEl.classList.remove('warmup-pills--hidden');
     }
+    if (added.length && state.announceEl) state.announceEl.textContent = added.join(' ');
+    syncPillsReserve();
   }
 
   function render() {

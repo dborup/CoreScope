@@ -7,15 +7,15 @@
 .live-page {
   position: relative;
   width: 100%;
-  height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px));
-  height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px));
+  height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
+  height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
   overflow: hidden;
   background: var(--surface-0);
 }
 /* Override #app height constraint on live page */
 #app:has(.live-page) {
-  height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px));
-  height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px));
+  height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
+  height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
   overflow: visible;
 }
 
@@ -738,9 +738,19 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
   body:has(.live-page) .top-nav { display: none !important; }
   body:has(.live-page) #app:has(.live-page),
   body:has(.live-page) .live-page {
-    height: calc(100vh - var(--bottom-nav-reserve, 0px));
-    height: calc(100dvh - var(--bottom-nav-reserve, 0px));
+    height: calc(100vh - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
+    height: calc(100dvh - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
   }
+}
+
+/* #894: on /live the top nav is a fixed overlay (live.js) above 640px, so
+ * the stale-source pill row (in flow, right after the nav) starts below the
+ * nav's 52px band instead of under it. Padding, not margin, so the row's
+ * measured height (--warmup-pills-h) includes it. Not when the nav is hidden
+ * (fullscreen, unpinned). */
+@media (min-width: 641px) {
+  body:has(.live-page):not(.live-fullscreen) .warmup-pills,
+  body.live-fullscreen.nav-pinned:has(.live-page) .warmup-pills { padding-top: calc(52px + 4px); }
 }
 
 @media (max-width: 640px) {

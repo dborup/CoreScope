@@ -34,7 +34,17 @@ function makeNode(tag) {
     setAttribute(k, v) { this.attrs[k] = String(v); },
     getAttribute(k) { return this.attrs[k]; },
     appendChild(c) { c.parentNode = this; this.children.push(c); return c; },
-    insertBefore(c) { c.parentNode = this; this.children.unshift(c); return c; },
+    insertBefore(c, ref) {
+      c.parentNode = this;
+      const i = ref ? this.children.indexOf(ref) : -1;
+      if (i >= 0) this.children.splice(i, 0, c); else if (ref === undefined) this.children.unshift(c); else this.children.push(c);
+      return c;
+    },
+    get nextSibling() {
+      if (!this.parentNode) return null;
+      const s = this.parentNode.children;
+      return s[s.indexOf(this) + 1] || null;
+    },
     removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); c.parentNode = null; return c; },
     addEventListener(t, fn) { (this.listeners[t] = this.listeners[t] || []).push(fn); },
     click() { (this.listeners.click || []).forEach(fn => fn({ preventDefault() {}, stopPropagation() {} })); },
@@ -51,12 +61,15 @@ function boot(initial, opts) {
   let clock = NOW;
   const store = Object.assign({}, opts.store || {});
   const body = makeNode('body');
+  const nav = makeNode('nav'); nav.className = 'top-nav';
+  const app = makeNode('main'); app.id = 'app';
+  body.appendChild(nav); body.appendChild(app);
   const timers = { active: 0, started: 0, cleared: 0 };
   const doc = {
     readyState: 'complete', body,
     createElement: makeNode,
     addEventListener() {},
-    querySelector() { return makeNode('nav'); },
+    querySelector(sel) { return sel === '.top-nav' ? nav : null; },
   };
   const sessionStorage = opts.brokenStorage ? {
     getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); },
@@ -89,13 +102,15 @@ function boot(initial, opts) {
   const api = ctx.window.__warmupBanner;
   const tick = async () => { for (let i = 0; i < 4; i++) await new Promise(r => setImmediate(r)); };
   return {
-    api, body, store, timers, get fetches() { return fetches; },
+    api, body, nav, store, timers, get fetches() { return fetches; },
     set(h, hd) { healthz = h; if (hd !== undefined) header = hd; },
     setClock(ms) { clock = ms; },
     async poll() { api._pollOnce(); await tick(); },
     pills() { return walk(body).filter(n => /warmup-pill\b/.test(n.className) && !/__/.test(n.className)); },
     pillText() { return this.pills().map(p => p.textContent); },
     banner() { return walk(body).find(n => n.id === 'warmup-banner'); },
+    row() { return walk(body).find(n => n.id === 'warmup-stale-pills'); },
+    announce() { return walk(body).find(n => n.id === 'warmup-stale-announce'); },
   };
 }
 
@@ -159,7 +174,37 @@ function hz(ageSec, extra) {
     assert.deepStrictEqual(Object.keys(api.pruneDismissed({ a: true }, [])), []);
   });
 
+  await test('shouldShowBanner matches the banner: warm-up only, never stale-only (review F5)', () => {
+    assert.strictEqual(api.shouldShowBanner(hz(3600), 'ready', NOW), false, 'stale-only: the banner stays hidden');
+    assert.strictEqual(api.shouldShowBanner(hz(10, { ready: false }), 'loading', NOW), true);
+    assert.strictEqual(api.shouldShowBanner(hz(3600, { from_pubkey_backfill: { done: false, processed: 1, total: 2 } }), 'ready', NOW), true);
+  });
+
   // ---- DOM behaviour -------------------------------------------------------
+  await test('the pill row is placed right after the top nav, in the page flow (review F1)', async () => {
+    const env = boot({ healthz: hz(3600) });
+    await env.poll();
+    const kids = env.body.children;
+    assert.strictEqual(kids[kids.indexOf(env.nav) + 1], env.row(), 'row directly after .top-nav: ' + kids.map(k => k.id || k.className || k.tagName).join(','));
+    assert.ok(kids.indexOf(env.row()) < kids.findIndex(k => k.id === 'app'), 'row before #app');
+    assert.ok(!env.row().style.top && !env.row().style.position, 'no JS positioning');
+  });
+  await test('only an added pill is announced; minute updates are not (review F3)', async () => {
+    const env = boot({ healthz: hz(3600) });
+    await env.poll();
+    assert.ok(!env.row().getAttribute('aria-live') && !env.row().getAttribute('role'), 'pill row is not a live region');
+    const ann = env.announce();
+    assert.ok(ann && ann.getAttribute('role') === 'status' && ann.getAttribute('aria-live') === 'polite');
+    assert.ok(!walk(env.row()).includes(ann), 'announcer sits outside the pill row');
+    assert.strictEqual(ann.textContent, 'No packets from mqtt-eu in 60 min.');
+    env.set(hz(3900)); await env.poll();
+    assert.ok(/in 65 min\./.test(env.pillText()[0]), 'pill text updated');
+    assert.strictEqual(ann.textContent, 'No packets from mqtt-eu in 60 min.', 'minute update not announced');
+    env.set(hz(3900, { ingest_liveness: {
+      'mqtt-eu': { lastReceiptUnix: NOW / 1000 - 3900 }, 'mqtt-us': { lastReceiptUnix: NOW / 1000 - 600 } } }));
+    await env.poll();
+    assert.strictEqual(ann.textContent, 'No packets from mqtt-us in 10 min.', 'a second source is announced alone');
+  });
   await test('stale source renders a compact pill, not the full-width banner', async () => {
     const env = boot({ healthz: hz(3600) });
     await env.poll();

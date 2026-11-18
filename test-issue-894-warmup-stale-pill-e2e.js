@@ -6,17 +6,22 @@
  * clock is installed so the 30 s poll interval can be fast-forwarded.
  *
  * Asserts, on a phone at 375x560 from a cold start (no storage), real taps:
- *   1. stale source → a pill under the top nav (never over it), inside the
- *      screen, no sideways overflow, × at least 44 px and hit by itself, an
- *      accessible label naming the source; the full-width banner stays hidden;
+ *   1. stale source → a pill in its own row right under the top nav (never
+ *      over it), inside the screen, no sideways overflow, × at least 44 px
+ *      and hit by itself, an accessible label naming the source; the new
+ *      pill is announced once, the pill row itself is not a live region; the
+ *      full-width banner stays hidden;
  *   2. polling continues while stale: the minute count moves after one 30 s
  *      interval, with no reload;
  *   3. the source recovers → the pill is gone by itself, no reload;
  *   4. stale again → tap × → pill gone and stays gone across polls; the
  *      dismissal is per session (survives a reload); recovery forgets it, so a
  *      later silence shows the pill again;
- *   5. warm-up (ready=false) → today's banner with its text and no pill;
- *   6. no console errors.
+ *   5. warm-up (ready=false) → today's banner with its text; a pill shown at
+ *      the same time moves down with the nav and its × stays hit-testable;
+ *   6. the banner hides again → the pill row is right under the nav (no gap)
+ *      and a real tap on × still dismisses it;
+ *   7. no console errors.
  *
  * Usage:
  *   BASE_URL=http://localhost:13800 [SHOT=/path/shot.png] node test-issue-894-warmup-stale-pill-e2e.js
@@ -83,12 +88,17 @@ function assert(c, m) { if (!c) { failures++; console.log('  ❌ ' + m); } else 
     const r = pill.getBoundingClientRect(), n = nav.getBoundingClientRect();
     const btn = pill.querySelector('button'), br = btn.getBoundingClientRect();
     const hit = document.elementFromPoint(br.x + br.width / 2, br.y + br.height / 2);
+    const row = document.getElementById('warmup-stale-pills');
+    const ann = document.getElementById('warmup-stale-announce');
     return {
       top: r.top, bottom: r.bottom, left: r.left, right: r.right, h: r.height, navBottom: n.bottom,
+      rowTop: row.getBoundingClientRect().top, rowPos: getComputedStyle(row).position,
       bw: br.width, bh: br.height, bx: br.x + br.width / 2, by: br.y + br.height / 2,
       hitBtn: hit === btn, label: btn.getAttribute('aria-label'),
       overflowX: document.documentElement.scrollWidth > window.innerWidth,
-      role: document.getElementById('warmup-stale-pills').getAttribute('role'),
+      rowLive: row.getAttribute('aria-live'), rowRole: row.getAttribute('role'),
+      annRole: ann && ann.getAttribute('role'), annLive: ann && ann.getAttribute('aria-live'),
+      annText: ann ? ann.textContent : null, annInRow: !!ann && row.contains(ann),
     };
   });
 
@@ -103,10 +113,14 @@ function assert(c, m) { if (!c) { failures++; console.log('  ❌ ' + m); } else 
   assert(!(await bannerShown()), 'full-width banner stays hidden for a stale source');
   let g = await geom();
   assert(g && g.top >= g.navBottom - 0.5, `pill (top ${g && g.top}) sits under the nav (bottom ${g && g.navBottom})`);
+  assert(g && g.rowPos === 'static' && Math.abs(g.rowTop - g.navBottom) <= 0.5, `pill row in normal flow right after the nav (${g && g.rowPos}, row top ${g && g.rowTop})`);
   assert(g && g.left >= 0 && g.right <= VP.width && !g.overflowX, 'pill inside the 375px screen, no sideways overflow');
   assert(g && g.h < 100, 'pill is compact (' + (g && g.h) + 'px tall)');
   assert(g && g.bw >= 44 && g.bh >= 44 && g.hitBtn, `× is ${g && g.bw}x${g && g.bh}, hit by itself`);
-  assert(g && /mqtt-eu/.test(g.label) && g.role === 'status', 'accessible label + status region: ' + (g && g.label));
+  assert(g && /mqtt-eu/.test(g.label), 'accessible label names the source: ' + (g && g.label));
+  assert(g && !g.rowLive && !g.rowRole, 'the pill row is not a live region (minute updates stay silent)');
+  assert(g && g.annRole === 'status' && g.annLive === 'polite' && !g.annInRow && /^No packets from mqtt-eu in 1[123] min\.$/.test(g.annText),
+    'the added pill is announced once via a separate status region: ' + JSON.stringify(g && g.annText));
   if (process.env.SHOT) await page.screenshot({ path: process.env.SHOT });
 
   // 2 ── still polling, minute count moves ────────────────────────────────
@@ -117,6 +131,8 @@ function assert(c, m) { if (!c) { failures++; console.log('  ❌ ' + m); } else 
   t = await pills();
   assert(healthzCalls > before, 'another /api/healthz request after one interval');
   assert(t.length === 1 && /in (19|20|21) min\./.test(t[0]), 'minute count moved: ' + JSON.stringify(t));
+  g = await geom();
+  assert(g && /in 1[123] min\./.test(g.annText), 'the minute update is not announced again: ' + JSON.stringify(g && g.annText));
 
   // 3 ── recovery clears it ───────────────────────────────────────────────
   console.log('3. recovery clears the pill');
@@ -159,6 +175,25 @@ function assert(c, m) { if (!c) { failures++; console.log('  ❌ ' + m); } else 
   assert(await bannerShown(), 'banner visible while loading');
   const btxt = await page.evaluate(() => document.querySelector('#warmup-banner').textContent);
   assert(/Loading historical data/.test(btxt) && !/No packets from/.test(btxt), 'banner has the loading text only: ' + btxt.trim());
+  // review F2: the banner appearing while a pill is shown must not leave the
+  // × under the nav.
+  await page.waitForTimeout(600); // banner max-height transition
+  g = await geom();
+  assert((await pills()).length === 1, 'the stale pill stays shown next to the banner');
+  assert(g && g.top >= g.navBottom - 0.5 && g.hitBtn, `banner shown: pill (top ${g && g.top}) under the moved nav (bottom ${g && g.navBottom}), × hit by itself`);
+
+  // 6 ── banner hides again ───────────────────────────────────────────────
+  console.log('6. banner hides → pill row right under the nav');
+  mode = 'stale';
+  await page.evaluate(() => window.__warmupBanner._pollOnce());
+  await page.waitForFunction(() => document.getElementById('warmup-banner').classList.contains('warmup-banner--hidden'), null, { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(600);
+  assert(!(await bannerShown()), 'banner hidden once ready');
+  g = await geom();
+  assert(g && Math.abs(g.rowTop - g.navBottom) <= 0.5 && g.hitBtn, `no gap: row top ${g && g.rowTop} = nav bottom ${g && g.navBottom}, × hit by itself`);
+  await page.touchscreen.tap(g.bx, g.by);
+  await page.waitForTimeout(300);
+  assert((await pills()).length === 0, 'a real tap on × dismisses it');
 
   assert(errors.length === 0, 'no console errors' + (errors.length ? ': ' + errors.join(' | ') : ''));
   await browser.close();
