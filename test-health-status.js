@@ -95,7 +95,7 @@ function check(label, fn) {
     ['My Mesh', decision('home.js', 'const ev = MyMeshActivity.statusEvidence({ node, stats });', 'const statusDot', 'status')],
     ['Home health', decision('home.js', 'const ev = MyMeshActivity.statusEvidence({ node, stats });\n      const heardAt', 'const snr = MyMeshActivity.snr', 'status')],
     ['Favorites', decision('app.js', 'const heardAt = getHealthLastHeard(h.node, h.stats);', 'return \'<a href=', 'statusLabel')],
-    ['Live', decision('live.js', 'const status = getHealthStatus(', 'let html =', 'status')],
+    ['Live', decision('live.js', 'function liveNodeHealthView(', 'async function showNodeDetail', 'liveNodeHealthView(node, stats).status')],
   ];
   check('real Home, Favorites and Live decision blocks pass the node role', () => {
     for (const [name, block] of blocks) {
