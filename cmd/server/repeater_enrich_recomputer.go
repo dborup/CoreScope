@@ -124,4 +124,7 @@ func recomputeRepeaterEnrichmentSafe(s *PacketStore, windowHours float64) {
 	s.repeaterUsefulCache = useful
 	s.repeaterUsefulAt = now
 	s.repeaterEnrichMu.Unlock()
+	if h := s.momentsRelayHook.Load(); h != nil {
+		(*h)(relay)
+	}
 }

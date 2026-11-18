@@ -72,6 +72,8 @@ func (s *PacketStore) computeRepeaterRelayInfoMap(windowHours float64) map[strin
 func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeaterRelaySnapshot {
 	// The same floor/time describes every entry in this result.
 	now := time.Now().UTC()
+	// #881 moments busy window (0 unless moments are on).
+	recent := time.Duration(s.relayRecentWindow.Load())
 	// Node metadata (SQL) is read BEFORE s.mu so no query runs under the
 	// packet-store lock (#412/#495).
 	metadata := s.snapshotPathNodes()
@@ -206,7 +208,7 @@ func (s *PacketStore) computeRepeaterRelaySnapshot(windowHours float64) *repeate
 			e.self = isSelfAdvert(e.origin, k.key)
 			entries = append(entries, e)
 		}
-		out[k.key] = computeRelayInfoFromEntriesAt(entries, windowHours, now)
+		out[k.key] = computeRelayInfoFromEntriesWindowed(entries, windowHours, now, recent)
 	}
 	snapshot.info = out
 	return snapshot

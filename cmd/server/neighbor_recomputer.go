@@ -85,6 +85,9 @@ func (s *PacketStore) refreshNeighborGraphFromSnapshot() {
 	g := loadNeighborEdgesFromDB(s.db.conn)
 	if g != nil {
 		s.graph.Store(g)
+		if h := s.momentsGraphHook.Load(); h != nil {
+			(*h)(g)
+		}
 	}
 }
 
