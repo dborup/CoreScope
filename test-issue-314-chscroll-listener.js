@@ -229,6 +229,7 @@ function makeHarness() {
   }
   load('public/vendor/aes-ecb.js');
   load('public/channel-decrypt.js');
+  load('public/admin-key.js');
   load('public/channel-proposals.js');
   ctx.window.ChannelProposals.mount = noop;
   ctx.window.ChannelProposals.unmount = noop;

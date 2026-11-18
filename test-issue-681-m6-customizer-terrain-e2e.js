@@ -55,9 +55,11 @@ const PAIR_LINK = 'profile=' + PK_A + ',' + PK_B;
 
 const HEIGHT_FIELDS = ['heightRepeater', 'heightRoom', 'heightCompanion', 'heightSensor', 'heightPoint'];
 const CHART_VARS = ['--terrain-fill', '--terrain-clutter', '--los-line',
-  '--fresnel-100', '--fresnel-60', '--profile-blocked', '--terrain-building', '--terrain-vegetation'];
+  '--fresnel-100', '--fresnel-60', '--profile-blocked', '--terrain-building', '--terrain-vegetation',
+  // #789 M3 — the owner height badge, in the same group.
+  '--owner-badge'];
 const CHART_KEYS = ['terrainFill', 'terrainClutter', 'losLine', 'fresnel100', 'fresnel60', 'profileBlocked',
-  'terrainBuilding', 'terrainVegetation'];
+  'terrainBuilding', 'terrainVegetation', 'ownerBadge'];
 
 let passed = 0, failed = 0;
 async function step(name, fn) {
@@ -262,7 +264,7 @@ function profileFor(q, opts) {
   for (const theme of ['light', 'dark']) {
     const { ctx, page } = await newCtx({ theme });
     await gotoMap(page);
-    await step('the Theme tab carries the eight chart colours in ' + theme, async () => {
+    await step('the Theme tab carries the profile colours in ' + theme, async () => {
       await openCustomizer(page, 'theme');
       const section = theme === 'dark' ? 'themeDark' : 'theme';
       const rows = await page.evaluate((s) => Array.from(

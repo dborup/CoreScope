@@ -304,6 +304,7 @@ function makeHarness(opts) {
   }
   load('public/vendor/aes-ecb.js');
   load('public/channel-decrypt.js');
+  load('public/admin-key.js');
   load('public/channel-proposals.js');
   // Capture the onApproved callback init() hands to ChannelProposals.mount
   // without letting mount() touch the DOM or start polling. The pure

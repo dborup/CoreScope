@@ -13,6 +13,7 @@ const vm = require('vm');
 const SRC_PATH = path.join(__dirname, 'public', 'antenna-claims.js');
 const SRC = fs.readFileSync(SRC_PATH, 'utf8');
 const HEIGHT_SRC_PATH = path.join(__dirname, 'public', 'antenna-height.js');
+const ADMIN_KEY_PATH = path.join(__dirname, 'public', 'admin-key.js');
 
 function load() {
   const ctx = { console, Promise, Math, JSON, Object, Array, String, Number, encodeURIComponent, URLSearchParams };
@@ -21,6 +22,7 @@ function load() {
   ctx.clearTimeout = clearTimeout;
   vm.createContext(ctx);
   vm.runInContext(fs.readFileSync(HEIGHT_SRC_PATH, 'utf8'), ctx, { filename: HEIGHT_SRC_PATH });
+  vm.runInContext(fs.readFileSync(ADMIN_KEY_PATH, 'utf8'), ctx, { filename: ADMIN_KEY_PATH });
   vm.runInContext(SRC, ctx, { filename: SRC_PATH });
   return ctx.AntennaClaims;
 }
@@ -126,8 +128,53 @@ test('pollDelay backs off and is capped', () => {
   assert.strictEqual(AC.pollDelay(1), 3000);
   for (let i = 0; i < 100; i++) assert.ok(AC.pollDelay(i) <= 30000 && AC.pollDelay(i) >= 2000, 'attempt ' + i);
   let total = 0;
-  for (let i = 0; i < AC.MAX_POLL_ATTEMPTS; i++) total += AC.pollDelay(i);
-  assert.ok(total <= 40 * 60 * 1000, 'polling runs ' + total + ' ms before giving up');
+  assert.strictEqual(AC.DEFAULT_SETTINGS.pollMaxAttempts, 60);
+  for (let i = 0; i < AC.DEFAULT_SETTINGS.pollMaxAttempts; i++) total += AC.pollDelay(i);
+  assert.ok(total > 20 * 60 * 1000 && total <= 40 * 60 * 1000, 'polling runs ' + total + ' ms before giving up');
+});
+
+// ── #789 M3: the operator's settings from GET /api/antenna-claims/config ──
+test('clientSettings: the M2 constants are the defaults, a config answer replaces them', () => {
+  eq(AC.clientSettings(null), { pollInitialMs: 2000, pollBackoff: 1.5, pollMaxMs: 30000, pollMaxAttempts: 60, adminDefaultFilter: 'proven' });
+  eq(AC.clientSettings({ enabled: true, pollInitialMs: 1000, pollBackoff: 2, pollMaxMs: 8000, pollMaxAttempts: 5, adminDefaultFilter: 'pending' }),
+    { pollInitialMs: 1000, pollBackoff: 2, pollMaxMs: 8000, pollMaxAttempts: 5, adminDefaultFilter: 'pending' });
+  // Junk keeps the default, field by field.
+  eq(AC.clientSettings({ pollInitialMs: '1000', pollBackoff: 0.5, pollMaxMs: -1, pollMaxAttempts: 2.5, adminDefaultFilter: '<b>' }),
+    AC.clientSettings(null));
+});
+
+test('pollDelay follows the operator settings', () => {
+  const s = { pollInitialMs: 1000, pollBackoff: 2, pollMaxMs: 5000, pollMaxAttempts: 5 };
+  eq([0, 1, 2, 3, 4].map((i) => AC.pollDelay(i, s)), [1000, 2000, 4000, 5000, 5000]);
+});
+
+test('the poller uses the settings for delays and for when to give up', async () => {
+  const T = fakeTimers();
+  let gaveUp = 0;
+  const p = AC.createStatusPoller({
+    setTimeout: T.setTimeout, clearTimeout: T.clearTimeout,
+    settings: { pollInitialMs: 1000, pollBackoff: 2, pollMaxMs: 5000, pollMaxAttempts: 3 },
+    fetchStatus: () => Promise.resolve({ status: 'pending' }),
+    onUpdate: () => {}, onGiveUp: () => gaveUp++,
+  });
+  p.start('abcdef0123456789');
+  const delays = [];
+  for (let i = 0; i < 3; i++) { delays.push(T.peek()); await T.fire(); }
+  eq([delays, gaveUp, T.pending()], [[1000, 2000, 4000], 1, 0]);
+});
+
+test('currentHeight: the profile badge and wording for each source', () => {
+  const TP = { heightBadge: (s) => ({ owner: { key: 'owner', label: 'owner' }, 'dsm-estimate': { key: 'estimate', label: 'estimate' } })[s] || null,
+    sourceLabel: (s) => ({ owner: 'set by the node owner', 'dsm-estimate': 'estimated from surface model' })[s] || '' };
+  const o = AC.currentHeight({ antennaM: 18.5, antennaSource: 'owner', assumed: false }, TP);
+  eq([o.height, o.label, o.badge.key, o.text], ['18.5 m', 'set by the node owner', 'owner', '18.5 m, set by the node owner.']);
+  const e = AC.currentHeight({ antennaM: 22, antennaSource: 'dsm-estimate', assumed: true }, TP);
+  eq([e.height, e.badge.key], ['22 m', 'estimate']);
+  const p = AC.currentHeight({ antennaM: 10, antennaSource: 'role-default', assumed: true, estimatePending: true }, null);
+  assert.ok(/^10 m, role-default\. A path profile may still raise it/.test(p.text), p.text);
+  for (const bad of [null, {}, { antennaM: '18', antennaSource: 'owner' }, { antennaM: 18 }, { antennaM: NaN, antennaSource: 'owner' }]) {
+    assert.strictEqual(AC.currentHeight(bad, TP), null, JSON.stringify(bad));
+  }
 });
 
 function fakeTimers() {
@@ -136,6 +183,7 @@ function fakeTimers() {
     setTimeout: (fn, ms) => { const t = { fn, ms }; q.push(t); return t; },
     clearTimeout: (t) => { const i = q.indexOf(t); if (i >= 0) q.splice(i, 1); },
     pending: () => q.length,
+    peek: () => (q[0] ? q[0].ms : null),
     async fire() { const t = q.shift(); assert.ok(t, 'no timer pending'); t.fn(); await new Promise((r) => setImmediate(r)); },
   };
 }
@@ -241,6 +289,14 @@ test('the node section deep link carries only the request id', () => {
     assert.strictEqual(AC.claimParam('#/nodes/x' + bad), null, bad);
   }
   assert.ok(!/code|7KX9QM/i.test(h), 'the code must never be in the link');
+});
+
+test('the admin filter default comes from the settings and is left out of the link', () => {
+  assert.strictEqual(AC.parseFilter(undefined, 'pending'), 'pending');
+  assert.strictEqual(AC.parseFilter('nonsense', 'approved'), 'approved');
+  assert.strictEqual(AC.parseFilter('proven', 'pending'), 'proven');
+  assert.strictEqual(AC.adminHash('pending', 'pending'), '#/tools/antenna-claims');
+  assert.strictEqual(AC.adminHash('proven', 'pending'), '#/tools/antenna-claims?filter=proven');
 });
 
 test('the admin filter round-trips through the link; proven is the default', () => {

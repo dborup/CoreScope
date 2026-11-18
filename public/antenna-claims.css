@@ -5,6 +5,12 @@
 /* A .btn's display would otherwise beat the hidden attribute. */
 .ac-body [hidden] { display: none !important; }
 .ac-hint, .ac-what { margin: 0 0 8px; font-size: 13px; }
+/* #789 M3 — the node's current antenna height, above the claim. */
+.ac-current { margin: 0 0 8px; font-size: 13px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.ac-current-source { color: var(--text-muted); }
+/* A line focused from code (focusQuietly) after the control that had the
+   focus was replaced; keyboard focus still shows its ring. */
+.ac-body [tabindex="-1"]:focus:not(:focus-visible), .ac-status[tabindex="-1"]:focus:not(:focus-visible) { outline: none; }
 .ac-expiry { margin: 4px 0 0; font-size: 12px; }
 .ac-form, .ac-key-form { margin: 0; }
 .ac-modes { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 8px; }
@@ -88,3 +94,9 @@ a.ac-item-name, .ac-item-proof { display: flex; align-items: center; align-self:
 }
 .ac-flag { border-color: var(--warning); }
 .ac-empty { padding: 12px 0; color: var(--text-muted); font-size: 13px; }
+
+/* #789 M3 a11y — white text on the legacy --accent is 2.75:1; the owner
+   section and the admin queue put their primary actions (Get code, Unlock,
+   Approve) on --accent-strong, as #1668 M2 does for white-on-blue. */
+.ac-body .btn-primary, .ac-admin .btn-primary { background: var(--accent-strong); color: var(--text-on-accent); }
+.ac-body .btn-primary:hover:not(:disabled), .ac-admin .btn-primary:hover:not(:disabled) { background: var(--accent-strong); filter: brightness(0.9); }

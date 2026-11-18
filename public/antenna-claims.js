@@ -1,8 +1,10 @@
 /* #789 M2b — owner antenna-height claims: the owner flow on the node page
  * and the administrator's queue (Tools → Antenna Height Claims).
  *
- * Server contract (cmd/server/antenna_claims.go, #789 M2a):
- *   GET  /api/antenna-claims/config                → {enabled}
+ * Server contract (cmd/server/antenna_claims.go, #789 M2a and M3):
+ *   GET  /api/antenna-claims/config                → {enabled, pollInitialMs, pollBackoff,
+ *        pollMaxMs, pollMaxAttempts, adminDefaultFilter}   (antennaClaims.* in config.json)
+ *   GET  /api/nodes/{pubkey}/antenna               → {antennaM, antennaSource, assumed, estimatePending}
  *   POST /api/nodes/{pubkey}/antenna-claims {heightM} | {clear:true}
  *        → 202 {requestId, code, expiresAt, nameBudgetBytes, suggestedName}
  *          403 closed · 404 hidden/unknown/no position · 429/503 Retry-After
@@ -131,21 +133,46 @@
     return 'Stopped checking automatically. The claim keeps waiting; check again after sending the advert.';
   }
 
-  // Bounded backoff: 2 s, 3 s, 4.5 s … capped at 30 s, at most
-  // MAX_POLL_ATTEMPTS checks (about 25 minutes), then "Check again".
-  var MAX_POLL_ATTEMPTS = 60;
-  function pollDelay(attempt) {
-    return Math.min(Math.round(2000 * Math.pow(1.5, Math.max(0, attempt))), 30000);
+  // The operator's settings (antennaClaims.* in config.json, #789 M3)
+  // arrive with the config read. DEFAULT_SETTINGS are the server's own
+  // defaults, used only until that read answers or when it fails.
+  var DEFAULT_SETTINGS = { pollInitialMs: 2000, pollBackoff: 1.5, pollMaxMs: 30000, pollMaxAttempts: 60, adminDefaultFilter: 'proven' };
+  var settings = DEFAULT_SETTINGS;
+
+  // clientSettings takes the settings from a config answer; a missing or
+  // unusable value keeps its default (the server already bounds them).
+  function clientSettings(c) {
+    c = c || {};
+    var pos = function (v) { return typeof v === 'number' && isFinite(v) && v > 0; };
+    var out = {
+      pollInitialMs: pos(c.pollInitialMs) ? c.pollInitialMs : DEFAULT_SETTINGS.pollInitialMs,
+      pollBackoff: pos(c.pollBackoff) && c.pollBackoff >= 1 ? c.pollBackoff : DEFAULT_SETTINGS.pollBackoff,
+      pollMaxMs: pos(c.pollMaxMs) ? c.pollMaxMs : DEFAULT_SETTINGS.pollMaxMs,
+      pollMaxAttempts: pos(c.pollMaxAttempts) && Math.floor(c.pollMaxAttempts) === c.pollMaxAttempts ? c.pollMaxAttempts : DEFAULT_SETTINGS.pollMaxAttempts,
+      adminDefaultFilter: DEFAULT_SETTINGS.adminDefaultFilter
+    };
+    for (var i = 0; i < FILTERS.length; i++) if (FILTERS[i][0] === c.adminDefaultFilter) out.adminDefaultFilter = c.adminDefaultFilter;
+    return out;
+  }
+
+  // Bounded backoff: pollInitialMs, growing by pollBackoff, each wait capped
+  // at pollMaxMs, at most pollMaxAttempts checks, then "Check again". With
+  // the defaults: 2 s, 3 s, 4.5 s … 30 s, 60 checks (about 25 minutes).
+  function pollDelay(attempt, s) {
+    s = s || settings;
+    return Math.min(Math.round(s.pollInitialMs * Math.pow(s.pollBackoff, Math.max(0, attempt))), s.pollMaxMs);
   }
 
   // One poller per view. opts.fetchStatus(id) → Promise<status>;
   // opts.onUpdate(status); opts.onGiveUp(); opts.isAlive() stops it once the
   // view is gone; opts.keepGoing(status) says whether to poll again (default:
-  // until statusInfo says done). Timers are injectable for tests.
+  // until statusInfo says done). Timers and opts.settings are injectable for
+  // tests; without them the delays follow the operator's settings as they
+  // are when a check is scheduled.
   function createStatusPoller(opts) {
     var setT = opts.setTimeout || root.setTimeout.bind(root);
     var clearT = opts.clearTimeout || root.clearTimeout.bind(root);
-    var maxAttempts = opts.maxAttempts || MAX_POLL_ATTEMPTS;
+    function cfg() { return opts.settings || settings; }
     var keepGoing = opts.keepGoing || function (st) { return !statusInfo(st).done; };
     var alive = opts.isAlive || function () { return true; };
     var timer = null;
@@ -161,12 +188,12 @@
       var gen = generation;
       var attempt = 0;
       function schedule() {
-        if (attempt >= maxAttempts) {
+        if (attempt >= (opts.maxAttempts || cfg().pollMaxAttempts)) {
           timer = null;
           if (opts.onGiveUp) opts.onGiveUp();
           return;
         }
-        timer = setT(tick, pollDelay(attempt));
+        timer = setT(tick, pollDelay(attempt, cfg()));
         attempt++;
       }
       function tick() {
@@ -202,16 +229,18 @@
     return '#/nodes/' + encodeURIComponent(pubkey) + '?section=node-antenna' + (id ? '&claim=' + id : '');
   }
 
-  // The admin queue: #/tools/antenna-claims[?filter=…]. "proven" is the
-  // review queue and the default.
+  // The admin queue: #/tools/antenna-claims[?filter=…]. The operator's
+  // adminDefaultFilter ("proven", the review queue, unless configured) is
+  // the first view and is left out of the link.
   var FILTERS = [['proven', 'To review'], ['pending', 'Waiting for advert'], ['approved', 'Approved'],
     ['rejected', 'Rejected'], ['revoked', 'Revoked'], ['expired', 'Expired'], ['superseded', 'Superseded']];
-  function parseFilter(v) {
+  function parseFilter(v, def) {
     for (var i = 0; i < FILTERS.length; i++) if (FILTERS[i][0] === v) return v;
-    return 'proven';
+    return def || settings.adminDefaultFilter;
   }
-  function adminHash(filter) {
-    return '#/tools/antenna-claims' + (filter && filter !== 'proven' ? '?filter=' + encodeURIComponent(filter) : '');
+  function adminHash(filter, def) {
+    def = def || settings.adminDefaultFilter;
+    return '#/tools/antenna-claims' + (filter && filter !== def ? '?filter=' + encodeURIComponent(filter) : '');
   }
   // The decisions the server accepts per status (claimDecisionSources).
   function decisionsFor(status) {
@@ -235,31 +264,9 @@
   }
 
   // ── Network ────────────────────────────────────────────────────────────
-  var adminKey = null; // memory only
-
-  function request(method, path, opts) {
-    opts = opts || {};
-    var headers = { 'Accept': 'application/json' };
-    if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
-    if (opts.admin && adminKey) headers['X-API-Key'] = adminKey;
-    return fetch('/api' + path, {
-      method: method,
-      headers: headers,
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-      cache: 'no-store'
-    }).then(function (res) {
-      return res.text().then(function (text) {
-        var data = null;
-        try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
-        if (!res.ok) {
-          var err = new Error((data && data.error) || ('Request failed (' + res.status + ')'));
-          err.status = res.status;
-          throw err;
-        }
-        return data;
-      });
-    });
-  }
+  // The admin key, in memory only (public/admin-key.js).
+  var adminSession = root.MCAdminKey.create();
+  var request = adminSession.request;
 
   function statusOf(id) {
     return request('GET', '/antenna-claims/requests/' + encodeURIComponent(id));
@@ -270,6 +277,7 @@
   function loadConfig() {
     if (!configPromise) {
       configPromise = request('GET', '/antenna-claims/config').then(function (c) {
+        settings = clientSettings(c);
         return { enabled: !!(c && c.enabled === true) };
       }, function () {
         configPromise = null;
@@ -314,6 +322,19 @@
   function setStatus(line, info) {
     line.textContent = info.text;
     line.setAttribute('data-kind', info.kind);
+  }
+  // focusQuietly moves the focus to a line the page just put in place of
+  // the control that had it (a re-render took that control away), so a
+  // keyboard or screen-reader user goes on from there instead of from the
+  // top of the page. A line is focusable from code only.
+  function focusQuietly(node) {
+    if (!node || !node.focus) return;
+    if (!node.matches('a,button,input,select,textarea')) node.setAttribute('tabindex', '-1');
+    node.focus({ preventScroll: true });
+  }
+  function lostFocus() {
+    var a = document.activeElement;
+    return !a || a === document.body || !a.isConnected;
   }
   function copy(text, btn) {
     var done = function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 2000); };
@@ -392,12 +413,58 @@
     return api;
   }
 
+  // currentHeight is the node page's line for GET /api/nodes/{pk}/antenna:
+  // the height, the profile's badge for its source (owner, estimate,
+  // operator, default) and the profile's wording for it. tp is
+  // TerrainProfile (heightBadge, sourceLabel); null without an answer.
+  function currentHeight(r, tp) {
+    if (!r || typeof r.antennaM !== 'number' || !isFinite(r.antennaM) || typeof r.antennaSource !== 'string') return null;
+    var out = {
+      height: fmtHeight(r.antennaM),
+      label: (tp && tp.sourceLabel ? tp.sourceLabel(r.antennaSource) : '') || r.antennaSource,
+      note: r.estimatePending ? 'A path profile may still raise it to a surface estimate.' : '',
+      badge: tp && tp.heightBadge ? tp.heightBadge(r.antennaSource) : null,
+      source: r.antennaSource
+    };
+    out.text = out.height + ', ' + out.label + '.' + (out.note ? ' ' + out.note : '');
+    return out;
+  }
+
+  // renderCurrent fills the "Current height" line once the server answers;
+  // without an answer (terrain profile off, an error) the line stays out.
+  function renderCurrent(line, n, view) {
+    request('GET', '/nodes/' + encodeURIComponent(n.public_key) + '/antenna').then(function (r) {
+      var cur = currentHeight(r, root.TerrainProfile);
+      if (!cur || !view.alive) return;
+      line.textContent = '';
+      line.appendChild(el('span', 'ac-current-label', 'Current height: '));
+      line.appendChild(el('strong', 'ac-current-value', cur.height));
+      if (cur.badge) {
+        var b = el('span', 'tp-hbadge tp-hbadge-' + cur.badge.key, cur.badge.label);
+        b.title = cur.badge.title;
+        b.setAttribute('data-testid', 'ac-current-badge');
+        line.appendChild(document.createTextNode(' '));
+        line.appendChild(b);
+      }
+      line.appendChild(el('span', 'ac-current-source', ' ' + cur.label + '.' + (cur.note ? ' ' + cur.note : '')));
+      line.setAttribute('data-source', cur.source);
+      line.hidden = false;
+    }, function () { /* no line */ });
+  }
+
   function renderOwnerSection(section, n, view) {
     section.textContent = '';
     section.setAttribute('data-testid', 'antenna-claim');
     var title = el('h4', null, 'Antenna height (owner)');
     title.id = 'antennaClaimTitle';
+    section.setAttribute('role', 'region');
+    section.setAttribute('aria-labelledby', 'antennaClaimTitle');
     section.appendChild(title);
+    var current = el('p', 'ac-current');
+    current.setAttribute('data-testid', 'ac-current');
+    current.hidden = true;
+    section.appendChild(current);
+    renderCurrent(current, n, view);
     var body = el('div', 'ac-body');
     section.appendChild(body);
     var hasPos = n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
@@ -484,6 +551,8 @@
         remember(res.requestId, info);
         history.replaceState(null, '', claimHash(n.public_key, res.requestId));
         renderClaim(body, n, view, res.requestId, info);
+        // The form is gone: go on from what the claim is.
+        if (lostFocus()) focusQuietly(body.querySelector('.ac-what'));
       }, function (err) {
         var msg = err.status === 429 ? 'Too many claims right now. Please try again later.'
           : err.status === 403 ? 'Antenna height claims are closed on this site.'
@@ -555,8 +624,10 @@
       view.poller.cancel();
       history.replaceState(null, '', claimHash(n.public_key, null));
       var hasPos = n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
-      if (hasPos) renderForm(body, n, view);
-      else { body.textContent = ''; body.appendChild(el('p', 'text-muted', 'This node sends no position in its adverts, so an antenna height cannot be claimed for it.')); }
+      if (hasPos) {
+        renderForm(body, n, view);
+        focusQuietly(body.querySelector('#acHeight'));
+      } else { body.textContent = ''; body.appendChild(el('p', 'text-muted', 'This node sends no position in its adverts, so an antenna height cannot be claimed for it.')); }
     });
     view.poller.start(id);
   }
@@ -587,7 +658,7 @@
     var cmdRow = el('div', 'ac-cmd-row');
     var cmd = el('code', 'ac-cmd');
     cmd.setAttribute('data-testid', 'ac-cmd');
-    var copyBtn = button('Copy', 'btn btn-secondary ac-copy');
+    var copyBtn = button('Copy', 'btn btn-secondary ac-copy', { 'aria-label': 'Copy the set name command' });
     cmdRow.appendChild(cmd);
     cmdRow.appendChild(copyBtn);
     s1.appendChild(cmdRow);
@@ -615,7 +686,7 @@
   var admin = null; // { container, filter, poller, deciding: {id, text} }
 
   function adminInit(container) {
-    admin = { container: container, filter: parseFilter((hashParams(location.hash) || { get: function () {} }).get('filter')), deciding: null };
+    admin = { container: container, filter: null, deciding: null };
     admin.poller = createStatusPoller({
       fetchStatus: statusOf,
       isAlive: function () { return !!admin && admin.container.isConnected; },
@@ -653,7 +724,13 @@
     bodyEl.id = 'acAdminBody';
     page.appendChild(bodyEl);
     container.appendChild(page);
-    renderAdminBody();
+    // The first view is the operator's adminDefaultFilter: wait for it.
+    var mine = admin;
+    loadConfig().then(function () {
+      if (admin !== mine) return;
+      admin.filter = parseFilter((hashParams(location.hash) || { get: function () {} }).get('filter'));
+      renderAdminBody();
+    });
   }
 
   function adminDestroy() {
@@ -690,7 +767,7 @@
   // once that row has left the list, in the line above the list. Nothing is
   // shown once the key was dropped (a 401 on the refresh says why).
   function showDecision(id, text, kind) {
-    if (!admin || !adminKey) return;
+    if (!admin || !adminSession.has()) return;
     var row = rowOf(id);
     var line = row && row.querySelector('.ac-item-status');
     if (line) {
@@ -700,13 +777,15 @@
       line = adminStatus(text, kind);
     }
     reveal(line);
+    // The decided row's buttons were rebuilt or left the list.
+    if (lostFocus()) focusQuietly(line);
   }
 
   function renderAdminBody() {
     var body = document.getElementById('acAdminBody');
-    if (!body || !admin) return;
+    if (!body || !admin || !admin.filter) return;
     body.textContent = '';
-    if (!adminKey) {
+    if (!adminSession.has()) {
       var form = el('form', 'ac-key-form');
       form.noValidate = true;
       var lab = el('label', 'ac-label', 'Admin API key');
@@ -725,9 +804,10 @@
       form.addEventListener('submit', function (e) {
         e.preventDefault();
         if (!key.value) return;
-        adminKey = key.value;
+        adminSession.set(key.value);
         adminStatus('', 'info');
         renderAdminBody();
+        focusQuietly(document.querySelector('#acAdminBody .ac-filter[aria-pressed="true"]'));
       });
       body.appendChild(form);
       return;
@@ -743,6 +823,7 @@
         history.replaceState(null, '', adminHash(f[0]));
         adminStatus('', 'info');
         renderAdminBody();
+        focusQuietly(document.querySelector('#acAdminBody .ac-filter[aria-pressed="true"]'));
       });
       group.appendChild(b);
     });
@@ -750,7 +831,12 @@
     var refresh = button('Refresh', 'btn btn-secondary');
     refresh.addEventListener('click', loadAdminList);
     var lock = button('Lock', 'btn btn-secondary');
-    lock.addEventListener('click', function () { adminKey = null; adminStatus('', 'info'); renderAdminBody(); });
+    lock.addEventListener('click', function () {
+      adminSession.clear();
+      adminStatus('', 'info');
+      renderAdminBody();
+      focusQuietly(document.getElementById('acAdminKey'));
+    });
     bar.appendChild(refresh);
     bar.appendChild(lock);
     body.appendChild(bar);
@@ -784,9 +870,10 @@
 
   function onAdminError(err) {
     if (err && (err.status === 401 || err.status === 403)) {
-      adminKey = null;
+      adminSession.clear();
       renderAdminBody();
       adminStatus(err.status === 401 ? 'The API key was not accepted.' : err.message, 'error');
+      focusQuietly(document.getElementById('acAdminKey'));
       return;
     }
     adminStatus((err && err.message) || 'Something went wrong.', 'error');
@@ -869,7 +956,9 @@
 
   root.AntennaClaims = {
     NAME_BUDGET: NAME_BUDGET,
-    MAX_POLL_ATTEMPTS: MAX_POLL_ATTEMPTS,
+    DEFAULT_SETTINGS: DEFAULT_SETTINGS,
+    clientSettings: clientSettings,
+    currentHeight: currentHeight,
     FILTERS: FILTERS,
     parseHeight: parseHeight,
     utf8Length: utf8Length,

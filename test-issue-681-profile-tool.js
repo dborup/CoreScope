@@ -1457,6 +1457,67 @@ atest('a customizer role height below the estimate never replaces it', async () 
   });
 });
 
+// #789 M3: "Prefer owner heights" is the viewer's switch, on by default.
+// On (or absent): the owner height stands, as above. Off: the viewer's own
+// customizer role height replaces it, higher or lower, like a default; a
+// remembered height and a link still win either way.
+test('themeDefaults: preferOwnerHeights is on unless the section says false', () => {
+  assert.strictEqual(TP.themeDefaults(null).preferOwnerHeights, true);
+  assert.strictEqual(TP.themeDefaults(terrainCfg()).preferOwnerHeights, true);
+  assert.strictEqual(TP.themeDefaults(terrainCfg({ preferOwnerHeights: true })).preferOwnerHeights, true);
+  assert.strictEqual(TP.themeDefaults(terrainCfg({ preferOwnerHeights: 'false' })).preferOwnerHeights, true, 'only a boolean false turns it off');
+  assert.strictEqual(TP.themeDefaults(terrainCfg({ preferOwnerHeights: false })).preferOwnerHeights, false);
+});
+
+atest('prefer owner heights on: an explicit true keeps the owner height', async () => {
+  const live = loadLive();
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: 30, preferOwnerHeights: true }) };
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  const data = defaultsAnswer();
+  data.a = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 18.5, antennaSource: 'owner', assumed: false };
+  data.b = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 18.5, antennaSource: 'owner', assumed: false };
+  f.calls[0].settle.resolve(data);
+  await sleep(0);
+  assert.strictEqual(f.calls.length, 1, 'the owner height was re-asked with the toggle on');
+  assert.strictEqual(live.dom.find('tp-hsrc-a').textContent, 'owner');
+});
+
+[30, 5].forEach((viewerH) => {
+  atest('prefer owner heights off: a customizer role height of ' + viewerH + ' m replaces an owner height', async () => {
+    const live = loadLive();
+    live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: viewerH, preferOwnerHeights: false }) };
+    const f = deferredFetch();
+    openPair(live.TP, live.dom, f);
+    const data = defaultsAnswer();
+    data.a = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 18.5, antennaSource: 'owner', assumed: false };
+    data.b = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 18.5, antennaSource: 'owner', assumed: false };
+    f.calls[0].settle.resolve(data);
+    await sleep(0);
+    eq(askedHeights(f.calls[f.calls.length - 1]), { ha: String(viewerH), hb: String(viewerH) }, 'the owner height was kept with the toggle off');
+    const second = defaultsAnswer();
+    second.a = { kind: 'node', role: 'repeater', groundM: 0, antennaM: viewerH, antennaSource: 'request', assumed: false };
+    second.b = { kind: 'node', role: 'repeater', groundM: 0, antennaM: viewerH, antennaSource: 'request', assumed: false };
+    f.calls[f.calls.length - 1].settle.resolve(second);
+    await sleep(0);
+    assert.strictEqual(live.dom.find('tp-hsrc-a').textContent, 'default');
+    assert.strictEqual(live.dom.find('tp-h-a').value, String(viewerH));
+  });
+});
+
+atest('prefer owner heights off leaves operator heights and estimates alone', async () => {
+  const live = loadLive();
+  live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: 5, preferOwnerHeights: false }) };
+  const f = deferredFetch();
+  openPair(live.TP, live.dom, f);
+  const data = defaultsAnswer();
+  data.a = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 18, antennaSource: 'operator-node', assumed: false };
+  data.b = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 22, antennaSource: 'dsm-estimate', assumed: true };
+  f.calls[0].settle.resolve(data);
+  await sleep(0);
+  assert.strictEqual(f.calls.length, 1, 'the toggle reached past owner heights');
+});
+
 atest('a remembered height outranks the customizer default', async () => {
   const live = loadLive();
   live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: 25 }) };
