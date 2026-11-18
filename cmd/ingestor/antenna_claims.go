@@ -1,6 +1,7 @@
 package main
 
-// Owner antenna-height claims (#789 M2a) — the writer side.
+// Owner antenna-height claims (#789 M2a) and station details (#898) — the
+// writer side.
 //
 // The read-only server issues a claim (a random code bound to one public key
 // and one height, or a clear) as a command file in the antenna-claim queue.
@@ -19,6 +20,14 @@ package main
 //
 // The ingestor knows nothing about hidden identities (#743): the server
 // refuses to issue claims for hidden nodes and never serves their heights.
+//
+// #898: one claim carries a height part, a details part or both, each a set
+// or an explicit clear (height_op, details_op). Approval is all-or-nothing;
+// approving a claim retires on older approved claims only the parts it
+// carries (the in-force flags). The admin contact lives in
+// node_claim_admin_contacts and, like contact_public, exists only while
+// antennaclaim.ContactLiveSQL holds: every other transition deletes it in
+// the same transaction, and every prune sweeps orphans.
 
 import (
 	"context"
@@ -54,7 +63,9 @@ type pendingClaim struct {
 	id        string
 	code      string
 	expiresAt int64 // Unix ms
-	clear     bool
+	// clearOnly: every part the claim carries is a clear, so it needs no
+	// proof position (antennaclaim.ClearOnlySQL).
+	clearOnly bool
 }
 
 type antennaClaimRunner struct {
@@ -95,8 +106,8 @@ func (r *antennaClaimRunner) pendingCount() int {
 
 // match finds and removes the pending claim of pubkey whose code is a whole
 // token within the first budget bytes of name. hasPos is whether the advert
-// carries a position: a height is bound to where it was proven, so only a
-// clear claim may be proven without one. O(1) map lookup plus a scan of at
+// carries a position: a height and details are bound to where they were
+// proven, so only a clear-only claim may be proven without one. O(1) map lookup plus a scan of at
 // most MaxPendingPerNode codes over at most 32 bytes.
 func (r *antennaClaimRunner) match(pubkey, name string, budget int, hasPos bool) (pendingClaim, bool) {
 	nowMs := r.now().UnixMilli()
@@ -104,7 +115,7 @@ func (r *antennaClaimRunner) match(pubkey, name string, budget int, hasPos bool)
 	defer r.mu.Unlock()
 	list := r.pending[pubkey]
 	for i, pc := range list {
-		if pc.expiresAt < nowMs || (!pc.clear && !hasPos) {
+		if pc.expiresAt < nowMs || (!pc.clearOnly && !hasPos) {
 			continue
 		}
 		if antennaclaim.ContainsCode(name, budget, pc.code) {
@@ -161,9 +172,11 @@ func (r *antennaClaimRunner) restore(pubkey string, pc pendingClaim) {
 	r.pending[pubkey] = append(r.pending[pubkey], pc)
 }
 
-// proveAntennaClaim records the proof of a pending claim. A clear claim takes
-// effect at once (the owner withdraws their own height, owner decision 4); a
-// height is approved automatically only with autoApprove and no review flag,
+// proveAntennaClaim records the proof of a pending claim. A clear-only claim
+// takes effect at once (the owner withdraws their own data, owner decision
+// 4); a claim that sets details always waits for an administrator (#898 N3:
+// contactPublic is free text that must not go public unreviewed); any other
+// claim is approved automatically only with autoApprove and no review flag,
 // otherwise it waits as proven. Returns the new status, or "" when the claim
 // was no longer pending or had expired (a racing match, a reject).
 func (s *Store) proveAntennaClaim(ctx context.Context, id, hash string, lat, lon *float64, autoApprove bool, nowMs int64) (string, error) {
@@ -174,11 +187,12 @@ func (s *Store) proveAntennaClaim(ctx context.Context, id, hash string, lat, lon
 	defer tx.Rollback()
 	var (
 		pubkey      string
-		isClear     bool
+		clearOnly   bool
+		setsDetails bool
 		needsReview bool
 	)
-	err = tx.QueryRowContext(ctx, `SELECT pubkey, height_m IS NULL, needs_review FROM node_antenna_claims
-		WHERE request_id = ? AND status = 'pending' AND expires_at >= ?`, id, nowMs).Scan(&pubkey, &isClear, &needsReview)
+	err = tx.QueryRowContext(ctx, `SELECT pubkey, `+antennaclaim.ClearOnlySQL+`, COALESCE(details_op = 'set', 0), needs_review
+		FROM node_antenna_claims WHERE request_id = ? AND status = 'pending' AND expires_at >= ?`, id, nowMs).Scan(&pubkey, &clearOnly, &setsDetails, &needsReview)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -188,16 +202,14 @@ func (s *Store) proveAntennaClaim(ctx context.Context, id, hash string, lat, lon
 	status, approvedBy := antennaclaim.StatusProven, sql.NullString{}
 	var reviewedAt sql.NullInt64
 	switch {
-	case isClear:
+	case clearOnly:
 		status, approvedBy = antennaclaim.StatusApproved, sql.NullString{String: antennaclaim.ApprovedByOwner, Valid: true}
+	case setsDetails:
 	case autoApprove && !needsReview:
 		status, approvedBy = antennaclaim.StatusApproved, sql.NullString{String: antennaclaim.ApprovedByAuto, Valid: true}
 	}
 	if status == antennaclaim.StatusApproved {
 		reviewedAt = sql.NullInt64{Int64: nowMs, Valid: true}
-		if err := supersedeApproved(ctx, tx, pubkey, id, nowMs); err != nil {
-			return "", err
-		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE node_antenna_claims
 		SET status = ?, proven_at = ?, proof_hash = ?, proof_lat = ?, proof_lon = ?, reviewed_at = ?, approved_by = ?
@@ -205,14 +217,55 @@ func (s *Store) proveAntennaClaim(ctx context.Context, id, hash string, lat, lon
 		status, nowMs, hash, lat, lon, reviewedAt, approvedBy, id); err != nil {
 		return "", err
 	}
+	if status == antennaclaim.StatusApproved {
+		if err := putInForce(ctx, tx, pubkey, id, nowMs); err != nil {
+			return "", err
+		}
+	}
 	return status, tx.Commit()
 }
 
-// supersedeApproved retires every other approved claim of pubkey: one claim
-// per key is in force.
-func supersedeApproved(ctx context.Context, tx *sql.Tx, pubkey, keep string, nowMs int64) error {
-	_, err := tx.ExecContext(ctx, `UPDATE node_antenna_claims SET status = 'superseded', reviewed_at = ?
-		WHERE pubkey = ? AND status = 'approved' AND request_id != ?`, nowMs, pubkey, keep)
+// putInForce runs inside an approval's transaction, after the claim's status
+// became approved: the claim's in-force flags become the parts it carries,
+// and every other approved claim of pubkey loses the parts this one carries
+// (a part replaced by details also loses its contacts). An older claim whose
+// flags are both 0 is superseded; one that still has a part in force stays
+// approved. Nothing is ever put back in force: a later revoke of this claim
+// leaves the node without the part (no resurrection, #898 T5).
+func putInForce(ctx context.Context, tx *sql.Tx, pubkey, id string, nowMs int64) error {
+	var carriesHeight, carriesDetails bool
+	if err := tx.QueryRowContext(ctx, `UPDATE node_antenna_claims
+		SET height_in_force = (height_op IS NOT NULL), details_in_force = (details_op IS NOT NULL)
+		WHERE request_id = ? RETURNING height_in_force, details_in_force`, id).Scan(&carriesHeight, &carriesDetails); err != nil {
+		return err
+	}
+	const others = ` WHERE pubkey = ? AND status = 'approved' AND request_id != ?`
+	if carriesHeight {
+		if _, err := tx.ExecContext(ctx, `UPDATE node_antenna_claims SET height_in_force = 0`+others+` AND height_in_force = 1`, pubkey, id); err != nil {
+			return err
+		}
+	}
+	if carriesDetails {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM node_claim_admin_contacts WHERE request_id IN
+			(SELECT request_id FROM node_antenna_claims`+others+` AND details_in_force = 1)`, pubkey, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE node_antenna_claims SET details_in_force = 0, contact_public = NULL`+others+` AND details_in_force = 1`, pubkey, id); err != nil {
+			return err
+		}
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE node_antenna_claims SET status = 'superseded', reviewed_at = ?`+others+`
+		AND height_in_force = 0 AND details_in_force = 0`, nowMs, pubkey, id)
+	return err
+}
+
+// dropContacts deletes the contacts of claim id, inside a transition out of
+// antennaclaim.ContactLiveSQL (reject, revoke).
+func dropContacts(ctx context.Context, tx *sql.Tx, id string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM node_claim_admin_contacts WHERE request_id = ?`, id); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE node_antenna_claims SET contact_public = NULL WHERE request_id = ?`, id)
 	return err
 }
 
@@ -251,20 +304,48 @@ func (s *Store) insertAntennaClaim(ctx context.Context, cmd antennaclaim.Command
 	if created <= 0 {
 		created = nowMs
 	}
+	parts := cmd.Parts()
+	var (
+		d                           antennaclaim.DetailsInput
+		antennaType, installation   sql.NullString
+		contactPublic, contactAdmin sql.NullString
+		powerMask                   sql.NullInt64
+	)
+	if cmd.Details != nil {
+		d = *cmd.Details
+		antennaType, installation = nullString(d.AntennaType), nullString(d.Installation)
+		contactPublic, contactAdmin = nullString(d.ContactPublic), nullString(d.ContactAdmin)
+		if m, ok := antennaclaim.PowerMask(d.Power); ok {
+			powerMask = sql.NullInt64{Int64: int64(m), Valid: true}
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO node_antenna_claims
-		(request_id, pubkey, height_m, code, status, needs_review, created_at, expires_at)
-		VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)`,
-		cmd.RequestID, cmd.PubKey, cmd.HeightM, cmd.Code, cmd.NeedsReview, created, created+l.RequestTTL.Milliseconds()); err != nil {
+		(request_id, pubkey, height_m, height_op, details_op, antenna_type, gain_dbi, power_mask, installation, contact_public,
+		 code, status, needs_review, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+		cmd.RequestID, cmd.PubKey, cmd.HeightM, nullString(parts.Height), nullString(parts.Details),
+		antennaType, d.GainDBi, powerMask, installation, contactPublic,
+		cmd.Code, cmd.NeedsReview, created, created+l.RequestTTL.Milliseconds()); err != nil {
 		return "", err
+	}
+	if contactAdmin.Valid {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO node_claim_admin_contacts (request_id, contact) VALUES (?, ?)`,
+			cmd.RequestID, contactAdmin); err != nil {
+			return "", err
+		}
 	}
 	return antennaclaim.StatusPending, tx.Commit()
 }
 
-// reviewAntennaClaim applies an administrator's decision: a claim in one of
-// sources moves to target. Repeating a decision is idempotent. An approval
-// whose proof is older than the key's claim in force is refused
+func nullString(s string) sql.NullString { return sql.NullString{String: s, Valid: s != ""} }
+
+// reviewAntennaClaim applies an administrator's decision to the whole claim
+// (#898: no part is decided alone): a claim in one of sources moves to
+// target. Repeating a decision is idempotent. An approval whose proof is
+// older than an approved claim that carries one of its parts is refused
 // (ErrNewerApproved): the newest proof by the key holder wins, whatever order
-// an administrator reviews them in.
+// an administrator reviews them in. A reject or revoke deletes the claim's
+// contacts, and a revoke takes its parts out of force.
 func (s *Store) reviewAntennaClaim(ctx context.Context, id string, sources []string, target string, nowMs int64) (string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -273,7 +354,9 @@ func (s *Store) reviewAntennaClaim(ctx context.Context, id string, sources []str
 	defer tx.Rollback()
 	var status, pubkey string
 	var provenAt sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT status, pubkey, proven_at FROM node_antenna_claims WHERE request_id = ?`, id).Scan(&status, &pubkey, &provenAt)
+	var carriesHeight, carriesDetails bool
+	err = tx.QueryRowContext(ctx, `SELECT status, pubkey, proven_at, height_op IS NOT NULL, details_op IS NOT NULL
+		FROM node_antenna_claims WHERE request_id = ?`, id).Scan(&status, &pubkey, &provenAt, &carriesHeight, &carriesDetails)
 	if err == sql.ErrNoRows {
 		return "", errClaimNotFound
 	}
@@ -294,34 +377,85 @@ func (s *Store) reviewAntennaClaim(ctx context.Context, id string, sources []str
 	if target == antennaclaim.StatusApproved {
 		approvedBy = sql.NullString{String: antennaclaim.ApprovedByAdmin, Valid: true}
 		var newer bool
-		if err := tx.QueryRowContext(ctx, antennaclaim.NewerApprovedQuery, pubkey, id, provenAt.Int64).Scan(&newer); err != nil {
+		if err := tx.QueryRowContext(ctx, antennaclaim.NewerApprovedQuery, pubkey, id, provenAt.Int64, carriesHeight, carriesDetails).Scan(&newer); err != nil {
 			return "", err
 		}
 		if newer {
 			return status, antennaclaim.ErrNewerApproved
-		}
-		if err := supersedeApproved(ctx, tx, pubkey, id, nowMs); err != nil {
-			return "", err
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE node_antenna_claims SET status = ?, reviewed_at = ?, approved_by = ?
 		WHERE request_id = ? AND status = ?`, target, nowMs, approvedBy, id, status); err != nil {
 		return "", err
 	}
+	switch target {
+	case antennaclaim.StatusApproved:
+		if err := putInForce(ctx, tx, pubkey, id, nowMs); err != nil {
+			return "", err
+		}
+	case antennaclaim.StatusRevoked:
+		if _, err := tx.ExecContext(ctx, `UPDATE node_antenna_claims SET height_in_force = 0, details_in_force = 0 WHERE request_id = ?`, id); err != nil {
+			return "", err
+		}
+		fallthrough
+	case antennaclaim.StatusRejected:
+		if err := dropContacts(ctx, tx, id); err != nil {
+			return "", err
+		}
+	}
 	return target, tx.Commit()
 }
 
 // PruneAntennaClaims deletes finished claims decided before cutoffMs and
-// claims still pending or proven that were issued before it. The claim in
-// force (approved) is kept: at most one per key.
+// claims still pending or proven that were issued before it; their admin
+// contacts go with them (ON DELETE CASCADE). The claims in force (approved)
+// are kept: at most one per part and key. Then it sweeps the contacts of
+// every claim outside antennaclaim.ContactLiveSQL, defence in depth for the
+// per-transition deletes. One transaction.
 func (s *Store) PruneAntennaClaims(ctx context.Context, cutoffMs int64) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM node_antenna_claims
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM node_antenna_claims
 		WHERE (status IN ('rejected', 'revoked', 'expired', 'superseded') AND COALESCE(reviewed_at, created_at) < ?)
 		   OR (status IN ('pending', 'proven') AND created_at < ?)`, cutoffMs, cutoffMs)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM node_claim_admin_contacts WHERE request_id NOT IN
+		(SELECT request_id FROM node_antenna_claims WHERE `+antennaclaim.ContactLiveSQL+`)`); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE node_antenna_claims SET contact_public = NULL
+		WHERE contact_public IS NOT NULL AND NOT `+antennaclaim.ContactLiveSQL); err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
+// expireAntennaClaims marks pending claims whose code ran out as expired and
+// deletes their contacts, in one transaction.
+func (s *Store) expireAntennaClaims(ctx context.Context, nowMs int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	const due = `status = 'pending' AND expires_at < ?`
+	if _, err := tx.ExecContext(ctx, `DELETE FROM node_claim_admin_contacts WHERE request_id IN
+		(SELECT request_id FROM node_antenna_claims WHERE `+due+`)`, nowMs); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE node_antenna_claims SET status = 'expired', contact_public = NULL WHERE `+due, nowMs); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // RunOnce applies the waiting commands, expires claims whose code ran out,
@@ -352,8 +486,7 @@ func (r *antennaClaimRunner) RunOnce(ctx context.Context) {
 	}
 	nowMs := r.now().UnixMilli()
 	if !r.loaded || r.hasExpired(nowMs) {
-		if _, err := r.store.db.ExecContext(ctx, `UPDATE node_antenna_claims SET status = 'expired'
-			WHERE status = 'pending' AND expires_at < ?`, nowMs); err != nil {
+		if err := r.store.expireAntennaClaims(ctx, nowMs); err != nil {
 			log.Printf("[antenna-claims] expiry failed: %v", err)
 		}
 		changed = true
@@ -378,7 +511,7 @@ func (r *antennaClaimRunner) hasExpired(nowMs int64) bool {
 
 // reload rebuilds the pending map from the table, bounded by MaxPending.
 func (r *antennaClaimRunner) reload(ctx context.Context, nowMs int64) {
-	rows, err := r.store.db.QueryContext(ctx, `SELECT request_id, pubkey, code, expires_at, height_m IS NULL
+	rows, err := r.store.db.QueryContext(ctx, `SELECT request_id, pubkey, code, expires_at, `+antennaclaim.ClearOnlySQL+`
 		FROM node_antenna_claims WHERE status = 'pending' AND expires_at >= ?
 		ORDER BY created_at LIMIT ?`, nowMs, r.limits.MaxPending)
 	if err != nil {
@@ -390,7 +523,7 @@ func (r *antennaClaimRunner) reload(ctx context.Context, nowMs int64) {
 	for rows.Next() {
 		var pc pendingClaim
 		var pubkey string
-		if err := rows.Scan(&pc.id, &pubkey, &pc.code, &pc.expiresAt, &pc.clear); err != nil {
+		if err := rows.Scan(&pc.id, &pubkey, &pc.code, &pc.expiresAt, &pc.clearOnly); err != nil {
 			log.Printf("[antenna-claims] loading pending claims failed: %v", err)
 			return
 		}
