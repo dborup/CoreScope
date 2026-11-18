@@ -52,9 +52,19 @@
 
   function signature() { return colors().join('|'); }
 
+  // One module-level data-theme observer feeds every watcher: the dark-mode
+  // toggle flips the attribute without a theme-changed event. It lives for the
+  // page's life (a subscriber-less call is a no-op), so a page that mounts and
+  // unmounts leaves no observer of its own behind.
+  var subscribers = [];
+  function pokeAll() { subscribers.slice().forEach(function (f) { f(); }); }
+  if (typeof MutationObserver === 'function' && typeof document !== 'undefined' && document.documentElement && document.documentElement.nodeType) {
+    new MutationObserver(pokeAll).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  }
+
   /** cb() after a change that moved the gradient. Returns the unsubscribe. */
   function watch(cb) {
-    var last = signature(), timer = null, mo = null;
+    var last = signature(), timer = null;
     function check() {
       timer = null;
       var now = signature();
@@ -70,15 +80,12 @@
     }
     window.addEventListener('theme-changed', schedule);
     window.addEventListener('cb-preset-changed', schedule);
-    // The dark-mode toggle flips data-theme without a theme-changed event.
-    if (typeof MutationObserver === 'function' && typeof document !== 'undefined' && document.documentElement && document.documentElement.nodeType) {
-      mo = new MutationObserver(schedule);
-      mo.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
-    }
+    subscribers.push(schedule);
     return function unwatch() {
       window.removeEventListener('theme-changed', schedule);
       window.removeEventListener('cb-preset-changed', schedule);
-      if (mo) mo.disconnect();
+      var k = subscribers.indexOf(schedule);
+      if (k >= 0) subscribers.splice(k, 1);
       if (timer != null) { clearTimeout(timer); timer = null; }
     };
   }

@@ -26,6 +26,7 @@
     "HEALTH_THRESHOLDS": "readonly",
     "HashColor": "readonly",
     "HeardBy": "readonly",
+    "HeatGradient": "readonly",
     "HopDisplay": "readonly",
     "HopResolver": "readonly",
     "IATA_CITIES": "readonly",
