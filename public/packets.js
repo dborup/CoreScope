@@ -1598,7 +1598,9 @@
     }
     wsHandler = debouncedOnWS(function (msgs) {
       if (packetsPaused) {
-        pauseBuffer.push(...msgs);
+        // Only packets are replayed on resume, so only packets count in the
+        // badge: a #881 moment (or any other frame type) is not a packet.
+        pauseBuffer.push(...msgs.filter(m => m && m.type === 'packet'));
         if (pauseBuffer.length > 2000) pauseBuffer = pauseBuffer.slice(-2000);
         const btn = document.getElementById('pktPauseBtn');
         if (btn) btn.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-play"/></svg> ' + pauseBuffer.length;

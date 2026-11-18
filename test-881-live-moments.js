@@ -1,0 +1,442 @@
+/* test-881-live-moments.js
+ * #881 M2 — Live "Moments". Unit tests for the real public/live-moments.js,
+ * loaded in a vm sandbox with a small fake DOM, fake timers and a fake
+ * clock. No browser.
+ */
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+const assert = require('assert');
+
+let passed = 0, failed = 0;
+const queue = [];
+function test(name, fn) { queue.push({ name, fn }); }
+function section(title) { queue.push({ title }); }
+
+// ── Fake DOM ──────────────────────────────────────────────────────────────
+const created = [];
+class El {
+  constructor(tag) {
+    this.tagName = tag.toUpperCase(); this.children = []; this.parentNode = null;
+    this.attrs = {}; this.className = ''; this.hidden = false; this.style = {};
+    this._text = ''; this.listeners = {}; this.href = ''; this.type = '';
+    created.push(this);
+  }
+  get classList() {
+    const self = this;
+    const list = () => self.className.split(/\s+/).filter(Boolean);
+    return {
+      contains: (c) => list().includes(c),
+      add: (c) => { if (!list().includes(c)) self.className = list().concat(c).join(' '); },
+      remove: (c) => { self.className = list().filter((x) => x !== c).join(' '); },
+      toggle: (c, on) => { if (on === undefined) on = !list().includes(c); if (on) this.classList.add(c); else this.classList.remove(c); },
+    };
+  }
+  get textContent() { return this._text + this.children.map((c) => c.textContent).join(''); }
+  set textContent(v) { this.children.forEach((c) => { c.parentNode = null; }); this.children = []; this._text = String(v); }
+  get firstChild() { return this.children[0] || null; }
+  appendChild(c) { if (c.parentNode) c.parentNode.removeChild(c); c.parentNode = this; this.children.push(c); return c; }
+  removeChild(c) { const i = this.children.indexOf(c); if (i !== -1) this.children.splice(i, 1); c.parentNode = null; return c; }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  addEventListener(t, fn) { (this.listeners[t] = this.listeners[t] || []).push(fn); }
+  removeEventListener(t, fn) { this.listeners[t] = (this.listeners[t] || []).filter((f) => f !== fn); }
+  fire(t, e) { (this.listeners[t] || []).slice().forEach((fn) => fn(e || {})); }
+  focus() {}
+  all() { return [this].concat(...this.children.map((c) => c.all())); }
+  find(cls) { return this.all().filter((e) => e.classList.contains(cls)); }
+}
+function makeDoc() {
+  const doc = new El('document');
+  doc.createElement = (t) => new El(t);
+  doc.createElementNS = (_ns, t) => new El(t);
+  return doc;
+}
+
+// ── Fake timers and clock ─────────────────────────────────────────────────
+function makeClock() {
+  let now = Date.UTC(2026, 10, 18, 12, 0, 0), seq = 0;
+  const pending = new Map();
+  return {
+    now: () => now,
+    setTimeout: (fn, ms) => { const id = ++seq; pending.set(id, { at: now + (ms || 0), fn }); return id; },
+    clearTimeout: (id) => { pending.delete(id); },
+    pending: () => pending.size,
+    advance(ms) {
+      const end = now + ms;
+      for (;;) {
+        let next = null;
+        for (const [id, t] of pending) if (t.at <= end && (!next || t.at < next[1].at)) next = [id, t];
+        if (!next) break;
+        pending.delete(next[0]); now = next[1].at; next[1].fn();
+      }
+      now = end;
+    },
+  };
+}
+
+function load() {
+  const ctx = { window: {}, console, Date, Math, Number, String, JSON, Array, Object, Set, Map, Promise,
+    isFinite, isNaN, encodeURIComponent, AbortController };
+  vm.createContext(ctx);
+  const f = 'public/live-moments.js';
+  vm.runInContext(fs.readFileSync(path.join(__dirname, f), 'utf8'), ctx, { filename: f });
+  return ctx.window.LiveMoments;
+}
+const LM = load();
+
+const PK = (c) => c.repeat(64);
+const AT = new Date(Date.UTC(2026, 10, 18, 11, 59, 50)).toISOString();
+const nodeM = (id, extra) => Object.assign({ id, kind: 'new_node', at: AT,
+  node: { publicKey: PK('a'), name: 'DK_6100_Haderslev', role: 'repeater', lat: 55.25, lon: 9.49 } }, extra || {});
+const linkM = (id) => ({ id, kind: 'record_link', at: AT, previousKm: 40,
+  link: { a: { publicKey: PK('a'), name: 'A-node', role: 'repeater', lat: 55, lon: 9 },
+          b: { publicKey: PK('b'), name: 'B-node', role: 'room', lat: 55.5, lon: 10 }, distanceKm: 61.234 } });
+
+function harness(opts) {
+  opts = opts || {};
+  const clock = makeClock();
+  const doc = makeDoc();
+  const root = new El('div');
+  const media = Object.assign({ '(max-width: 640px)': false, '(max-height: 419px)': false, '(prefers-reduced-motion: reduce)': false }, opts.media || {});
+  const listeners = [];
+  const store = {};
+  const h = { clock, doc, root, media, listeners, store, flights: [], nav: [], mode: 'LIVE', suppressed: false, fetchResolve: null };
+  const fetchJSON = opts.fetch === false ? null : () => new Promise((res) => { h.fetchResolve = res; });
+  h.c = LM.create({
+    doc, root,
+    onWS: (fn) => listeners.push(fn),
+    offWS: (fn) => { const i = listeners.indexOf(fn); if (i !== -1) listeners.splice(i, 1); },
+    fetchJSON,
+    now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+    matchMedia: (q) => ({ matches: !!media[q] }),
+    storage: opts.storage || { getItem: (k) => store[k] || null, setItem: (k, v) => { store[k] = v; } },
+    getMode: () => h.mode,
+    getZoom: () => 9,
+    isSuppressed: () => h.suppressed,
+    profileOffered: () => !!opts.profile,
+    navigate: (href) => h.nav.push(href),
+    onFly: (plan, t, m) => h.flights.push({ plan, t, m }),
+    enabled: opts.enabled,
+  });
+  h.send = (m) => listeners.slice().forEach((fn) => fn({ type: 'moment', data: m }));
+  h.tick = (ms) => clock.advance(ms || 0);
+  h.cards = () => root.find('live-moment-card').filter((e) => !e.classList.contains('is-leaving'));
+  return h;
+}
+
+section('=== live-moments: normalize / describe ===');
+
+test('normalize rejects unknown kinds, missing ids and nodes', () => {
+  assert.strictEqual(LM.normalize(null), null);
+  assert.strictEqual(LM.normalize({ id: 'x', kind: 'nope', node: { publicKey: 'k' } }), null);
+  assert.strictEqual(LM.normalize({ kind: 'new_node', node: { publicKey: 'k' } }), null);
+  assert.strictEqual(LM.normalize({ id: 'x', kind: 'new_node' }), null);
+  assert.strictEqual(LM.normalize({ id: 'x', kind: 'record_link', link: { a: { publicKey: 'a' } } }), null);
+});
+
+test('normalize drops (0,0) and half positions, casts numbers', () => {
+  const m = LM.normalize(nodeM('1', { node: { publicKey: 'k', lat: 0, lon: 0 } }));
+  assert.strictEqual(m.node.lat, null);
+  assert.strictEqual(LM.normalize(nodeM('1', { node: { publicKey: 'k', lat: 55 } })).node.lat, null);
+  const b = LM.normalize({ id: 'b', kind: 'back_online', at: AT, silentHours: '37.4', node: { publicKey: 'k' } });
+  assert.strictEqual(b.silentHours, 37.4);
+});
+
+test('describe covers every kind and "+N more"', () => {
+  assert.strictEqual(LM.describe(LM.normalize(nodeM('1', { more: 2 }))).detail, 'DK_6100_Haderslev · repeater +2 more');
+  assert.strictEqual(LM.describe(LM.normalize(linkM('2'))).detail, '61.2 km · A-node ↔ B-node');
+  assert.strictEqual(LM.describe(LM.normalize({ id: '3', kind: 'back_online', silentHours: 37.4, node: { publicKey: PK('c') } })).detail,
+    'cccccccc · silent 37 h');
+  const busy = LM.describe(LM.normalize({ id: '4', kind: 'busiest_repeater', relays: 42, windowMinutes: 10, node: { publicKey: 'k', name: 'R' } }));
+  assert.strictEqual(busy.title, 'Busiest repeater');
+  assert.strictEqual(busy.detail, 'R · 42 relays / 10 min');
+});
+
+section('=== live-moments: links, fly plan, initial state ===');
+
+test('detailsHref uses node, profile and neighbor routes, never #/live?node=', () => {
+  const n = LM.normalize(nodeM('1'));
+  const l = LM.normalize(linkM('2'));
+  assert.strictEqual(LM.detailsHref(n, false), '#/nodes/' + PK('a'));
+  assert.strictEqual(LM.detailsHref(l, true), '#/map?profile=' + PK('a') + ',' + PK('b'));
+  assert.strictEqual(LM.detailsHref(l, false), '#/nodes/' + PK('a') + '?section=node-neighbors');
+  const odd = LM.normalize(nodeM('3', { node: { publicKey: 'a/b?node=x#y' } }));
+  assert.strictEqual(LM.detailsHref(odd, false), '#/nodes/a%2Fb%3Fnode%3Dx%23y');
+  for (const m of [n, l, odd]) for (const p of [true, false]) assert.ok(!/#\/live/.test(LM.detailsHref(m, p)));
+});
+
+test('a link to a non-hex key falls back to neighbors even with the profile tool', () => {
+  const l = LM.normalize(linkM('2')); l.link.b.publicKey = 'not-a-key';
+  assert.strictEqual(LM.detailsHref(l, true), '#/nodes/' + PK('a') + '?section=node-neighbors');
+});
+
+test('flyPlan: reduced motion picks setView({animate:false}), otherwise flyTo', () => {
+  const t = LM.flyTarget(LM.normalize(nodeM('1')));
+  const r = LM.flyPlan(t, true, 9);
+  assert.strictEqual(r.method, 'setView');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(r.args)), [[55.25, 9.49], 12, { animate: false }]);
+  const f = LM.flyPlan(t, false, 14);
+  assert.strictEqual(f.method, 'flyTo');
+  assert.strictEqual(f.args[1], 14, 'keeps a closer zoom');
+  const lt = LM.flyTarget(LM.normalize(linkM('2')));
+  assert.strictEqual(LM.flyPlan(lt, true, 9).method, 'fitBounds');
+  assert.strictEqual(LM.flyPlan(lt, true, 9).args[1].animate, false);
+  assert.strictEqual(LM.flyPlan(lt, false, 9).args[1].animate, true);
+  assert.strictEqual(LM.flyTarget(LM.normalize(nodeM('3', { node: { publicKey: 'k' } }))), null);
+});
+
+test('resolveInitialEnabled: ?moments= wins, default on', () => {
+  assert.strictEqual(LM.resolveInitialEnabled(null, null), true);
+  assert.strictEqual(LM.resolveInitialEnabled(null, 'false'), false);
+  assert.strictEqual(LM.resolveInitialEnabled('1', 'false'), true);
+  assert.strictEqual(LM.resolveInitialEnabled('0', 'true'), false);
+  assert.strictEqual(LM.resolveInitialEnabled('junk', 'false'), false);
+});
+
+section('=== live-moments: card stream ===');
+
+test('desktop shows at most 3 cards; the rest queue and follow', () => {
+  const h = harness();
+  for (let i = 0; i < 5; i++) h.send(nodeM('m' + i));
+  h.tick();
+  assert.strictEqual(h.cards().length, 3);
+  assert.strictEqual(h.c.stats().queued, 2);
+  assert.strictEqual(h.root.find('live-moments-more')[0].textContent, '+2');
+  h.tick(LM.DWELL_MS);
+  assert.strictEqual(h.cards().length, 2, 'the first three left, the two queued took over');
+  h.tick(LM.DWELL_MS + 300);
+  assert.strictEqual(h.root.find('live-moment-card').length, 0, 'faded cards are removed');
+});
+
+test('phone shows one card', () => {
+  const h = harness({ media: { '(max-width: 640px)': true } });
+  h.send(nodeM('a')); h.send(nodeM('b')); h.tick();
+  assert.strictEqual(h.cards().length, 1);
+  assert.strictEqual(h.c.stats().queued, 1);
+});
+
+test('dwell is 8 s; hover holds the card, leaving resumes the rest', () => {
+  const h = harness();
+  h.send(nodeM('a')); h.tick();
+  h.tick(4000);
+  const card = h.cards()[0];
+  card.fire('mouseenter');
+  h.tick(20000);
+  assert.strictEqual(h.cards().length, 1, 'held while hovered');
+  card.fire('mouseleave');
+  h.tick(3999);
+  assert.strictEqual(h.cards().length, 1);
+  h.tick(1);
+  assert.strictEqual(h.cards().length, 0);
+});
+
+test('focus holds a card like hover', () => {
+  const h = harness();
+  h.send(nodeM('a')); h.tick();
+  h.cards()[0].fire('focusin');
+  h.tick(30000);
+  assert.strictEqual(h.cards().length, 1);
+});
+
+test('reduced motion removes a card at once, with no fade', () => {
+  const h = harness({ media: { '(prefers-reduced-motion: reduce)': true } });
+  h.send(nodeM('a')); h.tick(); h.tick(LM.DWELL_MS);
+  assert.strictEqual(h.root.find('live-moment-card').length, 0);
+});
+
+test('dedup by id across WS and REST', () => {
+  const h = harness();
+  h.send(nodeM('a')); h.send(nodeM('a')); h.tick();
+  assert.strictEqual(h.c.stats().history, 1);
+  assert.strictEqual(h.cards().length, 1);
+});
+
+test('pause sends moments to history only and clears the cards', () => {
+  const h = harness();
+  h.send(nodeM('a')); h.tick();
+  h.c.setPaused(true); h.tick();
+  assert.strictEqual(h.cards().length, 0);
+  h.send(nodeM('b')); h.tick();
+  assert.strictEqual(h.cards().length, 0);
+  assert.strictEqual(h.c.stats().history, 2);
+  const pill = h.root.find('live-moments-count')[0];
+  assert.strictEqual(pill.textContent, 'Moments · 2');
+  assert.strictEqual(h.root.find('live-moments-pause')[0].getAttribute('aria-pressed'), 'true');
+});
+
+test('VCR PAUSED / REPLAY: history only; leaving LIVE drops the cards', () => {
+  const h = harness();
+  h.send(nodeM('a')); h.tick();
+  h.mode = 'PAUSED'; h.c.onModeChange(); h.tick();
+  assert.strictEqual(h.cards().length, 0);
+  h.send(nodeM('b')); h.mode = 'REPLAY'; h.send(nodeM('c')); h.tick();
+  assert.strictEqual(h.cards().length, 0);
+  assert.strictEqual(h.c.stats().history, 3);
+  h.mode = 'LIVE'; h.c.onModeChange(); h.send(nodeM('d')); h.tick();
+  assert.strictEqual(h.cards().length, 1);
+});
+
+test('phone: an open sheet or a short viewport sends moments to history only', () => {
+  const h = harness({ media: { '(max-width: 640px)': true } });
+  h.suppressed = true; h.send(nodeM('a')); h.tick();
+  assert.strictEqual(h.cards().length, 0);
+  h.suppressed = false; h.media['(max-height: 419px)'] = true; h.send(nodeM('b')); h.tick();
+  assert.strictEqual(h.cards().length, 0);
+  assert.strictEqual(h.c.stats().history, 2);
+});
+
+test('a short landscape viewport wider than a phone also sends moments to history only', () => {
+  const h = harness({ media: { '(max-height: 419px)': true } });
+  h.send(nodeM('a')); h.tick();
+  assert.strictEqual(h.cards().length, 0);
+  assert.strictEqual(h.c.stats().history, 1);
+});
+
+test('suppression only applies on phones', () => {
+  const h = harness();
+  h.suppressed = true; h.send(nodeM('a')); h.tick();
+  assert.strictEqual(h.cards().length, 1);
+});
+
+test('a name with <script> renders as text', () => {
+  const h = harness();
+  const before = created.length;
+  const evil = '<script>alert(1)</script><img src=x onerror=alert(2)>';
+  h.send(nodeM('x', { node: { publicKey: PK('d'), name: evil, role: 'room', lat: 55, lon: 9 } }));
+  h.tick();
+  const made = created.slice(before);
+  assert.ok(!made.some((e) => e.tagName === 'SCRIPT' || e.tagName === 'IMG'));
+  const detail = h.cards()[0].find('live-moment-detail')[0];
+  assert.strictEqual(detail.textContent, evil.slice(0, 64) + ' · room');
+  assert.strictEqual(detail.children.length, 0);
+});
+
+test('non-moment frames are ignored without work', () => {
+  const h = harness();
+  h.listeners.forEach((fn) => { fn({ type: 'packet', data: {} }); fn(null); fn({ type: 'moment', data: { bogus: 1 } }); });
+  h.tick();
+  assert.strictEqual(h.c.stats().history, 0);
+  assert.strictEqual(h.clock.pending(), 0);
+});
+
+section('=== live-moments: click, drawer, switch ===');
+
+test('click flies via onFly; reduced motion passes setView', () => {
+  const h = harness({ media: { '(prefers-reduced-motion: reduce)': true } });
+  h.send(nodeM('a')); h.tick();
+  h.cards()[0].find('live-moment-main')[0].fire('click');
+  assert.strictEqual(h.flights.length, 1);
+  assert.strictEqual(h.flights[0].plan.method, 'setView');
+  assert.strictEqual(h.flights[0].t.key, PK('a'));
+});
+
+test('a moment with no GPS opens its details instead', () => {
+  const h = harness();
+  h.send(nodeM('a', { node: { publicKey: PK('e'), name: 'n' } })); h.tick();
+  h.cards()[0].find('live-moment-main')[0].fire('click');
+  assert.strictEqual(h.flights.length, 0);
+  assert.deepStrictEqual(h.nav, ['#/nodes/' + PK('e')]);
+});
+
+test('card Details link uses the profile route when offered', () => {
+  const h = harness({ profile: true });
+  h.send(linkM('l')); h.tick();
+  assert.strictEqual(h.cards()[0].find('live-moment-link')[0].href, '#/map?profile=' + PK('a') + ',' + PK('b'));
+});
+
+test('drawer lists history, Escape closes it and drops its key listener', () => {
+  const h = harness();
+  for (let i = 0; i < 25; i++) h.send(nodeM('d' + i));
+  h.tick();
+  h.root.find('live-moments-open')[0].fire('click');
+  const drawer = h.root.find('live-moments-drawer')[0];
+  assert.strictEqual(drawer.hidden, false);
+  assert.strictEqual(h.root.find('live-moment-row').length, 20, 'history capped at 20');
+  assert.strictEqual(h.root.find('live-moment-row')[0].getAttribute('data-moment-id'), 'd24', 'newest first');
+  assert.strictEqual(h.c.stats().keyListener, true);
+  h.doc.fire('keydown', { key: 'Enter' });
+  assert.strictEqual(drawer.hidden, false);
+  h.doc.fire('keydown', { key: 'Escape' });
+  assert.strictEqual(drawer.hidden, true);
+  assert.strictEqual((h.doc.listeners.keydown || []).length, 0);
+});
+
+test('REST history fills the drawer once, after WS frames that raced it', async () => {
+  const h = harness();
+  await Promise.resolve();
+  h.send(nodeM('ws-new')); h.tick();
+  h.fetchResolve({ moments: [nodeM('ws-new'), nodeM('rest-1'), linkM('rest-2')] });
+  await new Promise((r) => setImmediate(r));
+  h.tick();
+  h.c.openDrawer();
+  const ids = h.root.find('live-moment-row').map((r) => r.getAttribute('data-moment-id'));
+  assert.deepStrictEqual(ids, ['ws-new', 'rest-1', 'rest-2']);
+  assert.strictEqual(h.cards().length, 1, 'REST history never becomes cards');
+});
+
+test('viewer switch: off hides everything and is saved; storage errors are swallowed', () => {
+  const h = harness();
+  h.send(nodeM('a')); h.tick();
+  h.c.setEnabled(false); h.tick();
+  assert.strictEqual(h.root.find('live-moments')[0].hidden, true);
+  assert.strictEqual(h.cards().length, 0);
+  assert.strictEqual(h.store['live-moments'], 'false');
+  const t = harness({ storage: { getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); } } });
+  t.c.setEnabled(false); t.tick();
+  assert.strictEqual(t.c.stats().enabled, false);
+});
+
+test('starts off when enabled:false is passed', () => {
+  const h = harness({ enabled: false });
+  h.send(nodeM('a')); h.tick();
+  assert.strictEqual(h.cards().length, 0);
+  assert.strictEqual(h.c.stats().history, 1);
+});
+
+section('=== live-moments: teardown ===');
+
+test('destroy unsubscribes, clears every timer and listener, removes the DOM', async () => {
+  const base = LM.liveCount();
+  const h = harness();
+  await Promise.resolve();
+  assert.strictEqual(LM.liveCount(), base + 1);
+  for (let i = 0; i < 4; i++) h.send(nodeM('t' + i));
+  h.tick(); h.c.openDrawer();
+  assert.ok(h.clock.pending() > 0);
+  h.c.destroy();
+  assert.strictEqual(h.listeners.length, 0, 'WS listener removed');
+  assert.strictEqual(h.clock.pending(), 0, 'no timer left');
+  assert.strictEqual(h.c.stats().timers, 0);
+  assert.strictEqual((h.doc.listeners.keydown || []).length, 0, 'Escape listener removed');
+  assert.strictEqual(h.root.children.length, 0, 'DOM removed');
+  assert.strictEqual(LM.liveCount(), base);
+  h.fetchResolve({ moments: [nodeM('late')] });
+  await new Promise((r) => setImmediate(r));
+  assert.strictEqual(h.c.stats().history, 0, 'a late fetch is ignored');
+  h.c.destroy();
+  assert.strictEqual(LM.liveCount(), base, 'destroy is idempotent');
+});
+
+test('100 mount/destroy cycles leave nothing behind', () => {
+  const base = LM.liveCount();
+  for (let i = 0; i < 100; i++) {
+    const h = harness();
+    h.send(nodeM('c' + i)); h.tick(100);
+    h.c.destroy();
+    assert.strictEqual(h.clock.pending(), 0);
+    assert.strictEqual(h.listeners.length, 0);
+  }
+  assert.strictEqual(LM.liveCount(), base);
+});
+
+(async () => {
+  for (const t of queue) {
+    if (t.title) { console.log('\n' + t.title); continue; }
+    try { await t.fn(); passed++; console.log('  ✅ ' + t.name); }
+    catch (e) { failed++; console.log('  ❌ ' + t.name + ': ' + e.message); }
+  }
+  console.log('\n' + passed + ' passed, ' + failed + ' failed');
+  process.exit(failed ? 1 : 0);
+})();

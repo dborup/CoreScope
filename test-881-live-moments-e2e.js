@@ -1,0 +1,374 @@
+/**
+ * E2E: Live "Moments" (#881 M2).
+ *
+ * The server keeps moments off by default, so the moments block of
+ * /api/config/client is added by interception, GET /api/moments is stubbed
+ * and the app's shared WebSocket is replaced with page.routeWebSocket, which
+ * sends the moment frames. Nothing here needs moments on in the server.
+ *
+ *   1. Without the config block: no UI, no /api/moments request, no toggle.
+ *   2. With it: /api/moments is asked once; WS frames become cards, at most
+ *      3 at 1440x900; the drawer lists history newest first and Esc closes
+ *      it; cards leave after the dwell; pause sends frames to history only.
+ *   3. Clicking a card moves the map centre to the payload position and
+ *      draws the highlight; the Details href is the node route.
+ *   4. Hit test at 1024x768, 1440x900 (legend in all 4 corners) and 375x560:
+ *      no Leaflet control, gear, legend toggle/close, feed button or VCR
+ *      button is covered by a moment element. Short landscape (740x360,
+ *      568x320): frames go to history only and the bar covers nothing.
+ *   5. Reduced motion: the click jumps (setView, no animation) and the ring
+ *      is static.
+ *   6. ?moments=0 starts off and is saved; the toggle turns it back on.
+ *   7. Teardown: Live → Packets → Live three times leaves one controller,
+ *      one moments root and the same number of WS listeners; Packets'
+ *      pause badge does not count a moment frame.
+ *   8. Phone real taps from a cold start at 375x560 with touch: one card
+ *      and a +1 chip; tap the card (map moves), tap the drawer button
+ *      (bottom sheet opens), tap the backdrop (closes); with a card up,
+ *      Settings and Fullscreen still take their taps.
+ *
+ * Usage: BASE_URL=http://localhost:13581 node test-881-live-moments-e2e.js
+ */
+'use strict';
+const { chromium } = require('playwright');
+
+const BASE = process.env.BASE_URL || 'http://localhost:13581';
+if (!['localhost', '127.0.0.1', '[::1]'].includes(new URL(BASE).hostname)) throw new Error('local server only');
+
+let passed = 0, failed = 0;
+async function step(name, fn) {
+  try { await fn(); passed++; console.log('  ✓ ' + name); }
+  catch (e) { failed++; console.error('  ✗ ' + name + ': ' + (e && e.stack || e)); }
+}
+function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
+
+const PK = (c) => c.repeat(64);
+const VIEW = 'lat=55.3&lon=9.6&zoom=9';
+const at = (agoS) => new Date(Date.now() - agoS * 1000).toISOString();
+function nodeMoment(id, lat, lon, name) {
+  return { id, kind: 'new_node', at: at(2), node: { publicKey: PK('a'), name: name || 'E2E-881 ' + id, role: 'repeater', lat, lon } };
+}
+const REST = [
+  { id: 'rest-2', kind: 'back_online', at: at(600), silentHours: 37, node: { publicKey: PK('b'), name: 'E2E-881 back', role: 'repeater', lat: 55.1, lon: 9.1 } },
+  { id: 'rest-1', kind: 'record_link', at: at(1200), link: { a: { publicKey: PK('c'), name: 'A', role: 'repeater', lat: 55, lon: 9 },
+    b: { publicKey: PK('d'), name: 'B', role: 'room', lat: 55.5, lon: 10 }, distanceKm: 61.2 } },
+];
+
+// open: a context with the moments block (unless off), the stubbed history
+// and a mocked socket. Returns the page and a send() for moment frames.
+async function open(browser, opts) {
+  opts = opts || {};
+  const ctx = await browser.newContext(Object.assign({ viewport: opts.viewport || { width: 1440, height: 900 } },
+    opts.touch ? { hasTouch: true, isMobile: true } : {}, opts.reducedMotion ? { reducedMotion: 'reduce' } : {}));
+  const h = { ctx, momentsRequests: 0, sockets: [], errors: [] };
+  if (!opts.off) {
+    await ctx.route(/\/api\/config\/client(\?|$)/, async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      body.moments = { enabled: true, historySize: 50 };
+      await route.fulfill({ response: res, json: body });
+    });
+  }
+  await ctx.route(/\/api\/moments(\?|$)/, (route) => {
+    h.momentsRequests++;
+    return route.fulfill({ json: { moments: REST } });
+  });
+  await ctx.routeWebSocket(/.*/, (ws) => { h.sockets.push(ws); });
+  const page = await ctx.newPage();
+  page.on('pageerror', (e) => h.errors.push(String(e.stack || e.message).split('\n').slice(0, 4).join(' | ')));
+  h.page = page;
+  h.send = async (frames) => {
+    const ws = h.sockets[h.sockets.length - 1];
+    assert(ws, 'the app socket connected');
+    for (const f of [].concat(frames)) ws.send(JSON.stringify(f));
+  };
+  h.moment = (m) => h.send({ type: 'moment', data: m });
+  h.goto = async (hash) => {
+    await page.goto(BASE + '/?r=' + Date.now() + '#/live?' + (hash || VIEW), { waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() => window._liveWSHandler && window._liveWSHandler() && window._liveGetMap && window._liveGetMap(), null, { timeout: 20000 });
+    await page.waitForFunction(() => window.MeshConfigReady !== undefined, null, { timeout: 5000 });
+    await page.evaluate(() => window.MeshConfigReady);
+    if (!opts.off) await page.waitForFunction(() => window._liveMoments && window._liveMoments(), null, { timeout: 10000 });
+  };
+  return h;
+}
+
+async function cardCount(page) {
+  return page.evaluate(() => document.querySelectorAll('.live-moment-card:not(.is-leaving)').length);
+}
+
+// controlsCovered lists every visible control whose centre hits a moment
+// element instead of the control.
+async function controlsCovered(page) {
+  return page.evaluate(() => {
+    const sel = ['.leaflet-control a', '.leaflet-control button', '#liveControlsToggle', '#liveFullscreenToggle',
+      '#legendToggleBtn', '#legendCloseBtn', '#feedShowBtn', '#feedHideBtn', '.vcr-bar button',
+      '.panel-corner-btn', '#liveHeaderToggle'].join(',');
+    const bad = [];
+    let checked = 0;
+    for (const el of document.querySelectorAll(sel)) {
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height || getComputedStyle(el).visibility === 'hidden') continue;
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
+      checked++;
+      const hit = document.elementFromPoint(x, y);
+      if (hit && hit.closest('.live-moments, .live-moments-drawer')) bad.push((el.id || el.className || el.tagName) + '');
+    }
+    return { bad, checked };
+  });
+}
+
+async function fillCards(h, n) {
+  const frames = [];
+  for (let i = 0; i < n; i++) frames.push({ type: 'moment', data: nodeMoment('fill-' + Date.now() + '-' + i, 55.2 + i * 0.01, 9.4) });
+  await h.send(frames);
+  await h.page.waitForFunction((n) => document.querySelectorAll('.live-moment-card').length >= n, Math.min(n, 3));
+}
+
+(async () => {
+  const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH || undefined });
+  try {
+    console.log('\n=== #881 M2 Live moments E2E ===');
+
+    await step('server flag off: no moments UI, no /api/moments request, no toggle', async () => {
+      const h = await open(browser, { off: true });
+      await h.goto();
+      await h.page.waitForTimeout(500);
+      const s = await h.page.evaluate(() => ({
+        root: document.querySelectorAll('.live-moments').length,
+        ctrl: !!(window._liveMoments && window._liveMoments()),
+        label: getComputedStyle(document.getElementById('liveMomentsLabel')).display,
+      }));
+      await h.moment(nodeMoment('off-1', 55.3, 9.6));
+      await h.page.waitForTimeout(200);
+      assert(s.root === 0 && !s.ctrl, 'no moments UI: ' + JSON.stringify(s));
+      assert(s.label === 'none', 'toggle hidden');
+      assert(h.momentsRequests === 0, '/api/moments not requested');
+      assert(await cardCount(h.page) === 0);
+      assert(!h.errors.length, h.errors.join('; '));
+      await h.ctx.close();
+    });
+
+    const h = await open(browser);
+    await h.goto();
+
+    await step('history is fetched once; frames become at most 3 cards with a +N chip', async () => {
+      assert(h.momentsRequests === 1, 'one /api/moments request, got ' + h.momentsRequests);
+      const frames = [];
+      for (let i = 0; i < 5; i++) frames.push({ type: 'moment', data: nodeMoment('ws-' + i, 55.3 + i * 0.01, 9.6) });
+      frames.push({ type: 'packet', data: {} });
+      frames.push({ type: 'moment', data: nodeMoment('ws-4', 55.3, 9.6) }); // duplicate id
+      await h.send(frames);
+      await h.page.waitForFunction(() => document.querySelectorAll('.live-moment-card').length === 3);
+      const s = await h.page.evaluate(() => ({
+        count: document.querySelector('.live-moments-count').textContent,
+        more: document.querySelector('.live-moments-more').textContent,
+        newest: [...document.querySelectorAll('.live-moment-card')].pop().getAttribute('data-moment-id'),
+      }));
+      assert(s.count === 'Moments · 7', s.count);
+      assert(s.more === '+2', s.more);
+      assert(s.newest === 'ws-2', 'newest shown card nearest the anchor: ' + s.newest);
+    });
+
+    await step('drawer lists history newest first; Escape closes it', async () => {
+      await h.page.click('.live-moments-bar .live-moments-open');
+      await h.page.waitForSelector('.live-moments-drawer:not([hidden])');
+      const ids = await h.page.$$eval('.live-moment-row', (r) => r.map((e) => e.getAttribute('data-moment-id')));
+      assert(ids.join(',') === 'ws-4,ws-3,ws-2,ws-1,ws-0,rest-2,rest-1', ids.join(','));
+      await h.page.keyboard.press('Escape');
+      await h.page.waitForSelector('.live-moments-drawer', { state: 'hidden' });
+    });
+
+    await step('Details link is the node route, never #/live?node=', async () => {
+      const hrefs = await h.page.$$eval('.live-moment-card .live-moment-link', (a) => a.map((e) => e.getAttribute('href')));
+      assert(hrefs.length && hrefs.every((x) => x === '#/nodes/' + 'a'.repeat(64)), hrefs.join(','));
+    });
+
+    await step('click moves the map centre to the moment and draws the ring', async () => {
+      await h.page.evaluate(() => window._liveGetMap().setView([54, 8], 8, { animate: false }));
+      const id = await h.page.$eval('.live-moment-card', (e) => e.getAttribute('data-moment-id'));
+      const target = { 'ws-0': 55.3, 'ws-1': 55.31, 'ws-2': 55.32 }[id];
+      await h.page.click('.live-moment-card[data-moment-id="' + id + '"] .live-moment-main');
+      await h.page.waitForFunction((lat) => {
+        const c = window._liveGetMap().getCenter();
+        return Math.abs(c.lat - lat) < 1e-3 && Math.abs(c.lng - 9.6) < 1e-3 && window._liveGetMap().getZoom() >= 12;
+      }, target, { timeout: 5000 });
+      assert(await h.page.$('.live-moment-hl'), 'highlight ring drawn');
+    });
+
+    await step('cards leave after the 8 s dwell, then queued ones follow', async () => {
+      await h.page.mouse.move(5, 5);
+      await h.page.waitForFunction(() => {
+        const ids = [...document.querySelectorAll('.live-moment-card:not(.is-leaving)')].map((e) => e.getAttribute('data-moment-id'));
+        return ids.length === 2 && ids.includes('ws-3') && ids.includes('ws-4');
+      }, null, { timeout: 12000 });
+      await h.page.waitForFunction(() => !document.querySelector('.live-moment-card'), null, { timeout: 12000 });
+    });
+
+    await step('pause sends frames to history only', async () => {
+      await h.page.click('.live-moments-bar .live-moments-pause');
+      await h.moment(nodeMoment('paused-1', 55.3, 9.6));
+      await h.page.waitForFunction(() => document.querySelector('.live-moments-count').textContent.startsWith('Moments · 8'));
+      assert(await cardCount(h.page) === 0, 'no card while paused');
+      await h.page.click('.live-moments-bar .live-moments-pause');
+      await h.moment(nodeMoment('resumed-1', 55.3, 9.6));
+      await h.page.waitForFunction(() => document.querySelectorAll('.live-moment-card').length === 1);
+    });
+
+    for (const vp of [{ width: 1024, height: 768 }, { width: 1440, height: 900 }]) {
+      await step('hit test ' + vp.width + 'x' + vp.height + ', legend in all 4 corners: no control covered', async () => {
+        await h.page.setViewportSize(vp);
+        for (const corner of ['tl', 'tr', 'br', 'bl']) {
+          await h.page.evaluate((c) => localStorage.setItem('panel-corner-liveLegend', c), corner);
+          await h.goto();
+          await fillCards(h, 3);
+          const pos = await h.page.$eval('#liveLegend', (e) => e.getAttribute('data-position'));
+          assert(pos === corner, 'legend in ' + corner + ', got ' + pos);
+          const r = await controlsCovered(h.page);
+          assert(r.checked >= 6, 'checked ' + r.checked + ' controls');
+          assert(!r.bad.length, 'covered at legend ' + corner + ': ' + r.bad.join(', '));
+        }
+      });
+    }
+
+    for (const vp of [{ width: 740, height: 360 }, { width: 568, height: 320 }]) {
+      await step('short landscape ' + vp.width + 'x' + vp.height + ': history only, the bar covers no control', async () => {
+        await h.page.setViewportSize(vp);
+        await h.goto();
+        await h.moment(nodeMoment('land-' + vp.width, 55.3, 9.6));
+        await h.page.waitForFunction((id) => [...document.querySelectorAll('.live-moments-count')].some((e) => e.textContent.startsWith('Moments · ')), 'land');
+        await h.page.waitForTimeout(100);
+        assert(await cardCount(h.page) === 0, 'no card on a short viewport');
+        const r = await controlsCovered(h.page);
+        assert(r.checked >= 5 && !r.bad.length, JSON.stringify(r));
+      });
+    }
+    await h.page.setViewportSize({ width: 1440, height: 900 });
+    await h.goto();
+
+    await step('teardown: Live → Packets → Live x3 keeps one controller and stable WS listeners', async () => {
+      const base = await h.page.evaluate(() => ({ ws: wsListeners.length, live: LiveMoments.liveCount() }));
+      base.requests = h.momentsRequests;
+      assert(base.live === 1, 'one controller on Live, got ' + base.live);
+      for (let i = 0; i < 3; i++) {
+        await h.page.evaluate(() => { location.hash = '#/packets'; });
+        await h.page.waitForFunction(() => !document.querySelector('.live-page'));
+        const off = await h.page.evaluate(() => ({ live: LiveMoments.liveCount(), roots: document.querySelectorAll('.live-moments, .live-moments-drawer').length }));
+        assert(off.live === 0 && off.roots === 0, 'nothing left on Packets: ' + JSON.stringify(off));
+        await h.page.evaluate((v) => { location.hash = '#/live?' + v; }, VIEW);
+        await h.page.waitForFunction(() => window._liveMoments && window._liveMoments(), null, { timeout: 20000 });
+      }
+      const after = await h.page.evaluate(() => ({ ws: wsListeners.length, live: LiveMoments.liveCount(), roots: document.querySelectorAll('.live-moments').length }));
+      assert(after.ws === base.ws, 'WS listeners ' + base.ws + ' → ' + after.ws);
+      assert(after.live === 1 && after.roots === 1, JSON.stringify(after));
+      assert(h.momentsRequests === base.requests + 3, 'one history fetch per entry: ' + base.requests + ' → ' + h.momentsRequests);
+      assert(!h.errors.length, h.errors.join('; '));
+    });
+
+    await step('Packets pause badge ignores moment frames', async () => {
+      await h.page.evaluate(() => { location.hash = '#/packets'; });
+      await h.page.waitForSelector('#pktPauseBtn');
+      await h.page.click('#pktPauseBtn');
+      await h.send([{ type: 'moment', data: nodeMoment('pk-1', 55, 9) }, { type: 'moment', data: nodeMoment('pk-2', 55, 9) },
+        { type: 'packet', data: { packet: { id: 1, hash: 'e2e881', payload_type: 4 } } }]);
+      await h.page.waitForFunction(() => /\b1$/.test(document.getElementById('pktPauseBtn').textContent.trim()), null, { timeout: 5000 });
+    });
+    await h.ctx.close();
+
+    await step('reduced motion: the click jumps without animation and the ring is static', async () => {
+      const r = await open(browser, { reducedMotion: true });
+      await r.goto();
+      await r.moment(nodeMoment('rm-1', 55.45, 9.75));
+      await r.page.waitForSelector('.live-moment-card');
+      await r.page.evaluate(() => window._liveGetMap().setView([54, 8], 8, { animate: false }));
+      const c = await r.page.evaluate(() => {
+        document.querySelector('.live-moment-card .live-moment-main').click();
+        const m = window._liveGetMap(); const c = m.getCenter();
+        return { lat: c.lat, lng: c.lng, zoom: m.getZoom(), anim: getComputedStyle(document.querySelector('.live-moment-hl')).animationName,
+          staticRing: document.querySelector('.live-moment-hl').classList.contains('is-static') };
+      });
+      assert(Math.abs(c.lat - 55.45) < 1e-6 && Math.abs(c.lng - 9.75) < 1e-6 && c.zoom === 12, 'synchronous jump: ' + JSON.stringify(c));
+      assert(c.staticRing && c.anim === 'none', 'static ring: ' + JSON.stringify(c));
+      await r.ctx.close();
+    });
+
+    await step('?moments=0 starts off and is saved; the toggle turns it back on', async () => {
+      const o = await open(browser);
+      await o.goto(VIEW + '&moments=0');
+      const s = await o.page.evaluate(() => ({ stored: localStorage.getItem('live-moments'), hidden: document.querySelector('.live-moments').hidden,
+        checked: document.getElementById('liveMomentsToggle').checked }));
+      assert(s.stored === 'false' && s.hidden && !s.checked, JSON.stringify(s));
+      await o.moment(nodeMoment('off-ws', 55, 9));
+      await o.page.waitForTimeout(200);
+      assert(await cardCount(o.page) === 0);
+      await o.page.click('#liveControlsToggle');
+      await o.page.check('#liveMomentsToggle');
+      const t = await o.page.evaluate(() => ({ stored: localStorage.getItem('live-moments'), hash: location.hash }));
+      assert(t.stored === 'true' && !/moments=/.test(t.hash), JSON.stringify(t));
+      await o.moment(nodeMoment('on-ws', 55, 9));
+      await o.page.waitForSelector('.live-moment-card');
+      await o.ctx.close();
+    });
+
+    await step('phone 375x560 real taps from a cold start', async () => {
+      const p = await open(browser, { viewport: { width: 375, height: 560 }, touch: true });
+      await p.goto();
+      await p.send([{ type: 'moment', data: nodeMoment('ph-1', 55.4, 9.7) }, { type: 'moment', data: nodeMoment('ph-2', 55.41, 9.71) }]);
+      await p.page.waitForSelector('.live-moment-card');
+      const s = await p.page.evaluate(() => {
+        const card = document.querySelector('.live-moment-card').getBoundingClientRect();
+        const rail = document.querySelector('.leaflet-top.leaflet-right').getBoundingClientRect();
+        const btns = [...document.querySelectorAll('.live-moments-bar button')].filter((b) => b.getClientRects().length)
+          .map((b) => { const r = b.getBoundingClientRect(); return [r.width, r.height]; });
+        return { cards: document.querySelectorAll('.live-moment-card').length, more: document.querySelector('.live-moments-more').textContent,
+          cardRight: card.right, cardH: card.height, railLeft: rail.left, btns, overflow: document.documentElement.scrollWidth - innerWidth };
+      });
+      assert(s.cards === 1 && s.more === '+1', JSON.stringify(s));
+      assert(s.cardRight <= s.railLeft, 'card clear of the control rail: ' + JSON.stringify(s));
+      assert(s.cardH <= 56, 'card ≤ 56px tall: ' + s.cardH);
+      assert(s.btns.length && s.btns.every(([w, hh]) => w >= 40 && hh >= 40), 'tap targets ≥ 40px: ' + JSON.stringify(s.btns));
+      assert(s.overflow <= 0, 'no sideways scroll');
+      let r = await controlsCovered(p.page);
+      assert(r.checked >= 5 && !r.bad.length, 'phone hit test: ' + JSON.stringify(r));
+
+      await p.page.evaluate(() => window._liveGetMap().setView([54, 8], 8, { animate: false }));
+      await p.page.tap('.live-moment-card .live-moment-main');
+      await p.page.waitForFunction(() => {
+        const c = window._liveGetMap().getCenter();
+        return Math.abs(c.lat - 55.4) < 1e-3 && Math.abs(c.lng - 9.7) < 1e-3;
+      }, null, { timeout: 5000 });
+
+      await p.page.tap('.live-moments-bar .live-moments-open');
+      await p.page.waitForSelector('.live-moments-drawer:not([hidden])');
+      const sheet = await p.page.evaluate(() => {
+        const d = document.querySelector('.live-moments-drawer').getBoundingClientRect();
+        const page = document.querySelector('.live-page').getBoundingClientRect();
+        return { left: d.left, right: d.right, bottom: d.bottom, pageLeft: page.left, pageRight: page.right, pageBottom: page.bottom,
+          rows: document.querySelectorAll('.live-moment-row').length };
+      });
+      assert(Math.abs(sheet.left - sheet.pageLeft) < 1 && Math.abs(sheet.right - sheet.pageRight) < 1 && Math.abs(sheet.bottom - sheet.pageBottom) < 1,
+        'bottom sheet spans the page: ' + JSON.stringify(sheet));
+      assert(sheet.rows === 4, 'rows ' + sheet.rows);
+      await p.page.touchscreen.tap(180, 40);
+      await p.page.waitForSelector('.live-moments-drawer', { state: 'hidden' });
+
+      await p.moment(nodeMoment('ph-3', 55.42, 9.72));
+      await p.page.waitForSelector('.live-moment-card[data-moment-id]');
+      r = await controlsCovered(p.page);
+      assert(!r.bad.length, 'covered: ' + r.bad.join(','));
+      await p.page.tap('#liveControlsToggle');
+      await p.page.waitForFunction(() => document.getElementById('liveControls').classList.contains('is-expanded'));
+      await p.page.tap('#liveControlsToggle');
+      await p.page.tap('#liveFullscreenToggle');
+      await p.page.waitForFunction(() => document.body.classList.contains('live-fullscreen'));
+      await p.page.tap('#liveFullscreenToggle');
+      assert(!p.errors.length, p.errors.join('; '));
+      await p.ctx.close();
+    });
+  } finally {
+    await browser.close();
+  }
+  console.log('\n' + passed + ' passed, ' + failed + ' failed');
+  process.exit(failed ? 1 : 0);
+})().catch((e) => { console.error(e); process.exit(1); });
