@@ -443,6 +443,25 @@
    * light theme. Dark theme override is set in both dark-mode blocks below. */
   --shadow: rgba(0,0,0,0.3);
   --trace-ghost-color: #94a3b8;
+  /* #882 — Live "Color by scope" palette (public/live-scope-color.js).
+   * 12 qualitative slots, kept off pure red (foreign-origin red wins), plus
+   * two greys that differ from each other: no scope (FLOOD/DIRECT) and
+   * unknown scope (route 0/3, region not resolved). Customizer: #882 M2. */
+  --scope-1: #0072b2;
+  --scope-2: #009e73;
+  --scope-3: #b35c00;
+  --scope-4: #7e3fa0;
+  --scope-5: #a8780b;
+  --scope-6: #00838f;
+  --scope-7: #b0306f;
+  --scope-8: #4b5eaa;
+  --scope-9: #5e8b2f;
+  --scope-10: #8b4513;
+  --scope-11: #c026d3;
+  --scope-12: #6d6d00;
+  --scope-none: #a1a1aa;
+  --scope-unknown: #57534e;
+  --scope-other: #111827;
   /* #880 — Live "Follow a packet". Built on theme tokens, so both dark
    * blocks follow without their own copies. Customizer mapping: #880 M3. */
   --follow-ring: var(--accent);
@@ -549,6 +568,22 @@
     --hover-bg: rgba(255,255,255, 0.06);
     --shadow: rgba(0,0,0,0.5);
     --trace-ghost-color: #94a3b8;
+    /* #882 — Live scope palette, dark (keep both dark blocks in sync). */
+    --scope-1: #3d8bfd;
+    --scope-2: #3fd7a5;
+    --scope-3: #f0a03c;
+    --scope-4: #c49be0;
+    --scope-5: #e6c34a;
+    --scope-6: #4dd0e1;
+    --scope-7: #f06292;
+    --scope-8: #8c9eff;
+    --scope-9: #a5d66b;
+    --scope-10: #d7a07a;
+    --scope-11: #e879f9;
+    --scope-12: #dce775;
+    --scope-none: #6b7280;
+    --scope-unknown: #c4b5a5;
+    --scope-other: #f8fafc;
     --section-bg: #1e1e34;
   }
 }
@@ -622,6 +657,22 @@
   --hover-bg: rgba(255,255,255, 0.06);
   --shadow: rgba(0,0,0,0.5);
   --trace-ghost-color: #94a3b8;
+  /* #882 — Live scope palette, dark (keep both dark blocks in sync). */
+  --scope-1: #3d8bfd;
+  --scope-2: #3fd7a5;
+  --scope-3: #f0a03c;
+  --scope-4: #c49be0;
+  --scope-5: #e6c34a;
+  --scope-6: #4dd0e1;
+  --scope-7: #f06292;
+  --scope-8: #8c9eff;
+  --scope-9: #a5d66b;
+  --scope-10: #d7a07a;
+  --scope-11: #e879f9;
+  --scope-12: #dce775;
+  --scope-none: #6b7280;
+  --scope-unknown: #c4b5a5;
+  --scope-other: #f8fafc;
   --section-bg: #1e1e34;
 }
 

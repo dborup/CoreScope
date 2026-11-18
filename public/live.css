@@ -1845,3 +1845,29 @@ select.live-heard-select {
   .live-follow-card .lf-link { padding: 0 6px; }
   .live-follow-card .lf-observers { max-height: none; }
 }
+
+/* #882 — "SCOPES (last 15 min)" legend section. Swatch colours come from the
+ * --scope-* variables (style.css), so the theme drives them. */
+.live-scope-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 4px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.live-scope-legend .legend-list li { overflow-wrap: anywhere; }
+.live-scope-legend { margin-bottom: 8px; }
+.live-scope-empty,
+.live-scope-more { color: var(--text-muted); font-style: italic; }
+/* Settings-panel copy of the SCOPES list: only where the legend panel is
+ * hidden (phones, and the 501-620px-tall narrow window, #875). */
+.live-scope-legend--menu { display: none; margin: 6px 0 0; }
+@media (max-width: 640px) {
+  .live-scope-legend--menu:not([hidden]) { display: block; }
+}
+@media (max-width: 768px) and (min-height: 501px) and (max-height: 620px) {
+  .live-scope-legend--menu:not([hidden]) { display: block; }
+}
+.live-scope-legend--menu .legend-list { font-size: 12px; }
