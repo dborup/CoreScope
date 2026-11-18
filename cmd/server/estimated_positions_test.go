@@ -258,7 +258,17 @@ func TestEstimatedPositionsArchivedPathImmutable(t *testing.T) {
 func TestEstimatedPositionsAreasSkipQueriesAndPreserveDensity(t *testing.T) {
 	db := setupPacketPathCountingDB(t)
 	defer db.Close()
+	// The area handler reads the /api/observers roster (#918), so the stub
+	// observers table takes the production columns GetObservers selects.
 	_, err := db.conn.Exec(`ALTER TABLE nodes ADD COLUMN last_seen TEXT;
+		DROP TABLE observers;
+		CREATE TABLE observers (
+			id TEXT PRIMARY KEY, name TEXT, iata TEXT, last_seen TEXT, first_seen TEXT,
+			packet_count INTEGER DEFAULT 0, model TEXT, firmware TEXT, client_version TEXT, radio TEXT,
+			battery_mv INTEGER, uptime_secs INTEGER, noise_floor REAL, inactive INTEGER DEFAULT 0,
+			last_packet_at TEXT, last_neighbors_report_at TEXT,
+			clock_skew_seconds INTEGER, clock_skew_count_24h INTEGER DEFAULT 0, clock_last_naive_at TEXT
+		);
 		INSERT INTO nodes(public_key,name,role,lat,lon) VALUES ('anchor','GPS','repeater',55.5,9.5),('ghost','No GPS','repeater',NULL,NULL);
 		INSERT INTO neighbor_edges(node_a,node_b,count) VALUES ('anchor','ghost',10);`)
 	if err != nil {
