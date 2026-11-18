@@ -253,6 +253,8 @@ console.log('\n=== #681 M5: antenna-height source badge ===');
     ['operator-role', null, 'operator'],
     ['dsm-estimate', null, 'estimate'], // #789 M1
     ['dsm-estimate', 'yours', 'estimate'],
+    ['owner', null, 'owner'], // #789 M2b
+    ['owner', 'yours', 'owner'],
     ['request', 'yours', 'yours'],
     ['request', 'link', 'link'],
     ['request', null, 'link'],

@@ -95,6 +95,12 @@
   // the next number, so a delayed response from an earlier view is ignored --
   // even for the same node (A -> B -> A) in a panel that is still connected.
   let detailViewSeq = 0;
+  // #789 M2b: the owner antenna-height section of the full node page.
+  let antennaClaimView = null;
+  function destroyAntennaClaimView() {
+    if (antennaClaimView) antennaClaimView.destroy();
+    antennaClaimView = null;
+  }
 
   // Disposes the detail map together with its pending resize, so the timer
   // can never outlive the map it was scheduled for.
@@ -1191,7 +1197,9 @@
           <div id="fullPathsContent"><div class="text-muted" style="padding:8px"><span class="spinner"></span> Loading paths…</div></div>
         </div>
 
-        <div class="node-full-card skew-detail-section" id="node-clock-skew" style="display:none"></div>`;
+        <div class="node-full-card skew-detail-section" id="node-clock-skew" style="display:none"></div>
+
+        ${(n.role === 'repeater' || n.role === 'room') ? '<div class="node-full-card" id="node-antenna" hidden></div>' : ''}`;
 
       // Map -- shows the real fix (solid pin), the neighbor estimate
       // (dashed pin), or both at once (connected by a dashed line, fit to
@@ -1242,6 +1250,11 @@
       });
 
       mountNodeActions(body.querySelector('.node-full-actions'), n);
+
+      // #789 M2b: shown only while owner claims are open on this site. A
+      // re-render of the same node keeps the owner's flow where it was.
+      if (window.AntennaClaims) antennaClaimView = window.AntennaClaims.mountOwnerSection(document.getElementById('node-antenna'), n, antennaClaimView);
+      else destroyAntennaClaimView();
 
       bindNodeAdverts(document.getElementById('node-packets'));
 
@@ -1483,6 +1496,7 @@
     document.removeEventListener('keydown', _nodesEsc);
     document.removeEventListener('keydown', _nodesPanelEsc);
     closeDetailView();
+    destroyAntennaClaimView();
     if (regionChangeHandler) RegionFilter.offChange(regionChangeHandler);
     regionChangeHandler = null;
     if (areaChangeHandler) AreaFilter.offChange(areaChangeHandler);

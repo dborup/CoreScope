@@ -1436,6 +1436,27 @@ atest('a customizer role height below the estimate never replaces it', async () 
   assert.strictEqual(live.dom.find('tp-h-a').value, '22');
 });
 
+// #789 M2b (#866 F8): an approved owner height is a proven measurement.
+// No customizer role height replaces it, higher or lower, and it shows the
+// "owner" badge with its own source label.
+[30, 5].forEach((viewerH) => {
+  atest('a customizer role height of ' + viewerH + ' m never replaces an owner height', async () => {
+    const live = loadLive();
+    live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: viewerH }) };
+    const f = deferredFetch();
+    openPair(live.TP, live.dom, f);
+    const data = defaultsAnswer();
+    data.a = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 18.5, antennaSource: 'owner', assumed: false };
+    data.b = { kind: 'node', role: 'repeater', groundM: 0, antennaM: 18.5, antennaSource: 'owner', assumed: false };
+    f.calls[0].settle.resolve(data);
+    await sleep(0);
+    assert.strictEqual(f.calls.length, 1, 'the owner height was re-asked with a customizer default');
+    assert.strictEqual(live.dom.find('tp-hsrc-a').textContent, 'owner');
+    assert.strictEqual(live.dom.find('tp-h-a').value, '18.5');
+    assert.strictEqual(live.TP.sourceLabel('owner', null), 'set by the node owner');
+  });
+});
+
 atest('a remembered height outranks the customizer default', async () => {
   const live = loadLive();
   live.win.SITE_CONFIG = { terrain: terrainCfg({ heightRepeater: 25 }) };
