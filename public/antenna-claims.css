@@ -19,6 +19,28 @@
 .ac-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0; }
 .ac-label { font-size: 13px; font-weight: 600; flex-basis: 100%; }
 .ac-label.ac-disabled { color: var(--text-muted); }
+/* #898 — the height and station-details parts of one claim. */
+.ac-fieldset { border: 1px solid var(--border); border-radius: var(--radius-sm); margin: 0 0 8px; padding: 4px 10px 6px; min-width: 0; }
+.ac-fieldset-plain { border: 0; padding: 0; }
+.ac-fieldset-plain > .ac-legend { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.ac-legend { font-size: 13px; font-weight: 600; padding: 0 4px; }
+.ac-details [hidden], .ac-form [hidden] { display: none !important; }
+.ac-power { border: 0; padding: 0; margin: 6px 0; min-width: 0; }
+.ac-power > .ac-label { padding: 0; }
+.ac-field-hint { flex-basis: 100%; margin: 0; font-size: 12px; color: var(--text-muted); }
+.ac-visibility { margin-left: 2px; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 11px; font-weight: 600; line-height: 18px; }
+.ac-contact-admin .ac-visibility { border-color: var(--warning); }
+.ac-replace-note { margin: 4px 0 2px; }
+.ac-row .ac-select { min-height: 44px; flex: 1 1 140px; max-width: 320px; box-sizing: border-box; font-size: 16px; }
+.ac-mode input { width: 18px; height: 18px; margin: 0; }
+/* The public Station block (#898). */
+.ac-station { margin: 0 0 10px; font-size: 13px; }
+.ac-station-title { margin: 0 0 4px; font-size: 13px; }
+.ac-station-list { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; margin: 0; }
+.ac-station-row { display: contents; }
+.ac-station-list dt { color: var(--text-muted); }
+.ac-station-list dd { margin: 0; overflow-wrap: anywhere; }
+.ac-station-note { margin: 4px 0 0; font-size: 12px; color: var(--text-muted); }
 .ac-row .input { min-height: 44px; min-width: 0; flex: 1 1 140px; max-width: 320px; box-sizing: border-box; font-size: 16px; }
 
 .ac-status, .ac-name-check {
@@ -82,7 +104,10 @@ a.ac-item-name, .ac-item-proof { display: flex; align-items: center; align-self:
   scroll-margin-bottom: calc(12px + var(--bottom-nav-reserve, 0px));
 }
 .ac-item-meta { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
-.ac-item-height { font-weight: 600; }
+.ac-item-part { overflow-wrap: anywhere; }
+.ac-item-part-label { font-weight: 600; }
+.ac-item-contact { overflow-wrap: anywhere; padding-left: 6px; border-left: 2px solid var(--border); }
+.ac-replaced { margin-left: 2px; color: var(--text-muted); }
 .ac-item-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; }
 .ac-chip, .ac-flag {
   align-self: flex-start;
@@ -101,3 +126,7 @@ a.ac-item-name, .ac-item-proof { display: flex; align-items: center; align-self:
    Approve) on --accent-strong, as #1668 M2 does for white-on-blue. */
 .ac-body .btn-primary, .ac-admin .btn-primary { background: var(--accent-strong); color: var(--text-on-accent); }
 .ac-body .btn-primary:hover:not(:disabled), .ac-admin .btn-primary:hover:not(:disabled) { background: var(--accent-strong); filter: brightness(0.9); }
+/* #898 — Get code is disabled while both parts are on Keep: show it. Owner
+   form only; the admin Approve and Unlock buttons keep their look while a
+   request is in flight, as before #898 (review PR#908 F7). */
+.ac-form .ac-submit:disabled { opacity: 0.5; cursor: not-allowed; }
