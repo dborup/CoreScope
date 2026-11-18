@@ -3,10 +3,13 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/mux"
 )
 
 type observerCreditCase struct {
@@ -17,7 +20,34 @@ type observerCreditCase struct {
 	ObserverIDUpper       bool   `json:"observerIdUpper"`
 	ObserverIDTrim        int    `json:"observerIdTrim"`
 	ObserverOnlineMinutes int    `json:"observerOnlineMinutes"`
+	ObserverRoster        string `json:"observerRoster"`
 	Status                string `json:"status"`
+}
+
+// observerID is the id the case's observer row is stored under.
+func (c observerCreditCase) observerID(key string) string {
+	id := key[:64-c.ObserverIDTrim]
+	if c.ObserverIDUpper {
+		id = strings.ToUpper(id)
+	}
+	return id
+}
+
+// bucket maps the fixture's client status onto the server's bucket name.
+func (c observerCreditCase) bucket() string {
+	return map[string]string{"healthy": "active", "degraded": "degraded", "silent": "silent"}[c.Status]
+}
+
+func (fx observerCreditFixture) thresholds(c observerCreditCase) HealthThresholds {
+	ht := HealthThresholds{
+		InfraDegradedHours: fx.Thresholds.InfraDegradedHours, InfraSilentHours: fx.Thresholds.InfraSilentHours,
+		NodeDegradedHours: fx.Thresholds.NodeDegradedHours, NodeSilentHours: fx.Thresholds.NodeSilentHours,
+		ObserverOnlineMinutes: fx.Thresholds.ObserverOnlineMinutes,
+	}
+	if c.ObserverOnlineMinutes > 0 {
+		ht.ObserverOnlineMinutes = c.ObserverOnlineMinutes
+	}
+	return ht
 }
 
 type observerCreditFixture struct {
@@ -53,30 +83,119 @@ func TestObserverCreditParityWithClient(t *testing.T) {
 	ago := func(sec int64) string { return now.Add(-time.Duration(sec) * time.Second).Format(time.RFC3339) }
 	for _, c := range fx.Cases {
 		t.Run(c.Name, func(t *testing.T) {
-			ht := HealthThresholds{
-				InfraDegradedHours: fx.Thresholds.InfraDegradedHours, InfraSilentHours: fx.Thresholds.InfraSilentHours,
-				NodeDegradedHours: fx.Thresholds.NodeDegradedHours, NodeSilentHours: fx.Thresholds.NodeSilentHours,
-				ObserverOnlineMinutes: fx.Thresholds.ObserverOnlineMinutes,
-			}
-			if c.ObserverOnlineMinutes > 0 {
-				ht.ObserverOnlineMinutes = c.ObserverOnlineMinutes
-			}
 			obs := ObserverReports{}
-			if c.ObserverAgoSec != nil {
-				id := key[:64-c.ObserverIDTrim]
-				if c.ObserverIDUpper {
-					id = strings.ToUpper(id)
-				}
-				obs.add(id, ago(*c.ObserverAgoSec))
+			// Like the client, the helper only sees served observers; the
+			// roster filter itself is covered by the endpoint test below.
+			if c.ObserverAgoSec != nil && c.ObserverRoster == "" {
+				obs.add(c.observerID(key), ago(*c.ObserverAgoSec))
 			}
 			var heard sql.NullString
 			if c.HeardAgoSec != nil {
 				heard = validStr(ago(*c.HeardAgoSec))
 			}
-			got := classifyNodeHealth(c.Role, key, heard, now.UnixMilli(), ht, obs)
-			want := map[string]string{"healthy": "active", "degraded": "degraded", "silent": "silent"}[c.Status]
-			if got != want {
+			got := classifyNodeHealth(c.Role, key, heard, now.UnixMilli(), fx.thresholds(c), obs)
+			if want := c.bucket(); got != want {
 				t.Fatalf("got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// TestObserverCreditParityThroughEndpoints runs every shared case through the
+// real server: the case's node and observer row go into a fresh database, then
+//   - /api/observers (what the client indexes) serves the observer exactly
+//     when the case has no observerRoster exclusion, and
+//   - /api/nodes/network-status and /api/analytics/areas both put the node in
+//     the case's bucket.
+//
+// With the JS test giving the client the same served roster, this pins that
+// the server reads the client's roster, not every observers row (#921 F1),
+// and that both handlers pass it on (#921 F2).
+func TestObserverCreditParityThroughEndpoints(t *testing.T) {
+	fx := loadObserverCreditFixture(t)
+	key := strings.Repeat("ab", 32)
+	f := func(v float64) *float64 { return &v }
+	for _, c := range fx.Cases {
+		t.Run(c.Name, func(t *testing.T) {
+			db := setupTestDB(t)
+			defer db.Close()
+			ht := fx.thresholds(c)
+			cfg := &Config{
+				Port:             3000,
+				HealthThresholds: &ht,
+				Areas:            map[string]AreaEntry{"ODE": {Label: "Odense by", LatMin: f(55.32), LatMax: f(55.45), LonMin: f(10.3), LonMax: f(10.5)}},
+			}
+			obsID := c.observerID(key)
+			if c.ObserverRoster == "blacklisted" {
+				cfg.ObserverBlacklist = []string{strings.ToLower(obsID)}
+			}
+			srv := NewServer(db, cfg, NewHub())
+			router := mux.NewRouter()
+			srv.RegisterRoutes(router)
+
+			// Millisecond timestamps, taken just before the requests, keep
+			// the 1 s margins of the boundary cases intact.
+			now := time.Now().UTC()
+			ago := func(sec int64) string {
+				return now.Add(-time.Duration(sec) * time.Second).Format("2006-01-02T15:04:05.000Z07:00")
+			}
+			var heard interface{}
+			if c.HeardAgoSec != nil {
+				heard = ago(*c.HeardAgoSec)
+			}
+			if _, err := db.conn.Exec("INSERT INTO nodes (public_key, name, role, last_seen, lat, lon) VALUES (?, 'n', ?, ?, 55.40, 10.40)", key, c.Role, heard); err != nil {
+				t.Fatal(err)
+			}
+			if c.ObserverAgoSec != nil {
+				inactive := 0
+				if c.ObserverRoster == "inactive" {
+					inactive = 1
+				}
+				if _, err := db.conn.Exec("INSERT INTO observers (id, name, last_seen, inactive) VALUES (?, 'obs', ?, ?)", obsID, ago(*c.ObserverAgoSec), inactive); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			get := func(path string, v interface{}) {
+				t.Helper()
+				w := httptest.NewRecorder()
+				router.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+				if w.Code != 200 {
+					t.Fatalf("%s: status=%d body=%s", path, w.Code, w.Body.String())
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), v); err != nil {
+					t.Fatalf("%s: %v", path, err)
+				}
+			}
+
+			var roster ObserverListResponse
+			get("/api/observers", &roster)
+			wantServed := c.ObserverAgoSec != nil && c.ObserverRoster == ""
+			if served := len(roster.Observers) == 1 && roster.Observers[0].ID == obsID; served != wantServed || len(roster.Observers) > 1 {
+				t.Fatalf("/api/observers served %+v, want observer served=%v", roster.Observers, wantServed)
+			}
+
+			want := c.bucket()
+			var status struct {
+				Active   int `json:"active"`
+				Degraded int `json:"degraded"`
+				Silent   int `json:"silent"`
+			}
+			get("/api/nodes/network-status", &status)
+			gotStatus := map[string]int{"active": status.Active, "degraded": status.Degraded, "silent": status.Silent}
+			if gotStatus[want] != 1 || status.Active+status.Degraded+status.Silent != 1 {
+				t.Errorf("network-status %+v, want the node in %q", status, want)
+			}
+
+			var areas AreaAnalyticsResponse
+			get("/api/analytics/areas", &areas)
+			if len(areas.Density) != 1 {
+				t.Fatalf("areas density = %+v, want one ODE entry", areas.Density)
+			}
+			d := areas.Density[0]
+			got := map[string]int{"active": d.Active, "degraded": d.Degraded, "silent": d.Silent}
+			if d.Total != 1 || got[want] != 1 {
+				t.Errorf("areas ODE = %+v, want the node in %q", d, want)
 			}
 		})
 	}
@@ -110,7 +229,7 @@ func TestGetNetworkStatusCreditsReportingObserver(t *testing.T) {
 	seedHealthObserver(t, db, strings.ToUpper(pkObs), now.Add(-5*time.Minute).Format(time.RFC3339))
 
 	ht := HealthThresholds{InfraDegradedHours: 2, InfraSilentHours: 48, NodeDegradedHours: 1, NodeSilentHours: 24, ObserverOnlineMinutes: 60}
-	res, err := db.GetNetworkStatus(ht)
+	res, err := db.GetNetworkStatus(ht, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,16 +263,28 @@ func TestComputeAreaDensityCreditsReportingObserver(t *testing.T) {
 	}
 }
 
-// Observers load once per computation, not once per node.
-func TestLoadObserverReportsReadsRosterOnce(t *testing.T) {
+// The credit roster is the /api/observers roster: soft-deleted rows and
+// blacklisted ids (any case) are not loaded (#921 F1).
+func TestLoadObserverReportsUsesListedRoster(t *testing.T) {
 	db := setupTestDB(t)
 	defer db.Close()
-	seedHealthObserver(t, db, strings.Repeat("AB", 32), time.Now().UTC().Format(time.RFC3339))
-	obs, err := db.LoadObserverReports()
+	now := time.Now().UTC().Format(time.RFC3339)
+	listed, gone, banned := strings.Repeat("AB", 32), strings.Repeat("CD", 32), strings.Repeat("EF", 32)
+	for _, id := range []string{listed, gone, banned} {
+		seedHealthObserver(t, db, id, now)
+	}
+	if _, err := db.conn.Exec("UPDATE observers SET inactive = 1 WHERE id = ?", gone); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &Config{ObserverBlacklist: []string{strings.ToLower(banned)}}
+	obs, err := db.LoadObserverReports(cfg.IsObserverBlacklisted)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(obs) != 1 {
-		t.Fatalf("got %d observers, want 1", len(obs))
+	if _, ok := obs[strings.ToLower(listed)]; !ok || len(obs) != 1 {
+		t.Fatalf("got %v, want only %s", obs, listed)
+	}
+	if all, _ := db.LoadObserverReports(nil); len(all) != 2 {
+		t.Fatalf("nil blacklist: got %d observers, want 2 (inactive row still dropped)", len(all))
 	}
 }

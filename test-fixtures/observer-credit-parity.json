@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared client/server cases for the #902/#918 observer credit. Read by cmd/server/observer_credit_test.go and test-issue-918-observer-credit-parity.js. Ages are seconds before 'now'; a negative observerAgoSec is in the future. 'status' is the three-state bucket (healthy/degraded/silent).",
+  "_comment": "Shared client/server cases for the #902/#918 observer credit. Read by cmd/server/observer_credit_test.go and test-issue-918-observer-credit-parity.js. Ages are seconds before 'now'; a negative observerAgoSec is in the future. 'status' is the three-state bucket (healthy/degraded/silent). 'observerRoster' (inactive|blacklisted) marks an observer row the database holds but /api/observers does not serve (soft-deleted, or in observerBlacklist): the client never sees it, so it gives no credit. The Go test runs every case through the real /api/observers, /api/nodes/network-status and /api/analytics/areas.",
   "thresholds": {"infraDegradedHours": 2, "infraSilentHours": 48, "nodeDegradedHours": 1, "nodeSilentHours": 24, "observerOnlineMinutes": 60},
   "cases": [
     {"name": "not an observer, heard 3h ago: degraded", "role": "companion", "heardAgoSec": 10800, "observerAgoSec": null, "status": "degraded"},
@@ -16,6 +16,11 @@
     {"name": "already healthy stays healthy with a stale observer", "role": "client", "heardAgoSec": 1800, "observerAgoSec": 90000, "status": "healthy"},
     {"name": "a 62-char key prefix is never matched", "role": "client", "heardAgoSec": 172800, "observerAgoSec": 300, "observerIdTrim": 2, "status": "silent"},
     {"name": "custom 10 min online window excludes a 20 min old report", "role": "client", "heardAgoSec": 172800, "observerAgoSec": 1200, "observerOnlineMinutes": 10, "status": "silent"},
-    {"name": "custom 10 min online window includes a 5 min old report", "role": "client", "heardAgoSec": 172800, "observerAgoSec": 300, "observerOnlineMinutes": 10, "status": "healthy"}
+    {"name": "custom 10 min online window includes a 5 min old report", "role": "client", "heardAgoSec": 172800, "observerAgoSec": 300, "observerOnlineMinutes": 10, "status": "healthy"},
+    {"name": "#918: companion heard 10 h ago with an observer 1 min ago is healthy", "role": "companion", "heardAgoSec": 36000, "observerAgoSec": 60, "status": "healthy"},
+    {"name": "#918: companion heard 10 h ago with an observer 2 h ago is degraded", "role": "companion", "heardAgoSec": 36000, "observerAgoSec": 7200, "status": "degraded"},
+    {"name": "soft-deleted (inactive) observer reporting 1 min ago gives no credit", "role": "companion", "heardAgoSec": 36000, "observerAgoSec": 60, "observerRoster": "inactive", "status": "degraded"},
+    {"name": "blacklisted observer reporting 1 min ago gives no credit", "role": "companion", "heardAgoSec": 36000, "observerAgoSec": 60, "observerRoster": "blacklisted", "status": "degraded"},
+    {"name": "blacklisted upper-case observer id gives no credit to a silent repeater", "role": "repeater", "heardAgoSec": 259200, "observerAgoSec": 60, "observerIdUpper": true, "observerRoster": "blacklisted", "status": "silent"}
   ]
 }

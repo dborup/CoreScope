@@ -1639,6 +1639,25 @@ func (db *DB) GetObservers() ([]Observer, error) {
 	return observers, nil
 }
 
+// GetListedObservers returns the observer roster /api/observers serves, and
+// so the one the client indexes: GetObservers (soft-deleted rows dropped)
+// minus the ids blacklisted reports true for (nil: none). The server-side
+// observer credit (#918) reads this same roster so it cannot credit an
+// observer the client never sees.
+func (db *DB) GetListedObservers(blacklisted func(id string) bool) ([]Observer, error) {
+	observers, err := db.GetObservers()
+	if err != nil || blacklisted == nil {
+		return observers, err
+	}
+	listed := observers[:0]
+	for _, o := range observers {
+		if !blacklisted(o.ID) {
+			listed = append(listed, o)
+		}
+	}
+	return listed, nil
+}
+
 // GetNonRelayObserverPubkeys returns the lowercase observer.id pubkeys
 // for observers that have advertised `repeat:off` (#1290). The server's
 // path-hop disambiguator consumes this to exclude listener-only nodes
@@ -2157,9 +2176,10 @@ func (db *DB) GetDistinctIATAs() ([]string, error) {
 	return codes, nil
 }
 
-// GetNetworkStatus returns overall network health status.
-func (db *DB) GetNetworkStatus(healthThresholds HealthThresholds) (map[string]interface{}, error) {
-	observers, err := db.LoadObserverReports()
+// GetNetworkStatus returns overall network health status. blacklisted is the
+// observer blacklist (see LoadObserverReports); nil blacklists nothing.
+func (db *DB) GetNetworkStatus(healthThresholds HealthThresholds, blacklisted func(id string) bool) (map[string]interface{}, error) {
+	observers, err := db.LoadObserverReports(blacklisted)
 	if err != nil {
 		return nil, err
 	}

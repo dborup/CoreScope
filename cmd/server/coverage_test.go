@@ -3826,7 +3826,7 @@ func TestDBGetNetworkStatus(t *testing.T) {
 
 	cfg := &Config{}
 	ht := cfg.GetHealthThresholds()
-	result, err := db.GetNetworkStatus(ht)
+	result, err := db.GetNetworkStatus(ht, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

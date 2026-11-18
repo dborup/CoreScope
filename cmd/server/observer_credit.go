@@ -55,22 +55,21 @@ func (o ObserverReports) add(id, lastSeen string) {
 }
 
 // LoadObserverReports reads the observer roster once, for one computation.
-func (db *DB) LoadObserverReports() (ObserverReports, error) {
-	rows, err := db.conn.Query("SELECT id, last_seen FROM observers")
+// It is the roster /api/observers serves (GetListedObservers: no
+// soft-deleted rows, no blacklisted ids), so the server credits exactly the
+// observers the client can index.
+func (db *DB) LoadObserverReports(blacklisted func(id string) bool) (ObserverReports, error) {
+	observers, err := db.GetListedObservers(blacklisted)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := ObserverReports{}
-	for rows.Next() {
-		var id string
-		var lastSeen sql.NullString
-		if rows.Scan(&id, &lastSeen) != nil || !lastSeen.Valid {
-			continue
+	out := make(ObserverReports, len(observers))
+	for _, o := range observers {
+		if o.LastSeen != nil {
+			out.add(o.ID, *o.LastSeen)
 		}
-		out.add(id, lastSeen.String)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // parseHealthTimestamp parses a nodes/observers last_seen in the two

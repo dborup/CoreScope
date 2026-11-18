@@ -787,7 +787,7 @@ func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 		graph = s.store.graph.Load()
 	}
 
-	observers, err := s.db.LoadObserverReports()
+	observers, err := s.db.LoadObserverReports(s.cfg.IsObserverBlacklisted)
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -2424,7 +2424,7 @@ func (s *Server) handleBulkHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleNetworkStatus(w http.ResponseWriter, r *http.Request) {
 	ht := s.cfg.GetHealthThresholds()
-	result, err := s.db.GetNetworkStatus(ht)
+	result, err := s.db.GetNetworkStatus(ht, s.cfg.IsObserverBlacklisted)
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -3793,7 +3793,8 @@ func (s *Server) handleObservers(w http.ResponseWriter, r *http.Request) {
 // refill path can be wrapped in singleflight and counted by tests.
 // #1483 follow-up.
 func (s *Server) buildObserversDefaultResponse() (ObserverListResponse, error) {
-	observers, err := s.db.GetObservers()
+	// Defense in depth: blacklisted observers are dropped from the roster.
+	observers, err := s.db.GetListedObservers(s.cfg.IsObserverBlacklisted)
 	if err != nil {
 		return ObserverListResponse{}, err
 	}
@@ -3813,10 +3814,6 @@ func (s *Server) buildObserversDefaultResponse() (ObserverListResponse, error) {
 	nowTime := time.Now().UTC()
 	for i := range observers {
 		o := &observers[i]
-		// Defense in depth: skip observers that are in the blacklist
-		if s.cfg != nil && s.cfg.IsObserverBlacklisted(o.ID) {
-			continue
-		}
 		plh := 0
 		if c, ok := pktCounts[o.ID]; ok {
 			plh = c

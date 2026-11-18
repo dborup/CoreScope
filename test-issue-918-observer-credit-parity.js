@@ -36,7 +36,12 @@ async function load(thresholds, observerOnlineMinutes) {
   for (const c of fx.cases) {
     const r = await load(fx.thresholds, c.observerOnlineMinutes || fx.thresholds.observerOnlineMinutes);
     const obsId = (c.observerIdUpper ? KEY.toUpperCase() : KEY).slice(0, 64 - (c.observerIdTrim || 0));
-    const idx = r.MyMeshObservers.index({ observers: c.observerAgoSec == null ? [] : [{ id: obsId, last_seen: iso(c.observerAgoSec) }] });
+    // The client indexes the /api/observers payload. A row the database holds
+    // but the endpoint does not serve (observerRoster: soft-deleted or
+    // blacklisted) is absent from it; the Go test checks the endpoint really
+    // omits it and that both server buckets then give no credit either.
+    const served = c.observerAgoSec != null && !c.observerRoster;
+    const idx = r.MyMeshObservers.index({ observers: served ? [{ id: obsId, last_seen: iso(c.observerAgoSec) }] : [] });
     const heard = c.heardAgoSec == null ? null : iso(c.heardAgoSec);
     const got = r.getNodeHealth(c.role, heard, r.MyMeshObservers.reportedAt(idx, KEY), NOW).status;
     assert.equal(got, c.status, c.name);
