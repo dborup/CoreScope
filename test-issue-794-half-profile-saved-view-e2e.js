@@ -2,7 +2,7 @@
  * E2E (#794): a half-profile link from node detail does not overwrite the
  * viewer's saved Map view.
  *
- * "Terrain profile to…" on node detail opens #/map?profile=<one key>: A is
+ * "Terrain profile" on node detail opens #/map?profile=<one key>: A is
  * filled in, the picker is armed for B and the map pans to A. That pan is
  * the link's view, not the viewer's, so — like the full-profile fit (#765)
  * — it must not be written to localStorage["map-view"]. A pan the viewer
