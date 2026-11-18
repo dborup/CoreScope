@@ -1515,6 +1515,11 @@
     // them together rather than in series halves worst-case time-to-first-row
     // on slow links / loaded CI runners without changing render contracts.
     await Promise.all([loadObservers(), loadPackets()]);
+    // #881 F2: the page may have been left (destroy) or re-entered while the
+    // first fetch was in flight. Everything below registers document/WS
+    // listeners that only destroy() takes off, so a stale init must stop here
+    // or it leaks them into whichever page is current now.
+    if (gen !== initGeneration) return;
 
     // Auto-select packet detail when arriving via hash URL
     if (directPacketHash) {
@@ -1543,6 +1548,7 @@
       } catch {}
     }
 
+    if (gen !== initGeneration) return; // the directPacketHash lookup awaited
     // Event delegation for data-action buttons
     bindDocumentHandler('action', 'click', function (e) {
       var btn = e.target.closest('[data-action]');
@@ -1596,6 +1602,8 @@
         }
       } catch {}
     }
+    // The directPacketId lookup above awaits too: same stale-init guard.
+    if (gen !== initGeneration) return;
     wsHandler = debouncedOnWS(function (msgs) {
       if (packetsPaused) {
         // Only packets are replayed on resume, so only packets count in the
@@ -1715,6 +1723,7 @@
 
   function destroy() {
     ++packetLoadGeneration;
+    ++initGeneration; // invalidates an init() still awaiting its first fetch
     clearTimeout(_renderTimer);
     if (wsHandler) offWS(wsHandler);
     wsHandler = null;

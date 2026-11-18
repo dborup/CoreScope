@@ -77,6 +77,7 @@ run test-issue-254-affinity-debug-toggle.js
 run test-issue-258-column-widths.js
 run test-issue-259-nodes-esc-listener.js
 run test-issue-282-pktesc-listener.js
+run test-881-packets-init-race.js
 run test-issue-282-comment-guards.js
 run test-issue-314-chscroll-listener.js
 run test-issue-405-observers-listener-leak.js
