@@ -259,6 +259,7 @@ func TestEstimatedPositionsAreasSkipQueriesAndPreserveDensity(t *testing.T) {
 	db := setupPacketPathCountingDB(t)
 	defer db.Close()
 	_, err := db.conn.Exec(`ALTER TABLE nodes ADD COLUMN last_seen TEXT;
+		ALTER TABLE observers ADD COLUMN last_seen TEXT;
 		INSERT INTO nodes(public_key,name,role,lat,lon) VALUES ('anchor','GPS','repeater',55.5,9.5),('ghost','No GPS','repeater',NULL,NULL);
 		INSERT INTO neighbor_edges(node_a,node_b,count) VALUES ('anchor','ghost',10);`)
 	if err != nil {

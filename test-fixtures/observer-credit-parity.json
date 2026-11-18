@@ -1,0 +1,21 @@
+{
+  "_comment": "Shared client/server cases for the #902/#918 observer credit. Read by cmd/server/observer_credit_test.go and test-issue-918-observer-credit-parity.js. Ages are seconds before 'now'; a negative observerAgoSec is in the future. 'status' is the three-state bucket (healthy/degraded/silent).",
+  "thresholds": {"infraDegradedHours": 2, "infraSilentHours": 48, "nodeDegradedHours": 1, "nodeSilentHours": 24, "observerOnlineMinutes": 60},
+  "cases": [
+    {"name": "not an observer, heard 3h ago: degraded", "role": "companion", "heardAgoSec": 10800, "observerAgoSec": null, "status": "degraded"},
+    {"name": "observer reported 10 min ago lifts a degraded companion", "role": "companion", "heardAgoSec": 10800, "observerAgoSec": 600, "status": "healthy"},
+    {"name": "observer id in upper case still matches", "role": "repeater", "heardAgoSec": 259200, "observerAgoSec": 600, "observerIdUpper": true, "status": "healthy"},
+    {"name": "observer 90 min old gives no credit", "role": "repeater", "heardAgoSec": 259200, "observerAgoSec": 5400, "status": "silent"},
+    {"name": "observer exactly at the online window is credited", "role": "client", "heardAgoSec": 172800, "observerAgoSec": 3600, "status": "healthy"},
+    {"name": "observer 29 s past the window is still inside the tolerance", "role": "client", "heardAgoSec": 172800, "observerAgoSec": 3629, "status": "healthy"},
+    {"name": "observer 30 s past the window is not credited", "role": "client", "heardAgoSec": 172800, "observerAgoSec": 3630, "status": "silent"},
+    {"name": "observer report 20 s in the future is credited", "role": "client", "heardAgoSec": 172800, "observerAgoSec": -20, "status": "healthy"},
+    {"name": "observer report 31 s in the future is not credited", "role": "client", "heardAgoSec": 172800, "observerAgoSec": -31, "status": "silent"},
+    {"name": "repeater degraded at 3h is lifted by an observer report", "role": "repeater", "heardAgoSec": 10800, "observerAgoSec": 300, "status": "healthy"},
+    {"name": "never heard but observer reporting is healthy", "role": "room", "heardAgoSec": null, "observerAgoSec": 300, "status": "healthy"},
+    {"name": "already healthy stays healthy with a stale observer", "role": "client", "heardAgoSec": 1800, "observerAgoSec": 90000, "status": "healthy"},
+    {"name": "a 62-char key prefix is never matched", "role": "client", "heardAgoSec": 172800, "observerAgoSec": 300, "observerIdTrim": 2, "status": "silent"},
+    {"name": "custom 10 min online window excludes a 20 min old report", "role": "client", "heardAgoSec": 172800, "observerAgoSec": 1200, "observerOnlineMinutes": 10, "status": "silent"},
+    {"name": "custom 10 min online window includes a 5 min old report", "role": "client", "heardAgoSec": 172800, "observerAgoSec": 300, "observerOnlineMinutes": 10, "status": "healthy"}
+  ]
+}

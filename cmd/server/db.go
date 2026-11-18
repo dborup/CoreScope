@@ -2159,6 +2159,10 @@ func (db *DB) GetDistinctIATAs() ([]string, error) {
 
 // GetNetworkStatus returns overall network health status.
 func (db *DB) GetNetworkStatus(healthThresholds HealthThresholds) (map[string]interface{}, error) {
+	observers, err := db.LoadObserverReports()
+	if err != nil {
+		return nil, err
+	}
 	rows, err := db.conn.Query("SELECT public_key, name, role, last_seen FROM nodes")
 	if err != nil {
 		return nil, err
@@ -2180,20 +2184,12 @@ func (db *DB) GetNetworkStatus(healthThresholds HealthThresholds) (map[string]in
 		}
 		roleCounts[r]++
 
-		age := int64(math.MaxInt64)
-		if lastSeen.Valid {
-			if t, err := time.Parse(time.RFC3339, lastSeen.String); err == nil {
-				age = now - t.UnixMilli()
-			} else if t, err := time.Parse("2006-01-02 15:04:05", lastSeen.String); err == nil {
-				age = now - t.UnixMilli()
-			}
-		}
-		degradedMs, silentMs := healthThresholds.GetHealthMs(r)
-		if age < int64(degradedMs) {
+		switch classifyNodeHealth(r, pk, lastSeen, now, healthThresholds, observers) {
+		case "active":
 			active++
-		} else if age < int64(silentMs) {
+		case "degraded":
 			degraded++
-		} else {
+		default:
 			silent++
 		}
 	}
@@ -4568,7 +4564,7 @@ func (db *DB) GetNodesForAreaAnalytics() (positioned []areaAnalyticsNode, unposi
 // a node in "Aarhus by" also counts toward "Jylland") and tallies role mix
 // plus the same active/degraded/silent breakdown GetNetworkStatus uses
 // network-wide, but per area.
-func computeAreaDensity(nodes []areaAnalyticsNode, areas map[string]AreaEntry, healthThresholds HealthThresholds) []AreaDensity {
+func computeAreaDensity(nodes []areaAnalyticsNode, areas map[string]AreaEntry, healthThresholds HealthThresholds, observers ObserverReports) []AreaDensity {
 	now := time.Now().UnixMilli()
 	counts := make(map[string]*AreaDensity)
 	for _, n := range nodes {
@@ -4580,21 +4576,7 @@ func computeAreaDensity(nodes []areaAnalyticsNode, areas map[string]AreaEntry, h
 		if role == "" {
 			role = "unknown"
 		}
-		age := int64(math.MaxInt64)
-		if n.LastSeen.Valid {
-			if t, err := time.Parse(time.RFC3339, n.LastSeen.String); err == nil {
-				age = now - t.UnixMilli()
-			} else if t, err := time.Parse("2006-01-02 15:04:05", n.LastSeen.String); err == nil {
-				age = now - t.UnixMilli()
-			}
-		}
-		degradedMs, silentMs := healthThresholds.GetHealthMs(role)
-		status := "silent"
-		if age < int64(degradedMs) {
-			status = "active"
-		} else if age < int64(silentMs) {
-			status = "degraded"
-		}
+		status := classifyNodeHealth(role, n.PublicKey, n.LastSeen, now, healthThresholds, observers)
 		for _, key := range keys {
 			c, exists := counts[key]
 			if !exists {

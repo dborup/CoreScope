@@ -787,8 +787,14 @@ func (s *Server) handleAreaAnalytics(w http.ResponseWriter, r *http.Request) {
 		graph = s.store.graph.Load()
 	}
 
+	observers, err := s.db.LoadObserverReports()
+	if err != nil {
+		writeError(w, 500, err.Error())
+		return
+	}
+
 	resp := &AreaAnalyticsResponse{
-		Density:           computeAreaDensity(positioned, s.cfg.Areas, s.cfg.GetHealthThresholds()),
+		Density:           computeAreaDensity(positioned, s.cfg.Areas, s.cfg.GetHealthThresholds(), observers),
 		BridgeNodes:       computeAreaBridgeNodes(positioned, s.cfg.Areas, graph),
 		UnpositionedTotal: len(unpositioned),
 	}
