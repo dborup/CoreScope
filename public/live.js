@@ -208,6 +208,8 @@
   let _observerRosterPromise = null;
   let _followSkewPromise = null;
   let _followToastTimer = null;
+  // Folds the controls panel (set by wireLiveCollapseToggles; null off Live).
+  let collapseLiveControls = null;
 
   // ROLE_COLORS loaded from shared roles.js (includes 'unknown')
 
@@ -596,6 +598,8 @@
     if (wasLive !== (mode === 'LIVE')) applyHeardFilter();
     if (mode !== 'LIVE' && !VCR.frozenNow) VCR.frozenNow = Date.now();
     if (mode === 'LIVE') VCR.frozenNow = null;
+    // #880 — "Follow next" picks a live packet; a replay must not feed it.
+    if (mode !== 'LIVE' && followArmed) setFollowArmed(false);
     updateVCRUI();
   }
 
@@ -759,7 +763,9 @@
         return;
       }
       const group = replayGroups[groupIdx];
-      renderPacketTree(group.packets);
+      // #880 — a follow owns the map: the replay keeps its clock but does
+      // not animate (as live packets are buffered, not drawn, in LIVE).
+      if (!followState) renderPacketTree(group.packets);
       updateVCRClock(group.ts);
       updateVCRLcd();
       VCR.playhead = Math.min(VCR.buffer.length, VCR.playhead + group.packets.length);
@@ -1388,15 +1394,22 @@
   }
 
   // #880 — "Follow next packet": arm / cancel. Armed, renderPacketTree
-  // follows the next group that passes the Live filters.
+  // follows the next group that passes the Live filters. Two buttons, one
+  // state: an icon in the feed header (> 640px) and a row in the controls
+  // panel (<= 640px, where the feed is hidden); CSS shows one of them.
   function wireFollowNext() {
-    const btn = document.getElementById('liveFollowNextBtn');
-    if (!btn || btn.dataset.liveWired === '1') return;
-    btn.dataset.liveWired = '1';
-    btn.addEventListener('click', function() {
-      if (followArmed) { setFollowArmed(false); return; }
-      stopFollow();
-      setFollowArmed(true);
+    document.querySelectorAll('.live-page .live-follow-next').forEach(function(btn) {
+      if (btn.dataset.liveWired === '1') return;
+      btn.dataset.liveWired = '1';
+      btn.addEventListener('click', function() {
+        if (followArmed) { setFollowArmed(false); return; }
+        // A VCR replay renders historical packets; the next one is not live.
+        if (VCR.mode !== 'LIVE') { showFollowToast('Follow next packet works in LIVE mode.'); return; }
+        stopFollow();
+        setFollowArmed(true);
+        showFollowToast('Waiting for the next packet that passes the Live filters…');
+        collapseControlsOnPhone();
+      });
     });
   }
 
@@ -1624,7 +1637,7 @@
             <label id="liveHeardLabel" class="live-heard-label" title="Hide repeaters and rooms not heard within this window. Heard = an own advert or a flood packet the server resolved this node relaying, plus live packets since the page loaded. Adverts alone are infrequent and the interval is set per node, so a healthy repeater that relays nothing can look silent until its next advert: pick a window longer than its advert interval. Companions and sensors are never hidden. Suspended during VCR replay.">Last heard <select id="liveHeardSelect" class="live-heard-select" aria-describedby="heardDesc"></select></label>
             <span id="heardDesc" class="sr-only">Hide repeaters and rooms with no advert or relayed traffic within the chosen window. Adverts are infrequent and the interval is set per node, so a healthy repeater that relays nothing can look silent until its next advert: pick a window longer than its advert interval. Companions and sensors are never hidden. Suspended during VCR replay.</span>
             <span id="liveHeardCount" class="live-filter-count hidden" aria-live="polite"></span>
-            <button type="button" id="liveFollowNextBtn" class="vcr-btn live-follow-next" aria-pressed="false" title="Replay how the next visible packet spreads through the mesh">Follow next packet</button>
+            <button type="button" id="liveFollowNextBtn" class="vcr-btn live-follow-next live-follow-next--menu" aria-pressed="false" title="Replay how the next visible packet spreads through the mesh">Follow next packet</button>
             <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Geo filter boundary</label>
             <label id="liveSelectedAreaLabel" style="display:none"><input type="checkbox" id="liveSelectedAreaToggle"> Selected area outline</label>
             </div>
@@ -1651,6 +1664,7 @@
         <div class="live-overlay live-feed" id="liveFeed">
           <div class="panel-header">
             <button class="panel-corner-btn" data-panel="liveFeed" title="Move panel to next corner" aria-label="Move panel to next corner">◫</button>
+            <button type="button" id="liveFeedFollowNextBtn" class="live-follow-next live-follow-next--feed" aria-pressed="false" title="Follow next packet: replay how the next visible packet spreads through the mesh" aria-label="Follow next packet"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-crosshair"/></svg></button>
             <button class="feed-hide-btn" id="feedHideBtn" title="Hide feed" aria-label="Hide feed"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-x"/></svg></button>
           </div>
           <div class="panel-content" aria-live="polite" aria-relevant="additions" role="log">
@@ -2573,6 +2587,10 @@
         });
       });
       applyForViewport();
+      // #880 — a follow folds the panel on phones; not persisted, so a
+      // pinned-open panel comes back on the next visit.
+      var controlsPair = pairs.find(function(p) { return p.rootId === 'liveControls'; });
+      collapseLiveControls = function() { setExpanded(controlsPair, false); };
       initControlsFitTracker(); // #667
       // #1180 — bind once across SPA re-mounts. MQL is process-global per
       // query string; per-init binds accumulate handlers without bound.
@@ -3883,7 +3901,7 @@
 
     // #880 — "Follow next packet": the first group that passed every filter
     // above, i.e. the next one the viewer can see.
-    if (followArmed && !isReplay) {
+    if (followArmed && !isReplay && VCR.mode === 'LIVE') {
       const nextHash = window.LiveFollow && window.LiveFollow.parseFollowParam(first.hash);
       if (nextHash) startFollow(nextHash, { settleMs: followSettleMs(first._ts) });
     }
@@ -5140,13 +5158,10 @@
   // controller: one fetch, one rAF loop, one Esc listener, one layer, one
   // card. Everything lives on followState; stopFollow() releases it all.
 
-  // Time left of the propagation window for a packet first seen at tsMs, so
-  // late observations reach the DB before the one fetch. A deep link or an
-  // older line fetches at once.
+  // Wait before the one fetch (LiveFollow.settleMs): what is left of the
+  // propagation window, so late observations reach the DB first.
   function followSettleMs(tsMs) {
-    const buf = Number(window.PROPAGATION_BUFFER_MS) || 0;
-    const age = Date.now() - (Number(tsMs) || 0);
-    return Math.max(0, Math.min(buf, buf - age));
+    return window.LiveFollow.settleMs(tsMs, window.PROPAGATION_BUFFER_MS, Date.now());
   }
 
   function prefersReducedMotion() {
@@ -5194,11 +5209,23 @@
 
   function setFollowArmed(on) {
     followArmed = !!on;
-    const btn = document.getElementById('liveFollowNextBtn');
-    if (!btn) return;
-    btn.setAttribute('aria-pressed', followArmed ? 'true' : 'false');
-    btn.classList.toggle('active', followArmed);
-    btn.textContent = followArmed ? 'Waiting for next packet… (cancel)' : 'Follow next packet';
+    document.querySelectorAll('.live-page .live-follow-next').forEach(function(btn) {
+      btn.setAttribute('aria-pressed', followArmed ? 'true' : 'false');
+      btn.classList.toggle('active', followArmed);
+      btn.title = followArmed ? 'Waiting for the next packet; click to cancel'
+        : 'Follow next packet: replay how the next visible packet spreads through the mesh';
+      if (btn.classList.contains('live-follow-next--menu')) {
+        btn.textContent = followArmed ? 'Waiting for next packet… (cancel)' : 'Follow next packet';
+      }
+    });
+  }
+
+  // On a phone the controls panel covers the map, and the replay is the
+  // point of a follow: fold the panel away when one is armed or starts.
+  function collapseControlsOnPhone() {
+    if (collapseLiveControls && window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+      collapseLiveControls();
+    }
   }
 
   function showFollowToast(text) {
@@ -5280,6 +5307,7 @@
       rings: [], ringRadii: [], litRelays: 0, depthShown: -1, done: false, reduced: false,
     };
     setLiveHashParam(LF.HASH_PARAM, h);
+    collapseControlsOnPhone();
     buildFollowCard(st);
     st.keyHandler = function onFollowKey(e) { if (e.key === 'Escape') stopFollow(); };
     document.addEventListener('keydown', st.keyHandler);
@@ -5362,7 +5390,9 @@
     for (const ob of m.observers) if (ob.pos) pts.push(ob.pos);
     if (!pts.length || !map) return;
     const phone = window.innerWidth <= 768;
-    const cardH = st.card ? st.card.offsetHeight : 0;
+    // The phone sheet grows to its 40vh cap when the summary shows; pad for
+    // that from the start so it never covers markers (live.css).
+    const cardH = Math.max(st.card ? st.card.offsetHeight : 0, phone ? Math.round(window.innerHeight * 0.4) : 0);
     try {
       map.fitBounds(L.latLngBounds(pts), {
         paddingTopLeft: [40, 60],
@@ -5596,6 +5626,7 @@
     // #880 — the route already changed, so leave the URL alone.
     stopFollow({ keepUrl: true });
     followArmed = false;
+    collapseLiveControls = null;
     observerRoster = {};
     _observerRosterPromise = null;
     _followSkewPromise = null;

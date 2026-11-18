@@ -395,6 +395,16 @@
     return rows;
   }
 
+  // Wait before the one fetch of a follow started from a line or packet
+  // first seen at tsMs: what is left of the propagation window (bufferMs),
+  // so late observations reach the DB first. Older packets fetch at once.
+  function settleMs(tsMs, bufferMs, nowMs) {
+    var buf = Number(bufferMs) || 0;
+    var age = Number(nowMs) - (Number(tsMs) || 0);
+    if (!(buf > 0) || !isFinite(age)) return 0;
+    return Math.max(0, Math.min(buf, buf - age));
+  }
+
   window.LiveFollow = {
     HASH_PARAM: HASH_PARAM,
     MAX_OBSERVATIONS: MAX_OBSERVATIONS,
@@ -403,6 +413,7 @@
     LATE_SEC: LATE_SEC,
     CAPTION: CAPTION,
     parseFollowParam: parseFollowParam,
+    settleMs: settleMs,
     toEpochSec: toEpochSec,
     buildObserverRoster: buildObserverRoster,
     buildSkewMap: buildSkewMap,
