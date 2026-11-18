@@ -1793,10 +1793,6 @@
             <label><input type="checkbox" id="liveColorHashToggle" aria-describedby="colorHashDesc"> Color by hash</label>
             <span id="colorHashDesc" class="sr-only">Color flying-packet dots and contrails by packet hash for propagation tracing</span>
             <span id="colorHashScopeNote" class="sr-only">Inactive while Color by scope is on</span>
-            <label><input type="checkbox" id="liveColorScopeToggle" aria-describedby="colorScopeDesc"> Color by scope</label>
-            <span id="colorScopeDesc" class="sr-only">Color packet routes by their scope (region). Takes precedence over Color by hash; foreign-origin red still wins</span>
-            <label title="Show only scoped packets"><input type="checkbox" id="liveScopedOnlyToggle" aria-describedby="scopedOnlyDesc"> Scoped only</label>
-            <span id="scopedOnlyDesc" class="sr-only">Show only scoped packets (transport routes, including an unknown scope); hide plain flood and direct packets</span>
             <label><input type="checkbox" id="liveMatrixToggle" aria-describedby="matrixDesc"> Matrix</label>
             <span id="matrixDesc" class="sr-only">Animate packet hex bytes flowing along paths like the Matrix</span>
             <label><input type="checkbox" id="liveMatrixRainToggle" aria-describedby="rainDesc"> Rain</label>
@@ -1816,12 +1812,6 @@
             <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Geo filter boundary</label>
             <label id="liveSelectedAreaLabel" style="display:none"><input type="checkbox" id="liveSelectedAreaToggle"> Selected area outline</label>
             </div>
-            <!-- #882: phones hide the legend panel (#875), so the SCOPES list is
-                 mirrored here; CSS shows it only where the legend is hidden. -->
-            <div id="scopeLegendMenu" class="live-scope-legend live-scope-legend--menu" hidden>
-              <h3 class="legend-title">SCOPES (last 15 min)</h3>
-              <ul class="legend-list" id="scopeLegendMenuList"></ul>
-            </div>
             <div class="live-toggles">
               <div class="live-node-filter-wrap" style="position:relative">
                 <label class="live-node-filter-hitarea">
@@ -1834,6 +1824,21 @@
             </div>
             <div id="liveRegionFilter" class="region-filter-container live-region-filter-container" aria-label="Filter live packets by IATA region"></div>
             <div id="liveAreaFilter" class="live-area-filter-container"></div>
+            <!-- #882: appended after every existing control so none of them moves
+                 (the desktop row, the capped phone panel and the node-filter
+                 typeahead keep their geometry, #670/#671). -->
+            <div class="live-toggles live-scope-toggles">
+              <label><input type="checkbox" id="liveColorScopeToggle" aria-describedby="colorScopeDesc"> Color by scope</label>
+              <span id="colorScopeDesc" class="sr-only">Color packet routes by their scope (region). Takes precedence over Color by hash; foreign-origin red still wins</span>
+              <label title="Show only scoped packets"><input type="checkbox" id="liveScopedOnlyToggle" aria-describedby="scopedOnlyDesc"> Scoped only</label>
+              <span id="scopedOnlyDesc" class="sr-only">Show only scoped packets (transport routes, including an unknown scope); hide plain flood and direct packets</span>
+            </div>
+            <!-- #882: phones hide the legend panel (#875), so the SCOPES list is
+                 mirrored here; CSS shows it only where the legend is hidden. -->
+            <div id="scopeLegendMenu" class="live-scope-legend live-scope-legend--menu" hidden>
+              <h3 class="legend-title">SCOPES (last 15 min)</h3>
+              <ul class="legend-list" id="scopeLegendMenuList"></ul>
+            </div>
             <div class="audio-controls hidden" id="audioControls">
               <label class="audio-slider-label">Voice <select id="audioVoiceSelect" class="audio-voice-select"></select></label>
               <label class="audio-slider-label">BPM <input type="range" id="audioBpmSlider" min="40" max="300" value="120" class="audio-slider"><span id="audioBpmVal">120</span></label>
