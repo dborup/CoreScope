@@ -45,6 +45,7 @@
  */
 'use strict';
 const { chromium } = require('playwright');
+const { tapWhenSettled } = require('./tests/e2e-tap');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13700';
 const ADMIN_KEY = 'e2e-antenna-admin-key-0123456789';
@@ -421,26 +422,8 @@ function profileFor(q) {
   // ── 6. Phone, cold start, real taps ─────────────────────────────────────
   await step('phone 375x560, cold start on the node list, real taps: node, section, customizer switch', async () => {
     const { ctx, page, errors } = await newCtx({ viewport: { width: 375, height: 560 }, touch: true, dhm: true });
-    async function tapTarget(sel, minH) {
-      const loc = page.locator(sel).first();
-      let prev = null;
-      for (let i = 0; i < 50; i++) {
-        // Centre it: at the viewport's edge the fixed top bar or bottom nav
-        // would take the tap (a finger scrolls a control into the open).
-        await loc.evaluate(e => e.scrollIntoView({ block: 'center', inline: 'nearest' }));
-        const b = await loc.boundingBox();
-        assert(b && b.height >= (minH || 44) && b.x >= 0 && b.x + b.width <= 375 + 0.5, sel + ' box ' + JSON.stringify(b));
-        const x = b.x + b.width / 2, y = b.y + b.height / 2;
-        const still = prev && prev.x === b.x && prev.y === b.y;
-        if (still && await loc.evaluate((e, p) => { const t = document.elementFromPoint(p.x, p.y); return !!t && (t === e || e.contains(t)); }, { x, y })) {
-          await page.touchscreen.tap(x, y);
-          return;
-        }
-        prev = b;
-        await new Promise(r => setTimeout(r, 100));
-      }
-      throw new Error(sel + ' never settled under a tap');
-    }
+    // A finger tap on a centred control that holds still (tests/e2e-tap.js).
+    const tapTarget = (sel, minH) => tapWhenSettled(page, sel, { minHeight: minH });
     await page.goto(BASE + '/#/nodes', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('tr[data-key]', { timeout: 15000 });
     const keys = await page.$$eval('tr[data-key]', rs => rs.map(r => r.getAttribute('data-key')));
