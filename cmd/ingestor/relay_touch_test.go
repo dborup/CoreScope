@@ -252,14 +252,20 @@ func TestInsertTransmission_TouchesOnlyFloodRelays(t *testing.T) {
 // floodACK builds one observation of a FLOOD ACK (header 0x0d) whose path
 // holds hops of width bytes each, followed by the 4-byte ACK payload.
 func floodACK(hash, observer, rxTime string, width int, hops ...string) *PacketData {
+	return floodPacket(hash, observer, rxTime, 3, width, hops...)
+}
+
+// floodPacket builds one FLOOD observation of payloadType whose path holds
+// hops of width bytes each, followed by a 4-byte placeholder payload.
+func floodPacket(hash, observer, rxTime string, payloadType, width int, hops ...string) *PacketData {
 	pathByte := byte(width-1)<<6 | byte(len(hops))
 	quoted := make([]string, len(hops))
 	for i, h := range hops {
 		quoted[i] = `"` + h + `"`
 	}
 	return &PacketData{
-		Hash: hash, RouteType: 1, PayloadType: 3,
-		RawHex:     fmt.Sprintf("0d%02x%s11223344", pathByte, strings.Join(hops, "")),
+		Hash: hash, RouteType: 1, PayloadType: payloadType,
+		RawHex:     fmt.Sprintf("%02x%02x%s11223344", payloadType<<2|1, pathByte, strings.Join(hops, "")),
 		PathJSON:   "[" + strings.Join(quoted, ",") + "]",
 		ObserverID: observer, Timestamp: rxTime,
 	}
@@ -406,5 +412,113 @@ func TestInsertTransmission_ListenerRoleDoesNotMakePrefixAmbiguous(t *testing.T)
 	}
 	if got := nodeLastSeen(t, store, companion); got != before {
 		t.Errorf("companion last_seen = %q, want unchanged %q", got, before)
+	}
+}
+
+// TestResolveObservationPath_ContextNullsUniqueHops reproduces the staging
+// finding on PR #899: the unique-prefix touch refreshes some relays that the
+// contextual resolver did not. The only branch where resolveHopWithContext
+// returns nil for a prefix with exactly one relay candidate is its exclude
+// set, which holds the advert originator, the hops already resolved on the
+// path, and, for the last hop of a flood path, the observer. Those rules are
+// about a hop's position in the displayed path, not about who the prefix
+// names, so resolvePath (the touch, and the server's uniqueResolve) still
+// names the node.
+func TestResolveObservationPath_ContextNullsUniqueHops(t *testing.T) {
+	relay := "aa" + strings.Repeat("11", 31)
+	other := "cc" + strings.Repeat("33", 31)
+	idx := prefixIndex{"aa": {relay}, "cc": {other}}
+	cases := []struct {
+		name     string
+		hops     []string
+		from     string
+		observer string
+		nulled   int // index of the hop the contextual resolver leaves nil
+	}{
+		// A repeater observer that reports its own transmissions (the bridge
+		// default is logTx, MeshCore src/helpers/CommonCLI.h bridge_pkt_src)
+		// reports a forwarded flood with its own hash appended last
+		// (Mesh.cpp routeRecvPacket, Dispatcher.cpp logTx after the send).
+		{"last hop is the observer", []string{"cc", "aa"}, "", relay, 1},
+		// The originator of an ADVERT echoed back to it, or a node outside
+		// the nodes table that shares its prefix.
+		{"hop is the advert originator", []string{"aa", "cc"}, relay, "", 0},
+		// A loop: the second position repeats a node already resolved.
+		{"node already on the path", []string{"aa", "cc", "aa"}, "", "", 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := resolveObservationPath(tc.hops, tc.from, tc.observer, routeTypeFlood, NewNeighborGraph(), idx)
+			uniq := resolvePath(tc.hops, idx)
+			if ctx[tc.nulled] != nil {
+				t.Errorf("contextual hop %d = %s, want nil", tc.nulled, *ctx[tc.nulled])
+			}
+			if uniq[tc.nulled] == nil || *uniq[tc.nulled] != relay {
+				t.Errorf("unique-prefix hop %d = %v, want %s", tc.nulled, uniq[tc.nulled], relay)
+			}
+		})
+	}
+}
+
+// TestInsertTransmission_UniqueHopNulledByContextStillRefreshes pins the
+// decision on PR #899: liveness follows the server's confirmedRelayKey, which
+// takes a unique prefix wherever it sits in the path. In the two cases where
+// the contextual exclusion changes the touch set, the node is alive at rxTime
+// anyway: it is the observer reporting this frame, or the originator of this
+// advert. The stored resolved_path keeps the hop nil.
+func TestInsertTransmission_UniqueHopNulledByContextStillRefreshes(t *testing.T) {
+	relay := "aa" + strings.Repeat("11", 31)
+	other := "cc" + strings.Repeat("33", 31)
+	const before = "2026-07-01T00:00:00Z"
+	const rxTime = "2026-07-10T12:00:00Z"
+	cases := []struct {
+		name     string
+		data     *PacketData
+		resolved string
+	}{
+		{
+			name:     "last hop is the observer",
+			data:     floodACK("observer-own-tx", relay, rxTime, 1, "cc", "aa"),
+			resolved: `["` + other + `",null]`,
+		},
+		{
+			name: "hop is the advert originator",
+			data: func() *PacketData {
+				d := floodPacket("originator-echo", "fixture-observer", rxTime, PayloadADVERT, 1, "aa", "cc")
+				d.FromPubkey = relay
+				return d
+			}(),
+			resolved: `[null,"` + other + `"]`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			for _, pk := range []string{relay, other} {
+				seedRelayNode(t, store, pk, "Fixture relay", before)
+			}
+			if err := store.RefreshPrefixIndex(); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.UpsertObserver(tc.data.ObserverID, "Fixture observer", "", nil); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := store.InsertTransmission(tc.data); err != nil {
+				t.Fatal(err)
+			}
+
+			if got := storedResolvedPath(t, store, tc.data.Hash); got != tc.resolved {
+				t.Fatalf("resolved_path = %s, want %s", got, tc.resolved)
+			}
+			for _, pk := range []string{relay, other} {
+				if got := nodeLastSeen(t, store, pk); got != rxTime {
+					t.Errorf("relay %s last_seen = %q, want %q", pk[:8], got, rxTime)
+				}
+			}
+			if got := store.Stats.RelayTouches.Load(); got != 2 {
+				t.Errorf("RelayTouches = %d, want 2", got)
+			}
+		})
 	}
 }

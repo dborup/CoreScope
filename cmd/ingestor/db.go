@@ -1328,7 +1328,11 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 		// only a hop whose prefix names one relay: adjacency can settle a
 		// colliding prefix for the displayed path, but cannot prove which
 		// of the colliding nodes transmitted (#897, upstream 2334/2329).
-		// Same rule and prefix snapshot as the stored path.
+		// Same hops and prefix snapshot as the stored path, not the same
+		// rule: a unique hop the stored path leaves nil because of its
+		// position (the observer as last hop, the advert originator) is
+		// still touched, as confirmedRelayKey counts it on the server.
+		// That node is alive at rxTime either way (PR #899).
 		if pathHopsTransmitted(data) {
 			s.touchRelayNodesLocked(resolvedPubkeys(resolvePath(hops, prefixIdx)), rxTime)
 		}
