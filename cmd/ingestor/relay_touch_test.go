@@ -18,7 +18,8 @@ import (
 //
 // The writer lives in the ingestor, which already resolves hop prefixes to
 // full pubkeys for observations.resolved_path. These tests pin the touch
-// to that existing resolution point.
+// to the unique-prefix resolution (resolvePath), the server's rule for relay
+// evidence; the contextual resolution is for display only (#897).
 
 // helper: seed a node so the prefix index can resolve a hop to it.
 func seedRelayNode(t *testing.T, s *Store, pubkey, name, lastSeen string) {

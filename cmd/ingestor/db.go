@@ -1120,10 +1120,11 @@ func pathHopsTransmitted(data *PacketData) bool {
 // since that refactor (the error was discarded at the call site) and is
 // removed in this change.
 //
-// Callers pass the resolved pubkeys already computed for
-// observations.resolved_path -- only unambiguously resolved hops reach
-// this function, so a 1-byte prefix collision cannot keep a silent node
-// alive. resolvedPubkeys already dedups, so no second pass here.
+// Callers pass only unique-prefix results from resolvePath, deduplicated
+// by resolvedPubkeys, so a prefix collision cannot keep a silent node alive.
+// That is the server's rule for relay evidence (confirmedRelayKey in
+// cmd/server/node_activity.go). The contextual resolution stored in
+// observations.resolved_path must not refresh liveness (#897).
 //
 // Never inserts: the UPDATE matches an existing row or does nothing.
 // Never rewinds: the last_seen guard makes out-of-order ingest a no-op.
@@ -1289,13 +1290,15 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 	// otherwise). Per #188: flood paths are also walked backwards from the
 	// observer, whose neighbour the last hop is. Empty resolved JSON → NULL
 	// via nilIfEmpty.
+	hops := parsePathArray(data.PathJSON)
+	prefixIdx := s.prefixIdx.load()
 	resolved := resolveObservationPath(
-		parsePathArray(data.PathJSON),
+		hops,
 		strings.ToLower(data.FromPubkey),
 		data.ObserverID,
 		data.RouteType,
 		s.neighborGraph.load(),
-		s.prefixIdx.load(),
+		prefixIdx,
 	)
 	resolvedJSON := marshalResolvedPath(resolved)
 
@@ -1320,12 +1323,14 @@ func (s *Store) InsertTransmission(data *PacketData) (bool, error) {
 		log.Printf("[db] observation insert (non-fatal): %v", err)
 	} else {
 		s.Stats.ObservationsInserted.Add(1)
-		// A resolved hop proves the node was forwarding traffic at
-		// rxTime. Refresh its last_seen so staleness/eviction logic sees
-		// relay activity, not just ADVERTs. Only a flood path is that
-		// proof -- see pathHopsTransmitted (#623).
+		// Refresh last_seen from relay activity, not just ADVERTs. Only a
+		// flood path is that proof -- see pathHopsTransmitted (#623). And
+		// only a hop whose prefix names one relay: adjacency can settle a
+		// colliding prefix for the displayed path, but cannot prove which
+		// of the colliding nodes transmitted (#897, upstream 2334/2329).
+		// Same rule and prefix snapshot as the stored path.
 		if pathHopsTransmitted(data) {
-			s.touchRelayNodesLocked(resolvedPubkeys(resolved), rxTime)
+			s.touchRelayNodesLocked(resolvedPubkeys(resolvePath(hops, prefixIdx)), rxTime)
 		}
 		// #1690: bump transmissions.last_seen so cold-load can filter on
 		// effective recency. Conditional `last_seen < ?` so we never go
