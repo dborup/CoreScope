@@ -2419,6 +2419,11 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
 .health-dot.health-green { background: var(--status-green); box-shadow: 0 0 6px #22c55e80; }
 .health-dot.health-yellow { background: var(--status-yellow); box-shadow: 0 0 6px #eab30880; }
 .health-dot.health-red { background: var(--status-red); box-shadow: 0 0 6px #ef444480; }
+/* #905 F4: the Live node popup's glyph dot (an SVG painted in currentColor). */
+.live-health-dot.health-green { color: var(--status-green); }
+.live-health-dot.health-yellow { color: var(--status-yellow); }
+.live-health-dot.health-red { color: var(--status-red); }
+.live-health-dot.health-muted { color: var(--text-muted); }
 .obs-table td:first-child { white-space: nowrap; }
 .obs-table td:nth-child(6) { max-width: none; overflow: visible; }
 .col-observer { min-width: 70px; max-width: none; }

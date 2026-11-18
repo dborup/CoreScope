@@ -64,6 +64,11 @@ type RepeaterRelayInfo struct {
 	// liveness window. These immutable values never enter existing node JSON.
 	regionScopes          []regionScopeRelay
 	regionScopesTruncated bool
+
+	// relayCountRecent is RelayCount24h narrowed to the #881 moments busy
+	// window (computeRelayInfoFromEntriesWindowed); 0 when no window is set.
+	// Unexported, so it never enters node JSON.
+	relayCountRecent int
 }
 
 // maxTransportedScopes bounds the per-node TransportedScopes list so a
@@ -261,10 +266,18 @@ func computeRelayInfoFromEntries(entries []relayEntry, windowHours float64) Repe
 }
 
 func computeRelayInfoFromEntriesAt(entries []relayEntry, windowHours float64, now time.Time) RepeaterRelayInfo {
+	return computeRelayInfoFromEntriesWindowed(entries, windowHours, now, 0)
+}
+
+// computeRelayInfoFromEntriesWindowed is computeRelayInfoFromEntriesAt that
+// also counts relayCountRecent over the last recent (≤ 24 h; 0: not
+// counted): one more comparison per entry the 24 h count already visits.
+func computeRelayInfoFromEntriesWindowed(entries []relayEntry, windowHours float64, now time.Time, recent time.Duration) RepeaterRelayInfo {
 	info := RepeaterRelayInfo{WindowHours: windowHours}
 
 	cutoff1h := now.Add(-time.Hour)
 	cutoff24h := now.Add(-24 * time.Hour)
+	cutoffRecent := now.Add(-recent)
 
 	var latest time.Time
 	var latestRaw string
@@ -332,6 +345,9 @@ func computeRelayInfoFromEntriesAt(entries []relayEntry, windowHours float64, no
 			}
 			if t.After(cutoff1h) {
 				info.RelayCount1h++
+			}
+			if recent > 0 && t.After(cutoffRecent) {
+				info.relayCountRecent++
 			}
 		}
 	}

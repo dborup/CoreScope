@@ -22,6 +22,7 @@ func TestRemainingGatesReadOnlyCanonicalKeys888(t *testing.T) {
 		{"clientRegions", func(c *Config) bool { return c.ClientRegionsEnabled() }},
 		{"clientRxCoverage", func(c *Config) bool { return c.ClientRxCoverageEnabled() }},
 		{"channelProposals", func(c *Config) bool { return c.ChannelProposals.SubmissionsRequested() }},
+		{"moments", func(c *Config) bool { return c.MomentsEnabled() }},
 	}
 	for _, g := range gates {
 		cases := []struct {

@@ -79,6 +79,9 @@ type Server struct {
 	// can't race on the .tmp file or interleave disk/memory updates.
 	saveMu sync.Mutex
 
+	// #881 moments detector; nil while moments are off (moments.go).
+	moments atomic.Pointer[momentsDetector]
+
 	// Neighbor affinity graph: background-built, with one synchronous first build.
 	neighborBuildMu sync.Mutex                    // serializes initial and background builds
 	neighborGraph   atomic.Pointer[NeighborGraph] // published snapshot; readers never lock
@@ -510,6 +513,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	// swallowed by it (id="neighbors") instead of reaching this handler.
 	r.HandleFunc("/api/observers/neighbors", s.handleAllObserverNeighbors).Methods("GET")
 	r.HandleFunc("/api/analytics/new-nodes", s.handleNewNodes).Methods("GET")
+	r.HandleFunc("/api/moments", s.handleMoments).Methods("GET")
 	r.HandleFunc("/api/analytics/node-changes", s.handleNodeChanges).Methods("GET")
 	r.HandleFunc("/api/analytics/network-digest", s.handleNetworkDigest).Methods("GET")
 	r.HandleFunc("/api/observers/{id}", s.handleObserverDetail).Methods("GET")
@@ -682,6 +686,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		Tiles:               s.cfg.Tiles,
 		Customizer:          CustomizerClientConfig{DisabledTabs: disabledTabs},
 		ClientRxCoverage:    s.cfg.ClientRxCoverageEnabled(),
+		Moments:             s.cfg.momentsClientConfig(),
 		GeoFilter:           s.getGeoFilter(),
 		Privacy:             privacy,
 		EstimatedPositions:  EstimatedPositionsClientConfig{Enabled: s.estimatedPositionsEnabled()},

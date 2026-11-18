@@ -102,7 +102,9 @@ const server = http.createServer((req, res) => {
       // a fixture with no identity-safe activity at all has nothing to
       // attribute and keeps the plain label.
       const STATUS_LABEL = { healthy: 'Active', degraded: 'Degraded', silent: 'Silent' };
-      const expectedLabel = f => STATUS_LABEL[expected(f)] +
+      // #902: a companion or sensor in the middle state reads "Quiet".
+      const plainLabel = f => expected(f) === 'degraded' && (f.role === 'companion' || f.role === 'sensor') ? 'Quiet' : STATUS_LABEL[expected(f)];
+      const expectedLabel = f => plainLabel(f) +
         (!f.unknown && !f.invalid && (f.relay || f.legacy) ? ' · relay-attributed' : '');
       await page.goto(origin + '/#/home', { waitUntil: 'domcontentloaded' });
       await page.waitForFunction(n => document.querySelectorAll('#myNodesGrid .my-node-card').length === n, fixtures.length);
@@ -141,7 +143,7 @@ const server = http.createServer((req, res) => {
         await page.locator('#favDropdown .fav-dd-item[data-key="' + fixtures[0].key + '"]').waitFor();
         for (const f of fixtures) {
           const dot = page.locator('#favDropdown .fav-dd-item[data-key="' + f.key + '"] .fav-dd-status');
-          assert.equal(await dot.getAttribute('title'), f.unknown || f.invalid ? 'unknown' : expected(f), f.name + ': favorite'); checks++;
+          assert.equal(await dot.getAttribute('title'), f.unknown || f.invalid ? 'unknown' : plainLabel(f), f.name + ': favorite (#902 shared label)'); checks++;
         }
       } else {
         // Existing bottom-nav layout intentionally suppresses the desktop

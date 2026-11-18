@@ -517,6 +517,11 @@ func main() {
 	log.Printf("[neighbor-recompute] snapshot reload enabled (interval=%s)",
 		NeighborGraphRecomputerDefaultInterval)
 
+	// #881 moments: off unless config moments.enabled. Its first node tick
+	// waits for the store to finish loading and seeds silently.
+	stopMoments := srv.startMoments(momentsNodeTickInterval)
+	defer stopMoments()
+
 	// Ping-score highscore/leaderboard: the persistent-history engine
 	// (fase 4A-4E design, fase 5B-5G production wiring) replaces the old
 	// synchronous-at-startup StartPingScoresRecomputer, which on a large

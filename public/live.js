@@ -3022,11 +3022,16 @@
   // directory timestamps. A null status is painted red like silent, the
   // shared convention (Favorites status-err, My Mesh and Analytics count it
   // as silent), but labelled "Unknown" as Favorites does, not "Offline".
-  function liveNodeHealthView(n, stats, nowMs) {
+  // #902: status goes through the shared getNodeHealth entry point, so an
+  // in-window observer report is credited, and companions/sensors read
+  // "Quiet" in the neutral colour (getHealthLabel / isQuietHealthRole).
+  function liveNodeHealthView(n, stats, nowMs, observerReportedAt) {
+    const role = n && n.role;
     const heardAt = getHealthLastHeard(n, stats);
-    const status = getHealthStatus(n && n.role, heardAt, nowMs);
-    const dotClass = status === 'healthy' ? 'health-green' : status === 'degraded' ? 'health-yellow' : 'health-red';
-    const label = status === 'healthy' ? 'Online' : status === 'degraded' ? 'Degraded'
+    const status = getNodeHealth(role, heardAt, observerReportedAt, nowMs).status;
+    const quiet = status === 'degraded' && isQuietHealthRole(role);
+    const dotClass = status === 'healthy' ? 'health-green' : status === 'degraded' ? (quiet ? 'health-muted' : 'health-yellow') : 'health-red';
+    const label = status === 'healthy' ? 'Online' : status === 'degraded' ? getHealthLabel(role, status)
       : status === 'silent' ? 'Offline' : 'Unknown';
     return { status, heardAt, dotClass, label };
   }
@@ -3039,10 +3044,13 @@
     document.getElementById('nodeDetailBackdrop').classList.add('active');
     content.innerHTML = '<div style="padding:20px;color:var(--text-muted)">Loading…</div>';
     try {
-      const [data, healthData] = await Promise.all([
+      const [data, healthData, observersResp] = await Promise.all([
         api('/nodes/' + encodeURIComponent(pubkey), { ttl: 30 }),
-        api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: 30 }).catch(() => null)
+        api('/nodes/' + encodeURIComponent(pubkey) + '/health', { ttl: 30 }).catch(() => null),
+        // #902: the cached bulk roster, for observer credit. Never per node.
+        api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null)
       ]);
+      const observerIdx = MyMeshObservers.index(observersResp);
       const n = data.node;
       const h = healthData || {};
       const stats = h.stats || {};
@@ -3053,7 +3061,8 @@
       // #901: same evidence as the other health views (identity-safe
       // stats.lastHeard, legacy fallback to last_heard / last_seen); the
       // status dot and the "Last Heard" time share one timestamp.
-      const health = liveNodeHealthView(n, stats);
+      // #902: plus observer credit from the cached bulk roster.
+      const health = liveNodeHealthView(n, stats, undefined, MyMeshObservers.reportedAt(observerIdx, pubkey));
       const lastSeen = formatLiveTimestampHtml(health.heardAt);
       const statusDot = health.dotClass;
       const statusLabel = health.label;
@@ -3061,7 +3070,7 @@
       let html = `
         <div style="padding:16px;">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
-            <span class="${statusDot}" style="font-size:18px" aria-hidden="true"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span>
+            <span class="live-health-dot ${statusDot}" style="font-size:18px" aria-hidden="true"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span>
             <h3 style="margin:0;font-size:16px;font-weight:700;">${escapeHtml(n.name || 'Unknown')}</h3>
           </div>
           <div style="margin-bottom:12px;">

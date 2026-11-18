@@ -140,6 +140,8 @@ async function newHarness(browser) {
     // #262: the My Mesh grid fetches the bulk observer list once per render.
     // An empty list is the pre-#262 card shape (no node here is an observer).
     window.__apiResponders = { '/observers': { data: { observers: [] } } };
+    // #902: the health panel also reads the cached bulk observer roster, so
+    // the fetch counts below exclude '/observers' and count health fetches.
     api = async (p) => {
       window.__apiCalls.push(p);
       const r = window.__apiResponders[p];
@@ -305,12 +307,12 @@ function cardFor(page, pubkey) {
       const { page } = await newHarness(browser);
       await stub(page, '/nodes/' + encodeURIComponent(NORMAL_PK) + '/health', HEALTH_OK);
       await renderMyMesh(page, [NORMAL_PK]);
-      const before = await page.evaluate(() => window.__apiCalls.length); // 1: the render-time fetch
+      const before = await page.evaluate(() => window.__apiCalls.filter(p => p !== '/observers').length); // 1: the render-time fetch
       const btn = cardFor(page, NORMAL_PK).locator('.mnc-btn[data-action="node"]');
       if (trigger === 'click') { await btn.click(); }
       else { await btn.focus(); await page.keyboard.press(trigger); }
       await page.waitForTimeout(100);
-      const after = await page.evaluate(() => window.__apiCalls.length);
+      const after = await page.evaluate(() => window.__apiCalls.filter(p => p !== '/observers').length);
       assert.equal(after, before, 'no additional /health fetch should happen from the Node page action');
       const homeHealthVisible = await page.evaluate(() => document.getElementById('homeHealth')?.classList.contains('visible'));
       assert.ok(!homeHealthVisible, 'the home health panel must not open');
@@ -324,11 +326,11 @@ function cardFor(page, pubkey) {
       const { page } = await newHarness(browser);
       await stub(page, '/nodes/' + encodeURIComponent(NORMAL_PK) + '/health', HEALTH_OK);
       await renderMyMesh(page, [NORMAL_PK]);
-      const before = await page.evaluate(() => window.__apiCalls.length);
+      const before = await page.evaluate(() => window.__apiCalls.filter(p => p !== '/observers').length);
       await cardFor(page, NORMAL_PK).focus();
       await page.keyboard.press(key);
       await page.waitForTimeout(100);
-      const after = await page.evaluate(() => window.__apiCalls.length);
+      const after = await page.evaluate(() => window.__apiCalls.filter(p => p !== '/observers').length);
       assert.equal(after, before + 1, key + ' on the card must trigger exactly one health fetch');
       const visible = await page.evaluate(() => document.getElementById('homeHealth')?.classList.contains('visible'));
       assert.ok(visible, 'health panel should be visible after ' + key + ' on the card');
@@ -342,10 +344,10 @@ function cardFor(page, pubkey) {
     const { page } = await newHarness(browser);
     await stub(page, '/nodes/' + encodeURIComponent(NORMAL_PK) + '/health', HEALTH_OK);
     await renderMyMesh(page, [NORMAL_PK]);
-    const before = await page.evaluate(() => window.__apiCalls.length);
+    const before = await page.evaluate(() => window.__apiCalls.filter(p => p !== '/observers').length);
     await cardFor(page, NORMAL_PK).locator('.mnc-btn[data-action="health"]').click();
     await page.waitForTimeout(80);
-    const after = await page.evaluate(() => window.__apiCalls.length);
+    const after = await page.evaluate(() => window.__apiCalls.filter(p => p !== '/observers').length);
     assert.equal(after, before + 1, 'Full health must trigger exactly one fetch (not two, from a bubbled card click)');
     await cardFor(page, NORMAL_PK).locator('.mnc-btn[data-action="packets"]').click();
     const hash = await page.evaluate(() => location.hash);
@@ -358,11 +360,11 @@ function cardFor(page, pubkey) {
       const { page } = await newHarness(browser);
       await stub(page, '/nodes/' + encodeURIComponent(NORMAL_PK) + '/health', HEALTH_OK);
       await renderMyMesh(page, [NORMAL_PK]);
-      const before = await page.evaluate(() => window.__apiCalls.length);
+      const before = await page.evaluate(() => window.__apiCalls.filter(p => p !== '/observers').length);
       await cardFor(page, NORMAL_PK).locator('.mnc-btn[data-action="health"]').focus();
       await page.keyboard.press(key);
       await page.waitForTimeout(100);
-      const after = await page.evaluate(() => window.__apiCalls.length);
+      const after = await page.evaluate(() => window.__apiCalls.filter(p => p !== '/observers').length);
       assert.equal(after, before + 1, key + ' on Full health must fetch exactly once (button activation), not zero (swallowed) or two (card + button)');
       await page.close();
     });
@@ -465,10 +467,10 @@ function cardFor(page, pubkey) {
     // refresh would do, without navigating away first.
     await page.evaluate(() => window.fixturePages.home.init(document.getElementById('fixture')));
     await page.waitForSelector('.my-node-card');
-    const before = await page.evaluate(() => window.__apiCalls.length);
+    const before = await page.evaluate(() => window.__apiCalls.filter(p => p !== '/observers').length);
     await cardFor(page, NORMAL_PK).locator('.mnc-btn[data-action="health"]').click();
     await page.waitForTimeout(80);
-    const after = await page.evaluate(() => window.__apiCalls.length);
+    const after = await page.evaluate(() => window.__apiCalls.filter(p => p !== '/observers').length);
     assert.equal(after, before + 1, 'exactly one fetch after a re-render, not two from a stacked listener');
     await page.close();
   });
