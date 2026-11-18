@@ -184,26 +184,6 @@ func TestCommand898_ClaimParts(t *testing.T) {
 	}
 }
 
-// TestCommand898_ClearOnly is T3 for the command form: only claims whose
-// every carried part is a clear are clear-only (mutant M2: any clear).
-func TestCommand898_ClearOnly(t *testing.T) {
-	for p, want := range map[Parts]bool{
-		{}:                     false,
-		{Height: PartSet}:      false,
-		{Height: PartClear}:    true,
-		{Details: PartSet}:     false,
-		{Details: PartClear}:   true,
-		{PartSet, PartSet}:     false,
-		{PartSet, PartClear}:   false,
-		{PartClear, PartSet}:   false,
-		{PartClear, PartClear}: true,
-	} {
-		if got := p.ClearOnly(); got != want {
-			t.Errorf("%+v.ClearOnly() = %v, want %v", p, got, want)
-		}
-	}
-}
-
 // TestDetails898_StrictJSON: the owner's body decodes the embedded public
 // fields and contactAdmin, and the public type has no admin contact field.
 func TestDetails898_StrictJSON(t *testing.T) {

@@ -274,8 +274,9 @@ func (r *claimRig) contactsOf(id string) (admin, public bool) {
 }
 
 // T8: the contacts' lifecycle, each field checked on its own (mutants M9,
-// M10). Present while pending, proven and approved; gone after every other
-// transition; kept when only the height is replaced.
+// M10, MX1, MX2). Present while pending, proven (which never expires) and
+// approved with the details in force; gone after every other transition;
+// kept when only the height is replaced.
 func TestAntennaClaim898_ContactLifecycle(t *testing.T) {
 	both := func(t *testing.T, r *claimRig, id, when string, want bool) {
 		t.Helper()
@@ -321,6 +322,22 @@ func TestAntennaClaim898_ContactLifecycle(t *testing.T) {
 			t.Fatalf("not expired: %+v", p)
 		}
 		both(t, r, claimA, "expired", false)
+	})
+	t.Run("proven survives the expire sweep", func(t *testing.T) {
+		r := withDetails(t, nil)
+		r.prove898("AAAAAA", true)
+		// B is a pending claim that expires in the same run: the sweep runs
+		// only once a pending claim is due.
+		r.claim898(claimB, "BBBBBB", setDetails)
+		r.clock = r.clock.Add(antennaclaim.DefaultRequestTTL + time.Hour)
+		r.runner.RunOnce(context.Background())
+		if p := r.parts898(claimB); p.status != antennaclaim.StatusExpired {
+			t.Fatalf("the sweep did not run, control claim: %+v", p)
+		}
+		if p := r.parts898(claimA); p.status != antennaclaim.StatusProven {
+			t.Fatalf("proven claim after the expire sweep: %+v, want proven", p)
+		}
+		both(t, r, claimA, "proven past the request TTL", true)
 	})
 	t.Run("supersede by details set", func(t *testing.T) {
 		r := withDetails(t, nil)
@@ -370,22 +387,50 @@ func TestAntennaClaim898_ContactLifecycle(t *testing.T) {
 		}
 	})
 	t.Run("orphan sweep", func(t *testing.T) {
-		r := withDetails(t, nil)
-		r.decide898(antennaclaim.OpReject, claimA)
-		// Plant what a missed delete would leave: both contacts on a
-		// rejected claim, still inside the retention window.
-		if _, err := r.store.db.Exec(`UPDATE node_antenna_claims SET contact_public = 'orphan' WHERE request_id = ?`, claimA); err != nil {
-			t.Fatal(err)
+		// plant leaves what a missed delete would: both contacts on claim
+		// id, still inside the retention window.
+		plant := func(t *testing.T, r *claimRig, id string) {
+			t.Helper()
+			if _, err := r.store.db.Exec(`UPDATE node_antenna_claims SET contact_public = 'orphan' WHERE request_id = ?`, id); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.store.db.Exec(`INSERT INTO node_claim_admin_contacts (request_id, contact) VALUES (?, 'orphan')`, id); err != nil {
+				t.Fatal(err)
+			}
+			both(t, r, id, "planted orphans", true)
 		}
-		if _, err := r.store.db.Exec(`INSERT INTO node_claim_admin_contacts (request_id, contact) VALUES (?, 'orphan')`, claimA); err != nil {
-			t.Fatal(err)
-		}
-		both(t, r, claimA, "planted orphans", true)
-		r.runner.Prune(context.Background())
-		both(t, r, claimA, "after the sweep", false)
-		if p := r.parts898(claimA); p.status != antennaclaim.StatusRejected {
-			t.Fatalf("the sweep removed the claim itself: %+v", p)
-		}
+		t.Run("rejected", func(t *testing.T) {
+			r := withDetails(t, nil)
+			r.decide898(antennaclaim.OpReject, claimA)
+			plant(t, r, claimA)
+			r.runner.Prune(context.Background())
+			both(t, r, claimA, "after the sweep", false)
+			if p := r.parts898(claimA); p.status != antennaclaim.StatusRejected {
+				t.Fatalf("the sweep removed the claim itself: %+v", p)
+			}
+		})
+		// Approved is not enough: A keeps its height in force, but its
+		// details were replaced by B, so A's contacts are orphans. B's
+		// details are in force, so B's contacts stay.
+		t.Run("approved, details replaced", func(t *testing.T) {
+			r := newClaimRig(t, nil)
+			r.claim898(claimA, "AAAAAA", func(c *antennaclaim.Command) { setHeight(10)(c); setDetails(c) })
+			r.prove898("AAAAAA", true)
+			r.decide898(antennaclaim.OpApprove, claimA)
+			r.claim898(claimB, "BBBBBB", setDetails)
+			r.prove898("BBBBBB", true)
+			r.decide898(antennaclaim.OpApprove, claimB)
+			if p := r.parts898(claimA); p.status != antennaclaim.StatusApproved || !p.hIn || p.dIn {
+				t.Fatalf("A: %+v, want approved with only its height in force", p)
+			}
+			plant(t, r, claimA)
+			r.runner.Prune(context.Background())
+			both(t, r, claimA, "after the sweep", false)
+			both(t, r, claimB, "details in force, after the sweep", true)
+			if p := r.parts898(claimA); p.status != antennaclaim.StatusApproved || !p.hIn {
+				t.Fatalf("the sweep changed the claim itself: %+v", p)
+			}
+		})
 	})
 }
 

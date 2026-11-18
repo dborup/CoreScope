@@ -304,13 +304,6 @@ func (c Command) Parts() Parts {
 	return p
 }
 
-// ClearOnly reports whether every carried part is a clear; false when no
-// part is carried. It is ClearOnlySQL for a command.
-func (p Parts) ClearOnly() bool {
-	return (p.Height == "" || p.Height == PartClear) && (p.Details == "" || p.Details == PartClear) &&
-		(p.Height != "" || p.Details != "")
-}
-
 // Validate checks c against the shared rules. The ingestor runs it again on
 // every file it reads: it never trusts the queue.
 func (c Command) Validate() error {

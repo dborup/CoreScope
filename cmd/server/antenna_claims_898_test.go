@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
+	"github.com/meshcore-analyzer/dbschema"
 )
 
 // #898 M1 — station details, the read-only server side: the submit rules,
@@ -52,8 +55,15 @@ func nullIfEmpty(s string) interface{} {
 
 func (e *claim789Env) insert898(t *testing.T, c claimRow898) {
 	t.Helper()
+	insertClaimRow898(t, e.srv.db.conn, e.now, c)
+	e.svc.invalidateOwners()
+}
+
+// insertClaimRow898 writes c at time now, as the ingestor would.
+func insertClaimRow898(tb testing.TB, db *sql.DB, now time.Time, c claimRow898) {
+	tb.Helper()
 	if c.provenAt == 0 {
-		c.provenAt = e.now.UnixMilli()
+		c.provenAt = now.UnixMilli()
 	}
 	if c.reviewedAt == 0 {
 		c.reviewedAt = c.provenAt
@@ -62,22 +72,21 @@ func (e *claim789Env) insert898(t *testing.T, c claimRow898) {
 	if c.powerMask != 0 {
 		mask = c.powerMask
 	}
-	if _, err := e.srv.db.conn.Exec(`INSERT INTO node_antenna_claims
+	if _, err := db.Exec(`INSERT INTO node_antenna_claims
 		(request_id, pubkey, height_m, height_op, details_op, height_in_force, details_in_force,
 		 antenna_type, gain_dbi, power_mask, installation, contact_public,
 		 code, status, created_at, expires_at, proven_at, proof_hash, proof_lat, proof_lon, reviewed_at, approved_by)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '7KX9QM', ?, ?, ?, ?, 'abcd', ?, ?, ?, CASE WHEN ? = 'approved' THEN 'admin' END)`,
 		c.id, c.pk, c.heightM, nullIfEmpty(c.heightOp), nullIfEmpty(c.detailsOp), c.hIn, c.dIn,
 		nullIfEmpty(c.antennaType), c.gain, mask, nullIfEmpty(c.installation), nullIfEmpty(c.contactPublic),
-		c.status, e.now.UnixMilli(), e.now.Add(24*time.Hour).UnixMilli(), c.provenAt, c.lat, c.lon, c.reviewedAt, c.status); err != nil {
-		t.Fatal(err)
+		c.status, now.UnixMilli(), now.Add(24*time.Hour).UnixMilli(), c.provenAt, c.lat, c.lon, c.reviewedAt, c.status); err != nil {
+		tb.Fatal(err)
 	}
 	if c.contactAdmin != "" {
-		if _, err := e.srv.db.conn.Exec(`INSERT INTO node_claim_admin_contacts (request_id, contact) VALUES (?, ?)`, c.id, c.contactAdmin); err != nil {
-			t.Fatal(err)
+		if _, err := db.Exec(`INSERT INTO node_claim_admin_contacts (request_id, contact) VALUES (?, ?)`, c.id, c.contactAdmin); err != nil {
+			tb.Fatal(err)
 		}
 	}
-	e.svc.invalidateOwners()
 }
 
 // stationRow is an approved details claim in force at the test position.
@@ -653,18 +662,25 @@ func TestAntennaClaims898_NodesKeySetUnchanged(t *testing.T) {
 // BenchmarkStationSnapshot898 is the station snapshot's read: one SELECT
 // of 2K approved details, every ownerHeightsTTL (T14).
 func BenchmarkStationSnapshot898(b *testing.B) {
-	// The env helpers take a *testing.T; setup failures would surface as a
-	// wrong row count below.
-	t := &testing.T{}
-	env := newClaim789Env(t, claimAdminKey, detailsOn(nil), nil)
+	// The snapshot reads only the claims table: no test server is needed,
+	// and every setup step fails through b.
+	conn, err := sql.Open("sqlite", filepath.Join(b.TempDir(), "claims.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { conn.Close() })
+	if err := dbschema.EnsureNodeAntennaClaims(conn); err != nil {
+		b.Fatal(err)
+	}
+	svc := newAntennaClaimService(nil, conn, "")
+	now := time.UnixMilli(1_800_000_000_000)
 	for i := 0; i < 2000; i++ {
-		row := stationRow(fmt.Sprintf("%016x", i+1), fmt.Sprintf("%064x", i+1))
-		env.insert898(t, row)
+		insertClaimRow898(b, conn, now, stationRow(fmt.Sprintf("%016x", i+1), fmt.Sprintf("%064x", i+1)))
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		m, err := env.svc.readOwnerStations(context.Background())
+		m, err := svc.readOwnerStations(context.Background())
 		if err != nil || len(m) != 2000 {
 			b.Fatalf("%d rows, %v", len(m), err)
 		}
