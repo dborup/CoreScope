@@ -201,7 +201,7 @@
    *   now()          ms
    *   matchMedia(q)  → { matches }
    *   setTimeout, clearTimeout
-   *   getMode()      'LIVE' | 'PAUSED' | 'REPLAY'
+   *   getMode()      'LIVE' | 'PAUSED' | 'REPLAY' | 'FOLLOW' (cards only in LIVE)
    *   isSuppressed() true while a phone sheet/panel owns the bottom
    *   profileOffered() bool
    *   onFly(plan, target, moment)

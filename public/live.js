@@ -3925,7 +3925,9 @@
       matchMedia: (q) => window.matchMedia(q),
       setTimeout: (fn, ms) => setTimeout(fn, ms),
       clearTimeout: (id) => clearTimeout(id),
-      getMode: () => VCR.mode,
+      // #880: a follow holds the live stream (bufferPacket), so it holds the
+      // cards too: moments go to history only, as with the VCR out of LIVE.
+      getMode: () => (followState ? 'FOLLOW' : VCR.mode),
       getZoom: () => (map ? map.getZoom() : null),
       // Phone: the node-detail sheet and the open settings own the bottom.
       isSuppressed: () => {
@@ -5439,6 +5441,7 @@
       model: null, sched: null, ptr: 0, startTs: 0, pausedElapsed: null,
       rings: [], ringRadii: [], litRelays: 0, depthShown: -1, done: false, reduced: false,
     };
+    if (moments) moments.onModeChange();
     setLiveHashParam(LF.HASH_PARAM, h);
     collapseControlsOnPhone();
     buildFollowCard(st);
@@ -5721,6 +5724,7 @@
     if (st.layer) { try { st.layer.remove(); } catch (_) {} st.layer = null; }
     if (st.card) { st.card.remove(); st.card = null; }
     if (!(opts && opts.keepUrl) && window.LiveFollow) setLiveHashParam(window.LiveFollow.HASH_PARAM, '');
+    if (moments) moments.onModeChange();
   }
 
   function destroy() {
