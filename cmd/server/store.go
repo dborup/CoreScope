@@ -546,6 +546,14 @@ type PacketStore struct {
 	// (issue #1203 sub-fix).
 	graph atomic.Pointer[NeighborGraph]
 
+	// #881 moments: the detector's hooks, called after a neighbor-graph
+	// snapshot swap and after a repeater-relay recompute (nil: moments
+	// off), and its busy window for RepeaterRelayInfo.relayCountRecent
+	// (nanoseconds; 0: not counted).
+	momentsGraphHook  atomic.Pointer[func(*NeighborGraph)]
+	momentsRelayHook  atomic.Pointer[func(*repeaterRelaySnapshot)]
+	relayRecentWindow atomic.Int64
+
 	// Singleflight state for ensureNeighborGraph. These were package-globals
 	// in #1203 r0 — moved to per-store fields (PR #1208 review) so parallel
 	// tests with independent *PacketStore values don't share rebuild state

@@ -393,6 +393,10 @@ type Config struct {
 	// ⇒ off; see ClientRxCoverageEnabled.
 	ClientRxCoverage *ClientRxCoverageConfig `json:"clientRxCoverage,omitempty"`
 
+	// Moments configures the #881 live moments detector (moments.go).
+	// Absent/nil ⇒ off; see MomentsConfig.
+	Moments *MomentsConfig `json:"moments,omitempty"`
+
 	// ClientRegions gates GET /api/nodes/{pubkey}/declared-regions (#126). The
 	// same config.json entry gates the ingestor's write path; absent ⇒ off.
 	ClientRegions *ClientRegionsConfig `json:"clientRegions,omitempty"`
@@ -939,6 +943,7 @@ func LoadConfig(baseDirs ...string) (*Config, error) {
 		cfg.warnGatedTileDefaults(log.Printf)
 		cfg.extractTypedMapBlocks()
 		cfg.applyListLimitsDefaults()
+		cfg.normalizeMoments()
 		cfg.RegionGroups = normalizeRegionGroups(cfg.RegionGroups, log.Printf)
 		applyCORSEnv(cfg)
 		cfg.loadHashRegionsFile(p)
@@ -1207,6 +1212,9 @@ func (c *Config) applyCanonicalKeys(keys *configkey.Doc) error {
 	}
 	if c.ClientRxCoverage != nil {
 		c.ClientRxCoverage.Enabled = keys.On("clientRxCoverage", "enabled")
+	}
+	if c.Moments != nil {
+		c.Moments.Enabled = keys.On("moments", "enabled")
 	}
 	if c.Compression != nil {
 		c.Compression.GZip = keys.On("compression", "gzip")
