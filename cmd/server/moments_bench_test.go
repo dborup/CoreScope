@@ -154,33 +154,98 @@ func bestOf(n int, f func()) time.Duration {
 	return best
 }
 
-// TestMomentsTickCostBounded_881 enforces the tick budgets at 5x the
-// expected scale. The bounds are an order of magnitude above the measured
-// cost (see the PR) so a slow CI runner or -race does not flake them, yet an
-// O(n²) slip at these sizes (10^8 steps) would blow straight through.
+// tickCase is one detector pass at size n, built fresh so the two sizes of a
+// scaling check share nothing.
+type tickCase struct {
+	name string
+	// build returns the closure that performs one tick at size n.
+	build func(tb testing.TB, n int) func()
+}
+
+func tickCases() []tickCase {
+	return []tickCase{
+		{"node tick", func(tb testing.TB, n int) func() {
+			h, rows := nodeTickHarness(tb, n)
+			return func() { nodeTickOnce(h, rows) }
+		}},
+		{"record scan", func(tb testing.TB, n int) func() {
+			h, g := recordGraph(tb, n, 2*n)
+			return func() { h.d.onGraph(g) }
+		}},
+		{"busiest pass", func(tb testing.TB, n int) func() {
+			h := newMomentsHarness(tb, nil)
+			rows := make([]momentNodeRow, n)
+			info := make(map[string]RepeaterRelayInfo, n)
+			for i := range rows {
+				rows[i] = nodeRow(momentPK(i), "repeater", momentsT0, momentsT0.Add(-2000*time.Hour))
+				info[momentPK(i)] = RepeaterRelayInfo{relayCountRecent: i}
+			}
+			h.tick(rows...)
+			snap := &repeaterRelaySnapshot{info: info}
+			return func() { h.d.onRelay(snap) }
+		}},
+	}
+}
+
+// Scaling bounds. A linear tick scales ~4x from n to 4n and an O(n²) one
+// ~16x; momentsMaxScale sits between them with room for noise. The absolute
+// cap is a sanity net only, ~10x the measured cost at 5x scale, so a slow
+// runner cannot trip it but a runaway still does.
+const (
+	momentsScaleSmall = 5000
+	momentsScaleBig   = 20000
+	momentsMaxScale   = 9.0
+	momentsAbsCap     = time.Second
+	momentsMaxAllocs  = 64 // per tick; measured 1-2, independent of n
+)
+
+// scaleRatio returns best(big)/best(small) with the two sizes sampled
+// interleaved, so a load spike hits both and mostly cancels. Each size keeps
+// its minimum over rounds; the minimum is the least load-sensitive statistic.
+func scaleRatio(small, big func(), rounds int) (ratio float64, bigBest time.Duration) {
+	sb, bb := time.Duration(1<<63-1), time.Duration(1<<63-1)
+	for i := 0; i < rounds; i++ {
+		s := time.Now()
+		small()
+		if d := time.Since(s); d < sb {
+			sb = d
+		}
+		s = time.Now()
+		big()
+		if d := time.Since(s); d < bb {
+			bb = d
+		}
+	}
+	if sb <= 0 {
+		sb = 1
+	}
+	return float64(bb) / float64(sb), bb
+}
+
+// TestMomentsTickCostBounded_881 proves a tick does bounded, linear work
+// without a runner-dependent wall-clock budget (#926): allocations per tick
+// are deterministic, and time is judged by how it scales from n to 4n (a
+// ratio, so load cancels) plus a generous absolute sanity cap. The
+// benchmarks above report the real timings.
 func TestMomentsTickCostBounded_881(t *testing.T) {
-	h, rows := nodeTickHarness(t, 10000)
-	if d := bestOf(5, func() { nodeTickOnce(h, rows) }); d > 100*time.Millisecond {
-		t.Fatalf("node tick over 10K changed rows took %v, budget 100ms", d)
-	}
-	rh, g := recordGraph(t, 10000, 20000)
-	if d := bestOf(5, func() { rh.d.onGraph(g) }); d > 100*time.Millisecond {
-		t.Fatalf("record scan over 20K edges took %v, budget 100ms", d)
-	}
-	bh := newMomentsHarness(t, nil)
-	brows := make([]momentNodeRow, 10000)
-	counts := make(map[string]int, 10000)
-	for i := range brows {
-		brows[i] = nodeRow(momentPK(i), "repeater", momentsT0, momentsT0.Add(-2000*time.Hour))
-		counts[momentPK(i)] = i
-	}
-	bh.tick(brows...)
-	info := make(map[string]RepeaterRelayInfo, len(counts))
-	for k, c := range counts {
-		info[k] = RepeaterRelayInfo{relayCountRecent: c}
-	}
-	snap := &repeaterRelaySnapshot{info: info}
-	if d := bestOf(5, func() { bh.d.onRelay(snap) }); d > 100*time.Millisecond {
-		t.Fatalf("busiest pass over 10K repeaters took %v, budget 100ms", d)
+	for _, c := range tickCases() {
+		t.Run(c.name, func(t *testing.T) {
+			small, big := c.build(t, momentsScaleSmall), c.build(t, momentsScaleBig)
+			if a := testing.AllocsPerRun(5, big); a > momentsMaxAllocs {
+				t.Fatalf("%d allocs per tick at n=%d, max %d (per-row allocation?)", int(a), momentsScaleBig, momentsMaxAllocs)
+			}
+			// Retry the noisy timing check: a real regression fails every
+			// attempt, a load spike does not.
+			var ratio float64
+			var bb time.Duration
+			for attempt := 0; attempt < 3; attempt++ {
+				ratio, bb = scaleRatio(small, big, 9)
+				if ratio <= momentsMaxScale && bb <= momentsAbsCap {
+					return
+				}
+			}
+			t.Fatalf("tick scales %.1fx for %dx the rows (max %.1fx), best %v at n=%d (cap %v)",
+				ratio, momentsScaleBig/momentsScaleSmall, momentsMaxScale, bb, momentsScaleBig, momentsAbsCap)
+		})
 	}
 }
