@@ -130,7 +130,12 @@ async function controlsCovered(page) {
       if (x < 0 || y < 0 || x > innerWidth || y > innerHeight) continue;
       checked++;
       const hit = document.elementFromPoint(x, y);
-      if (hit && hit.closest('.live-moments, .live-moments-drawer')) bad.push((el.id || el.className || el.tagName) + '');
+      if (hit && hit.closest('.live-moments, .live-moments-drawer')) {
+        const by = hit.getBoundingClientRect();
+        // Both rects, so a CI-only overlap can be read from the log.
+        bad.push((el.id || el.className || el.tagName) + ' ' + [r.left, r.top, r.right, r.bottom].map(Math.round).join(',') +
+          ' under ' + (hit.className && hit.className.baseVal !== undefined ? hit.tagName : hit.className) + ' ' + [by.left, by.top, by.right, by.bottom].map(Math.round).join(','));
+      }
     }
     return { bad, checked };
   });
@@ -273,6 +278,17 @@ async function fillCards(h, n) {
         assert(await cardCount(h.page) === 0, 'no card on a short viewport');
         const r = await controlsCovered(h.page);
         assert(r.checked >= 5 && !r.bad.length, JSON.stringify(r));
+        if (vp.width <= 640) {
+          // Font-independent: the button is left of the whole control row,
+          // not merely below it (the gap below depends on the VCR bar height).
+          const g = await h.page.evaluate(() => {
+            const bar = document.querySelector('.live-moments-bar').getBoundingClientRect();
+            const ctl = [...document.querySelectorAll('.leaflet-top.leaflet-right .leaflet-control')]
+              .map((e) => e.getBoundingClientRect()).filter((x) => x.width && x.height);
+            return { barRight: bar.right, barW: bar.width, rowLeft: Math.min(...ctl.map((x) => x.left)) };
+          });
+          assert(g.barW > 0 && g.barRight <= g.rowLeft, 'drawer button left of the control row: ' + JSON.stringify(g));
+        }
       });
     }
     await h.page.setViewportSize({ width: 1440, height: 900 });

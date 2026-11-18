@@ -1896,6 +1896,15 @@ select.live-heard-select {
     background: var(--shadow);
   }
 }
+/* Short phone landscape (e.g. 568x320): no cards (live-moments.js
+ * SHORT_MQ), only the drawer button. The Leaflet controls are a row there
+ * (#666), 250px wide at ≤640px with the legend hidden (#875), and the
+ * Fullscreen control would sit straight above the button with only the
+ * font-dependent VCR bar height between them. Keep the button left of the
+ * whole row instead. */
+@media (max-width: 640px) and (max-height: 419px) {
+  .live-moments { right: calc(250px + 12px); }
+}
 @media (min-width: 641px) {
   .live-moments-drawer-head .live-moments-pause { display: none; }
 }
