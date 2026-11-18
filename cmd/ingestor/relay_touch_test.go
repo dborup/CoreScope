@@ -257,11 +257,13 @@ func floodACK(hash, observer, rxTime string, width int, hops ...string) *PacketD
 
 // floodPacket builds one FLOOD observation of payloadType whose path holds
 // hops of width bytes each, followed by a 4-byte placeholder payload.
+// path_json carries the hops in upper case, as decodePath writes them
+// (strings.ToUpper in decoder.go), so the resolvers' lower-casing is tested.
 func floodPacket(hash, observer, rxTime string, payloadType, width int, hops ...string) *PacketData {
 	pathByte := byte(width-1)<<6 | byte(len(hops))
 	quoted := make([]string, len(hops))
 	for i, h := range hops {
-		quoted[i] = `"` + h + `"`
+		quoted[i] = `"` + strings.ToUpper(h) + `"`
 	}
 	return &PacketData{
 		Hash: hash, RouteType: 1, PayloadType: payloadType,
@@ -443,7 +445,7 @@ func TestResolveObservationPath_ContextNullsUniqueHops(t *testing.T) {
 		// The originator of an ADVERT echoed back to it, or a node outside
 		// the nodes table that shares its prefix.
 		{"hop is the advert originator", []string{"aa", "cc"}, relay, "", 0},
-		// A loop: the second position repeats a node already resolved.
+		// A loop: the third position repeats a node already resolved.
 		{"node already on the path", []string{"aa", "cc", "aa"}, "", "", 2},
 	}
 	for _, tc := range cases {
