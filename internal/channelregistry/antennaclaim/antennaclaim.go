@@ -56,20 +56,22 @@ const (
 var Statuses = []string{StatusPending, StatusProven, StatusApproved, StatusRejected, StatusRevoked, StatusExpired, StatusSuperseded}
 
 // ValidStatus reports whether s is a stored status.
-func ValidStatus(s string) bool {
-	for _, v := range Statuses {
-		if s == v {
-			return true
-		}
-	}
-	return false
-}
+func ValidStatus(s string) bool { return oneOf(s, Statuses) }
 
 // Who put a claim in force, as stored in node_antenna_claims.approved_by.
 const (
 	ApprovedByAuto  = "auto"  // autoApproveProven approved a proven, unflagged height
 	ApprovedByAdmin = "admin" // an administrator approved it
-	ApprovedByOwner = "owner" // a proven clear claim: the owner withdrew their height
+	ApprovedByOwner = "owner" // a proven clear-only claim: the owner withdrew their own data
+)
+
+// Part operations, as stored in node_antenna_claims.height_op and
+// details_op (#898). A claim carries a height part, a details part or both;
+// a part it does not carry is NULL. Clear is always explicit: no code path
+// reads a NULL value column as a clear.
+const (
+	PartSet   = "set"
+	PartClear = "clear"
 )
 
 // RequestQueued is the status of a command the ingestor has not applied yet;
@@ -226,16 +228,21 @@ func (l Limits) NeedsReview(heightM float64, surfaceM *float64) bool {
 // (read-side rule: the height is ignored, nothing is written).
 func (l Limits) Stale(movedM float64) bool { return movedM > l.StaleMoveM }
 
-// Command is one queued request. For OpClaim, PubKey, Code and exactly one of
-// HeightM or Clear are set, and the claim's id is RequestID; for the admin
-// ops, ClaimID names the claim.
+// Command is one queued request. For OpClaim, PubKey and Code are set and
+// the claim carries at least one part: the height part (at most one of
+// HeightM or Clear) and the details part (at most one of Details or
+// ClearDetails, #898); the claim's id is RequestID. For the admin ops,
+// ClaimID names the claim. Clear keeps its wire name and meaning (clear the
+// height), so command files queued by an older server still apply.
 type Command struct {
-	RequestID string   `json:"requestId"`
-	Op        string   `json:"op"`
-	PubKey    string   `json:"pubkey,omitempty"`
-	HeightM   *float64 `json:"heightM,omitempty"`
-	Clear     bool     `json:"clear,omitempty"`
-	Code      string   `json:"code,omitempty"`
+	RequestID    string        `json:"requestId"`
+	Op           string        `json:"op"`
+	PubKey       string        `json:"pubkey,omitempty"`
+	HeightM      *float64      `json:"heightM,omitempty"`
+	Clear        bool          `json:"clear,omitempty"`
+	Details      *DetailsInput `json:"details,omitempty"`
+	ClearDetails bool          `json:"clearDetails,omitempty"`
+	Code         string        `json:"code,omitempty"`
 	// NeedsReview is the server's flag from the cached surface estimate;
 	// a flagged claim is never auto-approved.
 	NeedsReview bool   `json:"needsReview,omitempty"`
@@ -253,10 +260,49 @@ var ErrInvalidCommand = errors.New("invalid antenna claim command")
 var ErrNewerApproved = errors.New("a newer claim for this node is already approved")
 
 // NewerApprovedQuery reports whether pubkey has an approved claim, other than
-// request id, proven after provenAt. Args: pubkey, request id, provenAt (ms).
-// Server and ingestor share it so their 409 and refusal agree.
+// request id, proven after provenAt, that carries a part this claim carries
+// (#898: a newer details claim does not block an older height, and the
+// reverse). Args: pubkey, request id, provenAt (ms), carriesHeight,
+// carriesDetails. Server and ingestor share it so their 409 and refusal
+// agree.
 const NewerApprovedQuery = `SELECT EXISTS(SELECT 1 FROM node_antenna_claims
-	WHERE pubkey = ? AND status = 'approved' AND request_id != ? AND proven_at > ?)`
+	WHERE pubkey = ? AND status = 'approved' AND request_id != ? AND proven_at > ?
+	  AND ((? AND height_op IS NOT NULL) OR (? AND details_op IS NOT NULL)))`
+
+// ClearOnlySQL is true for a claim whose every carried part is a clear: a
+// proven clear-only claim takes effect at once (the owner withdraws their
+// own data). It reads the explicit ops only, never a value column: a
+// details-only claim has a NULL height_m and must not pass for a clear.
+const ClearOnlySQL = `((height_op IS NULL OR height_op = 'clear')
+	AND (details_op IS NULL OR details_op = 'clear')
+	AND (height_op IS NOT NULL OR details_op IS NOT NULL))`
+
+// ContactLiveSQL is true for a claim whose contacts may exist: pending,
+// proven, or approved with its details part still in force. Every other
+// claim's contact_public is NULL and its admin contact row is gone.
+const ContactLiveSQL = `(status IN ('pending','proven') OR (status = 'approved' AND details_in_force = 1))`
+
+// Parts is what a claim carries, from the explicit fields only: "",
+// PartSet or PartClear each.
+type Parts struct{ Height, Details string }
+
+// Parts returns what c carries.
+func (c Command) Parts() Parts {
+	var p Parts
+	switch {
+	case c.HeightM != nil:
+		p.Height = PartSet
+	case c.Clear:
+		p.Height = PartClear
+	}
+	switch {
+	case c.Details != nil:
+		p.Details = PartSet
+	case c.ClearDetails:
+		p.Details = PartClear
+	}
+	return p
+}
 
 // Validate checks c against the shared rules. The ingestor runs it again on
 // every file it reads: it never trusts the queue.
@@ -266,10 +312,14 @@ func (c Command) Validate() error {
 	}
 	switch c.Op {
 	case OpClaim:
-		if !ValidPubKey(c.PubKey) || !ValidCode(c.Code) || (c.HeightM != nil) == c.Clear {
+		if !ValidPubKey(c.PubKey) || !ValidCode(c.Code) || (c.HeightM != nil && c.Clear) ||
+			(c.Details != nil && c.ClearDetails) || (c.Parts() == Parts{}) {
 			return ErrInvalidCommand
 		}
 		if c.HeightM != nil && !ValidHeight(*c.HeightM) {
+			return ErrInvalidCommand
+		}
+		if c.Details != nil && c.Details.Validate() != nil {
 			return ErrInvalidCommand
 		}
 	case OpApprove, OpReject, OpRevoke:
@@ -349,6 +399,10 @@ type Config struct {
 	// Enabled opens public claims. It only takes effect with a strong admin
 	// apiKey (owner decision 5); off by default.
 	Enabled *bool `json:"enabled,omitempty"`
+	// DetailsEnabled also lets owners set station details (#898). It only
+	// takes effect with Enabled; off by default. Clearing details stays
+	// open while claims are enabled.
+	DetailsEnabled bool `json:"detailsEnabled,omitempty"`
 	// AutoApproveProven approves a proven, unflagged height without an
 	// administrator (owner decision 3); off by default.
 	AutoApproveProven  bool `json:"autoApproveProven,omitempty"`
@@ -377,11 +431,16 @@ func (c *Config) SubmissionsRequested() bool {
 	return c != nil && c.Enabled != nil && *c.Enabled
 }
 
+// DetailsRequested reports whether the operator switched station details
+// on. Callers must additionally require SubmissionsRequested and a strong
+// admin API key.
+func (c *Config) DetailsRequested() bool { return c != nil && c.DetailsEnabled }
+
 // AutoApprove reports whether proven, unflagged heights are approved without
 // an administrator.
 func (c *Config) AutoApprove() bool { return c != nil && c.AutoApproveProven }
 
-// ApplyGates sets both switches from on, which reports whether the config
+// ApplyGates sets the switches from on, which reports whether the config
 // value at a path of canonical, exact-case keys is the JSON boolean true
 // (configkey.Doc.On). encoding/json would also take `Enabled` or
 // `AutoApproveProven`; the server and the ingestor both call this, so they
@@ -393,6 +452,7 @@ func (c *Config) ApplyGates(on func(path ...string) bool) {
 	enabled := on("antennaClaims", "enabled")
 	c.Enabled = &enabled
 	c.AutoApproveProven = on("antennaClaims", "autoApproveProven")
+	c.DetailsEnabled = on("antennaClaims", "detailsEnabled")
 }
 
 // Limits are the resolved limits.
