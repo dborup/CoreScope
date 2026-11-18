@@ -117,6 +117,7 @@ run test-issue-646-og-meta.js
 run test-traces.js
 run test-live-multibyte-filter.js
 run test-live-heard-filter.js
+run test-live-follow.js
 run test-map-last-heard-options.js
 run test-issue-124-rx-coverage-viewport.js
 run test-rx-coverage-escape.js

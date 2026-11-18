@@ -443,6 +443,12 @@
    * light theme. Dark theme override is set in both dark-mode blocks below. */
   --shadow: rgba(0,0,0,0.3);
   --trace-ghost-color: #94a3b8;
+  /* #880 — Live "Follow a packet". Built on theme tokens, so both dark
+   * blocks follow without their own copies. Customizer mapping: #880 M3. */
+  --follow-ring: var(--accent);
+  --follow-relay: var(--status-yellow);
+  --follow-observer: var(--status-green);
+  --follow-flag: var(--warning);
 
   /* #620: minimum viewport margin of the region/area dropdown menus. Read by
    * region-filter.js placeMenu() as well as the menu max-width below. */
