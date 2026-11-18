@@ -1,6 +1,7 @@
 package antennaclaim
 
 import (
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -158,7 +159,7 @@ func TestNeedsReview789(t *testing.T) {
 		{27.9, f(30), true},
 	}
 	for _, c := range cases {
-		if got := NeedsReview(c.h, c.s); got != c.want {
+		if got := (*Config)(nil).Limits().NeedsReview(c.h, c.s); got != c.want {
 			t.Errorf("NeedsReview(%v, %v) = %v, want %v", c.h, c.s, got, c.want)
 		}
 	}
@@ -215,5 +216,71 @@ func TestLimits789_Defaults(t *testing.T) {
 	// Auto-approval is off by default, also with submissions on.
 	if (&Config{Enabled: &on}).AutoApprove() {
 		t.Fatal("auto-approval must default off")
+	}
+}
+
+// #789 M3 — the read-side thresholds and the owner page's client settings
+// are operator config with the M2 constants as defaults.
+func TestConfig789M3_DefaultsUnchanged(t *testing.T) {
+	for name, c := range map[string]*Config{"nil": nil, "empty": {}} {
+		l := c.Limits()
+		if l.StaleMoveM != 50 || l.ReviewDeltaM != 60 {
+			t.Errorf("%s: staleMoveM %v reviewDeltaM %v, want 50 and 60", name, l.StaleMoveM, l.ReviewDeltaM)
+		}
+		cs := c.Client()
+		want := ClientSettings{PollInitialMs: 2000, PollBackoff: 1.5, PollMaxMs: 30000, PollMaxAttempts: 60, AdminDefaultFilter: "proven"}
+		if cs != want {
+			t.Errorf("%s: client %+v, want %+v", name, cs, want)
+		}
+	}
+}
+
+func TestConfig789M3_ParsedAndBounded(t *testing.T) {
+	var c Config
+	if err := json.Unmarshal([]byte(`{"staleMoveM":120.5,"reviewDeltaM":25,"pollInitialMs":1000,
+		"pollBackoff":2,"pollMaxMs":60000,"pollMaxAttempts":10,"adminDefaultFilter":"pending"}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	l, cs := c.Limits(), c.Client()
+	if l.StaleMoveM != 120.5 || l.ReviewDeltaM != 25 {
+		t.Fatalf("limits %+v", l)
+	}
+	if cs != (ClientSettings{PollInitialMs: 1000, PollBackoff: 2, PollMaxMs: 60000, PollMaxAttempts: 10, AdminDefaultFilter: "pending"}) {
+		t.Fatalf("client %+v", cs)
+	}
+	// Out of range or unknown: the default, never a broken value.
+	bad := Config{StaleMoveM: -1, ReviewDeltaM: 5000, PollInitialMs: 10, PollBackoff: 0.5,
+		PollMaxMs: 999999999, PollMaxAttempts: 100000, AdminDefaultFilter: "everything"}
+	l, cs = bad.Limits(), bad.Client()
+	if l.StaleMoveM != 50 || l.ReviewDeltaM != 60 {
+		t.Fatalf("bad limits %+v", l)
+	}
+	if cs != (ClientSettings{PollInitialMs: 2000, PollBackoff: 1.5, PollMaxMs: 30000, PollMaxAttempts: 60, AdminDefaultFilter: "proven"}) {
+		t.Fatalf("bad client %+v", cs)
+	}
+	// The cap never falls below the first delay.
+	if cs := (&Config{PollInitialMs: 45000}).Client(); cs.PollMaxMs != 45000 {
+		t.Fatalf("cap %d below the first delay 45000", cs.PollMaxMs)
+	}
+}
+
+func TestNeedsReview789M3_ConfiguredDelta(t *testing.T) {
+	s := 18.0
+	l := (&Config{ReviewDeltaM: 10}).Limits()
+	if l.NeedsReview(30, &s) || !l.NeedsReview(30.1, &s) {
+		t.Fatal("reviewDeltaM 10 not applied: 30 m must pass and 30.1 m be flagged over an 18 m surface")
+	}
+	if !l.NeedsReview(15.9, &s) {
+		t.Fatal("the 2 m below-surface rule must not change")
+	}
+}
+
+func TestStale789M3_ConfiguredDistance(t *testing.T) {
+	l := (&Config{StaleMoveM: 100}).Limits()
+	if l.Stale(100) || !l.Stale(100.1) {
+		t.Fatal("staleMoveM 100 not applied")
+	}
+	if d := (*Config)(nil).Limits(); d.Stale(50) || !d.Stale(50.1) {
+		t.Fatal("default 50 m changed")
 	}
 }

@@ -51,6 +51,7 @@
 'use strict';
 const { chromium } = require('playwright');
 const path = require('path');
+const { tapWhenSettled } = require('./tests/e2e-tap');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13700';
 const SHOT_DIR = process.env.SCREENSHOT_DIR || '';
@@ -463,25 +464,8 @@ function pathOf(url) { return new URL(url).pathname; }
     // tap on a slow machine.
     await advance(page, 1000);
     // tapTarget taps the middle of a control once it has stopped moving and
-    // is the element a finger there would hit.
-    async function tapTarget(sel) {
-      const loc = page.locator(sel).first();
-      let prev = null;
-      for (let i = 0; i < 50; i++) {
-        await loc.scrollIntoViewIfNeeded();
-        const b = await loc.boundingBox();
-        assert(b && b.height >= 44 && b.x >= 0 && b.x + b.width <= 375 + 0.5, sel + ' box ' + JSON.stringify(b));
-        const x = b.x + b.width / 2, y = b.y + b.height / 2;
-        const still = prev && prev.x === b.x && prev.y === b.y;
-        if (still && await loc.evaluate((e, p) => { const t = document.elementFromPoint(p.x, p.y); return !!t && (t === e || e.contains(t)); }, { x, y })) {
-          await page.touchscreen.tap(x, y);
-          return;
-        }
-        prev = b;
-        await new Promise(r => setTimeout(r, 100));
-      }
-      throw new Error(sel + ' never settled under a tap');
-    }
+    // is the element a finger there would hit (tests/e2e-tap.js).
+    const tapTarget = (sel) => tapWhenSettled(page, sel);
     await tapTarget('[data-testid="ac-height"]');
     await page.keyboard.type('18.5');
     assert((await page.inputValue('[data-testid="ac-height"]')) === '18.5', 'the tap did not focus the height field');

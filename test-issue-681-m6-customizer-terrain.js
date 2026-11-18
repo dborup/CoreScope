@@ -68,7 +68,26 @@ test('the built-in defaults are the server’s own role heights', () => {
   assert.strictEqual(ctx.window.MCAntennaHeight.MAX_M, 100);
 });
 
-test('the eight chart colours map onto the documented CSS variables', () => {
+// Review PR#893 F1: the Path profile falls back to MCAntennaHeight's
+// built-in heights where an untouched role height is not stored. They are
+// the server's terrainRoleAntennaM and what the customizer shows.
+test('MCAntennaHeight.ROLE_DEFAULTS mirror the server and the customizer', () => {
+  const { api, ctx } = load();
+  const go = fs.readFileSync(path.join(__dirname, 'cmd', 'server', 'terrain_profile.go'), 'utf8');
+  const block = go.match(/var terrainRoleAntennaM = map\[string\]float64\{([\s\S]*?)\n\}/);
+  assert.ok(block, 'terrainRoleAntennaM not found');
+  const server = {};
+  block[1].replace(/"?(\w+)"?:\s*([0-9.]+)/g, (_, k, v) => { server[k === 'terrainPointKey' ? 'point' : k] = Number(v); });
+  const shared = Object.assign({}, ctx.window.MCAntennaHeight.ROLE_DEFAULTS);
+  assert.deepStrictEqual(shared, server);
+  assert.deepStrictEqual(shared, {
+    repeater: api.TERRAIN_DEFAULTS.heightRepeater, room: api.TERRAIN_DEFAULTS.heightRoom,
+    companion: api.TERRAIN_DEFAULTS.heightCompanion, sensor: api.TERRAIN_DEFAULTS.heightSensor,
+    point: api.TERRAIN_DEFAULTS.heightPoint,
+  });
+});
+
+test('the profile colours map onto the documented CSS variables', () => {
   const { api } = load();
   const want = {
     terrainFill: '--terrain-fill', terrainClutter: '--terrain-clutter',
@@ -76,12 +95,14 @@ test('the eight chart colours map onto the documented CSS variables', () => {
     fresnel60: '--fresnel-60', profileBlocked: '--profile-blocked',
     // #730 M3 — the surface band by class.
     terrainBuilding: '--terrain-building', terrainVegetation: '--terrain-vegetation',
+    // #789 M3 — the owner height badge (test-issue-789-m3-customizer.js).
+    ownerBadge: '--owner-badge',
   };
   Object.keys(want).forEach((k) => {
     assert.strictEqual(api.THEME_CSS_MAP[k], want[k], k + ' is not mapped to ' + want[k]);
     assert.ok(api.TERRAIN_COLOR_KEYS.indexOf(k) >= 0, k + ' missing from TERRAIN_COLOR_KEYS');
   });
-  assert.strictEqual(api.TERRAIN_COLOR_KEYS.length, 8);
+  assert.strictEqual(api.TERRAIN_COLOR_KEYS.length, 9);
 });
 
 test('the chart colours live in the theme sections, light and dark apart', () => {

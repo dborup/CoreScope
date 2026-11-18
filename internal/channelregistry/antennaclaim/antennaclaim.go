@@ -91,11 +91,6 @@ const (
 	// NameBudgetWithLocation is the name's bytes on air in an advert with a
 	// position, which every claimable node has.
 	NameBudgetWithLocation = MaxAdvertDataSize - 1 - 8
-	// StaleMoveM is how far a node may move from where its height was
-	// proven before the height is ignored (read-side rule).
-	StaleMoveM = 50
-	// ReviewAboveM flags a height this far above surface + RoofM.
-	ReviewAboveM = 60
 	// ReviewBelowM flags a height this far below the surface.
 	ReviewBelowM = 2
 	// RoofM is the M1 estimate's antenna above the surface.
@@ -216,15 +211,20 @@ func SuggestedName(current, code string, budget int) string {
 }
 
 // NeedsReview flags a height an administrator should look at: more than
-// ReviewAboveM above surface + RoofM, or more than ReviewBelowM below the
+// ReviewDeltaM above surface + RoofM, or more than ReviewBelowM below the
 // surface. surfaceM is the cached M1 surface; nil (unknown) flags nothing.
-func NeedsReview(heightM float64, surfaceM *float64) bool {
+func (l Limits) NeedsReview(heightM float64, surfaceM *float64) bool {
 	if surfaceM == nil {
 		return false
 	}
 	s := *surfaceM
-	return heightM > s+RoofM+ReviewAboveM+1e-9 || heightM < s-ReviewBelowM-1e-9
+	return heightM > s+RoofM+l.ReviewDeltaM+1e-9 || heightM < s-ReviewBelowM-1e-9
 }
+
+// Stale reports whether a node that moved movedM metres from where its
+// height was proven has moved too far for the height to be used
+// (read-side rule: the height is ignored, nothing is written).
+func (l Limits) Stale(movedM float64) bool { return movedM > l.StaleMoveM }
 
 // Command is one queued request. For OpClaim, PubKey, Code and exactly one of
 // HeightM or Clear are set, and the claim's id is RequestID; for the admin
@@ -316,6 +316,31 @@ const (
 	DefaultSubmissionsPerHour = 20
 	DefaultRequestTTL         = 24 * time.Hour
 	maxResultFactor           = 4
+
+	// DefaultStaleMoveM is how far a node may move from where its height
+	// was proven before the height is ignored; MaxStaleMoveM bounds it.
+	DefaultStaleMoveM = 50.0
+	MaxStaleMoveM     = 5000.0
+	// DefaultReviewDeltaM flags a height this far above surface + RoofM;
+	// MaxReviewDeltaM bounds it.
+	DefaultReviewDeltaM = 60.0
+	MaxReviewDeltaM     = 1000.0
+
+	// The owner page's status polling: the first delay, the factor each
+	// later delay grows by, the cap on one delay and the number of checks
+	// before "Check again" (2 s, 3 s, 4.5 s … 30 s, 60 checks ≈ 25 min).
+	DefaultPollInitialMs   = 2000
+	MinPollInitialMs       = 500
+	MaxPollInitialMs       = 60000
+	DefaultPollBackoff     = 1.5
+	MaxPollBackoff         = 4.0
+	DefaultPollMaxMs       = 30000
+	MaxPollMaxMs           = 600000
+	DefaultPollMaxAttempts = 60
+	MaxPollMaxAttempts     = 1000
+	// DefaultAdminFilter is the admin queue's first view: the claims to
+	// review.
+	DefaultAdminFilter = StatusProven
 )
 
 // Config is the "antennaClaims" block in config.json, read by the server and
@@ -332,6 +357,18 @@ type Config struct {
 	MaxPendingPerNode  int  `json:"maxPendingPerNode,omitempty"`
 	MaxQueuedRequests  int  `json:"maxQueuedRequests,omitempty"`
 	RetentionDays      int  `json:"retentionDays,omitempty"`
+	// StaleMoveM and ReviewDeltaM are the server's read-side thresholds
+	// (#789 M3); zero, negative or above the bound is the default.
+	StaleMoveM   float64 `json:"staleMoveM,omitempty"`
+	ReviewDeltaM float64 `json:"reviewDeltaM,omitempty"`
+	// The owner page's polling and the admin queue's first filter, served
+	// to the browser by GET /api/antenna-claims/config (#789 M3); a value
+	// out of its bounds is the default.
+	PollInitialMs      int     `json:"pollInitialMs,omitempty"`
+	PollBackoff        float64 `json:"pollBackoff,omitempty"`
+	PollMaxMs          int     `json:"pollMaxMs,omitempty"`
+	PollMaxAttempts    int     `json:"pollMaxAttempts,omitempty"`
+	AdminDefaultFilter string  `json:"adminDefaultFilter,omitempty"`
 }
 
 // SubmissionsRequested reports whether the operator switched claims on.
@@ -367,6 +404,8 @@ type Limits struct {
 	RetentionDays      int
 	SubmissionsPerHour int
 	RequestTTL         time.Duration
+	StaleMoveM         float64
+	ReviewDeltaM       float64
 }
 
 // Limits resolves the configured limits. Safe on a nil *Config.
@@ -382,13 +421,53 @@ func (c *Config) Limits() Limits {
 		RetentionDays:      orDefault(in.RetentionDays, DefaultRetentionDays),
 		SubmissionsPerHour: orDefault(in.SubmissionsPerHour, DefaultSubmissionsPerHour),
 		RequestTTL:         DefaultRequestTTL,
+		StaleMoveM:         inRange(in.StaleMoveM, 0, MaxStaleMoveM, DefaultStaleMoveM),
+		ReviewDeltaM:       inRange(in.ReviewDeltaM, 0, MaxReviewDeltaM, DefaultReviewDeltaM),
 	}
 	l.MaxResults = l.MaxQueuedRequests * maxResultFactor
 	return l
 }
 
+// ClientSettings are the browser's settings for the owner page and the
+// admin queue, as GET /api/antenna-claims/config serves them.
+type ClientSettings struct {
+	PollInitialMs      int     `json:"pollInitialMs"`
+	PollBackoff        float64 `json:"pollBackoff"`
+	PollMaxMs          int     `json:"pollMaxMs"`
+	PollMaxAttempts    int     `json:"pollMaxAttempts"`
+	AdminDefaultFilter string  `json:"adminDefaultFilter"`
+}
+
+// Client resolves the client settings. Safe on a nil *Config.
+func (c *Config) Client() ClientSettings {
+	var in Config
+	if c != nil {
+		in = *c
+	}
+	cs := ClientSettings{
+		PollInitialMs:      int(inRange(float64(in.PollInitialMs), MinPollInitialMs-1, MaxPollInitialMs, DefaultPollInitialMs)),
+		PollBackoff:        inRange(in.PollBackoff, 1-1e-9, MaxPollBackoff, DefaultPollBackoff),
+		PollMaxMs:          int(inRange(float64(in.PollMaxMs), 0, MaxPollMaxMs, DefaultPollMaxMs)),
+		PollMaxAttempts:    int(inRange(float64(in.PollMaxAttempts), 0, MaxPollMaxAttempts, DefaultPollMaxAttempts)),
+		AdminDefaultFilter: DefaultAdminFilter,
+	}
+	cs.PollMaxMs = max(cs.PollMaxMs, cs.PollInitialMs)
+	if ValidStatus(in.AdminDefaultFilter) {
+		cs.AdminDefaultFilter = in.AdminDefaultFilter
+	}
+	return cs
+}
+
 func orDefault(v, def int) int {
 	if v <= 0 {
+		return def
+	}
+	return v
+}
+
+// inRange is v when lo < v <= hi, else def.
+func inRange(v, lo, hi, def float64) float64 {
+	if !(v > lo && v <= hi) {
 		return def
 	}
 	return v

@@ -59,9 +59,23 @@ type AntennaClaimRequest struct {
 }
 
 // AntennaClaimConfigResponse is GET /api/antenna-claims/config: whether
-// owners can claim a height right now (the submit route's own gate).
+// owners can claim a height right now (the submit route's own gate), and
+// the operator's settings for the owner page and the admin queue (#789 M3).
 type AntennaClaimConfigResponse struct {
 	Enabled bool `json:"enabled"`
+	antennaclaim.ClientSettings
+}
+
+// NodeAntennaResponse is GET /api/nodes/{pubkey}/antenna (#789 M3): the
+// antenna height a terrain profile uses for the node and where it comes
+// from (profilecard.TerrainEndpoint's antennaM, antennaSource and
+// assumed). EstimatePending: no surface estimate is cached yet, so a
+// profile may still raise a default to one.
+type NodeAntennaResponse struct {
+	AntennaM        float64 `json:"antennaM"`
+	AntennaSource   string  `json:"antennaSource"`
+	Assumed         bool    `json:"assumed"`
+	EstimatePending bool    `json:"estimatePending,omitempty"`
 }
 
 // AntennaClaimIssuedResponse is the 202 body of a queued claim. The code is
@@ -106,8 +120,8 @@ type AdminAntennaClaim struct {
 	ReviewedAt  *int64   `json:"reviewedAt,omitempty"`
 	ApprovedBy  string   `json:"approvedBy,omitempty"`
 	// MovedM is the distance from the proof position to the node's current
-	// position; Stale when it is more than StaleMoveM (the height is then
-	// not served).
+	// position; Stale when it is more than antennaClaims.staleMoveM (the
+	// height is then not served).
 	MovedM *float64 `json:"movedM,omitempty"`
 	Stale  bool     `json:"stale,omitempty"`
 }
@@ -129,6 +143,7 @@ type antennaClaimService struct {
 	enabled     bool
 	autoApprove bool
 	limits      antennaclaim.Limits
+	client      antennaclaim.ClientSettings
 	queue       *channelregistry.Queue // nil without a database path
 	db          *sql.DB                // read-only; nil without a database
 	now         func() time.Time
@@ -149,6 +164,7 @@ func newAntennaClaimService(cfg *Config, db *sql.DB, queueDir string) *antennaCl
 	}
 	svc := &antennaClaimService{
 		limits:      cc.Limits(),
+		client:      cc.Client(),
 		autoApprove: cc.AutoApprove(),
 		db:          db,
 		now:         time.Now,
@@ -257,12 +273,12 @@ func (c *antennaClaimService) readOwnerHeights(ctx context.Context) (map[string]
 }
 
 // ownerHeightAt is the approved owner height of node pubkey standing at pt,
-// or nil: none, or the node has moved more than StaleMoveM from where the
+// or nil: none, or the node has moved more than staleMoveM from where the
 // height was proven (stale: fall back, no write). The caller has already
 // refused hidden nodes.
 func (c *antennaClaimService) ownerHeightAt(ctx context.Context, pubkey string, pt dhm.LatLon) *float64 {
 	h, ok := c.ownerHeights(ctx)[strings.ToLower(pubkey)]
-	if !ok || dhm.GroundDistance(pt, dhm.LatLon{Lat: h.lat, Lon: h.lon}) > antennaclaim.StaleMoveM {
+	if !ok || c.limits.Stale(dhm.GroundDistance(pt, dhm.LatLon{Lat: h.lat, Lon: h.lon})) {
 		return nil
 	}
 	v := h.heightM
@@ -283,7 +299,35 @@ func (s *Server) attachOwnerHeights(ctx context.Context, ends *[2]terrainEnd) {
 // GET /api/antenna-claims/config
 func (s *Server) handleAntennaClaimConfig(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	writeJSON(w, AntennaClaimConfigResponse{Enabled: s.antennaClaims().enabled})
+	c := s.antennaClaims()
+	writeJSON(w, AntennaClaimConfigResponse{Enabled: c.enabled, ClientSettings: c.client})
+}
+
+// GET /api/nodes/{pubkey}/antenna: the height a profile uses for the node,
+// by the profile's own precedence (terrainProfiler.antenna), from the
+// caches alone: it never measures the surface. Hidden, unknown and
+// unpositioned nodes answer one identical 404 (#743).
+func (s *Server) handleNodeAntenna(w http.ResponseWriter, r *http.Request) {
+	p := s.terrain
+	if p == nil {
+		writeError(w, http.StatusServiceUnavailable, "antenna heights are unavailable: the terrain profile is off")
+		return
+	}
+	pk := strings.ToLower(mux.Vars(r)["pubkey"])
+	if !antennaclaim.ValidPubKey(pk) {
+		writeError(w, http.StatusBadRequest, "invalid public key")
+		return
+	}
+	end, ok := s.resolveTerrainEnd(r.Context(), terrainRef{pubkey: pk})
+	if !ok {
+		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	ends := [2]terrainEnd{end}
+	s.attachOwnerHeights(r.Context(), &ends)
+	pending := p.cachedEstimates(&ends, [2]*float64{})
+	h, src, assumed := p.antenna(ends[0], nil)
+	writeJSON(w, NodeAntennaResponse{AntennaM: h, AntennaSource: src, Assumed: assumed, EstimatePending: pending})
 }
 
 // POST /api/nodes/{pubkey}/antenna-claims
@@ -340,7 +384,7 @@ func (s *Server) handleAntennaClaimSubmit(w http.ResponseWriter, r *http.Request
 		CreatedAt: now.UnixMilli(),
 	}
 	if body.HeightM != nil {
-		cmd.NeedsReview = antennaclaim.NeedsReview(*body.HeightM, s.cachedSurfaceOnly(end))
+		cmd.NeedsReview = c.limits.NeedsReview(*body.HeightM, s.cachedSurfaceOnly(end))
 	}
 	if !c.enqueue(w, cmd) {
 		c.refund()
@@ -403,7 +447,8 @@ const claimSelect = `SELECT c.request_id, c.pubkey, c.height_m, c.status, c.need
 	COALESCE(n.name, ''), COALESCE(n.role, ''), n.lat, n.lon
 	FROM node_antenna_claims c LEFT JOIN nodes n ON n.public_key = c.pubkey`
 
-func scanClaim(sc interface{ Scan(...interface{}) error }) (claimRow, error) {
+// scanClaim reads one claim; l decides whether a moved node is stale.
+func scanClaim(sc interface{ Scan(...interface{}) error }, l antennaclaim.Limits) (claimRow, error) {
 	var r claimRow
 	var h, plat, plon sql.NullFloat64
 	var proven, reviewed sql.NullInt64
@@ -418,7 +463,7 @@ func scanClaim(sc interface{ Scan(...interface{}) error }) (claimRow, error) {
 	if r.ProofLat != nil && r.ProofLon != nil && r.nodeLat.Valid && r.nodeLon.Valid {
 		d := dhm.GroundDistance(dhm.LatLon{Lat: *r.ProofLat, Lon: *r.ProofLon}, dhm.LatLon{Lat: r.nodeLat.Float64, Lon: r.nodeLon.Float64})
 		d = math.Round(d*10) / 10
-		r.MovedM, r.Stale = &d, d > antennaclaim.StaleMoveM
+		r.MovedM, r.Stale = &d, l.Stale(d)
 	}
 	return r, nil
 }
@@ -446,7 +491,7 @@ func (s *Server) visibleClaim(ctx context.Context, id string) (r claimRow, ok bo
 	if c.db == nil {
 		return r, false, nil
 	}
-	r, err = scanClaim(c.db.QueryRowContext(ctx, claimSelect+` WHERE c.request_id = ?`, id))
+	r, err = scanClaim(c.db.QueryRowContext(ctx, claimSelect+` WHERE c.request_id = ?`, id), c.limits)
 	if err == sql.ErrNoRows || isMissingClaimsTable(err) {
 		return r, false, nil
 	}
@@ -535,7 +580,7 @@ func (s *Server) handleAdminAntennaClaims(w http.ResponseWriter, r *http.Request
 			var list []AdminAntennaClaim
 			var keys []string
 			for rows.Next() {
-				row, err := scanClaim(rows)
+				row, err := scanClaim(rows, c.limits)
 				if err != nil {
 					log.Printf("[antenna-claims] admin list failed: %v", err)
 					writeError(w, http.StatusInternalServerError, "could not list claims")

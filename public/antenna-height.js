@@ -16,6 +16,12 @@
   'use strict';
 
   var MAX_M = 100;
+  /* The server's built-in heights per endpoint kind, terrainRoleAntennaM in
+   * cmd/server/terrain_profile.go (customize-v2.js TERRAIN_DEFAULTS shows the
+   * same values). The Path profile falls back to them where a viewer who
+   * turned "Prefer owner heights" off kept the role height untouched (#789
+   * M3), since an owner height hides what the server would have used. */
+  var ROLE_DEFAULTS = { repeater: 10, room: 5, companion: 2, sensor: 2, point: 2 };
   // Same digit limits as terrain-profile.js DECIMAL_RE, without the sign.
   var HEIGHT_RE = /^[0-9]{1,6}(\.[0-9]{1,10})?$/;
 
@@ -30,5 +36,5 @@
     return Math.round(n * 10) / 10 || 0;
   }
 
-  global.MCAntennaHeight = { MAX_M: MAX_M, parse: parse };
+  global.MCAntennaHeight = { MAX_M: MAX_M, ROLE_DEFAULTS: ROLE_DEFAULTS, parse: parse };
 })(typeof window !== 'undefined' ? window : this);

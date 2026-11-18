@@ -332,9 +332,10 @@ func routeDescriptions() map[string]routeMeta {
 				{Status: "429", Description: "Global budget of antennaClaims.submissionsPerHour (default 20) exceeded; Retry-After gives the seconds to wait."},
 				{Status: "503", Description: "The claim queue is full (antennaClaims.maxQueuedRequests); Retry-After is set. The budget is refunded."},
 			}},
-		"GET /api/antenna-claims/config":               {Summary: "Antenna height claim availability", Description: "Returns {enabled}: whether owners can claim a node's antenna height (requires antennaClaims.enabled and a strong apiKey), the same gate as POST /api/nodes/{pubkey}/antenna-claims.", Tag: "nodes"},
+		"GET /api/antenna-claims/config":               {Summary: "Antenna height claim availability", Description: "Returns {enabled, pollInitialMs, pollBackoff, pollMaxMs, pollMaxAttempts, adminDefaultFilter}: whether owners can claim a node's antenna height (requires antennaClaims.enabled and a strong apiKey), the same gate as POST /api/nodes/{pubkey}/antenna-claims, and the operator's antennaClaims settings for the claim status polling (first delay, growth factor, cap per delay, number of checks) and the admin queue's first filter.", Tag: "nodes"},
+		"GET /api/nodes/{pubkey}/antenna":              {Summary: "A node's current antenna height", Description: "Returns {antennaM, antennaSource, assumed, estimatePending}: the antenna height a terrain profile uses for the node and its source, by the profile's precedence (operator-node, owner, dsm-estimate, operator-role, role-default). It never measures the surface: estimatePending is true while no surface estimate is cached, and a profile may then still raise a default to one. Hidden, unknown and unpositioned nodes all answer the same 404; 503 while the terrain profile is off.", Tag: "nodes"},
 		"GET /api/antenna-claims/requests/{requestId}": {Summary: "Status of an antenna height claim", Description: "Returns {status: queued|pending|proven|approved|rejected|revoked|expired|superseded|error, expiresAt, error}. The request id is the capability; the code is never returned here. A claim whose node is hidden answers like an unknown one (404).", Tag: "nodes"},
-		"GET /api/admin/antenna-claims":                {Summary: "List antenna height claims", Description: "Returns {claims, enabled, autoApprove}, newest first, at most 1000. Each claim has id, pubkey, name, role, heightM (null for a clear), status, needsReview (the height is more than 60 m above the cached surface estimate + 2 m, or more than 2 m below the surface), createdAt, expiresAt, provenAt, proofHash, proofLat, proofLon, reviewedAt, approvedBy (auto, admin or owner), movedM and stale (the node moved more than 50 m from the proof position; its height is then not used). Codes are never listed. Claims of hidden nodes are left out. Optional status filter.", Tag: "admin", Auth: true, QueryParams: []paramMeta{{Name: "status", Description: "pending, proven, approved, rejected, revoked, expired or superseded", Type: "string"}}},
+		"GET /api/admin/antenna-claims":                {Summary: "List antenna height claims", Description: "Returns {claims, enabled, autoApprove}, newest first, at most 1000. Each claim has id, pubkey, name, role, heightM (null for a clear), status, needsReview (the height is more than antennaClaims.reviewDeltaM metres above the cached surface estimate + 2 m, or more than 2 m below the surface), createdAt, expiresAt, provenAt, proofHash, proofLat, proofLon, reviewedAt, approvedBy (auto, admin or owner), movedM and stale (the node moved more than antennaClaims.staleMoveM metres from the proof position; its height is then not used). Codes are never listed. Claims of hidden nodes are left out. Optional status filter.", Tag: "admin", Auth: true, QueryParams: []paramMeta{{Name: "status", Description: "pending, proven, approved, rejected, revoked, expired or superseded", Type: "string"}}},
 		"POST /api/admin/antenna-claims/{id}/approve":  {Summary: "Approve a proven antenna height claim", Description: "Queues the approval and returns 202 {requestId}; 409 unless the claim is proven. The approved height becomes the node's owner antenna height in terrain profiles (below the operator's per-node height, above the surface-model estimate) and supersedes the node's previous one.", Tag: "admin", Auth: true},
 		"POST /api/admin/antenna-claims/{id}/reject":   {Summary: "Reject an antenna height claim", Description: "Queues the rejection and returns 202 {requestId}; 409 unless the claim is pending or proven.", Tag: "admin", Auth: true},
 		"POST /api/admin/antenna-claims/{id}/revoke":   {Summary: "Revoke an approved antenna height claim", Description: "Queues the revocation and returns 202 {requestId}; 409 unless the claim is approved. Profiles fall back to the next antenna source within 30 s.", Tag: "admin", Auth: true},
@@ -358,6 +359,9 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/analytics/new-nodes": {Summary: "Most recently first-seen nodes, network-wide", Description: "Tools > New Nodes. Newest first, each with its configured area(s) (same touched-areas matching View Path/Ping Scores' Area Activity draw from). Excludes nodes that also appear in inactive_nodes -- a node pruned for inactivity and later returning would otherwise get a freshly-INSERTed nodes.first_seen and misleadingly look brand new; that \"came back after being pruned\" case is its own distinct signal, not covered by this feed. Blacklisted nodes (config.json nodeBlacklist) are excluded. Empty list (not an error) when nothing qualifies.", Tag: "nodes",
 			QueryParams: []paramMeta{{Name: "limit", Description: "Max entries to return (default 50)", Type: "integer"}},
 			Response:    schemaRef("NewNodesResponse")},
+		"GET /api/moments": {Summary: "Recent live moments (#881)", Description: "The newest moments first, from an in-memory ring of moments.historySize (default 50) entries. The same moments are broadcast on the WebSocket as {\"type\":\"moment\",\"data\":Moment}. Kinds: new_node (a repeater, room or sensor key seen for the first time in retained history: first_seen at most 10 min old and no inactive_nodes row), back_online (a repeater heard again after at least moments.backOnlineHours of silence, or returning from inactive_nodes), record_link (a new longest confident direct neighbor link inside the rolling moments.recordWindowHours, beating the previous record by max(0.5 km, 1 %)), busiest_repeater (the repeater with the most distinct non-advert relays in the last moments.busyWindowMinutes, at least moments.busyMinRelays). Detection runs on existing timers (node delta every 15 s, neighbor-graph swap every 60 s, relay recompute), never per packet; the first look after startup is a silent baseline. Rate limited per kind and globally (moments.maxPerMinute); a tick with more nodes of one kind than its cap allows becomes one moment with more = the rest. Companions never appear; node and observer blacklists and hidden-name prefixes are applied when a moment fires and again on every read; positions are advertised GPS only. An empty list (not an error) when moments are disabled (moments.enabled, default false).", Tag: "nodes",
+			QueryParams: []paramMeta{{Name: "limit", Description: "Max moments to return (default and maximum moments.historySize)", Type: "integer"}},
+			Response:    schemaRef("MomentsResponse")},
 		"GET /api/analytics/node-changes": {Summary: "Recent node role/name/position changes and pruned-node returns", Description: "Tools > Node Changes, a durable audit log written by cmd/ingestor's UpsertNode as ADVERTs arrive (not a periodic snapshot diff, so nothing is missed between polls). changeType is \"role\", \"name\", \"position\" (>=1km move; GPS jitter under that is not logged), or \"resurrected\" (pubkey previously pruned to inactive_nodes for inactivity, now advertising again -- oldValue is its last_seen there before it returned). A field is only compared when both the old and new ADVERT values are present, since adverts routinely omit name/location. Each entry also carries the node's CURRENT role and foreign_advert (resolved live, not a historical snapshot) for the Tools page's role and All/Domestic/Foreign filters. Newest first. Blacklisted nodes excluded. Empty list (not an error) when nothing has been logged yet.", Tag: "nodes",
 			QueryParams: []paramMeta{{Name: "limit", Description: "Max entries to return (default 50)", Type: "integer"}},
 			Response:    schemaRef("NodeChangesResponse")},
@@ -439,6 +443,53 @@ func jsonErrorResponse(description string) openAPIResponse {
 	return openAPIResponse{
 		Description: description,
 		Content:     map[string]openAPIMediaType{"application/json": {Schema: openAPIRef("ApiError")}},
+	}
+}
+
+// momentSchemas documents GET /api/moments and the {"type":"moment"}
+// WebSocket frame (#881).
+func momentSchemas() map[string]*openAPISchema {
+	zero := 0
+	num := func(desc string) *openAPISchema { return &openAPISchema{Type: "number", Description: desc} }
+	return map[string]*openAPISchema{
+		"MomentNode": {
+			Type:        "object",
+			Description: "A node in a moment. Never a companion.",
+			Properties: map[string]*openAPISchema{
+				"publicKey": {Type: "string"},
+				"name":      {Type: "string", Description: "Omitted when the node has no name."},
+				"role":      {Type: "string"},
+				"lat":       num("Advertised latitude; omitted without GPS (never 0,0 or an estimate)."),
+				"lon":       num("Advertised longitude; omitted without GPS."),
+			},
+		},
+		"MomentLink": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"a":          openAPIRef("MomentNode"),
+				"b":          openAPIRef("MomentNode"),
+				"distanceKm": num("Great-circle distance between the advertised positions, 0.1 km."),
+			},
+		},
+		"Moment": {
+			Type: "object",
+			Properties: map[string]*openAPISchema{
+				"id":            {Type: "string", Description: "Unique per server run; clients deduplicate by it."},
+				"kind":          {Type: "string", Enum: []string{MomentKindNewNode, MomentKindBackOnline, MomentKindRecordLink, MomentKindBusiest}},
+				"at":            {Type: "string", Description: "RFC3339 time the moment was detected."},
+				"node":          openAPIRef("MomentNode"),
+				"link":          openAPIRef("MomentLink"),
+				"silentHours":   num("back_online: hours of silence, 0.1 h."),
+				"relays":        {Type: "integer", Minimum: &zero, Description: "busiest_repeater: distinct non-advert packets relayed in windowMinutes."},
+				"windowMinutes": {Type: "integer", Minimum: &zero, Description: "busiest_repeater: the busy window."},
+				"previousKm":    num("record_link: the record this link beat; omitted for the first record."),
+				"more":          {Type: "integer", Minimum: &zero, Description: "Further nodes of the same kind folded into this moment by the per-kind cap; omitted when 0."},
+			},
+		},
+		"MomentsResponse": {
+			Type:       "object",
+			Properties: map[string]*openAPISchema{"moments": {Type: "array", Items: openAPIRef("Moment"), Description: "Newest first."}},
+		},
 	}
 }
 
@@ -1259,6 +1310,9 @@ func componentSchemas() map[string]interface{} {
 		schemas[name] = schema
 	}
 	for name, schema := range regionsObservedSchemas() {
+		schemas[name] = schema
+	}
+	for name, schema := range momentSchemas() {
 		schemas[name] = schema
 	}
 	for name, schema := range heardBySchemas() {

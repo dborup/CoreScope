@@ -1658,6 +1658,9 @@ type ClientConfigResponse struct {
 	MapDarkTileProvider string                 `json:"mapDarkTileProvider,omitempty"` // deprecated. TODO: remove after v3.5.0
 	Customizer          CustomizerClientConfig `json:"customizer"`
 	ClientRxCoverage    bool                   `json:"clientRxCoverage"`
+	// Moments says whether the server emits #881 moments ({"type":"moment"}
+	// WebSocket frames, GET /api/moments). Omitted when moments are off.
+	Moments *MomentsClientConfig `json:"moments,omitempty"`
 	// GeoFilter is the configured geo_filter box/polygon (#730), exposed
 	// for client-side domestic/foreign classification — see
 	// nodePassesGeoFilter (public/app.js) and geo_filter.go. Omitted when

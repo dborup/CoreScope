@@ -79,6 +79,9 @@ type Server struct {
 	// can't race on the .tmp file or interleave disk/memory updates.
 	saveMu sync.Mutex
 
+	// #881 moments detector; nil while moments are off (moments.go).
+	moments atomic.Pointer[momentsDetector]
+
 	// Neighbor affinity graph: background-built, with one synchronous first build.
 	neighborBuildMu sync.Mutex                    // serializes initial and background builds
 	neighborGraph   atomic.Pointer[NeighborGraph] // published snapshot; readers never lock
@@ -495,6 +498,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/channel-proposals/requests/{requestId}", s.handleChannelProposalRequest).Methods("GET")
 	r.HandleFunc("/api/antenna-claims/config", s.handleAntennaClaimConfig).Methods("GET")
 	r.HandleFunc("/api/nodes/{pubkey}/antenna-claims", s.handleAntennaClaimSubmit).Methods("POST")
+	r.HandleFunc("/api/nodes/{pubkey}/antenna", s.handleNodeAntenna).Methods("GET")
 	r.HandleFunc("/api/antenna-claims/requests/{requestId}", s.handleAntennaClaimRequest).Methods("GET")
 	r.HandleFunc("/api/known-channels", s.handleKnownChannels).Methods("GET")
 	r.HandleFunc("/api/observers/metrics/summary", s.handleMetricsSummary).Methods("GET")
@@ -508,6 +512,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	// swallowed by it (id="neighbors") instead of reaching this handler.
 	r.HandleFunc("/api/observers/neighbors", s.handleAllObserverNeighbors).Methods("GET")
 	r.HandleFunc("/api/analytics/new-nodes", s.handleNewNodes).Methods("GET")
+	r.HandleFunc("/api/moments", s.handleMoments).Methods("GET")
 	r.HandleFunc("/api/analytics/node-changes", s.handleNodeChanges).Methods("GET")
 	r.HandleFunc("/api/analytics/network-digest", s.handleNetworkDigest).Methods("GET")
 	r.HandleFunc("/api/observers/{id}", s.handleObserverDetail).Methods("GET")
@@ -680,6 +685,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		Tiles:               s.cfg.Tiles,
 		Customizer:          CustomizerClientConfig{DisabledTabs: disabledTabs},
 		ClientRxCoverage:    s.cfg.ClientRxCoverageEnabled(),
+		Moments:             s.cfg.momentsClientConfig(),
 		GeoFilter:           s.getGeoFilter(),
 		Privacy:             privacy,
 		EstimatedPositions:  EstimatedPositionsClientConfig{Enabled: s.estimatedPositionsEnabled()},

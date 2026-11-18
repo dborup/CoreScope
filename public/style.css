@@ -208,6 +208,10 @@
      these). Dark values live in BOTH dark blocks below. */
   --mast-site: #0e7490;                          /* every antenna site */
   --mast-interference: #c2410c;                  /* 700/800/900 MHz ring */
+  /* #789 M3 — the badge on an antenna height the node's owner set (Path
+     profile, node page). Follows --success in light and dark alike unless
+     the customizer sets ownerBadge. */
+  --owner-badge: var(--success);
   /* #792 — the colour-by-elevation ramp, one variable per stop in metres.
      They are the colours the server renders the tiles with
      (internal/dhm.ElevationRamp; cmd/server's
@@ -1091,12 +1095,13 @@ img.brand-logo {
    tap-to-scroll works because <body> is the scroll container.  Pages that need
    a fixed-height container (maps, virtual-scroll, split-panels) add
    .app-fixed via the router so their children can use height:100%. */
-#app { min-height: calc(100vh - 52px); min-height: calc(100dvh - 52px); }
+#app { min-height: calc(100vh - 52px - var(--warmup-pills-h, 0px)); min-height: calc(100dvh - 52px - var(--warmup-pills-h, 0px)); }
 /* #1174 mesh-op review: subtract --bottom-nav-reserve so /map and the
  * other fixed-height pages (packets, nodes, channels, audio-lab) do not
  * have their last 56px covered by the bottom-nav at ≤768. The token is
  * 0px at desktop so wide-viewport behavior is unchanged. */
-#app.app-fixed { height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px)); height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px)); min-height: 0; overflow: hidden; }
+/* #894: also subtract --warmup-pills-h, the stale-source pill row (0px when hidden). */
+#app.app-fixed { height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px)); height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px)); min-height: 0; overflow: hidden; }
 
 .split-layout {
   display: flex; height: 100%; overflow: hidden;
@@ -6329,6 +6334,64 @@ body.embed #app.app-fixed {
   padding: 0.1rem 0;
 }
 
+/* #894 — stale MQTT source: compact dismissible pill(s), not the banner.
+ * The row sits in normal flow right after .top-nav (warmup-banner.js inserts
+ * it there), right-aligned, so it takes its own row and never overlays page
+ * content. No position / z-index on purpose. Fixed-height pages subtract
+ * its height through --warmup-pills-h (set from JS, 0px when hidden).
+ * Colours: theme variables only. */
+.warmup-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px 6px;
+  padding: 4px var(--gutter, 8px);
+  min-width: 0;
+}
+.warmup-pills--hidden { display: none; }
+/* Embedded views have no nav and claim the full viewport. */
+body.embed .warmup-pills { display: none !important; }
+.warmup-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding: 0 0 0 12px;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--warning);
+  border-radius: 22px;
+  box-shadow: 0 2px 6px var(--shadow);
+  font-size: 0.8rem;
+  line-height: 1.3;
+}
+.warmup-pill__text { min-width: 0; overflow-wrap: anywhere; }
+.warmup-pill__close {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 50%;
+}
+.warmup-pill__close:focus-visible { outline: 2px solid var(--warning); outline-offset: -4px; }
+.warmup-pill__more {
+  padding: 2px 10px;
+  font-size: 0.75rem;
+  color: var(--text);
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
 /* ============================================================
  * #1715 — Neighbor-graph role swatches (`#ngRoleChecks` labels).
  *
@@ -6918,7 +6981,7 @@ body.embed #app.app-fixed {
 .tp-hbadge-operator { border-color: var(--accent, var(--link-color)); color: var(--text); }
 .tp-hbadge-estimate { border-style: dashed; border-color: var(--accent, var(--link-color)); color: var(--text); }
 .tp-hbadge-yours { border-color: var(--success); color: var(--text); }
-.tp-hbadge-owner { border-width: 2px; border-color: var(--success); color: var(--text); }
+.tp-hbadge-owner { border-width: 2px; border-color: var(--owner-badge); color: var(--text); }
 .tp-hbadge-link { border-color: var(--border); color: var(--text); }
 
 /* #681 M5 — "Terrain profile to…" on node detail: a 48 px target in both

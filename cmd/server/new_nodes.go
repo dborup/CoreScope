@@ -43,6 +43,17 @@ type NewNodeEntry struct {
 // anything cleverer.
 const newNodesSQLFetchCap = 500
 
+// inactiveNodeLastSeenSQL is the shared "returning vs new" rule (see
+// computeNewNodes below): a correlated subquery that is NULL when the nodes
+// row aliased alias has no inactive_nodes row -- a genuinely new key -- and
+// the retired row's last_seen (empty when unknown) when it has one, i.e. the
+// key was seen before, was pruned for inactivity and has come back. Used by
+// Tools > New Nodes and the #881 moments detector (moments.go), so both
+// draw the line in the same place. One primary-key lookup per row.
+func inactiveNodeLastSeenSQL(alias string) string {
+	return "(SELECT COALESCE(i.last_seen, '') FROM inactive_nodes i WHERE i.public_key = " + alias + ".public_key)"
+}
+
 // computeNewNodes returns the most recently first-seen nodes, newest
 // first, capped at limit (clamped to [1, newNodesSQLFetchCap]).
 //
@@ -65,7 +76,7 @@ func (s *Server) computeNewNodes(limit int) ([]NewNodeEntry, error) {
 	rows, err := s.db.conn.Query(`
 		SELECT n.public_key, n.name, n.role, n.lat, n.lon, n.first_seen, n.foreign_advert
 		FROM nodes n
-		WHERE NOT EXISTS (SELECT 1 FROM inactive_nodes i WHERE i.public_key = n.public_key)
+		WHERE `+inactiveNodeLastSeenSQL("n")+` IS NULL
 		  AND n.first_seen IS NOT NULL AND n.first_seen != ''
 		ORDER BY n.first_seen DESC
 		LIMIT ?`, newNodesSQLFetchCap)
