@@ -208,6 +208,10 @@
      these). Dark values live in BOTH dark blocks below. */
   --mast-site: #0e7490;                          /* every antenna site */
   --mast-interference: #c2410c;                  /* 700/800/900 MHz ring */
+  /* #789 M3 — the badge on an antenna height the node's owner set (Path
+     profile, node page). Follows --success in light and dark alike unless
+     the customizer sets ownerBadge. */
+  --owner-badge: var(--success);
   /* #792 — the colour-by-elevation ramp, one variable per stop in metres.
      They are the colours the server renders the tiles with
      (internal/dhm.ElevationRamp; cmd/server's
@@ -6971,7 +6975,7 @@ body.embed .warmup-pills { display: none !important; }
 .tp-hbadge-operator { border-color: var(--accent, var(--link-color)); color: var(--text); }
 .tp-hbadge-estimate { border-style: dashed; border-color: var(--accent, var(--link-color)); color: var(--text); }
 .tp-hbadge-yours { border-color: var(--success); color: var(--text); }
-.tp-hbadge-owner { border-width: 2px; border-color: var(--success); color: var(--text); }
+.tp-hbadge-owner { border-width: 2px; border-color: var(--owner-badge); color: var(--text); }
 .tp-hbadge-link { border-color: var(--border); color: var(--text); }
 
 /* #681 M5 — "Terrain profile to…" on node detail: a 48 px target in both

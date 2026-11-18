@@ -122,6 +122,7 @@ run test-rx-coverage-escape.js
 run test-issue-125-live-toggles-wiring.js
 run test-issue-2052-touch-target-css.js
 run test-channel-proposals.js
+run test-admin-key.js
 run test-antenna-claims.js
 run test-packet-detail-channel-xss.js
 run test-channels-name-escaping.js
@@ -164,6 +165,7 @@ run test-issue-812-m4-packet-share.js
 run test-issue-812-m4-share-customizer.js
 run test-issue-812-m4-docs.js
 run test-issue-727-m4-share-customizer.js
+run test-issue-789-m3-customizer.js
 run test-issue-781-profile-cursor.js
 run test-issue-839-profile-ux.js
 run test-issue-737-skraafoto-viewer.js
@@ -176,6 +178,7 @@ run test-issue-728-ortho-base.js
 run test-issue-728-dhm-tile-retry.js
 run test-issue-728-ortho-followups.js
 run test-packets-window-pinned.js
+run test-tap-when-settled.js
 run test-issue-733-dhm-credit.js
 run test-issue-734-dhm-overlays.js
 run test-issue-734-customizer-overlays.js

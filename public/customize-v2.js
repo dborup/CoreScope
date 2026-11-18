@@ -61,6 +61,9 @@
     fresnel60: '--fresnel-60', profileBlocked: '--profile-blocked',
     // #730 M3 — the surface band by class.
     terrainBuilding: '--terrain-building', terrainVegetation: '--terrain-vegetation',
+    // #789 M3 — the badge of a height the node's owner set (Path profile and
+    // the node page's antenna section).
+    ownerBadge: '--owner-badge',
     // #724 M3 — the antenna sites map layer (canvas markers + popup).
     mastSite: '--mast-site', mastInterference: '--mast-interference',
     font: '--font', mono: '--mono'
@@ -70,7 +73,7 @@
   // so they must stay out of preset detection: an operator who recolours
   // the profile chart has not stopped using the preset they picked.
   var TERRAIN_COLOR_KEYS = ['terrainFill', 'terrainClutter', 'losLine', 'fresnel100', 'fresnel60', 'profileBlocked',
-    'terrainBuilding', 'terrainVegetation'];
+    'terrainBuilding', 'terrainVegetation', 'ownerBadge'];
   // #724 M3 — likewise outside preset detection: no preset defines them.
   var MASTS_COLOR_KEYS = ['mastSite', 'mastInterference'];
 
@@ -339,6 +342,7 @@
     losLine: 'Line of Sight', fresnel100: 'Fresnel Zone', fresnel60: 'Fresnel 60 %',
     profileBlocked: 'Obstruction',
     terrainBuilding: 'Buildings (DSM)', terrainVegetation: 'Trees/other (DSM)',
+    ownerBadge: 'Owner Height Badge',
     mastSite: 'Antenna Site', mastInterference: 'Interference Ring',
     font: 'Body Font', mono: 'Mono Font'
   };
@@ -366,6 +370,7 @@
     profileBlocked: 'Path profile: where terrain rises into the zone',
     terrainBuilding: 'Path profile: the surface inside a building footprint, where buildings are told from trees',
     terrainVegetation: 'Path profile: the raised surface with no building footprint — trees or other',
+    ownerBadge: 'Path profile and node page: the badge on an antenna height the node\u2019s owner set',
     mastSite: 'Map: every Mastedatabasen antenna site (mast, tower or rooftop)',
     mastInterference: 'Map: the ring around sites with a 700/800/900 MHz transmitter',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
@@ -506,6 +511,20 @@
   function shareSettings(effectiveConfig) {
     var src = (effectiveConfig && effectiveConfig.terrain) || {};
     return { shareLinks: src[TERRAIN_SHARE_KEY] !== false };
+  }
+
+  // ── #789 M3 — prefer owner heights ──
+  // terrain.preferOwnerHeights is the viewer's own switch: on (the
+  // default), an antenna height the node's owner proved and this site
+  // approved stands against this section's role heights; off, the role
+  // heights replace it like a server default. It changes which heights the
+  // Path profile asks for, so a change re-measures an open profile.
+  var TERRAIN_OWNER_KEY = 'preferOwnerHeights';
+
+  /** The effective owner switch: on unless this section says false. */
+  function ownerSettings(effectiveConfig) {
+    var src = (effectiveConfig && effectiveConfig.terrain) || {};
+    return { preferOwnerHeights: src[TERRAIN_OWNER_KEY] !== false };
   }
 
   // ── #724 M5 — antenna sites settings ──
@@ -824,6 +843,14 @@
             tOut[TERRAIN_SHARE_KEY] = tIn[TERRAIN_SHARE_KEY];
           } else {
             console.warn('[customizer-v2] Invalid terrain share setting rejected:', tIn[TERRAIN_SHARE_KEY]);
+          }
+        }
+        // #789 M3 — the owner switch, a boolean and nothing else.
+        if (tIn[TERRAIN_OWNER_KEY] != null) {
+          if (typeof tIn[TERRAIN_OWNER_KEY] === 'boolean') {
+            tOut[TERRAIN_OWNER_KEY] = tIn[TERRAIN_OWNER_KEY];
+          } else {
+            console.warn('[customizer-v2] Invalid terrain owner-height setting rejected:', tIn[TERRAIN_OWNER_KEY]);
           }
         }
         if (Object.keys(tOut).length) clean[key] = tOut;
@@ -1148,7 +1175,7 @@
      * field handlers because setOverride is debounced — a listener fired
      * from there would still read the previous settings off SITE_CONFIG.
      * The first run only records the baseline. */
-    var terrainNow = JSON.stringify(terrainSettings(effectiveConfig));
+    var terrainNow = JSON.stringify([terrainSettings(effectiveConfig), ownerSettings(effectiveConfig)]);
     if (_lastTerrain !== null && _lastTerrain !== terrainNow) {
       try {
         window.dispatchEvent(new CustomEvent('terrain-defaults-changed'));
@@ -1412,7 +1439,7 @@
             if (TERRAIN_MODELS.indexOf(obj[key][trk]) === -1) {
               errors.push('Invalid terrain model: "' + obj[key][trk] + '" \u2014 must be dtm or both');
             }
-          } else if (trk === TERRAIN_SHARE_KEY) {
+          } else if (trk === TERRAIN_SHARE_KEY || trk === TERRAIN_OWNER_KEY) {
             if (typeof obj[key][trk] !== 'boolean') {
               errors.push('Invalid terrain setting: terrain.' + trk + ' = "' + obj[key][trk] + '" \u2014 must be true or false');
             }
@@ -2219,7 +2246,17 @@
           modelOpt('dtm', 'Terrain only') +
         '</select>' +
         '<div class="cust-hint">Terrain always decides the verdict. Surface is drawn for information and costs a second elevation request.</div></div>' +
+      _renderOwnerSetting() +
       _renderShareSettings(tp, '<p class="cust-section-title" style="font-size:13px;margin:16px 0 6px">Share previews</p>');
+  }
+
+  // #789 M3 — the owner switch, below the heights it relates to.
+  function _renderOwnerSetting() {
+    var on = ownerSettings(_getEffective()).preferOwnerHeights;
+    return '<div class="cust-field" style="margin-top:10px"><label class="cust-check" for="cv2-terrain-owner" style="display:flex;align-items:center;gap:8px;min-height:48px;cursor:pointer">' +
+        '<input type="checkbox" id="cv2-terrain-owner" data-cv2-terrain-owner aria-describedby="cv2-terrain-owner-hint"' + (on ? ' checked' : '') + ' style="width:20px;height:20px">' +
+        '<span>Prefer owner heights' + _overrideDot('terrain', TERRAIN_OWNER_KEY) + '</span></label>' +
+      '<div class="cust-hint" id="cv2-terrain-owner-hint">On: a height the node\u2019s owner proved, and this site approved, stands against the role heights above. Off: the role heights above replace it.</div></div>';
   }
 
   // ── #727 M4 / #811 M4 / #812 M4 Share previews ──
@@ -3227,6 +3264,14 @@
       });
     });
 
+    // #789 M3 — the owner switch. On is the default, so only off is stored.
+    container.querySelectorAll('[data-cv2-terrain-owner]').forEach(function (box) {
+      box.addEventListener('change', function () {
+        if (box.checked) clearOverride('terrain', TERRAIN_OWNER_KEY);
+        else setOverride('terrain', TERRAIN_OWNER_KEY, false);
+      });
+    });
+
     // #724 M5 — antenna sites settings. A value back at the operator's is
     // a cleared override, like the terrain defaults.
     container.querySelectorAll('[data-cv2-masts]').forEach(function (inp) {
@@ -4000,6 +4045,9 @@
     // #727 M4 — exposed for tests; see test-issue-727-m4-share-customizer.js.
     TERRAIN_SHARE_KEY: TERRAIN_SHARE_KEY,
     shareSettings: shareSettings,
+    // #789 M3 — exposed for tests; see test-issue-789-m3-customizer.js.
+    TERRAIN_OWNER_KEY: TERRAIN_OWNER_KEY,
+    ownerSettings: ownerSettings,
     MASTS_COLOR_KEYS: MASTS_COLOR_KEYS,
     VALID_SECTIONS: VALID_SECTIONS,
     isValidAntennaHeight: isValidAntennaHeight,

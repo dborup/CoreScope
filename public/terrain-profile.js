@@ -82,7 +82,9 @@
   var DEFAULT_MODEL = 'both';
   /* The antenna sources the server reports when it had nothing but its own
    * built-in default — the only ones a customizer default may replace.
-   * An owner height (#789 M2) is a proven measurement, never replaced. */
+   * An owner height (#789 M2) is a proven measurement, replaced only when
+   * the viewer turned "Prefer owner heights" off (#789 M3,
+   * terrain.preferOwnerHeights; see promotable). */
   var PROMOTABLE_SOURCES = { 'role-default': true, 'point-default': true };
   /* #789 M1: the server floors its surface-model estimate at the role
    * height that would otherwise apply, max(role, surface + 2). The
@@ -91,6 +93,13 @@
   var FLOORED_SOURCES = { 'dsm-estimate': true };
 
   function validModel(m) { return m === 'dtm' || m === 'both'; }
+
+  /* promotable reports whether a customizer default may replace a height
+   * of this source outright: a server default, or an owner height when
+   * the viewer prefers their own defaults (defs.preferOwnerHeights false). */
+  function promotable(source, defs) {
+    return !!PROMOTABLE_SOURCES[source] || (source === 'owner' && !!defs && defs.preferOwnerHeights === false);
+  }
 
   // ── Numbers ──────────────────────────────────────────────────────────────
 
@@ -123,15 +132,17 @@
   /* themeDefaults resolves the customizer's terrain section. Pass the raw
    * section to resolve a specific one; omit it to read the live config.
    * Junk is not a default: an unusable value falls through to the server.
-   * shareLinks is the viewer's preview-link switch (#727 M4): only an
-   * explicit false turns it off. */
+   * shareLinks is the viewer's preview-link switch (#727 M4) and
+   * preferOwnerHeights the owner-height switch (#789 M3): only an explicit
+   * false turns either off. */
   function themeDefaults(section) {
     var src = (section === undefined)
       ? (global.SITE_CONFIG && global.SITE_CONFIG.terrain)
       : section;
-    var out = { model: DEFAULT_MODEL, heights: {}, shareLinks: true };
+    var out = { model: DEFAULT_MODEL, heights: {}, shareLinks: true, preferOwnerHeights: true };
     if (!src || typeof src !== 'object') return out;
     if (src.shareLinks === false) out.shareLinks = false;
+    if (src.preferOwnerHeights === false) out.preferOwnerHeights = false;
     if (validModel(src.model)) out.model = src.model;
     Object.keys(THEME_HEIGHT_KEYS).forEach(function (role) {
       var h = themeHeightOf(src[THEME_HEIGHT_KEYS[role]]);
@@ -155,12 +166,27 @@
    * height, exactly as cmd/server/terrain_profile.go does. */
   function themeHeight(end, defaults) {
     if (!end || !defaults || !defaults.heights) return null;
-    var role = POINT_STORAGE_KEY;
-    if (end.kind === 'node') {
-      role = Object.prototype.hasOwnProperty.call(THEME_HEIGHT_KEYS, end.role) ? end.role : 'companion';
-    }
-    var v = defaults.heights[role];
+    var v = defaults.heights[heightKey(end)];
     return v === undefined ? null : v;
+  }
+
+  /* heightKey is the role an endpoint's height is looked up under. */
+  function heightKey(end) {
+    if (end.kind !== 'node') return POINT_STORAGE_KEY;
+    return Object.prototype.hasOwnProperty.call(THEME_HEIGHT_KEYS, end.role) ? end.role : 'companion';
+  }
+
+  /* roleHeight is the role height that replaces an owner height when the
+   * viewer turned "Prefer owner heights" off (#789 M3): the customizer's
+   * role height, else the built-in one the customizer shows for it
+   * (MCAntennaHeight.ROLE_DEFAULTS). An untouched role height is not
+   * stored, so themeHeight alone has nothing to offer there. */
+  function roleHeight(end, defaults) {
+    var h = themeHeight(end, defaults);
+    if (h !== null || !end) return h;
+    var builtIn = global.MCAntennaHeight && global.MCAntennaHeight.ROLE_DEFAULTS;
+    var v = builtIn ? builtIn[heightKey(end)] : undefined;
+    return typeof v === 'number' ? v : null;
   }
 
   function boundedNumber(v, lo, hi, places) {
@@ -1735,9 +1761,12 @@
       if (!end || themeH[side] !== null) return false;
       if ((side === 'a' ? state.ha : state.hb) !== null) return false;
       var floored = FLOORED_SOURCES[end.antennaSource];
-      if (!PROMOTABLE_SOURCES[end.antennaSource] && !floored) return false;
-      var h = themeHeight(end, defs);
-      if (h === null || h === clampHeight(end.antennaM)) return false;
+      if (!promotable(end.antennaSource, defs) && !floored) return false;
+      /* An owner height the viewer set aside takes the role height even
+       * when the two are equal: the badge must not say "owner" (#789 M3). */
+      var owner = end.antennaSource === 'owner';
+      var h = owner ? roleHeight(end, defs) : themeHeight(end, defs);
+      if (h === null || (!owner && h === clampHeight(end.antennaM))) return false;
       if (floored && !(h > clampHeight(end.antennaM))) return false;
       themeH[side] = h;
       origin[side] = 'theme';
@@ -2773,7 +2802,9 @@
     requestURL: requestURL,
     clampHeight: clampHeight,
     themeDefaults: themeDefaults,
+    promotable: promotable,
     themeHeight: themeHeight,
+    roleHeight: roleHeight,
     sourceLabel: sourceLabel,
     assumedHeight: assumedHeight,
     recallHeight: recallHeight,
