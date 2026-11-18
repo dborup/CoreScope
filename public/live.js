@@ -5164,12 +5164,13 @@
     return _followSkewPromise;
   }
 
-  function followIcon(name) {
+  // iconId is always a literal Phosphor sprite id from this file.
+  function followIcon(iconId) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'ph-icon');
     svg.setAttribute('aria-hidden', 'true');
     const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
-    use.setAttribute('href', '/icons/phosphor-sprite.svg#' + name);
+    use.setAttribute('href', '/icons/phosphor-sprite.svg#' + iconId);
     svg.appendChild(use);
     return svg;
   }
