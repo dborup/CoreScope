@@ -4,10 +4,12 @@
  * The gradient is a single hue family (violet -> magenta) that the "Colour by
  * elevation" ramp does not use, so a hot heat area is never mistaken for high
  * terrain. Its five stops are theme tokens, read when the layer is built:
- *   --heat-1..5     style.css (:root and both dark blocks), the customizer
- *                   (THEME_CSS_MAP heat1..5)
- *   --mc-heat-1..5  set by a colour-blind preset (cb-presets.js heatRamp);
- *                   wins over --heat-N while a preset is active
+ *   --heat-1..5          style.css (:root and both dark blocks), the
+ *                        customizer (THEME_CSS_MAP heat1..5)
+ *   --mc-heat-light-1..5 set by a colour-blind preset (cb-presets.js
+ *   --mc-heat-dark-1..5  heatRamp), one ramp per base-map mode
+ *   --heat-stop-1..5     what this helper reads: style.css resolves it to the
+ *                        preset's ramp for the current mode, else --heat-N
  * A missing or unusable token falls back to DEFAULTS, so the layer is never
  * left without a gradient.
  *
@@ -19,7 +21,8 @@
   'use strict';
 
   var STOPS = [0.2, 0.4, 0.6, 0.8, 1];
-  // The last-resort values; style.css carries the same light defaults.
+  // The last-resort values: the :root --heat-N in style.css (a unit test
+  // keeps them equal).
   var DEFAULTS = ['#5b21b6', '#7e22ce', '#a21caf', '#c026d3', '#e879f9'];
   var COLOR_RE = /^(#[0-9a-fA-F]{3,8}|rgba?\([0-9\s,.%\/]+\)|hsla?\([0-9\s,.%\/deg]+\))$/;
 
@@ -33,7 +36,7 @@
     try { cs = getComputedStyle(document.documentElement); } catch (e) {}
     var out = [];
     for (var i = 1; i <= 5; i++) {
-      out.push(token(cs, '--mc-heat-' + i) || token(cs, '--heat-' + i) || DEFAULTS[i - 1]);
+      out.push(token(cs, '--heat-stop-' + i) || DEFAULTS[i - 1]);
     }
     return out;
   }

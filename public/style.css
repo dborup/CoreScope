@@ -215,6 +215,14 @@
   --heat-3: #a21caf;
   --heat-4: #c026d3;
   --heat-5: #e879f9;
+  /* The stop in effect: a colour-blind preset's ramp for this mode
+     (cb-presets.js heatRamp) wins over the theme's. Dark blocks pick the
+     preset's dark ramp. */
+  --heat-stop-1: var(--mc-heat-light-1, var(--heat-1));
+  --heat-stop-2: var(--mc-heat-light-2, var(--heat-2));
+  --heat-stop-3: var(--mc-heat-light-3, var(--heat-3));
+  --heat-stop-4: var(--mc-heat-light-4, var(--heat-4));
+  --heat-stop-5: var(--mc-heat-light-5, var(--heat-5));
   /* #789 M3 — the badge on an antenna height the node's owner set (Path
      profile, node page). Follows --success in light and dark alike unless
      the customizer sets ownerBadge. */
@@ -501,6 +509,11 @@
     --heat-3: #c026d3;
     --heat-4: #d946ef;
     --heat-5: #f0abfc;
+    --heat-stop-1: var(--mc-heat-dark-1, var(--heat-1));
+    --heat-stop-2: var(--mc-heat-dark-2, var(--heat-2));
+    --heat-stop-3: var(--mc-heat-dark-3, var(--heat-3));
+    --heat-stop-4: var(--mc-heat-dark-4, var(--heat-4));
+    --heat-stop-5: var(--mc-heat-dark-5, var(--heat-5));
     --status-green: #22c55e;
     /* #1719 — on dark card-bg (#232340) #22c55e gives 6.65:1, AA pass.
        Keep the bright hue for text rather than darkening it. */
@@ -586,6 +599,11 @@
   --heat-3: #c026d3;
   --heat-4: #d946ef;
   --heat-5: #f0abfc;
+  --heat-stop-1: var(--mc-heat-dark-1, var(--heat-1));
+  --heat-stop-2: var(--mc-heat-dark-2, var(--heat-2));
+  --heat-stop-3: var(--mc-heat-dark-3, var(--heat-3));
+  --heat-stop-4: var(--mc-heat-dark-4, var(--heat-4));
+  --heat-stop-5: var(--mc-heat-dark-5, var(--heat-5));
   /* Brighter link-strength hues for contrast on dark map tiles + surfaces. */
   --link-strong: #3fb950;
   --link-medium: #d29922;

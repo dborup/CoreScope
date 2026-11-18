@@ -79,7 +79,7 @@
   // #724 M3 — likewise outside preset detection: no preset defines them.
   var MASTS_COLOR_KEYS = ['mastSite', 'mastInterference'];
   // #914 — likewise: the heat map gradient; colour-blind presets set it
-  // through --mc-heat-N, not through these keys.
+  // through --mc-heat-{light,dark}-N, not through these keys.
   var HEAT_COLOR_KEYS = ['heat1', 'heat2', 'heat3', 'heat4', 'heat5'];
 
   var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) {

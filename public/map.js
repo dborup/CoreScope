@@ -3715,7 +3715,7 @@
       // the heat gradient rebuilds the layer; no reload.
       _heatUnwatch = HeatGradient.watch(function () {
         if (!heatLayer || !map) return;
-        map.removeLayer(heatLayer); heatLayer = null; window._meshcoreHeatLayer = null;
+        toggleHeatmap(false); // removes the old layer: one heat canvas, never two
         toggleHeatmap(true);
       });
       return init(app, routeParam);

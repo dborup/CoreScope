@@ -9,14 +9,20 @@
  *   2. Live: the same, through the same helper;
  *   3. a customizer change of --heat-5 rebuilds the layer without a reload
  *      (a window marker survives) and the new palette is drawn; clearing it
- *      brings the default back;
- *   4. a colour-blind preset rebuilds it too and the default preset / clear
- *      restores the theme's;
+ *      brings the default back; Map and Live;
+ *   4. the achromatopsia preset rebuilds it with its light ramp, the dark
+ *      toggle switches it to its dark ramp, clearing restores the theme's;
+ *      a preset without a heat ramp (deut) leaves the layer alone; Map and
+ *      Live;
  *   5. the dark-mode toggle rebuilds it with the dark tokens;
- *   6. the Display tab lists the five Heat map colour rows;
- *   7. at 375x560 (touch, real taps) the Heat map checkbox is tapped off
- *      and on in the Map controls and the layer returns with the tokens;
- *   8. no console errors.
+ *   6. after every rebuild above the page holds exactly one heat canvas (an
+ *      old layer left under the new one goes red; #917 review finding 3);
+ *   7. the Theme tab lists the five Heat map colour rows;
+ *   8. at 375x560 (touch), from a map with the heat map off, real taps open
+ *      the Map controls, the Display section and the Heat map checkbox; each
+ *      target is the topmost element at its tap point; the layer comes with
+ *      the tokens and goes again;
+ *   9. no console errors.
  *
  * Usage:  BASE_URL=http://localhost:13700 node test-issue-914-heat-palette-e2e.js
  */
@@ -47,9 +53,10 @@ const READ = (global) => `(() => {
   const l = window.${global};
   if (!l || !l._heat || !l._heat._grad) return null;
   const g = l._heat._grad, cs = getComputedStyle(document.documentElement);
-  const tok = [1, 2, 3, 4, 5].map((n) => (cs.getPropertyValue('--mc-heat-' + n).trim() || cs.getPropertyValue('--heat-' + n).trim()));
+  const tok = [1, 2, 3, 4, 5].map((n) => cs.getPropertyValue('--heat-stop-' + n).trim());
   const px = (i) => '#' + [g[i], g[i + 1], g[i + 2]].map((v) => v.toString(16).padStart(2, '0')).join('');
-  return { grad: l.options.gradient, tok, top: px(255 * 4), low: px(51 * 4), id: l._leaflet_id };
+  return { grad: l.options.gradient, tok, top: px(255 * 4), low: px(51 * 4), id: l._leaflet_id,
+    canvases: document.querySelectorAll('canvas.leaflet-heatmap-layer').length };
 })()`;
 
 (async () => {
@@ -70,12 +77,12 @@ const READ = (global) => `(() => {
     });
     await ctx.addInitScript((d) => {
       try {
-        localStorage.setItem('meshcore-theme', d ? 'dark' : 'light');
-        localStorage.setItem('meshcore-map-heatmap', 'true');
-        localStorage.setItem('meshcore-live-heatmap', 'true');
+        localStorage.setItem('meshcore-theme', d.dark ? 'dark' : 'light');
+        localStorage.setItem('meshcore-map-heatmap', d.heat ? 'true' : 'false');
+        localStorage.setItem('meshcore-live-heatmap', d.heat ? 'true' : 'false');
         localStorage.removeItem('meshcore-cb-preset');
       } catch (e) {}
-    }, !!o.dark);
+    }, { dark: !!o.dark, heat: o.heat !== false });
     const page = await ctx.newPage();
     page.on('console', (m) => { if (m.type() === 'error' && !/tile|net::ERR|Failed to load resource/i.test(m.text())) errors.push(m.text()); });
     page.on('pageerror', (e) => errors.push(String(e)));
@@ -95,7 +102,20 @@ const READ = (global) => `(() => {
       assert(h >= 255 && h <= 325, label + ': token ' + r.tok[i] + ' hue ' + h.toFixed(0) + ' is not violet-magenta');
     });
     assert(near(r.top, r.tok[4]), label + ': drawn top colour ' + r.top + ' != --heat-5 ' + r.tok[4]);
+    assert(r.canvases === 1, label + ': ' + r.canvases + ' heat canvases, want 1');
   }
+  // A preset ramp: the layer and the drawn palette follow the --heat-stop-N
+  // tokens, which must be the preset's ramp for the mode.
+  function checkRamp(r, ramp, label) {
+    assert(r, label + ': no heat layer');
+    ['0.2', '0.4', '0.6', '0.8', '1'].forEach((k, i) => {
+      assert(r.tok[i].toLowerCase() === ramp[i].toLowerCase(), label + ': token ' + (i + 1) + ' ' + r.tok[i] + ' != ' + ramp[i]);
+      assert(r.grad[k].toLowerCase() === ramp[i].toLowerCase(), label + ': stop ' + k + ' ' + r.grad[k] + ' != ' + ramp[i]);
+    });
+    assert(near(r.top, ramp[4]), label + ': drawn top colour ' + r.top + ' != ' + ramp[4]);
+    assert(r.canvases === 1, label + ': ' + r.canvases + ' heat canvases, want 1');
+  }
+  const darkToggle = (page) => page.evaluate(() => { (document.getElementById('darkModeToggle') || document.getElementById('darkModeCheckbox')).click(); });
 
   let lightTop;
   for (const dark of [false, true]) {
@@ -126,6 +146,7 @@ const READ = (global) => `(() => {
       await page.waitForFunction(`window.${global} && window.${global}._leaflet_id !== ${before.id} && window.${global}.options.gradient['1'] === '#00aa11'`, null, { timeout: 8000 });
       const after = await read(page, global);
       assert(near(after.top, '#00aa11'), 'drawn top colour ' + after.top);
+      assert(after.canvases === 1, after.canvases + ' heat canvases after the change, want 1');
       assert(await page.evaluate(() => window.__noReload === 1), 'the page reloaded');
       await page.evaluate(() => window._customizerV2.clearOverride('theme', 'heat5'));
       await page.waitForFunction(`window.${global}.options.gradient['1'] !== '#00aa11'`, null, { timeout: 8000 });
@@ -134,25 +155,40 @@ const READ = (global) => `(() => {
     });
   }
 
-  await step('Map: a colour-blind preset rebuilds the layer; clearing restores the theme palette', async () => {
-    const { ctx, page } = await open('map');
-    await waitLayer(page, '_meshcoreHeatLayer');
-    const before = await read(page, '_meshcoreHeatLayer');
-    await page.evaluate(() => window.MeshCorePresets.applyPreset('deut'));
-    await page.waitForFunction(`window._meshcoreHeatLayer._leaflet_id !== ${before.id}`, null, { timeout: 8000 });
-    const p = await read(page, '_meshcoreHeatLayer');
-    const deut = await page.evaluate(() => window.MeshCorePresets.list.find((x) => x.id === 'deut').heatRamp);
-    assert(p.grad['1'].toLowerCase() === deut[4].toLowerCase(), 'preset top ' + p.grad['1']);
-    await page.evaluate(() => window.MeshCorePresets.clearPreset());
-    await page.waitForFunction(`window._meshcoreHeatLayer.options.gradient['1'].toLowerCase() === '${before.grad['1'].toLowerCase()}'`, null, { timeout: 8000 });
-    await ctx.close();
-  });
+  for (const [route, global] of [['map', '_meshcoreHeatLayer'], ['live', '_meshcoreLiveHeatLayer']]) {
+    await step(route + ': the achromatopsia preset rebuilds the layer per mode; deut leaves it; clearing restores the theme', async () => {
+      const { ctx, page } = await open(route);
+      await waitLayer(page, global);
+      const theme = await read(page, global);
+      const ramp = await page.evaluate(() => window.MeshCorePresets.list.find((x) => x.id === 'achromat').heatRamp);
+      await page.evaluate(() => window.MeshCorePresets.applyPreset('achromat'));
+      await page.waitForFunction(`window.${global}._leaflet_id !== ${theme.id}`, null, { timeout: 8000 });
+      const light = await read(page, global);
+      checkRamp(light, ramp.light, route + ' achromat light');
+      await darkToggle(page);
+      await page.waitForFunction(`window.${global}._leaflet_id !== ${light.id}`, null, { timeout: 8000 });
+      checkRamp(await read(page, global), ramp.dark, route + ' achromat dark');
+      await darkToggle(page);
+      await page.waitForFunction(`window.${global}.options.gradient['1'].toLowerCase() === '${ramp.light[4]}'`, null, { timeout: 8000 });
+      await page.evaluate(() => window.MeshCorePresets.clearPreset());
+      await page.waitForFunction(`window.${global}.options.gradient['1'].toLowerCase() === '${theme.grad['1'].toLowerCase()}'`, null, { timeout: 8000 });
+      const back = await read(page, global);
+      checkTokens(back, route + ' after clear');
+      await page.evaluate(() => window.MeshCorePresets.applyPreset('deut'));
+      await page.waitForTimeout(300);
+      const deut = await read(page, global);
+      assert(deut.id === back.id, 'deut (no heat ramp) rebuilt the layer');
+      checkTokens(deut, route + ' deut');
+      await page.evaluate(() => window.MeshCorePresets.clearPreset());
+      await ctx.close();
+    });
+  }
 
   await step('Map: the dark-mode toggle rebuilds the layer with the dark tokens', async () => {
     const { ctx, page } = await open('map');
     await waitLayer(page, '_meshcoreHeatLayer');
     const before = await read(page, '_meshcoreHeatLayer');
-    await page.evaluate(() => { document.getElementById('darkModeToggle') ? document.getElementById('darkModeToggle').click() : document.getElementById('darkModeCheckbox').click(); });
+    await darkToggle(page);
     await page.waitForFunction(`window._meshcoreHeatLayer._leaflet_id !== ${before.id}`, null, { timeout: 8000 });
     const after = await read(page, '_meshcoreHeatLayer');
     assert(after.grad['1'].toLowerCase() !== before.grad['1'].toLowerCase(), 'gradient did not change');
@@ -160,34 +196,32 @@ const READ = (global) => `(() => {
     await ctx.close();
   });
 
-  await step('Customizer Display tab lists the five Heat map colours', async () => {
+  await step('Customizer Theme tab lists the five Heat map colours', async () => {
     const { ctx, page } = await open('map');
     await waitLayer(page, '_meshcoreHeatLayer');
     await page.evaluate(() => { const b = document.getElementById('customizeToggle'); if (b) b.click(); });
     await page.waitForSelector('.cust-heat-colors', { state: 'attached', timeout: 8000 });
-    const n = await page.$$eval('.cust-heat-colors input[type=color], .cust-heat-colors [data-cv2-field]', (e) => e.length);
+    const n = await page.$$eval('[data-panel="theme"] .cust-heat-colors input[type=color], [data-panel="theme"] .cust-heat-colors [data-cv2-field]', (e) => e.length);
     assert(n >= 5, 'only ' + n + ' heat inputs');
     await ctx.close();
   });
 
-  await step('375x560 touch: real taps switch Heat map off and on; the layer returns with the tokens', async () => {
-    const { ctx, page } = await open('map', { viewport: { width: 375, height: 560 }, touch: true });
-    await waitLayer(page, '_meshcoreHeatLayer');
-    await page.touchscreen.tap(...(await centre(page, '#mapControlsToggle')));
+  await step('375x560 touch: real taps on the controls, the Display section and Heat map bring the layer with the tokens and take it away', async () => {
+    const { ctx, page } = await open('map', { viewport: { width: 375, height: 560 }, touch: true, heat: false });
+    await page.waitForSelector('#mapControlsToggle', { state: 'visible', timeout: 15000 });
+    assert(await page.evaluate(() => !window._meshcoreHeatLayer && !document.querySelector('canvas.leaflet-heatmap-layer')), 'heat map on before any tap');
+    await tap(page, '#mapControlsToggle');
     await page.waitForFunction(() => !document.getElementById('mapControls').classList.contains('collapsed'));
-    // The Heat map checkbox sits in a section that may be collapsed on phones.
-    await page.evaluate(() => {
-      const cb = document.getElementById('mcHeatmap');
-      const fs = cb.closest('fieldset.mc-section');
-      const lg = fs && fs.querySelector('legend.mc-label');
-      if (fs && fs.classList.contains('mc-collapsed') && lg) lg.click();
-    });
+    // The Heat map checkbox sits in a section that may start collapsed on phones.
+    if (await page.evaluate(() => { const fs = document.getElementById('mcHeatmap').closest('fieldset.mc-section'); return !!(fs && fs.classList.contains('mc-collapsed')); })) {
+      await tap(page, 'fieldset.mc-section:has(#mcHeatmap) > legend.mc-label');
+    }
     await page.waitForFunction(() => { const r = document.getElementById('mcHeatmap').getBoundingClientRect(); return r.width > 0 && r.height > 0; });
-    await page.touchscreen.tap(...(await centre(page, '#mcHeatmap')));
-    await page.waitForFunction(() => !window._meshcoreHeatLayer, null, { timeout: 5000 });
-    await page.touchscreen.tap(...(await centre(page, '#mcHeatmap')));
+    await tap(page, '#mcHeatmap');
     await waitLayer(page, '_meshcoreHeatLayer');
     checkTokens(await read(page, '_meshcoreHeatLayer'), 'Map 375x560');
+    await tap(page, '#mcHeatmap');
+    await page.waitForFunction(() => !window._meshcoreHeatLayer && !document.querySelector('canvas.leaflet-heatmap-layer'), null, { timeout: 5000 });
     await ctx.close();
   });
 
@@ -198,8 +232,18 @@ const READ = (global) => `(() => {
   process.exit(failed ? 1 : 0);
 })();
 
-async function centre(page, sel) {
-  const b = await page.locator(sel).boundingBox();
+// A real touch tap at the target's centre, after checking that the target
+// (or its label) is the topmost element there, so nothing covers it.
+async function tap(page, sel) {
+  const loc = page.locator(sel).first();
+  await loc.scrollIntoViewIfNeeded();
+  const b = await loc.boundingBox();
   if (!b) throw new Error(sel + ' has no box');
-  return [Math.round(b.x + b.width / 2), Math.round(b.y + b.height / 2)];
+  const x = Math.round(b.x + b.width / 2), y = Math.round(b.y + b.height / 2);
+  const hit = await loc.evaluate((el, p) => {
+    const top = document.elementFromPoint(p.x, p.y);
+    return !!top && (el === top || el.contains(top) || (el.labels && Array.from(el.labels).some((l) => l.contains(top))));
+  }, { x, y });
+  if (!hit) throw new Error(sel + ' is covered at ' + x + ',' + y);
+  await page.touchscreen.tap(x, y);
 }
