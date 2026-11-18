@@ -472,7 +472,7 @@
   function nodeEntryAction(node, cfg) {
     var entryHref = nodeEntryHash(node, cfg);
     if (!entryHref) return null;
-    var a = el('a', 'btn-primary node-terrain-action');
+    var a = el('a', 'btn-primary node-action-chip');
     // Not HTML-escaped: an attribute set through the DOM is not HTML,
     // and escaping would turn a second parameter's & into &amp;. It is
     // safe as built: '#/map?profile=' plus a PUBKEY_RE-checked key.
@@ -484,7 +484,7 @@
     icon.setAttribute('aria-hidden', 'true');
     icon.innerHTML = '<svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-ruler"/></svg>';
     a.appendChild(icon);
-    a.appendChild(el('span', null, 'Terrain profile to…'));
+    a.appendChild(el('span', null, 'Terrain profile'));
     return a;
   }
 

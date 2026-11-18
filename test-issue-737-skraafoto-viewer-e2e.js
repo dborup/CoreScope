@@ -456,9 +456,9 @@ function searchAnswer(q, o) {
     const { ctx, page, rec } = await newCtx({ holdSearch: true });
     await gotoNode(page, PK);
     await page.waitForSelector(ACTION, { timeout: 10000 });
-    await step('node page: the action is a 48 px button', async () => {
+    await step('node page: the action is a compact chip button (#920)', async () => {
       const b = await rect(page, ACTION);
-      assert(b.h >= 48 && b.w >= 48, `target ${b.w}x${b.h}`);
+      assert(b.h < 44, `desktop chip ${b.w}x${b.h}`);
       assert(await page.$eval(ACTION, e => e.tagName) === 'BUTTON', 'a button: it opens a dialog');
       assert(rec.search.length === 0, 'nothing asked before a click');
     });

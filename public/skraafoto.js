@@ -1058,7 +1058,7 @@
     if (!offered(cfg) || !at || !covered(cfg, at)) return null;
     var name = node.name || node.advert_name || '';
     return actionButton({
-      cls: 'btn-primary node-terrain-action sf-node-action', testid: 'node-skraafoto', cfg: cfg,
+      cls: 'btn-primary node-action-chip sf-node-action', testid: 'node-skraafoto', cfg: cfg,
       title: 'Oblique aerial photos of this node\'s position, from four sides and straight down',
       getPoint: function () { return { lat: at.lat, lon: at.lon, label: name ? String(name) : null }; }
     });

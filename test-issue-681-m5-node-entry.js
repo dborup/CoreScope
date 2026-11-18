@@ -202,18 +202,18 @@ test('offered() is true only for enabled + profile', () => {
   });
 }
 
-test('nodeEntryAction builds a real link with a ≥48 px target class and a test id', () => {
+test('nodeEntryAction builds a real link with the shared node-action chip class and a test id', () => {
   const { TP: T } = load();
   const a = T.nodeEntryAction({ public_key: PK_A, name: '<b>x</b>', lat: 56.1, lon: 10.2 }, ON);
   assert.ok(a, 'no action for a node with a fix');
   assert.strictEqual(a.tagName, 'A');
   assert.strictEqual(a.attrs.href, '#/map?profile=' + PK_A);
   assert.strictEqual(a.attrs['data-testid'], 'node-terrain-profile');
-  assert.ok(/\bnode-terrain-action\b/.test(a.className), 'class = ' + a.className);
+  assert.ok(/\bnode-action-chip\b/.test(a.className), 'class = ' + a.className);
   // Text, not markup: the node name never reaches an HTML sink here.
   assert.strictEqual(a.innerHTML.indexOf('<b>'), -1);
   const text = a.children.map(c => c.textContent).join('');
-  assert.ok(/Terrain profile to/.test(text), 'label = ' + text);
+  assert.ok(/Terrain profile/.test(text) && !/ to/.test(text), 'label = ' + text);
 });
 
 // ── 2. The one-endpoint link ───────────────────────────────────────────────
