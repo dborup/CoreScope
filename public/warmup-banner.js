@@ -11,6 +11,10 @@
  *
  * Renders a role="status" live region so screen readers announce transitions.
  * Auto-dismisses (fades out) once ready=true AND from_pubkey_backfill.done=true.
+ *
+ * #894: a silent MQTT source is operator information, not a warm-up state. It
+ * is shown as a compact dismissible pill (#warmup-stale-pills); polling
+ * continues while one is shown so it updates and clears by itself.
  */
 (function () {
   'use strict';
@@ -26,14 +30,16 @@
   }
 
   /**
-   * Build ordered list of human-readable warm-up messages from current state.
+   * Warm-up messages only (loading + pubkey backfill). These keep the
+   * full-width banner exactly as before (#1660). Stale-source text is NOT
+   * included — see getStaleSources() (#894).
    *
    * @param {object|null} healthz   - parsed /api/healthz body, or null when unknown
    * @param {string|null} loadStatus - last seen X-Corescope-Load-Status header value
-   * @param {number} nowMs           - current time in ms (injectable for tests)
+   * @param {number} nowMs           - unused; kept so callers share one signature
    * @returns {string[]} ordered list of messages; empty when steady-state.
    */
-  function getWarmupMessages(healthz, loadStatus, nowMs) {
+  function getWarmupOnlyMessages(healthz, loadStatus, nowMs) {
     var msgs = [];
     var h = healthz || {};
     var backfill = h.from_pubkey_backfill || null;
@@ -53,8 +59,18 @@
       msgs.push('Backfilling pubkey index: ' + fmtNum(processed) +
         ' / ' + fmtNum(total) + ' (' + pct + '%)');
     }
+    return msgs;
+  }
 
-    var liveness = h.ingest_liveness || {};
+  /**
+   * MQTT sources silent for longer than STALE_INGEST_MS (#894: shown as a
+   * compact dismissible pill, not in the banner). Sorted by source name.
+   *
+   * @returns {{source:string, ageMin:number, text:string}[]}
+   */
+  function getStaleSources(healthz, nowMs) {
+    var out = [];
+    var liveness = (healthz && healthz.ingest_liveness) || {};
     var srcs = Object.keys(liveness).sort();
     for (var i = 0; i < srcs.length; i++) {
       var src = srcs[i];
@@ -64,10 +80,18 @@
       var ageMs = nowMs - lastUnix * 1000;
       if (ageMs > STALE_INGEST_MS) {
         var ageMin = Math.floor(ageMs / 60000);
-        msgs.push('No packets from ' + src + ' in ' + ageMin + ' min.');
+        out.push({ source: src, ageMin: ageMin,
+          text: 'No packets from ' + src + ' in ' + ageMin + ' min.' });
       }
     }
+    return out;
+  }
 
+  /** Warm-up messages followed by stale-source messages (pre-#894 shape). */
+  function getWarmupMessages(healthz, loadStatus, nowMs) {
+    var msgs = getWarmupOnlyMessages(healthz, loadStatus, nowMs);
+    var stale = getStaleSources(healthz, nowMs);
+    for (var i = 0; i < stale.length; i++) msgs.push(stale[i].text);
     return msgs;
   }
 
@@ -87,6 +111,25 @@
     return true;
   }
 
+  /**
+   * Polling decision: keep going until the server is steady AND no source is
+   * stale, so a stale pill updates and clears by itself (#894).
+   */
+  function shouldKeepPolling(healthz, loadStatus, nowMs) {
+    if (!isSteadyState(healthz) || loadStatus === 'loading') return true;
+    return getStaleSources(healthz, nowMs).length > 0;
+  }
+
+  /** Drop dismissals for sources that are no longer stale (recovery reset). */
+  function pruneDismissed(dismissed, staleList) {
+    var out = {};
+    for (var i = 0; i < staleList.length; i++) {
+      var s = staleList[i].source;
+      if (dismissed && dismissed[s]) out[s] = true;
+    }
+    return out;
+  }
+
   // -------- Browser integration (mount + poll + fetch intercept) ------------
 
   var state = {
@@ -97,7 +140,34 @@
     timer: null,
     inflight: false,
     mounted: false,
+    pillsEl: null,   // #894 container for stale-source pills
+    pills: {},       // source -> { el, textEl }
+    moreEl: null,    // "+N more" overflow note
+    dismissed: null, // source -> true; lazily loaded from sessionStorage
   };
+
+  var DISMISS_KEY = 'corescope-warmup-dismissed';
+  var MAX_PILLS = 3; // rule 0: bounded DOM however many sources go silent
+
+  function loadDismissed() {
+    if (state.dismissed) return state.dismissed;
+    var d = {};
+    try {
+      var raw = window.sessionStorage.getItem(DISMISS_KEY);
+      var parsed = raw ? JSON.parse(raw) : null;
+      if (parsed && typeof parsed === 'object') {
+        var keys = Object.keys(parsed);
+        for (var i = 0; i < keys.length; i++) if (parsed[keys[i]]) d[keys[i]] = true;
+      }
+    } catch (e) { /* storage blocked/corrupt — in-memory only */ }
+    state.dismissed = d;
+    return d;
+  }
+
+  function saveDismissed() {
+    try { window.sessionStorage.setItem(DISMISS_KEY, JSON.stringify(state.dismissed || {})); }
+    catch (e) { /* blocked — in-memory only */ }
+  }
 
   function ensureMounted() {
     if (state.mounted || typeof document === 'undefined') return;
@@ -118,14 +188,109 @@
     body.insertBefore(el, body.firstChild);
     state.el = el;
     state.listEl = list;
+    // #894: stale sources get compact dismissible pills, not the banner.
+    var pills = document.createElement('div');
+    pills.id = 'warmup-stale-pills';
+    pills.setAttribute('role', 'status');
+    pills.setAttribute('aria-live', 'polite');
+    pills.className = 'warmup-pills warmup-pills--hidden';
+    body.appendChild(pills);
+    state.pillsEl = pills;
     state.mounted = true;
+  }
+
+  function dismissSource(source) {
+    loadDismissed()[source] = true;
+    saveDismissed();
+    renderPills();
+  }
+
+  function makePill(source) {
+    var el = document.createElement('div');
+    el.className = 'warmup-pill';
+    var textEl = document.createElement('span');
+    textEl.className = 'warmup-pill__text';
+    var btn = document.createElement('button');
+    btn.setAttribute('type', 'button');
+    btn.className = 'warmup-pill__close';
+    btn.setAttribute('aria-label', 'Dismiss: no packets from ' + source);
+    btn.textContent = '\u00d7';
+    btn.addEventListener('click', function () { dismissSource(source); });
+    el.appendChild(textEl);
+    el.appendChild(btn);
+    return { el: el, textEl: textEl };
+  }
+
+  // Keep the pills just under the top nav (never over it), wherever the
+  // nav sits (a visible warm-up banner pushes it down).
+  function positionPills() {
+    try {
+      var nav = document.querySelector('.top-nav');
+      if (nav) state.pillsEl.style.top = (Math.round(nav.getBoundingClientRect().bottom) + 8) + 'px';
+    } catch (e) { /* cosmetic only */ }
+  }
+
+  function renderPills() {
+    if (!state.pillsEl) return;
+    var stale = getStaleSources(state.healthz, Date.now());
+    // Recovery forgets the dismissal, so a later silence shows the pill again.
+    // Only once healthz is known: "no data yet" is not "recovered".
+    var before = Object.keys(loadDismissed()).length;
+    if (state.healthz) {
+      state.dismissed = pruneDismissed(state.dismissed, stale);
+      if (Object.keys(state.dismissed).length !== before) saveDismissed();
+    }
+
+    var visible = [];
+    for (var i = 0; i < stale.length; i++) {
+      if (!state.dismissed[stale[i].source]) visible.push(stale[i]);
+    }
+    var shown = visible.slice(0, MAX_PILLS);
+    var keep = {};
+    for (var j = 0; j < shown.length; j++) keep[shown[j].source] = true;
+
+    Object.keys(state.pills).forEach(function (src) {
+      if (keep[src]) return;
+      var p = state.pills[src];
+      if (p.el.parentNode) p.el.parentNode.removeChild(p.el);
+      delete state.pills[src];
+    });
+    for (var k = 0; k < shown.length; k++) {
+      var s = shown[k];
+      var pill = state.pills[s.source];
+      if (!pill) {
+        pill = state.pills[s.source] = makePill(s.source);
+        state.pillsEl.appendChild(pill.el);
+      }
+      if (pill.text !== s.text) { pill.textEl.textContent = s.text; pill.text = s.text; }
+    }
+
+    var extra = visible.length - shown.length;
+    if (extra > 0) {
+      if (!state.moreEl) {
+        state.moreEl = document.createElement('div');
+        state.moreEl.className = 'warmup-pill__more';
+      }
+      state.moreEl.textContent = '+' + extra + ' more';
+      if (!state.moreEl.parentNode) state.pillsEl.appendChild(state.moreEl);
+    } else if (state.moreEl && state.moreEl.parentNode) {
+      state.moreEl.parentNode.removeChild(state.moreEl);
+    }
+
+    if (shown.length === 0) {
+      state.pillsEl.classList.add('warmup-pills--hidden');
+    } else {
+      positionPills();
+      state.pillsEl.classList.remove('warmup-pills--hidden');
+    }
   }
 
   function render() {
     if (!state.mounted) ensureMounted();
     if (!state.el || !state.listEl) return;
     var now = Date.now();
-    var msgs = getWarmupMessages(state.healthz, state.loadStatus, now);
+    var msgs = getWarmupOnlyMessages(state.healthz, state.loadStatus, now);
+    renderPills();
     if (msgs.length === 0) {
       // Fade out.
       state.el.classList.add('warmup-banner--hidden');
@@ -167,7 +332,11 @@
       .then(function (body) {
         if (body) state.healthz = body;
         render();
-        if (isSteadyState(state.healthz) && state.loadStatus !== 'loading') {
+        // #894: a shown stale-source pill keeps polling so it updates and
+        // clears by itself; stop only when steady and nothing is stale.
+        if (shouldKeepPolling(state.healthz, state.loadStatus, Date.now())) {
+          ensureTimer();
+        } else {
           stopPolling();
         }
       })
@@ -175,10 +344,14 @@
       .then(function () { state.inflight = false; });
   }
 
+  function ensureTimer() {
+    if (!state.timer) state.timer = setInterval(pollOnce, POLL_INTERVAL_MS);
+  }
+
   function startPolling() {
     if (state.timer) return;
     pollOnce();
-    state.timer = setInterval(pollOnce, POLL_INTERVAL_MS);
+    ensureTimer();
   }
 
   function stopPolling() {
@@ -233,6 +406,10 @@
 
   var api = {
     getWarmupMessages: getWarmupMessages,
+    getWarmupOnlyMessages: getWarmupOnlyMessages,
+    getStaleSources: getStaleSources,
+    shouldKeepPolling: shouldKeepPolling,
+    pruneDismissed: pruneDismissed,
     shouldShowBanner: shouldShowBanner,
     isSteadyState: isSteadyState,
     STALE_INGEST_MS: STALE_INGEST_MS,
