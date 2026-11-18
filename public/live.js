@@ -198,6 +198,16 @@
   // animation we want to play). The handoff sets this true, then clears it
   // after the replay window has elapsed.
   let suppressLive = false;
+  // #880 — "Follow a packet". One follow at a time; every timer, frame,
+  // listener and layer it owns hangs off followState and is released by
+  // stopFollow(), which destroy() calls. While it is set, live packets are
+  // buffered but not animated (the suppressLive path in bufferPacket).
+  let followState = null;
+  let followArmed = false;
+  let observerRoster = {};
+  let _observerRosterPromise = null;
+  let _followSkewPromise = null;
+  let _followToastTimer = null;
 
   // ROLE_COLORS loaded from shared roles.js (includes 'unknown')
 
@@ -800,11 +810,14 @@
     // each before joining into the popup HTML. (#1536)
     const chain = (hopNames || []).map(escapeHtml).join(' → ');
     const link = hash ? `<a class="lc-path-link" href="#/packets/${hash}" style="color:${color}">full detail →</a>` : '';
+    // #880 — only a valid 16-hex hash reaches the markup (and the button).
+    const followHash = typeof LiveFollow !== 'undefined' ? LiveFollow.parseFollowParam(hash) : null;
+    const follow = followHash ? `<button type="button" class="lc-follow-btn" data-follow-hash="${followHash}">Follow ▶</button>` : '';
     return `<div class="lc-path-popup">
       <span class="lc-path-badge" style="background:${color}">${typeName}</span>
       <div class="lc-path-time">${timeStr}</div>
       <div class="lc-path-chain">${chain}</div>
-      ${link ? '<div class="lc-path-link-wrap">' + link + '</div>' : ''}
+      ${link || follow ? '<div class="lc-path-link-wrap">' + link + follow + '</div>' : ''}
     </div>`;
   }
 
@@ -832,10 +845,20 @@
     poly.on('click', function(e) {
       if (dismissTimer) clearTimeout(dismissTimer);
       const html = buildClickablePathPopupHtml(typeName, color, hopNames, tsMs, hash);
-      L.popup({ maxWidth: 280, className: 'path-info-popup' })
+      const popup = L.popup({ maxWidth: 280, className: 'path-info-popup' })
         .setLatLng(e.latlng)
         .setContent(html)
         .openOn(map);
+      // #880 — the button lives in the popup's DOM; its listener goes with it.
+      const followBtn = popup.getElement() && popup.getElement().querySelector('.lc-follow-btn');
+      if (followBtn) {
+        followBtn.addEventListener('click', function(ev) {
+          ev.stopPropagation();
+          if (dismissTimer) { clearTimeout(dismissTimer); dismissTimer = null; }
+          if (map) map.closePopup();
+          startFollow(followBtn.getAttribute('data-follow-hash'), { settleMs: followSettleMs(tsMs) });
+        });
+      }
       dismissTimer = setTimeout(() => { if (map) map.closePopup(); }, CLICKABLE_POPUP_DISMISS_MS);
     });
   }
@@ -1131,7 +1154,8 @@
       // #1599 — manual replay handoff sets suppressLive=true so incoming live
       // WS packets don't clutter the replay animation. We still want the
       // timeline to tick so the UI shows traffic continuing.
-      if (suppressLive) { updateTimeline(); return; }
+      // #880 — a follow suppresses the same way, for as long as it lasts.
+      if (suppressLive || followState) { updateTimeline(); return; }
       if (realisticPropagation && pkt.hash) {
         const hash = pkt.hash;
         if (propagationBuffer.has(hash)) {
@@ -1359,6 +1383,20 @@
     // The Heat/Matrix interlock holds from the first paint.
     syncHeatToggleToMatrix(matrixMode);
     wireHeardFilter();
+    wireFollowNext();
+  }
+
+  // #880 — "Follow next packet": arm / cancel. Armed, renderPacketTree
+  // follows the next group that passes the Live filters.
+  function wireFollowNext() {
+    const btn = document.getElementById('liveFollowNextBtn');
+    if (!btn || btn.dataset.liveWired === '1') return;
+    btn.dataset.liveWired = '1';
+    btn.addEventListener('click', function() {
+      if (followArmed) { setFollowArmed(false); return; }
+      stopFollow();
+      setFollowArmed(true);
+    });
   }
 
   // Rewrites one ?param of the #/live hash in place. replaceState, so the
@@ -1585,6 +1623,7 @@
             <label id="liveHeardLabel" class="live-heard-label" title="Hide repeaters and rooms not heard within this window. Heard = an own advert or a flood packet the server resolved this node relaying, plus live packets since the page loaded. Adverts alone are infrequent and the interval is set per node, so a healthy repeater that relays nothing can look silent until its next advert: pick a window longer than its advert interval. Companions and sensors are never hidden. Suspended during VCR replay.">Last heard <select id="liveHeardSelect" class="live-heard-select" aria-describedby="heardDesc"></select></label>
             <span id="heardDesc" class="sr-only">Hide repeaters and rooms with no advert or relayed traffic within the chosen window. Adverts are infrequent and the interval is set per node, so a healthy repeater that relays nothing can look silent until its next advert: pick a window longer than its advert interval. Companions and sensors are never hidden. Suspended during VCR replay.</span>
             <span id="liveHeardCount" class="live-filter-count hidden" aria-live="polite"></span>
+            <button type="button" id="liveFollowNextBtn" class="vcr-btn live-follow-next" aria-pressed="false" title="Replay how the next visible packet spreads through the mesh">Follow next packet</button>
             <label id="liveGeoFilterLabel" style="display:none"><input type="checkbox" id="liveGeoFilterToggle"> Geo filter boundary</label>
             <label id="liveSelectedAreaLabel" style="display:none"><input type="checkbox" id="liveSelectedAreaToggle"> Selected area outline</label>
             </div>
@@ -2060,18 +2099,24 @@
 
     map.on('zoomend', rescaleMarkers);
 
+    // Observer roster, fetched once per Live visit: observer_id → IATA for
+    // the region filter (#1045), and positions + clock_naive for a follow
+    // (#880). /api/observers returns `{observers:[...], server_time:"..."}`
+    // (cmd/server/types.go ObserverListResponse) — NOT a top-level array.
+    // Bug #1136: previously parsed as array → map empty → region filter
+    // dropped every packet.
+    _observerRosterPromise = fetch('/api/observers').then(function(r) { return r.json(); }).then(function(data) {
+      if (generation !== liveGeneration) return;
+      setObserverIataMap(buildObserverIataMap(data));
+      if (window.LiveFollow) observerRoster = LiveFollow.buildObserverRoster(data);
+    }).catch(function() { /* leave maps empty; filter will hide all when active */ });
+    // #880 — deep link #/live?follow=<hash>; its fetch waits for the roster.
+    startFollowFromHash();
+
     // Region filter (#1045): dropdown of observer IATA regions
     (function initLiveRegionFilter() {
       var rfEl = document.getElementById('liveRegionFilter');
       if (!rfEl || !window.RegionFilter) return;
-      // Fetch observer roster to build observer_id → IATA map.
-      // /api/observers returns `{observers:[...], server_time:"..."}`
-      // (cmd/server/types.go ObserverListResponse) — NOT a top-level array.
-      // Bug #1136: previously parsed as array → map empty → region filter
-      // dropped every packet.
-      fetch('/api/observers').then(function(r) { return r.json(); }).then(function(data) {
-        setObserverIataMap(buildObserverIataMap(data));
-      }).catch(function() { /* leave map empty; filter will hide all when active */ });
       RegionFilter.init(rfEl, { dropdown: true });
       regionFilterChangeHandler = RegionFilter.onChange(function() {
         // #1108 — when the region selection changes, reload visible map
@@ -3674,6 +3719,11 @@
   window._liveSetNodeFilter = setNodeFilter;
   window._liveFormatLiveTimestampHtml = formatLiveTimestampHtml;
   window._liveResolveHopPositions = resolveHopPositions;
+  window._liveResolveHopEntries = resolveHopEntries;
+  window._liveStartFollow = function(hash, opts) { return startFollow(hash, opts); };
+  window._liveStopFollow = function() { stopFollow(); };
+  window._liveFollowState = function() { return followState; };
+  window._liveFollowArmed = function() { return followArmed; };
   window._liveForeignPathColor = foreignPathColor;
   window._liveVcrSpeedCycle = vcrSpeedCycle;
   window._liveSpeedLabel = speedLabel;
@@ -3828,6 +3878,13 @@
     if (window.RegionFilter && typeof RegionFilter.getSelected === 'function') {
       var _regionSel = RegionFilter.getSelected();
       if (_regionSel && _regionSel.length && !packetMatchesRegion(packets, observerIataMap, _regionSel)) return;
+    }
+
+    // #880 — "Follow next packet": the first group that passed every filter
+    // above, i.e. the next one the viewer can see.
+    if (followArmed && !isReplay) {
+      const nextHash = window.LiveFollow && LiveFollow.parseFollowParam(first.hash);
+      if (nextHash) startFollow(nextHash, { settleMs: followSettleMs(first._ts) });
     }
 
     // --- Ensure ADVERT nodes appear on map ---
@@ -4015,8 +4072,11 @@
     }
   }
 
-  function resolveHopPositions(hops, payload, resolvedPath) {
-    // Hoist sender GPS guard once — reject (0,0) as "no GPS"
+  // One entry per hop position: {key, pos, name, known}; pos is null when
+  // the hop is unresolved or its node has no GPS. Shared by the animation
+  // (resolveHopPositions) and a follow (#880), which needs the index.
+  function resolveHopEntries(hops, payload, resolvedPath) {
+    payload = payload || {};
     const hasValidGps = payload.lat != null && payload.lon != null
       && !(payload.lat === 0 && payload.lon === 0);
     const senderLat = hasValidGps ? payload.lat : null;
@@ -4050,7 +4110,7 @@
     }
 
     // Convert HopResolver's entry format to the array format live.js expects: {key, pos, name, known}
-    const raw = hops.map((hop, hopIndex) => {
+    return hops.map((hop, hopIndex) => {
       const r = perPosition[hopIndex];
       if (r && r.name && r.pubkey && !r.unreliable) {
         // Look up coordinates from nodeData (HopResolver resolves name/pubkey but doesn't return lat/lon directly)
@@ -4062,6 +4122,15 @@
       }
       return { key: 'hop-' + hop, pos: null, name: hop, known: false };
     });
+  }
+
+  function resolveHopPositions(hops, payload, resolvedPath) {
+    // Hoist sender GPS guard once — reject (0,0) as "no GPS"
+    const hasValidGps = payload.lat != null && payload.lon != null
+      && !(payload.lat === 0 && payload.lon === 0);
+    const senderLat = hasValidGps ? payload.lat : null;
+    const senderLon = hasValidGps ? payload.lon : null;
+    const raw = resolveHopEntries(hops, payload, resolvedPath);
 
     // Add sender position as anchor if available
     if (payload.pubKey && senderLat != null) {
@@ -5004,6 +5073,7 @@
     const rssi = pkt.RSSI ?? pkt.rssi ?? null;
     const observer = pkt.observer_name || pkt.observer || '';
     const pktId = pkt.id || '';
+    const followHash = window.LiveFollow ? LiveFollow.parseFollowParam(pkt.hash) : null;
 
     const card = document.createElement('div');
     card.className = 'feed-detail-card';
@@ -5023,6 +5093,7 @@
       </div>
       ${pkt.hash ? `<a class="fdc-link" href="#/packets/${pkt.hash.toLowerCase()}">View in packets →</a>` : ''}
       <button class="fdc-replay">↻ Replay</button>
+      ${followHash ? '<button type="button" class="fdc-follow">Follow ▶</button>' : ''}
     `;
     card.querySelector('.fdc-close').addEventListener('click', (e) => { e.stopPropagation(); card.remove(); });
     card.querySelector('.fdc-replay').addEventListener('click', (e) => {
@@ -5033,6 +5104,15 @@
       console.log('[replay] hash=' + pkt.hash + ' pkts=' + replayPkts.length + ' uniquePaths=' + uniquePaths.size, [...uniquePaths].slice(0, 3));
       renderPacketTree(replayPkts, true);
     });
+    const followBtn = card.querySelector('.fdc-follow');
+    if (followBtn) {
+      followBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        card.remove();
+        if (_feedCardDismiss) { document.removeEventListener('click', _feedCardDismiss); _feedCardDismiss = null; }
+        startFollow(followHash, { settleMs: followSettleMs(pkt._ts) });
+      });
+    }
     // #839 — one open card at a time (the old one is removed above), so one
     // module ref; destroy() removes it when Live is left with the card open.
     if (_feedCardDismiss) document.removeEventListener('click', _feedCardDismiss);
@@ -5052,6 +5132,430 @@
     if (window._liveDragMgr) {
       try { window._liveDragMgr.register(card); } catch (_) { /* ignore */ }
     }
+  }
+
+  // === #880 Follow a packet ===
+  // live-follow.js holds the pure model/schedule/summary; this is the thin
+  // controller: one fetch, one rAF loop, one Esc listener, one layer, one
+  // card. Everything lives on followState; stopFollow() releases it all.
+
+  // Time left of the propagation window for a packet first seen at tsMs, so
+  // late observations reach the DB before the one fetch. A deep link or an
+  // older line fetches at once.
+  function followSettleMs(tsMs) {
+    const buf = Number(window.PROPAGATION_BUFFER_MS) || 0;
+    const age = Date.now() - (Number(tsMs) || 0);
+    return Math.max(0, Math.min(buf, buf - age));
+  }
+
+  function prefersReducedMotion() {
+    try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
+    catch (_) { return false; }
+  }
+
+  // The clock-skew list is only used to flag observers; fetched at most once
+  // per Live visit.
+  function getFollowSkew() {
+    if (!_followSkewPromise) {
+      _followSkewPromise = fetch('/api/observers/clock-skew')
+        .then(function(r) { return r.ok ? r.json() : []; })
+        .catch(function() { return []; });
+    }
+    return _followSkewPromise;
+  }
+
+  function followIcon(name) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('class', 'ph-icon');
+    svg.setAttribute('aria-hidden', 'true');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', '/icons/phosphor-sprite.svg#' + name);
+    svg.appendChild(use);
+    return svg;
+  }
+
+  function followEl(tag, cls, text) {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text != null) el.textContent = text;
+    return el;
+  }
+
+  function followButton(cls, label, icon) {
+    const b = followEl('button', cls);
+    b.type = 'button';
+    b.setAttribute('aria-label', label);
+    b.title = label;
+    if (icon) b.appendChild(followIcon(icon));
+    return b;
+  }
+
+  function setFollowArmed(on) {
+    followArmed = !!on;
+    const btn = document.getElementById('liveFollowNextBtn');
+    if (!btn) return;
+    btn.setAttribute('aria-pressed', followArmed ? 'true' : 'false');
+    btn.classList.toggle('active', followArmed);
+    btn.textContent = followArmed ? 'Waiting for next packet… (cancel)' : 'Follow next packet';
+  }
+
+  function showFollowToast(text) {
+    const page = document.querySelector('.live-page');
+    if (!page) return;
+    page.querySelector('.live-follow-toast')?.remove();
+    const t = followEl('div', 'live-follow-toast', text);
+    t.setAttribute('role', 'status');
+    page.appendChild(t);
+    if (_followToastTimer) clearTimeout(_followToastTimer);
+    _followToastTimer = setTimeout(function() { _followToastTimer = null; t.remove(); }, 4000);
+  }
+
+  // Deep link #/live?follow=<hash>, read once per init after loadNodes().
+  function startFollowFromHash() {
+    if (!window.LiveFollow || !getHashParams) return;
+    const raw = getHashParams().get(LiveFollow.HASH_PARAM);
+    if (raw == null) return;
+    const h = LiveFollow.parseFollowParam(raw);
+    if (h) startFollow(h, { settleMs: 0 });
+    else showFollowToast('Not a packet hash: cannot follow this link.');
+  }
+
+  function buildFollowCard(st) {
+    const card = followEl('div', 'live-follow-card');
+    card.setAttribute('role', 'region');
+    card.setAttribute('aria-label', 'Following packet');
+    const head = followEl('div', 'panel-header lf-header');
+    head.appendChild(followEl('strong', 'lf-title', 'FOLLOWING'));
+    st.typeEl = followEl('span', 'lf-type', st.hash.slice(0, 8) + '…');
+    head.appendChild(st.typeEl);
+    const close = followButton('lf-close', 'Stop following', 'ph-x');
+    close.addEventListener('click', function(e) { e.stopPropagation(); stopFollow(); });
+    head.appendChild(close);
+    card.appendChild(head);
+
+    st.statusEl = followEl('div', 'lf-status', 'Loading…');
+    st.statusEl.setAttribute('aria-live', 'polite');
+    card.appendChild(st.statusEl);
+    const bar = followEl('div', 'lf-progress');
+    st.barEl = followEl('div', 'lf-bar');
+    bar.appendChild(st.barEl);
+    card.appendChild(bar);
+
+    const ctl = followEl('div', 'lf-controls');
+    st.pauseBtn = followButton('vcr-btn lf-pause', 'Pause', 'ph-pause');
+    st.pauseBtn.addEventListener('click', function(e) { e.stopPropagation(); toggleFollowPause(st); });
+    st.restartBtn = followButton('vcr-btn lf-restart', 'Restart', 'ph-arrow-clockwise');
+    st.restartBtn.addEventListener('click', function(e) { e.stopPropagation(); restartFollow(st); });
+    ctl.appendChild(st.pauseBtn);
+    ctl.appendChild(st.restartBtn);
+    st.controlsEl = ctl;
+    card.appendChild(ctl);
+
+    st.summaryEl = followEl('div', 'lf-summary');
+    st.summaryEl.hidden = true;
+    card.appendChild(st.summaryEl);
+
+    const page = document.querySelector('.live-page');
+    if (page) page.appendChild(card);
+    st.card = card;
+  }
+
+  function setFollowStatus(st, text, pct) {
+    if (st.statusEl) st.statusEl.textContent = text;
+    if (st.barEl && pct != null) st.barEl.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  }
+
+  function startFollow(hash, opts) {
+    const LF = window.LiveFollow;
+    const h = LF ? LF.parseFollowParam(hash) : null;
+    if (!h || !map) return false;
+    stopFollow({ keepUrl: true });
+    setFollowArmed(false);
+    const st = followState = {
+      hash: h, settleTimer: null, rafId: null, keyHandler: null,
+      layer: L.layerGroup().addTo(map), card: null,
+      model: null, sched: null, ptr: 0, startTs: 0, pausedElapsed: null,
+      rings: [], ringRadii: [], litRelays: 0, depthShown: -1, done: false, reduced: false,
+    };
+    setLiveHashParam(LF.HASH_PARAM, h);
+    buildFollowCard(st);
+    st.keyHandler = function onFollowKey(e) { if (e.key === 'Escape') stopFollow(); };
+    document.addEventListener('keydown', st.keyHandler);
+    const settle = Math.max(0, Number(opts && opts.settleMs) || 0);
+    setFollowStatus(st, settle ? 'Waiting ' + Math.ceil(settle / 1000) + ' s for late observations…' : 'Loading…', 0);
+    st.controlsEl.hidden = true;
+    st.settleTimer = setTimeout(function() { st.settleTimer = null; loadFollow(st); }, settle);
+    return true;
+  }
+
+  async function loadFollow(st) {
+    const LF = window.LiveFollow;
+    let detail;
+    let skewList = [];
+    try {
+      const res = await Promise.all([fetch('/api/packets/' + st.hash), getFollowSkew(), _observerRosterPromise]);
+      if (st !== followState) return;
+      if (!res[0].ok) throw new Error(res[0].status === 404 ? 'Packet not found.' : 'Could not load the packet.');
+      skewList = res[1];
+      detail = await res[0].json();
+    } catch (err) {
+      if (st !== followState) return;
+      showFollowError(st, err && /^(Packet|Could)/.test(err.message) ? err.message : 'Could not load the packet.');
+      return;
+    }
+    if (st !== followState) return;
+    const labels = window.PayloadLabels && PayloadLabels.api;
+    st.model = LF.reduceFollow(detail, {
+      roster: observerRoster,
+      skew: LF.buildSkewMap(skewList),
+      resolveHops: resolveHopEntries,
+      severity: window.observerSkewSeverity,
+      typeName: function(id) { return labels ? labels.enumNameById(id) : null; },
+    });
+    st.reduced = prefersReducedMotion();
+    st.sched = LF.buildFollowSchedule(st.model, { reducedMotion: st.reduced });
+    st.typeEl.textContent = st.model.typeName + ' · ' + st.hash.slice(0, 8) + '…';
+    computeFollowRings(st);
+    fitFollowBounds(st);
+    st.controlsEl.hidden = st.reduced;
+    if (!st.model.replayable) setFollowStatus(st, 'Path replay not meaningful for this route type.', 100);
+    runFollow(st);
+  }
+
+  function showFollowError(st, msg) {
+    setFollowStatus(st, msg, 0);
+    st.controlsEl.hidden = true;
+    st.summaryEl.hidden = false;
+    st.summaryEl.textContent = '';
+    const retry = followEl('button', 'vcr-btn lf-retry', 'Retry');
+    retry.type = 'button';
+    retry.addEventListener('click', function(e) {
+      e.stopPropagation();
+      st.summaryEl.hidden = true;
+      setFollowStatus(st, 'Loading…', 0);
+      loadFollow(st);
+    });
+    st.summaryEl.appendChild(retry);
+  }
+
+  // Ring d reaches the farthest positioned relay/observer at depth d.
+  function computeFollowRings(st) {
+    const m = st.model;
+    if (!m.origin || !window.HopResolver) return;
+    const o = m.origin.pos;
+    const far = function(p, d) {
+      if (!p) return;
+      const meters = HopResolver.haversineKm(o[0], o[1], p[0], p[1]) * 1000;
+      if (!(st.ringRadii[d] >= meters)) st.ringRadii[d] = meters;
+    };
+    for (const r of m.relays) far(r.pos, r.depth);
+    for (const ob of m.observers) far(ob.pos, ob.late ? m.depth : Math.min(ob.hops, m.depth));
+  }
+
+  function fitFollowBounds(st) {
+    const m = st.model;
+    const pts = [];
+    if (m.origin) pts.push(m.origin.pos);
+    for (const r of m.relays) if (r.pos) pts.push(r.pos);
+    for (const ob of m.observers) if (ob.pos) pts.push(ob.pos);
+    if (!pts.length || !map) return;
+    const phone = window.innerWidth <= 768;
+    const cardH = st.card ? st.card.offsetHeight : 0;
+    try {
+      map.fitBounds(L.latLngBounds(pts), {
+        paddingTopLeft: [40, 60],
+        paddingBottomRight: phone ? [40, cardH + 70] : [340, 110],
+        maxZoom: 13, animate: !st.reduced,
+      });
+    } catch (_) { /* degenerate bounds */ }
+  }
+
+  function runFollow(st) {
+    st.ptr = 0;
+    st.done = false;
+    if (st.reduced) { applyFollowEvents(st, Infinity); return; }
+    st.startTs = performance.now();
+    st.pausedElapsed = null;
+    st.rafId = requestAnimationFrame(followTick);
+  }
+
+  function followTick(now) {
+    const st = followState;
+    if (!st || !st.sched) return;
+    st.rafId = null;
+    const elapsed = now - st.startTs;
+    applyFollowEvents(st, elapsed);
+    const growing = growFollowRings(st, elapsed);
+    if (st.ptr < st.sched.events.length || growing) st.rafId = requestAnimationFrame(followTick);
+  }
+
+  function toggleFollowPause(st) {
+    if (st !== followState || !st.sched || st.reduced) return;
+    if (st.pausedElapsed == null) {
+      if (st.rafId) { cancelAnimationFrame(st.rafId); st.rafId = null; }
+      st.pausedElapsed = performance.now() - st.startTs;
+      st.pauseBtn.replaceChildren(followIcon('ph-play'));
+      st.pauseBtn.setAttribute('aria-label', 'Resume'); st.pauseBtn.title = 'Resume';
+    } else {
+      st.startTs = performance.now() - st.pausedElapsed;
+      st.pausedElapsed = null;
+      st.pauseBtn.replaceChildren(followIcon('ph-pause'));
+      st.pauseBtn.setAttribute('aria-label', 'Pause'); st.pauseBtn.title = 'Pause';
+      st.rafId = requestAnimationFrame(followTick);
+    }
+  }
+
+  function restartFollow(st) {
+    if (st !== followState || !st.sched) return;
+    if (st.rafId) { cancelAnimationFrame(st.rafId); st.rafId = null; }
+    st.layer.clearLayers();
+    st.rings = [];
+    st.litRelays = 0;
+    st.depthShown = -1;
+    st.summaryEl.hidden = true;
+    st.controlsEl.hidden = false;
+    st.card.classList.remove('lf-finished');
+    if (st.pausedElapsed != null) {
+      st.pauseBtn.replaceChildren(followIcon('ph-pause'));
+      st.pauseBtn.setAttribute('aria-label', 'Pause'); st.pauseBtn.title = 'Pause';
+    }
+    runFollow(st);
+  }
+
+  function applyFollowEvents(st, elapsed) {
+    const ev = st.sched.events;
+    while (st.ptr < ev.length && ev[st.ptr].at <= elapsed) applyFollowEvent(st, ev[st.ptr++]);
+    if (!st.done && st.model.replayable && st.depthShown >= 0) {
+      const D = st.model.depth;
+      setFollowStatus(st, 'Hop ' + st.depthShown + ' / ' + D + (st.model.origin ? '' : ' · origin unknown'),
+        st.sched.totalMs ? Math.min(100, (elapsed / st.sched.totalMs) * 100) : 100);
+    }
+  }
+
+  function followMarker(pos, cls, labelText, flagged) {
+    const el = followEl('div', 'lf-marker ' + cls);
+    el.appendChild(followEl('span', 'lf-dot'));
+    if (labelText) {
+      const lab = followEl('span', 'lf-label', labelText);
+      if (flagged) {
+        const f = followIcon('ph-clock');
+        f.setAttribute('class', 'ph-icon lf-clock-flag');
+        lab.appendChild(f);
+      }
+      el.appendChild(lab);
+    }
+    return L.marker(pos, {
+      icon: L.divIcon({ className: 'live-follow-icon', html: el, iconSize: [0, 0] }),
+      interactive: false, keyboard: false, pane: 'liveAnimPane',
+    });
+  }
+
+  function applyFollowEvent(st, e) {
+    const m = st.model;
+    if (e.kind === 'origin') {
+      if (m.origin) followMarker(m.origin.pos, 'lf-origin', m.origin.name).addTo(st.layer);
+    } else if (e.kind === 'ring') {
+      st.depthShown = e.depth;
+      const radius = st.ringRadii[e.depth];
+      if (!m.replayable || !m.origin || !(radius > 0)) return;
+      const c = L.circle(m.origin.pos, {
+        radius: st.reduced ? radius : 1, color: cssVar('--follow-ring'), weight: 2,
+        opacity: 0.8, fill: false, interactive: false, pane: 'liveAnimPane',
+      }).addTo(st.layer);
+      st.rings.push({ circle: c, start: e.at, target: radius });
+    } else if (e.kind === 'relay') {
+      const r = m.relays[e.index];
+      st.litRelays++;
+      if (r.pos) followMarker(r.pos, 'lf-relay', null).addTo(st.layer);
+    } else if (e.kind === 'observer') {
+      const o = m.observers[e.index];
+      if (o.pos) followMarker(o.pos, 'lf-observer' + (o.late ? ' lf-late' : ''), o.name + ' ' + LiveFollow.formatOffset(o), !!o.clock).addTo(st.layer);
+    } else if (e.kind === 'summary') {
+      st.done = true;
+      renderFollowSummary(st);
+    }
+  }
+
+  // Grows each ring over 90% of a step; returns true while any still grows.
+  function growFollowRings(st, elapsed) {
+    const dur = st.sched.stepMs * 0.9;
+    let growing = false;
+    for (const ring of st.rings) {
+      if (ring.done) continue;
+      const t = dur > 0 ? (elapsed - ring.start) / dur : 1;
+      if (t >= 1) { ring.circle.setRadius(ring.target); ring.done = true; continue; }
+      ring.circle.setRadius(Math.max(1, ring.target * t));
+      growing = true;
+    }
+    return growing;
+  }
+
+  function followClock(sec) {
+    try { return new Date(sec * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }); }
+    catch (_) { return new Date(sec * 1000).toISOString().slice(11, 19); }
+  }
+
+  function renderFollowSummary(st) {
+    const LF = window.LiveFollow;
+    const m = st.model;
+    const s = LF.summarizeFollow(m, window.HopResolver && HopResolver.haversineKm);
+    setFollowStatus(st, m.replayable ? 'Done · ' + m.depth + ' hop' + (m.depth === 1 ? '' : 's') : 'Summary', 100);
+    st.card.classList.add('lf-finished');
+    st.controlsEl.hidden = true; // the summary carries its own Replay
+    const box = st.summaryEl;
+    box.textContent = '';
+    if (!s.observers) box.appendChild(followEl('p', 'lf-note', 'No observations for this packet.'));
+    else if (!s.positionedObservers) box.appendChild(followEl('p', 'lf-note', 'No positioned observers.'));
+    const dl = followEl('dl', 'lf-rows');
+    for (const row of LF.summaryRows(s, followClock)) {
+      dl.appendChild(followEl('dt', null, row.label));
+      dl.appendChild(followEl('dd', null, row.value));
+    }
+    box.appendChild(dl);
+    box.appendChild(followEl('p', 'lf-caption', LF.CAPTION));
+    if (m.observers.length) {
+      const list = followEl('ol', 'lf-observers');
+      list.setAttribute('aria-label', 'Observers in the order heard');
+      for (const o of m.observers) {
+        const li = followEl('li', o.late ? 'lf-late' : null);
+        li.appendChild(followEl('span', 'lf-obs-name', o.name));
+        if (o.iata) li.appendChild(followEl('span', 'badge-iata', o.iata));
+        li.appendChild(followEl('span', 'lf-obs-when', LF.formatOffset(o) + (m.replayable ? ' · ' + o.hops + ' hop' + (o.hops === 1 ? '' : 's') : '')));
+        if (o.clock) {
+          const f = followEl('span', 'lf-clock-flag', o.clock === 'naive' ? 'clock: ingest time' : 'clock off');
+          f.title = o.clock === 'naive'
+            ? 'This observer\'s clock is unreliable; its recent times are the server\'s ingest time.'
+            : 'This observer\'s clock is known to be off by minutes or more. Times are shown as reported, not corrected.';
+          li.appendChild(f);
+        }
+        list.appendChild(li);
+      }
+      box.appendChild(list);
+    }
+    const actions = followEl('div', 'lf-actions');
+    const link = followEl('a', 'lf-link', 'View packet →');
+    link.href = '#/packets/' + st.hash;
+    actions.appendChild(link);
+    if (!st.reduced) {
+      const replay = followEl('button', 'vcr-btn lf-replay', 'Replay');
+      replay.type = 'button';
+      replay.addEventListener('click', function(e) { e.stopPropagation(); restartFollow(st); });
+      actions.appendChild(replay);
+    }
+    box.appendChild(actions);
+    box.hidden = false;
+  }
+
+  function stopFollow(opts) {
+    const st = followState;
+    if (!st) return;
+    followState = null;
+    if (st.settleTimer) { clearTimeout(st.settleTimer); st.settleTimer = null; }
+    if (st.rafId) { cancelAnimationFrame(st.rafId); st.rafId = null; }
+    if (st.keyHandler) { document.removeEventListener('keydown', st.keyHandler); st.keyHandler = null; }
+    if (st.layer) { try { st.layer.remove(); } catch (_) {} st.layer = null; }
+    if (st.card) { st.card.remove(); st.card = null; }
+    if (!(opts && opts.keepUrl) && window.LiveFollow) setLiveHashParam(LiveFollow.HASH_PARAM, '');
   }
 
   function destroy() {
@@ -5087,6 +5591,13 @@
       _dprMedia = null;
       _dprChangeHandler = null;
     }
+    // #880 — the route already changed, so leave the URL alone.
+    stopFollow({ keepUrl: true });
+    followArmed = false;
+    observerRoster = {};
+    _observerRosterPromise = null;
+    _followSkewPromise = null;
+    if (_followToastTimer) { clearTimeout(_followToastTimer); _followToastTimer = null; }
     stopReplay();
     if (_timelineRefreshInterval) { clearInterval(_timelineRefreshInterval); _timelineRefreshInterval = null; }
     if (_lcdClockInterval) { clearInterval(_lcdClockInterval); _lcdClockInterval = null; }
