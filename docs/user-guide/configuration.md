@@ -197,7 +197,7 @@ An administrator can also revoke a previously approved channel (see [Channels](c
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `false` | Opens public claims. Only takes effect with a strong `apiKey` (16+ characters, not a placeholder). |
-| `detailsEnabled` | `false` | Also lets owners set station details: antenna type, gain, power, installation and two optional contacts (see [Station details](#station-details) below). Needs `enabled` and a strong `apiKey` too. Off, a request that sets details is refused with 403, but one that only removes details is still accepted, so an owner can always remove their own data. Details already stored are kept, and an administrator can still revoke them. |
+| `detailsEnabled` | `false` | Also lets owners set station details: antenna type, gain, power, installation and two optional contacts (see [Station details](#station-details) below). Needs `enabled` and a strong `apiKey` too. Off, a request that sets details is refused with 403, but one that only removes details is still accepted by the API (the page offers no *Remove* while the switch is off). Details already stored are kept but not served, and an administrator can still revoke them. |
 | `autoApproveProven` | `false` | Approves a proven height without an administrator, unless it is flagged (see `reviewDeltaM`). Only repeater and room claims with a cached surface estimate can be flagged. |
 | `submissionsPerHour` | `20` | Global limit on new claims per hour. |
 | `maxPending` | `256` | Claims waiting for an advert, over all nodes. A claim over the limit is refused; it never evicts another. |

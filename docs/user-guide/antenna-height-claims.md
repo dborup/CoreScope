@@ -154,15 +154,15 @@ Both contacts live exactly as long as the details they belong to. They are delet
 
 Details that nothing replaced stay in force with no time limit. If the node moves more than 50 m (the operator may set another distance) from where you proved them, the site stops showing them until you claim them again. A move deletes nothing, and the administrator can still see them.
 
-If the site switches station details off, you can no longer set details, but you can still remove ones you set earlier while claims are open.
+If the site switches station details off, the page no longer shows your details or offers to change them. The site keeps what it stored. To have it removed, ask the operator (an administrator can revoke the claim). Or send `POST /api/nodes/{pubkey}/antenna-claims` with `{"clearDetails": true}` and prove it with an advert like any claim.
 
 ### What stays behind
 
 Deletion is **logical**, not a wipe of the disk:
 
-- **Backups.** Administrators can download a copy of the database, and operators back it up. A copy made while a contact exists contains it, and the operator's backup retention decides how long that copy lives. Ask the operator if a contact must be gone from their backups too.
+- **Backups.** Administrators can download a copy of the database, and operators back it up. `GET /api/backup` writes a fresh copy (`VACUUM INTO`) that holds only the contacts that exist at that moment. `scripts/backup-sqlite.sh` copies the database file and its WAL as they are, so it can also carry a contact deleted earlier, until SQLite reuses that space or a `VACUUM` rebuilds the file. The operator's backup retention decides how long a copy lives. Ask the operator if a contact must be gone from their backups too.
 - **Free pages.** SQLite does not overwrite deleted data at once. Deleted text can stay in unused parts of the database file and its write-ahead log until the space is reused or the file is rebuilt. The site does not use SQLite's secure delete.
-- **The request queue.** Your request waits in a file next to the database until the site applies it, normally within seconds, and at most 24 hours if the site's ingestor is down. That file holds both contacts and can be read by the site's service user only. It is removed when the request is applied.
+- **The request queue.** Your request waits in a file next to the database until the site applies it, normally within seconds. If the site's ingestor is not running, the file stays until it starts again. A request older than 24 hours is then refused without being applied, and its file is removed. That file holds both contacts and can be read by the site's service user only. It is also removed when the request is applied.
 
 This is the operator's own storage. Other visitors never see it.
 
