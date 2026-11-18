@@ -200,6 +200,18 @@ console.log('\n=== live.js: dbPacketToLive ===');
     assert.strictEqual(result._ts, new Date('2024-06-15T12:00:00Z').getTime());
   });
 
+  // #882: VCR replay needs route_type/scope_name for the scope colour and
+  // the "Scoped only" filter (/api/packets carries both).
+  test('#882 carries route_type and scope_name (including null) for replay', () => {
+    const base = { id: 3, hash: 'z', decoded_json: '{}', path_json: '[]', timestamp: '2024-01-01T00:00:00Z' };
+    const named = dbPacketToLive(Object.assign({}, base, { route_type: 0, scope_name: '#dk' }));
+    assert.strictEqual(named.route_type, 0);
+    assert.strictEqual(named.scope_name, '#dk');
+    const flood = dbPacketToLive(Object.assign({}, base, { route_type: 1, scope_name: null }));
+    assert.strictEqual(flood.route_type, 1);
+    assert.strictEqual(flood.scope_name, null);
+  });
+
   test('handles null decoded_json', () => {
     const pkt = { id: 1, hash: 'x', decoded_json: null, path_json: null, timestamp: '2024-01-01T00:00:00Z' };
     const result = dbPacketToLive(pkt);
@@ -1205,6 +1217,18 @@ console.log('\n=== live.js: foreignPathColor ===');
   test('renderPacketTree resolves the origin from hopPositions[0], matching the sender-anchor unshift', () => {
     assert.ok(src.includes('allPaths[ai].hopPositions[0]'),
       'origin lookup must read the first hop position (the sender anchor resolveHopPositions unshifts)');
+  });
+
+  // #882 precedence: foreign red > scope > hash (per segment) > packet type.
+  // A scope colour forces the path colour so drawAnimatedLine's per-segment
+  // hash colour cannot replace it.
+  test('#882 a scope colour forces the path colour over colorByHash, foreign red still first', () => {
+    assert.ok(src.includes('var pathColor = originForeign ? foreignPathColor(allPaths[ai].hopPositions.length) : (scopeColor || color);'),
+      'path colour precedence must be foreign > scope > type');
+    assert.ok(src.includes('var forcePathColor = originForeign || !!scopeColor;'),
+      'a scope colour must set forceColor so colorByHash does not override it');
+    assert.strictEqual((src.match(/pktMeta, forcePathColor\)/g) || []).length, 2,
+      'both animatePath calls (TRACE split and normal) must pass forcePathColor');
   });
 
   test('animatePath suppresses colorByHash when forceColor is set', () => {

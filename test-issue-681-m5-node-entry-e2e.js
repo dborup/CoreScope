@@ -1,5 +1,5 @@
 /**
- * E2E (#681 M5): "Terrain profile to…" on node detail, into the Map page
+ * E2E (#681 M5): "Terrain profile" on node detail, into the Map page
  * Path profile tool with A filled in and the picker armed for B.
  *
  * Same harness as test-issue-681-profile-tool-e2e.js: the CI server has no
@@ -10,7 +10,7 @@
  *
  * Asserts:
  *   1. the full node page and the side pane both offer the action for a
- *      node with a fix, as a ≥48 px target linking #/map?profile=<key>;
+ *      node with a fix, as a chip (#920; 44 px on a phone) linking #/map?profile=<key>;
  *   2. following it opens the Map tool with A named and the picker armed
  *      for B, with no profile request until B is picked;
  *   3. picking B measures once, from that node, and shows the height
@@ -269,13 +269,15 @@ function profileAnswer(q, o) {
   async function roundTrip(label, o) {
     const { ctx, page, rec } = await newCtx(o);
     await gotoNode(page, PK);
-    await step(`${label}: the full node page offers the action as a ≥48 px link`, async () => {
+    await step(`${label}: the full node page offers the action as a chip link (#920)`, async () => {
       const sel = '.node-full-card ' + ACTION;
       await page.waitForSelector(sel, { timeout: 5000 });
       const href = await page.$eval(sel, e => e.getAttribute('href'));
       assert(href === '#/map?profile=' + PK, 'href = ' + href);
       const b = await box(page, sel);
-      assert(b.h >= 48 && b.w >= 48, `target ${b.w}x${b.h}`);
+      // #920: a compact chip on desktop, a 44 px tap target on a phone.
+      if (o.viewport && o.viewport.width <= 768) assert(b.h >= 44 && b.w >= 44, `target ${b.w}x${b.h}`);
+      else assert(b.h < 44, `desktop chip ${b.w}x${b.h}`);
       assert(b.x >= 0 && b.x + b.w <= (o.viewport ? o.viewport.width : 1280), 'action off screen: ' + JSON.stringify(b));
     });
     if (SHOT_DIR) await page.screenshot({ path: path.join(SHOT_DIR, `681-m5-${o.shot}-node.png`) });
@@ -425,8 +427,8 @@ function profileAnswer(q, o) {
       const href = await page.$eval(sel, e => e.getAttribute('href'));
       assert(href === '#/map?profile=' + PK, 'href = ' + href);
       const [b, role] = await stableBoxes(page, [sel, '#nodesRight .node-detail-role'], 5000);
-      assert(b.h >= 48 && b.w >= 48, `target ${b.w}x${b.h}`);
-      // #711 N7: the 48 px action no longer wraps under the 20 px
+      assert(b.h < 44, `side-pane chip ${b.w}x${b.h}`);
+      // #711 N7: the action no longer wraps under the 20 px
       // Details/Analytics/Reach buttons and doubles the header row.
       assert(await page.$('#nodesRight .node-detail-role ' + ACTION) === null, 'the action is still inside the button row');
       assert(role.h < 48, `button row grew to ${role.h}px`);

@@ -58,6 +58,11 @@
   let matrixMode = localStorage.getItem('live-matrix-mode') === 'true';
   let matrixRain = localStorage.getItem('live-matrix-rain') === 'true';
   let colorByHash = localStorage.getItem('meshcore-color-packets-by-hash') !== 'false';
+  // #882 — "Color by scope" (takes precedence over hash colouring; the saved
+  // hash preference is left alone) and "Scoped only" (skip route 1/2 packets).
+  // Resolved from ?color= / ?scoped=, then localStorage, in resolveScopeParams().
+  let colorByScope = localStorage.getItem('meshcore-color-packets-by-scope') === 'true';
+  let scopedOnly = localStorage.getItem('live-scoped-only') === 'true';
   // #660 "Last heard" filter key (live-heard-filter.js). Resolved from the
   // hash, then localStorage, in wireHeardFilter() on every mount.
   let heardKey = 'all';
@@ -82,6 +87,147 @@
   }
   /** Current theme string for hash-color functions. */
   function _liveTheme() { return document.documentElement.dataset.theme || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); }
+
+  // === #882 Color by scope (logic in live-scope-color.js) ===
+  // One registry per page load, so a scope keeps its colour while the
+  // viewer stays (session-sticky). Bounded by LiveScopeColor.CAP.
+  let _scopeRegistry = null;
+  function scopeRegistry() {
+    if (!_scopeRegistry) _scopeRegistry = window.LiveScopeColor.createRegistry();
+    return _scopeRegistry;
+  }
+  // The canvas needs concrete colour strings: the --scope-* variables are
+  // resolved once and cached per theme; a customizer change ('theme-changed')
+  // drops the cache.
+  let _scopePalette = null;
+  let _scopePaletteTheme = '';
+  function scopePalette() {
+    const theme = _liveTheme();
+    if (!_scopePalette || _scopePaletteTheme !== theme) {
+      const cs = getComputedStyle(document.documentElement);
+      _scopePalette = window.LiveScopeColor.readPalette(function(v) { return cs.getPropertyValue(v); });
+      _scopePaletteTheme = theme;
+    }
+    return _scopePalette;
+  }
+  function invalidateScopePalette() { _scopePalette = null; }
+  let _scopeThemeListening = false;
+  // Scope colour of one transmission, or null when "Color by scope" is off.
+  // touch: register the scope in the legend (live packets only; a VCR
+  // replay only reads, its timestamps are not "now"). O(1) per packet.
+  function scopeColorFor(pkt, touch) {
+    const S = window.LiveScopeColor;
+    if (!S || !pkt) return null;
+    const cls = S.classify(pkt.route_type, pkt.scope_name);
+    let slot = S.OTHER;
+    if (cls.kind === 'named') {
+      if (touch) { slot = scopeRegistry().touch(cls.name, Date.now()); scheduleScopeLegend(); }
+      else slot = scopeRegistry().slotOf(cls.name);
+    }
+    if (!colorByScope) return null;
+    return scopePalette()[S.paletteVar(cls, slot)];
+  }
+  // "Scoped only": hide route 1/2 (and route-less) packets; an unknown scope
+  // (route 0/3 without a resolved name) still counts as scoped.
+  function isScopedHidden(pkt) {
+    return scopedOnly && !!window.LiveScopeColor && !window.LiveScopeColor.isScoped(pkt && pkt.route_type);
+  }
+  // Feed-item stripe: scope colour in scope mode, else the hash colour.
+  function feedStripeColor(pkt, hash) {
+    if (colorByScope && window.LiveScopeColor) return scopeColorFor(pkt, false);
+    if (colorByHash && hash && window.HashColor) return HashColor.hashToHsl(hash, _liveTheme());
+    return null;
+  }
+
+  // Legend section "SCOPES (last 15 min)": re-rendered at most once a second
+  // while packets arrive, on the shared 60 s tick (expiry) and on a toggle,
+  // and only touches the DOM when its rows changed. Names are untrusted
+  // (node/config strings), so rows are built with textContent.
+  let _scopeLegendTimer = null;
+  let _scopeLegendSig = '';
+  function scheduleScopeLegend() {
+    if (!colorByScope || _scopeLegendTimer) return;
+    _scopeLegendTimer = setTimeout(function() { _scopeLegendTimer = null; renderScopeLegend(); }, 1000);
+  }
+  function scopeLegendRow(cssVar, label, cls) {
+    const li = document.createElement('li');
+    if (cls) li.className = cls;
+    if (cssVar) {
+      const sw = document.createElement('span');
+      sw.className = 'live-scope-swatch';
+      sw.setAttribute('aria-hidden', 'true');
+      sw.style.background = 'var(' + cssVar + ')';
+      li.appendChild(sw);
+    }
+    const name = document.createElement('span');
+    name.className = 'live-scope-name';
+    name.textContent = label;
+    li.appendChild(name);
+    return li;
+  }
+  function renderScopeLegend() {
+    const S = window.LiveScopeColor;
+    const sec = document.getElementById('scopeLegendSection');
+    const list = document.getElementById('scopeLegendList');
+    const menu = document.getElementById('scopeLegendMenu');
+    const menuList = document.getElementById('scopeLegendMenuList');
+    if (!S || !sec || !list) return;
+    sec.hidden = !colorByScope;
+    if (menu) menu.hidden = !colorByScope;
+    if (!colorByScope) { _scopeLegendSig = ''; return; }
+    const L = scopeRegistry().legend(Date.now());
+    const sig = L.sig + '|' + scopedOnly;
+    if (sig === _scopeLegendSig) return;
+    _scopeLegendSig = sig;
+    const frag = document.createDocumentFragment();
+    if (!L.rows.length) frag.appendChild(scopeLegendRow(null, 'No named scopes yet', 'live-scope-empty'));
+    for (const r of L.rows) frag.appendChild(scopeLegendRow(S.paletteVar({ kind: 'named' }, r.slot), r.name));
+    if (L.more > 0) frag.appendChild(scopeLegendRow(null, '+' + L.more + ' more', 'live-scope-more'));
+    frag.appendChild(scopeLegendRow('--scope-unknown', 'Unknown scope (T?)'));
+    if (!scopedOnly) frag.appendChild(scopeLegendRow('--scope-none', 'No scope'));
+    if (menuList) menuList.replaceChildren(frag.cloneNode(true));
+    list.replaceChildren(frag);
+  }
+  // Hash colouring is inert while scope colouring is on: say so on the
+  // checkbox instead of silently ignoring it.
+  function syncScopeControls() {
+    const hashEl = document.getElementById('liveColorHashToggle');
+    if (hashEl) {
+      hashEl.disabled = colorByScope;
+      hashEl.setAttribute('aria-describedby', colorByScope ? 'colorHashDesc colorHashScopeNote' : 'colorHashDesc');
+      const lbl = hashEl.closest('label');
+      if (lbl) lbl.title = colorByScope ? 'Color by scope is on and takes precedence' : '';
+    }
+    renderScopeLegend();
+  }
+  // A valid ?color= / ?scoped= wins over the saved value and is saved
+  // (same rule as ?heard=, #660).
+  function resolveScopeParams() {
+    const S = window.LiveScopeColor;
+    if (!S) {
+      ['liveColorScopeToggle', 'liveScopedOnlyToggle'].forEach(function(id) {
+        const el = document.getElementById(id);
+        const lbl = el && el.closest('label');
+        if (lbl) lbl.style.display = 'none';
+      });
+      return;
+    }
+    const params = getHashParams ? getHashParams() : new URLSearchParams();
+    const m = S.resolveColorMode(params.get(S.COLOR_PARAM), { scope: colorByScope, hash: colorByHash });
+    if (m.fromHash) {
+      colorByScope = m.scope;
+      colorByHash = m.hash;
+      try {
+        localStorage.setItem(S.STORAGE_KEY, colorByScope);
+        localStorage.setItem('meshcore-color-packets-by-hash', colorByHash);
+      } catch (_) { /* quota */ }
+    }
+    const so = S.resolveScopedOnly(params.get(S.SCOPED_PARAM), scopedOnly);
+    if (so.fromHash) {
+      scopedOnly = so.on;
+      try { localStorage.setItem(S.SCOPED_STORAGE_KEY, scopedOnly); } catch (_) { /* quota */ }
+    }
+  }
   let nodeFilterKeys = (localStorage.getItem('live-node-filter') || '').split(',').map(s => s.trim()).filter(Boolean);
   let nodeFilterTotal = 0;
   let nodeFilterShown = 0;
@@ -849,7 +995,8 @@
   function registerClickablePath(latLngs, typeName, color, hopNames, tsMs, hash) {
     if (!clickablePathsLayer) return;
     const poly = L.polyline(latLngs, { weight: 12, opacity: 0, interactive: true }).addTo(clickablePathsLayer);
-    const entry = { addedAt: Date.now(), poly };
+    // color/hash: what the route was drawn in (read by the #882 E2E).
+    const entry = { addedAt: Date.now(), poly, color, hash };
     clickablePaths.push(entry);
     pruneClickablePaths(Date.now());
     let dismissTimer = null;
@@ -1044,6 +1191,8 @@
     return {
       id: pkt.id, hash: pkt.hash,
       raw: pkt.raw_hex,
+      // #882: scope colour and "Scoped only" in VCR replay.
+      route_type: pkt.route_type, scope_name: pkt.scope_name,
       path_json: pkt.path_json,
       resolved_path: pkt.resolved_path,
       _ts: new Date(pkt.timestamp || pkt.created_at).getTime(),
@@ -1335,6 +1484,7 @@
    * region controls, which stay hidden or inert until their own fetches.
    */
   function wireLiveControls() {
+    resolveScopeParams();
     const TOGGLES = [
       { id: 'liveHeatToggle', restore: () => heatEnabled, onChange: (v) => {
         heatEnabled = v;
@@ -1352,7 +1502,23 @@
       { id: 'liveColorHashToggle', restore: () => colorByHash, onChange: (v) => {
         colorByHash = v;
         localStorage.setItem('meshcore-color-packets-by-hash', colorByHash);
+        // A ?color=hash|type link keeps describing what is shown.
+        const cp = getHashParams ? getHashParams().get('color') : null;
+        if (cp === 'hash' || cp === 'type') setLiveHashParam('color', v ? 'hash' : 'type');
         window.dispatchEvent(new Event('storage'));
+      } },
+      { id: 'liveColorScopeToggle', restore: () => colorByScope, onChange: (v) => {
+        colorByScope = v;
+        localStorage.setItem('meshcore-color-packets-by-scope', colorByScope);
+        setLiveHashParam('color', v ? 'scope' : '');
+        syncScopeControls();
+      } },
+      { id: 'liveScopedOnlyToggle', restore: () => scopedOnly, onChange: (v) => {
+        scopedOnly = v;
+        localStorage.setItem('live-scoped-only', scopedOnly);
+        setLiveHashParam('scoped', v ? '1' : '');
+        rebuildFeedList();
+        syncScopeControls();
       } },
       { id: 'liveFavoritesToggle', restore: () => showOnlyFavorites, onChange: (v) => {
         showOnlyFavorites = v;
@@ -1393,6 +1559,7 @@
     }
     // The Heat/Matrix interlock holds from the first paint.
     syncHeatToggleToMatrix(matrixMode);
+    syncScopeControls();
     wireHeardFilter();
     wireFollowNext();
   }
@@ -1631,6 +1798,7 @@
             <span id="realisticDesc" class="sr-only">Buffer packets by hash and animate all paths simultaneously</span>
             <label><input type="checkbox" id="liveColorHashToggle" aria-describedby="colorHashDesc"> Color by hash</label>
             <span id="colorHashDesc" class="sr-only">Color flying-packet dots and contrails by packet hash for propagation tracing</span>
+            <span id="colorHashScopeNote" class="sr-only">Inactive while Color by scope is on</span>
             <label><input type="checkbox" id="liveMatrixToggle" aria-describedby="matrixDesc"> Matrix</label>
             <span id="matrixDesc" class="sr-only">Animate packet hex bytes flowing along paths like the Matrix</span>
             <label><input type="checkbox" id="liveMatrixRainToggle" aria-describedby="rainDesc"> Rain</label>
@@ -1664,6 +1832,21 @@
             </div>
             <div id="liveRegionFilter" class="region-filter-container live-region-filter-container" aria-label="Filter live packets by IATA region"></div>
             <div id="liveAreaFilter" class="live-area-filter-container"></div>
+            <!-- #882: appended after every existing control so none of them moves
+                 (the desktop row, the capped phone panel and the node-filter
+                 typeahead keep their geometry, #670/#671). -->
+            <div class="live-toggles live-scope-toggles">
+              <label><input type="checkbox" id="liveColorScopeToggle" aria-describedby="colorScopeDesc"> Color by scope</label>
+              <span id="colorScopeDesc" class="sr-only">Color packet routes by their scope (region). Takes precedence over Color by hash; foreign-origin red still wins</span>
+              <label title="Show only scoped packets"><input type="checkbox" id="liveScopedOnlyToggle" aria-describedby="scopedOnlyDesc"> Scoped only</label>
+              <span id="scopedOnlyDesc" class="sr-only">Show only scoped packets (transport routes, including an unknown scope); hide plain flood and direct packets</span>
+            </div>
+            <!-- #882: phones hide the legend panel (#875), so the SCOPES list is
+                 mirrored here; CSS shows it only where the legend is hidden. -->
+            <div id="scopeLegendMenu" class="live-scope-legend live-scope-legend--menu" hidden>
+              <h3 class="legend-title">SCOPES (last 15 min)</h3>
+              <ul class="legend-list" id="scopeLegendMenuList"></ul>
+            </div>
             <div class="audio-controls hidden" id="audioControls">
               <label class="audio-slider-label">Voice <select id="audioVoiceSelect" class="audio-voice-select"></select></label>
               <label class="audio-slider-label">BPM <input type="range" id="audioBpmSlider" min="40" max="300" value="120" class="audio-slider"><span id="audioBpmVal">120</span></label>
@@ -1698,6 +1881,10 @@
           </div>
           <div class="legend-body">
           <div class="panel-content">
+          <div id="scopeLegendSection" class="live-scope-legend" hidden>
+          <h3 class="legend-title">SCOPES (last 15 min)</h3>
+          <ul class="legend-list" id="scopeLegendList"></ul>
+          </div>
           <h3 class="legend-title">PACKET TYPES</h3>
           <ul class="legend-list">
             ${buildLegendHtml(window.PayloadLabels || null)}
@@ -3008,7 +3195,8 @@
     // Prune stale nodes every 60 seconds
     // One shared 60 s tick: nodes also age out of the "Last heard" filter
     // here (#660), with no timer of its own.
-    _pruneInterval = setInterval(() => { pruneStaleNodes(); applyHeardFilter(); }, 60000);
+    _pruneInterval = setInterval(() => { pruneStaleNodes(); applyHeardFilter(); renderScopeLegend(); }, 60000);
+    if (!_scopeThemeListening) { window.addEventListener('theme-changed', invalidateScopePalette); _scopeThemeListening = true; }
 
     // Refresh relative timestamps in feed every 10 seconds (#701)
     _feedTimestampInterval = setInterval(function() {
@@ -3475,6 +3663,7 @@
 
     for (const group of sorted) {
       if (multibyteOnly && !groupIsMultibyte(group.packets)) continue;
+      if (isScopedHidden(group.latestPkt)) continue;
       const pkt = Object.assign({}, group.latestPkt, { observation_count: group.count });
       const decoded = pkt.decoded || {};
       const header = decoded.header || {};
@@ -3512,6 +3701,9 @@
       item.setAttribute('role', 'button');
       if (group.hash) item.setAttribute('data-hash', group.hash);
       item.style.cursor = 'pointer';
+      // Rebuilt items had no hash stripe before #882; only the scope stripe is added here.
+      var _stripe1 = colorByScope ? feedStripeColor(pkt, group.hash) : null;
+      if (_stripe1) item.style.borderLeft = '4px solid ' + _stripe1;
       item.innerHTML = `
         <span class="feed-icon" style="color:${color}">${icon}</span>
         <span class="feed-type" style="color:${color}">${typeName}</span>
@@ -3787,6 +3979,8 @@
   window._liveFollowState = function() { return followState; };
   window._liveFollowArmed = function() { return followArmed; };
   window._liveForeignPathColor = foreignPathColor;
+  window._liveScopeColorFor = scopeColorFor;
+  window._liveScopeRegistry = function() { return window.LiveScopeColor ? scopeRegistry() : null; };
   window._liveVcrSpeedCycle = vcrSpeedCycle;
   window._liveSpeedLabel = speedLabel;
   window._liveVcrPause = vcrPause;
@@ -4049,6 +4243,9 @@
     // --- Favorites filter ---
     if (showOnlyFavorites && !packets.some(function(p) { return packetInvolvesFavorite(p); })) return;
 
+    // --- #882 "Scoped only": scope is a transmission attribute, first is enough ---
+    if (isScopedHidden(first)) return;
+
     // --- Node filter ---
     if (nodeFilterKeys.length) {
       nodeFilterTotal++;
@@ -4062,6 +4259,10 @@
       var _regionSel = RegionFilter.getSelected();
       if (_regionSel && _regionSel.length && !packetMatchesRegion(packets, observerIataMap, _regionSel)) return;
     }
+
+    // #882 — scope colour for this transmission (registers the scope for the
+    // legend in every colour mode); null unless "Color by scope" is on.
+    const scopeColor = scopeColorFor(first, !isReplay);
 
     // #880 — "Follow next packet": the first group that passed every filter
     // above, i.e. the next one the viewer can see.
@@ -4201,14 +4402,16 @@
       // depth-scaled red for this path's line segments instead.
       var originKey = allPaths[ai].hopPositions[0] && allPaths[ai].hopPositions[0].key;
       var originForeign = highlightForeign && originKey && nodeData[originKey] && !!nodeData[originKey].foreign;
-      var pathColor = originForeign ? foreignPathColor(allPaths[ai].hopPositions.length) : color;
+      // Precedence: foreign red > scope > hash (per segment) > packet type.
+      var pathColor = originForeign ? foreignPathColor(allPaths[ai].hopPositions.length) : (scopeColor || color);
+      var forcePathColor = originForeign || !!scopeColor;
       // For TRACE packets, split at hopsCompleted: solid for completed, dashed for remaining
       var hopsCompleted = decoded.path && decoded.path.hopsCompleted;
       if (typeName === 'TRACE' && hopsCompleted != null && hopsCompleted < allPaths[ai].hopPositions.length) {
         var completedPositions = allPaths[ai].hopPositions.slice(0, hopsCompleted + 1);
         var remainingPositions = allPaths[ai].hopPositions.slice(hopsCompleted);
         if (completedPositions.length >= 2) {
-          animatePath(completedPositions, typeName, pathColor, allPaths[ai].raw, onHop, pktMeta, originForeign);
+          animatePath(completedPositions, typeName, pathColor, allPaths[ai].raw, onHop, pktMeta, forcePathColor);
         } else if (completedPositions.length === 1) {
           pulseNode(completedPositions[0].key, completedPositions[0].pos, typeName);
         }
@@ -4216,7 +4419,7 @@
           drawDashedPath(remainingPositions, pathColor);
         }
       } else {
-        animatePath(allPaths[ai].hopPositions, typeName, pathColor, allPaths[ai].raw, onHop, pktMeta, originForeign);
+        animatePath(allPaths[ai].hopPositions, typeName, pathColor, allPaths[ai].raw, onHop, pktMeta, forcePathColor);
       }
     }
   }
@@ -4346,10 +4549,10 @@
     return raw.filter(h => h.pos != null);
   }
 
-  // forceColor (foreign-origin highlight): when true, always draw this
-  // path's segments in `color` — suppresses the colorByHash per-segment
-  // override below so the foreign flag stays visible even when "Color by
-  // hash" is also enabled.
+  // forceColor (foreign-origin highlight, or a #882 scope colour): when
+  // true, always draw this path's segments in `color` — suppresses the
+  // colorByHash per-segment override below so the foreign flag (or the
+  // scope) stays visible even when "Color by hash" is also enabled.
   function animatePath(hopPositions, typeName, color, rawHex, onHop, pktMeta, forceColor) {
     if (!animLayer || !pathsLayer) return;
     if (activeAnims >= MAX_CONCURRENT_ANIMS) return;
@@ -5117,10 +5320,9 @@
     item.setAttribute('tabindex', '0');
     item.setAttribute('role', 'button');
     item.style.cursor = 'pointer';
-    // Hash-color stripe for feed items (mirrors packets table border-left)
-    if (colorByHash && pkt.hash && window.HashColor) {
-      item.style.borderLeft = '4px solid ' + HashColor.hashToHsl(pkt.hash, _liveTheme());
-    }
+    // Scope- or hash-color stripe for feed items (mirrors packets table border-left)
+    var _stripe = feedStripeColor(pkt, pkt.hash);
+    if (_stripe) item.style.borderLeft = '4px solid ' + _stripe;
     // Channel color highlighting for GRP_TXT packets (#271)
     var _cs = _getChannelStyle(pkt);
     if (_cs) item.style.cssText += _cs;
@@ -5205,10 +5407,9 @@
     item.setAttribute('role', 'button');
     if (hash) item.setAttribute('data-hash', hash);
     item.style.cursor = 'pointer';
-    // Hash-color stripe for feed items (mirrors packets table border-left)
-    if (colorByHash && hash && window.HashColor) {
-      item.style.borderLeft = '4px solid ' + HashColor.hashToHsl(hash, _liveTheme());
-    }
+    // Scope- or hash-color stripe for feed items (mirrors packets table border-left)
+    var _stripe = feedStripeColor(pkt, hash);
+    if (_stripe) item.style.borderLeft = '4px solid ' + _stripe;
     // Channel color highlighting for GRP_TXT packets (#271)
     var _chanStyle = _getChannelStyle(pkt);
     if (_chanStyle) item.style.cssText += _chanStyle;
@@ -5803,6 +6004,9 @@
     if (_rateCounterInterval) { clearInterval(_rateCounterInterval); _rateCounterInterval = null; }
     if (_pruneInterval) { clearInterval(_pruneInterval); _pruneInterval = null; }
     if (_heardReapplyTimer) { clearTimeout(_heardReapplyTimer); _heardReapplyTimer = null; }
+    if (_scopeLegendTimer) { clearTimeout(_scopeLegendTimer); _scopeLegendTimer = null; }
+    _scopeLegendSig = '';
+    if (_scopeThemeListening) { window.removeEventListener('theme-changed', invalidateScopePalette); _scopeThemeListening = false; }
     if (_feedTimestampInterval) { clearInterval(_feedTimestampInterval); _feedTimestampInterval = null; }
     if (_affinityInterval) { clearInterval(_affinityInterval); _affinityInterval = null; }
     // Unsubscribe rather than close: the socket belongs to app.js and the rest

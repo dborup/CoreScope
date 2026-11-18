@@ -452,6 +452,25 @@
    * light theme. Dark theme override is set in both dark-mode blocks below. */
   --shadow: rgba(0,0,0,0.3);
   --trace-ghost-color: #94a3b8;
+  /* #882 — Live "Color by scope" palette (public/live-scope-color.js).
+   * 12 qualitative slots, kept off pure red (foreign-origin red wins), plus
+   * two greys that differ from each other: no scope (FLOOD/DIRECT) and
+   * unknown scope (route 0/3, region not resolved). Customizer: #882 M2. */
+  --scope-1: #0072b2;
+  --scope-2: #009e73;
+  --scope-3: #b35c00;
+  --scope-4: #7e3fa0;
+  --scope-5: #a8780b;
+  --scope-6: #00838f;
+  --scope-7: #b0306f;
+  --scope-8: #4b5eaa;
+  --scope-9: #5e8b2f;
+  --scope-10: #8b4513;
+  --scope-11: #c026d3;
+  --scope-12: #6d6d00;
+  --scope-none: #a1a1aa;
+  --scope-unknown: #57534e;
+  --scope-other: #111827;
   /* #880 — Live "Follow a packet". Built on theme tokens, so both dark
    * blocks follow without their own copies. Customizer mapping: #880 M3. */
   --follow-ring: var(--accent);
@@ -558,6 +577,22 @@
     --hover-bg: rgba(255,255,255, 0.06);
     --shadow: rgba(0,0,0,0.5);
     --trace-ghost-color: #94a3b8;
+    /* #882 — Live scope palette, dark (keep both dark blocks in sync). */
+    --scope-1: #3d8bfd;
+    --scope-2: #3fd7a5;
+    --scope-3: #f0a03c;
+    --scope-4: #c49be0;
+    --scope-5: #e6c34a;
+    --scope-6: #4dd0e1;
+    --scope-7: #f06292;
+    --scope-8: #8c9eff;
+    --scope-9: #a5d66b;
+    --scope-10: #d7a07a;
+    --scope-11: #e879f9;
+    --scope-12: #dce775;
+    --scope-none: #6b7280;
+    --scope-unknown: #c4b5a5;
+    --scope-other: #f8fafc;
     --section-bg: #1e1e34;
   }
 }
@@ -631,6 +666,22 @@
   --hover-bg: rgba(255,255,255, 0.06);
   --shadow: rgba(0,0,0,0.5);
   --trace-ghost-color: #94a3b8;
+  /* #882 — Live scope palette, dark (keep both dark blocks in sync). */
+  --scope-1: #3d8bfd;
+  --scope-2: #3fd7a5;
+  --scope-3: #f0a03c;
+  --scope-4: #c49be0;
+  --scope-5: #e6c34a;
+  --scope-6: #4dd0e1;
+  --scope-7: #f06292;
+  --scope-8: #8c9eff;
+  --scope-9: #a5d66b;
+  --scope-10: #d7a07a;
+  --scope-11: #e879f9;
+  --scope-12: #dce775;
+  --scope-none: #6b7280;
+  --scope-unknown: #c4b5a5;
+  --scope-other: #f8fafc;
   --section-bg: #1e1e34;
 }
 
@@ -6998,31 +7049,39 @@ body.embed .warmup-pills { display: none !important; }
 .tp-hbadge-owner { border-width: 2px; border-color: var(--owner-badge); color: var(--text); }
 .tp-hbadge-link { border-color: var(--border); color: var(--text); }
 
-/* #681 M5 — "Terrain profile to…" on node detail: a 48 px target in both
-   the side pane and the full page action row. */
-.node-terrain-action {
+/* #920 — every node action is one compact chip: on the full node page
+   Copy URL, Copy short URL, Analytics, Reach and Observer →; in the side
+   pane Details, Analytics and Reach; in both, the module actions "Terrain
+   profile" and "Oblique photo" (#681 M5, #737 M2). 12 px on the page,
+   11 px in the pane; on phones every chip grows to a 44 px tap target, so
+   a row keeps one height. */
+.node-action-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-height: 48px;
-  min-width: 48px;
-  padding: 4px 12px;
-  margin-left: 4px;
+  padding: 4px 10px;
   font-size: 12px;
+  line-height: 1.2;
   text-decoration: none;
+  white-space: nowrap;
   vertical-align: middle;
 }
-/* The side pane gives it a row of its own under the 20 px Details /
-   Analytics / Reach buttons, rather than letting it wrap there and double
-   the height of that row (#711). */
-.node-detail-actions { margin: -4px 0 12px; }
+/* The side pane gives the module chips a row of their own under the
+   Details / Analytics / Reach chips, rather than letting them wrap there
+   and double the height of that row (#711). Both rows align their chips to
+   the top instead of stretching them, so a chip that drifts in size shows
+   as a different height instead of being stretched to match its line. */
+.node-full-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+.node-detail-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 8px; align-items: flex-start; }
 .node-detail-actions:empty { display: none; }
-.node-full-actions .node-terrain-action,
-.node-detail-actions .node-terrain-action { margin-left: 0; }
+.node-detail .node-action-chip { padding: 2px 8px; font-size: 11px; }
 .node-terrain-icon { display: inline-flex; }
+@media (max-width: 768px) {
+  .node-action-chip { min-height: 44px; min-width: 44px; justify-content: center; }
+}
 
-/* #737 M2 — "Oblique photo": the node-detail button sits beside "Terrain
-   profile to…" with the same 48 px target; in the Path profile a row of
+/* #737 M2 — "Oblique photo": the node-detail button is a node action chip
+   (#920) beside "Terrain profile"; in the Path profile a row of
    its own under the chart (A, B, the clicked chart point). */
 .sf-icon { display: inline-flex; }
 .tp-sf-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 0; }
