@@ -747,6 +747,7 @@
     if (wasLive !== (mode === 'LIVE')) applyHeardFilter();
     if (mode !== 'LIVE' && !VCR.frozenNow) VCR.frozenNow = Date.now();
     if (mode === 'LIVE') VCR.frozenNow = null;
+    if (moments) moments.onModeChange();
     // #880 — "Follow next" picks a live packet; a replay must not feed it.
     if (mode !== 'LIVE' && followArmed) setFollowArmed(false);
     updateVCRUI();
@@ -1749,6 +1750,10 @@
   // Async initialization and search callbacks belong to one Live mount.
   // Invalidate them on exit, including when the user immediately returns.
   let liveGeneration = 0;
+  // #881 M2 — the moments controller (live-moments.js), null while the
+  // server has moments off or the viewer is on another page.
+  let moments = null;
+  let _momentHl = null; // { layers, timer } of the last fly-to highlight
 
   async function init(app) {
     const generation = ++liveGeneration;
@@ -1805,6 +1810,8 @@
             <span id="multibyteDesc" class="sr-only">Show only multibyte (≥2-byte path-hash) packets; hide unreliable single-byte traffic</span>
             <label><input type="checkbox" id="liveForeignToggle" checked aria-describedby="foreignDesc"> Foreign origin</label>
             <span id="foreignDesc" class="sr-only">Color a packet's route red when it originates from a node outside your configured region; darker red means more hops traveled</span>
+            <label id="liveMomentsLabel" style="display:none"><input type="checkbox" id="liveMomentsToggle" aria-describedby="momentsDesc"> Moments</label>
+            <span id="momentsDesc" class="sr-only">Show short cards for mesh moments: new nodes, repeaters back online, record links and the busiest repeater</span>
             <label id="liveHeardLabel" class="live-heard-label" title="Hide repeaters and rooms not heard within this window. Heard = an own advert or a flood packet the server resolved this node relaying, plus live packets since the page loaded. Adverts alone are infrequent and the interval is set per node, so a healthy repeater that relays nothing can look silent until its next advert: pick a window longer than its advert interval. Companions and sensors are never hidden. Suspended during VCR replay.">Last heard <select id="liveHeardSelect" class="live-heard-select" aria-describedby="heardDesc"></select></label>
             <span id="heardDesc" class="sr-only">Hide repeaters and rooms with no advert or relayed traffic within the chosen window. Adverts are infrequent and the interval is set per node, so a healthy repeater that relays nothing can look silent until its next advert: pick a window longer than its advert interval. Companions and sensors are never hidden. Suspended during VCR replay.</span>
             <span id="liveHeardCount" class="live-filter-count hidden" aria-live="polite"></span>
@@ -2276,6 +2283,7 @@
     if (generation !== liveGeneration) return;
     applyLiveControlEffects();
     connectWS();
+    initMoments(generation);
     initResizeHandler();
     initVCRHeightTracker();
     initLegendScrollRail();
@@ -3002,6 +3010,9 @@
       }
     }
     map.on('moveend', () => {
+      // Leaflet's remove() leaves invalidateSize's debounced moveend timer
+      // armed, so this can run after destroy() has nulled the map.
+      if (!map) return;
       const c = map.getCenter();
       localStorage.setItem('live-map-view', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
     });
@@ -3945,6 +3956,9 @@
   // app.js's shared channel and never open a socket of its own.
   window._liveConnectWS = connectWS;
   window._liveWSHandler = function() { return wsHandler; };
+  // #881 M2 E2E: the moments controller and the map a card click moves.
+  window._liveMoments = function() { return moments; };
+  window._liveGetMap = function() { return map; };
   window._liveVCR = function() { return VCR; };
   window._liveGetFavoritePubkeys = getFavoritePubkeys;
   window._livePacketInvolvesFavorite = packetInvolvesFavorite;
@@ -4059,6 +4073,99 @@
       try { bufferPacket(msg.data); } catch { }
     };
     onWS(wsHandler);
+  }
+
+  // #881 M2 — Moments. Waits for /api/config/client; does nothing at all
+  // (no listener, no request, no DOM) unless the server has moments on and
+  // the viewer has not turned them off. live-moments.js owns the cards and
+  // the drawer; this is the map half and the viewer switch.
+  async function initMoments(generation) {
+    try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}
+    const M = window.LiveMoments;
+    if (generation !== liveGeneration || !map || !M || !window.MC_MOMENTS_CFG || moments) return;
+    let stored = null;
+    try { stored = localStorage.getItem(M.STORAGE_KEY); } catch (_) { /* private mode */ }
+    const fromHash = getHashParams ? getHashParams().get(M.HASH_PARAM) : null;
+    const enabled = M.resolveInitialEnabled(fromHash, stored);
+    if (fromHash === '0' || fromHash === '1') {
+      try { localStorage.setItem(M.STORAGE_KEY, enabled ? 'true' : 'false'); } catch (_) { /* quota */ }
+    }
+    if (!document.querySelector('.live-page')) return;
+    if (enabled) startMoments();
+    const label = document.getElementById('liveMomentsLabel');
+    const toggle = document.getElementById('liveMomentsToggle');
+    if (label && toggle) {
+      label.style.display = '';
+      toggle.checked = enabled;
+      toggle.addEventListener('change', () => {
+        try { localStorage.setItem(M.STORAGE_KEY, toggle.checked ? 'true' : 'false'); } catch (_) { /* private mode */ }
+        if (toggle.checked) startMoments();
+        else if (moments) { moments.destroy(); moments = null; }
+        setLiveHashParam(M.HASH_PARAM, toggle.checked ? '' : '0');
+      });
+    }
+  }
+
+  function startMoments() {
+    const page = document.querySelector('.live-page');
+    if (moments || !page || !map) return;
+    moments = window.LiveMoments.create({
+      doc: document,
+      root: page,
+      onWS: onWS,
+      offWS: offWS,
+      fetchJSON: (url, signal) => fetch(url, { signal }).then(r => r.ok ? r.json() : null),
+      now: () => Date.now(),
+      matchMedia: (q) => window.matchMedia(q),
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (id) => clearTimeout(id),
+      // #880: a follow holds the live stream (bufferPacket), so it holds the
+      // cards too: moments go to history only, as with the VCR out of LIVE.
+      getMode: () => (followState ? 'FOLLOW' : VCR.mode),
+      getZoom: () => (map ? map.getZoom() : null),
+      // Phone: the node-detail sheet and the open settings own the bottom.
+      isSuppressed: () => {
+        const d = document.getElementById('liveNodeDetail');
+        const c = document.getElementById('liveControls');
+        return !!((d && !d.classList.contains('hidden')) || (c && c.classList.contains('is-expanded')));
+      },
+      profileOffered: () => !!(window.TerrainProfile && typeof window.TerrainProfile.offered === 'function' &&
+        window.TerrainProfile.offered(window.MC_DHM_CFG)),
+      navigate: (href) => { location.hash = href; },
+      onFly: momentFly,
+    });
+  }
+
+  function clearMomentHighlight() {
+    if (!_momentHl) return;
+    clearTimeout(_momentHl.timer);
+    for (const l of _momentHl.layers) { try { l.remove(); } catch (_) {} }
+    _momentHl = null;
+  }
+
+  // momentFly runs the module's Leaflet plan and marks the target for 10 s:
+  // a ring per node (a divIcon, so CSS styles it and reduced motion stops
+  // its pulse) and, for a record link, a dashed line between the two.
+  function momentFly(plan, t) {
+    if (!map || !plan) return;
+    try { map[plan.method].apply(map, plan.args); } catch (_) { return; }
+    clearMomentHighlight();
+    const ring = (p) => L.marker([p.lat, p.lon], {
+      icon: L.divIcon({ className: 'live-moment-hl' + (plan.reduce ? ' is-static' : ''), iconSize: [28, 28] }),
+      interactive: false, keyboard: false,
+    });
+    const layers = [];
+    if (t.type === 'link') {
+      const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+      layers.push(L.polyline([[t.a.lat, t.a.lon], [t.b.lat, t.b.lon]], {
+        color: accent, weight: 3, opacity: 0.9, dashArray: '6 6', interactive: false,
+      }));
+      layers.push(ring(t.a), ring(t.b));
+    } else {
+      layers.push(ring(t));
+    }
+    for (const l of layers) l.addTo(map);
+    _momentHl = { layers, timer: setTimeout(clearMomentHighlight, 10000) };
   }
 
   // A packet group is multibyte when its path hash size is >= 2 bytes.
@@ -5535,6 +5642,7 @@
       model: null, sched: null, ptr: 0, startTs: 0, pausedElapsed: null,
       rings: [], ringRadii: [], litRelays: 0, depthShown: -1, done: false, reduced: false,
     };
+    if (moments) moments.onModeChange();
     setLiveHashParam(LF.HASH_PARAM, h);
     collapseControlsOnPhone();
     buildFollowCard(st);
@@ -5817,6 +5925,7 @@
     if (st.layer) { try { st.layer.remove(); } catch (_) {} st.layer = null; }
     if (st.card) { st.card.remove(); st.card = null; }
     if (!(opts && opts.keepUrl) && window.LiveFollow) setLiveHashParam(window.LiveFollow.HASH_PARAM, '');
+    if (moments) moments.onModeChange();
   }
 
   function destroy() {
@@ -5874,6 +5983,8 @@
     // Unsubscribe rather than close: the socket belongs to app.js and the rest
     // of the app still needs it.
     if (wsHandler) { offWS(wsHandler); wsHandler = null; }
+    if (moments) { moments.destroy(); moments = null; }
+    clearMomentHighlight();
     if (regionFilterChangeHandler && window.RegionFilter && typeof RegionFilter.offChange === 'function') {
       RegionFilter.offChange(regionFilterChangeHandler);
       regionFilterChangeHandler = null;

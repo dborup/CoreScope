@@ -17,8 +17,8 @@
 
   var MAX_M = 100;
   /* The server's built-in heights per endpoint kind, terrainRoleAntennaM in
-   * cmd/server/terrain_profile.go (customize-v2.js TERRAIN_DEFAULTS shows the
-   * same values). The Path profile falls back to them where a viewer who
+   * cmd/server/terrain_profile.go (customize-v2.js TERRAIN_DEFAULTS reads
+   * these, the one client copy). The Path profile falls back to them where a viewer who
    * turned "Prefer owner heights" off kept the role height untouched (#789
    * M3), since an owner height hides what the server would have used. */
   var ROLE_DEFAULTS = { repeater: 10, room: 5, companion: 2, sensor: 2, point: 2 };

@@ -1702,6 +1702,228 @@ select.live-heard-select {
 }
 .live-toggles .live-heard-label { cursor: default; }
 
+/* ── #881 M2 — Moments: cards, bar and drawer ──────────────────────────────
+ * Anchored bottom-centre above the VCR bar (and the tile credit). The
+ * container never takes pointer events; only its buttons and links do.
+ * z-index 900 sits below every .live-overlay panel (1000), so a panel the
+ * viewer moved over the stack wins; the right edge on phones stops at
+ * --live-ctrl-rail so a card can never reach the Leaflet control rail.
+ * Colours are existing theme variables only. Visible cards (3 / 1) and the
+ * 8 s dwell are set in live-moments.js; customizer exposure is M3. */
+.live-moments {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
+  width: min(320px, calc(100% - 24px));
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+.live-moments[hidden],
+.live-moments-bar[hidden],
+.live-moments-drawer[hidden],
+.live-moments-backdrop[hidden] { display: none !important; }
+.live-moments-stack { display: flex; flex-direction: column; gap: 6px; order: 1; }
+.live-moments-bar {
+  order: 0;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 10px;
+  border-radius: 999px;
+  background: var(--card-bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px var(--shadow);
+  font-size: 12px;
+  pointer-events: auto;
+}
+.live-moments-count { white-space: nowrap; }
+.live-moments-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+.live-moments-btn:hover,
+.live-moments-btn:focus-visible { background: var(--accent-bg); }
+.live-moments-more:empty { display: none; }
+.live-moments-more { font-weight: 600; color: var(--accent); }
+.live-moments.is-paused .live-moments-count::after { content: ' · paused'; }
+
+.live-moment-card,
+.live-moment-row {
+  display: flex;
+  align-items: stretch;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.live-moment-card {
+  box-shadow: 0 4px 14px var(--shadow);
+  pointer-events: auto;
+  animation: live-moment-in 0.25s ease-out;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.live-moment-card.is-leaving { opacity: 0; transform: translateY(4px); }
+@keyframes live-moment-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.live-moment-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.live-moment-main:hover,
+.live-moment-main:focus-visible { background: var(--accent-bg); }
+.live-moment-main .ph-icon { flex: none; color: var(--accent); }
+.live-moment-text { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.live-moment-title { font-size: 12px; font-weight: 600; }
+.live-moment-detail,
+.live-moment-time { font-size: 12px; color: var(--text-muted); }
+.live-moment-detail { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.live-moment-time { flex: none; white-space: nowrap; }
+.live-moment-link {
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--accent);
+  border-left: 1px solid var(--border);
+}
+
+.live-moments-drawer {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
+  width: min(360px, calc(100% - 24px));
+  max-height: min(420px, calc(100% - var(--vcr-bar-height, 58px) - 96px));
+  z-index: 1060;
+  display: flex;
+  flex-direction: column;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px var(--shadow);
+}
+.live-moments-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 6px 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.live-moments-drawer-title { flex: 1; font-weight: 600; font-size: 13px; }
+.live-moments-list { list-style: none; margin: 0; padding: 6px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.live-moments-empty { padding: 8px; color: var(--text-muted); font-size: 12px; }
+.live-moments-backdrop { display: none; }
+
+/* Fly-to highlight: a divIcon ring, so CSS can style it on the canvas map. */
+.live-moment-hl {
+  border: 3px solid var(--accent);
+  border-radius: 50%;
+  box-sizing: border-box;
+  background: transparent;
+  animation: live-moment-hl-pulse 1.2s ease-out 4;
+}
+@keyframes live-moment-hl-pulse {
+  from { box-shadow: 0 0 0 0 var(--accent-border); }
+  to { box-shadow: 0 0 0 14px transparent; }
+}
+.live-moment-hl.is-static { animation: none; }
+
+@media (pointer: coarse) {
+  .live-moments-btn { min-width: 40px; height: 40px; }
+  .live-moment-main { min-height: 40px; }
+}
+
+/* Phone: one card from 8px to the control rail, the drawer button beside
+ * it, the count and pause move into the drawer, and the drawer is a bottom
+ * sheet with a backdrop.
+ * The sheet and backdrop are fixed to the viewport, not absolute in
+ * .live-page: there the hidden node-detail sheet makes .live-page wider
+ * than the screen, and any programmatic sideways scroll of it (a tap's
+ * scroll-into-view, a focus) would carry the sheet off the left edge. They
+ * end at --bottom-nav-reserve, the same reserve .live-page leaves for the
+ * bottom nav. */
+@media (max-width: 640px) {
+  .live-moments {
+    left: 8px;
+    right: var(--live-ctrl-rail, 68px);
+    width: auto;
+    transform: none;
+    flex-direction: row;
+    align-items: flex-end;
+  }
+  .live-moments-stack { flex: 1; min-width: 0; order: 0; }
+  .live-moments-bar { order: 1; padding: 2px; align-self: flex-end; }
+  .live-moments-bar .live-moments-count,
+  .live-moments-bar .live-moments-pause { display: none; }
+  .live-moment-card { max-height: 56px; }
+  .live-moments-drawer {
+    position: fixed;
+    left: 0; right: 0; bottom: var(--bottom-nav-reserve, 0px);
+    width: auto;
+    transform: none;
+    max-height: 60dvh;
+    border-radius: 16px 16px 0 0;
+    z-index: 1101;
+  }
+  .live-moments-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0 0 var(--bottom-nav-reserve, 0px) 0;
+    z-index: 1100;
+    background: var(--shadow);
+  }
+}
+/* Short phone landscape (e.g. 568x320): no cards (live-moments.js
+ * SHORT_MQ), only the drawer button. The Leaflet controls are a row there
+ * (#666), 250px wide at ≤640px with the legend hidden (#875), and the
+ * Fullscreen control would sit straight above the button with only the
+ * font-dependent VCR bar height between them. Keep the button left of the
+ * whole row instead. */
+@media (max-width: 640px) and (max-height: 419px) {
+  .live-moments { right: calc(250px + 12px); }
+}
+@media (min-width: 641px) {
+  .live-moments-drawer-head .live-moments-pause { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-moment-card { animation: none; transition: none; }
+  .live-moment-hl { animation: none; }
+}
+
 /* #880 — "Follow a packet": popup/feed buttons, the follow card and the
    map markers. Colours come from the --follow-* tokens in style.css. */
 .lc-follow-btn,
