@@ -59,7 +59,7 @@ func (q *Queue) WriteBuiltinNames(names []string) error {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if err := os.MkdirAll(q.dir, 0o755); err != nil {
+	if err := q.ensureDir(); err != nil {
 		return err
 	}
 	return q.writeAtomic(q.BuiltinNamesPath(), builtinNamesFile{Names: out})
