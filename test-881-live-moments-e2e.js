@@ -22,7 +22,10 @@
  *      DOM, no /api/moments request, no WS listener. The toggle turns it on
  *      (one request, cards) and off again (all gone, saved).
  *   7. VCR: leaving LIVE drops the visible cards and sends frames to
- *      history only; back to LIVE shows cards again.
+ *      history only; back to LIVE shows cards again. A follow (#880)
+ *      holds them the same way: a deep-linked follow at 720x900 sends
+ *      frames to history only, one started with a card up drops it, and
+ *      closing it shows cards again.
  *   8. Teardown: Live → Packets → Live three times, without waiting for
  *      Packets' init, leaves one controller, one moments root, the current
  *      Moments WS handler exactly once (no earlier one) and the same number
@@ -366,6 +369,34 @@ async function fillCards(h, n) {
       assert(Math.abs(c.lat - 55.45) < 1e-6 && Math.abs(c.lng - 9.75) < 1e-6 && c.zoom === 12, 'synchronous jump: ' + JSON.stringify(c));
       assert(c.staticRing && c.anim === 'none', 'static ring: ' + JSON.stringify(c));
       await r.ctx.close();
+    });
+
+    // #880: a follow holds the live stream, so it holds the cards too. At
+    // <= 768px the follow card is a bottom sheet over the cards' anchor; a
+    // card there would sit unseen under it and still be announced.
+    await step('a follow holds the cards (history only) at 720x900 and drops one that is up; closing it shows cards again', async () => {
+      const f = await open(browser, { viewport: { width: 720, height: 900 } });
+      await f.ctx.route(/\/api\/packets\/881f0110a5ed0001(\?|$)/, (route) => route.fulfill({ status: 404, json: {} }));
+      await f.goto(VIEW + '&follow=881f0110a5ed0001');
+      await f.page.waitForFunction(() => window._liveFollowState && window._liveFollowState() && document.querySelector('.live-follow-card'));
+      await f.page.waitForFunction(() => document.querySelector('.live-moments-count').textContent === 'Moments · 2');
+      await f.moment(nodeMoment('follow-held', 55.3, 9.6));
+      await f.page.waitForFunction(() => document.querySelector('.live-moments-count').textContent === 'Moments · 3');
+      await f.page.waitForTimeout(300);
+      const held = await f.page.evaluate(() => Object.assign({ cards: document.querySelectorAll('.live-moment-card').length },
+        window._liveMoments().stats()));
+      assert(held.cards === 0 && held.visible === 0 && held.queued === 0, 'no card while following: ' + JSON.stringify(held));
+      await f.page.click('.live-follow-card .lf-close');
+      await f.page.waitForFunction(() => !window._liveFollowState() && !document.querySelector('.live-follow-card'));
+      assert(await cardCount(f.page) === 0, 'a held moment does not pop up after the follow');
+      await f.moment(nodeMoment('after-follow', 55.3, 9.6));
+      await f.page.waitForSelector('.live-moment-card[data-moment-id="after-follow"]');
+      // A follow started with a card up drops it.
+      await f.page.evaluate(() => window._liveStartFollow('881f0110a5ed0001'));
+      await f.page.waitForFunction(() => !document.querySelector('.live-moment-card'), null, { timeout: 2000 });
+      await f.page.evaluate(() => window._liveStopFollow());
+      assert(!f.errors.length, f.errors.join('\n'));
+      await f.ctx.close();
     });
 
     await step('?moments=0: no controller (no DOM, request or WS listener), saved; the toggle turns it on and off', async () => {
