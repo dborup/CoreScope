@@ -18,10 +18,14 @@ const fixtures = [
   { name: 'Stale seen fresh heard', seen: 100, heard: 2, want: 'Online', cls: 'health-green' },
   { name: 'Fresh seen never heard', seen: 1, heard: null, want: 'Unknown', cls: 'health-red' },
   { name: 'Fresh seen old heard', seen: 1, heard: 100, want: 'Offline', cls: 'health-red' },
+  // #902/#905: the popup goes through getNodeHealth: Quiet companions and
+  // observer credit, with a dot that is really painted (F4).
+  { name: 'Quiet companion', role: 'companion', seen: 1, heard: 10, want: 'Quiet', cls: 'health-muted' },
+  { name: 'Observer repeater', seen: 1, heard: 100, observerAgoH: 0.05, want: 'Online', cls: 'health-green' },
 ].map((f, i) => ({ ...f, key: (i + 1).toString(16).padStart(2, '0') + '34'.repeat(31) }));
 const byKey = new Map(fixtures.map(f => [f.key, f]));
 const node = f => ({
-  public_key: f.key, name: f.name, role: 'repeater', last_seen: iso(f.seen), last_heard: iso(f.seen),
+  public_key: f.key, name: f.name, role: f.role || 'repeater', last_seen: iso(f.seen), last_heard: iso(f.seen),
   lat: 56 + Number.parseInt(f.key.slice(0, 2), 16) / 1000, lon: 10, advert_count: 1,
 });
 const health = f => ({
@@ -42,7 +46,7 @@ const server = http.createServer((req, res) => {
     if (match[2] === 'paths') return json(res, { paths: [], totalPaths: 0 });
     return json(res, { node: node(f), recentAdverts: [] });
   }
-  if (pathname === '/api/observers') return json(res, { observers: [] });
+  if (pathname === '/api/observers') return json(res, { observers: fixtures.filter(f => f.observerAgoH != null).map(f => ({ id: f.key.toUpperCase(), name: f.name, last_seen: iso(f.observerAgoH) })) });
   if (pathname === '/api/packets') return json(res, { packets: [], total: 0 });
   if (pathname.startsWith('/api/')) return json(res, {});
   const file = pathname === '/' ? path.join(publicDir, 'index.html') : path.resolve(publicDir, '.' + pathname);
@@ -85,6 +89,18 @@ const server = http.createServer((req, res) => {
       await panel.getByText(f.name, { exact: true }).waitFor();
       const dot = panel.locator('span[aria-hidden="true"]').first();
       assert.ok((await dot.getAttribute('class')).split(/\s+/).includes(f.cls), f.name + ': dot class ' + f.cls); checks++;
+      // #905 F4: the class must actually paint the dot in its CSS variable.
+      const cssVar = { 'health-green': '--status-green', 'health-yellow': '--status-yellow', 'health-red': '--status-red', 'health-muted': '--text-muted' }[f.cls];
+      const [dotColor, varColor, textColor] = await dot.evaluate((el, v) => {
+        const probe = document.createElement('span');
+        probe.style.color = `var(${v})`;
+        el.parentElement.appendChild(probe);
+        const out = [getComputedStyle(el).color, getComputedStyle(probe).color, getComputedStyle(el.parentElement).color];
+        probe.remove();
+        return out;
+      }, cssVar);
+      assert.equal(dotColor, varColor, f.name + ': dot painted in ' + cssVar);
+      assert.notEqual(dotColor, textColor, f.name + ': dot is not just the text colour'); checks++;
       // The accessible name is what the browser exposes, not an attribute
       // string: "Status: X" in the accessibility tree, "X" on screen.
       const aria = await panel.ariaSnapshot();

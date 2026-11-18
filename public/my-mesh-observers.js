@@ -90,6 +90,15 @@
     return idx.byId.get(id) || null;
   }
 
+  // reportedAt(index, pubkey) -> the matching observer's own last status
+  // report (observers.last_seen), or null. #902: the node-health helpers
+  // credit a recent one as activity (roles.js getNodeHealth); this only
+  // looks it up, by full key, from the one bulk roster the view fetched.
+  function reportedAt(idx, pubkey) {
+    var observer = match(idx, pubkey);
+    return observer ? parseTs(observer.last_seen) : null;
+  }
+
   // roleSummary(nodeRole) -> 'Observer · Repeater' | 'Observer'. The mesh
   // role is retained as the secondary term and is never replaced.
   function roleSummary(nodeRole) {
@@ -168,6 +177,7 @@
     normalizeId: normalizeId,
     index: index,
     match: match,
+    reportedAt: reportedAt,
     roleSummary: roleSummary,
     status: status,
     lastReport: lastReport,

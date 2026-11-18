@@ -2622,11 +2622,16 @@
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading node analytics…</div>';
     try {
       const rq = RegionFilter.regionQueryString() + AreaFilter.areaQueryString();
-      const [nodesResp, bulkHealth] = await Promise.all([
+      // #902: ONE bulk /observers request (cached by CLIENT_TTL.observers)
+      // lets Network Status credit a node that is a reporting observer. A
+      // failed request just means no observer credit, never a failed tab.
+      const [nodesResp, bulkHealth, observersResp] = await Promise.all([
         fetchAllNodes('&sortBy=lastSeen' + rq, { ttl: CLIENT_TTL.nodeList }),
-        api('/nodes/bulk-health?limit=50' + rq, { ttl: CLIENT_TTL.analyticsRF })
+        api('/nodes/bulk-health?limit=50' + rq, { ttl: CLIENT_TTL.analyticsRF }),
+        api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null)
       ]);
       if (myGen !== _nodesTabGen) return; // superseded by a newer filter/tab change
+      const observerIdx = MyMeshObservers.index(observersResp);
       const nodes = nodesResp.nodes || nodesResp;
       const myNodes = JSON.parse(localStorage.getItem('meshcore-my-nodes') || '[]');
       const myKeys = new Set(myNodes.map(n => n.pubkey));
@@ -2643,11 +2648,11 @@
       const byObservers = [...enriched].sort((a, b) => (b.health.heard.direct - a.health.heard.direct) || (b.health.heard.relay - a.health.heard.relay));
       const byRecent = [...enriched].filter(n => n.health.stats.lastHeard).sort((a, b) => new Date(b.health.stats.lastHeard) - new Date(a.health.stats.lastHeard));
 
-      // Compute network status client-side from loaded nodes using shared getHealthStatus().
+      // Compute network status client-side from loaded nodes using the shared getNodeHealth() (#902: observer credit).
       const now = Date.now();
       let active = 0, degraded = 0, silent = 0;
       nodes.forEach(function(n) {
-        const status = getHealthStatus(n.role, getHealthLastHeard(n), now);
+        const status = getNodeHealth(n.role, getHealthLastHeard(n), MyMeshObservers.reportedAt(observerIdx, n.public_key), now).status;
         if (status === 'healthy') active++;
         else if (status === 'degraded') degraded++;
         else silent++;
@@ -2685,7 +2690,7 @@
             </div>
             <div class="analytics-stat-card" style="flex:1;min-width:120px;text-align:center;padding:16px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px">
               <div style="font-size:28px;font-weight:700;color:var(--status-yellow)">${degraded}</div>
-              <div style="font-size:11px;text-transform:uppercase;color:var(--text-muted)"><span style="color:var(--status-yellow)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> Degraded</div>
+              <div style="font-size:11px;text-transform:uppercase;color:var(--text-muted)"><span style="color:var(--status-yellow)"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-circle-fill"/></svg></span> Degraded / quiet</div>
             </div>
             <div class="analytics-stat-card" style="flex:1;min-width:120px;text-align:center;padding:16px;background:var(--card-bg);border:1px solid var(--border);border-radius:8px">
               <div style="font-size:28px;font-weight:700;color:var(--status-red)">${silent}</div>
@@ -2844,11 +2849,14 @@
       // fine for a handful of favorites and amortized by CLIENT_TTL.nodeList
       // across tabs. If favorite counts ever grow large, switch to per-node
       // Promise.all(favs.map(pk => api('/nodes/' + pk))).
-      const [nodesResp, clockData, graphData] = await Promise.all([
+      const [nodesResp, clockData, graphData, observersResp] = await Promise.all([
         fetchAllNodes('&sortBy=lastSeen' + rq, { ttl: CLIENT_TTL.nodeList }),
         api('/nodes/clock-skew', { ttl: CLIENT_TTL.analyticsRF }).catch(() => []),
         api('/analytics/neighbor-graph?min_count=1&min_score=0', { ttl: CLIENT_TTL.analyticsRF }).catch(() => ({ nodes: [], edges: [] })),
+        // #902: one cached bulk roster, for observer credit in statusOf().
+        api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null),
       ]);
+      const observerIdx = MyMeshObservers.index(observersResp);
       const allNodes = nodesResp.nodes || nodesResp;
       const clockByPk = {};
       (Array.isArray(clockData) ? clockData : []).forEach(c => { if (c && c.pubkey) clockByPk[c.pubkey] = c; });
@@ -2860,7 +2868,7 @@
         return ms ? now - ms : Infinity;
       }
       function statusOf(n) {
-        const status = getHealthStatus(n.role, getHealthLastHeard(n), now);
+        const status = getNodeHealth(n.role, getHealthLastHeard(n), MyMeshObservers.reportedAt(observerIdx, n.public_key), now).status;
         return status === 'healthy' ? 'active' : status || 'silent';
       }
       const pct = v => (v != null ? (v * 100).toFixed(1) + '%' : '—');
@@ -7583,7 +7591,7 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(
           { key: 'area', label: 'Area', sortable: true },
           { key: 'total', label: 'Total', sortable: true, align: 'right' },
           { key: 'active', label: 'Active', sortable: true, align: 'right' },
-          { key: 'degraded', label: 'Degraded', sortable: true, align: 'right' },
+          { key: 'degraded', label: 'Degraded / quiet', sortable: true, align: 'right' },
           { key: 'silent', label: 'Silent', sortable: true, align: 'right' },
           { key: 'roleMix', label: 'Role Mix', sortable: false },
         ],

@@ -356,7 +356,9 @@ async function render(page, responses, width, height) {
         api = real;
         return seen;
       }, KEYS[1]);
-      assert.deepEqual(routes, [`/nodes/${KEYS[1]}/health`]);
+      // #902: the panel also reads the bulk observer roster (one cached
+      // /observers request) for observer credit; no other request.
+      assert.deepEqual(routes, [`/nodes/${KEYS[1]}/health`, '/observers']);
 
       assert.deepEqual(errors, []);
       await context.close();
