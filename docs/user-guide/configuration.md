@@ -190,6 +190,31 @@ Auto-approval uses the same name validation, global submission rate limit, queue
 
 An administrator can also revoke a previously approved channel (see [Channels](channels.md#revoking-an-approved-channel)) — this undoes the decryption going forward and takes the channel out of the channel list, but never deletes messages already decoded while it was approved (they return with the channel if it is approved again; a name the ingestor decrypts through its built-in/config list is never hidden). The channel also stays out of the list while the name is re-suggested (pending) or that re-suggestion is rejected; only an approval lists it again. Once the row is pruned by `retentionDays`, a channel whose messages are still stored shows in the list again. A revoked row is retained and pruned by the same `retentionDays` rule as a rejected one (counted from when it was revoked, not when it was first submitted); an approved row is still never pruned. Revoking introduces no new configuration of its own — it reuses the `maxPending`/`maxApproved`/`retentionDays`/`submissionsPerHour` limits above.
 
+## Owner antenna heights
+
+`antennaClaims` lets a node's owner set its antenna height for path profiles. The owner gets a 6-character code on the node page, puts it into the node's advert name and sends an advert; the advert's signature proves control of the node. Owners follow [Setting your node's antenna height](antenna-height-claims.md). The server and the ingestor read the same block; changing it requires a restart of both.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Opens public claims. Only takes effect with a strong `apiKey` (16+ characters, not a placeholder). |
+| `autoApproveProven` | `false` | Approves a proven height without an administrator, unless it is flagged (see `reviewDeltaM`). Only repeater and room claims with a cached surface estimate can be flagged. |
+| `submissionsPerHour` | `20` | Global limit on new claims per hour. |
+| `maxPending` | `256` | Claims waiting for an advert, over all nodes. A claim over the limit is refused; it never evicts another. |
+| `maxPendingPerNode` | `3` | Claims waiting for an advert, per node. An administrator can reject unproven claims under "Waiting for advert". |
+| `maxQueuedRequests` | `256` | Requests waiting for the ingestor in the queue directory next to the database. |
+| `retentionDays` | `30` | Finished claims are deleted after this many days. The approved one is kept. |
+| `staleMoveM` | `50` | Metres a node may move from where its height was proven. Further away, the height is not used (nothing is deleted) and the admin queue marks it stale. Range above 0 to 5000. |
+| `reviewDeltaM` | `60` | Metres above the cached surface estimate + 2 m at which a height is flagged for review. A height more than 2 m below the surface is always flagged. Range above 0 to 1000. |
+| `pollInitialMs` | `2000` | The owner page's first wait before it checks a claim's status. Range 500–60000. |
+| `pollBackoff` | `1.5` | Each later wait is this many times the one before. Range 1–4. |
+| `pollMaxMs` | `30000` | The longest single wait. Never below `pollInitialMs`; at most 600000. |
+| `pollMaxAttempts` | `60` | Status checks before the page stops and offers **Check again**. At most 1000. |
+| `adminDefaultFilter` | `proven` | The admin queue's first view (`#/tools/antenna-claims`): `proven`, `pending`, `approved`, `rejected`, `revoked`, `expired` or `superseded`. |
+
+A value outside its range falls back to its default. The page reads the last five from `GET /api/antenna-claims/config`, so they need only a server restart.
+
+An approved height ranks below `radio.antennaHeightsM` for the node and above the surface estimate. A height a viewer types or opens from a link still wins for that viewer, and each viewer can turn **Prefer owner heights** off in the customizer (see [Customization](customization.md#terrain-profile-display-tab)).
+
 ## Map defaults
 
 ```json
