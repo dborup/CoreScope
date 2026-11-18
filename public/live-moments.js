@@ -15,9 +15,12 @@
  * XSS: every server string reaches the page through textContent or a
  * property set from an encodeURIComponent'd value. No innerHTML.
  *
- * Display values below are hardcoded for M2; the customizer exposes them in
- * M3 (AGENTS.md rule 8): visible cards, dwell, drawer length, per-kind
- * show/hide, default on/off.
+ * Viewer settings (#881 M3, AGENTS.md rule 8) are the SETTINGS rule below:
+ * the customizer stores exactly these keys (its `moments` section) and this
+ * module reads them back through deps.getSettings(). Server policy
+ * (thresholds, rate) stays in the operator's config.json `moments` block.
+ * The drawer length, queue size and the phone's single card slot stay
+ * fixed; they are layout, not taste.
  */
 'use strict';
 
@@ -28,9 +31,7 @@
     record_link: { icon: 'ph-ruler', title: 'Record link' },
     busiest_repeater: { icon: 'ph-trend-up', title: 'Busiest repeater' }
   };
-  var VISIBLE_DESKTOP = 3;
-  var VISIBLE_PHONE = 1;
-  var DWELL_MS = 8000;
+  var VISIBLE_PHONE = 1;     // one slot: the node sheet and the controls own the rest
   var LEAVE_MS = 250;        // the CSS fade; 0 under reduced motion
   var DRAWER_LEN = 20;       // history kept and listed
   var QUEUE_MAX = 10;        // cards waiting for a slot; oldest dropped
@@ -44,6 +45,37 @@
   // controls become a row (live.css), so cards go to history only.
   var SHORT_MQ = '(max-height: 419px)';
   var REDUCE_MQ = '(prefers-reduced-motion: reduce)';
+  // The viewer settings: one rule for the customizer, the controller and the
+  // tests. visibleCards is the desktop stack (a phone always has one slot);
+  // dwellSeconds is how long a card stays before it fades out.
+  var KIND_SETTING = {
+    new_node: 'showNewNode',
+    back_online: 'showBackOnline',
+    record_link: 'showRecordLink',
+    busiest_repeater: 'showBusiest'
+  };
+  var SETTINGS = {
+    KEYS: ['enabled', 'visibleCards', 'dwellSeconds', 'showNewNode', 'showBackOnline', 'showRecordLink', 'showBusiest'],
+    DEFAULTS: { enabled: true, visibleCards: 3, dwellSeconds: 8, showNewNode: true, showBackOnline: true, showRecordLink: true, showBusiest: true },
+    LIMITS: { visibleCards: [1, 5], dwellSeconds: [3, 30] },
+    valid: function (key, val) {
+      if (SETTINGS.KEYS.indexOf(key) === -1) return false;
+      var lim = SETTINGS.LIMITS[key];
+      if (!lim) return typeof val === 'boolean';
+      return typeof val === 'number' && isFinite(val) && Math.floor(val) === val && val >= lim[0] && val <= lim[1];
+    },
+    // resolve is a section over the defaults; a bad or missing value is the
+    // default, so a hand-edited override never breaks the page.
+    resolve: function (sec) {
+      var out = {};
+      var src = sec && typeof sec === 'object' ? sec : {};
+      for (var i = 0; i < SETTINGS.KEYS.length; i++) {
+        var k = SETTINGS.KEYS[i];
+        out[k] = Object.prototype.hasOwnProperty.call(src, k) && SETTINGS.valid(k, src[k]) ? src[k] : SETTINGS.DEFAULTS[k];
+      }
+      return out;
+    }
+  };
   var PUBKEY_RE = /^[0-9a-f]{64}$/;
   var SVG_NS = 'http://www.w3.org/2000/svg';
   var SPRITE = '/icons/phosphor-sprite.svg#';
@@ -181,15 +213,19 @@
   }
 
   // resolveInitialEnabled: a valid ?moments=0|1 wins over the saved value
-  // (the #660 ?heard= contract); the default is on.
-  function resolveInitialEnabled(fromHash, stored) {
+  // (the #660 ?heard= contract), then the viewer's saved choice, then the
+  // customizer default (on unless the viewer set it off).
+  function resolveInitialEnabled(fromHash, stored, dflt) {
     if (fromHash === '1') return true;
     if (fromHash === '0') return false;
-    return stored !== 'false';
+    if (stored === 'true') return true;
+    if (stored === 'false') return false;
+    return dflt !== false;
   }
 
-  function visibleCap(isPhone) {
-    return isPhone ? VISIBLE_PHONE : VISIBLE_DESKTOP;
+  function visibleCap(isPhone, settings) {
+    if (isPhone) return VISIBLE_PHONE;
+    return (settings || SETTINGS.DEFAULTS).visibleCards;
   }
 
   // ── Controller ──────────────────────────────────────────────────────────
@@ -205,6 +241,8 @@
    *   isSuppressed() true while a phone sheet/panel owns the bottom
    *   profileOffered() bool
    *   onFly(plan, target, moment)
+   *   getSettings()  → the viewer's `moments` section (SETTINGS.resolve'd
+   *                    on every read, so a customizer change applies live)
    *
    * The per-viewer off switch lives in live.js: a viewer who turned Moments
    * off gets no controller at all (no fetch, no WS listener, no DOM).
@@ -226,6 +264,12 @@
     var keyHandler = null;
     liveCount++;
 
+    function settings() {
+      return SETTINGS.resolve(deps.getSettings ? deps.getSettings() : null);
+    }
+    function kindShown(kind, s) {
+      return s[KIND_SETTING[kind]] !== false;
+    }
     function mq(q) {
       try { return !!(deps.matchMedia && deps.matchMedia(q).matches); } catch (_) { return false; }
     }
@@ -342,7 +386,7 @@
 
     // pump moves queued moments into free card slots.
     function pump() {
-      var cap = visibleCap(mq(PHONE_MQ));
+      var cap = visibleCap(mq(PHONE_MQ), settings());
       while (cards.length > cap) leave(cards[0], true);
       while (queue.length && cards.length < cap) show(queue.shift());
       moreChip.textContent = queue.length ? '+' + queue.length : '';
@@ -372,7 +416,7 @@
     }
 
     function show(m) {
-      var card = { m: m, el: null, timer: null, deadline: 0, left: DWELL_MS, held: false, hover: false, focus: false };
+      var card = { m: m, el: null, timer: null, deadline: 0, left: settings().dwellSeconds * 1000, held: false, hover: false, focus: false };
       card.el = buildEntry(m, 'div', 'live-moment-card', activate);
       // Hold for a hovering mouse and for keyboard focus only. A tap on a
       // phone also fires a compat mouseenter and focuses the button, and
@@ -445,8 +489,13 @@
     // ── Drawer ──
     function fillDrawer() {
       while (list.firstChild) list.removeChild(list.firstChild);
-      if (!history.length) { list.appendChild(el('li', 'live-moments-empty', 'No moments yet')); return; }
-      for (var i = 0; i < history.length; i++) list.appendChild(buildEntry(history[i], 'li', 'live-moment-row', activate));
+      var s = settings(), n = 0;
+      for (var i = 0; i < history.length; i++) {
+        if (!kindShown(history[i].kind, s)) continue;
+        list.appendChild(buildEntry(history[i], 'li', 'live-moment-row', activate));
+        n++;
+      }
+      if (!n) list.appendChild(el('li', 'live-moments-empty', 'No moments yet'));
     }
     function openDrawer() {
       if (drawerOpen || destroyed) return;
@@ -494,7 +543,7 @@
     function ingest(raw) {
       if (destroyed) return false;
       var m = normalize(raw);
-      if (!m || !remember(m.id)) return false;
+      if (!m || !kindShown(m.kind, settings()) || !remember(m.id)) return false;
       addHistory(m);
       if (canShow()) {
         queue.push(m);
@@ -507,10 +556,10 @@
     // seed merges the REST history (newest first) into the drawer only.
     function seed(list) {
       if (destroyed || !Array.isArray(list)) return;
-      var add = [];
+      var add = [], s = settings();
       for (var i = 0; i < list.length && add.length < DRAWER_LEN; i++) {
         var m = normalize(list[i]);
-        if (m && remember(m.id)) add.push(m);
+        if (m && kindShown(m.kind, s) && remember(m.id)) add.push(m);
       }
       // WS frames that raced the fetch are newer; keep them first.
       history = history.concat(add).slice(0, DRAWER_LEN);
@@ -547,6 +596,19 @@
       scheduleRender();
     }
 
+    // onSettingsChanged: the customizer changed a value. Cards and queued
+    // moments of a kind now hidden go; the stack re-fits the new cap, and an
+    // open drawer re-lists. Dwell applies from the next card.
+    function onSettingsChanged() {
+      if (destroyed) return;
+      var s = settings();
+      queue = queue.filter(function (m) { return kindShown(m.kind, s); });
+      cards.slice().forEach(function (c) { if (!kindShown(c.m.kind, s)) leave(c, true); });
+      pump();
+      if (drawerOpen) fillDrawer();
+      scheduleRender();
+    }
+
     function destroy() {
       if (destroyed) return;
       destroyed = true;
@@ -568,6 +630,7 @@
       seed: seed,
       setPaused: setPaused,
       onModeChange: onModeChange,
+      onSettingsChanged: onSettingsChanged,
       openDrawer: openDrawer,
       closeDrawer: closeDrawer,
       destroy: destroy,
@@ -583,7 +646,9 @@
   window.LiveMoments = {
     STORAGE_KEY: STORAGE_KEY,
     HASH_PARAM: HASH_PARAM,
-    DWELL_MS: DWELL_MS,
+    SETTINGS: SETTINGS,
+    DWELL_MS: SETTINGS.DEFAULTS.dwellSeconds * 1000, // the default dwell
+    KIND_SETTING: KIND_SETTING,
     DRAWER_LEN: DRAWER_LEN,
     normalize: normalize,
     describe: describe,

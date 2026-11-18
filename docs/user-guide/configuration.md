@@ -276,6 +276,23 @@ Lower values = fresher data but more server load.
 |-------|---------|-------------|
 | `liveMap.propagationBufferMs` | `5000` | How long to buffer observations before animating |
 
+## Moments
+
+Off by default. The detection thresholds, the rate limit and the history size
+are the operator's; a viewer only chooses how the cards look (Customize →
+Display). Full reference, including every range, in [Live Moments](../moments.md).
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `moments.enabled` | `false` | Turn the detector, the `moment` WebSocket frames and `/api/moments` on |
+| `moments.backOnlineHours` | `24` | Silence before a repeater counts as back online |
+| `moments.recordWindowHours` | `24` | Rolling window for a record link |
+| `moments.recordMinKm` | `5` | Shortest link that can be a record |
+| `moments.busyWindowMinutes` | `10` | Window for the busiest repeater |
+| `moments.busyMinRelays` | `20` | Least relays the busiest repeater needs |
+| `moments.maxPerMinute` | `6` | Global rate limit (burst 3) |
+| `moments.historySize` | `50` | Moments kept for `/api/moments` (in memory) |
+
 ## HTTPS
 
 ```json

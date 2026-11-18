@@ -1708,8 +1708,9 @@ select.live-heard-select {
  * z-index 900 sits below every .live-overlay panel (1000), so a panel the
  * viewer moved over the stack wins; the right edge on phones stops at
  * --live-ctrl-rail so a card can never reach the Leaflet control rail.
- * Colours are existing theme variables only. Visible cards (3 / 1) and the
- * 8 s dwell are set in live-moments.js; customizer exposure is M3. */
+ * Colours are theme variables; the card fill and the per-kind accents are
+ * the --moment-* tokens (style.css, customizer Theme tab). Visible cards and
+ * the dwell are viewer settings (live-moments.js SETTINGS). */
 .live-moments {
   position: absolute;
   left: 50%;
@@ -1768,13 +1769,23 @@ select.live-heard-select {
 .live-moment-row {
   display: flex;
   align-items: stretch;
-  background: var(--card-bg);
+  background: var(--moment-card-bg);
   color: var(--text);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
+  border-left: 3px solid var(--moment-accent, var(--accent));
   border-radius: 8px;
   overflow: hidden;
 }
+/* One accent per kind: the stripe and the icon (#881 M3). The kind is also
+   the icon and the title, so colour is never the only carrier. */
+.live-moment-card[data-kind="new_node"],
+.live-moment-row[data-kind="new_node"] { --moment-accent: var(--moment-new-node); }
+.live-moment-card[data-kind="back_online"],
+.live-moment-row[data-kind="back_online"] { --moment-accent: var(--moment-back-online); }
+.live-moment-card[data-kind="record_link"],
+.live-moment-row[data-kind="record_link"] { --moment-accent: var(--moment-record-link); }
+.live-moment-card[data-kind="busiest_repeater"],
+.live-moment-row[data-kind="busiest_repeater"] { --moment-accent: var(--moment-busiest); }
 .live-moment-card {
   box-shadow: 0 4px 14px var(--shadow);
   pointer-events: auto;
@@ -1802,7 +1813,7 @@ select.live-heard-select {
 }
 .live-moment-main:hover,
 .live-moment-main:focus-visible { background: var(--accent-bg); }
-.live-moment-main .ph-icon { flex: none; color: var(--accent); }
+.live-moment-main .ph-icon { flex: none; color: var(--moment-accent, var(--accent)); }
 .live-moment-text { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
 .live-moment-title { font-size: 12px; font-weight: 600; }
 .live-moment-detail,

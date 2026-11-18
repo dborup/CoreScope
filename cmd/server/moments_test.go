@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -724,5 +725,48 @@ func TestMomentsConfigDefaultsAndClamps_881(t *testing.T) {
 	}
 	if (&Config{Moments: &MomentsConfig{}}).momentsClientConfig() != nil {
 		t.Fatal("client block present while off")
+	}
+}
+
+// #881 M3: the shipped example and the docs state the defaults the code
+// uses, field by field, so none of the three can drift alone.
+func TestMomentsExampleAndDocsMatchDefaults_881(t *testing.T) {
+	raw, err := os.ReadFile("../../config.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ex struct {
+		Moments MomentsConfig `json:"moments"`
+	}
+	if err := json.Unmarshal(raw, &ex); err != nil {
+		t.Fatal(err)
+	}
+	if ex.Moments.Enabled {
+		t.Fatal("config.example.json turns Moments on; the default is off")
+	}
+	// The example spells out every default: switched on, it behaves as an
+	// operator who wrote only {"enabled": true}.
+	ex.Moments.Enabled = true
+	spelled := (&Config{Moments: &ex.Moments}).momentsSettings()
+	bare := (&Config{Moments: &MomentsConfig{Enabled: true}}).momentsSettings()
+	if spelled != bare {
+		t.Fatalf("example values %+v differ from the code defaults %+v", spelled, bare)
+	}
+	for _, p := range []struct{ field, def string }{
+		{"enabled", "false"}, {"backOnlineHours", "24"}, {"recordWindowHours", "24"}, {"recordMinKm", "5"},
+		{"busyWindowMinutes", "10"}, {"busyMinRelays", "20"}, {"maxPerMinute", "6"}, {"historySize", "50"},
+	} {
+		row := "| `" + p.field + "` | `" + p.def + "` |"
+		for _, f := range []string{"../../docs/moments.md"} {
+			doc, err := os.ReadFile(f)
+			if err != nil || !strings.Contains(string(doc), row) {
+				t.Errorf("%s has no row %q", f, row)
+			}
+		}
+		cfgRow := "| `moments." + p.field + "` | `" + p.def + "` |"
+		doc, err := os.ReadFile("../../docs/user-guide/configuration.md")
+		if err != nil || !strings.Contains(string(doc), cfgRow) {
+			t.Errorf("docs/user-guide/configuration.md has no row %q", cfgRow)
+		}
 	}
 }

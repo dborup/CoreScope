@@ -20,6 +20,9 @@
 
   var STORAGE_KEY = 'meshcore-cb-preset';
   var DATA_ATTR   = 'data-cb-preset';
+  var MOMENT_KINDS = ['newNode', 'backOnline', 'recordLink', 'busiest'];
+  // newNode -> --mc-moment-new-node
+  function _momentVar(k) { return '--mc-moment-' + k.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
 
   // ── Palettes ────────────────────────────────────────────────────────────
   // Each preset declares colors for the 5 roles + the 3 multi-byte status
@@ -50,7 +53,10 @@
         unknown:   '#FF8888'
       }
     ,
-      routeRamp: ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725']
+      routeRamp: ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'],
+      // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
+      // against the light and the dark card (test-881-m3-theme-tokens.js).
+      momentAccents: { newNode: '#009E73', backOnline: '#2E86C1', recordLink: '#B8578A', busiest: '#D55E00' }
     },
     {
       id: 'deut',
@@ -76,7 +82,10 @@
         unknown:   '#DC267F'
       }
     ,
-      routeRamp: ['#0d0887', '#7e03a8', '#cc4778', '#f89540', '#f0f921']
+      routeRamp: ['#0d0887', '#7e03a8', '#cc4778', '#f89540', '#f0f921'],
+      // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
+      // against the light and the dark card (test-881-m3-theme-tokens.js).
+      momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' }
     },
     {
       id: 'prot',
@@ -100,7 +109,10 @@
         unknown:   '#DC267F'
       }
     ,
-      routeRamp: ['#0d0887', '#7e03a8', '#cc4778', '#f89540', '#f0f921']
+      routeRamp: ['#0d0887', '#7e03a8', '#cc4778', '#f89540', '#f0f921'],
+      // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
+      // against the light and the dark card (test-881-m3-theme-tokens.js).
+      momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' }
     },
     {
       id: 'trit',
@@ -132,7 +144,10 @@
         unknown:   '#CC6677'
       }
     ,
-      routeRamp: ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725']
+      routeRamp: ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'],
+      // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
+      // against the light and the dark card (test-881-m3-theme-tokens.js).
+      momentAccents: { newNode: '#2A8F4C', backOnline: '#C04F7F', recordLink: '#B45AA6', busiest: '#CC6677' }
     },
     {
       id: 'achromat',
@@ -167,7 +182,10 @@
         unknown:   '#595959'
       }
     ,
-      routeRamp: ['#222222', '#555555', '#888888', '#bbbbbb', '#eeeeee']
+      routeRamp: ['#222222', '#555555', '#888888', '#bbbbbb', '#eeeeee'],
+      // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
+      // against the light and the dark card (test-881-m3-theme-tokens.js).
+      momentAccents: { newNode: '#777777', backOnline: '#858585', recordLink: '#6f6f6f', busiest: '#8f8f8f' }
     }
   ];
 
@@ -258,6 +276,13 @@
       for (var ri = 0; ri < 5; ri++) {
         style.setProperty('--mc-rt-ramp-' + ri, rr[ri] || rr[rr.length - 1]);
       }
+      // #881 M3 — Live Moments kind accents; style.css reads them through
+      // --moment-* so a customizer colour still wins.
+      var ma = p.momentAccents || {};
+      MOMENT_KINDS.forEach(function (k) {
+        if (ma[k]) style.setProperty(_momentVar(k), ma[k]);
+        else style.removeProperty(_momentVar(k));
+      });
       // #1407 — ROLE_COLORS / ROLE_STYLE are now live getters in roles.js
       // that read --mc-role-* directly, so no explicit sync is needed. The
       // pre-#1407 code path kept them in sync as a workaround for the static
@@ -305,6 +330,7 @@
         style.removeProperty('--mc-mb-' + k);
       });
       for (var ri = 0; ri < 5; ri++) style.removeProperty('--mc-rt-ramp-' + ri);
+      MOMENT_KINDS.forEach(function (k) { style.removeProperty(_momentVar(k)); });
     }
     if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof window.CustomEvent === 'function') {
       try { window.dispatchEvent(new window.CustomEvent('cb-preset-changed', { detail: { id: null } })); } catch (e) {}

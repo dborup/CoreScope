@@ -1586,6 +1586,7 @@
   // #881 M2 — the moments controller (live-moments.js), null while the
   // server has moments off or the viewer is on another page.
   let moments = null;
+  let momentsListening = false; // the customizer-change listener is on window
   let _momentHl = null; // { layers, timer } of the last fly-to highlight
 
   async function init(app) {
@@ -3892,11 +3893,13 @@
     let stored = null;
     try { stored = localStorage.getItem(M.STORAGE_KEY); } catch (_) { /* private mode */ }
     const fromHash = getHashParams ? getHashParams().get(M.HASH_PARAM) : null;
-    const enabled = M.resolveInitialEnabled(fromHash, stored);
+    const enabled = M.resolveInitialEnabled(fromHash, stored, momentSettings().enabled);
     if (fromHash === '0' || fromHash === '1') {
       try { localStorage.setItem(M.STORAGE_KEY, enabled ? 'true' : 'false'); } catch (_) { /* quota */ }
     }
     if (!document.querySelector('.live-page')) return;
+    window.addEventListener('moments-defaults-changed', onMomentsDefaultsChanged);
+    momentsListening = true;
     if (enabled) startMoments();
     const label = document.getElementById('liveMomentsLabel');
     const toggle = document.getElementById('liveMomentsToggle');
@@ -3910,6 +3913,31 @@
         setLiveHashParam(M.HASH_PARAM, toggle.checked ? '' : '0');
       });
     }
+  }
+
+  // The viewer's `moments` customizer section over the built-in defaults
+  // (live-moments.js SETTINGS). Read on every use, so a change applies live.
+  function momentSettings() {
+    const sec = window.SITE_CONFIG && window.SITE_CONFIG.moments;
+    return window.LiveMoments.SETTINGS.resolve(sec);
+  }
+
+  // The customizer changed a default (#881 M3): the stack re-fits, and a
+  // changed on/off default - which the customizer applies by forgetting the
+  // viewer's saved choice - is re-resolved, so the checkbox follows.
+  function onMomentsDefaultsChanged() {
+    const M = window.LiveMoments;
+    const toggle = document.getElementById('liveMomentsToggle');
+    if (!M || !toggle || !window.MC_MOMENTS_CFG) return;
+    let stored = null;
+    try { stored = localStorage.getItem(M.STORAGE_KEY); } catch (_) { /* private mode */ }
+    const enabled = M.resolveInitialEnabled(null, stored, momentSettings().enabled);
+    if (enabled !== toggle.checked) {
+      toggle.checked = enabled;
+      if (enabled) startMoments();
+      else if (moments) { moments.destroy(); moments = null; }
+    }
+    if (moments) moments.onSettingsChanged();
   }
 
   function startMoments() {
@@ -3929,6 +3957,7 @@
       // cards too: moments go to history only, as with the VCR out of LIVE.
       getMode: () => (followState ? 'FOLLOW' : VCR.mode),
       getZoom: () => (map ? map.getZoom() : null),
+      getSettings: () => window.SITE_CONFIG && window.SITE_CONFIG.moments,
       // Phone: the node-detail sheet and the open settings own the bottom.
       isSuppressed: () => {
         const d = document.getElementById('liveNodeDetail');
@@ -5779,6 +5808,10 @@
     // Unsubscribe rather than close: the socket belongs to app.js and the rest
     // of the app still needs it.
     if (wsHandler) { offWS(wsHandler); wsHandler = null; }
+    if (momentsListening) {
+      window.removeEventListener('moments-defaults-changed', onMomentsDefaultsChanged);
+      momentsListening = false;
+    }
     if (moments) { moments.destroy(); moments = null; }
     clearMomentHighlight();
     if (regionFilterChangeHandler && window.RegionFilter && typeof RegionFilter.offChange === 'function') {
