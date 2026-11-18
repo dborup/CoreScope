@@ -2,27 +2,36 @@
  * and the administrator's queue (Tools → Antenna Height Claims).
  *
  * Server contract (cmd/server/antenna_claims.go, #789 M2a and M3):
- *   GET  /api/antenna-claims/config                → {enabled, pollInitialMs, pollBackoff,
+ *   GET  /api/antenna-claims/config                → {enabled, detailsEnabled, pollInitialMs, pollBackoff,
  *        pollMaxMs, pollMaxAttempts, adminDefaultFilter}   (antennaClaims.* in config.json)
  *   GET  /api/nodes/{pubkey}/antenna               → {antennaM, antennaSource, assumed, estimatePending}
- *   POST /api/nodes/{pubkey}/antenna-claims {heightM} | {clear:true}
+ *   GET  /api/nodes/{pubkey}/station (#898)        → {details: {antennaType, gainDbi, power,
+ *        installation, contactPublic} | null, approvedAt, stale}   (never contactAdmin)
+ *   POST /api/nodes/{pubkey}/antenna-claims: one combined claim (#898) with a
+ *        height part ({heightM} | {clear:true}) and/or a details part
+ *        ({details:{…, contactAdmin}} | {clearDetails:true})
  *        → 202 {requestId, code, expiresAt, nameBudgetBytes, suggestedName}
  *          403 closed · 404 hidden/unknown/no position · 429/503 Retry-After
  *   GET  /api/antenna-claims/requests/{id}         → {status, expiresAt, error}
  *   GET  /api/admin/antenna-claims[?status=]       → {claims, enabled, autoApprove}  (X-API-Key)
+ *        each claim: heightOp/detailsOp (set|clear, absent when not carried),
+ *        details, heightInForce/detailsInForce, contactAdmin (proven/approved only)
  *   POST /api/admin/antenna-claims/{id}/approve|reject|revoke → 202 {requestId}
  *        or 409 (wrong status, or a newer approved claim for the node)    (X-API-Key)
  *
  * The owner proves control of the node by putting the code into the node's
  * advert name and sending an advert; the ingestor matches it. The code is
  * not a secret (the advert signature does the security work), so it is kept
- * in sessionStorage per request id to survive a reload of the tab. The admin
- * key lives only in this module's memory until "Lock" or a page reload.
+ * in sessionStorage per request id to survive a reload of the tab, with the
+ * claim's parts and height only: no station detail and no contact is ever
+ * stored in the browser or put in the URL. The admin key lives only in this
+ * module's memory until "Lock" or a page reload.
  *
  * Every string from the server or the node reaches the page through
  * textContent or a non-URL attribute; there is no HTML built from data.
  *
- * Pure helpers (parseHeight, checkName, statusInfo, pollDelay,
+ * Pure helpers (parseHeight, parseGain, checkContact, buildClaimBody,
+ * stationView, adminParts, checkName, statusInfo, pollDelay,
  * createStatusPoller, parseFilter, …) have no DOM or network access so
  * test-antenna-claims.js can run them in Node.
  */
@@ -59,6 +68,209 @@
     var n = Math.round(Number(s) * 10) / 10;
     if (!(n >= 0) || n > maxHeight()) return { error: 'The height must be between 0 and ' + maxHeight() + ' m.' };
     return { heightM: n };
+  }
+
+  // ── Station details (#898) ─────────────────────────────────────────────
+  // The values and labels the server accepts (antennaclaim/details.go).
+  // POWER is in the server's canonical order.
+  var ANTENNA_TYPES = [['omni', 'Omni'], ['yagi', 'Yagi'], ['panel', 'Panel'], ['other', 'Other']];
+  var INSTALLATIONS = [['roof', 'Roof'], ['mast', 'Mast'], ['indoor', 'Indoor'], ['portable', 'Portable']];
+  var POWER = [['mains', 'Mains'], ['solar', 'Solar'], ['battery', 'Battery']];
+  var GAIN_MIN = -5, GAIN_MAX = 20, GAIN_REVIEW_MIN = 0, GAIN_REVIEW_MAX = 15;
+  var CONTACT_MAX_RUNES = 32, CONTACT_MAX_BYTES = 64;
+
+  function labelOf(list, v) {
+    for (var i = 0; i < list.length; i++) if (list[i][0] === v) return list[i][1];
+    return null;
+  }
+
+  // parseGain reads the optional antenna gain: −5 to 20 dBi on the 0.1 dBi
+  // grid, refused (never rounded) like a height. Empty means "not given".
+  function parseGain(raw) {
+    var s = String(raw == null ? '' : raw).trim().replace(',', '.').replace(/^\u2212/, '-');
+    if (!s) return { gainDbi: null };
+    if (!/^-?[0-9]{1,2}(\.[0-9]+)?$/.test(s)) return { error: 'Enter the gain in dBi, like 6 or 2.5.' };
+    if (/\.[0-9]{2,}$/.test(s) && !/\.[0-9]0+$/.test(s)) return { error: 'Use steps of 0.1 dBi, like 2.5.' };
+    var n = Math.round(Number(s) * 10) / 10;
+    if (n === 0) n = 0; // no −0 on the wire
+    if (!(n >= GAIN_MIN && n <= GAIN_MAX)) return { error: 'The gain must be between ' + GAIN_MIN + ' and ' + GAIN_MAX + ' dBi.' };
+    return { gainDbi: n };
+  }
+
+  function fmtGain(g) {
+    return typeof g === 'number' && isFinite(g) ? g.toFixed(1) + ' dBi' : null;
+  }
+
+  // powerList turns the ticked power sources ({mains: true, …}) into the
+  // server's canonical order; null when none is ticked.
+  function powerList(ticked) {
+    var out = [];
+    for (var i = 0; i < POWER.length; i++) if (ticked && ticked[POWER[i][0]]) out.push(POWER[i][0]);
+    return out.length ? out : null;
+  }
+
+  // A contact (public or admin) mirrors antennaclaim.ValidContact: 1–32
+  // characters and at most 64 bytes of letters, marks, decimal digits,
+  // single spaces and . _ - @ # + /. Everything else is refused, never
+  // rewritten: control and format characters (bidi overrides, zero-width
+  // joiners), ':' (so no links) and markup. Empty means "not given".
+  var CONTACT_CHAR_RE = /^[\p{L}\p{M}\p{Nd}._\-@#+/ ]$/u;
+  var CONTACT_RULE = 'Use up to 32 letters, digits, single spaces and . _ - @ # + / (no spaces at the ends).';
+  function checkContact(raw) {
+    var s = String(raw == null ? '' : raw);
+    if (s === '') return { value: '' };
+    var chars = Array.from(s);
+    if (chars.length > CONTACT_MAX_RUNES || utf8Length(s) > CONTACT_MAX_BYTES) return { error: 'The contact is too long. ' + CONTACT_RULE };
+    if (s[0] === ' ' || s[s.length - 1] === ' ' || s.indexOf('  ') >= 0) return { error: CONTACT_RULE };
+    for (var i = 0; i < chars.length; i++) if (!CONTACT_CHAR_RE.test(chars[i])) return { error: CONTACT_RULE };
+    return { value: s };
+  }
+
+  // buildClaimBody turns the owner's choices into the POST body. Each part
+  // is 'keep' (nothing sent for it), 'set' or 'clear'; nothing is inferred
+  // from an empty value (the clear trap of #898 §1.4). The details part is
+  // one unit: a set sends every given field, both contacts included.
+  //   choice = { height: {op, raw}, details: {op, antennaType, gainRaw,
+  //              power: {mains, solar, battery}, installation,
+  //              contactPublic, contactAdmin} }
+  // → { body } or { error, field }. Never an empty body.
+  function buildClaimBody(choice) {
+    var h = (choice && choice.height) || { op: 'keep' };
+    var d = (choice && choice.details) || { op: 'keep' };
+    var body = {};
+    if (h.op === 'set') {
+      var ph = parseHeight(h.raw);
+      if (ph.error) return { error: ph.error, field: 'height' };
+      body.heightM = ph.heightM;
+    } else if (h.op === 'clear') body.clear = true;
+    if (d.op === 'set') {
+      var det = {};
+      if (labelOf(ANTENNA_TYPES, d.antennaType)) det.antennaType = d.antennaType;
+      var g = parseGain(d.gainRaw);
+      if (g.error) return { error: g.error, field: 'gain' };
+      if (g.gainDbi !== null) det.gainDbi = g.gainDbi;
+      var p = powerList(d.power);
+      if (p) det.power = p;
+      if (labelOf(INSTALLATIONS, d.installation)) det.installation = d.installation;
+      var cp = checkContact(d.contactPublic);
+      if (cp.error) return { error: 'Public contact: ' + cp.error, field: 'contactPublic' };
+      if (cp.value) det.contactPublic = cp.value;
+      var ca = checkContact(d.contactAdmin);
+      if (ca.error) return { error: 'Administrator contact: ' + ca.error, field: 'contactAdmin' };
+      if (ca.value) det.contactAdmin = ca.value;
+      if (!Object.keys(det).length) return { error: 'Fill in at least one station detail, or choose Keep.', field: 'details' };
+      body.details = det;
+    } else if (d.op === 'clear') body.clearDetails = true;
+    if (!Object.keys(body).length) return { error: 'Choose what to change: the height, the station details or both.', field: 'mode' };
+    return { body: body };
+  }
+
+  // partsOf reads which parts a claim carries from a POST body, a stored
+  // claim or an admin row: '' (not carried), 'set' or 'clear'. A stored
+  // claim from before #898 has {clear} for its one height part.
+  function partsOf(x) {
+    x = x || {};
+    if (x.parts) return { height: x.parts.height || '', details: x.parts.details || '' };
+    if ('heightOp' in x || 'detailsOp' in x) return { height: x.heightOp || '', details: x.detailsOp || '' };
+    return {
+      height: x.heightM != null ? 'set' : x.clear ? 'clear' : '',
+      details: x.details ? 'set' : x.clearDetails ? 'clear' : ''
+    };
+  }
+
+  // describeClaim is the owner's line for what a claim does.
+  function describeClaim(parts, heightM) {
+    var bits = [];
+    if (parts.height === 'set') bits.push('setting the antenna height to ' + fmtHeight(heightM));
+    if (parts.height === 'clear') bits.push('removing the owner antenna height');
+    if (parts.details === 'set') bits.push('replacing the station details');
+    if (parts.details === 'clear') bits.push('removing the station details');
+    if (!bits.length) return '';
+    var s = bits.join(' and ');
+    return s.charAt(0).toUpperCase() + s.slice(1) + ' of this node.';
+  }
+
+  // detailValues lists a StationDetails' public values in display order:
+  // [label, text] pairs, unknown enum values left out.
+  function detailValues(d) {
+    var out = [];
+    if (!d) return out;
+    var t = labelOf(ANTENNA_TYPES, d.antennaType);
+    if (t) out.push(['Antenna', t]);
+    var g = fmtGain(d.gainDbi);
+    if (g) out.push(['Gain', g]);
+    if (Array.isArray(d.power)) {
+      var p = d.power.map(function (v) { return labelOf(POWER, v); }).filter(Boolean);
+      if (p.length) out.push(['Power', p.join(' + ')]);
+    }
+    var inst = labelOf(INSTALLATIONS, d.installation);
+    if (inst) out.push(['Installation', inst]);
+    return out;
+  }
+
+  // stationView is the public Station block for GET /station: null when
+  // there is nothing to show (no details, stale, cleared, feature off).
+  function stationView(r) {
+    var d = r && r.details;
+    if (!d || typeof d !== 'object') return null;
+    var rows = detailValues(d);
+    var contact = typeof d.contactPublic === 'string' && d.contactPublic ? d.contactPublic : '';
+    if (contact) rows.push(['Owner contact', contact]);
+    if (!rows.length) return null;
+    return { rows: rows, approvedAt: typeof r.approvedAt === 'number' ? r.approvedAt : null };
+  }
+
+  // stationPrefill is what the details form starts from: the public values
+  // only. contactAdmin is never pre-filled, because no route returns it.
+  function stationPrefill(r) {
+    var d = (r && r.details) || {};
+    var power = {};
+    (Array.isArray(d.power) ? d.power : []).forEach(function (v) { if (labelOf(POWER, v)) power[v] = true; });
+    return {
+      antennaType: labelOf(ANTENNA_TYPES, d.antennaType) ? d.antennaType : '',
+      gainRaw: typeof d.gainDbi === 'number' && isFinite(d.gainDbi) ? d.gainDbi.toFixed(1) : '',
+      power: power,
+      installation: labelOf(INSTALLATIONS, d.installation) ? d.installation : '',
+      contactPublic: typeof d.contactPublic === 'string' ? d.contactPublic : ''
+    };
+  }
+
+  // adminParts is the admin row's per-part lines for a claim, from heightOp
+  // and detailsOp only: a claim without a height part never reads as a
+  // height removal. The admin contact is listed only for proven and
+  // approved claims (an unproven one is anyone's text, Q5).
+  function adminParts(c) {
+    c = c || {};
+    var lines = [];
+    var approved = c.status === 'approved';
+    if (c.heightOp === 'set' || c.heightOp === 'clear') {
+      lines.push({ part: 'height', label: 'Height', text: c.heightOp === 'set' ? (fmtHeight(c.heightM) || '?') : 'remove',
+        replaced: approved && !c.heightInForce });
+    }
+    if (c.detailsOp === 'set' || c.detailsOp === 'clear') {
+      var text = 'remove';
+      if (c.detailsOp === 'set') {
+        var vals = detailValues(c.details).map(function (v) { return v[1]; });
+        if (c.details && typeof c.details.contactPublic === 'string' && c.details.contactPublic) vals.push('public contact ' + c.details.contactPublic);
+        text = vals.length ? vals.join(' \u00b7 ') : 'administrator contact only';
+      }
+      lines.push({ part: 'details', label: 'Station details', text: text, replaced: approved && !c.detailsInForce });
+    }
+    var contact = (c.status === 'proven' || approved) && typeof c.contactAdmin === 'string' ? c.contactAdmin : '';
+    return { lines: lines, contactAdmin: contact };
+  }
+
+  // reviewReasons says why the server flagged a claim (one needsReview flag
+  // covers an unusual height and an unusual gain).
+  function reviewReasons(c) {
+    if (!c || !c.needsReview) return [];
+    var g = c.details && c.details.gainDbi;
+    var gainOdd = c.detailsOp === 'set' && typeof g === 'number' && (g < GAIN_REVIEW_MIN || g > GAIN_REVIEW_MAX);
+    var out = [];
+    if (c.heightOp === 'set' && !gainOdd) out.push('Check: far from the surface estimate');
+    if (gainOdd) out.push('Check: gain outside the usual ' + GAIN_REVIEW_MIN + '\u2013' + GAIN_REVIEW_MAX + ' dBi');
+    if (!out.length) out.push('Check: flagged for review');
+    return out;
   }
 
   // utf8Prefix is the longest prefix of s that fits in max bytes.
@@ -110,20 +322,31 @@
   // statusInfo is the owner-facing line for a request status. `done` stops
   // polling; `kind` styles the line.
   function statusInfo(st, opts) {
-    var clear = !!(opts && opts.clear);
+    var parts = partsOf(opts);
     var status = st && st.status;
     switch (status) {
       case 'queued': return { text: 'Registering your request…', kind: 'info', done: false };
       case 'pending': return { text: 'Waiting for an advert from the node with the code in its name…', kind: 'info', done: false };
-      case 'proven': return { text: 'Proven: the node sent the code. An administrator of this site reviews the height next.', kind: 'success', done: false };
-      case 'approved': return { text: clear ? 'Done: your antenna height is removed.' : 'Approved: profiles now use your antenna height.', kind: 'success', done: true };
+      case 'proven': return { text: 'Proven: the node sent the code. An administrator of this site reviews the claim next.', kind: 'success', done: false };
+      case 'approved': return { text: approvedText(parts), kind: 'success', done: true };
       case 'rejected': return { text: 'An administrator rejected this claim.', kind: 'warn', done: true };
-      case 'revoked': return { text: 'An administrator withdrew this height.', kind: 'warn', done: true };
+      case 'revoked': return { text: 'An administrator withdrew this claim.', kind: 'warn', done: true };
       case 'expired': return { text: 'The code expired before the node sent it. Ask for a new code.', kind: 'warn', done: true };
       case 'superseded': return { text: 'A newer claim for this node replaced this one.', kind: 'info', done: true };
       case 'gone': return { text: 'This claim is no longer known here (expired or removed). Ask for a new code.', kind: 'warn', done: true };
       default: return { text: (st && st.error) || 'The claim could not be processed.', kind: 'error', done: true };
     }
+  }
+
+  function approvedText(parts) {
+    var bits = [];
+    if (parts.height === 'clear') bits.push('your antenna height is removed');
+    if (parts.details === 'clear') bits.push('your station details are removed');
+    if (parts.height === 'set') bits.push('profiles now use your antenna height');
+    if (parts.details === 'set') bits.push('your station details are shown on the node page');
+    if (!bits.length) return 'Approved.';
+    var lead = parts.height !== 'set' && parts.details !== 'set' ? 'Done: ' : 'Approved: ';
+    return lead + bits.join(' and ') + '.';
   }
 
   // giveUpText replaces the status line when the poller stops on its own.
@@ -251,11 +474,14 @@
   }
   var NEWER_APPROVED = 'a newer claim for this node is already approved';
   // decisionError explains a refused decision; the 409 for a newer approved
-  // claim (#866 F2) says what to do instead.
-  function decisionError(err) {
+  // claim (#866 F2) says what to do instead and, given the claim c, which of
+  // its parts overlap (#898: the check is per part).
+  function decisionError(err, c) {
     var msg = (err && err.message) || '';
     if (msg === NEWER_APPROVED) {
-      return 'Not approved: a newer claim for this node is already approved (it may be the owner’s own later height or removal). ' +
+      var p = partsOf(c || {});
+      var what = p.height && p.details ? 'height or station details' : p.details ? 'station details' : 'height';
+      return 'Not approved: a newer approved claim already sets this node’s ' + what + ' (it may be the owner’s own later change or removal). ' +
         'Approving this older proof would undo it. Reject this claim instead.';
     }
     if (err && err.status === 409) return 'Not possible any more: the ' + msg + '. The list is refreshed.';
@@ -278,10 +504,11 @@
     if (!configPromise) {
       configPromise = request('GET', '/antenna-claims/config').then(function (c) {
         settings = clientSettings(c);
-        return { enabled: !!(c && c.enabled === true) };
+        var enabled = !!(c && c.enabled === true);
+        return { enabled: enabled, detailsEnabled: enabled && c.detailsEnabled === true };
       }, function () {
         configPromise = null;
-        return { enabled: false };
+        return { enabled: false, detailsEnabled: false };
       });
     }
     return configPromise;
@@ -289,8 +516,19 @@
 
   // The code survives a reload of the tab (it is not a secret).
   var STORE_PREFIX = 'mc-antenna-claim:';
+  // storedInfo is what is kept per request id: the code, the name budget,
+  // the parts and the height. Station details and both contacts are never
+  // stored (#898 §6).
+  function storedInfo(info) {
+    var p = partsOf(info);
+    return {
+      code: info.code, suggestedName: info.suggestedName, expiresAt: info.expiresAt, budget: info.budget,
+      heightM: p.height === 'set' && typeof info.heightM === 'number' ? info.heightM : null,
+      parts: { height: p.height, details: p.details }, originalName: info.originalName
+    };
+  }
   function remember(id, info) {
-    try { root.sessionStorage.setItem(STORE_PREFIX + id, JSON.stringify(info)); } catch (e) { /* private mode */ }
+    try { root.sessionStorage.setItem(STORE_PREFIX + id, JSON.stringify(storedInfo(info))); } catch (e) { /* private mode */ }
   }
   function recall(id) {
     try {
@@ -412,6 +650,7 @@
     loadConfig().then(function (cfg) {
       if (!alive() || !cfg.enabled) return;
       var target = view.section;
+      view.detailsEnabled = cfg.detailsEnabled;
       renderOwnerSection(target, n, view);
       view.rendered = true;
       target.hidden = false;
@@ -476,10 +715,44 @@
     }, function () { /* no line */ });
   }
 
+  // loadStation asks GET /station once per view (with station details on)
+  // and keeps the answer for the Station block and the form's pre-fill;
+  // Start over and a theme refresh reuse it. Null without an answer.
+  function loadStation(n, view) {
+    if (!view.detailsEnabled) return Promise.resolve(null);
+    if (!view.station) {
+      view.station = request('GET', '/nodes/' + encodeURIComponent(n.public_key) + '/station').then(null, function () { return null; });
+    }
+    return view.station;
+  }
+
+  // renderStation fills the read-only Station block, for everyone, once
+  // /station answers with details. Every value goes in through textContent.
+  function renderStation(block, r) {
+    var sv = stationView(r);
+    block.textContent = '';
+    if (!sv) { block.hidden = true; return; }
+    block.appendChild(el('h5', 'ac-station-title', 'Station'));
+    var dl = el('dl', 'ac-station-list');
+    sv.rows.forEach(function (row) {
+      var item = el('div', 'ac-station-row');
+      item.appendChild(el('dt', null, row[0]));
+      var dd = el('dd', null, row[1]);
+      if (row[0] === 'Owner contact') dd.setAttribute('data-testid', 'ac-station-contact');
+      item.appendChild(dd);
+      dl.appendChild(item);
+    });
+    block.appendChild(dl);
+    block.appendChild(el('p', 'ac-station-note', 'Given by the node owner' + (sv.approvedAt ? ', confirmed ' + fmtTime(sv.approvedAt) : '') + '.'));
+    block.hidden = false;
+  }
+
+  var NO_POSITION = 'This node sends no position in its adverts, so nothing can be claimed for it.';
+
   function renderOwnerSection(section, n, view) {
     section.textContent = '';
     markSection(section);
-    var title = el('h4', null, 'Antenna height (owner)');
+    var title = el('h4', null, view.detailsEnabled ? 'Antenna and station (owner)' : 'Antenna height (owner)');
     title.id = 'antennaClaimTitle';
     section.appendChild(title);
     var current = el('p', 'ac-current');
@@ -487,40 +760,172 @@
     current.hidden = true;
     section.appendChild(current);
     renderCurrent(current, n, view);
+    if (view.detailsEnabled) {
+      var station = el('div', 'ac-station');
+      station.setAttribute('data-testid', 'ac-station');
+      station.hidden = true;
+      section.appendChild(station);
+      loadStation(n, view).then(function (r) { if (view.alive) renderStation(station, r); });
+    }
     var body = el('div', 'ac-body');
     section.appendChild(body);
     var hasPos = n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
     var id = claimParam(location.hash);
     if (id) { renderClaim(body, n, view, id, recall(id)); return; }
     if (!hasPos) {
-      body.appendChild(el('p', 'text-muted', 'This node sends no position in its adverts, so an antenna height cannot be claimed for it.'));
+      body.appendChild(el('p', 'text-muted', NO_POSITION));
       return;
     }
     renderForm(body, n, view);
   }
 
-  function renderForm(body, n, view) {
-    body.textContent = '';
-    body.appendChild(el('p', 'ac-hint', 'Own this node? Tell this site how high its antenna is. Terrain profiles use it instead of an estimate. ' +
-      'You prove you control the node by putting a short code into its name and sending an advert.'));
-    var form = el('form', 'ac-form');
-    form.noValidate = true;
+  // radioGroup builds one fieldset of Keep/Set/Remove-style radios. It
+  // returns { fieldset, value(), on(fn) }.
+  function radioGroup(name, legend, options, testPrefix) {
+    var fs = el('fieldset', 'ac-fieldset');
+    fs.appendChild(el('legend', 'ac-legend', legend));
     var modes = el('div', 'ac-modes');
     modes.setAttribute('role', 'radiogroup');
-    modes.setAttribute('aria-label', 'What to do');
-    function radio(value, label, checked) {
+    modes.setAttribute('aria-label', legend);
+    var radios = [];
+    options.forEach(function (o) {
       var l = el('label', 'ac-mode');
       var r = el('input');
-      r.type = 'radio'; r.name = 'acMode'; r.value = value; r.checked = checked;
-      r.setAttribute('data-testid', 'ac-mode-' + value);
+      r.type = 'radio'; r.name = name; r.value = o[0]; r.checked = !!o[2];
+      r.setAttribute('data-testid', testPrefix + o[0]);
       l.appendChild(r);
-      l.appendChild(document.createTextNode(' ' + label));
+      l.appendChild(document.createTextNode(' ' + o[1]));
       modes.appendChild(l);
-      return r;
+      radios.push(r);
+    });
+    fs.appendChild(modes);
+    return {
+      fieldset: fs,
+      value: function () { for (var i = 0; i < radios.length; i++) if (radios[i].checked) return radios[i].value; return 'keep'; },
+      on: function (fn) { radios.forEach(function (r) { r.addEventListener('change', fn); }); }
+    };
+  }
+
+  // field is one labelled control; `badge` is a visible tag inside the
+  // label (and so in its accessible name), such as who can see the value.
+  function field(labelText, control, hint, id, badge) {
+    var row = el('div', 'ac-row');
+    var lab = el('label', 'ac-label', labelText);
+    if (badge) { lab.appendChild(document.createTextNode(' ')); lab.appendChild(el('span', 'ac-visibility', badge)); }
+    lab.htmlFor = id;
+    control.id = id;
+    row.appendChild(lab);
+    if (hint) {
+      var h = el('p', 'ac-field-hint', hint);
+      h.id = id + 'Hint';
+      control.setAttribute('aria-describedby', h.id);
+      row.appendChild(h);
     }
-    var setR = radio('set', 'Set the height', true);
-    var clearR = radio('clear', 'Remove my height', false);
-    form.appendChild(modes);
+    row.appendChild(control);
+    return row;
+  }
+
+  function selectOf(options, testid) {
+    var sel = el('select', 'input ac-select');
+    sel.appendChild(el('option', null, 'Not given')).value = '';
+    options.forEach(function (o) { var opt = el('option', null, o[1]); opt.value = o[0]; sel.appendChild(opt); });
+    sel.setAttribute('data-testid', testid);
+    return sel;
+  }
+
+  function textInput(testid, opts) {
+    var i = el('input', 'input');
+    i.type = 'text';
+    i.setAttribute('autocomplete', 'off');
+    i.setAttribute('spellcheck', 'false');
+    i.setAttribute('data-testid', testid);
+    for (var k in opts || {}) i.setAttribute(k, opts[k]);
+    return i;
+  }
+
+  // detailsFields builds the details "Set" fields. The public values are
+  // pre-filled from /station once it answers, unless the owner has already
+  // typed; the administrator contact always starts empty (N5).
+  function detailsFields(n, view) {
+    var wrap = el('div', 'ac-details');
+    wrap.setAttribute('data-testid', 'ac-details-fields');
+    var type = selectOf(ANTENNA_TYPES, 'ac-antenna-type');
+    wrap.appendChild(field('Antenna type', type, null, 'acAntennaType'));
+    var gain = textInput('ac-gain', { inputmode: 'decimal', placeholder: '6.0' });
+    gain.className = 'input ac-gain';
+    wrap.appendChild(field('Antenna gain (dBi)', gain, GAIN_MIN + ' to ' + GAIN_MAX + ' dBi, in steps of 0.1.', 'acGain'));
+    var powerSet = el('fieldset', 'ac-fieldset ac-power');
+    powerSet.appendChild(el('legend', 'ac-label', 'Power (choose any)'));
+    var powerBoxes = {};
+    var powerRow = el('div', 'ac-modes');
+    POWER.forEach(function (p) {
+      var l = el('label', 'ac-mode');
+      var c = el('input');
+      c.type = 'checkbox'; c.value = p[0];
+      c.setAttribute('data-testid', 'ac-power-' + p[0]);
+      l.appendChild(c);
+      l.appendChild(document.createTextNode(' ' + p[1]));
+      powerRow.appendChild(l);
+      powerBoxes[p[0]] = c;
+    });
+    powerSet.appendChild(powerRow);
+    wrap.appendChild(powerSet);
+    var inst = selectOf(INSTALLATIONS, 'ac-installation');
+    wrap.appendChild(field('Installation', inst, null, 'acInstallation'));
+    var pub = textInput('ac-contact-public', { maxlength: '64' });
+    pub.className = 'input ac-contact';
+    var pubRow = field('Public contact (optional)', pub, 'Shown publicly to everyone on this node\u2019s page.', 'acContactPublic', 'Shown publicly');
+    pubRow.classList.add('ac-contact-public');
+    wrap.appendChild(pubRow);
+    var adm = textInput('ac-contact-admin', { maxlength: '64' });
+    adm.className = 'input ac-contact';
+    var admRow = field('Contact for this site\u2019s administrator (optional)', adm,
+      'Only visible to this site\u2019s administrators, never shown publicly. Deleted when these details are replaced, removed, rejected, withdrawn or expire.',
+      'acContactAdmin', 'Admin only');
+    admRow.classList.add('ac-contact-admin');
+    wrap.appendChild(admRow);
+    wrap.appendChild(el('p', 'ac-field-hint ac-replace-note', 'Saving details replaces all of them: an administrator contact you leave empty is removed.'));
+
+    var dirty = false;
+    wrap.addEventListener('input', function () { dirty = true; });
+    wrap.addEventListener('change', function () { dirty = true; });
+    loadStation(n, view).then(function (r) {
+      if (dirty || !view.alive || !r || !r.details) return;
+      var pf = stationPrefill(r);
+      type.value = pf.antennaType;
+      gain.value = pf.gainRaw;
+      POWER.forEach(function (p) { powerBoxes[p[0]].checked = !!pf.power[p[0]]; });
+      inst.value = pf.installation;
+      pub.value = pf.contactPublic;
+    });
+    return {
+      el: wrap,
+      read: function () {
+        var power = {};
+        POWER.forEach(function (p) { power[p[0]] = powerBoxes[p[0]].checked; });
+        return { antennaType: type.value, gainRaw: gain.value, power: power, installation: inst.value, contactPublic: pub.value, contactAdmin: adm.value };
+      },
+      focus: { gain: gain, contactPublic: pub, contactAdmin: adm, details: type }
+    };
+  }
+
+  function renderForm(body, n, view) {
+    body.textContent = '';
+    var details = !!view.detailsEnabled;
+    body.appendChild(el('p', 'ac-hint', details
+      ? 'Own this node? Tell this site how high its antenna is and how the station is built. Terrain profiles use the height instead of an estimate; the station details are shown on this page. ' +
+        'You prove you control the node by putting a short code into its name and sending an advert. One code covers everything you change here.'
+      : 'Own this node? Tell this site how high its antenna is. Terrain profiles use it instead of an estimate. ' +
+        'You prove you control the node by putting a short code into its name and sending an advert.'));
+    var form = el('form', 'ac-form');
+    form.noValidate = true;
+    // Without station details the height is the only part: Set or Remove,
+    // as before #898. With them, each part starts on Keep.
+    var heightModes = radioGroup('acMode', 'Antenna height', details
+      ? [['keep', 'Keep', true], ['set', 'Set the height'], ['clear', 'Remove my height']]
+      : [['set', 'Set the height', true], ['clear', 'Remove my height']], 'ac-mode-');
+    if (!details) heightModes.fieldset.classList.add('ac-fieldset-plain');
+    form.appendChild(heightModes.fieldset);
     var row = el('div', 'ac-row');
     var lab = el('label', 'ac-label', 'Antenna height above ground (m)');
     lab.htmlFor = 'acHeight';
@@ -532,44 +937,76 @@
     input.setAttribute('placeholder', '18.5');
     input.setAttribute('aria-describedby', 'acFormStatus');
     input.setAttribute('data-testid', 'ac-height');
+    row.appendChild(lab);
+    row.appendChild(input);
+    heightModes.fieldset.appendChild(row);
+
+    var detailModes = null, fields = null;
+    if (details) {
+      detailModes = radioGroup('acDetailsMode', 'Station details',
+        [['keep', 'Keep', true], ['set', 'Set the details'], ['clear', 'Remove my details']], 'ac-details-');
+      fields = detailsFields(n, view);
+      detailModes.fieldset.appendChild(fields.el);
+      form.appendChild(detailModes.fieldset);
+    }
+    var actions = el('div', 'ac-row ac-submit-row');
     var submit = el('button', 'btn btn-primary ac-submit', 'Get code');
     submit.type = 'submit';
     submit.setAttribute('data-testid', 'ac-submit');
-    row.appendChild(lab);
-    row.appendChild(input);
-    row.appendChild(submit);
-    form.appendChild(row);
+    actions.appendChild(submit);
+    form.appendChild(actions);
     var status = el('div', 'ac-status');
     status.id = 'acFormStatus';
     status.setAttribute('role', 'status');
     status.setAttribute('aria-live', 'polite');
+    status.setAttribute('data-testid', 'ac-form-status');
     form.appendChild(status);
     body.appendChild(form);
 
-    function sync() { input.disabled = clearR.checked; lab.classList.toggle('ac-disabled', clearR.checked); }
-    setR.addEventListener('change', sync);
-    clearR.addEventListener('change', sync);
+    function choice() {
+      return {
+        height: { op: heightModes.value(), raw: input.value },
+        details: detailModes ? Object.assign({ op: detailModes.value() }, fields.read()) : { op: 'keep' }
+      };
+    }
+    function sync() {
+      var h = heightModes.value();
+      row.hidden = details && h !== 'set';
+      input.disabled = h !== 'set';
+      lab.classList.toggle('ac-disabled', h !== 'set');
+      if (fields) fields.el.hidden = detailModes.value() !== 'set';
+      // Keep + Keep changes nothing: there is no claim to make.
+      var none = h === 'keep' && (!detailModes || detailModes.value() === 'keep');
+      submit.disabled = none;
+      if (none) setStatus(status, { text: 'Choose what to change: the height, the station details or both.', kind: 'info' });
+      else if (status.getAttribute('data-kind') === 'info' && !status.hasAttribute('data-busy')) setStatus(status, { text: '', kind: 'info' });
+    }
+    heightModes.on(sync);
+    if (detailModes) detailModes.on(sync);
+    sync();
     form.addEventListener('submit', function (e) {
       e.preventDefault();
-      var claim;
-      if (clearR.checked) claim = { clear: true };
-      else {
-        var h = parseHeight(input.value);
-        if (h.error) { setStatus(status, { text: h.error, kind: 'error' }); input.focus(); return; }
-        claim = { heightM: h.heightM };
+      var built = buildClaimBody(choice());
+      if (built.error) {
+        setStatus(status, { text: built.error, kind: 'error' });
+        var f = built.field === 'height' ? input : fields && fields.focus[built.field];
+        if (f) f.focus();
+        return;
       }
+      var claim = built.body;
       submit.disabled = true;
+      status.setAttribute('data-busy', '');
       setStatus(status, { text: 'Asking for a code…', kind: 'info' });
       request('POST', '/nodes/' + encodeURIComponent(n.public_key) + '/antenna-claims', { body: claim }).then(function (res) {
         if (!view.alive || !res || !ID_RE.test(res.requestId) || !CODE_RE.test(res.code)) {
           if (view.alive) setStatus(status, { text: 'The server sent an unexpected answer.', kind: 'error' });
           return;
         }
-        var info = {
+        var info = storedInfo({
           code: res.code, suggestedName: String(res.suggestedName || res.code), expiresAt: res.expiresAt,
           budget: res.nameBudgetBytes > 0 ? res.nameBudgetBytes : NAME_BUDGET,
-          heightM: claim.heightM == null ? null : claim.heightM, clear: !!claim.clear, originalName: n.name || ''
-        };
+          heightM: claim.heightM, parts: partsOf(claim), originalName: n.name || ''
+        });
         remember(res.requestId, info);
         history.replaceState(null, '', claimHash(n.public_key, res.requestId));
         renderClaim(body, n, view, res.requestId, info);
@@ -577,12 +1014,12 @@
         if (lostFocus()) focusQuietly(body.querySelector('.ac-what'));
       }, function (err) {
         var msg = err.status === 429 ? 'Too many claims right now. Please try again later.'
-          : err.status === 403 ? 'Antenna height claims are closed on this site.'
+          : err.status === 403 ? (claim.details ? 'Station details are closed on this site.' : 'Antenna height claims are closed on this site.')
           : err.status === 404 ? 'This node cannot take a claim (it may have no position).'
           : err.status === 503 ? 'The claim queue is full. Please try again later.'
           : err.message;
         setStatus(status, { text: msg, kind: 'error' });
-      }).then(function () { submit.disabled = false; });
+      }).then(function () { status.removeAttribute('data-busy'); if (submit.isConnected) sync(); });
     });
   }
 
@@ -592,8 +1029,7 @@
     wrap.setAttribute('data-claim-id', id);
     body.appendChild(wrap);
     if (info) {
-      wrap.appendChild(el('p', 'ac-what', info.clear ? 'Removing the owner antenna height of this node.'
-        : 'Claiming an antenna height of ' + fmtHeight(info.heightM) + '.'));
+      wrap.appendChild(el('p', 'ac-what', describeClaim(partsOf(info), info.heightM)));
       var codeRow = el('p', 'ac-code-row', 'Your code: ');
       var code = el('code', 'ac-code', info.code);
       code.setAttribute('data-testid', 'ac-code');
@@ -648,8 +1084,8 @@
       var hasPos = n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
       if (hasPos) {
         renderForm(body, n, view);
-        focusQuietly(body.querySelector('#acHeight'));
-      } else { body.textContent = ''; body.appendChild(el('p', 'text-muted', 'This node sends no position in its adverts, so an antenna height cannot be claimed for it.')); }
+        focusQuietly(body.querySelector('#acHeight:not(:disabled)') || body.querySelector('input[name="acMode"]:checked'));
+      } else { body.textContent = ''; body.appendChild(el('p', 'text-muted', NO_POSITION)); }
     });
     view.poller.start(id);
   }
@@ -724,7 +1160,7 @@
         var d = admin.deciding || {};
         var failed = st && st.status === 'error';
         loadAdminList().then(function () {
-          showDecision(d.id, failed ? decisionError({ message: st.error }) : 'Done: ' + d.text + '.', failed ? 'error' : 'success');
+          showDecision(d.id, failed ? decisionError({ message: st.error }, d.claim) : 'Done: ' + d.text + '.', failed ? 'error' : 'success');
         });
       },
       onGiveUp: function () { if (admin) showDecision((admin.deciding || {}).id, 'The decision is still queued. Refresh in a moment.', 'info'); }
@@ -732,8 +1168,8 @@
     container.textContent = '';
     var page = el('div', 'tools-landing ac-admin');
     page.appendChild(el('h2', null, 'Antenna Height Claims'));
-    page.appendChild(el('p', 'help-text', 'Node owners claim an antenna height by putting a code into the node’s name and sending an advert. ' +
-      'Review proven heights here. Each node can have at most 3 claims waiting for an advert; if unproven claims block the real owner, reject them under “Waiting for advert”.'));
+    page.appendChild(el('p', 'help-text', 'Node owners claim an antenna height, and where this site allows it station details, by putting a code into the node’s name and sending an advert. ' +
+      'Review proven claims here; Approve and Reject decide the whole claim. Each node can have at most 3 claims waiting for an advert; if unproven claims block the real owner, reject them under “Waiting for advert”.'));
     // List-level messages sit above the list, where a long queue cannot push
     // them out of sight; a decision's result goes into its row (#868 F2).
     var st = el('div', 'ac-status ac-admin-status');
@@ -915,12 +1351,37 @@
     if (key) who.setAttribute('href', claimHash(key, null));
     main.appendChild(who);
     main.appendChild(el('span', 'ac-item-meta mono', key.slice(0, 8) + (c.role ? ' · ' + c.role : '')));
-    main.appendChild(el('span', 'ac-item-height', c.heightM == null ? 'Remove the owner height' : fmtHeight(c.heightM)));
+    // One line per part the claim carries, from heightOp/detailsOp only.
+    var ap = adminParts(c);
+    ap.lines.forEach(function (line) {
+      var row = el('span', 'ac-item-part');
+      row.setAttribute('data-part', line.part);
+      row.appendChild(el('span', 'ac-item-part-label', line.label + ': '));
+      row.appendChild(el('span', 'ac-item-part-value', line.text));
+      if (line.replaced) {
+        var r = el('span', 'ac-chip ac-replaced', 'replaced');
+        r.title = 'A newer approved claim replaced this part.';
+        row.appendChild(document.createTextNode(' '));
+        row.appendChild(r);
+      }
+      main.appendChild(row);
+    });
+    if (ap.contactAdmin) {
+      var ca = el('span', 'ac-item-contact');
+      ca.setAttribute('data-testid', 'ac-admin-contact');
+      ca.appendChild(el('span', 'ac-item-part-label', 'Contact (admin only): '));
+      ca.appendChild(el('span', 'ac-item-part-value', ap.contactAdmin));
+      main.appendChild(ca);
+    }
     var chip = el('span', 'ac-chip', String(c.status || ''));
     chip.setAttribute('data-state', String(c.status || ''));
     main.appendChild(chip);
-    if (c.needsReview) main.appendChild(el('span', 'ac-flag', 'Check: far from the surface estimate'));
-    if (c.stale) main.appendChild(el('span', 'ac-flag', 'Moved ' + Math.round(c.movedM) + ' m since the proof: height not used'));
+    reviewReasons(c).forEach(function (t) { main.appendChild(el('span', 'ac-flag', t)); });
+    if (c.stale) {
+      var p = partsOf(c);
+      var notUsed = p.height === 'set' && p.details === 'set' ? 'height and details' : p.details === 'set' ? 'details' : 'height';
+      main.appendChild(el('span', 'ac-flag', 'Moved ' + Math.round(c.movedM) + ' m since the proof: ' + notUsed + ' not used'));
+    }
     var meta = 'Asked ' + fmtTime(c.createdAt);
     if (c.provenAt) meta += ' · proven ' + fmtTime(c.provenAt);
     if (c.reviewedAt) meta += ' · decided ' + fmtTime(c.reviewedAt) + (c.approvedBy ? ' (' + c.approvedBy + ')' : '');
@@ -957,7 +1418,7 @@
     var buttons = li.querySelectorAll('button');
     Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
     var who = c.name || 'the claim';
-    admin.deciding = { id: c.id, text: who + ' ' + DECISION_DONE[op] };
+    admin.deciding = { id: c.id, text: who + ' ' + DECISION_DONE[op], claim: c };
     showDecision(c.id, DECISION_LABEL[op] + ' ' + who + '…', 'info');
     request('POST', '/admin/antenna-claims/' + encodeURIComponent(c.id) + '/' + op, { admin: true }).then(function (res) {
       if (!admin) return;
@@ -965,7 +1426,7 @@
     }, function (err) {
       Array.prototype.forEach.call(buttons, function (b) { b.disabled = false; });
       if (err && (err.status === 401 || err.status === 403)) { onAdminError(err); return; }
-      var text = decisionError(err);
+      var text = decisionError(err, c);
       if (err && (err.status === 409 || err.status === 404) && err.message !== NEWER_APPROVED) {
         loadAdminList().then(function () { showDecision(c.id, text, 'error'); });
       } else {
@@ -980,6 +1441,17 @@
     NAME_BUDGET: NAME_BUDGET,
     DEFAULT_SETTINGS: DEFAULT_SETTINGS,
     clientSettings: clientSettings,
+    parseGain: parseGain,
+    powerList: powerList,
+    checkContact: checkContact,
+    buildClaimBody: buildClaimBody,
+    partsOf: partsOf,
+    describeClaim: describeClaim,
+    stationView: stationView,
+    stationPrefill: stationPrefill,
+    storedInfo: storedInfo,
+    adminParts: adminParts,
+    reviewReasons: reviewReasons,
     currentHeight: currentHeight,
     FILTERS: FILTERS,
     parseHeight: parseHeight,

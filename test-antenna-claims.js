@@ -109,8 +109,9 @@ test('statusInfo: queued, pending and proven keep polling; the rest are final', 
   live.forEach((s) => assert.strictEqual(AC.statusInfo({ status: s }).done, false, s));
   final.forEach((s) => assert.strictEqual(AC.statusInfo({ status: s }).done, true, String(s)));
   assert.ok(/review/.test(AC.statusInfo({ status: 'proven' }).text));
+  // A claim stored before #898 has {clear} for its one height part.
   assert.ok(/removed/.test(AC.statusInfo({ status: 'approved' }, { clear: true }).text));
-  assert.ok(/use your antenna height/.test(AC.statusInfo({ status: 'approved' }, { clear: false }).text));
+  assert.ok(/use your antenna height/.test(AC.statusInfo({ status: 'approved' }, { clear: false, heightM: 18.5 }).text));
   assert.strictEqual(AC.statusInfo({ status: 'error', error: 'claim refused' }).text, 'claim refused');
 });
 
@@ -333,12 +334,236 @@ test('decisionsFor offers only what the server accepts', () => {
 
 test('the 409 for a newer approved claim says what to do instead', () => {
   const msg = AC.decisionError({ status: 409, message: 'a newer claim for this node is already approved' });
-  assert.ok(/newer claim for this node is already approved/.test(msg), msg);
+  assert.ok(/newer approved claim already sets this node’s height/.test(msg), msg);
   assert.ok(/Reject this claim instead/.test(msg), msg);
   const other = AC.decisionError({ status: 409, message: 'claim is approved' });
   assert.ok(/claim is approved/.test(other) && !/Reject this claim instead/.test(other), other);
   // The ingestor's own refusal arrives as a result error with the same text.
   assert.strictEqual(AC.decisionError({ message: 'a newer claim for this node is already approved' }), msg);
+});
+
+// ── #898 M2: station details and the combined claim ───────────────────────
+test('parseGain: -5 to 20 dBi on the 0.1 grid, comma and minus sign accepted, empty is "not given"', () => {
+  const ok = { '': null, '  ': null, '6': 6, '2,5': 2.5, '-5': -5, '−2.5': -2.5, '20': 20, '20.0': 20, '0': 0, '-0': 0, '15.1': 15.1 };
+  for (const [raw, want] of Object.entries(ok)) {
+    const r = AC.parseGain(raw);
+    assert.strictEqual(r.error, undefined, raw + ': ' + r.error);
+    assert.ok(Object.is(r.gainDbi, want), JSON.stringify(raw) + ' → ' + r.gainDbi);
+  }
+  for (const raw of ['-5.1', '20.1', '0.05', '6.25', 'abc', '1e1', '6.', '.5', '100', '--1', '+3']) {
+    const r = AC.parseGain(raw);
+    assert.ok(r.error && r.gainDbi === undefined, JSON.stringify(raw) + ' accepted as ' + r.gainDbi);
+  }
+  assert.ok(/0\.1 dBi/.test(AC.parseGain('0.05').error), 'a finer step must say why');
+});
+
+test('powerList: ticked sources in the server\'s canonical order, null for none', () => {
+  eq(AC.powerList({ battery: true, mains: true }), ['mains', 'battery']);
+  eq(AC.powerList({ solar: true, battery: true, mains: true }), ['mains', 'solar', 'battery']);
+  assert.strictEqual(AC.powerList({}), null);
+  assert.strictEqual(AC.powerList({ wind: true }), null);
+  assert.strictEqual(AC.powerList(null), null);
+});
+
+test('checkContact mirrors antennaclaim.ValidContact (refused, never rewritten)', () => {
+  const ok = ['Jens', 'jens@example.dk', 'OZ1ABC', 'Ærø Radio', '+45 1234 5678', 'a.b_c-d#e/f', 'é' + 'x'.repeat(31), 'Ελλάδα', 'x'.repeat(32)];
+  for (const v of ok) eq(AC.checkContact(v), { value: v }, v);
+  eq(AC.checkContact(''), { value: '' });
+  const bad = ['x'.repeat(33), 'https://evil', 'a:b', 'a‮b', 'a‍b', '<img>', 'a&b', 'a"b', "a'b", 'a\nb', 'a\tb',
+    ' lead', 'trail ', 'two  spaces', 'a b', 'emoji 😀', 'ø'.repeat(33), '😀'.repeat(17)];
+  for (const v of bad) assert.ok(AC.checkContact(v).error, JSON.stringify(v) + ' was accepted');
+  // 32 runes but over 64 bytes (three-byte characters).
+  assert.ok(AC.checkContact('中'.repeat(22)).error, '66 bytes accepted');
+  assert.strictEqual(AC.checkContact('中'.repeat(21)).value, '中'.repeat(21));
+});
+
+const KEEP = { op: 'keep' };
+const DET = (o) => Object.assign({ op: 'set', antennaType: '', gainRaw: '', power: {}, installation: '', contactPublic: '', contactAdmin: '' }, o);
+test('buildClaimBody: every Keep/Set/Remove combination gives one member per part, never {}', () => {
+  const heights = { keep: KEEP, set: { op: 'set', raw: '12,5' }, clear: { op: 'clear', raw: '99' } };
+  const details = { keep: KEEP, set: DET({ antennaType: 'omni' }), clear: { op: 'clear', antennaType: 'yagi', contactAdmin: 'x' } };
+  for (const h of Object.keys(heights)) {
+    for (const d of Object.keys(details)) {
+      const r = AC.buildClaimBody({ height: heights[h], details: details[d] });
+      if (h === 'keep' && d === 'keep') { assert.ok(r.error && !r.body, 'Keep + Keep built a body'); continue; }
+      const keys = Object.keys(r.body).sort();
+      const want = [h === 'set' ? 'heightM' : h === 'clear' ? 'clear' : null, d === 'set' ? 'details' : d === 'clear' ? 'clearDetails' : null].filter(Boolean).sort();
+      eq(keys, want, h + '/' + d);
+      if (h === 'set') assert.strictEqual(r.body.heightM, 12.5);
+      if (h === 'clear') assert.strictEqual(r.body.clear, true);
+      if (d === 'clear') assert.strictEqual(r.body.clearDetails, true);
+    }
+  }
+  assert.ok(AC.buildClaimBody({}).error);
+  assert.ok(AC.buildClaimBody(null).error);
+});
+
+test('buildClaimBody: a details set sends only the given fields, both contacts included', () => {
+  const r = AC.buildClaimBody({ height: KEEP, details: DET({ antennaType: 'yagi', gainRaw: '6,5', power: { battery: true, solar: true },
+    installation: 'mast', contactPublic: 'OZ1ABC', contactAdmin: 'jens@example.dk' }) });
+  eq(r.body, { details: { antennaType: 'yagi', gainDbi: 6.5, power: ['solar', 'battery'], installation: 'mast', contactPublic: 'OZ1ABC', contactAdmin: 'jens@example.dk' } });
+  // Any non-empty subset of the six fields (N2), the admin contact alone too.
+  eq(AC.buildClaimBody({ details: DET({ contactAdmin: 'Jens' }) }).body, { details: { contactAdmin: 'Jens' } });
+  eq(AC.buildClaimBody({ details: DET({ gainRaw: '0' }) }).body, { details: { gainDbi: 0 } });
+  // Nothing given is not a clear: it is refused (the #898 §1.4 trap).
+  const empty = AC.buildClaimBody({ height: KEEP, details: DET({}) });
+  assert.ok(empty.error && !empty.body && empty.field === 'details', JSON.stringify(empty));
+  // Unknown enum values are not sent.
+  eq(AC.buildClaimBody({ details: DET({ antennaType: 'dish', installation: 'tree', power: { wind: true }, gainRaw: '3' }) }).body, { details: { gainDbi: 3 } });
+});
+
+test('buildClaimBody: a bad value is refused with the field to focus, nothing sent', () => {
+  const cases = [
+    [{ height: { op: 'set', raw: '18.55' } }, 'height'],
+    [{ details: DET({ gainRaw: '21' }) }, 'gain'],
+    [{ details: DET({ antennaType: 'omni', contactPublic: 'https://x' }) }, 'contactPublic'],
+    [{ details: DET({ antennaType: 'omni', contactAdmin: 'a‮b' }) }, 'contactAdmin'],
+    [{ height: { op: 'set', raw: '10' }, details: DET({ contactAdmin: ' x' }) }, 'contactAdmin'],
+  ];
+  for (const [c, f] of cases) {
+    const r = AC.buildClaimBody(c);
+    assert.ok(r.error && !r.body && r.field === f, JSON.stringify(c) + ' → ' + JSON.stringify(r));
+  }
+  assert.ok(/Public contact/.test(AC.buildClaimBody(cases[2][0]).error));
+  assert.ok(/Administrator contact/.test(AC.buildClaimBody(cases[3][0]).error));
+});
+
+test('partsOf reads the ops only; a details-only claim is never a height removal (U1)', () => {
+  eq(AC.partsOf({ heightOp: '', detailsOp: 'set', heightM: null }), { height: '', details: 'set' });
+  eq(AC.partsOf({ detailsOp: 'clear', heightM: null }), { height: '', details: 'clear' });
+  eq(AC.partsOf({ heightOp: 'clear', heightM: null }), { height: 'clear', details: '' });
+  eq(AC.partsOf({ details: { antennaType: 'omni' } }), { height: '', details: 'set' });
+  eq(AC.partsOf({ heightM: 3, clearDetails: true }), { height: 'set', details: 'clear' });
+  eq(AC.partsOf({ parts: { height: 'set', details: 'clear' } }), { height: 'set', details: 'clear' });
+  // A claim stored before #898.
+  eq(AC.partsOf({ clear: true, heightM: null }), { height: 'clear', details: '' });
+  eq(AC.partsOf({ clear: false, heightM: 7 }), { height: 'set', details: '' });
+});
+
+test('describeClaim and the approved text name each carried part', () => {
+  assert.strictEqual(AC.describeClaim({ height: 'set', details: 'set' }, 12.5), 'Setting the antenna height to 12.5 m and replacing the station details of this node.');
+  assert.strictEqual(AC.describeClaim({ height: '', details: 'set' }, null), 'Replacing the station details of this node.');
+  assert.strictEqual(AC.describeClaim({ height: 'clear', details: 'clear' }, null), 'Removing the owner antenna height and removing the station details of this node.');
+  const t = (p) => AC.statusInfo({ status: 'approved' }, { parts: p }).text;
+  assert.ok(/^Approved: .*station details are shown/.test(t({ height: '', details: 'set' })) && !/height/.test(t({ height: '', details: 'set' })), t({ height: '', details: 'set' }));
+  assert.ok(/^Done: your station details are removed\.$/.test(t({ height: '', details: 'clear' })), t({ height: '', details: 'clear' }));
+  assert.ok(/height is removed and your station details are removed/.test(t({ height: 'clear', details: 'clear' })));
+  assert.ok(/^Approved: your height is removed|^Approved: your antenna height is removed and your station details are shown/.test(t({ height: 'clear', details: 'set' })), t({ height: 'clear', details: 'set' }));
+});
+
+test('stationView: public values only, in order; nothing for null, stale or empty details', () => {
+  const v = AC.stationView({ details: { antennaType: 'omni', gainDbi: 6, power: ['solar', 'battery'], installation: 'mast', contactPublic: 'OZ1ABC' }, approvedAt: 1700000000000 });
+  eq(v.rows, [['Antenna', 'Omni'], ['Gain', '6.0 dBi'], ['Power', 'Solar + Battery'], ['Installation', 'Mast'], ['Owner contact', 'OZ1ABC']]);
+  assert.strictEqual(v.approvedAt, 1700000000000);
+  assert.strictEqual(AC.stationView({ details: null, stale: true }), null);
+  assert.strictEqual(AC.stationView({ details: null }), null);
+  assert.strictEqual(AC.stationView(null), null);
+  assert.strictEqual(AC.stationView({ details: {} }), null);
+  assert.strictEqual(AC.stationView({ details: { antennaType: 'dish' } }), null, 'an unknown value is not shown');
+  eq(AC.stationView({ details: { gainDbi: -2.5 } }).rows, [['Gain', '-2.5 dBi']]);
+});
+
+test('stationView and stationPrefill never carry contactAdmin, even if a response leaked it', () => {
+  const leaked = { details: { antennaType: 'omni', contactAdmin: 'ZZADMIN9', contactPublic: 'ZZPUBLIC7' }, approvedAt: 1 };
+  const v = JSON.stringify(AC.stationView(leaked));
+  assert.ok(!/ZZADMIN9/.test(v) && /ZZPUBLIC7/.test(v), v);
+  const pf = AC.stationPrefill(leaked);
+  assert.ok(!/ZZADMIN9/.test(JSON.stringify(pf)) && !('contactAdmin' in pf), JSON.stringify(pf));
+  eq(AC.stationPrefill(leaked), { antennaType: 'omni', gainRaw: '', power: {}, installation: '', contactPublic: 'ZZPUBLIC7' });
+  eq(AC.stationPrefill({ details: { gainDbi: 6, power: ['mains', 'wind'] } }).gainRaw, '6.0');
+  eq(AC.stationPrefill({ details: { power: ['mains', 'wind'] } }).power, { mains: true });
+  eq(AC.stationPrefill(null), { antennaType: '', gainRaw: '', power: {}, installation: '', contactPublic: '' });
+});
+
+test('storedInfo keeps the code, parts and height only: no detail, no contact (U4)', () => {
+  const info = AC.storedInfo({ code: CODE, suggestedName: 'Roof ' + CODE, expiresAt: 5, budget: 23, heightM: 12.5, originalName: 'Roof',
+    parts: { height: 'set', details: 'set' }, details: { contactAdmin: 'ZZADMIN9', contactPublic: 'ZZPUBLIC7', antennaType: 'omni' },
+    contactAdmin: 'ZZADMIN9', clear: false });
+  eq(info, { code: CODE, suggestedName: 'Roof ' + CODE, expiresAt: 5, budget: 23, heightM: 12.5, parts: { height: 'set', details: 'set' }, originalName: 'Roof' });
+  assert.strictEqual(AC.storedInfo({ code: CODE, heightM: 3, parts: { height: '', details: 'set' } }).heightM, null, 'a height kept for a claim without one');
+});
+
+test('adminParts: per-part lines from the ops, the replaced marker, contactAdmin from proven on', () => {
+  const base = { heightOp: 'set', heightM: 12.5, detailsOp: 'set', contactAdmin: 'ZZADMIN9',
+    details: { antennaType: 'omni', gainDbi: 6, power: ['solar', 'battery'], installation: 'mast', contactPublic: 'OZ1ABC' } };
+  const p = AC.adminParts(Object.assign({ status: 'proven' }, base));
+  eq(p.lines.map((l) => [l.part, l.label, l.text, l.replaced]), [
+    ['height', 'Height', '12.5 m', false],
+    ['details', 'Station details', 'Omni · 6.0 dBi · Solar + Battery · Mast · public contact OZ1ABC', false]]);
+  assert.strictEqual(p.contactAdmin, 'ZZADMIN9');
+  assert.strictEqual(AC.adminParts(Object.assign({ status: 'approved', heightInForce: true, detailsInForce: true }, base)).contactAdmin, 'ZZADMIN9');
+  for (const st of ['pending', 'rejected', 'revoked', 'expired', 'superseded', undefined]) {
+    assert.strictEqual(AC.adminParts(Object.assign({ status: st }, base)).contactAdmin, '', 'contactAdmin listed for ' + st);
+  }
+  // Partly replaced: the height is still in force, the details are not.
+  const part = AC.adminParts(Object.assign({ status: 'approved', heightInForce: true, detailsInForce: false }, base));
+  eq(part.lines.map((l) => l.replaced), [false, true]);
+  // A details-only claim has no height line at all, though heightM is null.
+  eq(AC.adminParts({ status: 'proven', heightM: null, detailsOp: 'set', details: { contactPublic: 'x' } }).lines.map((l) => l.part), ['details']);
+  eq(AC.adminParts({ status: 'proven', heightM: null, detailsOp: 'clear' }).lines.map((l) => [l.label, l.text]), [['Station details', 'remove']]);
+  eq(AC.adminParts({ status: 'approved', heightM: null, heightOp: 'clear', heightInForce: true }).lines.map((l) => [l.label, l.text]), [['Height', 'remove']]);
+  eq(AC.adminParts({ status: 'proven', detailsOp: 'set', details: {} }).lines[0].text, 'administrator contact only');
+  // No op, no line: nothing is inferred from heightM.
+  eq(AC.adminParts({ status: 'proven', heightM: null }).lines, []);
+});
+
+test('reviewReasons: the one needsReview flag explained by height or gain', () => {
+  eq(AC.reviewReasons({ needsReview: false, heightOp: 'set' }), []);
+  eq(AC.reviewReasons({ needsReview: true, heightOp: 'set' }), ['Check: far from the surface estimate']);
+  eq(AC.reviewReasons({ needsReview: true, heightOp: 'set', detailsOp: 'set', details: { gainDbi: 18 } }), ['Check: gain outside the usual 0–15 dBi']);
+  eq(AC.reviewReasons({ needsReview: true, detailsOp: 'set', details: { gainDbi: -1 } }), ['Check: gain outside the usual 0–15 dBi']);
+  eq(AC.reviewReasons({ needsReview: true, detailsOp: 'set', details: { gainDbi: 6 } }), ['Check: flagged for review']);
+});
+
+test('the 409 names the overlapping part of the claim', () => {
+  const err = { status: 409, message: 'a newer claim for this node is already approved' };
+  assert.ok(/sets this node’s station details/.test(AC.decisionError(err, { detailsOp: 'set' })));
+  assert.ok(/sets this node’s height or station details/.test(AC.decisionError(err, { heightOp: 'set', detailsOp: 'clear' })));
+  assert.ok(/sets this node’s height \(/.test(AC.decisionError(err, { heightOp: 'clear', heightM: null })));
+});
+
+// renderAdminRow in a minimal DOM whose innerHTML throws: every string of a
+// claim reaches the row as text (U2), and contactAdmin only from proven on.
+function fakeDom() {
+  function Node(tag) {
+    this.tagName = tag.toUpperCase(); this.children = []; this.attrs = {}; this._text = ''; this.className = ''; this.hidden = false;
+    this.classList = { add() {}, toggle() {} };
+  }
+  Node.prototype.appendChild = function (c) { this.children.push(c); return c; };
+  Node.prototype.setAttribute = function (k, v) { this.attrs[k] = String(v); };
+  Node.prototype.getAttribute = function (k) { return k in this.attrs ? this.attrs[k] : null; };
+  Node.prototype.addEventListener = function () {};
+  Object.defineProperty(Node.prototype, 'textContent', {
+    get() { return this.children.length ? this.children.map((c) => c.textContent).join('') : this._text; },
+    set(v) { this.children = []; this._text = String(v); },
+  });
+  Object.defineProperty(Node.prototype, 'innerHTML', { get() { throw new Error('innerHTML read'); }, set() { throw new Error('innerHTML set'); } });
+  return {
+    createElement: (t) => new Node(t),
+    createTextNode: (t) => { const n = new Node('#text'); n._text = String(t); return n; },
+  };
+}
+function loadWithDom() {
+  const ctx = { console, Promise, Math, JSON, Object, Array, String, Number, encodeURIComponent, URLSearchParams, document: fakeDom() };
+  ctx.window = ctx; ctx.setTimeout = setTimeout; ctx.clearTimeout = clearTimeout;
+  vm.createContext(ctx);
+  for (const f of [HEIGHT_SRC_PATH, ADMIN_KEY_PATH, SRC_PATH]) vm.runInContext(fs.readFileSync(f, 'utf8'), ctx, { filename: f });
+  return ctx.AntennaClaims;
+}
+test('renderAdminRow: markup in both contacts stays text; contactAdmin only for proven and approved', () => {
+  const ACD = loadWithDom();
+  const XSS = '<img src=x onerror=alert(1)>';
+  const claim = (status) => ({ id: '1111111111111111', pubkey: 'a'.repeat(64), name: XSS, role: 'repeater', status, createdAt: 1,
+    heightOp: 'set', heightM: 10, detailsOp: 'set', details: { antennaType: 'omni', contactPublic: XSS + 'P' }, contactAdmin: XSS + 'A' });
+  const text = (li) => li.textContent;
+  const proven = text(ACD.renderAdminRow(claim('proven')));
+  assert.ok(proven.includes('Contact (admin only): ' + XSS + 'A'), proven);
+  assert.ok(proven.includes('public contact ' + XSS + 'P'), proven);
+  assert.ok(proven.includes('Height: 10 m') && proven.includes('Station details: Omni'), proven);
+  assert.ok(!text(ACD.renderAdminRow(claim('pending'))).includes(XSS + 'A'), 'contactAdmin shown for a pending claim');
+  assert.ok(text(ACD.renderAdminRow(claim('approved'))).includes(XSS + 'A'), 'contactAdmin missing for an approved claim');
+  const detailsOnly = text(ACD.renderAdminRow({ id: '2222222222222222', pubkey: 'a'.repeat(64), name: 'x', status: 'proven', heightM: null, detailsOp: 'set', details: { installation: 'roof' } }));
+  assert.ok(!/Height/.test(detailsOnly) && /Station details: Roof/.test(detailsOnly), detailsOnly);
 });
 
 (async () => {
