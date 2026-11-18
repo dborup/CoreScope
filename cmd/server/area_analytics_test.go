@@ -28,7 +28,7 @@ func TestComputeAreaDensity(t *testing.T) {
 		{PublicKey: "outside1", Role: "client", LastSeen: validStr(now.Format(time.RFC3339)), Lat: 51.0, Lon: 4.0},                            // outside every area
 	}
 
-	got := computeAreaDensity(nodes, areas, thresholds)
+	got := computeAreaDensity(nodes, areas, thresholds, nil)
 	if len(got) != 2 {
 		t.Fatalf("got %d areas, want 2 (ODE + DK) -- result: %+v", len(got), got)
 	}

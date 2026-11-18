@@ -25,7 +25,8 @@
 #           sourced or linked; also with the setting removed afterwards, and
 #           on a volume without the marker whose .env alone asks for the mode
 #   queue   requests in the queue directories that the services did not write
-#           are set aside, never handed to the services
+#           are set aside, never handed to the services; private (0700/0600,
+#           #909) queue directories and files stay usable for the services
 #   record  owners/restore-owners restore mixed owners and the data dir mode
 #           exactly; set-owner is the coarse fallback; both refuse while an
 #           untrusted root-consumed file is present
@@ -367,6 +368,25 @@ check "queue: other entries untouched" "0:0 644|0:0 644" \
 start "$V" "${ON[@]}"
 check "queue: held requests stay held on the next start" "0:0" "$(stat_of "$V" client-rx-deletes/request-root.json.held | cut -d' ' -f1)"
 hasnt "queue: and are not reported again" "$OUT" 'WARNING: .*request-root'
+
+# #909: the Go services write these queues 0700/0600. Ownership is all the
+# start changes, and one account runs both services, so they keep using them.
+echo "# queue: private queue directories and files (#909)"
+V=$(vol queue909)
+layout "$V"
+as_root "$V" "cd /app/data && umask 077 && mkdir antenna-claim-requests &&
+    echo '{}' > antenna-claim-requests/cmd-root.json &&
+    echo '{}' > antenna-claim-requests/cmd-own.json && chown $U:$G antenna-claim-requests/cmd-own.json"
+start "$V" "${ON[@]}"
+check "queue 909: exit status" 0 "$RC"
+check "queue 909: private dir handed to the services, mode kept" "$U:$G 700" "$(stat_of "$V" antenna-claim-requests)"
+check "queue 909: root's private request held, owner and mode kept" "0:0 600" "$(stat_of "$V" antenna-claim-requests/cmd-root.json.held)"
+check "queue 909: the services cannot read a held private request" "denied" \
+    "$(as_svc "$V" 'cat /app/data/antenna-claim-requests/cmd-root.json.held > /dev/null 2>&1 && echo read || echo denied')"
+check "queue 909: the services' own private request stays pending" "$U:$G 600" "$(stat_of "$V" antenna-claim-requests/cmd-own.json)"
+check "queue 909: the services read, write and remove in the private dir" "{}|ok" \
+    "$(as_svc "$V" 'cd /app/data/antenna-claim-requests && b=$(cat cmd-own.json) && umask 077 && echo x > result-own.json &&
+        rm result-own.json cmd-own.json && echo "$b|ok"')"
 
 # ---------------------------------------------------------------------------
 echo "# record: rollback restores mixed owners exactly"

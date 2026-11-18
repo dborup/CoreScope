@@ -40,6 +40,7 @@ run test-issue-1065-gesture-hints-gates.js
 run test-frontend-helpers.js
 run test-health-status.js
 run test-issue-902-observer-credit.js
+run test-issue-918-observer-credit-parity.js
 run test-bottom-nav-route-coverage.js
 run test-app-api-inflight-cleanup-rejection.js
 run test-app-api-bust-inflight-243.js
@@ -78,6 +79,7 @@ run test-issue-254-affinity-debug-toggle.js
 run test-issue-258-column-widths.js
 run test-issue-259-nodes-esc-listener.js
 run test-issue-282-pktesc-listener.js
+run test-881-packets-init-race.js
 run test-issue-282-comment-guards.js
 run test-issue-314-chscroll-listener.js
 run test-issue-405-observers-listener-leak.js
@@ -117,6 +119,10 @@ run test-issue-646-og-meta.js
 run test-traces.js
 run test-live-multibyte-filter.js
 run test-live-heard-filter.js
+run test-live-scope-color.js
+run test-881-live-moments.js
+run test-881-m3-customizer-moments.js
+run test-live-follow.js
 run test-map-last-heard-options.js
 run test-issue-124-rx-coverage-viewport.js
 run test-rx-coverage-escape.js

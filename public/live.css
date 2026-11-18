@@ -1701,3 +1701,406 @@ select.live-heard-select {
   font-size: inherit;
 }
 .live-toggles .live-heard-label { cursor: default; }
+
+/* ── #881 M2 — Moments: cards, bar and drawer ──────────────────────────────
+ * Anchored bottom-centre above the VCR bar (and the tile credit). The
+ * container never takes pointer events; only its buttons and links do.
+ * z-index 900 sits below every .live-overlay panel (1000), so a panel the
+ * viewer moved over the stack wins; the right edge on phones stops at
+ * --live-ctrl-rail so a card can never reach the Leaflet control rail.
+ * Colours are theme variables; the card fill and the per-kind accents are
+ * the --moment-* tokens (style.css, customizer Theme tab). Visible cards and
+ * the dwell are viewer settings (live-moments.js SETTINGS). */
+.live-moments {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
+  width: min(320px, calc(100% - 24px));
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
+}
+.live-moments[hidden],
+.live-moments-bar[hidden],
+.live-moments-drawer[hidden],
+.live-moments-backdrop[hidden] { display: none !important; }
+.live-moments-stack { display: flex; flex-direction: column; gap: 6px; order: 1; }
+.live-moments-bar {
+  order: 0;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 10px;
+  border-radius: 999px;
+  background: var(--card-bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 8px var(--shadow);
+  font-size: 12px;
+  pointer-events: auto;
+}
+.live-moments-count { white-space: nowrap; }
+.live-moments-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+.live-moments-btn:hover,
+.live-moments-btn:focus-visible { background: var(--accent-bg); }
+.live-moments-more:empty { display: none; }
+.live-moments-more { font-weight: 600; color: var(--accent); }
+.live-moments.is-paused .live-moments-count::after { content: ' · paused'; }
+
+.live-moment-card,
+.live-moment-row {
+  display: flex;
+  align-items: stretch;
+  background: var(--moment-card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--moment-accent, var(--accent));
+  border-radius: 8px;
+  overflow: hidden;
+}
+/* One accent per kind: the stripe and the icon (#881 M3). The kind is also
+   the icon and the title, so colour is never the only carrier. */
+.live-moment-card[data-kind="new_node"],
+.live-moment-row[data-kind="new_node"] { --moment-accent: var(--moment-new-node); }
+.live-moment-card[data-kind="back_online"],
+.live-moment-row[data-kind="back_online"] { --moment-accent: var(--moment-back-online); }
+.live-moment-card[data-kind="record_link"],
+.live-moment-row[data-kind="record_link"] { --moment-accent: var(--moment-record-link); }
+.live-moment-card[data-kind="busiest_repeater"],
+.live-moment-row[data-kind="busiest_repeater"] { --moment-accent: var(--moment-busiest); }
+.live-moment-card {
+  box-shadow: 0 4px 14px var(--shadow);
+  pointer-events: auto;
+  animation: live-moment-in 0.25s ease-out;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.live-moment-card.is-leaving { opacity: 0; transform: translateY(4px); }
+@keyframes live-moment-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.live-moment-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.live-moment-main:hover,
+.live-moment-main:focus-visible { background: var(--accent-bg); }
+.live-moment-main .ph-icon { flex: none; color: var(--moment-accent, var(--accent)); }
+.live-moment-text { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.live-moment-title { font-size: 12px; font-weight: 600; }
+.live-moment-detail,
+.live-moment-time { font-size: 12px; color: var(--text-muted); }
+.live-moment-detail { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.live-moment-time { flex: none; white-space: nowrap; }
+.live-moment-link {
+  flex: none;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--accent);
+  border-left: 1px solid var(--border);
+}
+
+.live-moments-drawer {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
+  width: min(360px, calc(100% - 24px));
+  max-height: min(420px, calc(100% - var(--vcr-bar-height, 58px) - 96px));
+  z-index: 1060;
+  display: flex;
+  flex-direction: column;
+  background: var(--card-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px var(--shadow);
+}
+.live-moments-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 6px 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.live-moments-drawer-title { flex: 1; font-weight: 600; font-size: 13px; }
+.live-moments-list { list-style: none; margin: 0; padding: 6px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.live-moments-empty { padding: 8px; color: var(--text-muted); font-size: 12px; }
+.live-moments-backdrop { display: none; }
+
+/* Fly-to highlight: a divIcon ring, so CSS can style it on the canvas map. */
+.live-moment-hl {
+  border: 3px solid var(--accent);
+  border-radius: 50%;
+  box-sizing: border-box;
+  background: transparent;
+  animation: live-moment-hl-pulse 1.2s ease-out 4;
+}
+@keyframes live-moment-hl-pulse {
+  from { box-shadow: 0 0 0 0 var(--accent-border); }
+  to { box-shadow: 0 0 0 14px transparent; }
+}
+.live-moment-hl.is-static { animation: none; }
+
+@media (pointer: coarse) {
+  .live-moments-btn { min-width: 40px; height: 40px; }
+  .live-moment-main { min-height: 40px; }
+}
+
+/* Phone: one card from 8px to the control rail, the drawer button beside
+ * it, the count and pause move into the drawer, and the drawer is a bottom
+ * sheet with a backdrop.
+ * The sheet and backdrop are fixed to the viewport, not absolute in
+ * .live-page: there the hidden node-detail sheet makes .live-page wider
+ * than the screen, and any programmatic sideways scroll of it (a tap's
+ * scroll-into-view, a focus) would carry the sheet off the left edge. They
+ * end at --bottom-nav-reserve, the same reserve .live-page leaves for the
+ * bottom nav. */
+@media (max-width: 640px) {
+  .live-moments {
+    left: 8px;
+    right: var(--live-ctrl-rail, 68px);
+    width: auto;
+    transform: none;
+    flex-direction: row;
+    align-items: flex-end;
+  }
+  .live-moments-stack { flex: 1; min-width: 0; order: 0; }
+  .live-moments-bar { order: 1; padding: 2px; align-self: flex-end; }
+  .live-moments-bar .live-moments-count,
+  .live-moments-bar .live-moments-pause { display: none; }
+  .live-moment-card { max-height: 56px; }
+  .live-moments-drawer {
+    position: fixed;
+    left: 0; right: 0; bottom: var(--bottom-nav-reserve, 0px);
+    width: auto;
+    transform: none;
+    max-height: 60dvh;
+    border-radius: 16px 16px 0 0;
+    z-index: 1101;
+  }
+  .live-moments-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0 0 var(--bottom-nav-reserve, 0px) 0;
+    z-index: 1100;
+    background: var(--shadow);
+  }
+}
+/* Short phone landscape (e.g. 568x320): no cards (live-moments.js
+ * SHORT_MQ), only the drawer button. The Leaflet controls are a row there
+ * (#666), 250px wide at ≤640px with the legend hidden (#875), and the
+ * Fullscreen control would sit straight above the button with only the
+ * font-dependent VCR bar height between them. Keep the button left of the
+ * whole row instead. */
+@media (max-width: 640px) and (max-height: 419px) {
+  .live-moments { right: calc(250px + 12px); }
+}
+@media (min-width: 641px) {
+  .live-moments-drawer-head .live-moments-pause { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-moment-card { animation: none; transition: none; }
+  .live-moment-hl { animation: none; }
+}
+
+/* #880 — "Follow a packet": popup/feed buttons, the follow card and the
+   map markers. Colours come from the --follow-* tokens in style.css. */
+.lc-follow-btn,
+.fdc-follow {
+  border: 1px solid color-mix(in srgb, var(--follow-ring) 60%, transparent);
+  background: color-mix(in srgb, var(--follow-ring) 14%, transparent);
+  color: var(--text);
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.lc-follow-btn { margin-left: 8px; padding: 1px 8px; font-size: 11px; }
+.fdc-follow { display: block; width: 100%; margin-top: 4px; padding: 6px; font-size: .75rem; }
+.lc-follow-btn:hover,
+.fdc-follow:hover { background: color-mix(in srgb, var(--follow-ring) 28%, transparent); }
+/* "Follow next packet" lives where it moves nothing (#670, #671): an icon
+   in the feed header above 640px, a row in the controls panel at <= 640px,
+   where the feed is hidden. One state, two buttons; live.js keeps them in
+   step. */
+.live-toggles .live-follow-next--menu { display: none; width: auto; padding: 2px 8px; font: inherit; }
+.live-feed .live-follow-next--feed {
+  flex-shrink: 0;
+  width: 28px; height: 28px; padding: 0;
+  margin-left: auto; margin-right: 22px; /* clear of the absolute #feedHideBtn */
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 4px;
+  background: transparent; color: var(--text-muted);
+  opacity: 0.7; cursor: pointer;
+}
+.live-feed .live-follow-next--feed:hover { opacity: 1; background: color-mix(in srgb, var(--text) 12%, transparent); }
+.live-feed .live-follow-next--feed:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 2px; }
+.live-follow-next.active { opacity: 1; color: var(--follow-ring); border-color: var(--follow-ring); }
+@media (max-width: 640px) {
+  .live-toggles .live-follow-next--menu { display: inline-block; }
+}
+
+.live-follow-card {
+  position: absolute;
+  top: 64px; /* clear of the overlaid top nav */
+  right: 70px;
+  width: 300px;
+  max-width: calc(100% - 90px);
+  max-height: calc(100% - 190px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  z-index: 1050;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--surface-1) 95%, transparent);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--follow-ring);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px var(--shadow);
+  color: var(--text);
+  font-size: .8rem;
+}
+.live-follow-card [hidden] { display: none !important; }
+.live-follow-card .lf-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; padding: 0; }
+.live-follow-card .lf-title { font-size: .75rem; letter-spacing: .06em; color: var(--follow-ring); }
+.live-follow-card .lf-type { color: var(--text-muted); font-family: var(--mono, monospace); font-size: .75rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-follow-card .lf-close {
+  margin-left: auto; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 32px; min-height: 32px;
+  background: none; border: none; border-radius: 6px; color: var(--text-muted); cursor: pointer;
+}
+.live-follow-card .lf-close:hover { color: var(--text); background: color-mix(in srgb, var(--text) 12%, transparent); }
+.live-follow-card .lf-status { color: var(--text); font-variant-numeric: tabular-nums; }
+.live-follow-card .lf-progress { height: 4px; margin: 6px 0; border-radius: 2px; background: color-mix(in srgb, var(--text) 12%, transparent); overflow: hidden; }
+.live-follow-card .lf-bar { height: 100%; width: 0; background: var(--follow-ring); }
+.live-follow-card .lf-controls { display: flex; gap: 6px; }
+.live-follow-card .lf-controls .vcr-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; min-height: 32px; }
+.live-follow-card .lf-summary { margin-top: 6px; }
+.live-follow-card .lf-rows { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
+.live-follow-card .lf-rows dt { color: var(--text-muted); }
+.live-follow-card .lf-rows dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.live-follow-card .lf-caption,
+.live-follow-card .lf-note { margin: 6px 0; color: var(--text-muted); font-size: .72rem; }
+.live-follow-card .lf-observers { margin: 4px 0 0; padding-left: 20px; max-height: 160px; overflow-y: auto; }
+.live-follow-card .lf-observers li { margin: 2px 0; overflow-wrap: anywhere; }
+.live-follow-card .lf-observers li.lf-late { color: var(--text-muted); }
+.live-follow-card .lf-obs-name { font-weight: 600; }
+.live-follow-card .lf-obs-when { margin-left: 6px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.live-follow-card .badge-iata { margin-left: 4px; font-size: 10px; }
+.live-follow-card .lf-clock-flag { margin-left: 6px; color: var(--follow-flag); font-weight: 600; cursor: help; }
+.live-follow-card .lf-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.live-follow-card .lf-link { color: var(--accent); }
+
+.live-follow-toast {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+  z-index: 1050; padding: 6px 12px; border-radius: 6px;
+  background: var(--surface-1); color: var(--text); border: 1px solid var(--border);
+  box-shadow: 0 4px 12px var(--shadow); font-size: .8rem;
+}
+
+/* Map markers (divIcons on liveAnimPane; built in live.js with textContent). */
+.live-follow-icon { background: none; border: none; }
+.lf-marker { position: relative; width: 0; height: 0; }
+.lf-marker .lf-dot {
+  position: absolute; left: -6px; top: -6px; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--surface-1);
+  animation: lfPop .35s ease-out;
+}
+.lf-origin .lf-dot { left: -8px; top: -8px; width: 16px; height: 16px; background: var(--follow-ring); }
+.lf-relay .lf-dot { background: var(--follow-relay); }
+.lf-observer .lf-dot { background: var(--follow-observer); }
+.lf-observer.lf-late .lf-dot { opacity: .6; }
+.lf-marker .lf-label {
+  position: absolute; left: 10px; top: -9px; white-space: nowrap;
+  padding: 1px 5px; border-radius: 4px; font-size: 11px; line-height: 16px;
+  background: color-mix(in srgb, var(--surface-1) 88%, transparent); color: var(--text);
+  border: 1px solid var(--border);
+}
+.lf-marker .lf-clock-flag { width: 12px; height: 12px; margin-left: 4px; vertical-align: -2px; color: var(--follow-flag); }
+@keyframes lfPop { from { transform: scale(0.2); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .lf-marker .lf-dot { animation: none; }
+}
+
+@media (max-width: 768px) {
+  /* Bottom sheet above the bottom nav, like .feed-detail-card. */
+  .live-follow-card {
+    position: fixed;
+    left: 0; right: 0; top: auto; bottom: 58px;
+    width: 100%; max-width: 100vw; max-height: 40vh;
+    border-radius: 10px 10px 0 0;
+    border-left: 1px solid var(--border);
+    border-top: 3px solid var(--follow-ring);
+  }
+  .live-follow-card .lf-close,
+  .live-follow-card .lf-controls .vcr-btn,
+  .live-follow-card .lf-replay,
+  .live-toggles .live-follow-next--menu,
+  .fdc-follow { min-width: 44px; min-height: 44px; }
+  /* Touch targets for the popup's Follow and the summary's packet link. */
+  .lc-follow-btn,
+  .live-follow-card .lf-link {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 44px; min-height: 44px; vertical-align: middle;
+  }
+  .live-follow-card .lf-link { padding: 0 6px; }
+  .live-follow-card .lf-observers { max-height: none; }
+}
+
+/* #882 — "SCOPES (last 15 min)" legend section. Swatch colours come from the
+ * --scope-* variables (style.css), so the theme drives them. */
+.live-scope-swatch {
+  display: inline-block;
+  width: 18px;
+  height: 4px;
+  border-radius: 2px;
+  margin-right: 6px;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+.live-scope-legend .legend-list li { overflow-wrap: anywhere; }
+.live-scope-legend { margin-bottom: 8px; }
+.live-scope-empty,
+.live-scope-more { color: var(--text-muted); font-style: italic; }
+/* Settings-panel copy of the SCOPES list: only where the legend panel is
+ * hidden (phones, and the 501-620px-tall narrow window, #875). */
+.live-scope-legend--menu { display: none; margin: 6px 0 0; }
+@media (max-width: 640px) {
+  .live-scope-legend--menu:not([hidden]) { display: block; }
+}
+@media (max-width: 768px) and (min-height: 501px) and (max-height: 620px) {
+  .live-scope-legend--menu:not([hidden]) { display: block; }
+}
+.live-scope-legend--menu .legend-list { font-size: 12px; }

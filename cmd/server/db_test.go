@@ -1343,7 +1343,7 @@ func TestGetNetworkStatus(t *testing.T) {
 		NodeDegradedHours:  1,
 		NodeSilentHours:    24,
 	}
-	result, err := db.GetNetworkStatus(ht)
+	result, err := db.GetNetworkStatus(ht, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2361,7 +2361,7 @@ func TestGetNetworkStatusDateFormats(t *testing.T) {
 		NodeDegradedHours:  1,
 		NodeSilentHours:    24,
 	}
-	result, err := db.GetNetworkStatus(ht)
+	result, err := db.GetNetworkStatus(ht, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

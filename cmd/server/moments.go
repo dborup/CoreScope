@@ -17,7 +17,10 @@
 //   - Privacy: companions are never a moment; every node in a moment passes
 //     identityHidden (node/observer blacklist, hidden-name prefixes) and the
 //     node-list geofilter, at emit time, and identityHidden again when the
-//     history is read. Positions are advertised GPS only, never (0,0).
+//     history is read. At emit time the name is the detector's own node
+//     name (no SQL under its lock); a read also checks the node's current
+//     names (rename, observer name) in one bulk lookup (#881 M3).
+//     Positions are advertised GPS only, never (0,0).
 package main
 
 import (
@@ -900,7 +903,57 @@ func (s *Server) handleMoments(w http.ResponseWriter, r *http.Request) {
 		if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && v > 0 && v < limit {
 			limit = v
 		}
-		resp.Moments = d.history(limit)
+		if s.cfg != nil && len(s.cfg.EnforcedHiddenNamePrefixes()) > 0 {
+			// Hidden-name prefixes also apply to a node's current names (a
+			// rename, or an observer name on the same key), which the ring
+			// does not hold. One bulk lookup over at most historySize keys;
+			// the hidden ones go before the limit, so they do not eat it.
+			ms, err := s.momentsVisibleByLiveNames(r.Context(), d.history(d.set.historySize))
+			if err != nil {
+				log.Printf("WARN moments visibility: %v", err)
+				writeError(w, 500, "identity visibility lookup failed")
+				return
+			}
+			if len(ms) > limit {
+				ms = ms[:limit]
+			}
+			resp.Moments = ms
+		} else {
+			resp.Moments = d.history(limit)
+		}
 	}
 	writeJSON(w, resp)
+}
+
+// momentsVisibleByLiveNames drops every moment that names a node whose
+// current name (node, inactive-node or observer) has a hidden-name prefix.
+func (s *Server) momentsVisibleByLiveNames(ctx context.Context, ms []Moment) ([]Moment, error) {
+	seen := make(map[string]bool)
+	var keys []string
+	for i := range ms {
+		for _, n := range momentNodes(&ms[i]) {
+			if pk := strings.ToLower(n.PublicKey); !seen[pk] {
+				seen[pk] = true
+				keys = append(keys, pk)
+			}
+		}
+	}
+	live, err := s.hiddenIdentityNames(ctx, keys)
+	if err != nil {
+		return nil, err
+	}
+	out := ms[:0:0]
+	for i := range ms {
+		hidden := false
+		for _, n := range momentNodes(&ms[i]) {
+			if identityHidden(s.cfg, n.PublicKey, live[strings.ToLower(n.PublicKey)]...) {
+				hidden = true
+				break
+			}
+		}
+		if !hidden {
+			out = append(out, ms[i])
+		}
+	}
+	return out, nil
 }

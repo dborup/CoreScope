@@ -503,3 +503,92 @@ func TestMomentsNotOnPacketPath_881(t *testing.T) {
 		}
 	}
 }
+
+// #881 M3: hidden-name prefixes also apply to a node's CURRENT names (a
+// rename after the moment fired, or an observer name on the same key), by
+// the shared hiddenIdentityNames lookup, and hidden moments do not eat the
+// limit.
+func TestMomentsAPIHidesLiveNames_881(t *testing.T) {
+	srv, router := momentsTestServer(t, true)
+	d := newMomentsDetector(srv.cfg.momentsSettings(), momentsDeps{cfg: srv.cfg})
+	srv.moments.Store(d)
+	pkRenamed, pkObserver, pkClean, pkLinkB := momentPK(1), momentPK(2), momentPK(3), momentPK(4)
+	for pk, name := range map[string]string{pkRenamed: "Fine-name", pkClean: "Clean", pkLinkB: "Link-B"} {
+		if _, err := srv.db.conn.Exec(`INSERT INTO nodes (public_key, name, role, last_seen, first_seen) VALUES (?, ?, 'repeater', '2026-11-18T10:00:00Z', '2026-11-01T00:00:00Z')`, pk, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	node := func(id, pk string) Moment {
+		return Moment{ID: id, Kind: MomentKindNewNode, Node: &MomentNode{PublicKey: pk, Name: "Fine-name", Role: "repeater"}}
+	}
+	d.publish([]Moment{
+		node("a-clean", pkClean),
+		node("b-renamed", pkRenamed),
+		node("c-observer", pkObserver),
+		{ID: "d-link", Kind: MomentKindRecordLink, Link: &MomentLink{A: MomentNode{PublicKey: pkClean, Name: "Clean"}, B: MomentNode{PublicKey: pkLinkB, Name: "Link-B"}}},
+		node("e-clean2", pkClean),
+	})
+	ids := func(r MomentsResponse) string {
+		var s []string
+		for _, m := range r.Moments {
+			s = append(s, m.ID[:1])
+		}
+		return strings.Join(s, "")
+	}
+	queries := 0
+	srv.db.identityNamesQueryHook = func([]string) { queries++ }
+
+	// No prefix configured: every moment shows, and no names are looked up.
+	if got := ids(getMoments(t, router, "")); got != "edcba" || queries != 0 {
+		t.Fatalf("no prefix: %q, %d lookups", got, queries)
+	}
+
+	srv.cfg.SetHiddenNamePrefixes([]string{"Zz-"})
+	if _, err := srv.db.conn.Exec(`UPDATE nodes SET name = 'Zz-renamed' WHERE public_key = ?`, pkRenamed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.db.conn.Exec(`INSERT INTO observers (id, name, iata) VALUES (?, 'Zz-observer', 'CPH')`, pkObserver); err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(getMoments(t, router, "")); got != "eda" {
+		t.Fatalf("renamed and observer-named nodes: %q, want eda", got)
+	}
+	if queries != 1 {
+		t.Fatalf("%d name lookups for one request, want 1 bulk query", queries)
+	}
+
+	// One end of a link renamed: the link goes.
+	if _, err := srv.db.conn.Exec(`UPDATE nodes SET name = 'Zz-linkb' WHERE public_key = ?`, pkLinkB); err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(getMoments(t, router, "")); got != "ea" {
+		t.Fatalf("link with a renamed end: %q, want ea", got)
+	}
+
+	// Hidden moments are dropped before the limit: of the five (newest
+	// first e d c b a), d, c and b are hidden, so limit=2 is e and a, not
+	// "the two newest minus the hidden".
+	if got := ids(getMoments(t, router, "?limit=2")); got != "ea" {
+		t.Fatalf("limit=2: %q, want ea", got)
+	}
+	if got := ids(getMoments(t, router, "?limit=1")); got != "e" {
+		t.Fatalf("limit=1: %q, want e", got)
+	}
+}
+
+// A failed name lookup fails closed: an error, never the unfiltered list.
+func TestMomentsAPILiveNamesFailClosed_881(t *testing.T) {
+	srv, router := momentsTestServer(t, true)
+	d := newMomentsDetector(srv.cfg.momentsSettings(), momentsDeps{cfg: srv.cfg})
+	srv.moments.Store(d)
+	d.publish([]Moment{{ID: "x", Kind: MomentKindNewNode, Node: &MomentNode{PublicKey: momentPK(9), Name: "Fine", Role: "repeater"}}})
+	srv.cfg.SetHiddenNamePrefixes([]string{"Zz-"})
+	if _, err := srv.db.conn.Exec(`DROP TABLE observers`); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest("GET", "/api/moments", nil))
+	if w.Code != 500 || strings.Contains(w.Body.String(), `"x"`) {
+		t.Fatalf("lookup failure served %d %s", w.Code, w.Body.String())
+	}
+}

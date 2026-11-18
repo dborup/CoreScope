@@ -1639,6 +1639,25 @@ func (db *DB) GetObservers() ([]Observer, error) {
 	return observers, nil
 }
 
+// GetListedObservers returns the observer roster /api/observers serves, and
+// so the one the client indexes: GetObservers (soft-deleted rows dropped)
+// minus the ids blacklisted reports true for (nil: none). The server-side
+// observer credit (#918) reads this same roster so it cannot credit an
+// observer the client never sees.
+func (db *DB) GetListedObservers(blacklisted func(id string) bool) ([]Observer, error) {
+	observers, err := db.GetObservers()
+	if err != nil || blacklisted == nil {
+		return observers, err
+	}
+	listed := observers[:0]
+	for _, o := range observers {
+		if !blacklisted(o.ID) {
+			listed = append(listed, o)
+		}
+	}
+	return listed, nil
+}
+
 // GetNonRelayObserverPubkeys returns the lowercase observer.id pubkeys
 // for observers that have advertised `repeat:off` (#1290). The server's
 // path-hop disambiguator consumes this to exclude listener-only nodes
@@ -2157,8 +2176,13 @@ func (db *DB) GetDistinctIATAs() ([]string, error) {
 	return codes, nil
 }
 
-// GetNetworkStatus returns overall network health status.
-func (db *DB) GetNetworkStatus(healthThresholds HealthThresholds) (map[string]interface{}, error) {
+// GetNetworkStatus returns overall network health status. blacklisted is the
+// observer blacklist (see LoadObserverReports); nil blacklists nothing.
+func (db *DB) GetNetworkStatus(healthThresholds HealthThresholds, blacklisted func(id string) bool) (map[string]interface{}, error) {
+	observers, err := db.LoadObserverReports(blacklisted)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := db.conn.Query("SELECT public_key, name, role, last_seen FROM nodes")
 	if err != nil {
 		return nil, err
@@ -2180,20 +2204,12 @@ func (db *DB) GetNetworkStatus(healthThresholds HealthThresholds) (map[string]in
 		}
 		roleCounts[r]++
 
-		age := int64(math.MaxInt64)
-		if lastSeen.Valid {
-			if t, err := time.Parse(time.RFC3339, lastSeen.String); err == nil {
-				age = now - t.UnixMilli()
-			} else if t, err := time.Parse("2006-01-02 15:04:05", lastSeen.String); err == nil {
-				age = now - t.UnixMilli()
-			}
-		}
-		degradedMs, silentMs := healthThresholds.GetHealthMs(r)
-		if age < int64(degradedMs) {
+		switch classifyNodeHealth(r, pk, lastSeen, now, healthThresholds, observers) {
+		case "active":
 			active++
-		} else if age < int64(silentMs) {
+		case "degraded":
 			degraded++
-		} else {
+		default:
 			silent++
 		}
 	}
@@ -4568,7 +4584,7 @@ func (db *DB) GetNodesForAreaAnalytics() (positioned []areaAnalyticsNode, unposi
 // a node in "Aarhus by" also counts toward "Jylland") and tallies role mix
 // plus the same active/degraded/silent breakdown GetNetworkStatus uses
 // network-wide, but per area.
-func computeAreaDensity(nodes []areaAnalyticsNode, areas map[string]AreaEntry, healthThresholds HealthThresholds) []AreaDensity {
+func computeAreaDensity(nodes []areaAnalyticsNode, areas map[string]AreaEntry, healthThresholds HealthThresholds, observers ObserverReports) []AreaDensity {
 	now := time.Now().UnixMilli()
 	counts := make(map[string]*AreaDensity)
 	for _, n := range nodes {
@@ -4580,21 +4596,7 @@ func computeAreaDensity(nodes []areaAnalyticsNode, areas map[string]AreaEntry, h
 		if role == "" {
 			role = "unknown"
 		}
-		age := int64(math.MaxInt64)
-		if n.LastSeen.Valid {
-			if t, err := time.Parse(time.RFC3339, n.LastSeen.String); err == nil {
-				age = now - t.UnixMilli()
-			} else if t, err := time.Parse("2006-01-02 15:04:05", n.LastSeen.String); err == nil {
-				age = now - t.UnixMilli()
-			}
-		}
-		degradedMs, silentMs := healthThresholds.GetHealthMs(role)
-		status := "silent"
-		if age < int64(degradedMs) {
-			status = "active"
-		} else if age < int64(silentMs) {
-			status = "degraded"
-		}
+		status := classifyNodeHealth(role, n.PublicKey, n.LastSeen, now, healthThresholds, observers)
 		for _, key := range keys {
 			c, exists := counts[key]
 			if !exists {
