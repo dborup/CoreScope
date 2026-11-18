@@ -1858,7 +1858,13 @@ select.live-heard-select {
 
 /* Phone: one card from 8px to the control rail, the drawer button beside
  * it, the count and pause move into the drawer, and the drawer is a bottom
- * sheet with a backdrop. */
+ * sheet with a backdrop.
+ * The sheet and backdrop are fixed to the viewport, not absolute in
+ * .live-page: there the hidden node-detail sheet makes .live-page wider
+ * than the screen, and any programmatic sideways scroll of it (a tap's
+ * scroll-into-view, a focus) would carry the sheet off the left edge. They
+ * end at --bottom-nav-reserve, the same reserve .live-page leaves for the
+ * bottom nav. */
 @media (max-width: 640px) {
   .live-moments {
     left: 8px;
@@ -1874,7 +1880,8 @@ select.live-heard-select {
   .live-moments-bar .live-moments-pause { display: none; }
   .live-moment-card { max-height: 56px; }
   .live-moments-drawer {
-    left: 0; right: 0; bottom: 0;
+    position: fixed;
+    left: 0; right: 0; bottom: var(--bottom-nav-reserve, 0px);
     width: auto;
     transform: none;
     max-height: 60dvh;
@@ -1883,8 +1890,8 @@ select.live-heard-select {
   }
   .live-moments-backdrop {
     display: block;
-    position: absolute;
-    inset: 0;
+    position: fixed;
+    inset: 0 0 var(--bottom-nav-reserve, 0px) 0;
     z-index: 1100;
     background: var(--shadow);
   }

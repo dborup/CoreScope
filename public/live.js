@@ -3785,8 +3785,9 @@
   }
 
   // #881 M2 — Moments. Waits for /api/config/client; does nothing at all
-  // (no listener, no request, no DOM) unless the server has moments on.
-  // live-moments.js owns the cards and the drawer; this is the map half.
+  // (no listener, no request, no DOM) unless the server has moments on and
+  // the viewer has not turned them off. live-moments.js owns the cards and
+  // the drawer; this is the map half and the viewer switch.
   async function initMoments(generation) {
     try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}
     const M = window.LiveMoments;
@@ -3798,9 +3799,26 @@
     if (fromHash === '0' || fromHash === '1') {
       try { localStorage.setItem(M.STORAGE_KEY, enabled ? 'true' : 'false'); } catch (_) { /* quota */ }
     }
+    if (!document.querySelector('.live-page')) return;
+    if (enabled) startMoments();
+    const label = document.getElementById('liveMomentsLabel');
+    const toggle = document.getElementById('liveMomentsToggle');
+    if (label && toggle) {
+      label.style.display = '';
+      toggle.checked = enabled;
+      toggle.addEventListener('change', () => {
+        try { localStorage.setItem(M.STORAGE_KEY, toggle.checked ? 'true' : 'false'); } catch (_) { /* private mode */ }
+        if (toggle.checked) startMoments();
+        else if (moments) { moments.destroy(); moments = null; }
+        setLiveHashParam(M.HASH_PARAM, toggle.checked ? '' : '0');
+      });
+    }
+  }
+
+  function startMoments() {
     const page = document.querySelector('.live-page');
-    if (!page) return;
-    moments = M.create({
+    if (moments || !page || !map) return;
+    moments = window.LiveMoments.create({
       doc: document,
       root: page,
       onWS: onWS,
@@ -3810,7 +3828,6 @@
       matchMedia: (q) => window.matchMedia(q),
       setTimeout: (fn, ms) => setTimeout(fn, ms),
       clearTimeout: (id) => clearTimeout(id),
-      storage: localStorage,
       getMode: () => VCR.mode,
       getZoom: () => (map ? map.getZoom() : null),
       // Phone: the node-detail sheet and the open settings own the bottom.
@@ -3823,19 +3840,7 @@
         window.TerrainProfile.offered(window.MC_DHM_CFG)),
       navigate: (href) => { location.hash = href; },
       onFly: momentFly,
-      enabled,
     });
-    const label = document.getElementById('liveMomentsLabel');
-    const toggle = document.getElementById('liveMomentsToggle');
-    if (label && toggle) {
-      label.style.display = '';
-      toggle.checked = enabled;
-      toggle.addEventListener('change', () => {
-        if (!moments) return;
-        moments.setEnabled(toggle.checked);
-        setLiveHashParam(M.HASH_PARAM, toggle.checked ? '' : '0');
-      });
-    }
   }
 
   function clearMomentHighlight() {

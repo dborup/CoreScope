@@ -101,8 +101,7 @@ function harness(opts) {
   const root = new El('div');
   const media = Object.assign({ '(max-width: 640px)': false, '(max-height: 419px)': false, '(prefers-reduced-motion: reduce)': false }, opts.media || {});
   const listeners = [];
-  const store = {};
-  const h = { clock, doc, root, media, listeners, store, flights: [], nav: [], mode: 'LIVE', suppressed: false, fetchResolve: null };
+  const h = { clock, doc, root, media, listeners, flights: [], nav: [], mode: 'LIVE', suppressed: false, fetchResolve: null };
   const fetchJSON = opts.fetch === false ? null : () => new Promise((res) => { h.fetchResolve = res; });
   h.c = LM.create({
     doc, root,
@@ -111,14 +110,12 @@ function harness(opts) {
     fetchJSON,
     now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
     matchMedia: (q) => ({ matches: !!media[q] }),
-    storage: opts.storage || { getItem: (k) => store[k] || null, setItem: (k, v) => { store[k] = v; } },
     getMode: () => h.mode,
     getZoom: () => 9,
     isSuppressed: () => h.suppressed,
     profileOffered: () => !!opts.profile,
     navigate: (href) => h.nav.push(href),
     onFly: (plan, t, m) => h.flights.push({ plan, t, m }),
-    enabled: opts.enabled,
   });
   h.send = (m) => listeners.slice().forEach((fn) => fn({ type: 'moment', data: m }));
   h.tick = (ms) => clock.advance(ms || 0);
@@ -217,27 +214,90 @@ test('phone shows one card', () => {
   assert.strictEqual(h.c.stats().queued, 1);
 });
 
-test('dwell is 8 s; hover holds the card, leaving resumes the rest', () => {
+const MOUSE = { pointerType: 'mouse' };
+const TOUCH = { pointerType: 'touch' };
+// The target of a focusin: matches(':focus-visible') is true for keyboard
+// focus and false for the focus a click or tap leaves on the button.
+const focusFrom = (keyboard) => ({ target: { matches: (q) => q === ':focus-visible' && keyboard } });
+
+test('dwell is 8 s; mouse hover holds the card, leaving resumes the rest', () => {
   const h = harness();
   h.send(nodeM('a')); h.tick();
   h.tick(4000);
   const card = h.cards()[0];
-  card.fire('mouseenter');
+  card.fire('pointerenter', MOUSE);
   h.tick(20000);
   assert.strictEqual(h.cards().length, 1, 'held while hovered');
-  card.fire('mouseleave');
+  card.fire('pointerleave', MOUSE);
   h.tick(3999);
   assert.strictEqual(h.cards().length, 1);
   h.tick(1);
   assert.strictEqual(h.cards().length, 0);
 });
 
-test('focus holds a card like hover', () => {
+test('keyboard focus holds a card like hover; focus and hover together hold until both end', () => {
   const h = harness();
   h.send(nodeM('a')); h.tick();
-  h.cards()[0].fire('focusin');
+  const card = h.cards()[0];
+  card.fire('focusin', focusFrom(true));
   h.tick(30000);
-  assert.strictEqual(h.cards().length, 1);
+  assert.strictEqual(h.cards().length, 1, 'held while focused');
+  card.fire('pointerenter', MOUSE);
+  card.fire('focusout');
+  h.tick(30000);
+  assert.strictEqual(h.cards().length, 1, 'still held by the hover');
+  card.fire('pointerleave', MOUSE);
+  h.tick(LM.DWELL_MS);
+  assert.strictEqual(h.cards().length, 0, 'left once neither holds it');
+});
+
+test('phone tap: a tapped card still leaves after the dwell and the next moment shows', () => {
+  const h = harness({ media: { '(max-width: 640px)': true } });
+  h.send(nodeM('a')); h.send(nodeM('b')); h.tick();
+  const card = h.cards()[0];
+  // What a tap fires: a touch pointerenter, focus on the button (not
+  // :focus-visible), the click; pointerleave/focusout only come with the
+  // next tap elsewhere.
+  card.fire('pointerenter', TOUCH);
+  card.fire('focusin', focusFrom(false));
+  card.find('live-moment-main')[0].fire('click');
+  assert.strictEqual(h.flights.length, 1, 'the tap flew');
+  h.tick(LM.DWELL_MS);
+  assert.deepStrictEqual(h.cards().map((c) => c.getAttribute('data-moment-id')), ['b'],
+    'the tapped card left and the queued one took its slot');
+  assert.strictEqual(h.c.stats().queued, 0, 'nothing piles up behind it');
+});
+
+section('=== live-moments: bounded state (rule 0) ===');
+
+test('the queue keeps the newest 10 waiting moments and drops the oldest', () => {
+  const h = harness();
+  for (let i = 0; i < 3; i++) h.send(nodeM('q' + i));
+  h.tick();
+  assert.strictEqual(h.cards().length, 3);
+  for (let i = 3; i < 3 + 15; i++) h.send(nodeM('q' + i));
+  h.tick();
+  assert.strictEqual(h.c.stats().queued, 10, 'queue capped at 10');
+  assert.strictEqual(h.root.find('live-moments-more')[0].textContent, '+10');
+  // The three cards leave; the next shown are the oldest survivors, q8..q10.
+  h.tick(LM.DWELL_MS);
+  assert.deepStrictEqual(h.cards().map((c) => c.getAttribute('data-moment-id')), ['q8', 'q9', 'q10'],
+    'q3..q7 were dropped from the front of the queue');
+});
+
+test('dedup remembers the last 200 ids, so an id older than that is accepted again', () => {
+  const h = harness({ fetch: false });
+  h.send(nodeM('first'));
+  h.send(nodeM('first'));
+  assert.strictEqual(h.c.stats().history, 1, 'a repeat inside the window is dropped');
+  for (let i = 0; i < 199; i++) h.send(nodeM('d' + i));
+  h.send(nodeM('first'));
+  assert.strictEqual(h.c.stats().history, LM.DRAWER_LEN, 'still remembered after 199 more');
+  h.send(nodeM('d199')); h.tick();   // the 201st id evicts "first"
+  h.send(nodeM('first')); h.tick();
+  h.c.openDrawer();
+  const ids = h.root.find('live-moment-row').map((r) => r.getAttribute('data-moment-id'));
+  assert.deepStrictEqual(ids.slice(0, 2), ['first', 'd199'], 'the evicted id is accepted again');
 });
 
 test('reduced motion removes a card at once, with no fade', () => {
@@ -321,7 +381,7 @@ test('non-moment frames are ignored without work', () => {
   assert.strictEqual(h.clock.pending(), 0);
 });
 
-section('=== live-moments: click, drawer, switch ===');
+section('=== live-moments: click and drawer ===');
 
 test('click flies via onFly; reduced motion passes setView', () => {
   const h = harness({ media: { '(prefers-reduced-motion: reduce)': true } });
@@ -374,25 +434,6 @@ test('REST history fills the drawer once, after WS frames that raced it', async 
   const ids = h.root.find('live-moment-row').map((r) => r.getAttribute('data-moment-id'));
   assert.deepStrictEqual(ids, ['ws-new', 'rest-1', 'rest-2']);
   assert.strictEqual(h.cards().length, 1, 'REST history never becomes cards');
-});
-
-test('viewer switch: off hides everything and is saved; storage errors are swallowed', () => {
-  const h = harness();
-  h.send(nodeM('a')); h.tick();
-  h.c.setEnabled(false); h.tick();
-  assert.strictEqual(h.root.find('live-moments')[0].hidden, true);
-  assert.strictEqual(h.cards().length, 0);
-  assert.strictEqual(h.store['live-moments'], 'false');
-  const t = harness({ storage: { getItem() { throw new Error('denied'); }, setItem() { throw new Error('denied'); } } });
-  t.c.setEnabled(false); t.tick();
-  assert.strictEqual(t.c.stats().enabled, false);
-});
-
-test('starts off when enabled:false is passed', () => {
-  const h = harness({ enabled: false });
-  h.send(nodeM('a')); h.tick();
-  assert.strictEqual(h.cards().length, 0);
-  assert.strictEqual(h.c.stats().history, 1);
 });
 
 section('=== live-moments: teardown ===');

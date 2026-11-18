@@ -18,15 +18,24 @@
  *      568x320): frames go to history only and the bar covers nothing.
  *   5. Reduced motion: the click jumps (setView, no animation) and the ring
  *      is static.
- *   6. ?moments=0 starts off and is saved; the toggle turns it back on.
- *   7. Teardown: Live → Packets → Live three times leaves one controller,
- *      one moments root and the same number of WS listeners; leaving
- *      Live within 200 ms of a resize raises no page error; Packets'
- *      pause badge does not count a moment frame.
- *   8. Phone real taps from a cold start at 375x560 with touch: one card
- *      and a +1 chip; tap the card (map moves), tap the drawer button
- *      (bottom sheet opens), tap the backdrop (closes); with a card up,
- *      Settings and Fullscreen still take their taps.
+ *   6. ?moments=0 starts off and is saved, with no controller at all: no
+ *      DOM, no /api/moments request, no WS listener. The toggle turns it on
+ *      (one request, cards) and off again (all gone, saved).
+ *   7. VCR: leaving LIVE drops the visible cards and sends frames to
+ *      history only; back to LIVE shows cards again.
+ *   8. Teardown: Live → Packets → Live three times, without waiting for
+ *      Packets' init, leaves one controller, one moments root, the current
+ *      Moments WS handler exactly once (no earlier one) and the same number
+ *      of WS listeners in total; leaving Live within 200 ms of a resize
+ *      raises no page error; Packets' pause badge does not count a moment
+ *      frame.
+ *   9. Phone real taps from a cold start (Home, then the Live tab of the
+ *      bottom nav) at 375x560 and 360x640 with touch: one card and a +1
+ *      chip; tap the card (map moves) and it still leaves after the dwell,
+ *      the queued one following; with .live-page scrolled sideways the
+ *      bottom sheet still sits inside the viewport; tap the backdrop
+ *      (closes); with a card up, Settings and Fullscreen still take their
+ *      taps.
  *
  * Usage: BASE_URL=http://localhost:13581 node test-881-live-moments-e2e.js
  */
@@ -84,12 +93,19 @@ async function open(browser, opts) {
     for (const f of [].concat(frames)) ws.send(JSON.stringify(f));
   };
   h.moment = (m) => h.send({ type: 'moment', data: m });
-  h.goto = async (hash) => {
-    await page.goto(BASE + '/?r=' + Date.now() + '#/live?' + (hash || VIEW), { waitUntil: 'domcontentloaded' });
+  // ready waits for Live and, with the server flag on, for initMoments:
+  // the controller, or only the toggle when the viewer has Moments off.
+  h.ready = async (viewerOff) => {
     await page.waitForFunction(() => window._liveWSHandler && window._liveWSHandler() && window._liveGetMap && window._liveGetMap(), null, { timeout: 20000 });
     await page.waitForFunction(() => window.MeshConfigReady !== undefined, null, { timeout: 5000 });
     await page.evaluate(() => window.MeshConfigReady);
-    if (!opts.off) await page.waitForFunction(() => window._liveMoments && window._liveMoments(), null, { timeout: 10000 });
+    if (opts.off) return;
+    if (viewerOff) await page.waitForFunction(() => getComputedStyle(document.getElementById('liveMomentsLabel')).display !== 'none', null, { timeout: 10000 });
+    else await page.waitForFunction(() => window._liveMoments && window._liveMoments(), null, { timeout: 10000 });
+  };
+  h.goto = async (hash, viewerOff) => {
+    await page.goto(BASE + '/?r=' + Date.now() + '#/live?' + (hash || VIEW), { waitUntil: 'domcontentloaded' });
+    await h.ready(viewerOff);
   };
   return h;
 }
@@ -217,6 +233,20 @@ async function fillCards(h, n) {
       await h.page.waitForFunction(() => document.querySelectorAll('.live-moment-card').length === 1);
     });
 
+    await step('VCR away from LIVE drops the cards and sends frames to history only; LIVE shows them again', async () => {
+      assert(await cardCount(h.page) === 1, 'a card is up');
+      await h.page.click('#vcrPauseBtn');
+      await h.page.waitForFunction(() => window._liveVCR().mode === 'PAUSED');
+      await h.page.waitForFunction(() => !document.querySelector('.live-moment-card'), null, { timeout: 2000 });
+      await h.moment(nodeMoment('vcr-paused', 55.3, 9.6));
+      await h.page.waitForFunction(() => document.querySelector('.live-moments-count').textContent === 'Moments · 10');
+      assert(await cardCount(h.page) === 0, 'no card while the VCR is paused');
+      await h.page.click('#vcrLiveBtn');
+      await h.page.waitForFunction(() => window._liveVCR().mode === 'LIVE');
+      await h.moment(nodeMoment('vcr-live', 55.3, 9.6));
+      await h.page.waitForSelector('.live-moment-card[data-moment-id="vcr-live"]');
+    });
+
     for (const vp of [{ width: 1024, height: 768 }, { width: 1440, height: 900 }]) {
       await step('hit test ' + vp.width + 'x' + vp.height + ', legend in all 4 corners: no control covered', async () => {
         await h.page.setViewportSize(vp);
@@ -249,7 +279,12 @@ async function fillCards(h, n) {
     await h.goto();
 
     await step('teardown: Live → Packets → Live x3 keeps one controller and stable WS listeners', async () => {
-      const base = await h.page.evaluate(() => ({ ws: wsListeners.length, live: LiveMoments.liveCount() }));
+      // No wait for Packets' init before leaving: that is the hop that
+      // leaked Packets' WS handler before #881 F2.
+      const base = await h.page.evaluate(() => {
+        window.__e2eMomentHandlers = [window._liveMoments().wsHandler];
+        return { ws: wsListeners.length, live: LiveMoments.liveCount() };
+      });
       base.requests = h.momentsRequests;
       assert(base.live === 1, 'one controller on Live, got ' + base.live);
       for (let i = 0; i < 3; i++) {
@@ -259,8 +294,17 @@ async function fillCards(h, n) {
         assert(off.live === 0 && off.roots === 0, 'nothing left on Packets: ' + JSON.stringify(off));
         await h.page.evaluate((v) => { location.hash = '#/live?' + v; }, VIEW);
         await h.page.waitForFunction(() => window._liveMoments && window._liveMoments(), null, { timeout: 20000 });
+        await h.page.evaluate(() => { window.__e2eMomentHandlers.push(window._liveMoments().wsHandler); });
       }
-      const after = await h.page.evaluate(() => ({ ws: wsListeners.length, live: LiveMoments.liveCount(), roots: document.querySelectorAll('.live-moments').length }));
+      const after = await h.page.evaluate(() => {
+        const all = window.__e2eMomentHandlers, cur = all[all.length - 1];
+        return { ws: wsListeners.length, live: LiveMoments.liveCount(), roots: document.querySelectorAll('.live-moments').length,
+          current: wsListeners.filter((f) => f === cur).length,
+          stale: wsListeners.filter((f) => all.indexOf(f) !== -1 && f !== cur).length,
+          distinct: new Set(all).size };
+      });
+      assert(after.distinct === 4, 'a new controller per entry: ' + JSON.stringify(after));
+      assert(after.current === 1 && after.stale === 0, 'the current Moments handler once, no earlier one: ' + JSON.stringify(after));
       assert(after.ws === base.ws, 'WS listeners ' + base.ws + ' → ' + after.ws);
       assert(after.live === 1 && after.roots === 1, JSON.stringify(after));
       assert(h.momentsRequests === base.requests + 3, 'one history fetch per entry: ' + base.requests + ' → ' + h.momentsRequests);
@@ -308,79 +352,127 @@ async function fillCards(h, n) {
       await r.ctx.close();
     });
 
-    await step('?moments=0 starts off and is saved; the toggle turns it back on', async () => {
+    await step('?moments=0: no controller (no DOM, request or WS listener), saved; the toggle turns it on and off', async () => {
       const o = await open(browser);
-      await o.goto(VIEW + '&moments=0');
-      const s = await o.page.evaluate(() => ({ stored: localStorage.getItem('live-moments'), hidden: document.querySelector('.live-moments').hidden,
+      await o.goto(VIEW + '&moments=0', true);
+      await o.page.waitForTimeout(300);
+      const s = await o.page.evaluate(() => ({ stored: localStorage.getItem('live-moments'),
+        dom: document.querySelectorAll('.live-moments, .live-moments-drawer, .live-moments-backdrop').length,
+        ctrl: !!window._liveMoments(), live: LiveMoments.liveCount(),
         checked: document.getElementById('liveMomentsToggle').checked }));
-      assert(s.stored === 'false' && s.hidden && !s.checked, JSON.stringify(s));
+      assert(s.stored === 'false' && s.dom === 0 && !s.ctrl && s.live === 0 && !s.checked, JSON.stringify(s));
+      assert(o.momentsRequests === 0, '/api/moments not requested while off, got ' + o.momentsRequests);
+      const ws0 = await o.page.evaluate(() => wsListeners.length);
       await o.moment(nodeMoment('off-ws', 55, 9));
       await o.page.waitForTimeout(200);
       assert(await cardCount(o.page) === 0);
+
       await o.page.click('#liveControlsToggle');
       await o.page.check('#liveMomentsToggle');
-      const t = await o.page.evaluate(() => ({ stored: localStorage.getItem('live-moments'), hash: location.hash }));
+      const t = await o.page.evaluate(() => ({ stored: localStorage.getItem('live-moments'), hash: location.hash,
+        ws: wsListeners.length, live: LiveMoments.liveCount(), roots: document.querySelectorAll('.live-moments').length }));
       assert(t.stored === 'true' && !/moments=/.test(t.hash), JSON.stringify(t));
+      assert(t.ws === ws0 + 1 && t.live === 1 && t.roots === 1, 'one controller and one listener once on: ' + JSON.stringify(t));
+      await o.page.waitForFunction(() => document.querySelector('.live-moments-count') && /Moments · 2/.test(document.querySelector('.live-moments-count').textContent));
+      assert(o.momentsRequests === 1, 'history fetched once on turning on, got ' + o.momentsRequests);
+      await o.page.click('#liveControlsToggle');
       await o.moment(nodeMoment('on-ws', 55, 9));
       await o.page.waitForSelector('.live-moment-card');
+
+      await o.page.click('#liveControlsToggle');
+      await o.page.uncheck('#liveMomentsToggle');
+      const u = await o.page.evaluate(() => ({ stored: localStorage.getItem('live-moments'), hash: location.hash, ws: wsListeners.length,
+        live: LiveMoments.liveCount(), dom: document.querySelectorAll('.live-moments, .live-moments-drawer, .live-moments-backdrop').length }));
+      assert(u.stored === 'false' && /moments=0/.test(u.hash), JSON.stringify(u));
+      assert(u.ws === ws0 && u.live === 0 && u.dom === 0, 'all gone once off: ' + JSON.stringify(u));
+      assert(!o.errors.length, o.errors.join('; '));
       await o.ctx.close();
     });
 
-    await step('phone 375x560 real taps from a cold start', async () => {
-      const p = await open(browser, { viewport: { width: 375, height: 560 }, touch: true });
-      await p.goto();
-      await p.send([{ type: 'moment', data: nodeMoment('ph-1', 55.4, 9.7) }, { type: 'moment', data: nodeMoment('ph-2', 55.41, 9.71) }]);
-      await p.page.waitForSelector('.live-moment-card');
-      const s = await p.page.evaluate(() => {
-        const card = document.querySelector('.live-moment-card').getBoundingClientRect();
-        const rail = document.querySelector('.leaflet-top.leaflet-right').getBoundingClientRect();
-        const btns = [...document.querySelectorAll('.live-moments-bar button')].filter((b) => b.getClientRects().length)
-          .map((b) => { const r = b.getBoundingClientRect(); return [r.width, r.height]; });
-        return { cards: document.querySelectorAll('.live-moment-card').length, more: document.querySelector('.live-moments-more').textContent,
-          cardRight: card.right, cardH: card.height, railLeft: rail.left, btns, overflow: document.documentElement.scrollWidth - innerWidth };
+    for (const vp of [{ width: 375, height: 560 }, { width: 360, height: 640 }]) {
+      await step('phone ' + vp.width + 'x' + vp.height + ' real taps from a cold start', async () => {
+        const p = await open(browser, { viewport: vp, touch: true });
+        // Cold start: Home first, then the Live tab of the bottom nav.
+        await p.page.goto(BASE + '/?r=' + Date.now() + '#/', { waitUntil: 'domcontentloaded' });
+        await p.page.waitForSelector('[data-bottom-nav-tab="live"]', { state: 'visible', timeout: 20000 });
+        await p.page.evaluate(() => localStorage.setItem('live-map-view', JSON.stringify({ lat: 55.3, lng: 9.6, zoom: 9 })));
+        await p.page.tap('[data-bottom-nav-tab="live"]');
+        await p.ready();
+        await p.send([{ type: 'moment', data: nodeMoment('ph-1', 55.4, 9.7) }, { type: 'moment', data: nodeMoment('ph-2', 55.41, 9.71) }]);
+        await p.page.waitForSelector('.live-moment-card');
+        const s = await p.page.evaluate(() => {
+          const card = document.querySelector('.live-moment-card').getBoundingClientRect();
+          const rail = document.querySelector('.leaflet-top.leaflet-right').getBoundingClientRect();
+          const btns = [...document.querySelectorAll('.live-moments-bar button')].filter((b) => b.getClientRects().length)
+            .map((b) => { const r = b.getBoundingClientRect(); return [r.width, r.height]; });
+          return { cards: document.querySelectorAll('.live-moment-card').length, more: document.querySelector('.live-moments-more').textContent,
+            cardRight: card.right, cardH: card.height, railLeft: rail.left, btns, overflow: document.documentElement.scrollWidth - innerWidth };
+        });
+        assert(s.cards === 1 && s.more === '+1', JSON.stringify(s));
+        assert(s.cardRight <= s.railLeft, 'card clear of the control rail: ' + JSON.stringify(s));
+        assert(s.cardH <= 56, 'card ≤ 56px tall: ' + s.cardH);
+        assert(s.btns.length && s.btns.every(([w, hh]) => w >= 40 && hh >= 40), 'tap targets ≥ 40px: ' + JSON.stringify(s.btns));
+        assert(s.overflow <= 0, 'no sideways scroll');
+        let r = await controlsCovered(p.page);
+        assert(r.checked >= 5 && !r.bad.length, 'phone hit test: ' + JSON.stringify(r));
+
+        // Tap the card: the map flies there, and the card still leaves after
+        // the dwell, with the queued moment taking its slot (#881 F3).
+        await p.page.evaluate(() => window._liveGetMap().setView([54, 8], 8, { animate: false }));
+        const tappedAt = Date.now();
+        await p.page.tap('.live-moment-card .live-moment-main');
+        await p.page.waitForFunction(() => {
+          const c = window._liveGetMap().getCenter();
+          return Math.abs(c.lat - 55.4) < 1e-3 && Math.abs(c.lng - 9.7) < 1e-3;
+        }, null, { timeout: 5000 });
+        await p.page.waitForFunction(() => {
+          const ids = [...document.querySelectorAll('.live-moment-card:not(.is-leaving)')].map((e) => e.getAttribute('data-moment-id'));
+          return ids.length === 1 && ids[0] === 'ph-2' && document.querySelector('.live-moments-more').textContent === '';
+        }, null, { timeout: 12000 });
+        assert(Date.now() - tappedAt < 11000, 'the tapped card left within its dwell');
+
+        // The sheet sits inside the viewport even with .live-page scrolled
+        // sideways, as CI's tap scroll-into-view did (#881 F4).
+        await p.page.evaluate(() => { document.querySelector('.live-page').scrollLeft = 11; });
+        await p.page.tap('.live-moments-bar .live-moments-open');
+        await p.page.waitForSelector('.live-moments-drawer:not([hidden])');
+        const sheet = await p.page.evaluate(() => {
+          const d = document.querySelector('.live-moments-drawer').getBoundingClientRect();
+          const b = document.querySelector('.live-moments-backdrop').getBoundingClientRect();
+          const nav = document.querySelector('[data-bottom-nav]').getBoundingClientRect();
+          const rows = [...document.querySelectorAll('.live-moment-row')];
+          return { left: d.left, right: d.right, top: d.top, bottom: d.bottom, bdLeft: b.left, bdRight: b.right, bdTop: b.top,
+            vw: innerWidth, vh: innerHeight, navTop: nav.top, lastRowBottom: rows.length ? rows[rows.length - 1].getBoundingClientRect().bottom : null,
+            scrolled: document.querySelector('.live-page').scrollLeft, rows: rows.length };
+        });
+        assert(sheet.scrolled > 0, 'the page really was scrolled sideways: ' + JSON.stringify(sheet));
+        // Full width, inside the viewport, above the bottom nav: every row
+        // ends above the nav (the nav is drawn over the sheet's last pixels
+        // of padding, since it is 2px taller than --bottom-nav-reserve).
+        assert(Math.abs(sheet.left) < 1 && Math.abs(sheet.right - sheet.vw) < 1 && sheet.top >= 0 && sheet.bottom <= sheet.navTop + 3,
+          'bottom sheet inside the viewport, above the nav: ' + JSON.stringify(sheet));
+        assert(sheet.lastRowBottom !== null && sheet.lastRowBottom <= sheet.navTop, 'no row under the nav: ' + JSON.stringify(sheet));
+        assert(Math.abs(sheet.bdLeft) < 1 && Math.abs(sheet.bdRight - sheet.vw) < 1 && Math.abs(sheet.bdTop) < 1,
+          'backdrop covers the page area: ' + JSON.stringify(sheet));
+        assert(sheet.rows === 4, 'rows ' + sheet.rows);
+        await p.page.touchscreen.tap(180, 40);
+        await p.page.waitForSelector('.live-moments-drawer', { state: 'hidden' });
+        await p.page.evaluate(() => { document.querySelector('.live-page').scrollLeft = 0; });
+
+        await p.moment(nodeMoment('ph-3', 55.42, 9.72));
+        await p.page.waitForSelector('.live-moment-card[data-moment-id="ph-3"]');
+        r = await controlsCovered(p.page);
+        assert(!r.bad.length, 'covered: ' + r.bad.join(','));
+        await p.page.tap('#liveControlsToggle');
+        await p.page.waitForFunction(() => document.getElementById('liveControls').classList.contains('is-expanded'));
+        await p.page.tap('#liveControlsToggle');
+        await p.page.tap('#liveFullscreenToggle');
+        await p.page.waitForFunction(() => document.body.classList.contains('live-fullscreen'));
+        await p.page.tap('#liveFullscreenToggle');
+        assert(!p.errors.length, p.errors.join('; '));
+        await p.ctx.close();
       });
-      assert(s.cards === 1 && s.more === '+1', JSON.stringify(s));
-      assert(s.cardRight <= s.railLeft, 'card clear of the control rail: ' + JSON.stringify(s));
-      assert(s.cardH <= 56, 'card ≤ 56px tall: ' + s.cardH);
-      assert(s.btns.length && s.btns.every(([w, hh]) => w >= 40 && hh >= 40), 'tap targets ≥ 40px: ' + JSON.stringify(s.btns));
-      assert(s.overflow <= 0, 'no sideways scroll');
-      let r = await controlsCovered(p.page);
-      assert(r.checked >= 5 && !r.bad.length, 'phone hit test: ' + JSON.stringify(r));
-
-      await p.page.evaluate(() => window._liveGetMap().setView([54, 8], 8, { animate: false }));
-      await p.page.tap('.live-moment-card .live-moment-main');
-      await p.page.waitForFunction(() => {
-        const c = window._liveGetMap().getCenter();
-        return Math.abs(c.lat - 55.4) < 1e-3 && Math.abs(c.lng - 9.7) < 1e-3;
-      }, null, { timeout: 5000 });
-
-      await p.page.tap('.live-moments-bar .live-moments-open');
-      await p.page.waitForSelector('.live-moments-drawer:not([hidden])');
-      const sheet = await p.page.evaluate(() => {
-        const d = document.querySelector('.live-moments-drawer').getBoundingClientRect();
-        const page = document.querySelector('.live-page').getBoundingClientRect();
-        return { left: d.left, right: d.right, bottom: d.bottom, pageLeft: page.left, pageRight: page.right, pageBottom: page.bottom,
-          rows: document.querySelectorAll('.live-moment-row').length };
-      });
-      assert(Math.abs(sheet.left - sheet.pageLeft) < 1 && Math.abs(sheet.right - sheet.pageRight) < 1 && Math.abs(sheet.bottom - sheet.pageBottom) < 1,
-        'bottom sheet spans the page: ' + JSON.stringify(sheet));
-      assert(sheet.rows === 4, 'rows ' + sheet.rows);
-      await p.page.touchscreen.tap(180, 40);
-      await p.page.waitForSelector('.live-moments-drawer', { state: 'hidden' });
-
-      await p.moment(nodeMoment('ph-3', 55.42, 9.72));
-      await p.page.waitForSelector('.live-moment-card[data-moment-id]');
-      r = await controlsCovered(p.page);
-      assert(!r.bad.length, 'covered: ' + r.bad.join(','));
-      await p.page.tap('#liveControlsToggle');
-      await p.page.waitForFunction(() => document.getElementById('liveControls').classList.contains('is-expanded'));
-      await p.page.tap('#liveControlsToggle');
-      await p.page.tap('#liveFullscreenToggle');
-      await p.page.waitForFunction(() => document.body.classList.contains('live-fullscreen'));
-      await p.page.tap('#liveFullscreenToggle');
-      assert(!p.errors.length, p.errors.join('; '));
-      await p.ctx.close();
-    });
+    }
   } finally {
     await browser.close();
   }

@@ -1,7 +1,8 @@
 /* === CoreScope — live-moments.js === */
 /* #881 M2 — Live "Moments": short-lived cards for the server's
  * {"type":"moment"} WebSocket frames (cmd/server/moments.go), a drawer with
- * the latest ones, pause, a per-viewer off switch and fly-to on click.
+ * the latest ones, pause and fly-to on click. live.js owns the per-viewer
+ * off switch (resolveInitialEnabled).
  *
  * live.js owns the map and the page; this module owns the cards, the queue
  * and the drawer. Every dependency is injected (create(deps)), so the logic
@@ -200,18 +201,18 @@
    *   now()          ms
    *   matchMedia(q)  → { matches }
    *   setTimeout, clearTimeout
-   *   storage        { getItem, setItem } (may throw)
    *   getMode()      'LIVE' | 'PAUSED' | 'REPLAY'
    *   isSuppressed() true while a phone sheet/panel owns the bottom
    *   profileOffered() bool
    *   onFly(plan, target, moment)
-   *   enabled        initial viewer switch (resolveInitialEnabled)
+   *
+   * The per-viewer off switch lives in live.js: a viewer who turned Moments
+   * off gets no controller at all (no fetch, no WS listener, no DOM).
    */
   var liveCount = 0; // controllers not yet destroyed (leak check)
 
   function create(deps) {
     var doc = deps.doc;
-    var enabled = deps.enabled !== false;
     var paused = false;
     var destroyed = false;
     var history = [];          // newest first, ≤ DRAWER_LEN
@@ -323,8 +324,7 @@
     }
 
     function render() {
-      wrap.hidden = !enabled;
-      bar.hidden = !enabled || history.length === 0;
+      bar.hidden = history.length === 0;
       pill.textContent = 'Moments · ' + history.length;
       moreChip.textContent = queue.length ? '+' + queue.length : '';
       wrap.classList.toggle('is-paused', paused);
@@ -333,7 +333,7 @@
     }
 
     function canShow() {
-      if (!enabled || paused || destroyed) return false;
+      if (paused || destroyed) return false;
       if (deps.getMode && deps.getMode() !== 'LIVE') return false;
       if (mq(SHORT_MQ)) return false;
       if (mq(PHONE_MQ) && deps.isSuppressed && deps.isSuppressed()) return false;
@@ -372,12 +372,16 @@
     }
 
     function show(m) {
-      var card = { m: m, el: null, timer: null, deadline: 0, left: DWELL_MS, held: false };
+      var card = { m: m, el: null, timer: null, deadline: 0, left: DWELL_MS, held: false, hover: false, focus: false };
       card.el = buildEntry(m, 'div', 'live-moment-card', activate);
-      card.el.addEventListener('mouseenter', function () { hold(card); });
-      card.el.addEventListener('mouseleave', function () { release(card); });
-      card.el.addEventListener('focusin', function () { hold(card); });
-      card.el.addEventListener('focusout', function () { release(card); });
+      // Hold for a hovering mouse and for keyboard focus only. A tap on a
+      // phone also fires a compat mouseenter and focuses the button, and
+      // neither is undone until the next tap elsewhere, so a tapped card
+      // would stay up and every new moment would queue behind it.
+      card.el.addEventListener('pointerenter', function (e) { if (e && e.pointerType === 'mouse') holdFor(card, 'hover', true); });
+      card.el.addEventListener('pointerleave', function (e) { if (e && e.pointerType === 'mouse') holdFor(card, 'hover', false); });
+      card.el.addEventListener('focusin', function (e) { holdFor(card, 'focus', keyboardFocus(e)); });
+      card.el.addEventListener('focusout', function () { holdFor(card, 'focus', false); });
       // Newest last, so nearest the bottom anchor.
       stack.appendChild(card.el);
       cards.push(card);
@@ -389,6 +393,19 @@
     function arm(card) {
       card.deadline = deps.now() + card.left;
       card.timer = later(function () { card.timer = null; leave(card, false); }, card.left);
+    }
+    // keyboardFocus: focus a viewer moved there with the keyboard, not the
+    // focus a click or tap leaves on the button. Without :focus-visible
+    // support, any focus counts.
+    function keyboardFocus(e) {
+      var t = e && e.target;
+      try { return !(t && typeof t.matches === 'function') || t.matches(':focus-visible'); } catch (_) { return true; }
+    }
+    // holdFor: a card is held while the mouse is over it or it has keyboard
+    // focus, and resumes its dwell when neither is true.
+    function holdFor(card, why, on) {
+      card[why] = !!on;
+      if (card.hover || card.focus) hold(card); else release(card);
     }
     function hold(card) {
       if (card.held || card.timer === null) return;
@@ -523,12 +540,6 @@
       queue.length = 0;
       while (cards.length) leave(cards[0], true);
     }
-    function setEnabled(v) {
-      enabled = !!v;
-      try { deps.storage && deps.storage.setItem(STORAGE_KEY, enabled ? 'true' : 'false'); } catch (_) { /* private mode */ }
-      if (!enabled) { dropVisible(); closeDrawer(); }
-      scheduleRender();
-    }
     // onModeChange: leaving LIVE clears the cards; moments keep going to
     // history (VCR PAUSED / REPLAY).
     function onModeChange() {
@@ -556,7 +567,6 @@
       ingest: ingest,
       seed: seed,
       setPaused: setPaused,
-      setEnabled: setEnabled,
       onModeChange: onModeChange,
       openDrawer: openDrawer,
       closeDrawer: closeDrawer,
@@ -565,7 +575,7 @@
       // Test seam: counts, never the elements.
       stats: function () {
         return { visible: cards.length, queued: queue.length, history: history.length, timers: timers.size,
-          enabled: enabled, paused: paused, drawerOpen: drawerOpen, keyListener: !!keyHandler, destroyed: destroyed };
+          paused: paused, drawerOpen: drawerOpen, keyListener: !!keyHandler, destroyed: destroyed };
       }
     };
   }
