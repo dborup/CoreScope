@@ -1,6 +1,7 @@
 package main
 
-// Owner antenna-height claims (#789 M2a) — the read-only server side.
+// Owner antenna-height claims (#789 M2a) and station details (#898) — the
+// read-only server side.
 //
 // An owner asks for a claim (a height, or a clear) on a node; the server
 // answers with a random single-use code the owner puts into the node's advert
@@ -14,7 +15,13 @@ package main
 //   - serves the request status and the admin list from read-only queries.
 //
 // Hidden identities (#743): issuing, the request status, the admin routes
-// and serving a height all refuse a hidden node exactly like an unknown one.
+// and serving a height or station details all refuse a hidden node exactly
+// like an unknown one.
+//
+// Contacts (#898): contactPublic is served by /station once its claim is
+// approved; contactAdmin is read only by the admin list (adminClaimSelect),
+// and only for proven or approved claims. No public response type has a
+// field for it.
 //
 // Bounds: public claims open only with antennaClaims.enabled and a strong
 // apiKey (owner decision 5); a global sliding window of SubmissionsPerHour;
@@ -43,7 +50,7 @@ import (
 const (
 	// ownerHeightsTTL bounds how stale the served owner heights can be.
 	ownerHeightsTTL = 30 * time.Second
-	// maxOwnerHeights caps the snapshot: one approved claim per node.
+	// maxOwnerHeights caps the snapshots: one approved part per node.
 	maxOwnerHeights = 65536
 	// maxAdminClaimsListed caps the admin list.
 	maxAdminClaimsListed = 1000
@@ -51,17 +58,48 @@ const (
 	maxClaimBodyBytes = 1024
 )
 
-// AntennaClaimRequest is the body of POST /api/nodes/{pubkey}/antenna-claims:
-// exactly one of heightM (0–100 m, 0.1 m steps) or clear:true.
+// AntennaClaimRequest is the body of POST /api/nodes/{pubkey}/antenna-claims.
+// Height part: at most one of heightM (0–100 m, 0.1 m steps) or clear:true
+// (clear keeps its meaning, clear the height). Details part (#898): at most
+// one of details or clearDetails:true. At least one part.
 type AntennaClaimRequest struct {
-	HeightM *float64 `json:"heightM,omitempty"`
-	Clear   bool     `json:"clear,omitempty"`
+	HeightM      *float64                   `json:"heightM,omitempty"`
+	Clear        bool                       `json:"clear,omitempty"`
+	Details      *antennaclaim.DetailsInput `json:"details,omitempty"`
+	ClearDetails bool                       `json:"clearDetails,omitempty"`
 }
 
 // AntennaClaimConfigResponse is GET /api/antenna-claims/config: whether
-// owners can claim a height right now (the submit route's own gate).
+// owners can claim a height right now (the submit route's own gate), whether
+// they can set station details (#898), and the operator's settings for the
+// owner page and the admin queue (#789 M3).
 type AntennaClaimConfigResponse struct {
-	Enabled bool `json:"enabled"`
+	Enabled        bool `json:"enabled"`
+	DetailsEnabled bool `json:"detailsEnabled"`
+	antennaclaim.ClientSettings
+}
+
+// NodeStationResponse is GET /api/nodes/{pubkey}/station (#898), PUBLIC.
+// Details is null when the node has none, they were cleared, the node moved
+// more than staleMoveM from where they were proven (Stale), or station
+// details are off. It never carries contactAdmin: StationDetails has no
+// field for it.
+type NodeStationResponse struct {
+	Details    *antennaclaim.StationDetails `json:"details"`
+	ApprovedAt *int64                       `json:"approvedAt,omitempty"`
+	Stale      bool                         `json:"stale,omitempty"`
+}
+
+// NodeAntennaResponse is GET /api/nodes/{pubkey}/antenna (#789 M3): the
+// antenna height a terrain profile uses for the node and where it comes
+// from (profilecard.TerrainEndpoint's antennaM, antennaSource and
+// assumed). EstimatePending: no surface estimate is cached yet, so a
+// profile may still raise a default to one.
+type NodeAntennaResponse struct {
+	AntennaM        float64 `json:"antennaM"`
+	AntennaSource   string  `json:"antennaSource"`
+	Assumed         bool    `json:"assumed"`
+	EstimatePending bool    `json:"estimatePending,omitempty"`
 }
 
 // AntennaClaimIssuedResponse is the 202 body of a queued claim. The code is
@@ -94,7 +132,7 @@ type AdminAntennaClaim struct {
 	PubKey      string   `json:"pubkey"`
 	Name        string   `json:"name"`
 	Role        string   `json:"role"`
-	HeightM     *float64 `json:"heightM"` // null: a clear claim
+	HeightM     *float64 `json:"heightM"` // set only when heightOp = set
 	Status      string   `json:"status"`
 	NeedsReview bool     `json:"needsReview,omitempty"`
 	CreatedAt   int64    `json:"createdAt"`
@@ -106,10 +144,22 @@ type AdminAntennaClaim struct {
 	ReviewedAt  *int64   `json:"reviewedAt,omitempty"`
 	ApprovedBy  string   `json:"approvedBy,omitempty"`
 	// MovedM is the distance from the proof position to the node's current
-	// position; Stale when it is more than StaleMoveM (the height is then
-	// not served).
+	// position; Stale when it is more than antennaClaims.staleMoveM (the
+	// height is then not served).
 	MovedM *float64 `json:"movedM,omitempty"`
 	Stale  bool     `json:"stale,omitempty"`
+	// The parts (#898): heightOp and detailsOp are set or clear, absent
+	// when the claim does not carry that part. The in-force flags say which
+	// parts of an approved claim are still served; a part a newer approved
+	// claim replaced is no longer in force.
+	HeightOp       string                       `json:"heightOp,omitempty"`
+	DetailsOp      string                       `json:"detailsOp,omitempty"`
+	Details        *antennaclaim.StationDetails `json:"details,omitempty"`
+	HeightInForce  bool                         `json:"heightInForce,omitempty"`
+	DetailsInForce bool                         `json:"detailsInForce,omitempty"`
+	// ContactAdmin is admin only: listed for proven and approved claims
+	// (an unproven contact is anyone's text, Q5), never in a public route.
+	ContactAdmin string `json:"contactAdmin,omitempty"`
 }
 
 // AdminAntennaClaimListResponse is GET /api/admin/antenna-claims.
@@ -125,19 +175,69 @@ type ownerHeight struct {
 	lat, lon float64
 }
 
+// ownerStation is one approved details part and where it was proven.
+type ownerStation struct {
+	details    antennaclaim.StationDetails
+	lat, lon   float64
+	approvedAt int64
+}
+
 type antennaClaimService struct {
-	enabled     bool
-	autoApprove bool
-	limits      antennaclaim.Limits
-	queue       *channelregistry.Queue // nil without a database path
-	db          *sql.DB                // read-only; nil without a database
-	now         func() time.Time
+	enabled        bool
+	detailsEnabled bool
+	autoApprove    bool
+	limits         antennaclaim.Limits
+	client         antennaclaim.ClientSettings
+	queue          *channelregistry.Queue // nil without a database path
+	db             *sql.DB                // read-only; nil without a database
+	now            func() time.Time
 	submissionWindow
 
-	ownersMu      sync.Mutex
-	owners        map[string]ownerHeight // immutable once stored
-	ownersExpires time.Time
-	ownersLoad    singleflight.Group
+	owners   claimSnapshot[ownerHeight]
+	stations claimSnapshot[ownerStation]
+}
+
+// claimSnapshot is a map by public key read from the claims table and
+// refreshed every ownerHeightsTTL. The read runs outside mu, one at a time;
+// while it runs the previous snapshot is served. A failed read keeps the
+// last good snapshot. The map must not be modified.
+type claimSnapshot[V any] struct {
+	mu      sync.Mutex
+	m       map[string]V // immutable once stored
+	expires time.Time
+	load    singleflight.Group
+}
+
+func (s *claimSnapshot[V]) get(ctx context.Context, now func() time.Time, what string, read func(context.Context) (map[string]V, error)) map[string]V {
+	s.mu.Lock()
+	cur, fresh := s.m, s.m != nil && now().Before(s.expires)
+	s.mu.Unlock()
+	if fresh {
+		return cur
+	}
+	ctx = context.WithoutCancel(ctx)
+	v, _, _ := s.load.Do(what, func() (interface{}, error) {
+		next, err := read(ctx)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err != nil {
+			log.Printf("[antenna-claims] reading %s failed: %v", what, err)
+			if s.m == nil {
+				s.m = map[string]V{}
+			}
+		} else {
+			s.m = next
+		}
+		s.expires = now().Add(ownerHeightsTTL)
+		return s.m, nil
+	})
+	return v.(map[string]V)
+}
+
+func (s *claimSnapshot[V]) invalidate() {
+	s.mu.Lock()
+	s.m = nil
+	s.mu.Unlock()
 }
 
 func newAntennaClaimService(cfg *Config, db *sql.DB, queueDir string) *antennaClaimService {
@@ -149,6 +249,7 @@ func newAntennaClaimService(cfg *Config, db *sql.DB, queueDir string) *antennaCl
 	}
 	svc := &antennaClaimService{
 		limits:      cc.Limits(),
+		client:      cc.Client(),
 		autoApprove: cc.AutoApprove(),
 		db:          db,
 		now:         time.Now,
@@ -157,6 +258,7 @@ func newAntennaClaimService(cfg *Config, db *sql.DB, queueDir string) *antennaCl
 		svc.queue = channelregistry.NewQueue(queueDir)
 	}
 	svc.enabled = cc.SubmissionsRequested() && strongKey && svc.queue != nil && db != nil
+	svc.detailsEnabled = svc.enabled && cc.DetailsRequested()
 	if cc.SubmissionsRequested() && !svc.enabled {
 		log.Printf("[antenna-claims] WARNING: antennaClaims.enabled is set but owner claims stay closed: " +
 			"they need a strong apiKey (16+ characters, not a placeholder) and a database")
@@ -189,51 +291,37 @@ func isMissingClaimsTable(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no such table: node_antenna_claims")
 }
 
-// ownerHeights returns the approved heights by public key from a snapshot
-// refreshed every ownerHeightsTTL. The read runs outside ownersMu, one at a
-// time; while it runs the previous snapshot is served. A failed read keeps
-// the last good snapshot. The map must not be modified.
+// ownerHeights returns the approved heights by public key (claimSnapshot).
 func (c *antennaClaimService) ownerHeights(ctx context.Context) map[string]ownerHeight {
 	if c == nil || c.db == nil {
 		return nil
 	}
-	c.ownersMu.Lock()
-	cur, fresh := c.owners, c.owners != nil && c.now().Before(c.ownersExpires)
-	c.ownersMu.Unlock()
-	if fresh {
-		return cur
+	return c.owners.get(ctx, c.now, "owner heights", c.readOwnerHeights)
+}
+
+// ownerStations returns the approved station details by public key
+// (claimSnapshot, #898).
+func (c *antennaClaimService) ownerStations(ctx context.Context) map[string]ownerStation {
+	if c == nil || c.db == nil {
+		return nil
 	}
-	ctx = context.WithoutCancel(ctx)
-	v, _, _ := c.ownersLoad.Do("owners", func() (interface{}, error) {
-		next, err := c.readOwnerHeights(ctx)
-		c.ownersMu.Lock()
-		defer c.ownersMu.Unlock()
-		if err != nil {
-			log.Printf("[antenna-claims] reading owner heights failed: %v", err)
-			if c.owners == nil {
-				c.owners = map[string]ownerHeight{}
-			}
-		} else {
-			c.owners = next
-		}
-		c.ownersExpires = c.now().Add(ownerHeightsTTL)
-		return c.owners, nil
-	})
-	return v.(map[string]ownerHeight)
+	return c.stations.get(ctx, c.now, "station details", c.readOwnerStations)
 }
 
-// invalidateOwners drops the snapshot (tests).
+// invalidateOwners drops the snapshots (tests).
 func (c *antennaClaimService) invalidateOwners() {
-	c.ownersMu.Lock()
-	c.owners = nil
-	c.ownersMu.Unlock()
+	c.owners.invalidate()
+	c.stations.invalidate()
 }
 
-// readOwnerHeights is one indexed SELECT of the approved heights with a
+// readOwnerHeights is one indexed SELECT of the heights in force with a
 // proof position; a missing table (an ingestor older than #789 M2a) is none.
+// A height a newer claim replaced is no longer in force (#898), so the
+// in-force flag, not the newest approval, decides.
 func (c *antennaClaimService) readOwnerHeights(ctx context.Context) (map[string]ownerHeight, error) {
 	rows, err := c.db.QueryContext(ctx, `SELECT pubkey, height_m, proof_lat, proof_lon FROM node_antenna_claims
-		WHERE status = 'approved' AND height_m IS NOT NULL AND proof_lat IS NOT NULL AND proof_lon IS NOT NULL
+		WHERE status = 'approved' AND height_op = 'set' AND height_in_force = 1
+		  AND proof_lat IS NOT NULL AND proof_lon IS NOT NULL
 		ORDER BY reviewed_at LIMIT ?`, maxOwnerHeights)
 	if isMissingClaimsTable(err) {
 		return map[string]ownerHeight{}, nil
@@ -256,13 +344,49 @@ func (c *antennaClaimService) readOwnerHeights(ctx context.Context) (map[string]
 	return out, rows.Err()
 }
 
+// readOwnerStations is one SELECT of the station details in force with a
+// proof position. It names its columns and never the admin contact table:
+// contactAdmin cannot reach the public snapshot.
+func (c *antennaClaimService) readOwnerStations(ctx context.Context) (map[string]ownerStation, error) {
+	rows, err := c.db.QueryContext(ctx, `SELECT pubkey, antenna_type, gain_dbi, power_mask, installation, contact_public,
+		proof_lat, proof_lon, reviewed_at FROM node_antenna_claims
+		WHERE status = 'approved' AND details_op = 'set' AND details_in_force = 1
+		  AND proof_lat IS NOT NULL AND proof_lon IS NOT NULL
+		ORDER BY reviewed_at LIMIT ?`, maxOwnerHeights)
+	if isMissingClaimsTable(err) {
+		return map[string]ownerStation{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]ownerStation{}
+	for rows.Next() {
+		var pk string
+		var st ownerStation
+		var typ, inst, contact sql.NullString
+		var gain sql.NullFloat64
+		var mask, reviewed sql.NullInt64
+		if err := rows.Scan(&pk, &typ, &gain, &mask, &inst, &contact, &st.lat, &st.lon, &reviewed); err != nil {
+			return nil, err
+		}
+		st.details = antennaclaim.StationDetails{
+			AntennaType: typ.String, GainDBi: claimFloat(gain), Power: antennaclaim.PowerList(int(mask.Int64)),
+			Installation: inst.String, ContactPublic: contact.String,
+		}
+		st.approvedAt = reviewed.Int64
+		out[strings.ToLower(pk)] = st // the latest approval wins
+	}
+	return out, rows.Err()
+}
+
 // ownerHeightAt is the approved owner height of node pubkey standing at pt,
-// or nil: none, or the node has moved more than StaleMoveM from where the
+// or nil: none, or the node has moved more than staleMoveM from where the
 // height was proven (stale: fall back, no write). The caller has already
 // refused hidden nodes.
 func (c *antennaClaimService) ownerHeightAt(ctx context.Context, pubkey string, pt dhm.LatLon) *float64 {
 	h, ok := c.ownerHeights(ctx)[strings.ToLower(pubkey)]
-	if !ok || dhm.GroundDistance(pt, dhm.LatLon{Lat: h.lat, Lon: h.lon}) > antennaclaim.StaleMoveM {
+	if !ok || c.limits.Stale(dhm.GroundDistance(pt, dhm.LatLon{Lat: h.lat, Lon: h.lon})) {
 		return nil
 	}
 	v := h.heightM
@@ -283,7 +407,66 @@ func (s *Server) attachOwnerHeights(ctx context.Context, ends *[2]terrainEnd) {
 // GET /api/antenna-claims/config
 func (s *Server) handleAntennaClaimConfig(w http.ResponseWriter, r *http.Request) {
 	noStore(w)
-	writeJSON(w, AntennaClaimConfigResponse{Enabled: s.antennaClaims().enabled})
+	c := s.antennaClaims()
+	writeJSON(w, AntennaClaimConfigResponse{Enabled: c.enabled, DetailsEnabled: c.detailsEnabled, ClientSettings: c.client})
+}
+
+// GET /api/nodes/{pubkey}/station (#898): the node's approved station
+// details, from the snapshot alone. Hidden, unknown and unpositioned nodes
+// answer one identical 404 (#743). It does not need the terrain profile.
+// Details the node moved away from (more than staleMoveM from where they were
+// proven) are withheld and Stale is set; nothing is written.
+func (s *Server) handleNodeStation(w http.ResponseWriter, r *http.Request) {
+	pk := strings.ToLower(mux.Vars(r)["pubkey"])
+	if !antennaclaim.ValidPubKey(pk) {
+		writeError(w, http.StatusBadRequest, "invalid public key")
+		return
+	}
+	end, ok := s.resolveTerrainEnd(r.Context(), terrainRef{pubkey: pk})
+	if !ok {
+		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	c := s.antennaClaims()
+	resp := NodeStationResponse{}
+	if c.detailsEnabled {
+		if st, ok := c.ownerStations(r.Context())[pk]; ok {
+			if c.limits.Stale(dhm.GroundDistance(end.pt, dhm.LatLon{Lat: st.lat, Lon: st.lon})) {
+				resp.Stale = true
+			} else {
+				d, at := st.details, st.approvedAt
+				resp.Details, resp.ApprovedAt = &d, &at
+			}
+		}
+	}
+	writeJSON(w, resp)
+}
+
+// GET /api/nodes/{pubkey}/antenna: the height a profile uses for the node,
+// by the profile's own precedence (terrainProfiler.antenna), from the
+// caches alone: it never measures the surface. Hidden, unknown and
+// unpositioned nodes answer one identical 404 (#743).
+func (s *Server) handleNodeAntenna(w http.ResponseWriter, r *http.Request) {
+	p := s.terrain
+	if p == nil {
+		writeError(w, http.StatusServiceUnavailable, "antenna heights are unavailable: the terrain profile is off")
+		return
+	}
+	pk := strings.ToLower(mux.Vars(r)["pubkey"])
+	if !antennaclaim.ValidPubKey(pk) {
+		writeError(w, http.StatusBadRequest, "invalid public key")
+		return
+	}
+	end, ok := s.resolveTerrainEnd(r.Context(), terrainRef{pubkey: pk})
+	if !ok {
+		writeError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	ends := [2]terrainEnd{end}
+	s.attachOwnerHeights(r.Context(), &ends)
+	pending := p.cachedEstimates(&ends, [2]*float64{})
+	h, src, assumed := p.antenna(ends[0], nil)
+	writeJSON(w, NodeAntennaResponse{AntennaM: h, AntennaSource: src, Assumed: assumed, EstimatePending: pending})
 }
 
 // POST /api/nodes/{pubkey}/antenna-claims
@@ -299,13 +482,33 @@ func (s *Server) handleAntennaClaimSubmit(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if (body.HeightM != nil) == body.Clear {
-		writeError(w, http.StatusBadRequest, "give either heightM or clear:true")
+	if body.HeightM != nil && body.Clear {
+		writeError(w, http.StatusBadRequest, "give either heightM or clear:true, not both")
+		return
+	}
+	if body.Details != nil && body.ClearDetails {
+		writeError(w, http.StatusBadRequest, "give either details or clearDetails:true, not both")
+		return
+	}
+	if body.HeightM == nil && !body.Clear && body.Details == nil && !body.ClearDetails {
+		writeError(w, http.StatusBadRequest, "give heightM, clear:true, details or clearDetails:true")
 		return
 	}
 	if body.HeightM != nil && !antennaclaim.ValidHeight(*body.HeightM) {
 		writeError(w, http.StatusBadRequest, "heightM must be 0-100 m in steps of 0.1 m")
 		return
+	}
+	// Setting details needs detailsEnabled; clearing them stays open while
+	// claims are enabled, so an owner can always remove their data (N4).
+	if body.Details != nil && !c.detailsEnabled {
+		writeError(w, http.StatusForbidden, "station details are disabled")
+		return
+	}
+	if body.Details != nil {
+		if err := body.Details.Validate(); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	pk := strings.ToLower(mux.Vars(r)["pubkey"])
 	if !antennaclaim.ValidPubKey(pk) {
@@ -331,16 +534,21 @@ func (s *Server) handleAntennaClaimSubmit(w http.ResponseWriter, r *http.Request
 	}
 	now := c.now()
 	cmd := antennaclaim.Command{
-		RequestID: channelregistry.NewID(),
-		Op:        antennaclaim.OpClaim,
-		PubKey:    pk,
-		HeightM:   body.HeightM,
-		Clear:     body.Clear,
-		Code:      code,
-		CreatedAt: now.UnixMilli(),
+		RequestID:    channelregistry.NewID(),
+		Op:           antennaclaim.OpClaim,
+		PubKey:       pk,
+		HeightM:      body.HeightM,
+		Clear:        body.Clear,
+		Details:      body.Details,
+		ClearDetails: body.ClearDetails,
+		Code:         code,
+		CreatedAt:    now.UnixMilli(),
 	}
 	if body.HeightM != nil {
-		cmd.NeedsReview = antennaclaim.NeedsReview(*body.HeightM, s.cachedSurfaceOnly(end))
+		cmd.NeedsReview = c.limits.NeedsReview(*body.HeightM, s.cachedSurfaceOnly(end))
+	}
+	if body.Details != nil && body.Details.GainDBi != nil {
+		cmd.NeedsReview = cmd.NeedsReview || antennaclaim.GainNeedsReview(*body.Details.GainDBi)
 	}
 	if !c.enqueue(w, cmd) {
 		c.refund()
@@ -398,19 +606,45 @@ type claimRow struct {
 	nodeLat, nodeLon sql.NullFloat64
 }
 
-const claimSelect = `SELECT c.request_id, c.pubkey, c.height_m, c.status, c.needs_review, c.created_at, c.expires_at,
+// claimColumns and claimFrom are the claim columns every claim read shares.
+// They hold no admin contact: claimSelect serves the request status and the
+// admin decisions; only adminClaimSelect adds the contact.
+const (
+	claimColumns = `c.request_id, c.pubkey, c.height_m, c.status, c.needs_review, c.created_at, c.expires_at,
 	c.proven_at, COALESCE(c.proof_hash, ''), c.proof_lat, c.proof_lon, c.reviewed_at, COALESCE(c.approved_by, ''),
-	COALESCE(n.name, ''), COALESCE(n.role, ''), n.lat, n.lon
-	FROM node_antenna_claims c LEFT JOIN nodes n ON n.public_key = c.pubkey`
+	COALESCE(n.name, ''), COALESCE(n.role, ''), n.lat, n.lon,
+	COALESCE(c.height_op, ''), COALESCE(c.details_op, ''), c.height_in_force, c.details_in_force,
+	c.antenna_type, c.gain_dbi, c.power_mask, c.installation, c.contact_public`
+	claimFrom   = ` FROM node_antenna_claims c LEFT JOIN nodes n ON n.public_key = c.pubkey`
+	claimSelect = `SELECT ` + claimColumns + claimFrom
+	// adminClaimSelect is the admin list's read, the only one that joins
+	// node_claim_admin_contacts. A pending claim's contact is anyone's
+	// unproven text (Q5): SQL drops it, so Go never holds it.
+	adminClaimSelect = `SELECT ` + claimColumns + `,
+	CASE WHEN c.status IN ('proven','approved') THEN ac.contact END` + claimFrom + `
+	LEFT JOIN node_claim_admin_contacts ac ON ac.request_id = c.request_id`
+)
 
-func scanClaim(sc interface{ Scan(...interface{}) error }) (claimRow, error) {
+// scanClaim reads one claim from claimSelect, or from adminClaimSelect with
+// withAdminContact; l decides whether a moved node is stale.
+func scanClaim(sc interface{ Scan(...interface{}) error }, l antennaclaim.Limits, withAdminContact bool) (claimRow, error) {
 	var r claimRow
-	var h, plat, plon sql.NullFloat64
-	var proven, reviewed sql.NullInt64
-	err := sc.Scan(&r.ID, &r.PubKey, &h, &r.Status, &r.NeedsReview, &r.CreatedAt, &r.ExpiresAt,
-		&proven, &r.ProofHash, &plat, &plon, &reviewed, &r.ApprovedBy, &r.Name, &r.Role, &r.nodeLat, &r.nodeLon)
-	if err != nil {
+	var h, plat, plon, gain sql.NullFloat64
+	var proven, reviewed, mask sql.NullInt64
+	var typ, inst, contactPublic, contactAdmin sql.NullString
+	dest := []interface{}{&r.ID, &r.PubKey, &h, &r.Status, &r.NeedsReview, &r.CreatedAt, &r.ExpiresAt,
+		&proven, &r.ProofHash, &plat, &plon, &reviewed, &r.ApprovedBy, &r.Name, &r.Role, &r.nodeLat, &r.nodeLon,
+		&r.HeightOp, &r.DetailsOp, &r.HeightInForce, &r.DetailsInForce, &typ, &gain, &mask, &inst, &contactPublic}
+	if withAdminContact {
+		dest = append(dest, &contactAdmin)
+	}
+	if err := sc.Scan(dest...); err != nil {
 		return r, err
+	}
+	r.ContactAdmin = contactAdmin.String
+	if r.DetailsOp == antennaclaim.PartSet {
+		r.Details = &antennaclaim.StationDetails{AntennaType: typ.String, GainDBi: claimFloat(gain),
+			Power: antennaclaim.PowerList(int(mask.Int64)), Installation: inst.String, ContactPublic: contactPublic.String}
 	}
 	r.HeightM = claimFloat(h)
 	r.ProofLat, r.ProofLon = claimFloat(plat), claimFloat(plon)
@@ -418,7 +652,7 @@ func scanClaim(sc interface{ Scan(...interface{}) error }) (claimRow, error) {
 	if r.ProofLat != nil && r.ProofLon != nil && r.nodeLat.Valid && r.nodeLon.Valid {
 		d := dhm.GroundDistance(dhm.LatLon{Lat: *r.ProofLat, Lon: *r.ProofLon}, dhm.LatLon{Lat: r.nodeLat.Float64, Lon: r.nodeLon.Float64})
 		d = math.Round(d*10) / 10
-		r.MovedM, r.Stale = &d, d > antennaclaim.StaleMoveM
+		r.MovedM, r.Stale = &d, l.Stale(d)
 	}
 	return r, nil
 }
@@ -446,7 +680,7 @@ func (s *Server) visibleClaim(ctx context.Context, id string) (r claimRow, ok bo
 	if c.db == nil {
 		return r, false, nil
 	}
-	r, err = scanClaim(c.db.QueryRowContext(ctx, claimSelect+` WHERE c.request_id = ?`, id))
+	r, err = scanClaim(c.db.QueryRowContext(ctx, claimSelect+` WHERE c.request_id = ?`, id), c.limits, false)
 	if err == sql.ErrNoRows || isMissingClaimsTable(err) {
 		return r, false, nil
 	}
@@ -517,7 +751,7 @@ func (s *Server) handleAdminAntennaClaims(w http.ResponseWriter, r *http.Request
 	}
 	resp := AdminAntennaClaimListResponse{Claims: []AdminAntennaClaim{}, Enabled: c.enabled, AutoApprove: c.autoApprove}
 	if c.db != nil {
-		q, args := claimSelect, []interface{}{}
+		q, args := adminClaimSelect, []interface{}{}
 		if status != "" {
 			q += ` WHERE c.status = ?`
 			args = append(args, status)
@@ -535,7 +769,7 @@ func (s *Server) handleAdminAntennaClaims(w http.ResponseWriter, r *http.Request
 			var list []AdminAntennaClaim
 			var keys []string
 			for rows.Next() {
-				row, err := scanClaim(rows)
+				row, err := scanClaim(rows, c.limits, true)
 				if err != nil {
 					log.Printf("[antenna-claims] admin list failed: %v", err)
 					writeError(w, http.StatusInternalServerError, "could not list claims")
@@ -602,7 +836,8 @@ func (s *Server) handleAdminAntennaClaimDecision(op string) http.HandlerFunc {
 		}
 		if op == antennaclaim.OpApprove && row.ProvenAt != nil {
 			var newer bool
-			if err := c.db.QueryRowContext(r.Context(), antennaclaim.NewerApprovedQuery, row.PubKey, id, *row.ProvenAt).Scan(&newer); err != nil {
+			if err := c.db.QueryRowContext(r.Context(), antennaclaim.NewerApprovedQuery, row.PubKey, id, *row.ProvenAt,
+				row.HeightOp != "", row.DetailsOp != "").Scan(&newer); err != nil {
 				log.Printf("[antenna-claims] newer-claim check %s failed: %v", id, err)
 				writeError(w, http.StatusInternalServerError, "could not read the claim")
 				return

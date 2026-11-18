@@ -144,6 +144,9 @@ func Apply(rw *sql.DB, logf Logger) error {
 	if err := ensureNodeAntennaClaimsTable(rw); err != nil {
 		return fmt.Errorf("ensure node_antenna_claims: %w", err)
 	}
+	if err := ensureAntennaClaimParts(rw, logf); err != nil {
+		return fmt.Errorf("ensure node_antenna_claims parts: %w", err)
+	}
 	if err := ensureTransmissionsRouteMaskColumn(rw, logf); err != nil {
 		return fmt.Errorf("ensure transmissions.route_mask: %w", err)
 	}
@@ -210,6 +213,8 @@ func (e *NotReadyError) Transient() bool {
 	}
 	for _, m := range e.Missing {
 		switch {
+		case m == AntennaClaimPartsItem:
+			// The ingestor runs it at start-up, in one transaction.
 		case m == "table:route_mask_changes":
 		case m == "transmissions.route_mask" && tableUnknown:
 			// Added by the same Apply, right before the table.
@@ -394,6 +399,38 @@ func assertReady(ro *sql.DB, probed func(item string)) error {
 	mustCol("observers", "last_neighbors_report_at")
 	mustTable("observer_neighbors")
 	mustTable("observer_neighbor_metrics")
+	// #898: the claims table itself stays optional (a server treats a
+	// missing one as no claims), but once it exists the server reads the
+	// claim parts, so they must be migrated, and every row must carry a part.
+	func() {
+		ok, err := tableExists("node_antenna_claims")
+		if err != nil {
+			probeFailed("table:node_antenna_claims", err)
+			return
+		}
+		if !ok {
+			return
+		}
+		recorded, err := migrationRecorded(tx, AntennaClaimPartsMigration)
+		if err != nil {
+			probeFailed(AntennaClaimPartsItem, err)
+			return
+		}
+		if !recorded {
+			missing = append(missing, AntennaClaimPartsItem)
+			return
+		}
+		for _, c := range antennaClaimPartColumns {
+			mustCol("node_antenna_claims", c.name)
+		}
+		mustTable("node_claim_admin_contacts")
+		var partless bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM node_antenna_claims WHERE height_op IS NULL AND details_op IS NULL)`).Scan(&partless); err != nil {
+			probeFailed("node_antenna_claims parts", err)
+		} else if partless {
+			missing = append(missing, "node_antenna_claims rows without a part")
+		}
+	}()
 
 	if len(missing) > 0 || len(probes) > 0 {
 		return &NotReadyError{Missing: missing, Probes: probes}
@@ -1387,8 +1424,9 @@ func upgradeChannelProposalsStatusCheck(rw *sql.DB, logf Logger) error {
 // ensureNodeAntennaClaimsTable creates the owner antenna-height claims (#789
 // M2a). The ingestor is the only writer: it inserts claims from the server's
 // queue, proves them at advert ingest and applies admin decisions; the server
-// reads approved rows. height_m is NULL for a clear claim (the owner
-// withdraws their height). No IP, user agent or free text is stored.
+// reads approved rows. #898 adds the claim parts, the station details and
+// the contacts (ensureAntennaClaimParts). No IP or user agent is stored; the
+// only free text is the owner's two optional contacts.
 func ensureNodeAntennaClaimsTable(rw *sql.DB) error {
 	if _, err := rw.Exec(`CREATE TABLE IF NOT EXISTS node_antenna_claims (
 		request_id TEXT PRIMARY KEY,
@@ -1413,4 +1451,111 @@ func ensureNodeAntennaClaimsTable(rw *sql.DB) error {
 	}
 	_, err := rw.Exec(`CREATE INDEX IF NOT EXISTS idx_node_antenna_claims_status ON node_antenna_claims(status, created_at)`)
 	return err
+}
+
+// EnsureNodeAntennaClaims creates the claims tables exactly as Apply does,
+// for tests that need them without the rest of the schema (the server's
+// tests build them on a scratch database; the server never writes them).
+func EnsureNodeAntennaClaims(rw *sql.DB) error {
+	if err := ensureNodeAntennaClaimsTable(rw); err != nil {
+		return err
+	}
+	return ensureAntennaClaimParts(rw, func(string, ...interface{}) {})
+}
+
+// AntennaClaimPartsMigration records the #898 combined-claim migration:
+// the per-part ops, in-force flags, station details and contacts, and the
+// one-time backfill of the pre-#898 rows.
+const AntennaClaimPartsMigration = "antenna_claim_parts_v1"
+
+// AntennaClaimPartsItem is AssertReady's item for a claims table the
+// ingestor has not migrated yet: transient, like the route-mask change log.
+const AntennaClaimPartsItem = "migration:" + AntennaClaimPartsMigration
+
+// antennaClaimPartColumns are the #898 columns of node_antenna_claims, in
+// the order they are added: a CHECK may only name columns that exist
+// before it.
+//
+// The ops are explicit: height_op = 'clear' is the only way to say "remove
+// the height", details_op = 'clear' the only way to say "remove the
+// details", and a NULL op means the claim does not carry that part,
+// whatever the value columns hold. The in-force flags mean something only
+// while status = 'approved': a newer approved claim that carries a part sets
+// the older claim's flag for that part to 0 (#898 M0 revision §5).
+var antennaClaimPartColumns = []struct{ name, ddl string }{
+	{"height_op", `height_op TEXT NULL CHECK(height_op IS NULL OR (height_op IN ('set','clear') AND (height_op = 'set') = (height_m IS NOT NULL)))`},
+	{"details_op", `details_op TEXT NULL CHECK(details_op IS NULL OR details_op IN ('set','clear'))`},
+	{"height_in_force", `height_in_force INTEGER NOT NULL DEFAULT 0 CHECK(height_in_force IN (0,1) AND (height_in_force = 0 OR height_op IS NOT NULL))`},
+	{"details_in_force", `details_in_force INTEGER NOT NULL DEFAULT 0 CHECK(details_in_force IN (0,1) AND (details_in_force = 0 OR details_op IS NOT NULL))`},
+	{"antenna_type", `antenna_type TEXT NULL CHECK(antenna_type IS NULL OR (details_op IS 'set' AND antenna_type IN ('omni','yagi','panel','other')))`},
+	{"gain_dbi", `gain_dbi REAL NULL CHECK(gain_dbi IS NULL OR (details_op IS 'set' AND gain_dbi >= -5 AND gain_dbi <= 20))`},
+	{"power_mask", `power_mask INTEGER NULL CHECK(power_mask IS NULL OR (details_op IS 'set' AND power_mask BETWEEN 1 AND 7))`},
+	{"installation", `installation TEXT NULL CHECK(installation IS NULL OR (details_op IS 'set' AND installation IN ('roof','mast','indoor','portable')))`},
+	{"contact_public", `contact_public TEXT NULL CHECK(contact_public IS NULL OR (details_op IS 'set' AND length(contact_public) BETWEEN 1 AND 32))`},
+}
+
+// CreateNodeClaimAdminContactsSQL is the admin-only contact (#898): its own
+// table, read only by the admin list and never by a public query. A row
+// exists only while its claim is pending, proven, or approved with its
+// details in force; the ingestor deletes it on every other transition, the
+// cascade on retention, and an orphan sweep at every prune.
+const CreateNodeClaimAdminContactsSQL = `CREATE TABLE IF NOT EXISTS node_claim_admin_contacts (
+		request_id TEXT PRIMARY KEY REFERENCES node_antenna_claims(request_id) ON DELETE CASCADE,
+		contact TEXT NOT NULL CHECK(length(contact) BETWEEN 1 AND 32)
+	)`
+
+// ensureAntennaClaimParts adds the #898 columns and the admin contact table
+// and backfills the pre-#898 rows, in one transaction: a server never sees
+// the columns without the backfill.
+//
+// The backfill is the only place a NULL height_m is read as a clear. That is
+// safe there: before #898 every row was a height claim, and a NULL height
+// meant a clear by construction (Command.Validate allowed exactly one of
+// heightM or clear). It runs once, guarded by AntennaClaimPartsMigration.
+func ensureAntennaClaimParts(rw *sql.DB, logf Logger) error {
+	if err := ensureMigrationsTable(rw); err != nil {
+		return err
+	}
+	if done, err := migrationRecorded(rw, AntennaClaimPartsMigration); err != nil || done {
+		return err
+	}
+	tx, err := rw.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() // no-op after a successful Commit
+	added := 0
+	for _, c := range antennaClaimPartColumns {
+		has, err := tableHasColumn(tx, "node_antenna_claims", c.name)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		// PREFLIGHT: async=false reason="ADD COLUMN on node_antenna_claims only; a CHECKed ADD COLUMN reads that table once, which the claim caps keep to a few thousand rows; never transmissions"
+		if _, err := tx.Exec(`ALTER TABLE node_antenna_claims ADD COLUMN ` + c.ddl); err != nil {
+			return fmt.Errorf("add %s: %w", c.name, err)
+		}
+		added++
+	}
+	if _, err := tx.Exec(CreateNodeClaimAdminContactsSQL); err != nil {
+		return fmt.Errorf("create node_claim_admin_contacts: %w", err)
+	}
+	res, err := tx.Exec(`UPDATE node_antenna_claims
+		SET height_op = CASE WHEN height_m IS NULL THEN 'clear' ELSE 'set' END,
+		    height_in_force = (status = 'approved')
+		WHERE height_op IS NULL AND details_op IS NULL`)
+	if err != nil {
+		return fmt.Errorf("backfill claim parts: %w", err)
+	}
+	backfilled, _ := res.RowsAffected()
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO _migrations (name) VALUES (?)`, AntennaClaimPartsMigration); err != nil {
+		return fmt.Errorf("record %s: %w", AntennaClaimPartsMigration, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	logf("[dbschema] node_antenna_claims: added %d #898 column(s), backfilled %d claim(s)", added, backfilled)
+	return nil
 }

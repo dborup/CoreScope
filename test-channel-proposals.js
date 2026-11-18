@@ -10,6 +10,9 @@ const vm = require('vm');
 
 const SRC_PATH = path.join(__dirname, 'public', 'channel-proposals.js');
 const SRC = fs.readFileSync(SRC_PATH, 'utf8');
+// #789 M3: the admin-key session the page uses (index.html loads it first).
+const ADMIN_KEY_PATH = path.join(__dirname, 'public', 'admin-key.js');
+const ADMIN_KEY_SRC = fs.readFileSync(ADMIN_KEY_PATH, 'utf8');
 
 function load() {
   const ctx = { console, Promise, Map, Set, Math, JSON, Object, Array, String, encodeURIComponent };
@@ -17,6 +20,7 @@ function load() {
   ctx.setTimeout = setTimeout;
   ctx.clearTimeout = clearTimeout;
   vm.createContext(ctx);
+  vm.runInContext(ADMIN_KEY_SRC, ctx, { filename: ADMIN_KEY_PATH });
   vm.runInContext(SRC, ctx, { filename: SRC_PATH });
   return ctx.ChannelProposals;
 }
@@ -239,10 +243,16 @@ test('404 ends polling with an error; transient errors back off; attempts are bo
 
 // ── security properties of the source ────────────────────────────────────
 test('the admin key is never persisted or put in a URL', () => {
-  const code = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
-  assert.ok(!/localStorage|sessionStorage|indexedDB|document\.cookie/.test(code), 'storage API used');
-  assert.ok(/'X-API-Key'\] = adminKey/.test(code), 'key must travel in the X-API-Key header');
-  assert.ok(!/[?&](key|apiKey|api_key)=/.test(code), 'key-like query parameter found');
+  // #789 M3: the key lives in the shared session (public/admin-key.js).
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+  const code = strip(SRC);
+  const keyCode = strip(ADMIN_KEY_SRC);
+  [code, keyCode].forEach((c) => {
+    assert.ok(!/localStorage|sessionStorage|indexedDB|document\.cookie/.test(c), 'storage API used');
+    assert.ok(!/[?&](key|apiKey|api_key)=/.test(c), 'key-like query parameter found');
+  });
+  assert.ok(/MCAdminKey\.create\(\)/.test(code), 'the page must use the shared admin-key session');
+  assert.ok(/'X-API-Key'\] = key/.test(keyCode), 'key must travel in the X-API-Key header');
 });
 
 // ── revoke: FILTERS, renderAdminRow, XSS ──────────────────────────────────
@@ -535,6 +545,7 @@ function loadWithDom(fetchImpl, opts) {
   ctx.setTimeout = opts.setTimeout || setTimeout;
   ctx.clearTimeout = opts.clearTimeout || clearTimeout;
   vm.createContext(ctx);
+  vm.runInContext(ADMIN_KEY_SRC, ctx, { filename: ADMIN_KEY_PATH });
   vm.runInContext(SRC, ctx, { filename: SRC_PATH });
   return { CP: ctx.ChannelProposals, document: doc, fetchCalls, location };
 }

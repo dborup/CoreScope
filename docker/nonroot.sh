@@ -339,7 +339,7 @@ hold_requests() {
         n=$((n + 1))
       done
       mv "$e" "$held" || die "could not set aside $e"
-      log "WARNING: $d/${e##*/} was not written by the services (owner $(stat -c %u:%g "$held")); renamed to ${held##*/} and NOT run. Repeat the command as $1 (docker exec -u), or rename the file back to run it"
+      log "WARNING: $d/${e##*/} was not written by the services (owner $(stat -c %u:%g "$held")); renamed to ${held##*/} and NOT run. Repeat the command as $1 (docker exec -u), or give the file to $1 and rename it back to run it"
     done
   done
 }

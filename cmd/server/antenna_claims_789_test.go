@@ -13,6 +13,7 @@ import (
 
 	"github.com/meshcore-analyzer/channelregistry"
 	"github.com/meshcore-analyzer/channelregistry/antennaclaim"
+	"github.com/meshcore-analyzer/dbschema"
 	"github.com/meshcore-analyzer/dhm"
 )
 
@@ -20,14 +21,6 @@ import (
 // gate, issuance (identical 404 for hidden and unknown nodes, height
 // bounds, the global rate limit, the queue bound), the request status, the
 // admin routes, and the owner source in the profile's precedence.
-
-// Test fixture only: the production server never writes this table; the
-// ingestor creates it (internal/dbschema) and is its only writer.
-const claimTableDDL = `CREATE TABLE node_antenna_claims (
-	request_id TEXT PRIMARY KEY, pubkey TEXT NOT NULL, height_m REAL NULL, code TEXT NOT NULL,
-	status TEXT NOT NULL, needs_review INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
-	expires_at INTEGER NOT NULL, proven_at INTEGER NULL, proof_hash TEXT NULL, proof_lat REAL NULL,
-	proof_lon REAL NULL, reviewed_at INTEGER NULL, approved_by TEXT NULL)`
 
 const claimAdminKey = "antenna-admin-key-strong-enough"
 
@@ -43,7 +36,9 @@ func newClaim789Env(t *testing.T, apiKey string, cc *antennaclaim.Config, radio 
 	est := newEst789Env(t, &surfaceFake{surfaceM: 20}, radio)
 	est.srv.cfg.APIKey = apiKey
 	est.srv.cfg.AntennaClaims = cc
-	if _, err := est.srv.db.conn.Exec(claimTableDDL); err != nil {
+	// Test fixture only: the production server never writes these tables;
+	// the ingestor creates them (internal/dbschema) and is their only writer.
+	if err := dbschema.EnsureNodeAntennaClaims(est.srv.db.conn); err != nil {
 		t.Fatal(err)
 	}
 	env := &claim789Env{est789Env: est, now: time.UnixMilli(1_800_000_000_000)}
@@ -98,13 +93,14 @@ func (e *claim789Env) queued(t *testing.T) []antennaclaim.Command {
 	return out
 }
 
-// insertClaim writes a claim row as the ingestor would (test fixture).
+// insertClaim writes a height claim row as the ingestor would (test
+// fixture): an explicit height part (#898), in force while approved.
 func (e *claim789Env) insertClaim(t *testing.T, id, pk string, h *float64, status string, lat, lon float64) {
 	t.Helper()
 	if _, err := e.srv.db.conn.Exec(`INSERT INTO node_antenna_claims
-		(request_id, pubkey, height_m, code, status, created_at, expires_at, proven_at, proof_hash, proof_lat, proof_lon, reviewed_at, approved_by)
-		VALUES (?, ?, ?, '7KX9QM', ?, ?, ?, ?, 'abcd', ?, ?, ?, CASE WHEN ? = 'approved' THEN 'admin' END)`,
-		id, pk, h, status, e.now.UnixMilli(), e.now.Add(24*time.Hour).UnixMilli(), e.now.UnixMilli(), lat, lon, e.now.UnixMilli(), status); err != nil {
+		(request_id, pubkey, height_m, height_op, height_in_force, code, status, created_at, expires_at, proven_at, proof_hash, proof_lat, proof_lon, reviewed_at, approved_by)
+		VALUES (?, ?, ?, CASE WHEN ? IS NULL THEN 'clear' ELSE 'set' END, ? = 'approved', '7KX9QM', ?, ?, ?, ?, 'abcd', ?, ?, ?, CASE WHEN ? = 'approved' THEN 'admin' END)`,
+		id, pk, h, h, status, status, e.now.UnixMilli(), e.now.Add(24*time.Hour).UnixMilli(), e.now.UnixMilli(), lat, lon, e.now.UnixMilli(), status); err != nil {
 		t.Fatal(err)
 	}
 	e.svc.invalidateOwners()

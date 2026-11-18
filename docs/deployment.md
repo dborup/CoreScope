@@ -217,7 +217,15 @@ the old path unchanged and starts the same supervisor config files.
    root, or left by a root run — is **not** handed to them. It is renamed to
    `….held`, keeps its owner, and the log says
    `[nonroot] WARNING: … renamed to ….held and NOT run`. Repeat the command as
-   the services' user, or rename the file back if you still want it run.
+   the services' user, or give the file to that user and rename it back if you
+   still want it run. The services write `channel-proposal-requests/`,
+   `region-scope-requests/` and `antenna-claim-requests/` with mode `0700` and
+   their files with `0600`, because a request can carry the owner's admin-only
+   contact; a directory left `0755` by an older version is tightened when the
+   ingestor starts. A request or result a root run wrote there is therefore
+   readable by root only: a held request the services cannot read is discarded
+   once renamed back, and polling a result written by root fails until the
+   ingestor prunes it.
 6. It writes `/app/data/.corescope-nonroot` (root-owned, holds `UID:GID`).
    While that file exists, the check in step 1 runs at every start, even
    after the setting is removed, until the rollback below.

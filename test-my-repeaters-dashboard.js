@@ -61,7 +61,11 @@ const roleContext = {
 };
 roleContext.window = roleContext;
 require('node:vm').runInNewContext(fs.readFileSync(path.join(__dirname, 'public/roles.js'), 'utf8'), roleContext);
-const { getHealthStatus, getHealthLastHeard } = roleContext;
+// #902: statusOf() credits a reporting observer through the shared
+// getNodeHealth and the bulk roster helper, loaded as in index.html.
+roleContext.Map = Map;
+require('node:vm').runInNewContext(fs.readFileSync(path.join(__dirname, 'public/my-mesh-observers.js'), 'utf8'), roleContext);
+const { getHealthStatus, getHealthLastHeard, getNodeHealth, MyMeshObservers } = roleContext;
 const renderSkewBadge = (sev) => 'CLOCKBADGE:' + sev;
 const currentSkewValue = (cs) => (cs.recentMedianSkewSec != null ? cs.recentMedianSkewSec : cs.medianSkewSec);
 const favStar = (pk) => '<button class="fav-star" data-fav="' + pk + '"></button>';
@@ -72,10 +76,10 @@ const window = { ROLE_COLORS: { repeater: '#3b82f6', room: '#a855f7' }, aaBadgeS
 
 const M = new Function(
   'esc', 'getFavorites', 'RegionFilter', 'AreaFilter', 'fetchAllNodes', 'api', 'CLIENT_TTL',
-  'getHealthStatus', 'getHealthLastHeard', 'renderSkewBadge', 'currentSkewValue', 'favStar', 'timeAgo', 'bindFavStars', 'window',
+  'getHealthStatus', 'getHealthLastHeard', 'getNodeHealth', 'MyMeshObservers', 'renderSkewBadge', 'currentSkewValue', 'favStar', 'timeAgo', 'bindFavStars', 'window',
   block + '\nreturn { renderMyRepeatersTab, _mrStatusCell, _mrSummaryCard };')(
   esc, getFavorites, RegionFilter, AreaFilter, fetchAllNodes, api, CLIENT_TTL,
-  getHealthStatus, getHealthLastHeard, renderSkewBadge, currentSkewValue, favStar, timeAgo, bindFavStars, window);
+  getHealthStatus, getHealthLastHeard, getNodeHealth, MyMeshObservers, renderSkewBadge, currentSkewValue, favStar, timeAgo, bindFavStars, window);
 
 function makeEl() { return { _h: '', set innerHTML(v) { this._h = v; }, get innerHTML() { return this._h; } }; }
 const tick = () => new Promise(r => setTimeout(r, 0));

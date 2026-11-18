@@ -498,6 +498,8 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/channel-proposals/requests/{requestId}", s.handleChannelProposalRequest).Methods("GET")
 	r.HandleFunc("/api/antenna-claims/config", s.handleAntennaClaimConfig).Methods("GET")
 	r.HandleFunc("/api/nodes/{pubkey}/antenna-claims", s.handleAntennaClaimSubmit).Methods("POST")
+	r.HandleFunc("/api/nodes/{pubkey}/antenna", s.handleNodeAntenna).Methods("GET")
+	r.HandleFunc("/api/nodes/{pubkey}/station", s.handleNodeStation).Methods("GET")
 	r.HandleFunc("/api/antenna-claims/requests/{requestId}", s.handleAntennaClaimRequest).Methods("GET")
 	r.HandleFunc("/api/known-channels", s.handleKnownChannels).Methods("GET")
 	r.HandleFunc("/api/observers/metrics/summary", s.handleMetricsSummary).Methods("GET")

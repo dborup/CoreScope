@@ -18,9 +18,10 @@ func TestNodeAntennaClaimsTable789(t *testing.T) {
 		if by != "" {
 			approvedBy = by
 		}
+		// #898: every row carries an explicit part, as the ingestor writes it.
 		_, err := db.Exec(`INSERT INTO node_antenna_claims
-			(request_id, pubkey, height_m, code, status, created_at, expires_at, approved_by)
-			VALUES (?, 'ab', ?, '7KX9QM', ?, 1, 2, ?)`, id, h, status, approvedBy)
+			(request_id, pubkey, height_m, height_op, code, status, created_at, expires_at, approved_by)
+			VALUES (?, 'ab', ?, CASE WHEN ? IS NULL THEN 'clear' ELSE 'set' END, '7KX9QM', ?, 1, 2, ?)`, id, h, h, status, approvedBy)
 		return err
 	}
 	for _, st := range []string{"pending", "proven", "approved", "rejected", "revoked", "expired", "superseded"} {

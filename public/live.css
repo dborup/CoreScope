@@ -7,15 +7,15 @@
 .live-page {
   position: relative;
   width: 100%;
-  height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px));
-  height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px));
+  height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
+  height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
   overflow: hidden;
   background: var(--surface-0);
 }
 /* Override #app height constraint on live page */
 #app:has(.live-page) {
-  height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px));
-  height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px));
+  height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
+  height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
   overflow: visible;
 }
 
@@ -738,9 +738,19 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
   body:has(.live-page) .top-nav { display: none !important; }
   body:has(.live-page) #app:has(.live-page),
   body:has(.live-page) .live-page {
-    height: calc(100vh - var(--bottom-nav-reserve, 0px));
-    height: calc(100dvh - var(--bottom-nav-reserve, 0px));
+    height: calc(100vh - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
+    height: calc(100dvh - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px));
   }
+}
+
+/* #894: on /live the top nav is a fixed overlay (live.js) above 640px, so
+ * the stale-source pill row (in flow, right after the nav) starts below the
+ * nav's 52px band instead of under it. Padding, not margin, so the row's
+ * measured height (--warmup-pills-h) includes it. Not when the nav is hidden
+ * (fullscreen, unpinned). */
+@media (min-width: 641px) {
+  body:has(.live-page):not(.live-fullscreen) .warmup-pills,
+  body.live-fullscreen.nav-pinned:has(.live-page) .warmup-pills { padding-top: calc(52px + 4px); }
 }
 
 @media (max-width: 640px) {
@@ -1912,4 +1922,148 @@ select.live-heard-select {
 @media (prefers-reduced-motion: reduce) {
   .live-moment-card { animation: none; transition: none; }
   .live-moment-hl { animation: none; }
+}
+
+/* #880 — "Follow a packet": popup/feed buttons, the follow card and the
+   map markers. Colours come from the --follow-* tokens in style.css. */
+.lc-follow-btn,
+.fdc-follow {
+  border: 1px solid color-mix(in srgb, var(--follow-ring) 60%, transparent);
+  background: color-mix(in srgb, var(--follow-ring) 14%, transparent);
+  color: var(--text);
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.lc-follow-btn { margin-left: 8px; padding: 1px 8px; font-size: 11px; }
+.fdc-follow { display: block; width: 100%; margin-top: 4px; padding: 6px; font-size: .75rem; }
+.lc-follow-btn:hover,
+.fdc-follow:hover { background: color-mix(in srgb, var(--follow-ring) 28%, transparent); }
+/* "Follow next packet" lives where it moves nothing (#670, #671): an icon
+   in the feed header above 640px, a row in the controls panel at <= 640px,
+   where the feed is hidden. One state, two buttons; live.js keeps them in
+   step. */
+.live-toggles .live-follow-next--menu { display: none; width: auto; padding: 2px 8px; font: inherit; }
+.live-feed .live-follow-next--feed {
+  flex-shrink: 0;
+  width: 28px; height: 28px; padding: 0;
+  margin-left: auto; margin-right: 22px; /* clear of the absolute #feedHideBtn */
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid transparent; border-radius: 4px;
+  background: transparent; color: var(--text-muted);
+  opacity: 0.7; cursor: pointer;
+}
+.live-feed .live-follow-next--feed:hover { opacity: 1; background: color-mix(in srgb, var(--text) 12%, transparent); }
+.live-feed .live-follow-next--feed:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 2px; }
+.live-follow-next.active { opacity: 1; color: var(--follow-ring); border-color: var(--follow-ring); }
+@media (max-width: 640px) {
+  .live-toggles .live-follow-next--menu { display: inline-block; }
+}
+
+.live-follow-card {
+  position: absolute;
+  top: 64px; /* clear of the overlaid top nav */
+  right: 70px;
+  width: 300px;
+  max-width: calc(100% - 90px);
+  max-height: calc(100% - 190px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  z-index: 1050;
+  padding: 10px 12px;
+  background: color-mix(in srgb, var(--surface-1) 95%, transparent);
+  backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--follow-ring);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px var(--shadow);
+  color: var(--text);
+  font-size: .8rem;
+}
+.live-follow-card [hidden] { display: none !important; }
+.live-follow-card .lf-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; padding: 0; }
+.live-follow-card .lf-title { font-size: .75rem; letter-spacing: .06em; color: var(--follow-ring); }
+.live-follow-card .lf-type { color: var(--text-muted); font-family: var(--mono, monospace); font-size: .75rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-follow-card .lf-close {
+  margin-left: auto; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 32px; min-height: 32px;
+  background: none; border: none; border-radius: 6px; color: var(--text-muted); cursor: pointer;
+}
+.live-follow-card .lf-close:hover { color: var(--text); background: color-mix(in srgb, var(--text) 12%, transparent); }
+.live-follow-card .lf-status { color: var(--text); font-variant-numeric: tabular-nums; }
+.live-follow-card .lf-progress { height: 4px; margin: 6px 0; border-radius: 2px; background: color-mix(in srgb, var(--text) 12%, transparent); overflow: hidden; }
+.live-follow-card .lf-bar { height: 100%; width: 0; background: var(--follow-ring); }
+.live-follow-card .lf-controls { display: flex; gap: 6px; }
+.live-follow-card .lf-controls .vcr-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 36px; min-height: 32px; }
+.live-follow-card .lf-summary { margin-top: 6px; }
+.live-follow-card .lf-rows { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 0; }
+.live-follow-card .lf-rows dt { color: var(--text-muted); }
+.live-follow-card .lf-rows dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.live-follow-card .lf-caption,
+.live-follow-card .lf-note { margin: 6px 0; color: var(--text-muted); font-size: .72rem; }
+.live-follow-card .lf-observers { margin: 4px 0 0; padding-left: 20px; max-height: 160px; overflow-y: auto; }
+.live-follow-card .lf-observers li { margin: 2px 0; overflow-wrap: anywhere; }
+.live-follow-card .lf-observers li.lf-late { color: var(--text-muted); }
+.live-follow-card .lf-obs-name { font-weight: 600; }
+.live-follow-card .lf-obs-when { margin-left: 6px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.live-follow-card .badge-iata { margin-left: 4px; font-size: 10px; }
+.live-follow-card .lf-clock-flag { margin-left: 6px; color: var(--follow-flag); font-weight: 600; cursor: help; }
+.live-follow-card .lf-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.live-follow-card .lf-link { color: var(--accent); }
+
+.live-follow-toast {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+  z-index: 1050; padding: 6px 12px; border-radius: 6px;
+  background: var(--surface-1); color: var(--text); border: 1px solid var(--border);
+  box-shadow: 0 4px 12px var(--shadow); font-size: .8rem;
+}
+
+/* Map markers (divIcons on liveAnimPane; built in live.js with textContent). */
+.live-follow-icon { background: none; border: none; }
+.lf-marker { position: relative; width: 0; height: 0; }
+.lf-marker .lf-dot {
+  position: absolute; left: -6px; top: -6px; width: 12px; height: 12px; border-radius: 50%;
+  border: 2px solid var(--surface-1);
+  animation: lfPop .35s ease-out;
+}
+.lf-origin .lf-dot { left: -8px; top: -8px; width: 16px; height: 16px; background: var(--follow-ring); }
+.lf-relay .lf-dot { background: var(--follow-relay); }
+.lf-observer .lf-dot { background: var(--follow-observer); }
+.lf-observer.lf-late .lf-dot { opacity: .6; }
+.lf-marker .lf-label {
+  position: absolute; left: 10px; top: -9px; white-space: nowrap;
+  padding: 1px 5px; border-radius: 4px; font-size: 11px; line-height: 16px;
+  background: color-mix(in srgb, var(--surface-1) 88%, transparent); color: var(--text);
+  border: 1px solid var(--border);
+}
+.lf-marker .lf-clock-flag { width: 12px; height: 12px; margin-left: 4px; vertical-align: -2px; color: var(--follow-flag); }
+@keyframes lfPop { from { transform: scale(0.2); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .lf-marker .lf-dot { animation: none; }
+}
+
+@media (max-width: 768px) {
+  /* Bottom sheet above the bottom nav, like .feed-detail-card. */
+  .live-follow-card {
+    position: fixed;
+    left: 0; right: 0; top: auto; bottom: 58px;
+    width: 100%; max-width: 100vw; max-height: 40vh;
+    border-radius: 10px 10px 0 0;
+    border-left: 1px solid var(--border);
+    border-top: 3px solid var(--follow-ring);
+  }
+  .live-follow-card .lf-close,
+  .live-follow-card .lf-controls .vcr-btn,
+  .live-follow-card .lf-replay,
+  .live-toggles .live-follow-next--menu,
+  .fdc-follow { min-width: 44px; min-height: 44px; }
+  /* Touch targets for the popup's Follow and the summary's packet link. */
+  .lc-follow-btn,
+  .live-follow-card .lf-link {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 44px; min-height: 44px; vertical-align: middle;
+  }
+  .live-follow-card .lf-link { padding: 0 6px; }
+  .live-follow-card .lf-observers { max-height: none; }
 }

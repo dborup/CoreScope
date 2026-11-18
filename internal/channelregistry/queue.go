@@ -16,7 +16,12 @@ import (
 
 // QueueDirName is the directory, next to the SQLite database, that holds the
 // command and result files. Keeping it beside the database gives it the same
-// volume, backup and permission story as the prune queue (internal/prunequeue).
+// volume and backup story as the prune queue (internal/prunequeue).
+//
+// Only the account that runs the server and the ingestor may read it: a
+// command can carry the admin-only owner contact (#898), so files are 0600
+// and the directory 0700 (#909). Both services therefore run as one user,
+// root or the CORESCOPE_UID of the non-root container mode (#339).
 //
 // Layout:
 //
@@ -31,6 +36,10 @@ const (
 	resultPrefix = "result-"
 	tmpPrefix    = ".tmp-"
 	fileSuffix   = ".json"
+
+	// dirMode and fileMode are the queue's modes, whatever the umask (#909).
+	dirMode  os.FileMode = 0o700
+	fileMode os.FileMode = 0o600
 
 	// staleTmpAge is how old an orphaned temp file (from a writer that died
 	// between create and rename) must be before Prune removes it.
@@ -154,7 +163,7 @@ func (q *Queue) EnqueueValue(id string, v interface{}, maxQueued int) error {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if err := os.MkdirAll(q.dir, 0o755); err != nil {
+	if err := q.ensureDir(); err != nil {
 		return err
 	}
 	names, err := q.listNames(cmdPrefix)
@@ -251,7 +260,7 @@ func (q *Queue) CompleteValue(id string, v interface{}) error {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if err := os.MkdirAll(q.dir, 0o755); err != nil {
+	if err := q.ensureDir(); err != nil {
 		return err
 	}
 	if err := q.writeAtomic(q.resultPath(id), v); err != nil {
@@ -323,6 +332,11 @@ func (q *Queue) Prune(now time.Time, ttl time.Duration, maxResults int) (int, er
 		}
 		return 0, err
 	}
+	// The ingestor prunes at startup, so a directory left 0755 by an older
+	// version is tightened then, not only at the next write.
+	if err := q.tightenDir(); err != nil {
+		return 0, err
+	}
 	type aged struct {
 		path string
 		mod  time.Time
@@ -384,6 +398,28 @@ func (q *Queue) listNames(prefix string) ([]string, error) {
 	return out, nil
 }
 
+// ensureDir creates the queue directory, or tightens an existing one.
+func (q *Queue) ensureDir() error {
+	if err := os.MkdirAll(q.dir, dirMode); err != nil {
+		return err
+	}
+	return q.tightenDir()
+}
+
+// tightenDir sets the directory's mode to dirMode when it differs, e.g. the
+// 0755 of a queue created before #909. It changes the mode only, never the
+// owner; the caller must own the directory, as in every supported setup.
+func (q *Queue) tightenDir() error {
+	info, err := os.Stat(q.dir)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm() == dirMode {
+		return nil
+	}
+	return os.Chmod(q.dir, dirMode)
+}
+
 // writeAtomic writes v as JSON to a temp file in the same directory, syncs
 // it, renames it into place and syncs the directory, so a reader never sees a
 // partial file and a crash never leaves a truncated one under the final name.
@@ -411,7 +447,7 @@ func (q *Queue) writeAtomic(path string, v interface{}) error {
 		os.Remove(tmp)
 		return err
 	}
-	if err := os.Chmod(tmp, 0o644); err != nil {
+	if err := os.Chmod(tmp, fileMode); err != nil {
 		os.Remove(tmp)
 		return err
 	}

@@ -10,17 +10,20 @@ const source = fs.readFileSync(path.join(__dirname, 'public/roles.js'), 'utf8');
 // shared evidence helper, which reads these very thresholds. It is loaded
 // into the SAME context, so the blocks below still execute the real rules.
 const activitySource = fs.readFileSync(path.join(__dirname, 'public/my-mesh-activity.js'), 'utf8');
+// #902: the observer roster helper the blocks use to look up observer credit.
+const observersSource = fs.readFileSync(path.join(__dirname, 'public/my-mesh-observers.js'), 'utf8');
 const HOUR = 3600000;
 const NOW = Date.UTC(2026, 9, 24, 12);
 let passed = 0;
 
 async function load(config = {}) {
   const ctx = {
-    console, Date, fetch: async () => ({ json: async () => config }),
+    console, Date, Map, fetch: async () => ({ json: async () => config }),
     document: { readyState: 'complete', createElement: () => ({}), head: { appendChild() {} }, getElementById: () => null, addEventListener() {} },
   };
   ctx.window = ctx;
   vm.runInNewContext(source, ctx);
+  vm.runInNewContext(observersSource, ctx);
   vm.runInNewContext(activitySource, ctx);
   await ctx.MeshConfigReady;
   return ctx;
@@ -84,18 +87,24 @@ function check(label, fn) {
   // Execute the actual decision blocks, not hand-copied equivalents. Browser
   // tests cover their surrounding asynchronous/DOM wiring and visible labels.
   const callArgs = ['node', 'stats', 'h', 'n', 'getHealthLastHeard', 'getHealthStatus', 'MyMeshActivity'];
+  // #902: the blocks also read the shared node-health entry point and an
+  // observer roster. Here no node is an observer, so the role thresholds
+  // alone decide, exactly as before #902.
+  const extraArgs = ['timeAgo', 'getNodeHealth', 'getHealthLabel', 'getHealthStatusClass', 'isQuietHealthRole', 'MyMeshObservers', 'observerIdx', 'observerReportedAt', 'pk', 'pubkey'];
   function decision(file, start, end, returned) {
     const src = fs.readFileSync(path.join(__dirname, 'public', file), 'utf8');
     const from = src.indexOf(start), to = src.indexOf(end, from);
     assert.ok(from >= 0 && to > from, 'production decision block exists in ' + file);
-    const fn = new Function(...callArgs, 'timeAgo', src.slice(from, to) + '\nreturn ' + returned + ';');
-    return (...values) => fn(...values, r.MyMeshActivity, () => 'synthetic age');
+    const fn = new Function(...callArgs, ...extraArgs, src.slice(from, to) + '\nreturn ' + returned + ';');
+    const key = 'f'.repeat(64);
+    return (...values) => fn(...values, r.MyMeshActivity, () => 'synthetic age', r.getNodeHealth, r.getHealthLabel, r.getHealthStatusClass,
+      r.isQuietHealthRole, r.MyMeshObservers, r.MyMeshObservers.index({ observers: [] }), undefined, key, key);
   }
   const blocks = [
-    ['My Mesh', decision('home.js', 'const ev = MyMeshActivity.statusEvidence({ node, stats });', 'const statusDot', 'status')],
-    ['Home health', decision('home.js', 'const ev = MyMeshActivity.statusEvidence({ node, stats });\n      const heardAt', 'const snr = MyMeshActivity.snr', 'status')],
-    ['Favorites', decision('app.js', 'const heardAt = getHealthLastHeard(h.node, h.stats);', 'return \'<a href=', 'statusLabel')],
-    ['Live', decision('live.js', 'const status = getHealthStatus(', 'let html =', 'status')],
+    ['My Mesh', decision('home.js', 'const ev = MyMeshActivity.statusEvidence({ node, stats, observerReportedAt });', 'const statusDot', 'status')],
+    ['Home health', decision('home.js', 'const ev = MyMeshActivity.statusEvidence({ node, stats, observerReportedAt });\n      const heardAt', 'const snr = MyMeshActivity.snr', 'status')],
+    ['Favorites', decision('app.js', 'const heardAt = getHealthLastHeard(h.node, h.stats);', 'return \'<a href=', 'status')],
+    ['Live', decision('live.js', 'function liveNodeHealthView(', 'async function showNodeDetail', 'liveNodeHealthView(node, stats).status')],
   ];
   check('real Home, Favorites and Live decision blocks pass the node role', () => {
     for (const [name, block] of blocks) {
@@ -107,9 +116,10 @@ function check(label, fn) {
     }
   });
   check('real health decision blocks preserve confirmed relays and explicit null', () => {
-    for (const [name, block] of blocks.filter(([name]) => name !== 'Live')) {
+    const nullWant = { Favorites: null, Live: null };
+    for (const [name, block] of blocks) {
       const node = { role: 'repeater', last_seen: Date.now() };
-      for (const [heard, want] of [[Date.now() - HOUR / 2, 'healthy'], [null, name === 'Favorites' ? 'unknown' : 'silent']]) {
+      for (const [heard, want] of [[Date.now() - HOUR / 2, 'healthy'], [null, name in nullWant ? nullWant[name] : 'silent']]) {
         const stats = { lastHeard: heard, lastAdvert: null };
         assert.equal(block(node, stats, { node, stats }, node, r.getHealthLastHeard, r.getHealthStatus), want, name);
       }

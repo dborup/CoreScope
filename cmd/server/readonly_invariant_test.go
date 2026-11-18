@@ -214,9 +214,10 @@ func nodeTableWritePattern(verb, trailer string) *regexp.Regexp {
 // txTableWritePattern matches DML against the ingestor-owned packet tables
 // (transmissions, observations, observers, dropped_packets) and the tables
 // hung off them, in the shapes nodeTableWritePattern covers, plus the owner
-// antenna-height claims (#789 M2a), which only the ingestor writes.
+// antenna-height claims (#789 M2a) and their admin contacts (#898), which
+// only the ingestor writes.
 func txTableWritePattern(verb string) *regexp.Regexp {
-	const table = "[\"`\\[]?(transmissions|observations|observers|dropped_packets|ping_triggers|route_mask_changes|node_antenna_claims)[\"`\\]]?"
+	const table = "[\"`\\[]?(transmissions|observations|observers|dropped_packets|ping_triggers|route_mask_changes|node_antenna_claims|node_claim_admin_contacts)[\"`\\]]?"
 	return regexp.MustCompile(`(?i)` + verb + `\s+` + table + `\b`)
 }
 
@@ -307,6 +308,8 @@ func TestServerHasNoPacketTableWritesIsSensitive(t *testing.T) {
 		`UPDATE node_antenna_claims SET status = 'approved'`,
 		`INSERT INTO node_antenna_claims (request_id) VALUES (?)`,
 		`DELETE FROM node_antenna_claims WHERE status = 'expired'`,
+		`DELETE FROM node_claim_admin_contacts WHERE request_id = ?`,
+		`INSERT INTO node_claim_admin_contacts (request_id, contact) VALUES (?, ?)`,
 	} {
 		if !matches(stmt) {
 			t.Errorf("the guard does not match %q", stmt)
@@ -318,6 +321,7 @@ func TestServerHasNoPacketTableWritesIsSensitive(t *testing.T) {
 		`INSERT INTO observations_archive (a) VALUES (1)`,
 		`INSERT INTO observer_neighbors (a) VALUES (1)`,
 		`SELECT pubkey FROM node_antenna_claims WHERE status = 'approved'`,
+		`LEFT JOIN node_claim_admin_contacts ac ON ac.request_id = c.request_id`,
 		`tx_inserted`,
 	} {
 		if matches(stmt) {

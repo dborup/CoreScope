@@ -24,6 +24,9 @@ Every color in the UI is customizable:
 - **Status** — green (healthy), yellow (degraded), red (silent)
 - **Text** — primary text, muted text, borders
 - **Tables** — row stripe, hover, and selected row colors
+- **Terrain profile chart** — the Path profile's chart colours, and the
+  **Owner Height Badge** on an antenna height a node's owner set (Path
+  profile and the node page's antenna section)
 
 Both light and dark themes are independently configurable.
 
@@ -57,6 +60,10 @@ Shown only where the server offers the Map's Path profile tool:
 - **Antenna heights** per node role and for a map point, and the default
   **elevation model**. These are defaults: a height in a link, a height you
   type and one the operator set in server config all take precedence.
+- **Prefer owner heights** (on by default). On, an antenna height that a
+  node's owner proved and this site approved stands against your role
+  heights. Off, your role heights replace owner heights too, in your own
+  profiles only. See [Setting your node's antenna height](antenna-height-claims.md).
 - **Share previews**, when the server offers them. **Copy link shares a
   preview** picks whether Copy link hands out a link that shows a preview
   card in chats, or the plain map link. The card's theme and whether it

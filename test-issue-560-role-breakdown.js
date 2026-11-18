@@ -99,6 +99,7 @@ function makeAnalyticsSandbox() {
   ctx.initTabBar = () => {};
   ctx.IATA_COORDS_GEO = {};
   loadInCtx(ctx, 'public/roles.js');
+  loadInCtx(ctx, 'public/my-mesh-observers.js'); // #902: loaded before analytics.js, as in index.html
   loadInCtx(ctx, 'public/app.js');
   loadInCtx(ctx, 'public/heard-by.js');
   try { loadInCtx(ctx, 'public/analytics.js'); } catch (e) {
@@ -181,13 +182,20 @@ console.log('\n=== analytics.js: renderNodesTab (integration) ===');
       // returned 3 rows while the unfiltered mesh has far more of each role).
       return { nodes: filteredNodes, counts: { repeaters: 999, rooms: 999, companions: 999, sensors: 999 }, total: filteredNodes.length };
     };
-    ctx.api = async () => { apiCalls++; return []; };
+    let observerCalls = 0;
+    ctx.api = async (route) => {
+      // #902: Network Status adds ONE cached bulk /observers request for
+      // observer credit; it is counted separately, never per node.
+      if (route === '/observers') { observerCalls++; return { observers: [] }; }
+      apiCalls++; return [];
+    };
 
     const el = makeEl();
     await renderNodesTab(el);
 
     assert.strictEqual(fetchCalls, 1, 'exactly one fetchAllNodes call -- no extra request added by the fix');
     assert.strictEqual(apiCalls, 1, 'exactly one bulk-health call -- no extra request added by the fix');
+    assert.strictEqual(observerCalls, 1, 'exactly one bulk /observers call (#902), never one per node');
     assert.strictEqual(extractBadge(el._h, 'repeaters'), 2, 'repeaters badge must come from the 2 filtered rows, not the global 999');
     assert.strictEqual(extractBadge(el._h, 'rooms'), 1, 'rooms badge must come from the 1 filtered row, not the global 999');
     assert.strictEqual(extractBadge(el._h, 'companions'), 0);

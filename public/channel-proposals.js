@@ -183,32 +183,9 @@
   }
 
   // ── Network ────────────────────────────────────────────────────────────
-  var adminKey = null; // memory only
-
-  function request(method, path, opts) {
-    opts = opts || {};
-    var headers = { 'Accept': 'application/json' };
-    if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
-    if (opts.admin && adminKey) headers['X-API-Key'] = adminKey;
-    return fetch('/api' + path, {
-      method: method,
-      headers: headers,
-      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-      cache: 'no-store',
-      signal: opts.signal
-    }).then(function (res) {
-      return res.text().then(function (text) {
-        var data = null;
-        try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
-        if (!res.ok) {
-          var err = new Error((data && data.error) || ('Request failed (' + res.status + ')'));
-          err.status = res.status;
-          throw err;
-        }
-        return data;
-      });
-    });
-  }
+  // The admin key, in memory only (public/admin-key.js).
+  var adminSession = root.MCAdminKey.create();
+  var request = adminSession.request;
 
   function statusOf(requestId) {
     return request('GET', '/channel-proposals/requests/' + encodeURIComponent(requestId));
@@ -391,7 +368,7 @@
   function renderAdminBody() {
     var body = document.getElementById('chProposalsBody');
     if (!body) return;
-    if (!adminKey) {
+    if (!adminSession.has()) {
       body.innerHTML =
         '<form id="chProposalsKeyForm" class="ch-proposals-key" novalidate>' +
           '<label for="chProposalsKey" class="ch-proposals-label">Admin API key</label>' +
@@ -556,7 +533,7 @@
 
   function onAdminError(err) {
     if (err && (err.status === 401 || err.status === 403)) {
-      adminKey = null;
+      adminSession.clear();
       renderAdminBody();
       adminStatus(err.status === 401 ? 'The API key was not accepted.' : err.message, 'error');
       return;
@@ -660,7 +637,7 @@
     var a = t.closest && t.closest('[data-proposals-action]');
     if (a && a.getAttribute('data-proposals-action') === 'refresh') { loadAdminList(); return; }
     if (a && a.getAttribute('data-proposals-action') === 'lock') {
-      adminKey = null;
+      adminSession.clear();
       state.adminPoller.cancel();
       renderAdminBody();
       adminStatus('Locked. The key was forgotten.', 'info');
@@ -684,7 +661,7 @@
     var input = document.getElementById('chProposalsKey');
     var key = input ? input.value.trim() : '';
     if (!key) { adminStatus('Enter the admin API key.', 'error'); return; }
-    adminKey = key;
+    adminSession.set(key);
     if (input) input.value = '';
     adminStatus('');
     renderAdminBody();
