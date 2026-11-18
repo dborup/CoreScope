@@ -2204,10 +2204,11 @@ window.addEventListener('DOMContentLoaded', () => {
     favDropdown.innerHTML = '<div class="fav-dd-loading">Loading...</div>';
     // #902: one cached bulk roster for the whole list, so a favorite that is
     // also a reporting observer is credited. A failure only drops the credit.
-    const observerIdx = MyMeshObservers.index(await api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null));
+    // Fetched in parallel with the health reads, not before them.
+    const observerIdxP = api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null).then(MyMeshObservers.index);
     const items = await Promise.all(favs.map(async (pk) => {
       try {
-        const h = await api('/nodes/' + pk + '/health', { ttl: CLIENT_TTL.nodeHealth });
+        const [h, observerIdx] = await Promise.all([api('/nodes/' + pk + '/health', { ttl: CLIENT_TTL.nodeHealth }), observerIdxP]);
         const heardAt = getHealthLastHeard(h.node, h.stats);
         const status = getNodeHealth(h.node.role, heardAt, MyMeshObservers.reportedAt(observerIdx, pk)).status;
         const statusCls = getHealthStatusClass(h.node.role, status);

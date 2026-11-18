@@ -163,9 +163,14 @@
     if (classified) source = advertAt && advertStatus === classified ? 'advert' : (relayAt ? 'relay' : 'advert');
     var isObserver = ms(opts.observerReportedAt) !== null;
     var nodeHealth = root && typeof root.getNodeHealth === 'function' ? root.getNodeHealth : null;
+    var creditOf = root && typeof root.getObserverReportCredit === 'function' ? root.getObserverReportCredit : null;
+    var observerInWindow = isObserver && !!creditOf && creditOf(opts.observerReportedAt, opts.nowMs) !== null;
     var observerAt = null;
-    if (isObserver && nodeHealth && classified !== 'healthy') {
-      var combined = nodeHealth(node.role, heardAt, opts.observerReportedAt, opts.nowMs);
+    // A direct, in-window observer report replaces relay attribution too:
+    // it is first-hand evidence the device runs now (#905 F2). Relay-only
+    // radio evidence is therefore not passed as `heard` here.
+    if (isObserver && nodeHealth && (classified !== 'healthy' || source === 'relay')) {
+      var combined = nodeHealth(node.role, source === 'relay' ? null : heardAt, opts.observerReportedAt, opts.nowMs);
       if (combined && combined.source === 'observer') {
         observerAt = combined.at;
         classified = combined.status;
@@ -202,7 +207,9 @@
       isObserver: isObserver,
       observerAt: observerAt,
       observerReportedAt: isObserver ? opts.observerReportedAt : null,
-      observerText: isObserver && !observerAt ? OBSERVER_NOT_COUNTED : null,
+      // Based on the window itself, not on whether the report carried the
+      // badge: an advert can already make the node Active (#905 F1).
+      observerText: isObserver && !observerInWindow ? OBSERVER_NOT_COUNTED : null,
       advertText: advertAt ? null : ADVERT_NONE,
       relayText: relayAt ? null : (advertAt ? RELAY_NONE_NEWER : RELAY_NONE),
       explanation: quiet ? explanation + EXPLAIN_QUIET : explanation

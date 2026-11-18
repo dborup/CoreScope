@@ -27,6 +27,8 @@ const CASES = [
   { key: '4'.repeat(64), name: 'Old Repeater', role: 'repeater', advertAgo: 30 * HOUR, observerAgo: null },
   { key: '5'.repeat(64), name: 'Old Room', role: 'room', advertAgo: 30 * HOUR, observerAgo: null },
   { key: '6'.repeat(64), name: 'Quiet Sensor', role: 'sensor', advertAgo: 10 * HOUR, observerAgo: null },
+  // #905 F1: the advert already makes it Active; the fresh report must not read "not counted".
+  { key: '7'.repeat(64), name: 'Advert Observer', role: 'repeater', advertAgo: 2 * HOUR, observerAgo: 4 * MIN },
 ];
 
 const health = Object.fromEntries(CASES.map(c => [`/nodes/${c.key}/health?include=advertIntervals`, {
@@ -142,6 +144,13 @@ const varColor = (page, name) => page.evaluate(n => {
       assert.match(await card(page, 5).locator('.mnc-status-text').innerText(), /^Quiet · /);
       checks++;
 
+      // #905 F1: advert-carried Active observer; the row reports the fresh report.
+      const advObs = card(page, 6);
+      assert.match(await advObs.locator('.mnc-status-text').innerText(), /^Active · /);
+      assert.match(await advObs.locator('.mnc-evidence').textContent(), /Observer reporting/);
+      assert.doesNotMatch(await advObs.locator('.mnc-evidence').textContent(), /not counted/);
+      checks++;
+
       // No per-node observer request: one bulk /observers call for the grid.
       assert.equal(await page.evaluate(() => window.apiCalls.filter(r => r === '/observers').length), 1);
       checks++;
@@ -154,6 +163,13 @@ const varColor = (page, name) => page.evaluate(n => {
       await banner.waitFor({ timeout: 5000 });
       assert.match(await banner.innerText(), /observer reporting/);
       assert.match(await banner.getAttribute('class'), /\bgreen\b/);
+      checks++;
+
+      // #905 F8: the Quiet banner reads like the card, lower-case "last heard".
+      const quietName = quiet.locator('.mnc-name');
+      if (touch) await quietName.tap(); else await quietName.click();
+      await page.waitForFunction(() => /Quiet/.test(document.querySelector('#homeHealth .health-banner')?.textContent || ''), null, { timeout: 5000 });
+      assert.match(await banner.innerText(), /Quiet · last heard /);
       checks++;
 
       assert.deepEqual(errors, []);

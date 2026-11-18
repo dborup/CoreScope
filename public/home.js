@@ -709,7 +709,7 @@
       const statusMsg = ev.source === 'observer'
         ? `${ev.text} ${timeAgo(ev.statusAt)}`
         : (ev.quiet ? ev.label + ' · ' : '') +
-          (heardAt ? `Last heard ${timeAgo(heardAt)}` : 'No confirmed activity in the current window') +
+          (heardAt ? `${ev.quiet ? 'last' : 'Last'} heard ${timeAgo(heardAt)}` : 'No confirmed activity in the current window') +
           (ev.source === 'relay' ? ' · ' + MyMeshActivity.ATTRIBUTED_SUFFIX : '');
 
       const snr = MyMeshActivity.snr(stats, heard.direct);

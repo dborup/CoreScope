@@ -131,6 +131,33 @@ function check(label, fn) { fn(); passed++; console.log('PASS ' + label); }
     const e = ev('companion', 10 * MIN, MIN);
     assert.equal(e.status, 'healthy');
     assert.equal(e.source, 'advert');
+    // #905 F1: the report is in the window, so the row must not say "not counted".
+    assert.equal(e.observerText, null);
+    assert.equal(ev('repeater', 2 * HOUR, 4 * MIN).observerText, null, 'Kennedy case: advert 2 h, report 4 min');
+    assert.equal(ev('repeater', 2 * HOUR, 2 * HOUR).observerText, A.OBSERVER_NOT_COUNTED, 'out-of-window report still says so');
+  });
+
+  check('#905 F2: a direct observer report makes a relay-attributed node confident', () => {
+    const relay = obs => A.statusEvidence({
+      node: { role: 'repeater' },
+      stats: { lastHeard: iso(10 * MIN), lastAdvert: iso(40 * HOUR) },
+      observerReportedAt: obs == null ? undefined : iso(obs),
+      nowMs: NOW,
+    });
+    const base = relay();
+    assert.equal(base.source, 'relay', 'precondition: relay-attributed Active');
+    assert.equal(base.cls, 'status-warn');
+    const e = relay(MIN);
+    assert.equal(e.status, 'healthy');
+    assert.equal(e.source, 'observer');
+    assert.equal(e.confident, true);
+    assert.equal(e.cls, 'status-ok');
+    assert.equal(e.glyph, 'ph-circle-fill');
+    assert.equal(e.statusAt, iso(MIN));
+    assert.equal(e.observerText, null);
+    const stale = relay(2 * HOUR);
+    assert.equal(stale.source, 'relay', 'an out-of-window report leaves relay attribution alone');
+    assert.equal(stale.cls, 'status-warn');
   });
 
   check('shared helpers: one label and class per role/status', () => {
@@ -170,6 +197,17 @@ function check(label, fn) { fn(); passed++; console.log('PASS ' + label); }
     assert.equal(r.MyMeshObservers.reportedAt(idx, key), iso(MIN));
     assert.equal(r.MyMeshObservers.reportedAt(idx, 'a'.repeat(64)), null);
     assert.equal(r.MyMeshObservers.reportedAt(r.MyMeshObservers.index(null), key), null);
+    // #905 F5: full 64-char ids that share a 12- and a 6-char prefix with the
+    // node key but differ later must never match.
+    const node = 'c0ffee' + 'd'.repeat(58);
+    const near = r.MyMeshObservers.index({ observers: [
+      { id: node.slice(0, 12) + 'e'.repeat(52), last_seen: iso(MIN) },
+      { id: node.slice(0, 6) + 'f'.repeat(58), last_seen: iso(MIN) },
+      { id: node.slice(0, 63) + '0', last_seen: iso(MIN) },
+    ] });
+    assert.equal(near.byId.size, 3, 'all three ids are well-formed full keys');
+    assert.equal(r.MyMeshObservers.reportedAt(near, node), null);
+    assert.equal(r.MyMeshObservers.match(near, node), null);
   });
 
   // Execute the real decision blocks of the other three-state views so they
@@ -219,6 +257,34 @@ function check(label, fn) { fn(); passed++; console.log('PASS ' + label); }
     assert.deepEqual(run(MIN, 'repeater', 30 * HOUR), ['healthy', 'Online', 'health-green']);
     assert.deepEqual(run(null, 'room', 80 * HOUR), ['silent', 'Offline', 'health-red']);
   });
+
+  // #905 F6: the roster read must not delay the per-favorite health reads.
+  {
+    const src = read('app.js');
+    const from = src.indexOf('const observerIdxP = '), to = src.indexOf('// Footer action', from);
+    assert.ok(from >= 0 && to > from, 'favorites fetch block exists in app.js');
+    const AsyncFunction = (async () => {}).constructor;
+    const fn = new AsyncFunction('favs', 'api', 'CLIENT_TTL', 'MyMeshObservers', 'getHealthLastHeard', 'getNodeHealth', 'getHealthLabel', 'getHealthStatusClass', 'escapeHtml', 'truncate', 'timeAgo', 'favStar',
+      src.slice(from, to) + '\nreturn items;');
+    const calls = [];
+    let releaseObservers;
+    const api = route => {
+      calls.push(route);
+      if (route === '/observers') return new Promise(res => { releaseObservers = () => res({ observers: [{ id: KEY, last_seen: iso(MIN) }] }); });
+      return Promise.resolve({ node: { role: 'companion', name: 'n' }, stats: { lastHeard: iso(10 * HOUR) } });
+    };
+    const done = fn([KEY, 'd'.repeat(64)], api, { observers: 1, nodeHealth: 1 }, r.MyMeshObservers, r.getHealthLastHeard,
+      (a, b, c) => r.getNodeHealth(a, b, c, NOW), r.getHealthLabel, r.getHealthStatusClass, x => x, x => x, () => 'ago', () => '');
+    await new Promise(res => setImmediate(res));
+    assert.deepEqual(calls.slice().sort(), ['/nodes/' + 'd'.repeat(64) + '/health', '/nodes/' + KEY + '/health', '/observers'].sort(),
+      'health reads start while /observers is still pending');
+    releaseObservers();
+    const items = await done;
+    assert.match(items[0], /title="Active"/, 'the observer credit still applies');
+    assert.match(items[1], /title="Quiet"/);
+    assert.equal(calls.filter(c => c === '/observers').length, 1, 'one roster read for the list');
+    passed++; console.log('PASS favorites: /observers and health reads run in parallel');
+  }
 
   console.log(`${passed} checks passed`);
 })().catch(error => { console.error(error); process.exitCode = 1; });
