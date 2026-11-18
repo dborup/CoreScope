@@ -95,7 +95,7 @@ function check(label, fn) {
     ['My Mesh', decision('home.js', 'const ev = MyMeshActivity.statusEvidence({ node, stats });', 'const statusDot', 'status')],
     ['Home health', decision('home.js', 'const ev = MyMeshActivity.statusEvidence({ node, stats });\n      const heardAt', 'const snr = MyMeshActivity.snr', 'status')],
     ['Favorites', decision('app.js', 'const heardAt = getHealthLastHeard(h.node, h.stats);', 'return \'<a href=', 'statusLabel')],
-    ['Live', decision('live.js', 'const status = getHealthStatus(', 'let html =', 'status')],
+    ['Live', decision('live.js', 'function liveNodeHealthView(', 'async function showNodeDetail', 'liveNodeHealthView(node, stats).status')],
   ];
   check('real Home, Favorites and Live decision blocks pass the node role', () => {
     for (const [name, block] of blocks) {
@@ -107,9 +107,10 @@ function check(label, fn) {
     }
   });
   check('real health decision blocks preserve confirmed relays and explicit null', () => {
-    for (const [name, block] of blocks.filter(([name]) => name !== 'Live')) {
+    const nullWant = { Favorites: 'unknown', Live: null };
+    for (const [name, block] of blocks) {
       const node = { role: 'repeater', last_seen: Date.now() };
-      for (const [heard, want] of [[Date.now() - HOUR / 2, 'healthy'], [null, name === 'Favorites' ? 'unknown' : 'silent']]) {
+      for (const [heard, want] of [[Date.now() - HOUR / 2, 'healthy'], [null, name in nullWant ? nullWant[name] : 'silent']]) {
         const stats = { lastHeard: heard, lastAdvert: null };
         assert.equal(block(node, stats, { node, stats }, node, r.getHealthLastHeard, r.getHealthStatus), want, name);
       }

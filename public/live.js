@@ -3017,6 +3017,20 @@
     }, 2000);
   }
 
+  // #901: pure view model for the node popup's health. getHealthLastHeard
+  // never falls back from an explicit stats.lastHeard null to relay-touched
+  // directory timestamps. A null status is painted red like silent, the
+  // shared convention (Favorites status-err, My Mesh and Analytics count it
+  // as silent), but labelled "Unknown" as Favorites does, not "Offline".
+  function liveNodeHealthView(n, stats, nowMs) {
+    const heardAt = getHealthLastHeard(n, stats);
+    const status = getHealthStatus(n && n.role, heardAt, nowMs);
+    const dotClass = status === 'healthy' ? 'health-green' : status === 'degraded' ? 'health-yellow' : 'health-red';
+    const label = status === 'healthy' ? 'Online' : status === 'degraded' ? 'Degraded'
+      : status === 'silent' ? 'Offline' : 'Unknown';
+    return { status, heardAt, dotClass, label };
+  }
+
   async function showNodeDetail(pubkey) {
     activeNodeDetailKey = pubkey;
     const panel = document.getElementById('liveNodeDetail');
@@ -3036,12 +3050,13 @@
       const roleColor = ROLE_COLORS[n.role] || '#6b7280';
       const roleLabel = (ROLE_LABELS[n.role] || n.role || 'unknown').replace(/s$/, '');
       const hasLoc = n.lat != null && n.lon != null;
-      const lastSeen = formatLiveTimestampHtml(n.last_seen);
-      // Keep this panel's existing last_seen input; identity-safe health is
-      // a separate API contract and is not replaced with inferred relays.
-      const status = getHealthStatus(n.role, n.last_seen);
-      const statusDot = status === 'healthy' ? 'health-green' : status === 'degraded' ? 'health-yellow' : 'health-red';
-      const statusLabel = status === 'healthy' ? 'Online' : status === 'degraded' ? 'Degraded' : 'Offline';
+      // #901: same evidence as the other health views (identity-safe
+      // stats.lastHeard, legacy fallback to last_heard / last_seen); the
+      // status dot and the "Last Heard" time share one timestamp.
+      const health = liveNodeHealthView(n, stats);
+      const lastSeen = formatLiveTimestampHtml(health.heardAt);
+      const statusDot = health.dotClass;
+      const statusLabel = health.label;
 
       let html = `
         <div style="padding:16px;">
@@ -3051,13 +3066,13 @@
           </div>
           <div style="margin-bottom:12px;">
             <span style="display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;font-weight:600;background:${roleColor};color:#fff;">${roleLabel.toUpperCase()}</span>
-            <span style="color:var(--text-muted);font-size:12px;margin-left:8px;">${statusLabel}</span>
+            <span style="color:var(--text-muted);font-size:12px;margin-left:8px;"><span class="sr-only">Status: </span>${statusLabel}</span>
           </div>
           <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
             <code style="font-size:10px;word-break:break-all;">${escapeHtml(n.public_key)}</code>
           </div>
           <table style="font-size:12px;width:100%;border-collapse:collapse;">
-            <tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Last Seen</td><td>${lastSeen}</td></tr>
+            <tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Last Heard</td><td>${lastSeen}</td></tr>
             <tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Adverts</td><td>${n.advert_count || 0}</td></tr>
             ${'configured_scope' in n && n.configured_scope !== null ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;" title="Region scopes this node has configured, confirmed via an observer /neighbors report (status=responded) — concrete evidence (#1865).${n.configured_scope_at ? ' Last confirmed ' + escapeHtml(String(n.configured_scope_at)) + '.' : ''}">Configured scope <span style="color:var(--status-green,#2ecc71)" aria-label="confirmed"><svg class="ph-icon" aria-hidden="true"><use href="/icons/phosphor-sprite.svg#ph-check-circle"/></svg></span></td><td>${n.configured_scope === '' ? '<span style="color:var(--text-muted)">none configured</span>' : `<code style="color:var(--link-color)">${escapeHtml(n.configured_scope)}</code>`}</td></tr>` : ''}
             ${'default_scope' in n ? `<tr><td style="color:var(--text-muted);padding:4px 8px 4px 0;">Scope</td><td>${n.default_scope === null ? '<span style="color:var(--text-muted)">—</span>'
@@ -3646,6 +3661,7 @@
 
   // Expose for testing
   window._livePruneStaleNodes = pruneStaleNodes;
+  window._liveNodeHealthView = liveNodeHealthView;
   window._liveBuildClickablePathPopupHtml = buildClickablePathPopupHtml;
   window._livePruneClickablePaths = pruneClickablePaths;
   window._liveClickablePaths = clickablePaths;
