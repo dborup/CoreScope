@@ -86,6 +86,27 @@
   // #914 — likewise: the heat map gradient; colour-blind presets set it
   // through --mc-heat-{light,dark}-N, not through these keys.
   var HEAT_COLOR_KEYS = ['heat1', 'heat2', 'heat3', 'heat4', 'heat5'];
+  // The user's pick goes to its own slot, --heat-user-N, which style.css puts
+  // above the preset's ramp; THEME_CSS_MAP's --heat-N carries server config.
+  function _heatUserVar(key) { return THEME_CSS_MAP[key].replace('--heat-', '--heat-user-'); }
+
+  // #914 — the heat map follows the #1446 cascade: user override > colour-
+  // blind preset > server config > style.css. The value in effect for the
+  // mode is the user's only when the user's layer won the merge (in dark
+  // mode a server themeDark value beats a user light value, as for every
+  // theme key). A key with no value is removed, so a cleared override falls
+  // back to the preset or the stylesheet without a reload.
+  function _applyHeatCSS(root, effectiveConfig, userOverrides, dark) {
+    var eff = effectiveConfig || {}, ov = userOverrides || {};
+    HEAT_COLOR_KEYS.forEach(function (k) {
+      var fromDark = dark && eff.themeDark && eff.themeDark[k];
+      var val = fromDark || (eff.theme && eff.theme[k]) || '';
+      var userSec = fromDark ? ov.themeDark : ov.theme;
+      var user = !!(val && userSec && userSec[k]);
+      if (user) root.setProperty(_heatUserVar(k), val); else root.removeProperty(_heatUserVar(k));
+      if (val && !user) root.setProperty(THEME_CSS_MAP[k], val); else root.removeProperty(THEME_CSS_MAP[k]);
+    });
+  }
 
   // #881 M3 — likewise: the kind accents follow the colourblind preset
   // (cb-presets.js momentAccents), not the theme preset.
@@ -1073,15 +1094,10 @@
 
     // Apply theme color/font CSS variables
     for (var key in THEME_CSS_MAP) {
-      if (themeSection[key]) {
-        root.setProperty(THEME_CSS_MAP[key], themeSection[key]);
-      } else if (HEAT_COLOR_KEYS.indexOf(key) !== -1) {
-        // #914 — no server default behind these: a cleared override (or the
-        // other mode's) must fall back to style.css, not stay on the old
-        // inline value until a reload.
-        root.removeProperty(THEME_CSS_MAP[key]);
-      }
+      if (HEAT_COLOR_KEYS.indexOf(key) !== -1) continue; // _applyHeatCSS
+      if (themeSection[key]) root.setProperty(THEME_CSS_MAP[key], themeSection[key]);
     }
+    _applyHeatCSS(root, effectiveConfig, userOverrides, dark);
 
     // Logo brand colors mirror --accent / --accent-hover ONLY when an
     // operator has actually overridden them via the customizer. We check
@@ -3592,7 +3608,7 @@
         };
         inp.addEventListener('input', function () {
           // Optimistic CSS update (Decision #12)
-          var cssVar = THEME_CSS_MAP[key];
+          var cssVar = HEAT_COLOR_KEYS.indexOf(key) !== -1 ? _heatUserVar(key) : THEME_CSS_MAP[key];
           if (cssVar) document.documentElement.style.setProperty(cssVar, picked());
           // Mirror to logo brand vars so the wordmark recolors live too.
           if (key === 'accent') document.documentElement.style.setProperty('--logo-accent', inp.value);
@@ -3975,8 +3991,10 @@
       : (earlyEffective.theme || {});
     var root = document.documentElement.style;
     for (var key in THEME_CSS_MAP) {
+      if (HEAT_COLOR_KEYS.indexOf(key) !== -1) continue; // _applyHeatCSS
       if (themeSection[key]) root.setProperty(THEME_CSS_MAP[key], themeSection[key]);
     }
+    _applyHeatCSS(root, earlyEffective, earlyOverrides, dark);
     // Mirror accent → logo brand vars ONLY when present in overrides (so the
     // server-default accent never clobbers the sage/teal :root brand defaults).
     var ovTheme = dark
@@ -4122,6 +4140,10 @@
         });
         for (var ri = 0; ri < 5; ri++) rs.removeProperty('--mc-rt-ramp-' + ri);
         ['new-node', 'back-online', 'record-link', 'busiest'].forEach(function (k) { rs.removeProperty('--mc-moment-' + k); });
+        ['light', 'dark'].forEach(function (mode) {
+          for (var hn = 1; hn <= 5; hn++) rs.removeProperty('--mc-heat-' + mode + '-' + hn);
+        });
+        HEAT_COLOR_KEYS.forEach(function (k) { rs.removeProperty(_heatUserVar(k)); });
         // Theme vars the customizer might have stamped onto :root via
         // applyCSS (logo accents + every entry in THEME_CSS_MAP).
         rs.removeProperty('--logo-accent');

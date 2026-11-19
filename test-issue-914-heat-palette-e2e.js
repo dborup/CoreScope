@@ -12,8 +12,9 @@
  *      brings the default back; Map and Live;
  *   4. the achromatopsia preset rebuilds it with its light ramp, the dark
  *      toggle switches it to its dark ramp, clearing restores the theme's;
- *      a preset without a heat ramp (deut) leaves the layer alone; Map and
- *      Live;
+ *      a customizer colour beats the preset and clearing it brings the
+ *      preset back (the #1446 rule); a preset without a heat ramp (deut)
+ *      leaves the layer alone; Map and Live;
  *   5. the dark-mode toggle rebuilds it with the dark tokens;
  *   6. after every rebuild above the page holds exactly one heat canvas (an
  *      old layer left under the new one goes red; #917 review finding 3);
@@ -22,7 +23,12 @@
  *      the Map controls, the Display section and the Heat map checkbox; each
  *      target is the topmost element at its tap point; the layer comes with
  *      the tokens and goes again;
- *   9. no console errors.
+ *   9. a theme change with the heat map switched off leaves it off, on Map
+ *      and Live (#917 delta review finding 4);
+ *  10. Map: with a route view open, which hides the heat layer, a dark
+ *      toggle rebuilds the layer with the dark tokens but leaves it off the
+ *      map (#917 delta review finding 2);
+ *  11. no console errors.
  *
  * Usage:  BASE_URL=http://localhost:13700 node test-issue-914-heat-palette-e2e.js
  */
@@ -30,6 +36,8 @@
 const { chromium } = require('playwright');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
+// A fixture packet with a resolvable path: #/map?packet= opens its route view.
+const ROUTE_PACKET = 'e26ad9dfa1ac3f7e';
 let passed = 0, failed = 0;
 async function step(name, fn) {
   try { await fn(); passed++; console.log('  ✓ ' + name); }
@@ -170,6 +178,16 @@ const READ = (global) => `(() => {
       checkRamp(await read(page, global), ramp.dark, route + ' achromat dark');
       await darkToggle(page);
       await page.waitForFunction(`window.${global}.options.gradient['1'].toLowerCase() === '${ramp.light[4]}'`, null, { timeout: 8000 });
+      // #1446: a user's colour beats the active preset; clearing it brings the preset back.
+      await page.evaluate(() => window._customizerV2.setOverride('theme', 'heat5', '#ff0000'));
+      await page.waitForFunction(`window.${global}.options.gradient['1'].toLowerCase() === '#ff0000'`, null, { timeout: 8000 });
+      const user = await read(page, global);
+      assert(user.tok[4].toLowerCase() === '#ff0000' && near(user.top, '#ff0000'), route + ' user override under the preset: ' + user.tok[4] + ' drawn ' + user.top);
+      assert(user.tok[3].toLowerCase() === ramp.light[3], route + ' the other stops stay the preset\'s');
+      assert(user.canvases === 1, user.canvases + ' heat canvases, want 1');
+      await page.evaluate(() => window._customizerV2.clearOverride('theme', 'heat5'));
+      await page.waitForFunction(`window.${global}.options.gradient['1'].toLowerCase() === '${ramp.light[4]}'`, null, { timeout: 8000 });
+      checkRamp(await read(page, global), ramp.light, route + ' achromat after the override is cleared');
       await page.evaluate(() => window.MeshCorePresets.clearPreset());
       await page.waitForFunction(`window.${global}.options.gradient['1'].toLowerCase() === '${theme.grad['1'].toLowerCase()}'`, null, { timeout: 8000 });
       const back = await read(page, global);
@@ -193,6 +211,43 @@ const READ = (global) => `(() => {
     const after = await read(page, '_meshcoreHeatLayer');
     assert(after.grad['1'].toLowerCase() !== before.grad['1'].toLowerCase(), 'gradient did not change');
     checkTokens(after, 'Map after toggle');
+    await ctx.close();
+  });
+
+  for (const [route, global, box] of [['map', '_meshcoreHeatLayer', 'mcHeatmap'], ['live', '_meshcoreLiveHeatLayer', 'liveHeatToggle']]) {
+    await step(route + ': with the heat map switched off, a theme change leaves it off', async () => {
+      const { ctx, page } = await open(route);
+      await waitLayer(page, global); // nodes are in: a stray rebuild would have points to draw
+      await page.evaluate((id) => { const el = document.getElementById(id); el.checked = false; el.dispatchEvent(new Event('change', { bubbles: true })); }, box);
+      await page.waitForFunction(() => !document.querySelector('canvas.leaflet-heatmap-layer'), null, { timeout: 5000 });
+      await page.evaluate(() => window._customizerV2.setOverride('theme', 'heat5', '#00aa11'));
+      await page.waitForFunction(() => getComputedStyle(document.documentElement).getPropertyValue('--heat-stop-5').trim() === '#00aa11', null, { timeout: 8000 });
+      await darkToggle(page);
+      await page.waitForTimeout(500); // past the watcher's 30 ms coalescing
+      const n = await page.evaluate(() => document.querySelectorAll('canvas.leaflet-heatmap-layer').length);
+      assert(n === 0, n + ' heat canvases after a theme change with the heat map off');
+      await page.evaluate(() => window._customizerV2.clearOverride('theme', 'heat5'));
+      await ctx.close();
+    });
+  }
+
+  await step('Map: a dark toggle while a route view hides the heat layer rebuilds it off the map', async () => {
+    const { ctx, page } = await open('map?packet=' + ROUTE_PACKET);
+    await page.waitForFunction(() => !!window._meshcoreHeatLayer && !!document.querySelector('a[title="Close route"]') &&
+      !document.querySelector('canvas.leaflet-heatmap-layer'), null, { timeout: 15000 });
+    const before = await page.evaluate(() => ({ id: window._meshcoreHeatLayer._leaflet_id, top: window._meshcoreHeatLayer.options.gradient['1'] }));
+    await darkToggle(page);
+    await page.waitForFunction(`window._meshcoreHeatLayer && window._meshcoreHeatLayer._leaflet_id !== ${before.id}`, null, { timeout: 8000 });
+    await page.waitForTimeout(300);
+    const after = await page.evaluate(() => ({
+      top: window._meshcoreHeatLayer.options.gradient['1'],
+      tok: getComputedStyle(document.documentElement).getPropertyValue('--heat-stop-5').trim(),
+      canvases: document.querySelectorAll('canvas.leaflet-heatmap-layer').length,
+      route: !!document.querySelector('a[title="Close route"]'),
+    }));
+    assert(after.route, 'the route view closed');
+    assert(after.canvases === 0, after.canvases + ' heat canvases under the route view, want 0');
+    assert(after.top.toLowerCase() === after.tok.toLowerCase() && after.top !== before.top, 'the hidden layer kept ' + after.top + ', token ' + after.tok);
     await ctx.close();
   });
 

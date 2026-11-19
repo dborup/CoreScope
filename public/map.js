@@ -3436,7 +3436,9 @@
     destroyProfileTool();
   }
 
-  function toggleHeatmap(on) {
+  // opts.detached: build the layer but leave it off the map (a route view
+  // has it hidden; see the HeatGradient.watch callback in init).
+  function toggleHeatmap(on, opts) {
     if (!on || !map) {
       if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; window._meshcoreHeatLayer = null; }
       return;
@@ -3461,7 +3463,7 @@
       var canvas = heatLayer._canvas || (heatLayer.getContainer && heatLayer.getContainer());
       if (canvas) canvas.style.opacity = savedOpacity;
     });
-    heatLayer.addTo(map);
+    if (!(opts && opts.detached)) heatLayer.addTo(map);
     window._meshcoreHeatLayer = heatLayer;
   }
 
@@ -3715,8 +3717,13 @@
       // the heat gradient rebuilds the layer; no reload.
       _heatUnwatch = HeatGradient.watch(function () {
         if (!heatLayer || !map) return;
+        // A route view (drawPacketRoute, drawGPSTrail, estimated positions)
+        // takes the layer off the map but keeps it; the rebuilt one stays
+        // off too. (leaflet.heat's setOptions would throw on a removed layer:
+        // its redraw reads this._map._animating.)
+        var hidden = !map.hasLayer(heatLayer);
         toggleHeatmap(false); // removes the old layer: one heat canvas, never two
-        toggleHeatmap(true);
+        toggleHeatmap(true, { detached: hidden });
       });
       return init(app, routeParam);
     },

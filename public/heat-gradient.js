@@ -4,12 +4,14 @@
  * The gradient is a single hue family (violet -> magenta) that the "Colour by
  * elevation" ramp does not use, so a hot heat area is never mistaken for high
  * terrain. Its five stops are theme tokens, read when the layer is built:
- *   --heat-1..5          style.css (:root and both dark blocks), the
- *                        customizer (THEME_CSS_MAP heat1..5)
+ *   --heat-1..5          style.css (:root and both dark blocks), or server
+ *                        config through the customizer (THEME_CSS_MAP)
  *   --mc-heat-light-1..5 set by a colour-blind preset (cb-presets.js
  *   --mc-heat-dark-1..5  heatRamp), one ramp per base-map mode
- *   --heat-stop-1..5     what this helper reads: style.css resolves it to the
- *                        preset's ramp for the current mode, else --heat-N
+ *   --heat-user-1..5     the user's customizer pick (customize-v2.js)
+ *   --heat-stop-1..5     what this helper reads: style.css resolves it by the
+ *                        #1446 rule, user pick > the preset's ramp for the
+ *                        current mode > --heat-N
  * A missing or unusable token falls back to DEFAULTS, so the layer is never
  * left without a gradient.
  *

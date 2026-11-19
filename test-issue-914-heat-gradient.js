@@ -13,11 +13,17 @@
  *   3. style.css defines the tokens in :root and both dark blocks, no hex
  *      outside them, and the defaults are in the violet-magenta hue band
  *      that the elevation ramp (below its plum top) does not use;
- *      --heat-stop-N picks a preset's light ramp in :root and its dark ramp
- *      in both dark blocks, else the theme's --heat-N;
+ *      --heat-stop-N is the user's pick (--heat-user-N), else a preset's
+ *      light ramp in :root and its dark ramp in both dark blocks, else the
+ *      theme's --heat-N;
+ *   3b. the cascade, with the real applyCSS and applyPreset writing the
+ *      root's inline style and style.css's var() chain resolved over it:
+ *      user override > colour-blind preset > server config > style.css
+ *      (the #1446 rule; #917 delta review finding 3);
  *   4. the customizer maps the tokens (THEME_CSS_MAP) and keeps them out of
  *      preset detection; a cb-preset's heatRamp has a light and a dark ramp
- *      and applyPreset sets / clears --mc-heat-{light,dark}-N;
+ *      and applyPreset sets / clears --mc-heat-{light,dark}-N, also on a
+ *      direct switch from a preset with a ramp to one without;
  *   4b. every preset, in light and dark, under its own colour-vision
  *      simulation: the densest stop stands out from the base map at the
  *      default Map opacity, and the ramp stays away from the elevation ramp
@@ -34,6 +40,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 const assert = require('assert');
+const { loadCustomizer } = require('./tests/customizer-sandbox');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -191,12 +198,12 @@ test('style.css defines --heat-1..5 in :root and both dark blocks', () => {
   }
 });
 
-test('--heat-stop-N picks the preset light ramp in :root and the dark ramp in both dark blocks', () => {
+test('--heat-stop-N: the user pick, else the preset light ramp in :root and the dark ramp in both dark blocks', () => {
   const b = cssBlocks(read('style.css'));
   for (let n = 1; n <= 5; n++) {
-    assert.strictEqual(decl(b.root, '--heat-stop-' + n), 'var(--mc-heat-light-' + n + ', var(--heat-' + n + '))', ':root --heat-stop-' + n);
+    assert.strictEqual(decl(b.root, '--heat-stop-' + n), 'var(--heat-user-' + n + ', var(--mc-heat-light-' + n + ', var(--heat-' + n + ')))', ':root --heat-stop-' + n);
     for (const k of ['media', 'dark']) {
-      assert.strictEqual(decl(b[k], '--heat-stop-' + n), 'var(--mc-heat-dark-' + n + ', var(--heat-' + n + '))', k + ' --heat-stop-' + n);
+      assert.strictEqual(decl(b[k], '--heat-stop-' + n), 'var(--heat-user-' + n + ', var(--mc-heat-dark-' + n + ', var(--heat-' + n + ')))', k + ' --heat-stop-' + n);
       assert(/^#[0-9a-f]{6}$/i.test(decl(b[k], '--heat-' + n) || ''), k + ' --heat-' + n);
     }
   }
@@ -259,6 +266,22 @@ test('a preset heatRamp has 5 light and 5 dark stops; applyPreset sets and clear
   for (const mode of MODES) for (let n = 1; n <= 5; n++) assert(!('--mc-heat-' + mode + '-' + n in props), 'clearPreset leaves --mc-heat-' + mode + '-' + n);
 });
 
+test('a direct switch from a preset with a heat ramp to one without clears --mc-heat-* (no clearPreset between)', () => {
+  const { P, props } = loadPresets();
+  const withRamp = P.list.filter((p) => p.heatRamp), without = P.list.filter((p) => !p.heatRamp);
+  assert(withRamp.length && without.length, 'need presets with and without a heatRamp');
+  for (const from of withRamp) {
+    for (const to of without) {
+      P.applyPreset(from.id);
+      assert('--mc-heat-light-5' in props, from.id + ' did not set its ramp');
+      P.applyPreset(to.id);
+      for (const mode of MODES) for (let n = 1; n <= 5; n++) {
+        assert(!('--mc-heat-' + mode + '-' + n in props), from.id + ' -> ' + to.id + ' leaves --mc-heat-' + mode + '-' + n);
+      }
+    }
+  }
+});
+
 // #917 review findings 1 and 2. Each preset is judged under the vision it is
 // for. Base maps are flat approximations of the light and dark tiles; the
 // heat canvas is drawn at the default Map opacity (0.25; Live uses 0.3).
@@ -306,6 +329,72 @@ test('every preset, light and dark: no heat stop reads as elevation under its ow
       }
     }
   }
+});
+
+// #917 delta review finding 3: the #1446 cascade. The real customizer
+// (applyCSS) and the real presets (applyPreset) write the root's inline
+// style; resolve() then plays the browser: an inline custom property beats
+// the stylesheet's, var() takes its fallback when the name is unset, and a
+// dark block inherits what it does not declare from :root.
+function heatCascade(theme) {
+  const c = loadCustomizer({ theme, scripts: ['cb-presets.js'] });
+  const b = cssBlocks(read('style.css'));
+  const block = theme === 'dark' ? b.dark : b.root;
+  function lookup(name) {
+    if (c.rootStyle._props[name] != null) return c.rootStyle._props[name];
+    const v = decl(block, name);
+    return v != null ? v : decl(b.root, name);
+  }
+  function value(v) {
+    const m = v && v.match(/^var\((--[\w-]+)(?:,\s*(.*))?\)$/);
+    if (!m) return v;
+    const hit = lookup(m[1]);
+    if (hit != null) return value(hit);
+    return m[2] != null ? value(m[2]) : null;
+  }
+  const P = c.ctx.window.MeshCorePresets;
+  return {
+    P,
+    peak: () => value(lookup('--heat-stop-5')),
+    apply: (server, user) => {
+      c.api.writeOverrides(user || {});
+      c.api.applyCSS(c.api.computeEffective(server || {}, c.api.readOverrides()), c.api.readOverrides());
+    },
+  };
+}
+
+test('cascade: user override > colour-blind preset > server config > style.css, light and dark', () => {
+  for (const theme of MODES) {
+    const k = heatCascade(theme);
+    const sheet = decl(theme === 'dark' ? cssBlocks(read('style.css')).dark : cssBlocks(read('style.css')).root, '--heat-5');
+    const ramp = k.P.list.find((p) => p.id === 'achromat').heatRamp[theme][4];
+    const server = { theme: { heat5: '#0000aa' } };
+    k.apply({}, {});
+    assert.strictEqual(k.peak(), sheet, theme + ': style.css');
+    k.apply(server, {});
+    assert.strictEqual(k.peak(), '#0000aa', theme + ': server config over style.css');
+    k.P.applyPreset('achromat');
+    assert.strictEqual(k.peak(), ramp, theme + ': the preset over server config');
+    k.apply(server, { theme: { heat5: '#ff0000' } });
+    assert.strictEqual(k.peak(), '#ff0000', theme + ': the user override over the preset');
+    k.apply(server, {});
+    assert.strictEqual(k.peak(), ramp, theme + ': a cleared override falls back to the preset');
+    k.P.clearPreset();
+    assert.strictEqual(k.peak(), '#0000aa', theme + ': a cleared preset falls back to server config');
+    k.apply({}, {});
+    assert.strictEqual(k.peak(), sheet, theme + ': and then to style.css');
+  }
+});
+
+test('cascade, dark: a server themeDark colour still beats the user light pick (as for every theme key), and the preset beats it', () => {
+  const k = heatCascade('dark');
+  const ramp = k.P.list.find((p) => p.id === 'achromat').heatRamp.dark[4];
+  k.apply({ themeDark: { heat5: '#0000aa' } }, { theme: { heat5: '#ff0000' } });
+  assert.strictEqual(k.peak(), '#0000aa', 'server themeDark over the user light pick');
+  k.P.applyPreset('achromat');
+  assert.strictEqual(k.peak(), ramp, 'the preset over a server value');
+  k.apply({ themeDark: { heat5: '#0000aa' } }, { themeDark: { heat5: '#00aa00' } });
+  assert.strictEqual(k.peak(), '#00aa00', 'the user dark pick over the preset');
 });
 
 test('watch() calls back once per real change, never on an unchanged gradient, and unsubscribes', () => {
