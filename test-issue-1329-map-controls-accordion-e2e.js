@@ -37,7 +37,10 @@ async function run() {
   const browser = await chromium.launch(launchOpts);
 
   // === Mobile: 375x812 ===
-  const ctx = await browser.newContext({ viewport: { width: 375, height: 812 } });
+  // #935: the panel now ends above the bottom nav (it ran 24px under it at
+  // 812px high, which is the only reason 714px of content "fit" there), so
+  // the viewport is tall enough for the open section plus the nav.
+  const ctx = await browser.newContext({ viewport: { width: 375, height: 900 } });
   const page = await ctx.newPage();
 
   await page.goto(BASE + '/#/map', { waitUntil: 'load', timeout: 60000 });
