@@ -14,6 +14,7 @@
   let neighborPubkeys = null;        // Set of pubkeys that are direct neighbors of selected node
   let wsHandler = null;
   let heatLayer = null;
+  let routeViewOpen = false; // a route-style view hides the overlays (#929)
   let geoFilterLayer = null;
   let selectedAreaLayer = null;
   let affinityLayer = null;
@@ -970,6 +971,23 @@
     return edgeCounts;
   }
 
+  // #929: the route-style views (drawPacketRoute, drawGPSTrail,
+  // drawEstimatedNodes) hide the node overlays while they are open, and their
+  // close buttons restore them. The heat layer stays built off the map in
+  // between; toggleHeatmap keeps a rebuilt one off too.
+  function hideRouteViewOverlays() {
+    routeViewOpen = true;
+    if (markerLayer) map.removeLayer(markerLayer);
+    if (clusterGroup) map.removeLayer(clusterGroup);
+    if (heatLayer) map.removeLayer(heatLayer);
+  }
+  function restoreRouteViewOverlays() {
+    routeViewOpen = false;
+    if (markerLayer) map.addLayer(markerLayer);
+    if (clusterGroup) map.addLayer(clusterGroup);
+    if (heatLayer) map.addLayer(heatLayer);
+  }
+
   // #673: nothing of the route survives the 1-byte filter. Clear the layer
   // and the sidebar, so a live toggle does not leave the previous route up.
   function clearRouteView() {
@@ -1014,9 +1032,7 @@
     // #123: the map this route was requested for is gone.
     if (!alive() || !map) return;
     // Hide default markers so only the route is visible
-    if (markerLayer) map.removeLayer(markerLayer);
-    if (clusterGroup) map.removeLayer(clusterGroup);
-    if (heatLayer) map.removeLayer(heatLayer);
+    hideRouteViewOverlays();
 
     routeLayer.clearLayers();
 
@@ -1028,8 +1044,7 @@
       L.DomEvent.on(div, 'click', function (e) {
         L.DomEvent.preventDefault(e);
         routeLayer.clearLayers();
-        if (markerLayer) map.addLayer(markerLayer);
-        if (clusterGroup) map.addLayer(clusterGroup);
+        restoreRouteViewOverlays();
         map.removeControl(closeBtn);
         var container = map.getContainer();
         var legend = container.querySelector('.mc-route-legend');
@@ -1213,9 +1228,7 @@
   //    nearest-repeater proxy was from the sender's real position.
   function drawGPSTrail(points, opts) {
     opts = opts || {};
-    if (markerLayer) map.removeLayer(markerLayer);
-    if (clusterGroup) map.removeLayer(clusterGroup);
-    if (heatLayer) map.removeLayer(heatLayer);
+    hideRouteViewOverlays();
     routeLayer.clearLayers();
 
     const closeBtn = L.control({ position: 'topright' });
@@ -1225,8 +1238,7 @@
       L.DomEvent.on(div, 'click', function (e) {
         L.DomEvent.preventDefault(e);
         routeLayer.clearLayers();
-        if (markerLayer) map.addLayer(markerLayer);
-        if (clusterGroup) map.addLayer(clusterGroup);
+        restoreRouteViewOverlays();
         map.removeControl(closeBtn);
         const label = map.getContainer().querySelector('.mc-gps-trail-label');
         if (label) label.remove();
@@ -1319,9 +1331,7 @@
       showEstimatedPositionsDisabled();
       return;
     }
-    if (markerLayer) map.removeLayer(markerLayer);
-    if (clusterGroup) map.removeLayer(clusterGroup);
-    if (heatLayer) map.removeLayer(heatLayer);
+    hideRouteViewOverlays();
     routeLayer.clearLayers();
 
     const closeBtn = L.control({ position: 'topright' });
@@ -1331,8 +1341,7 @@
       L.DomEvent.on(div, 'click', function (e) {
         L.DomEvent.preventDefault(e);
         routeLayer.clearLayers();
-        if (markerLayer) map.addLayer(markerLayer);
-        if (clusterGroup) map.addLayer(clusterGroup);
+        restoreRouteViewOverlays();
         map.removeControl(closeBtn);
         const label = map.getContainer().querySelector('.mc-estimated-nodes-label');
         if (label) label.remove();
@@ -3428,6 +3437,7 @@
     _currentMarkerData = [];
     routeLayer = null;
     if (heatLayer) { heatLayer = null; }
+    routeViewOpen = false;
     geoFilterLayer = null;
     selectedReferenceNode = null;
     neighborPubkeys = null;
@@ -3436,9 +3446,9 @@
     destroyProfileTool();
   }
 
-  // opts.detached: build the layer but leave it off the map (a route view
-  // has it hidden; see the HeatGradient.watch callback in init).
-  function toggleHeatmap(on, opts) {
+  // While a route view is open the layer is built but left off the map
+  // (#929; see hideRouteViewOverlays).
+  function toggleHeatmap(on) {
     if (!on || !map) {
       if (heatLayer) { map.removeLayer(heatLayer); heatLayer = null; window._meshcoreHeatLayer = null; }
       return;
@@ -3452,8 +3462,10 @@
     if (!points.length || typeof L.heatLayer !== 'function') return;
     var savedOpacity = parseFloat(localStorage.getItem('meshcore-heatmap-opacity'));
     if (isNaN(savedOpacity)) savedOpacity = 0.25;
-    // Update existing layer data without recreating (avoids opacity flash)
-    if (heatLayer) {
+    // Update existing layer data without recreating (avoids opacity flash).
+    // leaflet.heat redraws through this._map, so a layer a route view took
+    // off the map is rebuilt off the map instead (#929).
+    if (heatLayer && map.hasLayer(heatLayer)) {
       heatLayer.setLatLngs(points);
       return;
     }
@@ -3463,7 +3475,7 @@
       var canvas = heatLayer._canvas || (heatLayer.getContainer && heatLayer.getContainer());
       if (canvas) canvas.style.opacity = savedOpacity;
     });
-    if (!(opts && opts.detached)) heatLayer.addTo(map);
+    if (!routeViewOpen) heatLayer.addTo(map);
     window._meshcoreHeatLayer = heatLayer;
   }
 
@@ -3717,13 +3729,12 @@
       // the heat gradient rebuilds the layer; no reload.
       _heatUnwatch = HeatGradient.watch(function () {
         if (!heatLayer || !map) return;
-        // A route view (drawPacketRoute, drawGPSTrail, estimated positions)
-        // takes the layer off the map but keeps it; the rebuilt one stays
-        // off too. (leaflet.heat's setOptions would throw on a removed layer:
-        // its redraw reads this._map._animating.)
-        var hidden = !map.hasLayer(heatLayer);
+        // Rebuild rather than setOptions: leaflet.heat's redraw would throw
+        // on a layer a route view took off the map (it reads
+        // this._map._animating). toggleHeatmap keeps the new one off the map
+        // while the route view is open.
         toggleHeatmap(false); // removes the old layer: one heat canvas, never two
-        toggleHeatmap(true, { detached: hidden });
+        toggleHeatmap(true);
       });
       return init(app, routeParam);
     },
