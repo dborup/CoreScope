@@ -37,6 +37,7 @@
  */
 'use strict';
 const { chromium } = require('playwright');
+const { doubleTapWait } = require('./tests/e2e-tap');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const SHOW_WAIT_MS = 1600; // show delay 800 ms + fade-in, with margin
@@ -162,6 +163,18 @@ async function pillUnder(page, x, y) {
   }, { H: HINT, x, y });
 }
 
+// tap is a finger tap at (x, y). A second tap within Chromium's double-tap
+// window of the page's previous one (tests/e2e-tap.js) would be read as a
+// double tap and lose its click, which a finger tapping More and then Nodes
+// in the sheet never does: the window is waited out first.
+const lastTapAt = new WeakMap();
+async function tap(page, x, y) {
+  const wait = doubleTapWait(lastTapAt.get(page), x, y, Date.now());
+  if (wait > 0) await page.waitForTimeout(wait);
+  await page.touchscreen.tap(x, y);
+  lastTapAt.set(page, { x, y, t: Date.now() });
+}
+
 async function middleOf(page, sel) {
   await page.locator(sel).first().scrollIntoViewIfNeeded();
   const b = await page.locator(sel).first().boundingBox();
@@ -225,7 +238,7 @@ async function middleOf(page, sel) {
       const p = (await coveredPoint(page, '#chooseExp')) || Object.assign(await middleOf(page, '#chooseExp'), { hint: 'no' });
       if (p.hint !== 'no') homeCovered.push(vp.name);
       assert((await pillUnder(page, p.x, p.y)) === (p.hint === 'no' ? null : p.hint), 'the probes disagree on the pill at the tap');
-      await page.touchscreen.tap(p.x, p.y);
+      await tap(page, p.x, p.y);
       await page.waitForFunction(() => !document.getElementById('chooseExp'), null, { timeout: 3000 })
         .catch(() => { throw new Error('the tap at (' + Math.round(p.x) + ',' + Math.round(p.y) + ') on the ' + p.hint + ' pill did not reach the button'); });
       // Only the hint the tap went through is dismissed; the other stays up.
@@ -249,7 +262,7 @@ async function middleOf(page, sel) {
       await assertNothingSwallowed(page, 'Nodes');
       const p = await coveredPoint(page, '#nodeSearch');
       assert(p && p.hint === 'edge-drawer', 'the edge-swipe pill does not cover the search field, so this case would prove nothing');
-      await page.touchscreen.tap(p.x, p.y);
+      await tap(page, p.x, p.y);
       assert(await page.evaluate(() => document.activeElement && document.activeElement.id === 'nodeSearch'),
         'the first tap at (' + Math.round(p.x) + ',' + Math.round(p.y) + ') did not focus the search field');
       await page.keyboard.type('zz');
@@ -267,11 +280,13 @@ async function middleOf(page, sel) {
       await waitHints(page, ['tab-swipe', 'edge-drawer']);
       let p = await middleOf(page, '[data-bottom-nav-tab="more"]');
       assert(await pillUnder(page, p.x, p.y) === null, 'More lies under a pill: this case assumes taps that miss every pill');
-      await page.touchscreen.tap(p.x, p.y);
+      await tap(page, p.x, p.y);
       await page.waitForSelector('[data-bottom-nav-more-route="nodes"]', { state: 'visible', timeout: 5000 });
       p = await middleOf(page, '[data-bottom-nav-more-route="nodes"]');
       assert(await pillUnder(page, p.x, p.y) === null, 'Nodes in the sheet lies under a pill: this case assumes taps that miss every pill');
-      await page.touchscreen.tap(p.x, p.y);
+      await tap(page, p.x, p.y);
+      await page.waitForFunction(() => /^#\/nodes\/?(\?|$)/.test(location.hash), null, { timeout: 5000 })
+        .catch(() => { throw new Error('the tap on Nodes in the More sheet did not open #/nodes'); });
       await page.waitForSelector('#nodesTable tbody tr[data-action="select"]', { timeout: 15000 });
       await waitHints(page, ['row-swipe']);
       assert(JSON.stringify(await flags(page)) === '{}', 'taps outside every pill marked hints as seen: ' + JSON.stringify(await flags(page)));
@@ -295,7 +310,7 @@ async function middleOf(page, sel) {
       p = await coveredPoint(page, rowSel);
       assert(p && p.hint === 'row-swipe', 'the row-swipe pill does not cover the row, so this case would prove nothing');
       await assertNothingSwallowed(page, 'Nodes with a row under the pill');
-      await page.touchscreen.tap(p.x, p.y);
+      await tap(page, p.x, p.y);
       await page.waitForFunction((k) => location.hash.indexOf('#/nodes/' + k) === 0, key, { timeout: 5000 })
         .catch(() => { throw new Error('the first tap at (' + Math.round(p.x) + ',' + Math.round(p.y) + ') on the row did not open the node'); });
       await page.waitForSelector('#nodeBackBtn', { timeout: 15000 });
@@ -305,7 +320,7 @@ async function middleOf(page, sel) {
       assert(shown.indexOf('row-swipe') < 0 && shown.indexOf('tab-swipe') < 0, 'a list hint followed onto the node page: ' + shown.join(','));
       await assertNothingSwallowed(page, 'node page');
       p = await middleOf(page, '#nodeBackBtn');
-      await page.touchscreen.tap(p.x, p.y);
+      await tap(page, p.x, p.y);
       await page.waitForFunction(() => /^#\/nodes\/?(\?|$)/.test(location.hash), null, { timeout: 5000 })
         .catch(() => { throw new Error('the first tap on Back to nodes did not go back'); });
       assert(errors.length === 0, 'page errors: ' + errors.join(' | '));
@@ -324,15 +339,15 @@ async function middleOf(page, sel) {
       assert(JSON.stringify(shown) === '["edge-drawer"]', 'want only the edge-swipe hint on the node page, shown: ' + shown.join(','));
       await assertNothingSwallowed(page, 'claim section');
       let p = await middleOf(page, '[data-testid="ac-height"]');
-      await page.touchscreen.tap(p.x, p.y);
+      await tap(page, p.x, p.y);
       await page.keyboard.type('18.5');
       assert((await page.inputValue('[data-testid="ac-height"]')) === '18.5', 'the first tap did not focus the height field');
       p = await middleOf(page, '[data-testid="ac-submit"]');
-      await page.touchscreen.tap(p.x, p.y);
+      await tap(page, p.x, p.y);
       await page.waitForSelector('[data-testid="ac-code"]', { timeout: 5000 });
       assert((await page.textContent('[data-testid="ac-code"]')) === CODE, 'Get code did not show the code');
       p = await middleOf(page, '[data-testid="ac-new"]');
-      await page.touchscreen.tap(p.x, p.y);
+      await tap(page, p.x, p.y);
       await page.waitForSelector('[data-testid="ac-height"]', { timeout: 5000 })
         .catch(() => { throw new Error('the tap on Start over did not bring the height field back'); });
       await ctx.close();
@@ -354,7 +369,7 @@ async function middleOf(page, sel) {
       // would also remove the hint (through its pill), and so prove nothing.
       const hit = await page.evaluate(({ x, y }) => { const t = document.elementFromPoint(x, y); return !!(t && t.closest('[data-gesture-hint-dismiss]')); }, { x, y });
       assert(hit, 'a tap at the middle of "Got it" does not hit the button');
-      await page.touchscreen.tap(x, y);
+      await tap(page, x, y);
       await page.waitForFunction(() => !document.querySelector('[data-gesture-hint="row-swipe"]'), null, { timeout: 2000 });
       assert(await page.evaluate(() => window.__t911Click) === true, 'the tap\'s click did not go to "Got it"');
       const f = await flags(page);
@@ -398,7 +413,7 @@ async function middleOf(page, sel) {
         return null;
       }, HINT);
       assert(free, 'no control outside the pills to tap');
-      await page.touchscreen.tap(free.x, free.y);
+      await tap(page, free.x, free.y);
       await page.waitForTimeout(300);
       assert(JSON.stringify(await flags(page)) === '{}', 'a tap outside every pill marked hints as seen: ' + JSON.stringify(await flags(page)));
       assert((await hintsShown(page)).length === 2, 'a tap outside every pill removed a hint: ' + (await hintsShown(page)).join(','));
@@ -458,7 +473,7 @@ async function middleOf(page, sel) {
         assert(Math.abs(x - h.x) + Math.abs(y - h.y) > 1, h.id + '\'s "Got it" did not move off the control');
         const hit = await page.evaluate(({ x, y }) => { const t = document.elementFromPoint(x, y); return !!(t && t.closest('[data-gesture-hint-dismiss]')); }, { x, y });
         assert(hit, h.id + '\'s "Got it" does not take a tap where it moved to');
-        await page.touchscreen.tap(x, y);
+        await tap(page, x, y);
         await page.waitForFunction((id) => !document.querySelector('[data-gesture-hint="' + id + '"]'), h.id, { timeout: 2000 });
       }
       const f = await flags(page);
