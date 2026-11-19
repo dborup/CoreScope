@@ -5965,13 +5965,16 @@ body { touch-action: pan-y; }
  * the analytics warm-up pill) now lies above a hint, as it should.
  * Comments live ABOVE the rule body, not interleaved, because a stray
  * em-dash or sequence inside the body has historically caused some CSS
- * parsers to drop the entire rule from the CSSOM. */
+ * parsers to drop the entire rule from the CSSOM.
+ * #911: only the Got it button takes taps. The pill body and its text are
+ * pointer-events none, so a tap on them reaches the control underneath. */
 .gesture-hint {
   position: fixed;
   z-index: calc(var(--z-modal-backdrop) - 1);
   width: -moz-fit-content;
   width: fit-content;
   max-width: 360px;
+  max-width: min(360px, calc(100vw - 32px));
   pointer-events: none !important;
   opacity: 1;
   animation-name: gesture-hint-slide-in;
@@ -5995,7 +5998,7 @@ body { touch-action: pan-y; }
   top: 80px;
 }
 .gesture-hint-inner {
-  pointer-events: auto;
+  pointer-events: none;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -7087,31 +7090,39 @@ body.embed .warmup-pills { display: none !important; }
 .tp-hbadge-owner { border-width: 2px; border-color: var(--owner-badge); color: var(--text); }
 .tp-hbadge-link { border-color: var(--border); color: var(--text); }
 
-/* #681 M5 — "Terrain profile to…" on node detail: a 48 px target in both
-   the side pane and the full page action row. */
-.node-terrain-action {
+/* #920 — every node action is one compact chip: on the full node page
+   Copy URL, Copy short URL, Analytics, Reach and Observer →; in the side
+   pane Details, Analytics and Reach; in both, the module actions "Terrain
+   profile" and "Oblique photo" (#681 M5, #737 M2). 12 px on the page,
+   11 px in the pane; on phones every chip grows to a 44 px tap target, so
+   a row keeps one height. */
+.node-action-chip {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-height: 48px;
-  min-width: 48px;
-  padding: 4px 12px;
-  margin-left: 4px;
+  padding: 4px 10px;
   font-size: 12px;
+  line-height: 1.2;
   text-decoration: none;
+  white-space: nowrap;
   vertical-align: middle;
 }
-/* The side pane gives it a row of its own under the 20 px Details /
-   Analytics / Reach buttons, rather than letting it wrap there and double
-   the height of that row (#711). */
-.node-detail-actions { margin: -4px 0 12px; }
+/* The side pane gives the module chips a row of their own under the
+   Details / Analytics / Reach chips, rather than letting them wrap there
+   and double the height of that row (#711). Both rows align their chips to
+   the top instead of stretching them, so a chip that drifts in size shows
+   as a different height instead of being stretched to match its line. */
+.node-full-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: flex-start; }
+.node-detail-actions { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 8px; align-items: flex-start; }
 .node-detail-actions:empty { display: none; }
-.node-full-actions .node-terrain-action,
-.node-detail-actions .node-terrain-action { margin-left: 0; }
+.node-detail .node-action-chip { padding: 2px 8px; font-size: 11px; }
 .node-terrain-icon { display: inline-flex; }
+@media (max-width: 768px) {
+  .node-action-chip { min-height: 44px; min-width: 44px; justify-content: center; }
+}
 
-/* #737 M2 — "Oblique photo": the node-detail button sits beside "Terrain
-   profile to…" with the same 48 px target; in the Path profile a row of
+/* #737 M2 — "Oblique photo": the node-detail button is a node action chip
+   (#920) beside "Terrain profile"; in the Path profile a row of
    its own under the chart (A, B, the clicked chart point). */
 .sf-icon { display: inline-flex; }
 .tp-sf-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0 0; }

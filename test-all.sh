@@ -159,6 +159,7 @@ run test-issue-723-profile-warning.js
 run test-issue-723-m4-heritage-customizer.js
 run test-issue-681-profile-tool.js
 run test-issue-681-m5-node-entry.js
+run test-issue-920-node-action-chips.js
 run test-issue-681-m6-customizer-terrain.js
 run test-issue-790-profile-compact.js
 run test-issue-721-move-endpoints.js

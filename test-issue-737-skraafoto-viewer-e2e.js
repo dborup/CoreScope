@@ -36,14 +36,14 @@
  *      move when the row is on;
  *   9. phones, 375x560 portrait and 640x360 landscape, each a cold start
  *      from `/` (no gesture hint marked as seen) by real taps: More, Nodes,
- *      the node's row, then the action — or "Terrain profile to…", a tap
+ *      the node's row, then the action — or "Terrain profile", a tap
  *      on the map for B (#790) and a tap on the chart — the dialog sits
  *      above the bottom nav and inside the viewport, its controls are hit
  *      by themselves, the gesture hints that are up do not cover it
  *      (#818), and the profile panel keeps its layout;
  *  10. a node name is text, never markup;
  *  11. a node outside the block's bounds (Denmark) has no action, while
- *      "Terrain profile to…" is still offered (#818);
+ *      "Terrain profile" is still offered (#818);
  *  12. #737 M3c, the marks: the stubbed search carries M3a's frame,
  *      point, inFrame, approx and, when asked for a path, path (preview
  *      pixels); the stubbed preview answers ?zoom=1&x=&y= with a crop and
@@ -456,9 +456,9 @@ function searchAnswer(q, o) {
     const { ctx, page, rec } = await newCtx({ holdSearch: true });
     await gotoNode(page, PK);
     await page.waitForSelector(ACTION, { timeout: 10000 });
-    await step('node page: the action is a 48 px button', async () => {
+    await step('node page: the action is a compact chip button (#920)', async () => {
       const b = await rect(page, ACTION);
-      assert(b.h >= 48 && b.w >= 48, `target ${b.w}x${b.h}`);
+      assert(b.h < 44, `desktop chip ${b.w}x${b.h}`);
       assert(await page.$eval(ACTION, e => e.tagName) === 'BUTTON', 'a button: it opens a dialog');
       assert(rec.search.length === 0, 'nothing asked before a click');
     });
@@ -1173,7 +1173,7 @@ function searchAnswer(q, o) {
   }
 
   /* A cold start to the Path profile, the way #790 lets a phone pick B:
-   * the node's "Terrain profile to…", a tap on the visible map for B, then
+   * the node's "Terrain profile", a tap on the visible map for B, then
    * a tap on the chart. The hints are dismissed with "Got it" as they come
    * up: one of them lies over the page's own panel until then (#823
    * review, F4), and the page's layering is not this viewer's. */

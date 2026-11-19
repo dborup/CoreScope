@@ -590,6 +590,7 @@ See `config.example.json` in the repository for all available options including:
 - Retention policies
 - Geo-filtering
 - Map tile providers (OSM, Stamen, Carto, etc.)
+- Owner antenna heights and station details (`antennaClaims`, including the opt-in `detailsEnabled`; a change needs a restart of the server and the ingestor)
 
 **A `config.json` that does not parse is ignored whole** (#694). The server
 tries `config.json` and then `data/config.json`; a file that fails to decode
@@ -1478,6 +1479,16 @@ that container is running.
 
 Back up `config.json` (which may contain secrets) and `theme.json` separately
 if wanted; the SQLite helper intentionally does not publish them.
+
+### Owner contacts in backups
+
+With `antennaClaims.detailsEnabled` (see [Owner antenna heights](user-guide/configuration.md#owner-antenna-heights)), the database holds the optional contacts that owners give with their station details. Treat a backup as operator data that contains personal data:
+
+- `GET /api/backup` (behind the admin API key) writes a fresh copy (`VACUUM INTO`) that holds only the contacts that exist at that moment. `scripts/backup-sqlite.sh` copies the database file and its WAL as they are, so it can also carry a contact deleted earlier, until SQLite reuses that space or a `VACUUM` rebuilds the file. Your backup retention decides how long a copy lives. Take that into account for any "remove my data" request.
+- The server's database connection is read-only, so a contact cannot be removed from a snapshot afterwards. Only the ingestor deletes contacts, in the same step as the status change that ends them: remove, replace, reject, revoke, expire and retention.
+- Deletion is **logical**. The database does not use `secure_delete`, so deleted text can stay in unused pages and in the write-ahead log until SQLite reuses the space or a `VACUUM` rebuilds the file.
+- Queued requests in `antenna-claim-requests/` carry both contacts until the ingestor next runs: command files are never pruned by age, so while the ingestor is down they stay. A request older than 24 hours is then refused without being applied, and its file is removed. The directory is `0700` and the files `0600`, owned by the service user (see [Running the Go services without root](#running-the-go-services-without-root-opt-in)). Copies of the data directory keep whatever access you give them.
+- The contacts are never written to the logs.
 
 ### Restore
 

@@ -6,9 +6,11 @@ If you own a node, you can give the site its real antenna height. You prove that
 
 This page is for node owners. Operators: see [Configuration → Owner antenna heights](configuration.md#owner-antenna-heights).
 
+Besides the height, a site can let you describe the station: antenna type, gain, power source and installation, plus optional contacts. See [Station details](#station-details).
+
 ## Before you start
 
-- The site must have owner claims switched on. If the node page has no **Antenna height (owner)** section, they are off on this site.
+- The site must have owner claims switched on. If the node page has no **Antenna height (owner)** or **Antenna and station (owner)** section, they are off on this site. The second title means station details are on too.
 - The page offers claims for **repeaters** and **room servers**.
 - The node must send its position in its adverts. Without a position, a height cannot be claimed.
 - You need access to the node's command line: over USB, or remotely as admin from the MeshCore app.
@@ -98,6 +100,72 @@ Viewers can turn **Prefer owner heights** off in Customize → Display → Terra
 
 When that advert arrives, your height is removed at once, without review. Profiles then fall back to the estimate or the default. Rename the node back afterwards.
 
+## Station details
+
+When the site has station details switched on, the section is called **Antenna and station (owner)** and the form has two groups: **Antenna height** and **Station details**. Each group has three choices:
+
+| Choice | What it does |
+|---|---|
+| **Keep** | Leaves that part as it is. This is the default. |
+| **Set** | Replaces that part with what you enter. |
+| **Remove** | Removes that part. |
+
+You can change the height, the details or both in one claim. One claim has one code, one advert proves it, and an administrator approves or rejects the whole claim. If one part is wrong, the claim is rejected and you submit a new one.
+
+A claim replaces only the parts it carries. A claim that sets the height leaves your approved details in force, and the other way round.
+
+The details are:
+
+| Field | Values |
+|---|---|
+| Antenna type | omni, yagi, panel or other |
+| Antenna gain | −5 to 20 dBi, in steps of 0.1. A gain outside 0–15 dBi gets a closer look from an administrator. |
+| Power | any of mains, solar and battery |
+| Installation | roof, mast, indoor or portable |
+| Public contact | optional; see below |
+| Administrator contact | optional; see below |
+
+At least one field must be filled in when you set the details. **Setting the details replaces all of them.** Nothing is merged, so if you change the gain, type your contacts again. The public values are pre-filled for you; the administrator contact never is, because no page can read it.
+
+Station details are for repeaters and room servers, like heights. A claim that sets details is never approved automatically: an administrator always reads it, because the public contact is free text that would otherwise go public unchecked. A claim that only removes things takes effect at once after its advert.
+
+### The two contacts
+
+| | Public contact | Administrator contact |
+|---|---|---|
+| Who sees it | Everyone, on the node's page and in the site's station API, once the claim is approved | Only the site's administrators, in the admin queue, once the claim is **proven** (not while it is still waiting for the advert) |
+| Meant for | A callsign, handle or name you want known | The site's operator reaching you about this site |
+| Required | No. It is empty unless you fill it in, and the form says plainly that it is public. | No |
+
+Both follow the same rules: 1–32 characters (at most 64 bytes) made of letters, digits, single spaces and `. _ - @ # + /`, with no space at the start or end. There is no `:`, so a link cannot be entered, and no control, invisible or direction-changing characters. A contact that breaks the rules is refused, never changed for you.
+
+Neither contact is put in a node card, a link preview, a share image or an export. The public contact shows only on the node page and in the station API. The administrator contact is in no public response at all.
+
+### When the details are deleted
+
+Both contacts live exactly as long as the details they belong to. They are deleted, and the public contact stops being shown, when:
+
+- **you remove the details** (a proven clear takes effect at once, without review);
+- **an administrator rejects** the claim;
+- **an administrator revokes** the approved claim;
+- **the claim expires**, because no advert with the code arrived within 24 hours;
+- **a newer approved claim replaces the details**, including a claim that only removes them;
+- **retention** deletes the finished claim, after the operator's retention period.
+
+Details that nothing replaced stay in force with no time limit. If the node moves more than 50 m (the operator may set another distance) from where you proved them, the site stops showing them until you claim them again. A move deletes nothing, and the administrator can still see them.
+
+If the site switches station details off, the page no longer shows your details or offers to change them. The site keeps what it stored. To have it removed, ask the operator (an administrator can revoke the claim). Or send `POST /api/nodes/{pubkey}/antenna-claims` with `{"clearDetails": true}` and prove it with an advert like any claim.
+
+### What stays behind
+
+Deletion is **logical**, not a wipe of the disk:
+
+- **Backups.** Administrators can download a copy of the database, and operators back it up. `GET /api/backup` writes a fresh copy (`VACUUM INTO`) that holds only the contacts that exist at that moment. `scripts/backup-sqlite.sh` copies the database file and its WAL as they are, so it can also carry a contact deleted earlier, until SQLite reuses that space or a `VACUUM` rebuilds the file. The operator's backup retention decides how long a copy lives. Ask the operator if a contact must be gone from their backups too.
+- **Free pages.** SQLite does not overwrite deleted data at once. Deleted text can stay in unused parts of the database file and its write-ahead log until the space is reused or the file is rebuilt. The site does not use SQLite's secure delete.
+- **The request queue.** Your request waits in a file next to the database until the site applies it, normally within seconds. If the site's ingestor is not running, the file stays until it starts again. A request older than 24 hours is then refused without being applied, and its file is removed. That file holds both contacts and can be read by the site's service user only. It is also removed when the request is applied.
+
+This is the operator's own storage. Other visitors never see it.
+
 ## Privacy
 
-The site stores the node's public key, the height, the code, and the time and position of the proving advert. Finished claims are deleted after a retention period set by the operator; the approved one is kept while it is in force. Nothing about you as a person is asked for or stored.
+The site stores the node's public key, the height, the station details you set, the code, and the time and position of the proving advert. The public contact is shown to everyone and the administrator contact only to administrators. Finished claims are deleted after a retention period set by the operator; the approved one is kept while it is in force. Nothing about you as a person is asked for, and both contacts are optional.

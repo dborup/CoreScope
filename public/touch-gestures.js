@@ -138,6 +138,12 @@
     return h || 'packets';
   }
 
+  // True when a tab swipe does something on this route: the route is one
+  // of the bottom-nav tabs (#911: the tab-swipe hint shows only here).
+  function canSwipeTabs() {
+    return getNavTabsInOrder().indexOf(currentRouteShort()) >= 0;
+  }
+
   function navigateRelative(delta) {
     var tabs = getNavTabsInOrder();
     if (!tabs.length) return;
@@ -450,6 +456,7 @@
   // Public API used by tests / future callers.
   window.TouchGestures = {
     dismissRowAction: dismissRowAction,
+    canSwipeTabs: canSwipeTabs,
     _navigateRelative: navigateRelative,
   };
 })();

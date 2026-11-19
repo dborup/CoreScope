@@ -197,6 +197,7 @@ An administrator can also revoke a previously approved channel (see [Channels](c
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `false` | Opens public claims. Only takes effect with a strong `apiKey` (16+ characters, not a placeholder). |
+| `detailsEnabled` | `false` | Also lets owners set station details: antenna type, gain, power, installation and two optional contacts (see [Station details](#station-details) below). Needs `enabled` and a strong `apiKey` too. Off, a request that sets details is refused with 403, but one that only removes details is still accepted by the API (the page offers no *Remove* while the switch is off). Details already stored are kept but not served, and an administrator can still revoke them. |
 | `autoApproveProven` | `false` | Approves a proven height without an administrator, unless it is flagged (see `reviewDeltaM`). Only repeater and room claims with a cached surface estimate can be flagged. |
 | `submissionsPerHour` | `20` | Global limit on new claims per hour. |
 | `maxPending` | `256` | Claims waiting for an advert, over all nodes. A claim over the limit is refused; it never evicts another. |
@@ -212,6 +213,20 @@ An administrator can also revoke a previously approved channel (see [Channels](c
 | `adminDefaultFilter` | `proven` | The admin queue's first view (`#/tools/antenna-claims`): `proven`, `pending`, `approved`, `rejected`, `revoked`, `expired` or `superseded`. |
 
 A value outside its range falls back to its default. The page reads the last five from `GET /api/antenna-claims/config`, so they need only a server restart.
+
+The switches `enabled`, `detailsEnabled` and `autoApproveProven` are read by their exact spelling, like the other opt-in gates: `DetailsEnabled`, or a top-level `AntennaClaims`, is ignored and logged, even after a canonical `false`. The page learns from the same route whether to show the station form (`detailsEnabled`).
+
+### Station details
+
+With `detailsEnabled`, a claim can carry station details next to the height, under one code. Owners follow [Station details](antenna-height-claims.md#station-details). What an operator needs to know:
+
+- **Review.** An administrator approves or rejects the whole claim in the admin queue. A claim that sets details is never approved by `autoApproveProven`, because the public contact is free text. A claim that only removes the height or the details takes effect at once after its advert.
+- **Public.** Antenna type, gain, power, installation and the optional public contact are served to everyone by `GET /api/nodes/{pubkey}/station` and shown on the node page. They are not in node cards, link previews, share images, `/api/nodes` or exports, and path profiles do not use them yet.
+- **Admin only.** The administrator contact is stored in its own table and read only by the admin queue (`GET /api/admin/antenna-claims`), for proven and approved claims. It is in no public response and is never logged.
+- **Deletion.** Both contacts are deleted when the details are removed, replaced, rejected, revoked or expired, and when retention deletes the claim. See the [owner guide](antenna-height-claims.md#when-the-details-are-deleted).
+- **Stale.** Details are not served once the node has moved more than `staleMoveM` from where they were proven. Portable stations too.
+- **Fixed limits.** The gain range (−5 to 20 dBi in 0.1 steps, with review outside 0–15 dBi) and the contact length (32 characters) are fixed in code and enforced by the database. They are not configurable.
+- **Backups and logical deletion.** `GET /api/backup` and `scripts/backup-sqlite.sh` copy the whole database, contacts included, while they exist. See [Deployment → Owner contacts in backups](../deployment.md#owner-contacts-in-backups).
 
 An approved height ranks below a per-node height in `radio.antennaHeightsM` and above the surface estimate and the role heights in `radio.antennaHeightsM`. In full, a profile takes the first of: the request (a typed height or a link), the operator's height for the node, the owner's approved height, the surface estimate (only where it is above the role height), the operator's height for the role, the built-in role default. A height a viewer types or opens from a link still wins for that viewer, and each viewer can turn **Prefer owner heights** off in the customizer (see [Customization](customization.md#terrain-profile-display-tab)).
 
