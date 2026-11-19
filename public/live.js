@@ -593,7 +593,9 @@
     // the same overlays clear it and never cover the credit.
     var credit = document.querySelector('#liveMap .leaflet-control-attribution');
     function publish() {
-      var h = Math.ceil(bar.getBoundingClientRect().height) || 58;
+      // #883: kiosk hides the bar; the 58px fallback would float the map
+      // credit above the bottom edge.
+      var h = kioskOn ? 0 : (Math.ceil(bar.getBoundingClientRect().height) || 58);
       page.style.setProperty('--vcr-bar-height', h + 'px');
       page.style.setProperty('--live-credit-height', (credit ? Math.ceil(credit.getBoundingClientRect().height) : 0) + 'px');
       // #1568 round-2: also publish on :root so JS reading
@@ -748,6 +750,7 @@
     if (mode !== 'LIVE' && !VCR.frozenNow) VCR.frozenNow = Date.now();
     if (mode === 'LIVE') VCR.frozenNow = null;
     if (moments) moments.onModeChange();
+    if (kiosk) kiosk.onModeChange();
     // #880 — "Follow next" picks a live packet; a replay must not feed it.
     if (mode !== 'LIVE' && followArmed) setFollowArmed(false);
     updateVCRUI();
@@ -1755,9 +1758,16 @@
   let moments = null;
   let momentsListening = false; // the customizer-change listener is on window
   let _momentHl = null; // { layers, timer } of the last fly-to highlight
+  // #883 M1 — kiosk mode (#/live?kiosk=1, live-kiosk.js). kioskOn is read
+  // from the hash once per mount; body.kiosk (never persisted) hides the
+  // chrome from the first paint. The controller exists while Live does.
+  let kioskOn = false;
+  let kiosk = null;
 
   async function init(app) {
     const generation = ++liveGeneration;
+    kioskOn = !!(window.LiveKiosk && getHashParams && window.LiveKiosk.parseKioskParams(getHashParams()).kiosk);
+    if (kioskOn) document.body.classList.add('kiosk');
     app.innerHTML = `
       <div class="live-page">
         <div id="liveMap" style="width:100%;height:100%;position:absolute;top:0;left:0;z-index:1"></div>
@@ -2285,6 +2295,7 @@
     applyLiveControlEffects();
     connectWS();
     initMoments(generation);
+    initKiosk(generation);
     initResizeHandler();
     initVCRHeightTracker();
     initLegendScrollRail();
@@ -2325,7 +2336,8 @@
       if (window.LiveFollow) observerRoster = window.LiveFollow.buildObserverRoster(data);
     }).catch(function() { /* leave maps empty; filter will hide all when active */ });
     // #880 — deep link #/live?follow=<hash>; its fetch waits for the roster.
-    startFollowFromHash();
+    // #883: ignored in kiosk, where the tour owns the camera.
+    if (!kioskOn) startFollowFromHash();
 
     // Region filter (#1045): dropdown of observer IATA regions
     (function initLiveRegionFilter() {
@@ -2366,7 +2378,8 @@
     const nodeFilterDropdown = document.getElementById('liveNodeFilterDropdown');
     if (nodeFilterInput) {
       // Restore from URL param or localStorage
-      const urlNode = getHashParams && getHashParams().get('node');
+      // #883: ignored in kiosk, which shows the whole mesh.
+      const urlNode = !kioskOn && getHashParams && getHashParams().get('node');
       if (urlNode) setNodeFilter(urlNode.split(',').map(s => s.trim()).filter(Boolean));
       else if (nodeFilterKeys.length) updateNodeFilterUI();
 
@@ -3004,7 +3017,9 @@
       ? parseViewportHash(location.hash) : null;
     if (urlVp) {
       map.setView([urlVp.lat, urlVp.lon], urlVp.zoom);
-    } else {
+    } else if (!kioskOn) {
+      // #883: kiosk starts from the hash or the map defaults, never from the
+      // viewer's own saved view.
       const savedView = localStorage.getItem('live-map-view');
       if (savedView) {
         try { const v = JSON.parse(savedView); map.setView([v.lat, v.lng], v.zoom); } catch {}
@@ -3014,6 +3029,9 @@
       // Leaflet's remove() leaves invalidateSize's debounced moveend timer
       // armed, so this can run after destroy() has nulled the map.
       if (!map) return;
+      // #883: the tour moves the map every step; the viewer's saved view
+      // stays as it was before kiosk.
+      if (kioskOn) return;
       const c = map.getCenter();
       localStorage.setItem('live-map-view', JSON.stringify({ lat: c.lat, lng: c.lng, zoom: map.getZoom() }));
     });
@@ -3959,6 +3977,8 @@
   window._liveWSHandler = function() { return wsHandler; };
   // #881 M2 E2E: the moments controller and the map a card click moves.
   window._liveMoments = function() { return moments; };
+  // #883 M1 E2E: the kiosk controller (stats() only).
+  window._liveKiosk = function() { return kiosk; };
   window._liveGetMap = function() { return map; };
   window._liveVCR = function() { return VCR; };
   window._liveGetFavoritePubkeys = getFavoritePubkeys;
@@ -4088,7 +4108,8 @@
     try { stored = localStorage.getItem(M.STORAGE_KEY); } catch (_) { /* private mode */ }
     const fromHash = getHashParams ? getHashParams().get(M.HASH_PARAM) : null;
     const enabled = M.resolveInitialEnabled(fromHash, stored, momentSettings().enabled);
-    if (fromHash === '0' || fromHash === '1') {
+    // #883: a kiosk link applies ?moments= without saving it.
+    if (!kioskOn && (fromHash === '0' || fromHash === '1')) {
       try { localStorage.setItem(M.STORAGE_KEY, enabled ? 'true' : 'false'); } catch (_) { /* quota */ }
     }
     if (!document.querySelector('.live-page')) return;
@@ -4132,6 +4153,45 @@
       else if (moments) { moments.destroy(); moments = null; }
     }
     if (moments) moments.onSettingsChanged();
+  }
+
+  // #883 M1 — the kiosk controller. Its tour fits the map to one area per
+  // step: animated (flyToBounds) unless the viewer prefers reduced motion.
+  function initKiosk(generation) {
+    const K = window.LiveKiosk;
+    if (!kioskOn || !K || kiosk || generation !== liveGeneration || !map) return;
+    const page = document.querySelector('.live-page');
+    if (!page) return;
+    kiosk = K.create({
+      doc: document,
+      win: window,
+      root: page,
+      map: { on: (t, fn) => { if (map) map.on(t, fn); }, off: (t, fn) => { if (map) map.off(t, fn); } },
+      params: K.parseKioskParams(getHashParams()),
+      // Shared with the selected-area outline: one request per hour at most.
+      fetchAreas: () => api('/config/areas/polygons', { ttl: 3600 }),
+      fly: (bounds, o) => {
+        if (!map) return;
+        // The safe-area inset (3 % of the short side) keeps the area clear
+        // of TV overscan.
+        const pad = Math.round(0.03 * Math.min(window.innerWidth, window.innerHeight));
+        const opts = { padding: [pad, pad], maxZoom: 12 };
+        if (o.animate) map.flyToBounds(bounds, Object.assign(opts, { duration: 2.5 }));
+        else map.fitBounds(bounds, Object.assign(opts, { animate: false }));
+      },
+      reducedMotion: prefersReducedMotion,
+      getMode: () => (followState ? 'FOLLOW' : VCR.mode),
+      requestFullscreen: () => document.documentElement.requestFullscreen({ navigationUI: 'hide' }),
+      exitFullscreen: () => document.exitFullscreen(),
+      exit: () => {
+        if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+        location.hash = K.stripKioskParams(location.hash);
+      },
+      warn: (m) => console.warn(m),
+      now: () => Date.now(),
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (id) => clearTimeout(id),
+    });
   }
 
   function startMoments() {
@@ -5669,6 +5729,7 @@
       rings: [], ringRadii: [], litRelays: 0, depthShown: -1, done: false, reduced: false,
     };
     if (moments) moments.onModeChange();
+    if (kiosk) kiosk.onModeChange();
     setLiveHashParam(LF.HASH_PARAM, h);
     collapseControlsOnPhone();
     buildFollowCard(st);
@@ -5952,6 +6013,7 @@
     if (st.card) { st.card.remove(); st.card = null; }
     if (!(opts && opts.keepUrl) && window.LiveFollow) setLiveHashParam(window.LiveFollow.HASH_PARAM, '');
     if (moments) moments.onModeChange();
+    if (kiosk) kiosk.onModeChange();
   }
 
   function destroy() {
@@ -6015,6 +6077,10 @@
     }
     if (moments) { moments.destroy(); moments = null; }
     clearMomentHighlight();
+    // #883 — before map.remove(): the controller holds map listeners.
+    if (kiosk) { kiosk.destroy(); kiosk = null; }
+    kioskOn = false;
+    if (document.body) document.body.classList.remove('kiosk');
     if (regionFilterChangeHandler && window.RegionFilter && typeof RegionFilter.offChange === 'function') {
       RegionFilter.offChange(regionFilterChangeHandler);
       regionFilterChangeHandler = null;
