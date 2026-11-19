@@ -889,6 +889,27 @@ let wsLastFrameAt = 0;
 let wsWatchdogTimer = null;
 let wsReconnectTimer = null; // the one pending reconnect, if any
 
+// #937: after a server restart every open page (kiosk screens stay open for
+// days) would reconnect in lock-step. The delay after each close starts at
+// WS_RECONNECT_MS (roles.js, operator setting `wsReconnectMs`), doubles per
+// attempt that never opened, is capped at WS_RECONNECT_MAX_MS (a larger
+// configured base is kept as is) and gets ±WS_RECONNECT_JITTER, never above
+// the cap: near the cap the range is only cut, not clamped, so the delays
+// stay spread instead of piling up on the cap. onopen resets it. Watchdog,
+// resume and pull reconnect at once.
+const WS_RECONNECT_MAX_MS = 30000;
+const WS_RECONNECT_JITTER = 0.2;
+let wsReconnectAttempts = 0;
+
+function wsReconnectDelay(attempt) {
+  const base = Number(window.WS_RECONNECT_MS) || 3000;
+  const cap = Math.max(base, WS_RECONNECT_MAX_MS);
+  const nominal = Math.min(base * Math.pow(2, attempt), cap);
+  const lo = nominal * (1 - WS_RECONNECT_JITTER);
+  const hi = Math.min(nominal * (1 + WS_RECONNECT_JITTER), cap);
+  return Math.round(lo + Math.random() * (hi - lo));
+}
+
 // --- Brand-logo packet-driven pulse (#1173) ---
 // Replaces the legacy live-dot indicator. Class-toggle only (CSS animations); colors come from
 // --logo-accent / --logo-accent-hi tokens. Test seam at window.__corescopeLogo.
@@ -1046,7 +1067,7 @@ function dropWS() {
 }
 
 // Watchdog and resume check. Inert while a reconnect is already scheduled
-// (ordinary close keeps its configured delay) or with no socket.
+// (ordinary close keeps its backoff delay) or with no socket.
 function checkWSLiveness() {
   clearTimeout(wsWatchdogTimer);
   wsWatchdogTimer = null;
@@ -1078,6 +1099,7 @@ function connectWS() {
   wsLastFrameAt = Date.now(); // from creation: a stuck handshake is caught too
   wsWatchdogTimer = setTimeout(checkWSLiveness, WS_STALE_MS);
   sock.onopen = () => {
+    wsReconnectAttempts = 0;
     Logo.setConnected(true);
     // A deploy restarts the server, so a reconnect is a cheap moment to
     // check for a new version (#614, see version-notice.js).
@@ -1092,7 +1114,9 @@ function connectWS() {
     // It used to be honoured only by the live map's private socket; now that
     // every view shares this one, the setting applies here or nowhere.
     clearTimeout(wsReconnectTimer);
-    wsReconnectTimer = setTimeout(connectWS, window.WS_RECONNECT_MS || 3000);
+    const delay = wsReconnectDelay(wsReconnectAttempts);
+    wsReconnectAttempts++;
+    wsReconnectTimer = setTimeout(connectWS, delay);
   };
   sock.onerror = () => sock.close();
   sock.onmessage = (e) => {
@@ -1111,19 +1135,32 @@ function connectWS() {
           invalidateApiCache('/nodes');
         }, 5000);
       }
-      wsListeners.forEach(fn => fn(msg));
+      // Each listener in its own try: one that throws must not starve the
+      // listeners after it.
+      wsListeners.forEach(fn => {
+        try { fn(msg); } catch (err) { console.error('[ws] listener error', err); }
+      });
     } catch {}
   };
 }
 
 // Timers in a hidden or sleeping tab can run late (or not at all), so check
 // as soon as the page is visible or back online instead of waiting out a
-// watchdog that may be minutes behind.
+// watchdog that may be minutes behind. A pending backoff reconnect (up to
+// WS_RECONNECT_MAX_MS) is not waited out either (#937): these events are per
+// client, so reconnecting at once brings back no stampede. connectWS()
+// cancels the pending timer; the attempt count is kept, so a server that is
+// still down continues the backoff.
+function resumeWS() {
+  if (wsReconnectTimer) connectWS();
+  else checkWSLiveness();
+}
+
 function setupWSResumeCheck() {
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) checkWSLiveness();
+    if (!document.hidden) resumeWS();
   });
-  window.addEventListener('online', checkWSLiveness);
+  window.addEventListener('online', resumeWS);
 }
 
 function onWS(fn) { wsListeners.push(fn); }
