@@ -66,6 +66,8 @@
     ownerBadge: '--owner-badge',
     // #724 M3 — the antenna sites map layer (canvas markers + popup).
     mastSite: '--mast-site', mastInterference: '--mast-interference',
+    // #914 — the node heat map's five-stop gradient (violet -> magenta).
+    heat1: '--heat-1', heat2: '--heat-2', heat3: '--heat-3', heat4: '--heat-4', heat5: '--heat-5',
     // #881 M3 — the Live "Moments" cards: the card fill and one icon /
     // stripe accent per kind.
     momentCardBg: '--moment-card-bg', momentNewNode: '--moment-new-node',
@@ -81,13 +83,38 @@
     'terrainBuilding', 'terrainVegetation', 'ownerBadge'];
   // #724 M3 — likewise outside preset detection: no preset defines them.
   var MASTS_COLOR_KEYS = ['mastSite', 'mastInterference'];
+  // #914 — likewise: the heat map gradient; colour-blind presets set it
+  // through --mc-heat-{light,dark}-N, not through these keys.
+  var HEAT_COLOR_KEYS = ['heat1', 'heat2', 'heat3', 'heat4', 'heat5'];
+  // The user's pick goes to its own slot, --heat-user-N, which style.css puts
+  // above the preset's ramp; THEME_CSS_MAP's --heat-N carries server config.
+  function _heatUserVar(key) { return THEME_CSS_MAP[key].replace('--heat-', '--heat-user-'); }
+
+  // #914 — the heat map follows the #1446 cascade: user override > colour-
+  // blind preset > server config > style.css. The value in effect for the
+  // mode is the user's only when the user's layer won the merge (in dark
+  // mode a server themeDark value beats a user light value, as for every
+  // theme key). A key with no value is removed, so a cleared override falls
+  // back to the preset or the stylesheet without a reload.
+  function _applyHeatCSS(root, effectiveConfig, userOverrides, dark) {
+    var eff = effectiveConfig || {}, ov = userOverrides || {};
+    HEAT_COLOR_KEYS.forEach(function (k) {
+      var fromDark = dark && eff.themeDark && eff.themeDark[k];
+      var val = fromDark || (eff.theme && eff.theme[k]) || '';
+      var userSec = fromDark ? ov.themeDark : ov.theme;
+      var user = !!(val && userSec && userSec[k]);
+      if (user) root.setProperty(_heatUserVar(k), val); else root.removeProperty(_heatUserVar(k));
+      if (val && !user) root.setProperty(THEME_CSS_MAP[k], val); else root.removeProperty(THEME_CSS_MAP[k]);
+    });
+  }
+
   // #881 M3 — likewise: the kind accents follow the colourblind preset
   // (cb-presets.js momentAccents), not the theme preset.
   var MOMENTS_COLOR_KEYS = ['momentCardBg', 'momentNewNode', 'momentBackOnline', 'momentRecordLink', 'momentBusiest'];
 
   var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) {
     return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1 && MASTS_COLOR_KEYS.indexOf(k) === -1 &&
-      MOMENTS_COLOR_KEYS.indexOf(k) === -1;
+      HEAT_COLOR_KEYS.indexOf(k) === -1 && MOMENTS_COLOR_KEYS.indexOf(k) === -1;
   });
 
   // ── Brand logo swap helper (PR #1137) ──
@@ -353,6 +380,7 @@
     terrainBuilding: 'Buildings (DSM)', terrainVegetation: 'Trees/other (DSM)',
     ownerBadge: 'Owner Height Badge',
     mastSite: 'Antenna Site', mastInterference: 'Interference Ring',
+    heat1: 'Heat: low', heat2: 'Heat: low-mid', heat3: 'Heat: mid', heat4: 'Heat: high', heat5: 'Heat: peak',
     momentCardBg: 'Card Fill', momentNewNode: 'New Node', momentBackOnline: 'Back Online',
     momentRecordLink: 'Record Link', momentBusiest: 'Busiest Repeater',
     font: 'Body Font', mono: 'Mono Font'
@@ -384,6 +412,10 @@
     ownerBadge: 'Path profile and node page: the badge on an antenna height the node\u2019s owner set',
     mastSite: 'Map: every Mastedatabasen antenna site (mast, tower or rooftop)',
     mastInterference: 'Map: the ring around sites with a 700/800/900 MHz transmitter',
+    heat1: 'Map and Live heat map: the faintest areas (violet by default)',
+    heat2: 'Map and Live heat map: low density', heat3: 'Map and Live heat map: medium density',
+    heat4: 'Map and Live heat map: high density',
+    heat5: 'Map and Live heat map: the densest areas (magenta by default)',
     momentCardBg: 'Live: the background of a Moments card and of its drawer rows',
     momentNewNode: 'Live: the icon and stripe of a new-node moment',
     momentBackOnline: 'Live: the icon and stripe of a back-online moment',
@@ -1062,10 +1094,10 @@
 
     // Apply theme color/font CSS variables
     for (var key in THEME_CSS_MAP) {
-      if (themeSection[key]) {
-        root.setProperty(THEME_CSS_MAP[key], themeSection[key]);
-      }
+      if (HEAT_COLOR_KEYS.indexOf(key) !== -1) continue; // _applyHeatCSS
+      if (themeSection[key]) root.setProperty(THEME_CSS_MAP[key], themeSection[key]);
     }
+    _applyHeatCSS(root, effectiveConfig, userOverrides, dark);
 
     // Logo brand colors mirror --accent / --accent-hover ONLY when an
     // operator has actually overridden them via the customizer. We check
@@ -2016,6 +2048,11 @@
       mastsRows += _renderColorRow(mk, section, current[mk] || _cssVarValue(mk), serverCurrent[mk]);
     }
 
+    var heatRows = '';
+    for (var hi = 0; hi < HEAT_COLOR_KEYS.length; hi++) {
+      var hk = HEAT_COLOR_KEYS[hi];
+      heatRows += _renderColorRow(hk, section, current[hk] || _cssVarValue(hk), serverCurrent[hk]);
+    }
     var momentsRows = '';
     for (var moci = 0; moci < MOMENTS_COLOR_KEYS.length; moci++) {
       var mock = MOMENTS_COLOR_KEYS[moci];
@@ -2030,6 +2067,7 @@
       '<details class="cust-advanced"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Advanced (' + ADVANCED_KEYS.length + ' options)</summary>' + advancedRows + '</details>' +
       '<details class="cust-terrain-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Terrain profile chart (' + TERRAIN_COLOR_KEYS.length + ' options)</summary>' + terrainRows + '</details>' +
       '<details class="cust-masts-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Antenna sites map layer (' + MASTS_COLOR_KEYS.length + ' options)</summary>' + mastsRows + '</details>' +
+      '<details class="cust-heat-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Heat map (' + HEAT_COLOR_KEYS.length + ' options)</summary>' + heatRows + '</details>' +
       '<details class="cust-moments-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live moments cards (' + MOMENTS_COLOR_KEYS.length + ' options)</summary>' + momentsRows + '</details>' +
       '<details class="cust-fonts" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Fonts</summary>' + fontRows + '</details>' +
     '</div>';
@@ -3570,7 +3608,7 @@
         };
         inp.addEventListener('input', function () {
           // Optimistic CSS update (Decision #12)
-          var cssVar = THEME_CSS_MAP[key];
+          var cssVar = HEAT_COLOR_KEYS.indexOf(key) !== -1 ? _heatUserVar(key) : THEME_CSS_MAP[key];
           if (cssVar) document.documentElement.style.setProperty(cssVar, picked());
           // Mirror to logo brand vars so the wordmark recolors live too.
           if (key === 'accent') document.documentElement.style.setProperty('--logo-accent', inp.value);
@@ -3953,8 +3991,10 @@
       : (earlyEffective.theme || {});
     var root = document.documentElement.style;
     for (var key in THEME_CSS_MAP) {
+      if (HEAT_COLOR_KEYS.indexOf(key) !== -1) continue; // _applyHeatCSS
       if (themeSection[key]) root.setProperty(THEME_CSS_MAP[key], themeSection[key]);
     }
+    _applyHeatCSS(root, earlyEffective, earlyOverrides, dark);
     // Mirror accent → logo brand vars ONLY when present in overrides (so the
     // server-default accent never clobbers the sage/teal :root brand defaults).
     var ovTheme = dark
@@ -4100,6 +4140,10 @@
         });
         for (var ri = 0; ri < 5; ri++) rs.removeProperty('--mc-rt-ramp-' + ri);
         ['new-node', 'back-online', 'record-link', 'busiest'].forEach(function (k) { rs.removeProperty('--mc-moment-' + k); });
+        ['light', 'dark'].forEach(function (mode) {
+          for (var hn = 1; hn <= 5; hn++) rs.removeProperty('--mc-heat-' + mode + '-' + hn);
+        });
+        HEAT_COLOR_KEYS.forEach(function (k) { rs.removeProperty(_heatUserVar(k)); });
         // Theme vars the customizer might have stamped onto :root via
         // applyCSS (logo accents + every entry in THEME_CSS_MAP).
         rs.removeProperty('--logo-accent');
@@ -4198,6 +4242,7 @@
     TERRAIN_OWNER_KEY: TERRAIN_OWNER_KEY,
     ownerSettings: ownerSettings,
     MASTS_COLOR_KEYS: MASTS_COLOR_KEYS,
+    HEAT_COLOR_KEYS: HEAT_COLOR_KEYS,
     VALID_SECTIONS: VALID_SECTIONS,
     isValidAntennaHeight: isValidAntennaHeight,
     terrainSettings: terrainSettings,

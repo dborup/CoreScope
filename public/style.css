@@ -208,6 +208,22 @@
      these). Dark values live in BOTH dark blocks below. */
   --mast-site: #0e7490;                          /* every antenna site */
   --mast-interference: #c2410c;                  /* 700/800/900 MHz ring */
+  /* #914 — node heat map: one violet -> magenta hue family, apart from the
+     Colour by elevation ramp (teal -> red). Read by public/heat-gradient.js. */
+  --heat-1: #5b21b6;
+  --heat-2: #7e22ce;
+  --heat-3: #a21caf;
+  --heat-4: #c026d3;
+  --heat-5: #e879f9;
+  /* The stop in effect, by the #1446 rule: the user's customizer pick
+     (--heat-user-N), else a colour-blind preset's ramp for this mode
+     (cb-presets.js heatRamp), else the theme's --heat-N (server config or
+     the values above). Dark blocks pick the preset's dark ramp. */
+  --heat-stop-1: var(--heat-user-1, var(--mc-heat-light-1, var(--heat-1)));
+  --heat-stop-2: var(--heat-user-2, var(--mc-heat-light-2, var(--heat-2)));
+  --heat-stop-3: var(--heat-user-3, var(--mc-heat-light-3, var(--heat-3)));
+  --heat-stop-4: var(--heat-user-4, var(--mc-heat-light-4, var(--heat-4)));
+  --heat-stop-5: var(--heat-user-5, var(--mc-heat-light-5, var(--heat-5)));
   /* #789 M3 — the badge on an antenna height the node's owner set (Path
      profile, node page). Follows --success in light and dark alike unless
      the customizer sets ownerBadge. */
@@ -522,6 +538,17 @@
     /* #724 M3 — antenna sites on dark tiles. */
     --mast-site: #22d3ee;
     --mast-interference: #fb923c;
+    /* #914 — heat map on dark tiles: brighter violet -> magenta. */
+    --heat-1: #7c3aed;
+    --heat-2: #9333ea;
+    --heat-3: #c026d3;
+    --heat-4: #d946ef;
+    --heat-5: #f0abfc;
+    --heat-stop-1: var(--heat-user-1, var(--mc-heat-dark-1, var(--heat-1)));
+    --heat-stop-2: var(--heat-user-2, var(--mc-heat-dark-2, var(--heat-2)));
+    --heat-stop-3: var(--heat-user-3, var(--mc-heat-dark-3, var(--heat-3)));
+    --heat-stop-4: var(--heat-user-4, var(--mc-heat-dark-4, var(--heat-4)));
+    --heat-stop-5: var(--heat-user-5, var(--mc-heat-dark-5, var(--heat-5)));
     --status-green: #22c55e;
     /* #1719 — on dark card-bg (#232340) #22c55e gives 6.65:1, AA pass.
        Keep the bright hue for text rather than darkening it. */
@@ -617,6 +644,17 @@
   /* #724 M3 — antenna sites on dark tiles (mirror of the @media block). */
   --mast-site: #22d3ee;
   --mast-interference: #fb923c;
+  /* #914 — heat map on dark tiles: brighter violet -> magenta. */
+  --heat-1: #7c3aed;
+  --heat-2: #9333ea;
+  --heat-3: #c026d3;
+  --heat-4: #d946ef;
+  --heat-5: #f0abfc;
+  --heat-stop-1: var(--heat-user-1, var(--mc-heat-dark-1, var(--heat-1)));
+  --heat-stop-2: var(--heat-user-2, var(--mc-heat-dark-2, var(--heat-2)));
+  --heat-stop-3: var(--heat-user-3, var(--mc-heat-dark-3, var(--heat-3)));
+  --heat-stop-4: var(--heat-user-4, var(--mc-heat-dark-4, var(--heat-4)));
+  --heat-stop-5: var(--heat-user-5, var(--mc-heat-dark-5, var(--heat-5)));
   /* Brighter link-strength hues for contrast on dark map tiles + surfaces. */
   --link-strong: #3fb950;
   --link-medium: #d29922;

@@ -25,6 +25,14 @@ function read(rel) { return fs.readFileSync(path.join(ROOT, rel), 'utf8'); }
 // style.css with comments removed: e2212f50 (#1627) added a comment that
 // mentions [data-theme="dark"] above the real block, and indexOf landed on it.
 function readCss() { return read('public/style.css').replace(/\/\*[\s\S]*?\*\//g, ''); }
+// The whole block that opens at the first '{' after i (nested blocks
+// included), not a fixed-length window: new dark tokens (#914) pushed
+// --card-bg past the old 2000-character slice.
+function blockFrom(css, i) {
+  let j = css.indexOf('{', i) + 1, depth = 1;
+  while (depth && j < css.length) { if (css[j] === '{') depth++; else if (css[j] === '}') depth--; j++; }
+  return css.slice(i, j);
+}
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -41,7 +49,7 @@ test('@media dark block sets --card-bg to var(--surface-2)', () => {
   // Find the @media (prefers-color-scheme: dark) block
   const mediaIdx = css.indexOf('@media (prefers-color-scheme: dark)');
   assert.ok(mediaIdx !== -1, '@media dark block not found');
-  const mediaBlock = css.slice(mediaIdx, mediaIdx + 2000);
+  const mediaBlock = blockFrom(css, mediaIdx);
   const m = mediaBlock.match(/--card-bg\s*:\s*([^;]+);/);
   assert.ok(m, '--card-bg not found in @media dark block');
   assert.strictEqual(m[1].trim(), 'var(--surface-2)',
@@ -52,7 +60,7 @@ test('[data-theme="dark"] block sets --card-bg to var(--surface-2)', () => {
   const css = readCss();
   const themeIdx = css.indexOf('[data-theme="dark"]');
   assert.ok(themeIdx !== -1, '[data-theme="dark"] block not found');
-  const themeBlock = css.slice(themeIdx, themeIdx + 2000);
+  const themeBlock = blockFrom(css, themeIdx);
   const m = themeBlock.match(/--card-bg\s*:\s*([^;]+);/);
   assert.ok(m, '--card-bg not found in [data-theme="dark"] block');
   assert.strictEqual(m[1].trim(), 'var(--surface-2)',

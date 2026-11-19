@@ -182,6 +182,16 @@
         unknown:   '#595959'
       }
     ,
+      // #914 — heat map: ColorBrewer Greys, one ramp per base-map mode so the
+      // densest (most opaque) area is the strongest contrast: dark on a light
+      // map, white on a dark one. deut/prot/trit carry none: the theme's
+      // violet -> magenta already keeps its contrast and its distance from
+      // the elevation ramp under their simulation
+      // (test-issue-914-heat-gradient.js checks every preset and mode).
+      heatRamp: {
+        light: ['#bdbdbd', '#969696', '#737373', '#525252', '#252525'],
+        dark:  ['#737373', '#969696', '#bdbdbd', '#d9d9d9', '#ffffff']
+      },
       routeRamp: ['#222222', '#555555', '#888888', '#bbbbbb', '#eeeeee'],
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
@@ -276,6 +286,16 @@
       for (var ri = 0; ri < 5; ri++) {
         style.setProperty('--mc-rt-ramp-' + ri, rr[ri] || rr[rr.length - 1]);
       }
+      // #914 — heat map gradient (5 stops per mode). style.css picks
+      // --mc-heat-light-N or --mc-heat-dark-N for --heat-stop-N, over the
+      // theme's --heat-N; a preset without a heatRamp sets none.
+      var hr = p.heatRamp;
+      ['light', 'dark'].forEach(function (mode) {
+        for (var hi = 1; hi <= 5; hi++) {
+          if (hr) style.setProperty('--mc-heat-' + mode + '-' + hi, hr[mode][hi - 1]);
+          else style.removeProperty('--mc-heat-' + mode + '-' + hi);
+        }
+      });
       // #881 M3 — Live Moments kind accents; style.css reads them through
       // --moment-* so a customizer colour still wins.
       var ma = p.momentAccents || {};
@@ -330,6 +350,9 @@
         style.removeProperty('--mc-mb-' + k);
       });
       for (var ri = 0; ri < 5; ri++) style.removeProperty('--mc-rt-ramp-' + ri);
+      ['light', 'dark'].forEach(function (mode) {
+        for (var hj = 1; hj <= 5; hj++) style.removeProperty('--mc-heat-' + mode + '-' + hj);
+      });
       MOMENT_KINDS.forEach(function (k) { style.removeProperty(_momentVar(k)); });
     }
     if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof window.CustomEvent === 'function') {

@@ -5267,10 +5267,7 @@
     if (points.length && typeof L.heatLayer === 'function') {
       var savedOpacity = parseFloat(localStorage.getItem('meshcore-live-heatmap-opacity'));
       if (isNaN(savedOpacity)) savedOpacity = 0.3;
-      heatLayer = L.heatLayer(points, {
-        radius: 25, blur: 15, maxZoom: 14, minOpacity: 0.05,
-        gradient: { 0.2: '#0d47a1', 0.4: '#1565c0', 0.6: '#42a5f5', 0.8: '#ffca28', 1.0: '#ff5722' }
-      }).addTo(map);
+      heatLayer = L.heatLayer(points, HeatGradient.options()).addTo(map);
       // Set overall layer opacity via canvas element
       if (heatLayer._canvas) { heatLayer._canvas.style.opacity = savedOpacity; }
       else { setTimeout(function() { if (heatLayer && heatLayer._canvas) heatLayer._canvas.style.opacity = savedOpacity; }, 100); }
@@ -6098,6 +6095,7 @@
   // across re-mounts. window.__liveMQLBindCount is a debug seam consumed by
   // test-live-mql-leak-1180-e2e.js and otherwise unused.
   var _liveNarrowMqlBound = false;
+  var _heatUnwatch = null;
   // #1514 S4 — single source of truth for window._liveTestSeams is at the
   // earlier exposure block (search for `window._liveTestSeams = {`). The
   // duplicate definition that lived here previously added a `_liveTestSeams.wake`
@@ -6111,6 +6109,9 @@
         if (activeNodeDetailKey) showNodeDetail(activeNodeDetailKey);
       };
       window.addEventListener('theme-refresh', _themeRefreshHandler);
+      // #914: a theme, customizer or colour-blind preset change that moves
+      // the heat gradient rebuilds the layer; no reload.
+      _heatUnwatch = HeatGradient.watch(function () { if (heatLayer) showHeatMap(); });
       var result = init(app, routeParam);
       // Install channel color picker (M2, #271)
       if (window.ChannelColorPicker) window.ChannelColorPicker.installLiveFeed();
@@ -6118,6 +6119,7 @@
     },
     destroy: function() {
       if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; }
+      if (_heatUnwatch) { _heatUnwatch(); _heatUnwatch = null; }
       return destroy();
     }
   });
