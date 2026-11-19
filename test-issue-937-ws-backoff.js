@@ -5,10 +5,12 @@
  * fake clock, fake timers, fake WebSocket, pinned Math.random) and checks:
  *  - the reconnect delay starts at WS_RECONNECT_MS (operator `wsReconnectMs`,
  *    default 3 s), doubles per failed attempt and is capped at 30 s;
- *  - ±20 % jitter, never above the cap;
+ *  - ±20 % jitter, cut (not clamped) at the cap, so capped delays spread
+ *    over 24–30 s instead of piling up on 30 s;
  *  - the delay resets to the base once a socket opens;
  *  - the #117 watchdog and the visible/online resume check still reconnect at
- *    once, whatever the backoff state;
+ *    once, whatever the backoff state; a resume does not wait out a pending
+ *    backoff reconnect, the watchdog and onclose do;
  *  - one throwing onWS listener does not starve the others, and is logged.
  */
 'use strict';
@@ -52,9 +54,11 @@ function delays(b, n) {
 
 console.log('\n=== delay sequence ===');
 
+// Math.random is pinned to 0.5: the middle of the jitter range, which is the
+// nominal step below the cap and 27 s (the middle of 24–30 s) at it.
 test('default base 3 s doubles per failed attempt and is capped at 30 s', () => {
   const b = booted();
-  assert.deepStrictEqual(delays(b, 7), [3000, 6000, 12000, 24000, 30000, 30000, 30000]);
+  assert.deepStrictEqual(delays(b, 7), [3000, 6000, 12000, 24000, 27000, 27000, 27000]);
 });
 
 test('the first close of an open socket waits the base delay', () => {
@@ -66,7 +70,7 @@ test('the first close of an open socket waits the base delay', () => {
 test('many failed attempts stay at the cap', () => {
   const b = booted();
   const d = delays(b, 60);
-  assert.strictEqual(d[59], 30000);
+  assert.strictEqual(d[59], 27000);
   assert(d.every((ms) => ms > 0 && ms <= 30000), 'a delay left (0, 30000]: ' + d.join(','));
 });
 
@@ -86,6 +90,19 @@ test('random just below 1 gives 1.2× below the cap and never exceeds 30 s', () 
   assert(d[3] >= 28800 && d[3] <= 30000, 'fourth delay ' + d[3]);
   assert.strictEqual(d[4], 30000);
   assert.strictEqual(d[5], 30000);
+});
+
+test('at the cap the jitter stays spread: few delays land on exactly 30 s', () => {
+  const b = booted({ random: Math.random });
+  let atCap = 0, min = Infinity, max = 0;
+  for (let i = 0; i < 10000; i++) {
+    const ms = b.ctx.wsReconnectDelay(20);
+    if (ms === 30000) atCap++;
+    min = Math.min(min, ms); max = Math.max(max, ms);
+  }
+  assert(atCap < 500, atCap + ' of 10000 capped delays are exactly 30000 ms');
+  assert(min >= 24000 && max <= 30000, 'capped delays span ' + min + '–' + max);
+  assert(max - min > 5000, 'capped delays span only ' + min + '–' + max);
 });
 
 test('random delays stay within ±20 % of the nominal step', () => {
@@ -114,25 +131,27 @@ test('the delay resets to the base once a socket opens', () => {
 test('creating a socket alone does not reset the backoff', () => {
   const b = booted();
   delays(b, 4);
-  assert.strictEqual(closeAndWait(b), 30000);
+  assert.strictEqual(closeAndWait(b), 27000);
 });
 
 console.log('\n=== wsReconnectMs ===');
 
 test('WS_RECONNECT_MS (operator wsReconnectMs) is the base', () => {
   const b = booted({ reconnectMs: 5000 });
-  assert.deepStrictEqual(delays(b, 5), [5000, 10000, 20000, 30000, 30000]);
+  assert.deepStrictEqual(delays(b, 5), [5000, 10000, 20000, 27000, 27000]);
 });
 
 test('a WS_RECONNECT_MS set after boot (config fetch) is used', () => {
   const b = booted();
   b.ctx.window.WS_RECONNECT_MS = 1000;
-  assert.deepStrictEqual(delays(b, 7), [1000, 2000, 4000, 8000, 16000, 30000, 30000]);
+  assert.deepStrictEqual(delays(b, 7), [1000, 2000, 4000, 8000, 16000, 27000, 27000]);
 });
 
 test('a base above the cap is honoured, not lowered', () => {
   const b = booted({ reconnectMs: 45000 });
-  assert.deepStrictEqual(delays(b, 3), [45000, 45000, 45000]);
+  assert.deepStrictEqual(delays(b, 3), [40500, 40500, 40500]);
+  const hi = booted({ reconnectMs: 45000, random: () => 0.999999 });
+  assert.strictEqual(closeAndWait(hi), 45000);
 });
 
 console.log('\n=== watchdog and resume are unaffected ===');
@@ -168,15 +187,34 @@ test('deep in backoff, online after a long silence reconnects at once', () => {
   assert.strictEqual(b.sockets.length, n + 1, 'online did not reconnect at once');
 });
 
-test('resume during a pending backoff reconnect adds no socket', () => {
+test('resume during a pending backoff reconnect reconnects at once, keeping the backoff', () => {
+  for (const resume of ['visible', 'online']) {
+    const b = booted();
+    delays(b, 4);
+    b.current().serverClose(); // the cap is pending
+    const n = b.sockets.length;
+    if (resume === 'visible') { b.setHidden(true); b.setHidden(false); } else b.online();
+    assert.strictEqual(b.sockets.length, n + 1, resume + ': waited out the pending backoff');
+    assert.strictEqual(b.live().length, 1, resume + ': ' + b.live().length + ' live sockets');
+    assert.strictEqual(b.pendingReconnects(), 0, resume + ': the old reconnect is still pending');
+    // The server is still down: the next close continues the backoff.
+    assert.strictEqual(closeAndWait(b), 27000, resume + ': the resume reset the backoff');
+  }
+});
+
+test('only resume skips the pending reconnect, not the watchdog or another close', () => {
   const b = booted();
   delays(b, 4);
-  b.current().serverClose(); // 30 s pending
+  b.current().serverClose();
   const n = b.sockets.length;
-  b.stepWall(STALE);
-  b.setHidden(false); b.online();
-  assert.strictEqual(b.sockets.length, n);
-  assert.strictEqual(pendingDelay(b), 30000);
+  const ms = pendingDelay(b);
+  b.ctx.checkWSLiveness(); // a late watchdog run
+  b.advance(ms - 1);
+  assert.strictEqual(b.sockets.length, n, 'the watchdog skipped the pending backoff');
+  assert.strictEqual(pendingDelay(b), 1);
+  b.advance(1);
+  assert.strictEqual(b.sockets.length, n + 1);
+  assert.strictEqual(b.live().length, 1);
 });
 
 console.log('\n=== listener fan-out ===');

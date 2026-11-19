@@ -894,7 +894,9 @@ let wsReconnectTimer = null; // the one pending reconnect, if any
 // WS_RECONNECT_MS (roles.js, operator setting `wsReconnectMs`), doubles per
 // attempt that never opened, is capped at WS_RECONNECT_MAX_MS (a larger
 // configured base is kept as is) and gets ±WS_RECONNECT_JITTER, never above
-// the cap. onopen resets it. Watchdog, resume and pull reconnect at once.
+// the cap: near the cap the range is only cut, not clamped, so the delays
+// stay spread instead of piling up on the cap. onopen resets it. Watchdog,
+// resume and pull reconnect at once.
 const WS_RECONNECT_MAX_MS = 30000;
 const WS_RECONNECT_JITTER = 0.2;
 let wsReconnectAttempts = 0;
@@ -903,8 +905,9 @@ function wsReconnectDelay(attempt) {
   const base = Number(window.WS_RECONNECT_MS) || 3000;
   const cap = Math.max(base, WS_RECONNECT_MAX_MS);
   const nominal = Math.min(base * Math.pow(2, attempt), cap);
-  const jitter = (Math.random() * 2 - 1) * WS_RECONNECT_JITTER;
-  return Math.round(Math.min(nominal * (1 + jitter), cap));
+  const lo = nominal * (1 - WS_RECONNECT_JITTER);
+  const hi = Math.min(nominal * (1 + WS_RECONNECT_JITTER), cap);
+  return Math.round(lo + Math.random() * (hi - lo));
 }
 
 // --- Brand-logo packet-driven pulse (#1173) ---
@@ -1064,7 +1067,7 @@ function dropWS() {
 }
 
 // Watchdog and resume check. Inert while a reconnect is already scheduled
-// (ordinary close keeps its configured delay) or with no socket.
+// (ordinary close keeps its backoff delay) or with no socket.
 function checkWSLiveness() {
   clearTimeout(wsWatchdogTimer);
   wsWatchdogTimer = null;
@@ -1143,12 +1146,21 @@ function connectWS() {
 
 // Timers in a hidden or sleeping tab can run late (or not at all), so check
 // as soon as the page is visible or back online instead of waiting out a
-// watchdog that may be minutes behind.
+// watchdog that may be minutes behind. A pending backoff reconnect (up to
+// WS_RECONNECT_MAX_MS) is not waited out either (#937): these events are per
+// client, so reconnecting at once brings back no stampede. connectWS()
+// cancels the pending timer; the attempt count is kept, so a server that is
+// still down continues the backoff.
+function resumeWS() {
+  if (wsReconnectTimer) connectWS();
+  else checkWSLiveness();
+}
+
 function setupWSResumeCheck() {
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) checkWSLiveness();
+    if (!document.hidden) resumeWS();
   });
-  window.addEventListener('online', checkWSLiveness);
+  window.addEventListener('online', resumeWS);
 }
 
 function onWS(fn) { wsListeners.push(fn); }

@@ -3,7 +3,7 @@
  *
  * Loads the real public/app.js in a vm with a fake clock, fake timers and a
  * fake WebSocket, and boots it through its DOMContentLoaded listeners.
- * Math.random is pinned (opts.random, default 0.5 = no reconnect jitter) so
+ * Math.random is pinned (opts.random, default 0.5 = the middle of the jitter range) so
  * reconnect delays are deterministic; console.error calls are recorded in
  * box.errors.
  */

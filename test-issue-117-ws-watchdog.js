@@ -151,19 +151,22 @@ test('an ordinary close keeps the configured reconnect delay, and schedules one 
   assert.strictEqual(b.live().length, 1);
 });
 
-test('resume and the watchdog during a pending reconnect do not add a socket', () => {
+test('resume during a pending reconnect replaces it with one socket; the watchdog does not', () => {
   const b = booted({ reconnectMs: 5000 });
   const s = b.current(); s.open();
   b.advance(STALE - 1000);
   s.serverClose();
+  b.ctx.checkWSLiveness(); // a late watchdog run waits for the pending reconnect
+  b.advance(1000);
+  assert.strictEqual(b.sockets.length, 1, 'the watchdog bypassed the pending reconnect');
   b.stepWall(STALE);
   b.setHidden(false); b.online();
-  b.advance(4999);
-  assert.strictEqual(b.sockets.length, 1, 'a resume check bypassed the pending reconnect');
-  b.advance(1);
-  assert.strictEqual(b.sockets.length, 2);
+  assert.strictEqual(b.sockets.length, 2, 'a resume waited out the pending reconnect');
   assert.strictEqual(b.live().length, 1);
   assert.strictEqual(b.pendingReconnects(), 0);
+  b.advance(10000); // past the 5 s the cancelled reconnect was due at
+  assert.strictEqual(b.sockets.length, 2, 'the cancelled reconnect still ran');
+  assert.strictEqual(b.live().length, 1);
 });
 
 test('a pull during the reconnect delay cancels the pending reconnect', () => {
