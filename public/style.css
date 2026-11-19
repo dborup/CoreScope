@@ -2902,7 +2902,13 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
      instead so visible content fits without internal scrolling. Panel can
      grow to fill available height; max-height bound by viewport so it
      never escapes the screen. */
-  .map-controls { width: calc(100vw - 24px); right: 12px; top: 8px; max-height: calc(100vh - 80px); font-size: 12px; padding: 10px 12px; }
+  .map-controls { width: calc(100vw - 24px); right: 12px; top: 8px; font-size: 12px; padding: 10px 12px; }
+  /* #935: bound the panel by the map's own height, as #app.app-fixed computes it
+     (100vh fallback, then 100dvh; minus the header, --bottom-nav-reserve and
+     --warmup-pills-h), less the 8px top offset, an 8px gap below and the map
+     credit. Without the reserves the last section could not scroll above the
+     bottom nav. */
+  .map-controls { max-height: calc(100vh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px) - 16px - var(--map-credit-height, 0px)); max-height: calc(100dvh - 52px - var(--bottom-nav-reserve, 0px) - var(--warmup-pills-h, 0px) - 16px - var(--map-credit-height, 0px)); }
   /* On mobile, hide collapsed section bodies (everything inside the
      fieldset except the legend). The legend remains tappable to expand. */
   .map-controls fieldset.mc-section.mc-collapsed > *:not(legend) { display: none; }
