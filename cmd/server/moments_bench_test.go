@@ -141,25 +141,25 @@ func BenchmarkComputeRepeaterRelaySnapshot(b *testing.B) {
 	}
 }
 
-// bestOf returns the fastest of n runs of f.
-func bestOf(n int, f func()) time.Duration {
-	best := time.Duration(1<<63 - 1)
-	for i := 0; i < n; i++ {
-		start := time.Now()
-		f()
-		if d := time.Since(start); d < best {
-			best = d
-		}
-	}
-	return best
-}
-
 // tickCase is one detector pass at size n, built fresh so the two sizes of a
 // scaling check share nothing.
 type tickCase struct {
 	name string
 	// build returns the closure that performs one tick at size n.
 	build func(tb testing.TB, n int) func()
+	// cap is the best-of-rounds wall-clock budget at momentsScaleBig for a
+	// plain (non-race) binary, ~10x the idle cost measured for this pass.
+	cap time.Duration
+}
+
+// budget is the case's cap for this binary. -race (and coverage) instrument
+// every memory access, which makes these loops several times slower, so the
+// race binary gets its own multiple rather than one number shared by both.
+func (c tickCase) budget() time.Duration {
+	if raceBuild {
+		return c.cap * momentsRaceFactor
+	}
+	return c.cap
 }
 
 func tickCases() []tickCase {
@@ -167,11 +167,11 @@ func tickCases() []tickCase {
 		{"node tick", func(tb testing.TB, n int) func() {
 			h, rows := nodeTickHarness(tb, n)
 			return func() { nodeTickOnce(h, rows) }
-		}},
+		}, momentsCapNode},
 		{"record scan", func(tb testing.TB, n int) func() {
 			h, g := recordGraph(tb, n, 2*n)
 			return func() { h.d.onGraph(g) }
-		}},
+		}, momentsCapRecord},
 		{"busiest pass", func(tb testing.TB, n int) func() {
 			h := newMomentsHarness(tb, nil)
 			rows := make([]momentNodeRow, n)
@@ -183,19 +183,30 @@ func tickCases() []tickCase {
 			h.tick(rows...)
 			snap := &repeaterRelaySnapshot{info: info}
 			return func() { h.d.onRelay(snap) }
-		}},
+		}, momentsCapBusiest},
 	}
 }
 
 // Scaling bounds. A linear tick scales ~4x from n to 4n and an O(n²) one
-// ~16x; momentsMaxScale sits between them with room for noise. The absolute
-// cap is a sanity net only, ~10x the measured cost at 5x scale, so a slow
-// runner cannot trip it but a runaway still does.
+// ~16x; momentsMaxScale sits between them with room for noise.
+//
+// The absolute caps are per pass, because the passes differ 3x in cost and a
+// cap shared by all of them is loose for the cheap ones: a linear tick made
+// 85x slower still fit under the old shared 1 s. Each cap is ~10x the idle
+// best-of-9 cost at momentsScaleBig on a plain binary (node tick 4.7 ms,
+// record scan 10 ms, busiest pass 3.4 ms), so a ~10x constant-factor
+// slowdown fails and ordinary runner noise does not. Under -race the cost
+// rises to roughly 25x (record scan 250-320 ms idle) and a loaded runner
+// reached 1.7 s on a single attempt, so the race binary gets
+// momentsRaceFactor x the cap, which leaves headroom for load.
 const (
 	momentsScaleSmall = 5000
 	momentsScaleBig   = 20000
 	momentsMaxScale   = 9.0
-	momentsAbsCap     = time.Second
+	momentsCapNode    = 50 * time.Millisecond
+	momentsCapRecord  = 100 * time.Millisecond
+	momentsCapBusiest = 40 * time.Millisecond
+	momentsRaceFactor = 30
 	momentsMaxAllocs  = 64 // per tick; measured 1-2, independent of n
 )
 
@@ -225,7 +236,7 @@ func scaleRatio(small, big func(), rounds int) (ratio float64, bigBest time.Dura
 // TestMomentsTickCostBounded_881 proves a tick does bounded, linear work
 // without a runner-dependent wall-clock budget (#926): allocations per tick
 // are deterministic, and time is judged by how it scales from n to 4n (a
-// ratio, so load cancels) plus a generous absolute sanity cap. The
+// ratio, so load cancels) plus a per-pass absolute cap (#931). The
 // benchmarks above report the real timings.
 func TestMomentsTickCostBounded_881(t *testing.T) {
 	for _, c := range tickCases() {
@@ -238,14 +249,17 @@ func TestMomentsTickCostBounded_881(t *testing.T) {
 			// attempt, a load spike does not.
 			var ratio float64
 			var bb time.Duration
+			defer func() {
+				t.Logf("best %v of budget %v at n=%d (%.1fx headroom), ratio %.1fx", bb, c.budget(), momentsScaleBig, float64(c.budget())/float64(bb), ratio)
+			}()
 			for attempt := 0; attempt < 3; attempt++ {
 				ratio, bb = scaleRatio(small, big, 9)
-				if ratio <= momentsMaxScale && bb <= momentsAbsCap {
+				if ratio <= momentsMaxScale && bb <= c.budget() {
 					return
 				}
 			}
 			t.Fatalf("tick scales %.1fx for %dx the rows (max %.1fx), best %v at n=%d (cap %v)",
-				ratio, momentsScaleBig/momentsScaleSmall, momentsMaxScale, bb, momentsScaleBig, momentsAbsCap)
+				ratio, momentsScaleBig/momentsScaleSmall, momentsMaxScale, bb, momentsScaleBig, c.budget())
 		})
 	}
 }
