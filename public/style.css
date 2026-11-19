@@ -2926,6 +2926,14 @@ button.ch-item:hover .ch-icon-btn { opacity: 1; }
   .map-controls fieldset.mc-section.mc-collapsed > legend.mc-label::after {
     content: '▸';
   }
+  /* #930: a checkbox row's label toggles its box, so the row is the touch
+     target. Give it 44 px with the box centred; desktop keeps 2 px rows. */
+  .map-controls .mc-section label:has(> input[type="checkbox"]) {
+    min-height: 44px;
+    padding: 12px 0;
+    line-height: 20px;
+    box-sizing: border-box;
+  }
   #leaflet-map { z-index: 0; }
   #map-wrap { z-index: 0; }
 
