@@ -149,6 +149,13 @@ func (k TileKey) BBox() [4]float64 {
 	}
 }
 
+// lonLatToMercator is the inverse of mercatorToLonLat.
+func lonLatToMercator(lon, lat float64) (x, y float64) {
+	x = lon / 180 * webMercatorHalf
+	y = 6378137 * math.Log(math.Tan(math.Pi/4+lat*math.Pi/360))
+	return
+}
+
 func mercatorToLonLat(x, y float64) (lon, lat float64) {
 	lon = x / webMercatorHalf * 180
 	lat = (2*math.Atan(math.Exp(y/6378137)) - math.Pi/2) * 180 / math.Pi
