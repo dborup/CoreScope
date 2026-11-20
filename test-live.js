@@ -976,8 +976,11 @@ console.log('\n=== live.js: source-level safety checks ===');
     // Moving the subscription took Live's private reconnect loop with it, and
     // that loop was the only place WS_RECONNECT_MS was honoured.
     const appSrc = fs.readFileSync('public/app.js', 'utf8');
-    assert.ok(appSrc.includes('setTimeout(connectWS, window.WS_RECONNECT_MS || 3000)'),
-      'app.js should reconnect on the configured interval, defaulting to 3s');
+    // The delay itself (base, backoff, jitter) is tested in
+    // test-issue-937-ws-backoff.js.
+    assert.ok(appSrc.includes('Number(window.WS_RECONNECT_MS) || 3000') &&
+      appSrc.includes('setTimeout(connectWS, delay)'),
+      'app.js should reconnect from the configured interval, defaulting to 3s');
     assert.ok(!src.includes('WS_RECONNECT_MS'),
       'live.js must not run a reconnect loop of its own');
   });
