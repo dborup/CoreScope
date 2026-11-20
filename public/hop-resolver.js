@@ -5,7 +5,7 @@
 window.HopResolver = (function() {
   'use strict';
 
-  const MAX_HOP_DIST = 1.8; // ~200km in degrees
+  const DEFAULT_MAX_HOP_DIST = 1.8; // ~200km in degrees
   const REGION_RADIUS_KM = 300;
 
   // Only repeaters and room servers can appear as path hops per protocol.
@@ -32,6 +32,16 @@ window.HopResolver = (function() {
   // live.js's resolve() from geographic picks to graph-based ones for the rest
   // of the session. Separate maps keep each consumer's behaviour its own.
   let pathAffinityMap = {};
+
+  // #912 M3 — the operator's maxHopDist (degrees) arrives as
+  // window.MAX_HOP_DIST after /api/config/client loads, which can be after
+  // this module, so it is read per check. Anything but a finite positive
+  // number falls back to the default.
+  function getMaxHopDist(configured) {
+    var v = arguments.length ? configured
+      : (typeof window !== 'undefined' ? window.MAX_HOP_DIST : undefined);
+    return (typeof v === 'number' && isFinite(v) && v > 0) ? v : DEFAULT_MAX_HOP_DIST;
+  }
 
   function dist(lat1, lon1, lat2, lon2) {
     return Math.sqrt((lat1 - lat2) ** 2 + (lon1 - lon2) ** 2);
@@ -308,6 +318,7 @@ window.HopResolver = (function() {
     }
 
     // Sanity check: drop hops impossibly far from neighbors
+    const maxHopDist = getMaxHopDist();
     for (let i = 0; i < hops.length; i++) {
       const pos = hopPositions[hops[i]];
       if (!pos) continue;
@@ -316,8 +327,8 @@ window.HopResolver = (function() {
       if (!prev && !next) continue;
       const dPrev = prev ? dist(pos.lat, pos.lon, prev.lat, prev.lon) : 0;
       const dNext = next ? dist(pos.lat, pos.lon, next.lat, next.lon) : 0;
-      const tooFarPrev = prev && dPrev > MAX_HOP_DIST;
-      const tooFarNext = next && dNext > MAX_HOP_DIST;
+      const tooFarPrev = prev && dPrev > maxHopDist;
+      const tooFarNext = next && dNext > maxHopDist;
       if ((tooFarPrev && tooFarNext) || (tooFarPrev && !next) || (tooFarNext && !prev)) {
         const r = resolved[hops[i]];
         if (r) r.unreliable = true;
@@ -972,5 +983,5 @@ window.HopResolver = (function() {
     return n && n.name ? n.name : null;
   }
 
-  return { init: init, resolve: resolve, inferPath: inferPath, LIKELY_CONFIDENCE: LIKELY_CONFIDENCE, resolveFromServer: resolveFromServer, serverHopEntry: serverHopEntry, ready: ready, initGeneration: initGeneration, haversineKm: haversineKm, setAffinity: setAffinity, getAffinity: getAffinity, setPathAffinity: setPathAffinity, getPathAffinity: getPathAffinity, nameForKey: nameForKey };
+  return { init: init, resolve: resolve, inferPath: inferPath, LIKELY_CONFIDENCE: LIKELY_CONFIDENCE, resolveFromServer: resolveFromServer, serverHopEntry: serverHopEntry, ready: ready, initGeneration: initGeneration, haversineKm: haversineKm, setAffinity: setAffinity, getAffinity: getAffinity, setPathAffinity: setPathAffinity, getPathAffinity: getPathAffinity, nameForKey: nameForKey, getMaxHopDist: getMaxHopDist };
 })();

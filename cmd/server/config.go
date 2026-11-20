@@ -1200,6 +1200,7 @@ func (c *Config) applyCanonicalKeys(keys *configkey.Doc) error {
 			}
 		}
 	}
+	c.applyMaxHopDist(keys, log.Printf)
 	c.Share.Nodes.Enabled = keys.On("share", "nodes", "enabled")
 	c.Share.Packets.Enabled = keys.On("share", "packets", "enabled")
 	c.AntennaClaims.ApplyGates(keys.On)
@@ -1232,6 +1233,32 @@ func (c *Config) applyCanonicalKeys(keys *configkey.Doc) error {
 		}
 	}
 	return nil
+}
+
+// maxHopDistLimit is the largest maxHopDist (degrees) accepted; ~10 deg is
+// over 1000 km, far beyond any LoRa hop.
+const maxHopDistLimit = 10.0
+
+// applyMaxHopDist (#912 M3) takes maxHopDist from the exact-case key only
+// (#884) and keeps it only when it is a number the client can use: above 0 and
+// at most maxHopDistLimit degrees. Otherwise it logs one warning and leaves it
+// unset, so the client keeps its default of 1.8 (~200 km).
+func (c *Config) applyMaxHopDist(keys *configkey.Doc, logf func(string, ...interface{})) {
+	c.MaxHopDist = nil
+	raw := keys.Get("maxHopDist")
+	if raw == nil {
+		return
+	}
+	var v float64
+	if json.Unmarshal(raw, &v) != nil {
+		logf("[config] maxHopDist is not a number; using the default")
+		return
+	}
+	if !(v > 0 && v <= maxHopDistLimit) { // NaN fails too
+		logf("[config] maxHopDist is out of range (want >0 and <=%v degrees); using the default", maxHopDistLimit)
+		return
+	}
+	c.MaxHopDist = &v
 }
 
 // jsonObject is a JSON object as encoding/json decodes it into
