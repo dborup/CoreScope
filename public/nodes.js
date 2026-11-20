@@ -318,7 +318,8 @@
   }
 
   /* Node-detail actions owned by other modules: #681 M5 "Terrain profile"
-   * (terrain-profile.js) and #737 M2 "Oblique photo" (skraafoto.js). They
+   * (terrain-profile.js), #941 "Predicted reach" (coverage.js) and #737 M2
+   * "Oblique photo" (skraafoto.js). They
    * and the built-in actions share the node-action-chip class (#920).
    * Each module owns its button and its gate (feature switched on, node
    * has a fix), so this only waits for the client config and appends what
@@ -349,9 +350,13 @@
 
   function mountNodeActions(row, n) {
     if (!row) return;
-    var tp = window.TerrainProfile, sf = window.Skraafoto;
+    var tp = window.TerrainProfile, sf = window.Skraafoto, pr = window.PredictedReach;
     if (tp && typeof tp.nodeEntryAction === 'function') {
       mountConfigAction(row, 'node-terrain-profile', function () { return tp.nodeEntryAction(n, window.MC_DHM_CFG); });
+    }
+    // #941: the node's predicted reach on the Map page.
+    if (pr && typeof pr.nodeEntryAction === 'function') {
+      mountConfigAction(row, 'node-predicted-reach', function () { return pr.nodeEntryAction(n, window.MC_COVERAGE_CFG); });
     }
     if (sf && typeof sf.nodeAction === 'function') {
       mountConfigAction(row, 'node-skraafoto', function () { return sf.nodeAction(n, window.MC_SKRAAFOTO_CFG); });

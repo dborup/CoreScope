@@ -898,6 +898,9 @@
     // #737 — oblique aerial photos (public/skraafoto.js); absent unless the
     // server's Skråfoto proxy is on. Never carries the token.
     window.MC_SKRAAFOTO_CFG = cfg.skraafoto || null;
+    // #941 — Predicted reach (public/coverage.js); absent unless the
+    // server's map.coverage is on and has terrain.
+    window.MC_COVERAGE_CFG = cfg.coverage || null;
     // #881 — Live moments; absent unless the server's moments.enabled is on.
     window.MC_MOMENTS_CFG = (cfg.moments && cfg.moments.enabled === true) ? cfg.moments : null;
     if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);

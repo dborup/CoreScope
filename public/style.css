@@ -213,6 +213,15 @@
   --heat-1: #5b21b6;
   --heat-2: #7e22ce;
   --heat-3: #a21caf;
+  /* #941 — Predicted reach: the margin classes, best first, and the
+     transmitter's dot. Ordered by lightness (dark green, bright yellow,
+     orange) so the classes also part without hue. public/coverage.js
+     reads them into its colour table; the customizer gets them in M4.
+     Dark values live in BOTH dark blocks below. */
+  --reach-good: #15803d;
+  --reach-marginal: #eab308;
+  --reach-weak: #ea580c;
+  --reach-centre: #1d4ed8;
   --heat-4: #c026d3;
   --heat-5: #e879f9;
   /* The stop in effect, by the #1446 rule: the user's customizer pick
@@ -543,6 +552,11 @@
     --heat-2: #9333ea;
     --heat-3: #c026d3;
     --heat-4: #d946ef;
+    /* #941 — Predicted reach on dark tiles. */
+    --reach-good: #22c55e;
+    --reach-marginal: #facc15;
+    --reach-weak: #fb923c;
+    --reach-centre: #60a5fa;
     --heat-5: #f0abfc;
     --heat-stop-1: var(--heat-user-1, var(--mc-heat-dark-1, var(--heat-1)));
     --heat-stop-2: var(--heat-user-2, var(--mc-heat-dark-2, var(--heat-2)));
@@ -649,6 +663,11 @@
   --heat-2: #9333ea;
   --heat-3: #c026d3;
   --heat-4: #d946ef;
+  /* #941 — Predicted reach on dark tiles (mirror of the @media block). */
+  --reach-good: #22c55e;
+  --reach-marginal: #facc15;
+  --reach-weak: #fb923c;
+  --reach-centre: #60a5fa;
   --heat-5: #f0abfc;
   --heat-stop-1: var(--heat-user-1, var(--mc-heat-dark-1, var(--heat-1)));
   --heat-stop-2: var(--heat-user-2, var(--mc-heat-dark-2, var(--heat-2)));
@@ -6678,6 +6697,103 @@ body.embed .warmup-pills { display: none !important; }
 @media (max-width: 640px) {
   #mapSidePane ~ .map-profile-toggle,
   #mapSidePane.expanded ~ .map-profile-toggle { right: 10px; }
+}
+
+/* #941 — Predicted reach: the toggle sits under the Path profile ruler. */
+.map-reach-toggle {
+  position: absolute;
+  top: 110px;
+  right: 10px;
+  z-index: 1001;
+  width: 48px;
+  height: 48px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 6px var(--shadow);
+}
+.map-reach-toggle:hover { background: var(--row-hover); }
+.map-reach-toggle:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.map-reach-toggle.active { background: var(--selected-bg); border-color: var(--reach-centre); }
+/* Without the ruler (no DHM, only the foreign fill) it takes its place. */
+.map-reach-toggle:not(.map-profile-toggle ~ .map-reach-toggle) { top: 54px; }
+@media (pointer: fine) {
+  .map-reach-toggle { top: 98px; width: 36px; height: 36px; }
+  .map-reach-toggle:not(.map-profile-toggle ~ .map-reach-toggle) { top: 54px; }
+}
+#mapSidePane ~ .map-reach-toggle { right: calc(32px + 10px); transition: right 0.2s; }
+#mapSidePane.expanded ~ .map-reach-toggle { right: calc(320px + 10px); }
+@media (max-width: 640px) {
+  #mapSidePane ~ .map-reach-toggle,
+  #mapSidePane.expanded ~ .map-reach-toggle { right: 10px; }
+}
+.leaflet-container.reach-picking { cursor: crosshair; }
+.reach-layer { image-rendering: auto; }
+.reach-centre-dot { fill: var(--reach-centre); stroke: var(--card-bg); }
+
+/* Beside the zoom and layer buttons, never over them. */
+.reach-panel {
+  position: absolute;
+  left: 68px;
+  bottom: 30px;
+  z-index: 1002;
+  width: 300px;
+  max-width: calc(100% - 78px);
+  max-height: calc(100% - 120px);
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  box-shadow: 0 2px 10px var(--shadow);
+}
+.reach-panel[hidden] { display: none; }
+.reach-panel.is-busy .reach-legend { opacity: 0.5; }
+.reach-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.reach-title { margin: 0; font-size: var(--fs-md, 1rem); }
+.reach-close {
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 1.4em;
+  cursor: pointer;
+}
+.reach-close:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.reach-centre, .reach-status, .reach-model, .reach-budget { margin: 4px 0; overflow-wrap: anywhere; }
+.reach-status[hidden] { display: none; }
+.reach-status.is-error { color: var(--danger); }
+.reach-model { color: var(--text-muted); }
+.reach-legend { margin: 6px 0; }
+.reach-legend-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.reach-legend-label { flex: 1; }
+.reach-legend-pct { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.reach-legend-note { margin: 4px 0 0; color: var(--text-muted); }
+.reach-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--border); flex: none; }
+.reach-swatch-good { background: var(--reach-good); }
+.reach-swatch-marginal { background: var(--reach-marginal); }
+.reach-swatch-weak { background: var(--reach-weak); }
+.reach-group { margin: 6px 0; padding: 4px 8px 6px; border: 1px solid var(--border); border-radius: 6px; min-width: 0; }
+.reach-group legend { padding: 0 4px; color: var(--text-muted); }
+.reach-field { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; align-items: center; gap: 6px; margin: 3px 0; }
+.reach-field-label { overflow-wrap: anywhere; }
+.reach-field-value { min-width: 4.5em; text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.reach-input { width: 100%; min-width: 0; min-height: 32px; box-sizing: border-box; }
+.reach-input.is-invalid { outline: 2px solid var(--danger); }
+.reach-credit { color: var(--text-muted); }
+.reach-credit-line { margin: 4px 0; overflow-wrap: anywhere; }
+@media (max-width: 640px) {
+  /* A sheet along the bottom, its own scroller, so the map keeps the top. */
+  .reach-panel { left: 8px; right: 8px; bottom: 8px; width: auto; max-width: none; max-height: 46%; }
 }
 
 .map-profile-hint {
