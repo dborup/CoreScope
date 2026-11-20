@@ -111,6 +111,8 @@ type Server struct {
 	// terrain is the #681 terrain profile; nil unless the proxy is active
 	// and map.dhm.profile.enabled (the endpoint then answers 404).
 	terrain *terrainProfiler
+	// coverage is the predicted reach (#941); nil while it is off.
+	coverage *terrainCoverage
 	// nodeCards is the node share card (#811 M3); nil unless
 	// share.nodes.enabled.
 	nodeCards *nodeCards
@@ -257,6 +259,7 @@ func NewServer(db *DB, cfg *Config, hub *Hub) *Server {
 		masts: newMastsProxyFromConfig(cfg),
 	}
 	s.terrain = newTerrainProfilerFromConfig(cfg, s.dhm, db)
+	s.coverage = newTerrainCoverageFromConfig(cfg, s.dhm, s.terrain, db)
 	s.initNodeCards()
 	s.initPacketCards()
 	s.heritage = newHeritageQueryFromConfig(cfg)
@@ -364,6 +367,8 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/map/dhm/wms", s.handleDHMTile).Methods("GET")
 	r.HandleFunc(dhmOrthoRoute, s.handleDHMOrtho).Methods("GET")
 	r.HandleFunc("/api/terrain/profile", s.handleTerrainProfile).Methods("GET")
+	r.HandleFunc(coverageRoute, s.handleTerrainCoverage).Methods("GET")
+	r.HandleFunc(coverageRasterRoute, s.handleTerrainCoverageRaster).Methods("GET")
 	r.HandleFunc(cardRoute, s.handleTerrainProfileCard).Methods("GET")
 	r.HandleFunc("/api/masts", s.handleMasts).Methods("GET")
 	r.HandleFunc("/api/terrain/heritage", s.handleHeritageInfo).Methods("GET")
@@ -694,6 +699,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		Heritage:            s.heritageClientConfig(),
 		Masts:               s.mastsClientConfig(),
 		Skraafoto:           s.skraafotoClientConfig(),
+		Coverage:            s.coverageClientConfig(),
 		Share:               s.shareClientConfig(),
 	})
 }

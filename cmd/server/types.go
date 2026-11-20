@@ -1694,6 +1694,10 @@ type ClientConfigResponse struct {
 	// token; it never carries the token.
 	Skraafoto *SkraafotoClientConfig `json:"skraafoto,omitempty"`
 
+	// Coverage offers the #941 predicted reach. Omitted unless
+	// map.coverage.enabled and DHM or the foreign fill gives terrain.
+	Coverage *CoverageClientConfig `json:"coverage,omitempty"`
+
 	// Share offers node share links (#811 M4). Omitted unless
 	// share.nodes.enabled is on.
 	Share *ShareClientConfig `json:"share,omitempty"`
