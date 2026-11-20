@@ -1855,6 +1855,10 @@ select.live-heard-select {
 }
 .live-moments-drawer-title { flex: 1; font-weight: 600; font-size: 13px; }
 .live-moments-list { list-style: none; margin: 0; padding: 6px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+/* A row is overflow: hidden, so its automatic min-height is 0 and it would
+   shrink inside this scrolling column instead of making the list scroll
+   (#940). Rows keep their content height. */
+.live-moments-list > .live-moment-row { flex: none; }
 .live-moments-empty { padding: 8px; color: var(--text-muted); font-size: 12px; }
 .live-moments-backdrop { display: none; }
 
