@@ -311,6 +311,10 @@ type Config struct {
 	// the browser receives only the fixed `skraafoto` client block.
 	Skraafoto SkraafotoConfig `json:"-"`
 
+	// Coverage is map.coverage (#941), the predicted reach, lifted out of
+	// Map the same way; the browser receives only the `coverage` block.
+	Coverage CoverageConfig `json:"-"`
+
 	// keys reads the loaded file by exact-case keys (#884); nil for a
 	// Config that did not come from LoadConfig.
 	keys *configkey.Doc

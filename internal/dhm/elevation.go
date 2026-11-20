@@ -160,27 +160,51 @@ func elevationIndex(h float64) uint8 {
 // (TileSize/elevationCell+1)² of them, row by row from the north-west
 // corner, elevationCell output pixels apart.
 func tileLattice(k TileKey) (e, n []float64) {
-	const side = TileSize/elevationCell + 1
+	const steps = TileSize / elevationCell
 	b := k.BBox()
 	span := b[2] - b[0]
-	e, n = make([]float64, side*side), make([]float64, side*side)
-	for j := 0; j < side; j++ {
-		for i := 0; i < side; i++ {
-			lon, lat := mercatorToLonLat(b[0]+span*float64(i)/(side-1), b[3]-span*float64(j)/(side-1))
-			e[j*side+i], n[j*side+i] = ToUTM32(lat, lon)
-		}
-	}
-	return e, n
+	l := newMercLattice(b[0], b[3], span, span, steps, steps, elevationCell)
+	return l.e, l.n
 }
 
 // latticePoint is the EPSG:25832 position of output pixel (x, y)'s centre,
 // interpolated in the lattice e, n of tileLattice.
 func latticePoint(e, n []float64, x, y int) (pe, pn float64) {
-	const side = TileSize/elevationCell + 1
-	cj, fy := y/elevationCell, (float64(y%elevationCell)+0.5)/elevationCell
-	ci, fx := x/elevationCell, (float64(x%elevationCell)+0.5)/elevationCell
-	i00 := cj*side + ci
-	i01, i10, i11 := i00+1, i00+side, i00+side+1
+	return mercLattice{cols: TileSize/elevationCell + 1, cell: elevationCell, e: e, n: n}.point(x, y)
+}
+
+// mercLattice places a Web Mercator raster in EPSG:25832 cheaply: the
+// projection is computed exactly at lattice points cell output pixels
+// apart and interpolated bilinearly inside each cell. The elevation tiles
+// (#792) and the predicted-reach raster (#941) share it.
+type mercLattice struct {
+	cols, cell int // points per lattice row; output pixels per lattice cell
+	e, n       []float64
+}
+
+// newMercLattice is the lattice of a raster whose north-west corner is
+// x0, y1 in EPSG:3857 metres, spanning spanX × spanY in steps × stepsY
+// lattice cells of cell output pixels each, row by row from the north-west.
+func newMercLattice(x0, y1, spanX, spanY float64, stepsX, stepsY, cell int) mercLattice {
+	l := mercLattice{cols: stepsX + 1, cell: cell}
+	l.e, l.n = make([]float64, (stepsX+1)*(stepsY+1)), make([]float64, (stepsX+1)*(stepsY+1))
+	for j := 0; j <= stepsY; j++ {
+		for i := 0; i <= stepsX; i++ {
+			lon, lat := mercatorToLonLat(x0+spanX*float64(i)/float64(stepsX), y1-spanY*float64(j)/float64(stepsY))
+			l.e[j*l.cols+i], l.n[j*l.cols+i] = ToUTM32(lat, lon)
+		}
+	}
+	return l
+}
+
+// point is the EPSG:25832 position of output pixel (x, y)'s centre.
+func (l mercLattice) point(x, y int) (pe, pn float64) {
+	cell := l.cell
+	cj, fy := y/cell, (float64(y%cell)+0.5)/float64(cell)
+	ci, fx := x/cell, (float64(x%cell)+0.5)/float64(cell)
+	i00 := cj*l.cols + ci
+	i01, i10, i11 := i00+1, i00+l.cols, i00+l.cols+1
+	e, n := l.e, l.n
 	pe = (e[i00]*(1-fx)+e[i01]*fx)*(1-fy) + (e[i10]*(1-fx)+e[i11]*fx)*fy
 	pn = (n[i00]*(1-fx)+n[i01]*fx)*(1-fy) + (n[i10]*(1-fx)+n[i11]*fx)*fy
 	return pe, pn

@@ -131,7 +131,7 @@ var terrainRoleAntennaM = map[string]float64{
 }
 
 // RadioConfig is config.json `radio`: the link-physics defaults of the
-// terrain profile. Every field is optional.
+// terrain profile and the predicted reach. Every field is optional.
 type RadioConfig struct {
 	// DefaultFreqMHz overrides the frequency observed from the mesh.
 	DefaultFreqMHz *float64 `json:"defaultFreqMHz,omitempty"`
@@ -141,6 +141,15 @@ type RadioConfig struct {
 	// role ("repeater", "room", "companion", "sensor", "point") or by a
 	// node's 64-hex public key.
 	AntennaHeightsM map[string]float64 `json:"antennaHeightsM,omitempty"`
+
+	// The link budget of the predicted reach (#941): the panel's starting
+	// values, which the browser applies to the server's path loss. See
+	// resolveCoverageRadio for the defaults and bounds.
+	TxPowerDbm     *float64 `json:"txPowerDbm,omitempty"`
+	AntennaGainDbi *float64 `json:"antennaGainDbi,omitempty"`
+	RxGainDbi      *float64 `json:"rxGainDbi,omitempty"`
+	LossDb         *float64 `json:"lossDb,omitempty"`
+	SensitivityDbm *float64 `json:"sensitivityDbm,omitempty"`
 }
 
 // ── Settings ───────────────────────────────────────────────────────────────

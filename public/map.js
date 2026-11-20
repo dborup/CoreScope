@@ -847,6 +847,8 @@
       // #681 M4 — offer the Path profile tool (and restore a ?profile= deep
       // link) once the nodes are in, so endpoint names resolve immediately.
       initProfileTool();
+      // #941 — the Predicted reach tool, and a #/map?reach=… link.
+      initReachTool();
       // Check for a wardriving GPS trail (via sessionStorage) — see
       // drawGPSTrail. Distinct from map-route-hops: these are raw shared
       // coordinates, not mesh hop keys needing node resolution.
@@ -2987,6 +2989,7 @@
   function profileArmFor(side, move) {
     var tool = ensureProfileTool();
     if (!tool) return;
+    reachPutAway(); // #941: one map tool at a time
     // Re-arming (Move A while Move B was armed) must not stack listeners.
     if (profileArm && map) {
       map.off('click', onProfileMapClick);
@@ -3384,6 +3387,51 @@
     return !!(map && map._panAnim && map._panAnim._inProgress);
   }
 
+  // ── #941: Predicted reach (public/coverage.js) ──
+  // The tool owns its button, panel, layer and link; the map lends it the
+  // map, the node names, and keeps it apart from the Path profile: one map
+  // tool at a time, so their pickers and panels never meet.
+  var reachTool = null;
+
+  async function initReachTool() {
+    const alive = mapToken();
+    try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}
+    var pr = window.PredictedReach;
+    if (!alive() || !map || reachTool || !pr || !pr.offered(window.MC_COVERAGE_CFG)) return;
+    reachTool = pr.create({
+      map: map,
+      mount: document.getElementById('map-wrap'),
+      cfg: window.MC_COVERAGE_CFG,
+      dhm: window.MC_DHM_CFG,
+      resolveNode: profileResolveNode,
+      onArm: reachPutProfileAway,
+      onOpen: reachPutProfileAway,
+      linkMove: profileLinkMove
+    });
+    var qs = (location.hash || '').split('?')[1] || '';
+    var st = pr.parseState(qs);
+    if (st) {
+      if (st.at.kind === 'node') await profileLoadExtraNode(st.at.pubkey);
+      if (alive() && reachTool) reachTool.open(st, { fit: true });
+    }
+  }
+
+  function reachPutProfileAway() {
+    profileDisarm();
+    if (profileTool && profileTool.isOpen()) profileTool.close();
+  }
+
+  function reachPutAway() {
+    if (!reachTool) return;
+    reachTool.disarm();
+    if (reachTool.isOpen()) reachTool.close();
+  }
+
+  function destroyReachTool() {
+    if (reachTool) reachTool.destroy();
+    reachTool = null;
+  }
+
   function destroyProfileTool() {
     profileDisarm();
     profileClearLine();
@@ -3444,6 +3492,7 @@
     delete window._mapSelectRefNode;
     delete window._mapGetNeighborPubkeys;
     destroyProfileTool();
+    destroyReachTool();
   }
 
   // While a route view is open the layer is built but left off the map

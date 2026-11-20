@@ -33,7 +33,11 @@
 // block (geotiff_tiled.go, #738; the fill itself is internal/copdem); utm.go projects
 // lat/lon to the rasters' EPSG:25832. profile.go plans the samples and
 // rasters of a terrain profile, physics.go assesses the link, and flight.go
-// coalesces calls with cancellation. get.go is the bounded, no-redirect
+// coalesces calls with cancellation. The predicted reach (#941) plans its
+// aligned elevation tiles, sweeps its radials and draws its raster in
+// coverage.go, with the Bullington diffraction next to the link physics in
+// diffraction.go and its sub-budget of the shared client in limit.go.
+// get.go is the bounded, no-redirect
 // GET of the keyless upstreams (internal/mastedb, internal/heritage), and
 // polygon.go the shared GeoJSON polygon reading, vertex cap and
 // point-in-polygon maths those features measure a point with (#730 M1a).

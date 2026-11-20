@@ -389,8 +389,8 @@ func (c *Config) extractDHMConfig() {
 }
 
 // extractTypedMapBlocks lifts every typed block out of the client-visible
-// Map: map.dhm (#680), map.heritage (#723), map.masts (#724) and
-// map.skraafoto (#737), and drops the tokens the client must not get (#741).
+// Map: map.dhm (#680), map.heritage (#723), map.masts (#724),
+// map.skraafoto (#737) and map.coverage (#941), and drops the tokens the client must not get (#741).
 func (c *Config) extractTypedMapBlocks() {
 	c.extractDHMConfig()
 	c.dropDHMTokenFromTiles()
@@ -398,6 +398,7 @@ func (c *Config) extractTypedMapBlocks() {
 	c.extractHeritageConfig()
 	c.extractMastsConfig()
 	c.extractSkraafotoConfig()
+	c.extractCoverageConfig()
 	// The exact-key reader has done its job; do not keep the document.
 	c.keys = nil
 }
