@@ -49,6 +49,12 @@
   gap: 1px;
 }
 
+/* #943: the feed body is a column flex container with overflow-y:auto and
+   min-height:0. Items default to flex-shrink:1 and are overflow:hidden, so a
+   full feed squeezed every item below its content height instead of
+   overflowing and scrolling (same cause as #940). Keep natural height. */
+.live-feed .panel-content > .live-feed-item { flex: none; }
+
 /* #1207: empty-state placeholder fills the feed body so the panel never
    renders as orphan chrome (✕ + ◫ buttons with no content). The placeholder
    is always in the DOM; CSS hides it when the feed has live-feed-item
