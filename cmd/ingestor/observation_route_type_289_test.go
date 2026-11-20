@@ -25,6 +25,14 @@ const (
 	directFrame289 = "1601c3aabb"
 	mixedMask289   = int64(0b0110) // routes 1 (FLOOD) and 2 (DIRECT)
 	floodMask289   = int64(0b0010) // route 1 only
+
+	// The transport route types, 0 (TRANSPORT_FLOOD) and 3
+	// (TRANSPORT_DIRECT). They share the low bit with the other family's
+	// non-transport type, so only bit 1 separates the families: a candidate
+	// test that looked at bit 0 would mis-classify exactly these two
+	// (PR #590 review F4).
+	transportFloodFrame289  = "1401c3aabb"
+	transportDirectFrame289 = "1701c3aabb"
 )
 
 func mask289(m int64) sql.NullInt64 { return sql.NullInt64{Int64: m, Valid: true} }
