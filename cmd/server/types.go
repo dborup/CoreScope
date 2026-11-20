@@ -1645,7 +1645,7 @@ type ClientConfigResponse struct {
 	Tiles               interface{}            `json:"tiles,omitempty"` // deprecated
 	SnrThresholds       interface{}            `json:"snrThresholds"`
 	DistThresholds      interface{}            `json:"distThresholds"`
-	MaxHopDist          interface{}            `json:"maxHopDist"`
+	MaxHopDist          *float64               `json:"maxHopDist"`
 	Limits              interface{}            `json:"limits"`
 	PerfSlowMs          interface{}            `json:"perfSlowMs"`
 	WsReconnectMs       interface{}            `json:"wsReconnectMs"`

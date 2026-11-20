@@ -1,5 +1,7 @@
 {
   "port": 3000,
+  "maxHopDist": 1.8,
+  "_comment_maxHopDist": "Optional. Longest hop, in degrees of lat/lon (not km; 1.8 is about 200 km), the browser accepts when it guesses a path's hops itself (route view, packet feed, node paths). A guessed hop farther than this from both neighbours, or from its only neighbour, is marked unreliable and not drawn. Accepted: above 0 up to 10; a number outside that range logs one warning and keeps 1.8. A non-number (e.g. \"abc\") is a JSON type error and the whole config file is rejected, as for any mistyped key. Hops the server already resolved (resolved_path) are not affected. Key is case-sensitive. Read at startup.",
   "apiKey": "your-secret-api-key-here",
   "nodeBlacklist": [],
   "_comment_nodeBlacklist": "Public keys of nodes to hide from all API responses. Use for trolls, offensive names, or nodes reporting false data that operators refuse to fix.",
