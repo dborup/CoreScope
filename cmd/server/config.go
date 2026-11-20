@@ -1249,9 +1249,9 @@ func (c *Config) applyMaxHopDist(keys *configkey.Doc, logf func(string, ...inter
 	if raw == nil {
 		return
 	}
+	// A non-number never gets here: the struct decode rejects the whole file.
 	var v float64
 	if json.Unmarshal(raw, &v) != nil {
-		logf("[config] maxHopDist is not a number; using the default")
 		return
 	}
 	if !(v > 0 && v <= maxHopDistLimit) { // NaN fails too
