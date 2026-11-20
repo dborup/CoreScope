@@ -608,8 +608,11 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
    persisted. It composes the #1532 fullscreen rules above and also hides
    the top nav (even when pinned), the bottom nav reserve, the map's
    top controls (zoom, layers, fullscreen, settings, legend), the beacon
-   strip and the stats pills. The map credit (.leaflet-bottom) stays
-   visible: --vcr-bar-height is 0 here, so it sits at the bottom edge. */
+   strip, the stats pills and the Moments pause and drawer buttons. The map
+   credit (.leaflet-bottom) stays visible: --vcr-bar-height is 0 here, so it
+   sits at the bottom edge. live.js publishes the same 0 inline once it
+   measures the bar, but Live awaits its nodes before that, and the credit
+   is on screen by then: this rule keeps it off the 58px fallback. */
 body.kiosk { --bottom-nav-reserve: 0px; }
 body.kiosk .live-page { --vcr-bar-height: 0px; }
 /* No top nav, no bottom nav: the page is the whole viewport from the first
@@ -632,7 +635,11 @@ body.kiosk .feed-show-btn,
 body.kiosk .top-nav,
 body.kiosk .live-header-critical,
 body.kiosk .live-stats-row,
+body.kiosk .live-moments-pause,
+body.kiosk .live-moments-open,
 body.kiosk #liveMap .leaflet-top .leaflet-control { display: none !important; }
+/* The Moments bar keeps its count only: even padding without the buttons. */
+body.kiosk .live-moments-bar { padding-right: 10px; }
 body.kiosk .live-header {
   background: transparent;
   border-color: transparent;
@@ -722,6 +729,12 @@ body.kiosk.kiosk-idle * { cursor: none !important; }
 .live-kiosk-exit:hover { border-color: var(--accent); }
 .live-kiosk-exit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 body.kiosk.kiosk-idle .live-kiosk-exit { opacity: 0; visibility: hidden; }
+/* Gone while the node panel is open: on a phone the button sits over the
+   panel's close button, and the tap that opened the node has just woken it.
+   The panel has its own close; Escape still exits. Both are children of
+   .live-page and the button comes later, so a sibling selector does it.
+   display, not visibility: no 0.3 s fade during which it still takes taps. */
+body.kiosk .live-node-detail:not(.hidden) ~ .live-kiosk-exit { display: none; }
 
 /* Start overlay: the Fullscreen API needs a click or a key. */
 .live-kiosk-overlay {
@@ -763,6 +776,8 @@ body.kiosk.kiosk-idle .live-kiosk-exit { opacity: 0; visibility: hidden; }
   .live-kiosk-start-hint { animation: none; }
 }
 @media (max-width: 640px) {
+  /* Here the Moments bar holds only the drawer button, hidden above. */
+  body.kiosk .live-moments-bar { display: none !important; }
   .live-kiosk-step { padding: 6px 10px 8px; max-width: calc(100% - 6vmin - 120px); }
   .live-kiosk-step-label { font-size: 20px; }
   .live-kiosk-step-count { font-size: 13px; }

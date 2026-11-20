@@ -18,7 +18,8 @@
  * Usage: BASE_URL=http://localhost:13581 node scripts/bench-883-kiosk-render.js
  *        [SECONDS=30] [RUNS=2] [RATE=20]
  * Prints one JSON line per run and a summary; exits 1 when the kiosk mean
- * differs from the css mean by more than 5 %.
+ * is more than 5 % above the css mean. One-sided: kiosk coming out faster
+ * is noise in the harmless direction, not a failure.
  */
 'use strict';
 const { chromium } = require('playwright');
@@ -118,5 +119,5 @@ async function run(browser, mode) {
   const gate = pct(on, css);
   console.log('SUMMARY ' + JSON.stringify({ rate: RATE, seconds: SECONDS, runs: RUNS, off: fmt(off), css: fmt(css), kiosk: fmt(on),
     kioskVsCssPct: gate, kioskVsOffPct: pct(on, off) }));
-  process.exit(Math.abs(gate) > 5 ? 1 : 0);
+  process.exit(gate > 5 ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

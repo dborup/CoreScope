@@ -27,12 +27,19 @@
  *      counts, against plain Live round trips: Live itself leaks a few per
  *      mount today, fixed in #883 M3).
  *   9. VCR out of LIVE pauses the tour; LIVE again resumes at the next step.
+ *      Follow (LIVE VCR) pauses it too; stopping Follow resumes it.
  *  10. The router clears a stray body.kiosk on a non-live route (app.js).
  *  11. ?follow= and ?node= are ignored in kiosk; ?moments=1 applies without
- *      writing live-moments.
+ *      writing live-moments, and its pause and drawer buttons are hidden.
  *      Without a tour the view is the map defaults, not the saved view.
- *  12. The kiosk page fills the viewport before Live's resize timer runs.
- *  13. 375x560 touch smoke: no horizontal scroll, credit visible, label up.
+ *  12. The kiosk page fills the viewport before Live's resize timer runs,
+ *      and the map credit sits at the bottom edge before Live measures the
+ *      (hidden) VCR bar.
+ *  13. 375x560 touch smoke: no horizontal scroll, credit visible, label up,
+ *      no Moments bar (on a phone it is only the drawer button).
+ *  14. 375x560 and 360x640 touch, cold link, real taps: tap a node, tap the
+ *      panel's close button. Kiosk stays, the panel closes ("Exit kiosk"
+ *      is hidden while the panel is open and covers no part of it).
  *
  * Usage: BASE_URL=http://localhost:13581 node test-883-kiosk-e2e.js
  */
@@ -116,6 +123,47 @@ function credit(page) {
       vw: innerWidth, vh: innerHeight, vis: getComputedStyle(a).visibility, fs: parseFloat(getComputedStyle(a).fontSize) };
   });
 }
+// Moments on (the fixture config has no moments block) with one moment in
+// the history, so the Moments bar shows.
+const MOMENTS = [{ id: 'kiosk-1', kind: 'back_online', at: new Date(Date.now() - 600000).toISOString(), silentHours: 37,
+  node: { publicKey: 'b'.repeat(64), name: 'Kiosk moment', role: 'repeater', lat: 37.3, lon: -121.9 } }];
+async function momentsOn(ctx) {
+  await ctx.route(/\/api\/config\/client(\?|$)/, async (route) => {
+    const res = await route.fetch();
+    const body = await res.json();
+    body.moments = { enabled: true, historySize: 50 };
+    await route.fulfill({ response: res, json: body });
+  });
+  await ctx.route(/\/api\/moments(\?|$)/, (route) => route.fulfill({ json: { moments: MOMENTS } }));
+}
+const MOMENT_BUTTONS = ['.live-moments-pause', '.live-moments-open'];
+// The middle of a node marker that a finger there would hit, clear of the
+// screen edges, or null.
+function tappableNode(page) {
+  return page.evaluate(() => {
+    for (const m of document.querySelectorAll('.live-node-marker')) {
+      const r = m.getBoundingClientRect();
+      const x = r.left + r.width / 2, y = r.top + r.height / 2;
+      if (x < 40 || y < 120 || x > innerWidth - 40 || y > innerHeight - 40) continue;
+      const t = document.elementFromPoint(x, y);
+      if (t && (t === m || m.contains(t))) return { x, y };
+    }
+    return null;
+  });
+}
+// A box that held still between two reads (a panel's slide has ended).
+async function settledBox(page, sel) {
+  let prev = null;
+  for (let i = 0; i < 40; i++) {
+    const b = await page.evaluate((sel) => { const e = document.querySelector(sel); if (!e) return null;
+      const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, w: r.width, h: r.height }; }, sel);
+    if (b && prev && b.w > 0 && JSON.stringify(b) === JSON.stringify(prev)) return { x: b.l + b.w / 2, y: b.t + b.h / 2, box: b };
+    prev = b;
+    await page.waitForTimeout(100);
+  }
+  throw new Error('no settled box for ' + sel + ': ' + JSON.stringify(prev));
+}
+
 function readStorage(page) {
   return page.evaluate((keys) => Object.fromEntries(keys.map((k) => [k, localStorage.getItem(k)])), Object.keys(SEEDED));
 }
@@ -240,6 +288,17 @@ function readStorage(page) {
       assert(await h.label() === 'Kiosk Area A|1 / 3', await h.label());
     });
 
+    await step('Follow pauses the tour (mode) with the VCR still LIVE; stopping it resumes at the next step', async () => {
+      // Follow starts in kiosk from a path popup or a feed card; the seam
+      // starts it the same way, and the pause is read in the same task.
+      const s = await page.evaluate(() => { window._liveStartFollow('abcdef0123456789');
+        return { st: window._liveKiosk().stats(), vcr: window._liveVCR().mode, following: !!window._liveFollowState() }; });
+      assert(s.following && s.vcr === 'LIVE', JSON.stringify(s));
+      assert(s.st.paused && s.st.reasons.includes('mode'), JSON.stringify(s));
+      const r = await page.evaluate(() => { window._liveStopFollow(); return window._liveKiosk().stats(); });
+      assert(!r.paused && r.step === 1, 'resumed at the next step: ' + JSON.stringify(r));
+    });
+
     await step('the viewer\'s storage is untouched while kiosk runs', async () => {
       const now = await readStorage(page);
       assert(JSON.stringify(now) === JSON.stringify(SEEDED), JSON.stringify(now));
@@ -339,13 +398,7 @@ function readStorage(page) {
 
     await step('kiosk ignores ?follow= and ?node=, and applies ?moments=1 without saving it', async () => {
       const m = await open(browser);
-      await m.ctx.route(/\/api\/config\/client(\?|$)/, async (route) => {
-        const res = await route.fetch();
-        const body = await res.json();
-        body.moments = { enabled: true, historySize: 50 };
-        await route.fulfill({ response: res, json: body });
-      });
-      await m.ctx.route(/\/api\/moments(\?|$)/, (route) => route.fulfill({ json: { moments: [] } }));
+      await momentsOn(m.ctx);
       await m.page.goto(BASE + '/?r=' + Date.now() + '#/packets', { waitUntil: 'domcontentloaded' });
       await m.page.evaluate(() => { localStorage.setItem('live-moments', 'false'); localStorage.removeItem('live-node-filter'); });
       await m.page.evaluate((hash) => { location.hash = hash; }, KIOSK + '&moments=1&follow=abcdef0123456789&node=zzz-kiosk');
@@ -357,6 +410,13 @@ function readStorage(page) {
       assert(!s.follow, 'no follow in kiosk');
       assert(!s.keys.length, 'no node filter in kiosk: ' + JSON.stringify(s.keys));
       assert(s.moments === 'false', 'live-moments not written: ' + s.moments);
+      // §4.3: the Moments pause and drawer buttons are chrome too; the bar
+      // keeps its count.
+      await m.page.waitForFunction(() => { const b = document.querySelector('.live-moments-bar'); return b && !b.hidden; });
+      const mb = await chromeState(m.page, ['.live-moments-bar', '.live-moments-count'].concat(MOMENT_BUTTONS));
+      assert(mb.every((x) => x.n > 0), 'Moments bar and buttons rendered: ' + JSON.stringify(mb));
+      assert(mb[0].vis && mb[1].vis, 'the Moments bar and count show: ' + JSON.stringify(mb));
+      assert(!mb.some((x) => MOMENT_BUTTONS.includes(x.s) && x.vis), 'Moments buttons hidden in kiosk: ' + JSON.stringify(mb));
       // No tour: a static view from the map defaults, not the viewer's saved view.
       await m.page.evaluate(() => localStorage.setItem('live-map-view', '{"lat":10.5,"lng":20.25,"zoom":5}'));
       await m.page.evaluate(() => { location.hash = '#/packets'; });
@@ -377,6 +437,13 @@ function readStorage(page) {
     await step('the kiosk page fills the viewport from the first paint, before Live measures it', async () => {
       const m = await open(browser);
       // A paused clock holds Live's 50 ms resize timer, so only CSS sizes it.
+      // The nodes request is held: Live awaits it after it builds the map and
+      // before it measures the VCR bar, so the map credit is laid out with
+      // CSS alone (no inline --vcr-bar-height yet; the base fallback is 58px).
+      let release = null;
+      await m.ctx.route(/\/api\/nodes(\?|$)/, (route) => new Promise((res) => {
+        release = () => res(route.continue().catch(() => {}));
+      }));
       await m.page.clock.install();
       await m.page.clock.pauseAt(Date.now() + 1000);
       await m.page.goto(BASE + '/?r=' + Date.now() + '#/live?kiosk=1', { waitUntil: 'domcontentloaded' });
@@ -384,14 +451,29 @@ function readStorage(page) {
       const r = await m.page.evaluate(() => { const b = document.querySelector('.live-page').getBoundingClientRect();
         return { top: b.top, bottom: b.bottom, vh: innerHeight, inline: document.querySelector('.live-page').style.height }; });
       assert(r.inline === '' && r.top === 0 && Math.abs(r.bottom - r.vh) < 1, JSON.stringify(r));
+      await m.page.waitForSelector('#liveMap .leaflet-control-attribution');
+      for (let i = 0; i < 100 && !release; i++) await m.page.waitForTimeout(50);
+      const c = await m.page.evaluate(() => {
+        const a = document.querySelector('#liveMap .leaflet-control-attribution').getBoundingClientRect();
+        return { inline: document.querySelector('.live-page').style.getPropertyValue('--vcr-bar-height'), b: a.bottom, h: a.height, vh: innerHeight };
+      });
+      assert(release, 'the nodes request is held');
+      assert(c.inline === '', 'Live has not measured the VCR bar yet: ' + JSON.stringify(c));
+      assert(c.h > 0 && c.b >= c.vh - 2 && c.b <= c.vh + 0.5, 'credit at the bottom edge before the measure: ' + JSON.stringify(c));
+      if (release) release();
       await m.ctx.close();
     });
 
-    await step('375x560 touch smoke: no sideways scroll, credit and label visible', async () => {
+    await step('375x560 touch smoke: no sideways scroll, credit and label visible, no Moments bar', async () => {
       const m = await open(browser, { viewport: { width: 375, height: 560 }, touch: true });
-      await m.page.goto(BASE + '/?r=' + Date.now() + KIOSK, { waitUntil: 'domcontentloaded' });
+      await momentsOn(m.ctx);
+      await m.page.goto(BASE + '/?r=' + Date.now() + KIOSK + '&moments=1', { waitUntil: 'domcontentloaded' });
       await m.liveReady();
       await m.kioskReady();
+      // The bar has a moment to show (not [hidden]); on a phone it holds only
+      // the drawer button, so kiosk hides all of it.
+      await m.page.waitForFunction(() => { const b = document.querySelector('.live-moments-bar'); return b && !b.hidden; },
+        null, { timeout: 10000 });
       await m.page.waitForTimeout(300);
       const s = await m.page.evaluate(() => ({ sw: document.documentElement.scrollWidth, vw: innerWidth,
         label: (() => { const r = document.querySelector('.live-kiosk-step').getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; })() }));
@@ -399,11 +481,51 @@ function readStorage(page) {
       assert(s.label[0] >= 0 && s.label[2] <= s.vw, 'label inside: ' + JSON.stringify(s));
       const c = await credit(m.page);
       assert(c && c.text && c.w > 0 && c.l >= 0 && c.r <= c.vw + 0.5 && c.b <= c.vh + 0.5, 'credit: ' + JSON.stringify(c));
-      const st = await chromeState(m.page, ['.bottom-nav', '.top-nav', '.vcr-bar']);
+      const st = await chromeState(m.page, ['.bottom-nav', '.top-nav', '.vcr-bar', '.live-moments-bar'].concat(MOMENT_BUTTONS));
       assert(!st.some((x) => x.vis), 'chrome: ' + JSON.stringify(st));
       assert(!m.errors.length, m.errors.join('; '));
       await m.ctx.close();
     });
+
+    // review PR#939 F1: on a phone "Exit kiosk" sat over the node panel's
+    // close button, and the tap that opens a node wakes it for 3 s.
+    for (const viewport of [{ width: 375, height: 560 }, { width: 360, height: 640 }]) {
+      await step(viewport.width + 'x' + viewport.height + ' touch, cold link: tap a node, tap the panel\'s close button; kiosk stays', async () => {
+        const m = await open(browser, { viewport, touch: true });
+        const p = m.page;
+        await p.goto(BASE + '/?r=' + Date.now() + '#/live?kiosk=1', { waitUntil: 'domcontentloaded' });
+        await m.liveReady();
+        await p.waitForFunction(() => window._liveKiosk && window._liveKiosk() && document.querySelector('.live-node-marker'),
+          null, { timeout: 20000 });
+        // Finger taps, spaced past Chromium's double-tap window.
+        const tap = async (pt) => { await p.touchscreen.tap(pt.x, pt.y); await p.waitForTimeout(600); };
+        if (await p.$('.live-kiosk-start')) {
+          await tap(await settledBox(p, '.live-kiosk-start'));
+          await p.waitForFunction(() => !document.querySelector('.live-kiosk-overlay'));
+        }
+        const node = await tappableNode(p);
+        assert(node, 'a node marker to tap');
+        await tap(node);
+        await p.waitForFunction(() => !document.getElementById('liveNodeDetail').classList.contains('hidden'));
+        const x = await settledBox(p, '#nodeDetailClose');
+        const open1 = await p.evaluate((pt) => {
+          const t = document.elementFromPoint(pt.x, pt.y), e = document.querySelector('.live-kiosk-exit');
+          return { idle: document.body.classList.contains('kiosk-idle'), exitShown: e.getBoundingClientRect().width > 0,
+            onClose: !!t && !!t.closest('#nodeDetailClose'), hit: t && (t.id || String(t.className && t.className.baseVal != null ? t.className.baseVal : t.className)) };
+        }, x);
+        assert(!open1.idle, 'the node tap woke kiosk: ' + JSON.stringify(open1));
+        assert(!open1.exitShown && open1.onClose, 'close button not covered: ' + JSON.stringify(open1));
+        await tap(x);
+        const after = await p.evaluate(() => ({ kiosk: document.body.classList.contains('kiosk'), hash: location.hash,
+          open: !document.getElementById('liveNodeDetail').classList.contains('hidden'), live: window.LiveKiosk.liveCount(),
+          exitShown: document.querySelector('.live-kiosk-exit').getBoundingClientRect().width > 0 }));
+        assert(after.kiosk && /kiosk=1/.test(after.hash) && after.live === 1, 'still kiosk: ' + JSON.stringify(after));
+        assert(!after.open, 'the panel closed: ' + JSON.stringify(after));
+        assert(after.exitShown, 'Exit kiosk back once the panel is closed: ' + JSON.stringify(after));
+        assert(!m.errors.length, m.errors.join('; '));
+        await m.ctx.close();
+      });
+    }
   } finally {
     await browser.close();
   }

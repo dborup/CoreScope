@@ -349,6 +349,8 @@
   // stopFollow(), which destroy() calls. While it is set, live packets are
   // buffered but not animated (the suppressLive path in bufferPacket).
   let followState = null;
+  // The mode the moments and kiosk controllers see: a follow counts as one.
+  function liveMode() { return followState ? 'FOLLOW' : VCR.mode; }
   let followArmed = false;
   let observerRoster = {};
   let _observerRosterPromise = null;
@@ -4180,7 +4182,8 @@
         else map.fitBounds(bounds, Object.assign(opts, { animate: false }));
       },
       reducedMotion: prefersReducedMotion,
-      getMode: () => (followState ? 'FOLLOW' : VCR.mode),
+      // Follow can start in kiosk (a path popup, a feed card), not by URL.
+      getMode: liveMode,
       requestFullscreen: () => document.documentElement.requestFullscreen({ navigationUI: 'hide' }),
       exitFullscreen: () => document.exitFullscreen(),
       exit: () => {
@@ -4209,7 +4212,7 @@
       clearTimeout: (id) => clearTimeout(id),
       // #880: a follow holds the live stream (bufferPacket), so it holds the
       // cards too: moments go to history only, as with the VCR out of LIVE.
-      getMode: () => (followState ? 'FOLLOW' : VCR.mode),
+      getMode: liveMode,
       getZoom: () => (map ? map.getZoom() : null),
       getSettings: () => window.SITE_CONFIG && window.SITE_CONFIG.moments,
       // Phone: the node-detail sheet and the open settings own the bottom.

@@ -268,6 +268,8 @@ function harness(opts) {
   const doc = makeDoc();
   const win = new Target();
   const root = new El('div');
+  if (opts.hidden) doc.hidden = true;
+  if (opts.noFullscreen) doc.fullscreenEnabled = false;
   const map = new Target();
   map.on = (t, fn) => map.addEventListener(t, fn);
   map.off = (t, fn) => map.removeEventListener(t, fn);
@@ -439,6 +441,23 @@ test('hidden → paused, no tour or cursor timer; visible → next step', async 
   h.c.destroy();
 });
 
+test('a kiosk opened in a hidden tab: no step timer until shown, then the tour starts', async () => {
+  // review PR#939 F3 (mutant R6: no setHidden(doc.hidden) after start()).
+  const h = harness({ hidden: true, noFullscreen: true });
+  await flush();
+  const s = h.c.stats();
+  assert.ok(s.paused && s.reasons.includes('hidden'), JSON.stringify(s));
+  assert.strictEqual(s.timers, 0, 'no step or cursor timer while hidden: ' + JSON.stringify(s));
+  h.clock.advance(600000);
+  assert.strictEqual(h.flights.length, 1, 'the first fit only, no step while hidden');
+  h.doc.hidden = false; h.doc.fire('visibilitychange');
+  assert.strictEqual(h.flights.length, 2, 'shown: the tour moves on');
+  assert.deepStrictEqual(h.c.stats().reasons, []);
+  h.clock.advance(60000);
+  assert.strictEqual(h.flights.length, 3, 'and keeps stepping');
+  h.c.destroy();
+});
+
 test('onModeChange: not LIVE pauses, LIVE resumes', async () => {
   const h = harness();
   await flush();
@@ -447,8 +466,25 @@ test('onModeChange: not LIVE pauses, LIVE resumes', async () => {
   assert.strictEqual(h.flights.length, 1);
   h.mode = 'LIVE'; h.c.onModeChange();
   assert.strictEqual(h.flights.length, 2);
-  h.mode = 'FOLLOW'; h.c.onModeChange();
+  h.mode = 'REPLAY'; h.c.onModeChange();
   assert.strictEqual(h.c.stats().paused, true);
+  h.c.destroy();
+});
+
+test('Follow pauses the tour; its end resumes at the next step', async () => {
+  // review PR#939 F4: Follow starts in kiosk from a path popup or a feed
+  // card. live.js reports it as getMode() 'FOLLOW' (liveMode(); the E2E
+  // pins that wiring).
+  const h = harness();
+  await flush();
+  h.mode = 'FOLLOW'; h.c.onModeChange();
+  const s = h.c.stats();
+  assert.ok(s.paused && s.reasons.includes('mode'), JSON.stringify(s));
+  h.clock.advance(600000);
+  assert.strictEqual(h.flights.length, 1, 'no step while following');
+  h.mode = 'LIVE'; h.c.onModeChange();
+  assert.strictEqual(h.flights.length, 2, 'resumed at the next step');
+  assert.strictEqual(h.c.stats().paused, false);
   h.c.destroy();
 });
 
