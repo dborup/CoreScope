@@ -1067,7 +1067,8 @@ type CoverageRaster struct {
 	Height int           `json:"height"`
 	Bounds [2][2]float64 `json:"bounds"` // [[south, west], [north, east]]: Web Mercator aligned
 	// Encoding: one byte per pixel, row 0 north; NoData, or the path
-	// loss LossBaseDb + value × LossStepDb.
+	// loss LossBaseDb + value × LossStepDb. NoData − 1 is that loss or
+	// more (the clamp), so its margin is unknown.
 	Encoding   string  `json:"encoding"`
 	LossBaseDb float64 `json:"lossBaseDb"`
 	LossStepDb float64 `json:"lossStepDb"`

@@ -205,16 +205,25 @@
     return out;
   }
 
-  /* buildLut is the 256-entry RGBA table of a raster: byte v is the loss
-   * meta.lossBaseDb + v·meta.lossStepDb, its margin budget − loss, coloured
-   * by class; no reach (margin < 0) and meta.noData are transparent. */
-  function buildLut(budget, meta, colors) {
-    var lut = new Uint8ClampedArray(256 * 4);
+  /* byteClass is the class of raster byte v at a budget: byte v is the loss
+   * meta.lossBaseDb + v·meta.lossStepDb, its margin budget − loss. null for
+   * meta.noData (no prediction). The byte below noData is every loss at or
+   * above its value (the server clamps there), so its margin is unknown and
+   * it is 'none' at every budget. */
+  function byteClass(v, budget, meta) {
     var base = Number(meta && meta.lossBaseDb), step = Number(meta && meta.lossStepDb);
     var noData = meta && typeof meta.noData === 'number' ? meta.noData : 255;
+    if (v === noData) return null;
+    if (v === noData - 1 || !isFinite(base) || !isFinite(step)) return 'none';
+    return marginClass(budget - (base + v * step));
+  }
+
+  /* buildLut is the 256-entry RGBA table of a raster, coloured by
+   * byteClass; no reach, no data and the clamped byte are transparent. */
+  function buildLut(budget, meta, colors) {
+    var lut = new Uint8ClampedArray(256 * 4);
     for (var v = 0; v < 256; v++) {
-      if (v === noData || !isFinite(base) || !isFinite(step)) continue;
-      var c = colors && colors[marginClass(budget - (base + v * step))];
+      var c = colors && colors[byteClass(v, budget, meta)];
       if (!c) continue;
       lut[4 * v] = c[0];
       lut[4 * v + 1] = c[1];
@@ -239,10 +248,10 @@
     var hist = new Uint32Array(256);
     for (var i = 0; i < raster.length; i++) hist[raster[i]]++;
     var out = { good: 0, marginal: 0, weak: 0, none: 0, total: 0 };
-    var noData = meta && typeof meta.noData === 'number' ? meta.noData : 255;
     for (var v = 0; v < 256; v++) {
-      if (v === noData || !hist[v]) continue;
-      out[marginClass(budget - (meta.lossBaseDb + v * meta.lossStepDb))] += hist[v];
+      var cls = hist[v] ? byteClass(v, budget, meta) : null;
+      if (!cls) continue;
+      out[cls] += hist[v];
       out.total += hist[v];
     }
     return out;

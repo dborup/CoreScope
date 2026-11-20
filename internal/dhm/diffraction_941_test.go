@@ -64,9 +64,10 @@ func p1812Profile(phase float64, ridge bool, base float64) []float32 {
 
 // TestBullington941_MatchesP1812Reference compares Link.Bullington with
 // the reference implementation of the same equations (OFCOM's Py1812
-// dl_bull, transcribed to plain Python; the script and its output are in
-// the PR) on six profiles: four beyond the horizon, two in line of sight
-// with the first Fresnel zone partly obstructed, and one fully clear.
+// dl_bull, transcribed to plain Python in
+// testdata/bullington_941_vectors.py, which prints the table below) on
+// eight profiles: four beyond the horizon, three in line of sight with
+// the first Fresnel zone partly obstructed, and one fully clear.
 // The heights are float32, as in the elevation grid; the reference ran on
 // the float64 values, so the tolerance allows for the rounding.
 func TestBullington941_MatchesP1812Reference(t *testing.T) {
@@ -91,8 +92,7 @@ func TestBullington941_MatchesP1812Reference(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			g := p1812Profile(c.phase, c.ridge, c.base)
-			// The reference generator used 20+15sin+8sin(+phase)+base with
-			// phase = case index; reproduce its antenna heights the same way.
+			// The antennas stand on the end samples, as in the generator.
 			link := Link{DistanceM: 6000, HeightA: float64(g[0]) + c.ta, HeightB: float64(g[200]) + c.ra, LambdaM: lambda, K: DefaultKFactor}
 			b, ok := link.Bullington(g)
 			if !ok {

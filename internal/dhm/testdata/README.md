@@ -37,7 +37,18 @@ all, against Denmark's 42,951 km². No test fetches anything. GLO-90 is a
 90 m surface model (trees and buildings included), so forests read some
 metres higher than in DHM/Terræn.
 
-Both files: © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
+## bullington_941_vectors.py
+
+The generator of the reference vectors in
+`TestBullington941_MatchesP1812Reference` (#941): a plain-Python
+transcription of OFCOM's Py1812 `dl_bull` (ITU-R P.1812-6 §4.3.1,
+eqs. 12-21) on the test's synthetic profiles. Standard library only;
+`python3 internal/dhm/testdata/bullington_941_vectors.py` prints the
+test's table rows. No test runs it.
+
+## Copernicus data
+
+`glo30-n55e012-ifds.bin` and `dk_land_hist_860.txt`: © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
 under COPERNICUS by the European Union and ESA; all rights reserved.
 
 The organisations in charge of the Copernicus programme by law or by

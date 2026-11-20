@@ -6794,6 +6794,17 @@ body.embed .warmup-pills { display: none !important; }
 @media (max-width: 640px) {
   /* A sheet along the bottom, its own scroller, so the map keeps the top. */
   .reach-panel { left: 8px; right: 8px; bottom: 8px; width: auto; max-width: none; max-height: 46%; }
+  /* The head and its × stay at the top of the scrolled sheet; it covers
+     the sheet's top padding so nothing scrolls past above it. */
+  .reach-head {
+    position: sticky;
+    top: -10px;
+    z-index: 1;
+    margin: -10px -12px 0;
+    padding: 10px 12px 0;
+    background: var(--card-bg);
+    border-bottom: 1px solid var(--border);
+  }
 }
 
 .map-profile-hint {

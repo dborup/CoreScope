@@ -23,6 +23,8 @@
  *   5. 375×560 with touch: no horizontal scroll, the panel's close button
  *      and the toggle are on screen and on top; a recolour of the
  *      40 km-sized raster under 4× CPU throttling stays within 50 ms;
+ *      from a cold #/map, taps open the panel and, scrolled down to the
+ *      link budget, the sticky head's × is still on top and closes it;
  *   6. dark and light: the layer's colours are the theme's CSS variables;
  *   7. a refusal shows the panel's words, not the server's text;
  *   8. no console error, and no request leaves localhost.
@@ -451,6 +453,50 @@ function rasterFor(c, radiusKm) {
       } finally { await ctx.close(); }
     });
   }
+
+  // ── 5b: phone, cold #/map: the head stays on top of a scrolled panel ──
+  await step('375×560 touch, cold #/map: taps open the panel; scrolled to the budget, × is on top and closes it', async () => {
+    const { ctx, page, rec } = await newCtx({ viewport: { width: 375, height: 560 }, touch: true });
+    try {
+      await page.goto(`${BASE}/#/map?lat=${AARHUS.lat}&lon=${AARHUS.lon}&zoom=10`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
+      await page.locator('[data-testid="map-reach-toggle"]').tap();
+      const m = await page.locator('#leaflet-map').boundingBox();
+      await page.touchscreen.tap(m.x + m.width / 2, m.y + 60);
+      await waitLayer(page);
+      // Down to the link budget, as a swipe inside the panel would: its
+      // last line is in view below the head, not under it.
+      const scrolled = await page.evaluate(() => {
+        const p = document.querySelector('[data-testid="reach-panel"]');
+        const b = document.querySelector('[data-testid="reach-budget"]');
+        b.scrollIntoView({ block: 'end' });
+        const pr = p.getBoundingClientRect(), br = b.getBoundingClientRect();
+        const hr = p.querySelector('.reach-head').getBoundingClientRect();
+        const top = document.elementFromPoint(br.left + 4, br.top + br.height / 2);
+        return { top: p.scrollTop, belowHead: br.top >= hr.bottom - 1, inPanel: br.bottom <= pr.bottom + 1,
+          budgetOnTop: !!top && (top === b || b.contains(top)) };
+      });
+      assert(scrolled.top > 100 && scrolled.belowHead && scrolled.inPanel && scrolled.budgetOnTop,
+        'the budget is not in view: ' + JSON.stringify(scrolled));
+      await page.waitForTimeout(100);
+      const close = await page.evaluate(() => {
+        const e = document.querySelector('[data-testid="reach-close"]');
+        const p = document.querySelector('[data-testid="reach-panel"]').getBoundingClientRect();
+        const r = e.getBoundingClientRect();
+        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        const top = document.elementFromPoint(x, y);
+        return { x, y, onTop: !!top && (top === e || e.contains(top)), inPanel: r.top >= p.top - 1 && r.bottom <= p.bottom + 1 };
+      });
+      assert(close.onTop && close.inPanel, '× scrolled away with the panel: ' + JSON.stringify(close));
+      await shot(page, '941-phone-sticky-head-light-375x560.jpg');
+      // A tap where × is, with no scrolling first.
+      await page.touchscreen.tap(close.x, close.y);
+      await page.waitForSelector('[data-testid="reach-panel"]', { state: 'hidden', timeout: 5000 });
+      await page.waitForFunction(() => !/[?&]reach=/.test(location.hash), null, { timeout: 5000 })
+        .catch(() => { throw new Error('reach= stayed in the hash'); });
+      noNetwork(rec);
+    } finally { await ctx.close(); }
+  });
 
   // ── 7: refusals ─────────────────────────────────────────────────────────
   await step('a refusal shows the panel\'s words, never the server\'s text', async () => {

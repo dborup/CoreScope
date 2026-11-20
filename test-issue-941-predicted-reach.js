@@ -147,11 +147,17 @@ test('the table colours each loss byte by its margin, at the class boundaries', 
   assert.deepStrictEqual(lutAt(lut, 0), [21, 128, 61, 255]);
   assert.deepStrictEqual(lutAt(lut, 254), [0, 0, 0, 0]);
   assert.deepStrictEqual(lutAt(lut, 255), [0, 0, 0, 0]);               // no data
-  // At the largest budget the panel allows (30 + 20 + 20 + 150 dB) every
-  // loss byte is coloured, and no data still is not.
-  const max = PR.buildLut(220, META, COLORS);
-  assert.deepStrictEqual(lutAt(max, 254), [21, 128, 61, 255]);
-  assert.deepStrictEqual(lutAt(max, 255), [0, 0, 0, 0]);
+  // Byte 254 is every loss ≥ 187 dB (the server clamps there), so its
+  // margin is unknown: it stays transparent at every budget, up to the
+  // largest the panel allows (30 + 20 + 20 + 150 dB). No data too.
+  for (const budget of [187, 200, 220]) {
+    const lt = PR.buildLut(budget, META, COLORS);
+    assert.deepStrictEqual(lutAt(lt, 254), [0, 0, 0, 0], '254 at ' + budget + ' dB');
+    assert.deepStrictEqual(lutAt(lt, 255), [0, 0, 0, 0], '255 at ' + budget + ' dB');
+  }
+  // The last exact byte, 253 (186.5 dB), is still coloured by its margin.
+  assert.deepStrictEqual(lutAt(PR.buildLut(187, META, COLORS), 253), [234, 88, 12, 255]);
+  assert.deepStrictEqual(lutAt(PR.buildLut(220, META, COLORS), 253), [21, 128, 61, 255]);
 });
 
 test('a budget change moves the boundaries: +8 dB turns weak into good', () => {
@@ -182,6 +188,16 @@ test('classShares counts the classes over the pixels with data', () => {
   const raster = new Uint8Array([0, 0, 177, 190, 191, 254, 255, 255]);
   const s = PR.classShares(raster, 158, META);
   assert.deepStrictEqual(JSON.parse(JSON.stringify(s)), { good: 2, marginal: 2, weak: 1, none: 1, total: 6 });
+});
+
+test('classShares never counts the clamped byte 254 (≥ 187 dB) as reachable', () => {
+  const raster = new Uint8Array([0, 253, 254, 254, 255]);
+  for (const budget of [187, 200, 220]) {
+    const s = JSON.parse(JSON.stringify(PR.classShares(raster, budget, META)));
+    assert.strictEqual(s.none, 2, 'none at ' + budget + ' dB');
+    assert.strictEqual(s.total, 4, 'total at ' + budget + ' dB');
+    assert.strictEqual(s.good + s.marginal + s.weak, 2, 'reachable at ' + budget + ' dB');
+  }
 });
 
 test('parseColor reads what getComputedStyle returns, and themeColors reads the variables', () => {

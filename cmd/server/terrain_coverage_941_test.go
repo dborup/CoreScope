@@ -448,6 +448,32 @@ func TestCoverage941_UpstreamPerMinuteBudget(t *testing.T) {
 	decodeCoverage(t, env.get(reachQuery("57.0488,9.9217", "r=5")))
 }
 
+// A refusal by the spent upstream budget gives the per-IP charge back,
+// like a full admission: with one reach per minute per IP, three
+// refusals in a row stay 503 (not 429), and the IP's first reach after
+// the refill is served.
+func TestCoverage941_UpstreamBudgetRefusalRefundsPerIP(t *testing.T) {
+	src := newFakeElevation(t, flatElev(3))
+	env := newCoverageEnv(t, src, CoverageConfig{UpstreamPerMin: intp(4), RateLimitPerMin: intp(1)}, nil, nil)
+	now := time.Unix(1_800_000_000, 0)
+	env.c.now = func() time.Time { return now }
+	env.c.budget.now = env.c.now
+	// Another IP spends the budget with a reach larger than it.
+	decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "r=20"), func(r *http.Request) { r.RemoteAddr = "198.51.100.3:1" }))
+	calls := src.calls.Load()
+	ip := func(r *http.Request) { r.RemoteAddr = "203.0.113.9:4000" }
+	for i := 0; i < 3; i++ {
+		w := env.get(reachQuery("57.0488,9.9217", fmt.Sprintf("r=%d", 5+i)), ip)
+		wantError(t, w, 503, "predicted reach busy")
+	}
+	if src.calls.Load() != calls {
+		t.Fatal("a refused reach went upstream")
+	}
+	// The budget refills; the per-IP limiter's minute has not passed.
+	now = now.Add(5 * time.Minute)
+	decodeCoverage(t, env.get(reachQuery("57.0488,9.9217", "r=5"), ip))
+}
+
 // coverageWCSEnv is the reach on the real WCS source and client, against up.
 func coverageWCSEnv(t *testing.T, up *fakeUpstream, timeout time.Duration) *coverageEnv {
 	t.Helper()

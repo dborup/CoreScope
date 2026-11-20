@@ -396,6 +396,69 @@ func TestCoverageRaster941_PolarToMercator(t *testing.T) {
 	}
 }
 
+// TestQuantizeCoverageLoss941_Rounds: a loss goes to the nearest step,
+// not the one below it; the ends clamp and NaN is no data.
+func TestQuantizeCoverageLoss941_Rounds(t *testing.T) {
+	for _, c := range []struct {
+		db   float64
+		want uint8
+	}{
+		{60.2, 0}, {60.3, 1}, {148.24, 176}, {148.26, 177},
+		{-5, 0}, {186.5, 253}, {186.8, 254}, {300, 254}, {math.NaN(), CoverageNoData},
+	} {
+		if got := QuantizeCoverageLoss(c.db); got != c.want {
+			t.Fatalf("QuantizeCoverageLoss(%v) = %d, want %d", c.db, got, c.want)
+		}
+	}
+}
+
+// TestComputeCoverage941_FlatPixelsCarryTheirDistance: over flat ground a
+// raster pixel's loss is free space plus Bullington at the pixel's own
+// distance from the centre, within one quantisation step. Close in, one
+// receiver step (90 m here) is more than a dB, so a pixel that reads its
+// neighbour's receiver fails; far out the knife edge past the 18.9 km
+// horizon is in the number too.
+func TestComputeCoverage941_FlatPixelsCarryTheirDistance(t *testing.T) {
+	e0, n0 := ToUTM32(covAarhusLat, covAarhusLon)
+	const r, res, txH, rxH = 25000.0, 30.0, 10.0, 2.0
+	g := covGridFrom(e0, n0, r, res, func(e, n float64) float32 { return 0 })
+	spec := CoverageSpec{Center: LatLon{Lat: covAarhusLat, Lon: covAarhusLon}, RadiusM: r, ResolutionM: res,
+		TxHeightM: txH, RxHeightM: rxH, FreqMHz: FirmwareFreqMHz, K: DefaultKFactor, OutPixelM: 100, Workers: 2}
+	got, err := ComputeCoverage(context.Background(), g, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lambda := Wavelength(FirmwareFreqMHz)
+	x0, y0 := lonLatToMercator(got.Bounds[0][1], got.Bounds[1][0])
+	x1, y1 := lonLatToMercator(got.Bounds[1][1], got.Bounds[0][0])
+	for _, bearing := range []float64{0, 90} {
+		for _, d := range []float64{400, 3000, 22000} {
+			s, c := math.Sincos(bearing * math.Pi / 180)
+			la, lo := FromUTM32(e0+d*s, n0+d*c)
+			x, y := lonLatToMercator(lo, la)
+			col := int((x - x0) / (x1 - x0) * float64(got.Width))
+			row := int((y0 - y) / (y0 - y1) * float64(got.Height))
+			// The pixel's centre and its own distance from the centre.
+			plo, pla := mercatorToLonLat(x0+(float64(col)+0.5)*(x1-x0)/float64(got.Width),
+				y0-(float64(row)+0.5)*(y0-y1)/float64(got.Height))
+			pe, pn := ToUTM32(pla, plo)
+			pd := math.Hypot(pe-e0, pn-n0)
+			link := Link{DistanceM: pd, HeightA: txH, HeightB: rxH, LambdaM: lambda, K: DefaultKFactor}
+			b, ok := link.Bullington(make([]float32, int(math.Round(pd/res))+1))
+			if !ok {
+				t.Fatal("reference failed")
+			}
+			want := QuantizeCoverageLoss(FreeSpaceLoss(pd, lambda) + b.Loss)
+			v := got.Loss[row*got.Width+col]
+			if diff := int(v) - int(want); diff < -1 || diff > 1 {
+				t.Fatalf("bearing %v° at %.0f m: pixel %d (%.1f dB), want %d (%.1f dB) within one step",
+					bearing, pd, v, CoverageLossBaseDb+float64(v)*CoverageLossStepDb,
+					want, CoverageLossBaseDb+float64(want)*CoverageLossStepDb)
+			}
+		}
+	}
+}
+
 // TestComputeCoverage941_EndToEnd runs the whole pure pipeline on a
 // synthetic ridge: the ground under the centre is reported, the area
 // behind the ridge loses more than the open side, and the inner loop
