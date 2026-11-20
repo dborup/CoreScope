@@ -1612,8 +1612,10 @@ function navigate() {
   // we navigate to a non-live route. Live page's destroy() also clears
   // it, but this guards against any boot path (deep-link, restore) that
   // somehow puts the body into fullscreen state outside /live.
+  // #883: the same for body.kiosk (Live's kiosk mode, never persisted).
   if (basePage !== 'live' && document.body) {
     document.body.classList.remove('live-fullscreen');
+    document.body.classList.remove('kiosk', 'kiosk-idle');
   }
 
   const app = document.getElementById('app');

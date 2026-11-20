@@ -609,6 +609,189 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
   top: 12px !important;
 }
 
+/* ---- #883 M1 Live kiosk mode (#/live?kiosk=1) ----
+   body.kiosk is set by live.js for the Live mount only and never
+   persisted. It composes the #1532 fullscreen rules above and also hides
+   the top nav (even when pinned), the bottom nav reserve, the map's
+   top controls (zoom, layers, fullscreen, settings, legend), the beacon
+   strip, the stats pills and the Moments pause and drawer buttons. The map
+   credit (.leaflet-bottom) stays visible: --vcr-bar-height is 0 here, so it
+   sits at the bottom edge. live.js publishes the same 0 inline once it
+   measures the bar, but Live awaits its nodes before that, and the credit
+   is on screen by then: this rule keeps it off the 58px fallback. */
+body.kiosk { --bottom-nav-reserve: 0px; }
+body.kiosk .live-page { --vcr-bar-height: 0px; }
+/* No top nav, no bottom nav: the page is the whole viewport from the first
+   paint, before live.js measures it (the base rule keeps 52px for the nav). */
+body.kiosk:has(.live-page) #app:has(.live-page),
+body.kiosk:has(.live-page) .live-page {
+  height: calc(100vh - var(--warmup-pills-h, 0px));
+  height: calc(100dvh - var(--warmup-pills-h, 0px));
+}
+body.kiosk .live-header-body,
+body.kiosk .live-controls-body,
+body.kiosk .live-controls-toggle,
+body.kiosk .live-header-toggle,
+body.kiosk .vcr-bar,
+body.kiosk .bottom-nav,
+body.kiosk .live-feed,
+body.kiosk .live-legend,
+body.kiosk .live-legend-toggle-ctl,
+body.kiosk .feed-show-btn,
+body.kiosk .top-nav,
+body.kiosk .live-header-critical,
+body.kiosk .live-stats-row,
+body.kiosk .live-moments-pause,
+body.kiosk .live-moments-open,
+body.kiosk #liveMap .leaflet-top .leaflet-control { display: none !important; }
+/* The Moments bar keeps its count only: even padding without the buttons. */
+body.kiosk .live-moments-bar { padding-right: 10px; }
+body.kiosk .live-header {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  pointer-events: none;
+}
+/* Idle: no cursor anywhere (Leaflet sets its own grab cursors). */
+body.kiosk.kiosk-idle,
+body.kiosk.kiosk-idle * { cursor: none !important; }
+
+/* Step label and "2 / 3", top-left inside a 3 % inset (TV overscan). */
+.live-kiosk-step {
+  position: absolute;
+  top: max(3vmin, env(safe-area-inset-top, 0px));
+  left: max(3vmin, env(safe-area-inset-left, 0px));
+  z-index: 950;
+  max-width: calc(100% - 6vmin - 140px);
+  padding: 10px 16px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--card-bg) 88%, transparent);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 10px var(--shadow);
+  pointer-events: none;
+}
+.live-kiosk-step-label {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+.live-kiosk-step-count {
+  margin-top: 2px;
+  font-size: 16px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.live-kiosk-step-count:empty { display: none; }
+.live-kiosk-progress {
+  height: 3px;
+  margin-top: 8px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform-origin: left center;
+  animation-name: live-kiosk-progress;
+  animation-timing-function: linear;
+  animation-fill-mode: both;
+}
+.live-kiosk-step.is-paused .live-kiosk-progress { visibility: hidden; }
+@keyframes live-kiosk-progress { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+/* "Skipped: …" for 10 s at start. */
+.live-kiosk-note {
+  position: absolute;
+  top: max(3vmin, env(safe-area-inset-top, 0px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 950;
+  max-width: min(480px, calc(100% - 24px));
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--card-bg);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+/* Exit button: shown with the cursor, hidden when idle. */
+.live-kiosk-exit {
+  position: absolute;
+  top: max(3vmin, env(safe-area-inset-top, 0px));
+  right: max(3vmin, env(safe-area-inset-right, 0px));
+  z-index: 1150;
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px var(--shadow);
+  transition: opacity 0.3s ease, visibility 0.3s;
+}
+.live-kiosk-exit:hover { border-color: var(--accent); }
+.live-kiosk-exit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+body.kiosk.kiosk-idle .live-kiosk-exit { opacity: 0; visibility: hidden; }
+/* Gone while the node panel is open: on a phone the button sits over the
+   panel's close button, and the tap that opened the node has just woken it.
+   The panel has its own close; Escape still exits. Both are children of
+   .live-page and the button comes later, so a sibling selector does it.
+   display, not visibility: no 0.3 s fade during which it still takes taps. */
+body.kiosk .live-node-detail:not(.hidden) ~ .live-kiosk-exit { display: none; }
+
+/* Start overlay: the Fullscreen API needs a click or a key. */
+.live-kiosk-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: color-mix(in srgb, var(--surface-0) 55%, transparent);
+}
+.live-kiosk-start {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 20px 32px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--accent-strong);
+  color: var(--text-on-accent);
+  box-shadow: 0 4px 16px var(--shadow);
+  font: inherit;
+  cursor: pointer;
+}
+.live-kiosk-start:focus-visible { outline: 3px solid var(--text); outline-offset: 3px; }
+.live-kiosk-start-title { font-size: 26px; font-weight: 700; }
+.live-kiosk-start-hint {
+  font-size: 15px;
+  animation: live-kiosk-hint-fade 0.6s ease 5s both;
+}
+@keyframes live-kiosk-hint-fade { to { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .live-kiosk-progress { display: none; }
+  .live-kiosk-exit { transition: none; }
+  .live-kiosk-start-hint { animation: none; }
+}
+@media (max-width: 640px) {
+  /* Here the Moments bar holds only the drawer button, hidden above. */
+  body.kiosk .live-moments-bar { display: none !important; }
+  .live-kiosk-step { padding: 6px 10px 8px; max-width: calc(100% - 6vmin - 120px); }
+  .live-kiosk-step-label { font-size: 20px; }
+  .live-kiosk-step-count { font-size: 13px; }
+  .live-kiosk-start { padding: 16px 20px; }
+  .live-kiosk-start-title { font-size: 20px; }
+  .live-kiosk-start-hint { font-size: 13px; }
+}
+
 
 
 /* ---- Medium breakpoint (#279) + collapse toggles (#1178, #1179) ---- */
