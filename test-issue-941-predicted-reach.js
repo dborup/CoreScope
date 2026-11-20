@@ -147,6 +147,11 @@ test('the table colours each loss byte by its margin, at the class boundaries', 
   assert.deepStrictEqual(lutAt(lut, 0), [21, 128, 61, 255]);
   assert.deepStrictEqual(lutAt(lut, 254), [0, 0, 0, 0]);
   assert.deepStrictEqual(lutAt(lut, 255), [0, 0, 0, 0]);               // no data
+  // At the largest budget the panel allows (30 + 20 + 20 + 150 dB) every
+  // loss byte is coloured, and no data still is not.
+  const max = PR.buildLut(220, META, COLORS);
+  assert.deepStrictEqual(lutAt(max, 254), [21, 128, 61, 255]);
+  assert.deepStrictEqual(lutAt(max, 255), [0, 0, 0, 0]);
 });
 
 test('a budget change moves the boundaries: +8 dB turns weak into good', () => {

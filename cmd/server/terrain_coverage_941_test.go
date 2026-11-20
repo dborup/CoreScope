@@ -364,7 +364,12 @@ func TestCoverage941_RadioBudgetIsNotInTheCacheKey(t *testing.T) {
 		}
 		seen[k] = q
 	}
-	// Heights snap to 0.5 m: 12.2 is 12.
+	// Heights snap to 0.5 m, in the key and in the computation alike: 12.2
+	// is 12, so a cached 12 m reach is exactly what 12.2 m would compute.
+	snapped := decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "r=5&ha=12.2&hr=2.3")))
+	if seen[snapped.Key] != "" || snapped.Params.TxHeightM != 12 || snapped.Params.RxHeightM != 2.5 {
+		t.Fatalf("12.2/2.3 m: key seen as %q, computed at %v/%v m", seen[snapped.Key], snapped.Params.TxHeightM, snapped.Params.RxHeightM)
+	}
 	if k := decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "r=5&ha=12.2"))).Key; seen[k] != "r=5&ha=12" {
 		t.Fatalf("12.2 m did not snap to 12 m")
 	}

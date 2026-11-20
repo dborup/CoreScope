@@ -25,6 +25,7 @@ func TestKnifeEdgeLoss941_ReferencePoints(t *testing.T) {
 	for _, c := range []struct{ nu, want float64 }{
 		{-3, 0},
 		{-0.78, 0},
+		{-0.75, 0.20111676909217024}, // just above the cut-off
 		{-0.5, 1.9592497062281762},
 		{0, 6.032852208563606},
 		{1, 13.925728934959924},

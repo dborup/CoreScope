@@ -519,3 +519,37 @@ func BenchmarkCoverage40km30m(b *testing.B) {
 	b.ReportMetric(float64(iters), "inner-iters")
 	b.ReportMetric(float64(spec.Workers), "workers")
 }
+
+// BenchmarkCoverageRadial40km30m is the before/after of the sweep on one
+// 40 km radial (1333 samples, a receiver every 3): "reference" runs
+// Link.Bullington once per receiver, the straightforward O(n) per path
+// with a division and a square root per sample; "sweep" is the
+// reorganised inner loop ComputeCoverage uses. Same results
+// (TestCoverageSweep941_MatchesLinkReference).
+func BenchmarkCoverageRadial40km30m(b *testing.B) {
+	const res, n, every = 30.0, 1333, 3
+	e0, n0 := ToUTM32(covAarhusLat, covAarhusLon)
+	elev := covSyntheticDEM(e0, n0)
+	h := make([]float32, n+1)
+	for i := range h {
+		h[i] = elev(e0+float64(i)*res, n0)
+	}
+	lambda := Wavelength(FirmwareFreqMHz)
+	b.Run("reference", func(b *testing.B) {
+		for it := 0; it < b.N; it++ {
+			for j := every; j <= n; j += every {
+				link := Link{DistanceM: float64(j) * res, HeightA: float64(h[0]) + 10, HeightB: float64(h[j]) + 2, LambdaM: lambda, K: DefaultKFactor}
+				if _, ok := link.Bullington(h[:j+1]); !ok {
+					b.Fatal("no result")
+				}
+			}
+		}
+	})
+	b.Run("sweep", func(b *testing.B) {
+		s := newRadialSweep(res, FirmwareFreqMHz, DefaultKFactor, n, every).scratch()
+		loss := make([]float32, n/every)
+		for it := 0; it < b.N; it++ {
+			s.run(h, 10, 2, loss, nil)
+		}
+	})
+}

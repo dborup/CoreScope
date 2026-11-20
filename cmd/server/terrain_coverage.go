@@ -530,7 +530,7 @@ func (s *Server) resolveCoverageRequest(ctx context.Context, c *terrainCoverage,
 	req.freqSource, req.kSource = freqSource, kSource
 	req.key = coverageKey{
 		Lat: int64(math.Round(req.center.Lat * coverageSnap)), Lon: int64(math.Round(req.center.Lon * coverageSnap)),
-		RadiusDm: int64(math.Round(radiusM / 100)), TxHalfM: int64(req.spec.TxHeightM * 2), RxHalfM: int64(req.spec.RxHeightM * 2),
+		RadiusDm: int64(math.Round(radiusM / 100)), TxHalfM: int64(math.Round(req.spec.TxHeightM * 2)), RxHalfM: int64(math.Round(req.spec.RxHeightM * 2)),
 		FreqKHz: int64(math.Round(freq * 1000)), KMilli: int64(math.Round(k * 1000)), ResolutionM: c.set.resolutionM,
 		Model: dhm.CoverageModel, DHM: c.dhm != nil, Fill: c.fill != nil,
 	}.hash()
