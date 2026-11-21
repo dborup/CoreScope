@@ -84,6 +84,7 @@ const ROUTES = [
   '/analytics?tab=wardriving',
   '/analytics?tab=areas',
   '/analytics?tab=advert-intervals', // #245 M2
+  '/analytics?tab=advert-intervals&bucket=flood.10800.s', // #896: a bucket's node list open
   '/audio-lab',
   '/reach-rank',                    // Reach leaderboard (reach-rank.js)
 ];
