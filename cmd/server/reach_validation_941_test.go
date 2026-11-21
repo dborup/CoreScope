@@ -1109,6 +1109,16 @@ func TestReachValidation941_FixtureMechanics(t *testing.T) {
 		if sumP != o.Positives || sumN != o.Negatives {
 			t.Fatalf("%s: bands hold %d/%d of %d/%d", m.Model, sumP, sumN, o.Positives, o.Negatives)
 		}
+		// The seeded firmware links are short and the network spans about
+		// 80 km: every band holds pairs, and the short band most positives.
+		for _, b := range m.Bands {
+			if b.Negatives == 0 {
+				t.Fatalf("%s: band %s is empty", m.Model, b.Band)
+			}
+		}
+		if m.Bands[0].Positives < 10 || m.Bands[0].Negatives >= m.Bands[2].Negatives {
+			t.Fatalf("%s: bands %+v", m.Model, m.Bands)
+		}
 	}
 	// Diffraction only ever adds loss: free space reaches at least as many
 	// pairs as Bullington, and Bullington as many as delta.
