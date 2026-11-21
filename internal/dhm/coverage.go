@@ -512,16 +512,18 @@ func newRadialSweep(res, freqMHz, k float64, nS, rxEvery int, model PathModel) *
 
 // sweepScratch is one worker's buffers on a shared radialSweep: the
 // radial's heights and, for the complete method, the running sums of the
-// heights above the centre's ground, Σg_i and Σi·g_i.
+// heights above the centre's ground, Σg_i and Σi·g_i, and the running
+// maxima of the transmitter-side slopes (see run).
 type sweepScratch struct {
 	*radialSweep
-	h, s0, s1 []float64
+	h, s0, s1, pa, po []float64
 }
 
 func (s *radialSweep) scratch() *sweepScratch {
 	sc := &sweepScratch{radialSweep: s, h: make([]float64, s.nS+1)}
 	if s.delta {
-		sc.s0, sc.s1 = make([]float64, s.nS+1), make([]float64, s.nS+1)
+		n := s.nS + 1
+		sc.s0, sc.s1, sc.pa, sc.po = make([]float64, n), make([]float64, n), make([]float64, n), make([]float64, n)
 	}
 	return sc
 }
@@ -535,12 +537,21 @@ func (s *radialSweep) scratch() *sweepScratch {
 // plus bulge above the transmitter and Δ the receiver above the
 // transmitter, the clearance is c_i = Δ·i/j − u_i, and the three maxima
 // (diffraction.go) take precomputed 1/d and 1/√i. With the complete
-// method it is Link.DeltaBullington: the same pass takes the three
-// obstruction maxima of eqs. 89a–c, and the smooth surface's sums v1, v2
-// (eqs. 85–86) come from the running sums in O(1). It works in heights
-// above the centre's ground, which the fit follows exactly (adding a
-// constant to every height adds it to the smooth surface), so the sums
-// stay small.
+// method it is Link.DeltaBullington: the same pass takes the obstruction
+// maxima of eqs. 89a and 89c, and the smooth surface's sums v1, v2 (eqs.
+// 85–86) come from the running sums in O(1). It works in heights above the
+// centre's ground, which the fit follows exactly (adding a constant to
+// every height adds it to the smooth surface), so the sums stay small.
+// The two slopes seen from the transmitter separate into a part of the
+// sample alone and a part of the receiver alone: with H_i = h_i − hts −
+// Δ·i/j (eq. 89d) and d_i = i·res,
+//
+//	H_i / d_i            = (h_i − hts)/d_i − Δ/(j·res)
+//	(H_i + bulge_i)/d_i  = (h_i − hts)/d_i − β·i/res + β·j/res − Δ/(j·res)
+//
+// so their maxima over the interior (eq. 89b, and Bullington's slope from
+// the transmitter) are running maxima along the radial, read in O(1) per
+// receiver; the loop keeps the two receiver-side maxima and the ratio.
 func (s *radialSweep) run(h []float32, txH, rxH float64, loss, ratio []float32) int64 {
 	return s.scratch().run(h, txH, rxH, loss, ratio)
 }
@@ -558,11 +569,18 @@ func (s *sweepScratch) run(h []float32, txH, rxH float64, loss, ratio []float32)
 	hts := hb[0] + txH
 	if s.delta && gap > 0 {
 		var a0, a1 float64
+		pa, po := math.Inf(-1), math.Inf(-1)
 		for i := 0; i < gap; i++ {
 			g := hb[i] - hb[0]
 			a0 += g
 			a1 += float64(i) * g
 			s.s0[i], s.s1[i] = a0, a1
+			if i > 0 {
+				t := (hb[i] - hts) * s.inv[i]
+				po = math.Max(po, t)
+				pa = math.Max(pa, t-s.bulge*float64(i)/s.res)
+			}
+			s.pa[i], s.po[i] = pa, po
 		}
 	}
 	var iters int64
@@ -576,49 +594,17 @@ func (s *sweepScratch) run(h []float32, txH, rxH float64, loss, ratio []float32)
 			continue
 		}
 		delta := hb[j] + rxH - hts
-		invj := 1 / float64(j)
-		a, b, rmin := math.Inf(-1), math.Inf(-1), math.Inf(1)
-		inv, rs, c := s.inv, s.rs, s.bulge
+		var a, b, rmin float64
 		fit := noObstruction()
 		if !s.delta {
-			for i := 1; i < j; i++ {
-				fi := float64(i)
-				cl := delta*fi*invj - (hb[i] - hts + c*fi*float64(j-i))
-				if t := -cl * inv[i]; t > a {
-					a = t
-				}
-				if t := -cl * inv[j-i]; t > b {
-					b = t
-				}
-				if t := cl * rs[i] * rs[j-i]; t < rmin {
-					rmin = t
-				}
-			}
+			a, b, rmin = s.bullingtonPass(hb, hts, delta, j)
 		} else {
-			for i := 1; i < j; i++ {
-				fi := float64(i)
-				// hh is H_i of eq. 89d; hh plus the bulge is minus the
-				// clearance.
-				hh := hb[i] - hts - delta*fi*invj
-				u := hh + c*fi*float64(j-i)
-				if t := u * inv[i]; t > a {
-					a = t
-				}
-				if t := u * inv[j-i]; t > b {
-					b = t
-				}
-				if t := -u * rs[i] * rs[j-i]; t < rmin {
-					rmin = t
-				}
-				if hh > fit.hobs {
-					fit.hobs = hh
-				}
-				if t := hh * inv[i]; t > fit.aobt {
-					fit.aobt = t
-				}
-				if t := hh * inv[j-i]; t > fit.aobr {
-					fit.aobr = t
-				}
+			b, rmin, fit.hobs, fit.aobr = s.deltaPass(hb, hts, delta, j)
+			a = math.Inf(-1)
+			if j > 1 {
+				lin := delta / float64(j) / s.res
+				a = s.pa[j-1] + s.bulge*float64(j)/s.res - lin
+				fit.aobt = s.po[j-1] - lin
 			}
 		}
 		iters += int64(max(0, j-1))
@@ -641,4 +627,57 @@ func (s *sweepScratch) run(h []float32, txH, rxH float64, loss, ratio []float32)
 		}
 	}
 	return iters
+}
+
+// bullingtonPass is Bullington's inner loop for receiver j: the two slope
+// maxima and the worst clearance ratio over the interior samples, before
+// ratioScale. Each pass is its own function so the compiler lays out the
+// two loops independently.
+func (s *sweepScratch) bullingtonPass(hb []float64, hts, delta float64, j int) (a, b, rmin float64) {
+	invj := 1 / float64(j)
+	a, b, rmin = math.Inf(-1), math.Inf(-1), math.Inf(1)
+	inv, rs, c := s.inv, s.rs, s.bulge
+	for i := 1; i < j; i++ {
+		fi := float64(i)
+		cl := delta*fi*invj - (hb[i] - hts + c*fi*float64(j-i))
+		if t := -cl * inv[i]; t > a {
+			a = t
+		}
+		if t := -cl * inv[j-i]; t > b {
+			b = t
+		}
+		if t := cl * rs[i] * rs[j-i]; t < rmin {
+			rmin = t
+		}
+	}
+	return a, b, rmin
+}
+
+// deltaPass is the complete method's inner loop for receiver j: the
+// receiver-side slope maximum and the worst ratio as in bullingtonPass,
+// and the obstruction terms hobs and α_obr (eqs. 89a, 89c). The
+// transmitter-side maxima come from the running maxima (see run).
+func (s *sweepScratch) deltaPass(hb []float64, hts, delta float64, j int) (b, rmin, hobs, aobr float64) {
+	invj := 1 / float64(j)
+	b, rmin, hobs, aobr = math.Inf(-1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	inv, rs, c := s.inv, s.rs, s.bulge
+	for i := 1; i < j; i++ {
+		fi := float64(i)
+		// hh is H_i of eq. 89d; hh plus the bulge is minus the clearance.
+		hh := hb[i] - hts - delta*fi*invj
+		u := hh + c*fi*float64(j-i)
+		if t := u * inv[j-i]; t > b {
+			b = t
+		}
+		if t := -u * rs[i] * rs[j-i]; t < rmin {
+			rmin = t
+		}
+		if hh > hobs {
+			hobs = hh
+		}
+		if t := hh * inv[j-i]; t > aobr {
+			aobr = t
+		}
+	}
+	return b, rmin, hobs, aobr
 }
