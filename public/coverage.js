@@ -722,7 +722,9 @@
         sw.setAttribute('aria-hidden', 'true');
         li.appendChild(sw);
         var a = el('a', 'reach-nir-link', r.name || (r.pubkey.slice(0, 8) + '…'));
-        a.setAttribute('href', nodeHref(r.pubkey));
+        // reachRows kept only keys nodeHref accepts: '#/nodes/' + 64 hex.
+        var href = nodeHref(r.pubkey);
+        a.setAttribute('href', href);
         li.appendChild(a);
         var meta = [r.role, isFinite(r.distanceKm) ? r.distanceKm.toFixed(1) + ' km' : '', isFinite(r.heightM) ? r.heightM + ' m mast' : '']
           .filter(Boolean).join(' · ');

@@ -400,7 +400,8 @@ test('the list is DOM only: no node field reaches an HTML string, and the chip c
   const body = SRC.slice(i, SRC.indexOf('function setStatus', j));
   assert.ok(i > 0 && j > i, 'list builders present');
   assert.ok(!/innerHTML|insertAdjacentHTML|outerHTML/.test(body), 'an HTML sink in the list code');
-  assert.ok(/setAttribute\('href', nodeHref\(r\.pubkey\)\)/.test(body), 'href from nodeHref only');
+  assert.ok(/var href = nodeHref\(r\.pubkey\);\s*a\.setAttribute\('href', href\);/.test(body), 'href from nodeHref only');
+  assert.strictEqual((body.match(/setAttribute\('href'/g) || []).length, 1, 'one href, the checked one');
   const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
   const block = css.slice(css.indexOf('/* #941 M2 — nodes in reach'), css.indexOf('@media (max-width: 640px) {', css.indexOf('/* #941 M2 — nodes in reach')));
   const rules = block.replace(/\/\*[\s\S]*?\*\//g, '');
