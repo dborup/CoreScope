@@ -64,7 +64,9 @@ func TestCoverage941M2_NodesInReachOrderAndCounts(t *testing.T) {
 	radio := &RadioConfig{AntennaHeightsM: map[string]float64{reachPK('3'): 25}}
 	env := newCoverageEnv(t, newFakeElevation(t, ridgeEastElev), CoverageConfig{}, radio, nil)
 	centre := reachPK('c')
-	addReachNode(t, env, centre, "Centre mast", "repeater", 0, 0)
+	// 5 m off the point the centre snaps to (4 decimals): inside the
+	// radius by distance, so only its key keeps it out of its own list.
+	addReachNode(t, env, centre, "Centre mast", "repeater", 3, 4)
 	addReachNode(t, env, reachPK('1'), "North near", "repeater", 0, 2000)
 	addReachNode(t, env, reachPK('2'), "Behind the ridge", "repeater", 8000, 0)
 	addReachNode(t, env, reachPK('3'), "West far, tall", "repeater", -11000, 0)
@@ -486,5 +488,25 @@ func TestCoverage941M2_OpenAPIReach(t *testing.T) {
 		if !strings.Contains(d, w) {
 			t.Fatalf("%q undocumented", w)
 		}
+	}
+}
+
+// TestCoverage941M2_CountsPerClass: the counts are the listed nodes'
+// classes at the operator's link budget, one per class here (158 dB:
+// margins 18, 8, 2 and −2 dB), boundaries to the better class.
+func TestCoverage941M2_CountsPerClass(t *testing.T) {
+	env := newCoverageEnv(t, newFakeElevation(t, flatElev(3)), CoverageConfig{}, nil, nil)
+	losses := []float64{140, 150, 156, 160, 148, 155, 158}
+	meta := &coverageReachMeta{}
+	for i, l := range losses {
+		pk := fmt.Sprintf("%064x", i+1)
+		addReachNode(t, env, pk, fmt.Sprintf("N%d", i), "repeater", float64(i)*100, 500)
+		meta.Nodes = append(meta.Nodes, coverageReachEntry{PubKey: pk, Role: "repeater", DistanceM: 500, HeightM: 10, HeightSource: "role-default", LossDb: l})
+	}
+	env.srv.store.InvalidateNodeCache()
+	r := env.srv.coverageReachView(context.Background(), env.c, meta)
+	// 148 is exactly 10 dB (good), 155 exactly 3 (marginal), 158 exactly 0 (weak).
+	if want := (CoverageReachCounts{Good: 2, Marginal: 2, Weak: 2, None: 1}); r.Counts != want || r.BudgetDb != 158 || len(r.Nodes) != 7 {
+		t.Fatalf("counts %+v at %v dB, want %+v", r.Counts, r.BudgetDb, want)
 	}
 }

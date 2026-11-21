@@ -191,13 +191,15 @@ function rasterFor(c, radiusKm) {
     }));
   }
 
+  /* setPower moves the power slider and waits past the panel's request
+   * debounce (500 ms), so a request it wrongly started would be seen. */
   async function setPower(page, v) {
     await page.evaluate((val) => {
       const s = document.querySelector('[data-testid="reach-power"]');
       s.value = String(val);
       s.dispatchEvent(new Event('input', { bubbles: true }));
     }, v);
-    await page.waitForTimeout(150);
+    await page.waitForTimeout(800);
   }
 
   function noNetwork(rec) {
