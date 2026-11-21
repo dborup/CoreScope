@@ -47,6 +47,10 @@ package main
 //     failed foreign fill leaves the reach partial and is kept only
 //     coveragePartialTTL, so a later request tries it again.
 //
+// With the raster comes the list of nodes in reach (#941 M2,
+// terrain_coverage_reach.go): repeaters and rooms evaluated point to point
+// over the same elevation grid, hidden identities withheld at serve time.
+//
 // The endpoint reads node positions from the in-memory node snapshot and
 // observer radios through the profile's read-only query; it writes
 // nothing to the database.
@@ -110,8 +114,8 @@ const (
 	// kept: briefly, so a later request tries the fill again.
 	coveragePartialTTL = 5 * time.Minute
 	// coverageResultMaxBytes bounds one cached result: the largest raster
-	// (1008², stored gzip) plus its metadata.
-	coverageResultMaxBytes = 1008*1008 + 64<<10
+	// (1008², stored gzip) plus its metadata and nodes in reach.
+	coverageResultMaxBytes = 1008*1008 + 64<<10 + coverageReachMaxNodes*coverageReachEntryBytes
 	// coverageRefusalLogEvery throttles the refusal and fill-failure logs.
 	coverageRefusalLogEvery = time.Minute
 	// coverageMaxInFlightCap bounds map.coverage.maxInFlight: each
@@ -515,6 +519,9 @@ type coverageRequest struct {
 	txAssumed           bool
 	freqSource, kSource string
 	key                 string
+	// targets lists the nodes in reach to evaluate; only a computation
+	// calls it.
+	targets func(context.Context) ([]coverageReachTarget, bool)
 }
 
 // coverageRefusal is a refused request's body: the error, and the limit
@@ -567,6 +574,9 @@ func (s *Server) resolveCoverageRequest(ctx context.Context, c *terrainCoverage,
 		OutPixelM: dhm.CoverageOutPixelFor(radiusM), Workers: c.workers, Model: model}
 	req.txSource, req.txAssumed, req.rxSource = txSource, assumed, rxSource
 	req.freqSource, req.kSource = freqSource, kSource
+	req.targets = func(ctx context.Context) ([]coverageReachTarget, bool) {
+		return s.coverageReachTargets(ctx, c, req.center, strings.ToLower(end.pubkey), radiusM)
+	}
 	req.key = coverageKey{
 		Lat: int64(math.Round(req.center.Lat * coverageSnap)), Lon: int64(math.Round(req.center.Lon * coverageSnap)),
 		RadiusDm: int64(math.Round(radiusM / 100)), TxHalfM: int64(math.Round(req.spec.TxHeightM * 2)), RxHalfM: int64(math.Round(req.spec.RxHeightM * 2)),
@@ -631,7 +641,9 @@ func (s *Server) handleTerrainCoverage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("X-CoreScope-Cache", state)
-	writeJSON(w, c.buildResponse(req, entry))
+	resp := c.buildResponse(req, entry)
+	resp.Reach = s.coverageReachView(r.Context(), c, entry.meta.Reach)
+	writeJSON(w, resp)
 }
 
 // handleTerrainCoverageRaster serves a cached reach's raster: the bytes
@@ -760,6 +772,15 @@ func (c *terrainCoverage) computeCall(req coverageRequest) func(context.Context)
 		}
 		entry := coverageEntry{meta: coverageEntryMeta{Width: res.Width, Height: res.Height, Bounds: res.Bounds,
 			CoveredPct: res.CoveredPct, DHM: used.dhm, Fill: used.fill}}
+		// Nodes in reach, from the same grid: no upstream call. Without a
+		// complete node snapshot the result has none and is kept briefly.
+		if targets, ok := req.targets(ctx); ok {
+			if entry.meta.Reach, err = evaluateReach(ctx, grid, spec, targets); err != nil {
+				return nil, dhm.ContextFailure(err)
+			}
+		} else {
+			partial = true
+		}
 		if !math.IsNaN(res.GroundM) {
 			g := round2(res.GroundM)
 			entry.meta.GroundM = &g
@@ -1022,6 +1043,9 @@ type coverageEntryMeta struct {
 	CoveredPct float64       `json:"c"`
 	DHM        bool          `json:"d"`
 	Fill       bool          `json:"f"`
+	// Reach is the nodes in reach; nil when the node snapshot was not
+	// ready.
+	Reach *coverageReachMeta `json:"n,omitempty"`
 }
 
 // coverageEntry is one cached result: the metadata and the gzip raster.
@@ -1072,6 +1096,9 @@ type CoverageResponse struct {
 	// AttributionFill the Copernicus Art. 6(b) line when the fill was.
 	Attribution     string `json:"attribution,omitempty"`
 	AttributionFill string `json:"attributionFill,omitempty"`
+	// Reach is the nodes in reach (#941 M2); null when they could not be
+	// evaluated.
+	Reach *CoverageReach `json:"reach"`
 }
 
 // CoverageCenter is the transmitter's position, snapped to 4 decimals.
