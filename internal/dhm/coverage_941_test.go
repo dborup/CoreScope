@@ -226,7 +226,7 @@ func TestCoverageGrid941_PasteAndSample(t *testing.T) {
 // sweepFor runs one radial of h with the reach sweep and returns its
 // per-receiver loss and line-of-sight ratio.
 func sweepFor(h []float32, res, txH, rxH, freq, k float64, rxEvery int) ([]float32, []float32) {
-	s := newRadialSweep(res, freq, k, len(h)-1, rxEvery)
+	s := newRadialSweep(res, freq, k, len(h)-1, rxEvery, PathBullington)
 	nRx := (len(h) - 1) / rxEvery
 	loss, ratio := make([]float32, nRx), make([]float32, nRx)
 	s.run(h, txH, rxH, loss, ratio)
@@ -609,7 +609,7 @@ func BenchmarkCoverageRadial40km30m(b *testing.B) {
 		}
 	})
 	b.Run("sweep", func(b *testing.B) {
-		s := newRadialSweep(res, FirmwareFreqMHz, DefaultKFactor, n, every).scratch()
+		s := newRadialSweep(res, FirmwareFreqMHz, DefaultKFactor, n, every, PathBullington).scratch()
 		loss := make([]float32, n/every)
 		for it := 0; it < b.N; it++ {
 			s.run(h, 10, 2, loss, nil)

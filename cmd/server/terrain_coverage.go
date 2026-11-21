@@ -23,6 +23,9 @@ package main
 //     sensitivity are not parameters and not in the cache key: they only
 //     shift the margin, so the browser applies them to the cached loss and
 //     a slider never asks the server again.
+//   - The propagation model (#941 M2) is the request's `model`
+//     (bullington or delta), else map.coverage.model, else Bullington; it
+//     is part of the cache key.
 //   - A point no source covers, an over-large radius, a hidden or unknown
 //     node and a cache hit make no upstream call.
 //   - A cache miss is charged to the client's per-IP budget
@@ -136,6 +139,10 @@ type CoverageConfig struct {
 	CacheTTLHours *float64 `json:"cacheTTLHours"`
 	// ElevationCacheMB bounds the elevation tile cache.
 	ElevationCacheMB *int `json:"elevationCacheMB"`
+	// Model is the default propagation model, "bullington" or "delta"
+	// (#941 M2); a request may name the other. Bullington until the
+	// validation report has run on real Danish links.
+	Model *string `json:"model"`
 }
 
 // coverageSettings are map.coverage, resolved and bounded.
@@ -148,6 +155,7 @@ type coverageSettings struct {
 	cacheEntries        int
 	cacheTTL            time.Duration
 	elevationCacheBytes int
+	model               dhm.PathModel
 }
 
 // resolveCoverageSettings applies the defaults and bounds; an
@@ -164,7 +172,22 @@ func resolveCoverageSettings(cc CoverageConfig, logf func(string, ...interface{}
 		cacheTTL:        time.Duration(k.num("cacheTTLHours", cc.CacheTTLHours, 24, 0, 168, true) * float64(time.Hour)),
 		// 64 MB holds 128 tiles: about three 40 km disks.
 		elevationCacheBytes: k.integer("elevationCacheMB", cc.ElevationCacheMB, 64, 8, 1024) << 20,
+		model:               coverageModelSetting(cc.Model, logf),
 	}
+}
+
+// coverageModelSetting is map.coverage.model: a served model, else
+// Bullington with a warning that echoes nothing.
+func coverageModelSetting(v *string, logf func(string, ...interface{})) dhm.PathModel {
+	if v == nil {
+		return dhm.PathBullington
+	}
+	m, ok := dhm.ParsePathModel(*v)
+	if !ok {
+		logf("[coverage] config map.coverage.model must be \"bullington\" or \"delta\"; using bullington")
+		return dhm.PathBullington
+	}
+	return m
 }
 
 // CoverageRadio is the link budget the browser colours the loss with:
@@ -211,6 +234,10 @@ type CoverageClientConfig struct {
 	DHM bool `json:"dhm"`
 	// Fill is the Copernicus credit while the foreign fill is used.
 	Fill *DHMFillClientConfig `json:"fill,omitempty"`
+	// Model is the default propagation model, Models every model a
+	// request may name (#941 M2).
+	Model  string   `json:"model"`
+	Models []string `json:"models"`
 }
 
 // ── Service ────────────────────────────────────────────────────────────────
@@ -401,13 +428,14 @@ func (e errCoverageBudget) Error() string { return "predicted reach busy" }
 // ── Request ────────────────────────────────────────────────────────────────
 
 // coverageParams are the only accepted query keys.
-var coverageParams = map[string]bool{"at": true, "ha": true, "hr": true, "r": true, "freq": true}
+var coverageParams = map[string]bool{"at": true, "ha": true, "hr": true, "r": true, "freq": true, "model": true}
 
 type coverageQuery struct {
 	at       terrainRef
 	ha, hr   *float64
 	radiusKm *float64
 	freq     *float64
+	model    dhm.PathModel // "": the operator's default
 }
 
 func parseCoverageQuery(q url.Values) (coverageQuery, error) {
@@ -420,6 +448,13 @@ func parseCoverageQuery(q url.Values) (coverageQuery, error) {
 	var err error
 	if cq.at, err = parseTerrainRef(q.Get("at")); err != nil {
 		return cq, err
+	}
+	if vs, ok := q["model"]; ok {
+		m, ok := dhm.ParsePathModel(vs[0])
+		if !ok {
+			return cq, errTerrainQuery
+		}
+		cq.model = m
 	}
 	for _, f := range []struct {
 		key   string
@@ -523,16 +558,20 @@ func (s *Server) resolveCoverageRequest(ctx context.Context, c *terrainCoverage,
 	}
 	freq, freqSource := c.link.frequency(q.freq)
 	k, kSource := c.link.kFactor(nil)
+	model := c.set.model
+	if q.model != "" {
+		model = q.model
+	}
 	req.spec = dhm.CoverageSpec{Center: req.center, RadiusM: radiusM, ResolutionM: float64(c.set.resolutionM),
 		TxHeightM: snapHalf(tx), RxHeightM: snapHalf(rx), FreqMHz: freq, K: k,
-		OutPixelM: dhm.CoverageOutPixelFor(radiusM), Workers: c.workers}
+		OutPixelM: dhm.CoverageOutPixelFor(radiusM), Workers: c.workers, Model: model}
 	req.txSource, req.txAssumed, req.rxSource = txSource, assumed, rxSource
 	req.freqSource, req.kSource = freqSource, kSource
 	req.key = coverageKey{
 		Lat: int64(math.Round(req.center.Lat * coverageSnap)), Lon: int64(math.Round(req.center.Lon * coverageSnap)),
 		RadiusDm: int64(math.Round(radiusM / 100)), TxHalfM: int64(math.Round(req.spec.TxHeightM * 2)), RxHalfM: int64(math.Round(req.spec.RxHeightM * 2)),
 		FreqKHz: int64(math.Round(freq * 1000)), KMilli: int64(math.Round(k * 1000)), ResolutionM: c.set.resolutionM,
-		Model: dhm.CoverageModel, DHM: c.dhm != nil, Fill: c.fill != nil,
+		Model: model.ID(), DHM: c.dhm != nil, Fill: c.fill != nil,
 	}.hash()
 	return req, 0, nil
 }
@@ -1092,7 +1131,7 @@ func (c *terrainCoverage) buildResponse(req coverageRequest, e coverageEntry) Co
 		Params: CoverageParams{RadiusKm: spec.RadiusM / 1000, ResolutionM: c.set.resolutionM,
 			TxHeightM: spec.TxHeightM, TxHeightSource: req.txSource, TxAssumed: req.txAssumed,
 			RxHeightM: spec.RxHeightM, RxHeightSource: req.rxSource,
-			FreqMHz: spec.FreqMHz, FreqSource: req.freqSource, K: spec.K, KSource: req.kSource, Model: dhm.CoverageModel},
+			FreqMHz: spec.FreqMHz, FreqSource: req.freqSource, K: spec.K, KSource: req.kSource, Model: spec.Model.ID()},
 		Raster: CoverageRaster{URL: coverageRasterRoute + "?key=" + req.key, Width: e.meta.Width, Height: e.meta.Height,
 			Bounds: e.meta.Bounds, Encoding: "loss-u8", LossBaseDb: dhm.CoverageLossBaseDb, LossStepDb: dhm.CoverageLossStepDb,
 			NoData: dhm.CoverageNoData, CoveredPct: e.meta.CoveredPct, Bytes: len(e.raster)},
@@ -1127,6 +1166,8 @@ func (s *Server) coverageClientConfig() *CoverageClientConfig {
 		PointAntenna: &DHMPointAntenna{M: h, Source: src},
 		Radio:        c.radio,
 		DHM:          c.dhm != nil,
+		Model:        string(c.set.model),
+		Models:       []string{string(dhm.PathBullington), string(dhm.PathDelta)},
 	}
 	if c.fill != nil {
 		out.Fill = &DHMFillClientConfig{
