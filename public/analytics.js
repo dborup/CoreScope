@@ -7745,6 +7745,7 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
     const active = document.activeElement;
     const focusPanel = bust || !!(active && active.closest && active.closest('.ai-bucket-panel'));
     const focusRow = active && active.dataset && el.contains(active) ? active.dataset.aiBucket : null;
+    const prev = _aiBucket;
     _aiLeave();
     el.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading advert intervals…</div>';
     try {
@@ -7753,7 +7754,7 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
       el.innerHTML = window.AdvertIntervalAnalytics.render(data);
       _aiChart = data;
       if (focusRow) _aiReturnFocus = focusRow;
-      _aiRestore(focusPanel);
+      _aiRestore(focusPanel, bust ? null : prev);
     } catch (err) {
       if (myGen !== _advertIntervalsGen) return;
       el.innerHTML = '<div class="text-center" style="color:var(--status-red);padding:40px">Failed to load advert intervals: ' + esc(String(err.message || err)) + '</div>';
@@ -7769,10 +7770,12 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
   // switching buckets replaces it; Close goes back when this page pushed the
   // entry, else drops bucket= in place. Further pages name the first page's
   // snapshot; a 409 (a newer snapshot) restarts from page 1, where the panel
-  // explains the changed count.
+  // explains the changed count. A re-render of the tab (the theme refresh
+  // after every page load, a theme change) keeps the loaded list of the same
+  // bucket and filter instead of fetching it again.
   const AI_BUCKET_PUSHED = 'aiBucketPushed';
   let _aiChart = null;        // the histogram response the panel belongs to
-  let _aiBucket = null;       // { b, key, resp, shown, focus } of the open panel
+  let _aiBucket = null;       // { b, key, filter, resp, members, shown, focus } of the open panel
   let _aiBucketGen = 0;
   let _aiBust = false;        // "Refresh chart": the next tab render refetches
   let _aiReturnFocus = null;  // bucket key whose row gets focus after Close went Back
@@ -7819,11 +7822,32 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
     panel.hidden = false;
   }
 
-  function _aiOpen(b, focus) {
+  function _aiFilter() { return RegionFilter.regionQueryString() + AreaFilter.areaQueryString(); }
+
+  // prev: the state of a panel open before a re-render; its loaded list is
+  // shown again when it is the same bucket under the same filter.
+  function _aiOpen(b, focus, prev) {
     _aiClosePanels();
-    _aiBucket = { b: b, key: window.AdvertIntervalAnalytics.formatBucketParam(b), resp: null, shown: 0, focus: !!focus };
-    _aiSetExpanded(_aiBucket.key);
-    _aiLoad(0);
+    const key = window.AdvertIntervalAnalytics.formatBucketParam(b);
+    const filter = _aiFilter();
+    const reuse = prev && prev.key === key && prev.filter === filter && prev.resp;
+    _aiBucket = reuse ? prev : { b: b, key: key, filter: filter, resp: null, members: [], shown: 0 };
+    _aiBucket.focus = !!focus;
+    _aiSetExpanded(key);
+    if (!reuse) { _aiLoad(0); return; }
+    _aiPaint(_aiView('ready', { resp: Object.assign({}, prev.resp, { members: prev.members }), shown: prev.shown }));
+    _aiFocusPanel(_aiBucket);
+  }
+
+  function _aiFocusPanel(st) {
+    if (!st.focus) return;
+    st.focus = false;
+    const h = document.getElementById('ai-bucket-heading-' + st.b.cls);
+    if (h) h.focus({ preventScroll: true });
+    // The panel's scroll-margin keeps it clear of the sticky top nav and the
+    // phone bottom nav, which a plain focus scroll ignores.
+    const panel = _aiPanel(st.b.cls);
+    if (panel) panel.scrollIntoView({ block: 'nearest' });
   }
 
   async function _aiLoad(offset) {
@@ -7844,21 +7868,15 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
     let q = 'class=' + b.cls + '&interval_s=' + b.intervalS + '&snapped=' + b.snapped + '&offset=' + offset;
     if (offset > 0 && st.resp) q += '&snapshot=' + encodeURIComponent(st.resp.generated_at);
     try {
-      const resp = await api(withQuery('/analytics/advert-intervals/bucket?' + q, RegionFilter.regionQueryString() + AreaFilter.areaQueryString()), { retry503: false });
+      const resp = await api(withQuery('/analytics/advert-intervals/bucket?' + q, st.filter), { retry503: false });
       if (myGen !== _aiBucketGen || st !== _aiBucket) return;
       const members = Array.isArray(resp.members) ? resp.members : [];
       if (offset === 0) {
         st.resp = resp;
+        st.members = members.slice();
         st.shown = members.length;
         _aiPaint(_aiView('ready', { resp: resp, shown: st.shown }));
-        if (st.focus) {
-          st.focus = false;
-          const h = document.getElementById('ai-bucket-heading-' + b.cls);
-          if (h) h.focus({ preventScroll: true });
-          // The panel's scroll-margin keeps it clear of the sticky top nav
-          // and the phone bottom nav, which a plain focus scroll ignores.
-          if (panel) panel.scrollIntoView({ block: 'nearest' });
-        }
+        _aiFocusPanel(st);
         return;
       }
       // "Show more": append one page, never rebuild the list.
@@ -7868,6 +7886,7 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
       if (!list || !foot) return;
       const first = list.children.length;
       list.insertAdjacentHTML('beforeend', window.AdvertIntervalAnalytics.bucketMembersHtml(members, b.cls));
+      st.members = st.members.concat(members);
       st.shown += members.length;
       foot.innerHTML = window.AdvertIntervalAnalytics.bucketFooterHtml(st.shown, resp.visible, resp.limit);
       if (body) body.setAttribute('aria-busy', 'false');
@@ -7882,11 +7901,11 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
 
   // After the chart renders: reopen the bucket the URL names, or give the
   // closed bucket's row focus back after a Close that went Back.
-  function _aiRestore(focusPanel) {
+  function _aiRestore(focusPanel, prev) {
     const b = _aiHashBucket();
     const back = _aiReturnFocus;
     _aiReturnFocus = null;
-    if (b) _aiOpen(b, focusPanel);
+    if (b) _aiOpen(b, focusPanel, prev);
     // After the router's own focus move (app.js, one frame after a mount).
     if (back && !focusPanel) requestAnimationFrame(() => { const row = _aiRow(back); if (row) row.focus(); });
   }

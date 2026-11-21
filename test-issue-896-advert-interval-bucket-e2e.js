@@ -188,10 +188,16 @@ async function openTabCold(page) {
     assert(!(await panelOpen(page)), 'panel closed after Back');
   });
 
-  await step('cold deep link opens the panel; Close drops bucket= in place', async () => {
+  await step('cold deep link opens the panel with one bucket request; Close drops bucket= in place', async () => {
     await gotoSettled(page, TAB + '&bucket=' + FLOOD_3H);
-    await page.reload({ waitUntil: 'domcontentloaded' });
-    await settle(page);
+    // The load's theme refresh re-renders the tab: it must reuse the list.
+    const req = await requestsDuring(page, async () => {
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await settle(page);
+      await readPanel(page, 'flood');
+      await page.waitForTimeout(500);
+    });
+    assert(req.bucket === 1 && req.nodes === 0, 'cold deep link requests: ' + JSON.stringify({ bucket: req.bucket, nodes: req.nodes }));
     const p = await readPanel(page, 'flood');
     assert(p.members.length === 3 && p.expanded.join() === FLOOD_3H, JSON.stringify(p));
     const before = await page.evaluate(() => history.length);
