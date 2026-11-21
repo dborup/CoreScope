@@ -140,7 +140,6 @@ func (s *Server) coverageReachTargets(ctx context.Context, c *terrainCoverage, c
 	if !ok {
 		return nil, false
 	}
-	claims := s.antennaClaims()
 	var out []coverageReachTarget
 	for i := range nodes {
 		n := &nodes[i]
@@ -153,13 +152,22 @@ func (s *Server) coverageReachTargets(ctx context.Context, c *terrainCoverage, c
 		if dhm.GroundDistance(centre, pt) > radiusM+1000 {
 			continue
 		}
-		end := terrainEnd{pt: pt, kind: "node", role: n.Role, pubkey: pk}
-		end.owner = claims.ownerHeightAt(ctx, pk, pt)
-		h, source, _ := c.link.antenna(end, nil)
+		h, source := s.coverageNodeHeight(ctx, c, pk, n.Role, pt)
 		out = append(out, coverageReachTarget{pubkey: pk, role: n.Role, pt: pt, heightM: h, heightSource: source})
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].pubkey < out[b].pubkey })
 	return out, true
+}
+
+// coverageNodeHeight is a node's antenna height above the ground in a
+// reach, for nodes in reach and the validation harness alike: the
+// profile's rules without measuring anything (the operator's per-node
+// value, the owner's approved height unless the node moved, the role).
+func (s *Server) coverageNodeHeight(ctx context.Context, c *terrainCoverage, pk, role string, pt dhm.LatLon) (float64, string) {
+	end := terrainEnd{pt: pt, kind: "node", role: role, pubkey: pk}
+	end.owner = s.antennaClaims().ownerHeightAt(ctx, pk, pt)
+	h, source, _ := c.link.antenna(end, nil)
+	return h, source
 }
 
 // evaluateReach computes the nodes in reach of spec over grid: the
