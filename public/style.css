@@ -6791,9 +6791,52 @@ body.embed .warmup-pills { display: none !important; }
 .reach-input.is-invalid { outline: 2px solid var(--danger); }
 .reach-credit { color: var(--text-muted); }
 .reach-credit-line { margin: 4px 0; overflow-wrap: anywhere; }
+/* #941 M2 — nodes in reach: the class chips open the list below them. */
+.reach-nir { margin: 6px 0; }
+.reach-nir[hidden] { display: none; }
+.reach-nir-title { margin: 6px 0 4px; font-size: var(--fs-sm); }
+.reach-nir-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.reach-nir-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card-bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.reach-nir-chip[hidden] { display: none; }
+.reach-nir-chip:hover { background: var(--row-hover); }
+.reach-nir-chip.active { background: var(--selected-bg); border-color: var(--reach-centre); }
+.reach-nir-chip:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
+.reach-nir-count { font-weight: 700; font-variant-numeric: tabular-nums; }
+.reach-nir-note { margin: 4px 0; color: var(--text-muted); overflow-wrap: anywhere; }
+.reach-nir-list { list-style: none; margin: 4px 0; padding: 0; max-height: 220px; overflow-y: auto; border-top: 1px solid var(--border); }
+.reach-nir-list[hidden] { display: none; }
+.reach-nir-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  column-gap: 8px;
+  align-items: center;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.reach-nir-item[hidden] { display: none; }
+.reach-nir-item .reach-swatch { grid-row: 1 / span 2; }
+.reach-nir-link { grid-column: 2; color: var(--link-color); overflow-wrap: anywhere; }
+.reach-nir-meta { grid-column: 2; color: var(--text-muted); font-size: 0.9em; }
+.reach-nir-margin { grid-column: 3; grid-row: 1 / span 2; font-variant-numeric: tabular-nums; }
+.reach-swatch-none { background: transparent; }
 @media (max-width: 640px) {
   /* A sheet along the bottom, its own scroller, so the map keeps the top. */
   .reach-panel { left: 8px; right: 8px; bottom: 8px; width: auto; max-width: none; max-height: 46%; }
+  /* Touch: the chips and list rows are full-size targets. */
+  .reach-nir-chip { min-height: 44px; }
+  .reach-nir-item { min-height: 44px; }
   /* The head and its × stay at the top of the scrolled sheet; it covers
      the sheet's top padding so nothing scrolls past above it. */
   .reach-head {
