@@ -299,6 +299,7 @@
       if (_currentTab !== 'wardriving') _stopWardrivingRefresh();
       if (_currentTab !== 'areas') _stopAreasRefresh();
       if (_currentTab !== 'distance') _leaveDistanceTab();
+      if (_currentTab !== 'advert-intervals') _aiLeave();
       _updateAnalyticsUrl();
       renderTab(_currentTab);
     });
@@ -349,6 +350,9 @@
       };
       analyticsContent.addEventListener('click', handler);
       analyticsContent.addEventListener('keydown', handler);
+      // #896 — Advert Intervals bucket rows and their node list.
+      analyticsContent.addEventListener('click', _aiOnClick);
+      analyticsContent.addEventListener('keydown', _aiOnKeydown);
     }
 
     // Re-render when distance unit or theme changes
@@ -438,6 +442,8 @@
     scopes: [SCOPES_SUBTAB.param, SCOPES_WINDOW.param, 'saq', 'sap', 'sav', 'scope'],
     wardriving: [WARDRIVING_WINDOW.param],
     'repeater-metrics': [BUSIEST_SORT.param, BUSIEST_OBSERVERS.param, BUSIEST_LIMIT.param],
+    // #896 — the open distribution bucket (#896 M1 block below).
+    'advert-intervals': ['bucket'],
   };
 
   // A value from the URL wins; an unknown one falls back to the default,
@@ -3563,7 +3569,7 @@
     }
   }
 
-function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; } if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; } _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
+function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; } if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; } _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
 
   // Expose for testing
   if (typeof window !== 'undefined') {
@@ -7732,16 +7738,205 @@ function destroy() { _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(
   let _advertIntervalsGen = 0;
   async function renderAdvertIntervalsTab(el) {
     const myGen = ++_advertIntervalsGen;
+    const bust = _aiBust;
+    _aiBust = false;
+    // A re-render (filter change, theme refresh, Refresh chart) keeps focus
+    // on the panel or row it was on.
+    const active = document.activeElement;
+    const focusPanel = bust || !!(active && active.closest && active.closest('.ai-bucket-panel'));
+    const focusRow = active && active.dataset && el.contains(active) ? active.dataset.aiBucket : null;
+    _aiLeave();
     el.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading advert intervals…</div>';
     try {
-      const data = await api(withQuery('/analytics/advert-intervals', RegionFilter.regionQueryString() + AreaFilter.areaQueryString()), { ttl: CLIENT_TTL.analyticsRF });
+      const data = await api(withQuery('/analytics/advert-intervals', RegionFilter.regionQueryString() + AreaFilter.areaQueryString()), { ttl: CLIENT_TTL.analyticsRF, bust: bust });
       if (myGen !== _advertIntervalsGen || _currentTab !== 'advert-intervals') return;
       el.innerHTML = window.AdvertIntervalAnalytics.render(data);
+      _aiChart = data;
+      if (focusRow) _aiReturnFocus = focusRow;
+      _aiRestore(focusPanel);
     } catch (err) {
       if (myGen !== _advertIntervalsGen) return;
       el.innerHTML = '<div class="text-center" style="color:var(--status-red);padding:40px">Failed to load advert intervals: ' + esc(String(err.message || err)) + '</div>';
     }
   }
+
+  // #896 M1 — the nodes of one Flood / Zero-hop distribution bucket, listed
+  // in the card's panel from GET /api/analytics/advert-intervals/bucket:
+  // one request per open, "Show more" or retry, never one per node. The open
+  // bucket is ?bucket=<class>.<interval_s>.<s|u> in the hash (TAB_URL_PARAMS
+  // drops it on a tab switch). Opening from closed pushes a history entry, so
+  // Back closes the panel (the router remounts the page from the URL);
+  // switching buckets replaces it; Close goes back when this page pushed the
+  // entry, else drops bucket= in place. Further pages name the first page's
+  // snapshot; a 409 (a newer snapshot) restarts from page 1, where the panel
+  // explains the changed count.
+  const AI_BUCKET_PUSHED = 'aiBucketPushed';
+  let _aiChart = null;        // the histogram response the panel belongs to
+  let _aiBucket = null;       // { b, key, resp, shown, focus } of the open panel
+  let _aiBucketGen = 0;
+  let _aiBust = false;        // "Refresh chart": the next tab render refetches
+  let _aiReturnFocus = null;  // bucket key whose row gets focus after Close went Back
+
+  function _aiHashBucket() {
+    return window.AdvertIntervalAnalytics.parseBucketParam(new URLSearchParams(location.hash.split('?')[1] || '').get('bucket'));
+  }
+
+  // Rows are found by comparing data-ai-bucket, never by a selector built
+  // from the URL.
+  function _aiRow(key) {
+    return Array.from(document.querySelectorAll('#analyticsContent [data-ai-bucket]')).find(r => r.dataset.aiBucket === key) || null;
+  }
+
+  function _aiPanel(cls) { return document.getElementById('ai-bucket-panel-' + cls); }
+
+  function _aiSetExpanded(key) {
+    document.querySelectorAll('#analyticsContent [data-ai-bucket]').forEach(r => r.setAttribute('aria-expanded', r.dataset.aiBucket === key ? 'true' : 'false'));
+  }
+
+  function _aiClosePanels() {
+    document.querySelectorAll('#analyticsContent .ai-bucket-panel').forEach(p => { p.hidden = true; p.innerHTML = ''; });
+    _aiSetExpanded(null);
+  }
+
+  // Forget the open bucket; a request still in flight is ignored.
+  function _aiLeave() { _aiBucket = null; _aiBucketGen++; }
+
+  function _aiView(status, extra) {
+    const b = _aiBucket.b;
+    const s = _aiChart && _aiChart[b.cls];
+    const hit = s && Array.isArray(s.buckets) ? s.buckets.find(x => Number(x.interval_s) === b.intervalS && !!x.snapped === b.snapped) : null;
+    return Object.assign({
+      bucket: b, status: status,
+      chart: { generated_at: _aiChart && _aiChart.scan ? _aiChart.scan.generated_at : '', nodes: hit ? Number(hit.nodes) || 0 : 0 },
+      scope: { region: RegionFilter.getRegionParam(), area: AreaFilter.getSelectedLabel ? AreaFilter.getSelectedLabel() : '' },
+    }, extra);
+  }
+
+  function _aiPaint(view) {
+    const panel = _aiPanel(_aiBucket.b.cls);
+    if (!panel) return;
+    panel.innerHTML = window.AdvertIntervalAnalytics.renderBucketPanel(view);
+    panel.hidden = false;
+  }
+
+  function _aiOpen(b, focus) {
+    _aiClosePanels();
+    _aiBucket = { b: b, key: window.AdvertIntervalAnalytics.formatBucketParam(b), resp: null, shown: 0, focus: !!focus };
+    _aiSetExpanded(_aiBucket.key);
+    _aiLoad(0);
+  }
+
+  async function _aiLoad(offset) {
+    const st = _aiBucket;
+    if (!st) return;
+    const myGen = ++_aiBucketGen;
+    const b = st.b;
+    const panel = _aiPanel(b.cls);
+    if (offset === 0) {
+      st.resp = null;
+      _aiPaint(_aiView('loading'));
+    } else if (panel) {
+      const more = panel.querySelector('[data-ai-bucket-more]');
+      if (more) more.disabled = true;
+      const body = panel.querySelector('.ai-bucket-body');
+      if (body) body.setAttribute('aria-busy', 'true');
+    }
+    let q = 'class=' + b.cls + '&interval_s=' + b.intervalS + '&snapped=' + b.snapped + '&offset=' + offset;
+    if (offset > 0 && st.resp) q += '&snapshot=' + encodeURIComponent(st.resp.generated_at);
+    try {
+      const resp = await api(withQuery('/analytics/advert-intervals/bucket?' + q, RegionFilter.regionQueryString() + AreaFilter.areaQueryString()), { retry503: false });
+      if (myGen !== _aiBucketGen || st !== _aiBucket) return;
+      const members = Array.isArray(resp.members) ? resp.members : [];
+      if (offset === 0) {
+        st.resp = resp;
+        st.shown = members.length;
+        _aiPaint(_aiView('ready', { resp: resp, shown: st.shown }));
+        if (st.focus) {
+          st.focus = false;
+          const h = document.getElementById('ai-bucket-heading-' + b.cls);
+          if (h) h.focus({ preventScroll: true });
+          // The panel's scroll-margin keeps it clear of the sticky top nav
+          // and the phone bottom nav, which a plain focus scroll ignores.
+          if (panel) panel.scrollIntoView({ block: 'nearest' });
+        }
+        return;
+      }
+      // "Show more": append one page, never rebuild the list.
+      const list = panel && panel.querySelector('.ai-bucket-list');
+      const foot = panel && panel.querySelector('.ai-bucket-foot');
+      const body = panel && panel.querySelector('.ai-bucket-body');
+      if (!list || !foot) return;
+      const first = list.children.length;
+      list.insertAdjacentHTML('beforeend', window.AdvertIntervalAnalytics.bucketMembersHtml(members, b.cls));
+      st.shown += members.length;
+      foot.innerHTML = window.AdvertIntervalAnalytics.bucketFooterHtml(st.shown, resp.visible, resp.limit);
+      if (body) body.setAttribute('aria-busy', 'false');
+      const link = list.children[first] && list.children[first].querySelector('a');
+      if (link) link.focus();
+    } catch (e) {
+      if (myGen !== _aiBucketGen || st !== _aiBucket) return;
+      if (e && e.status === 409) { _aiLoad(0); return; }
+      _aiPaint(_aiView('error', { error: { status: e && e.status } }));
+    }
+  }
+
+  // After the chart renders: reopen the bucket the URL names, or give the
+  // closed bucket's row focus back after a Close that went Back.
+  function _aiRestore(focusPanel) {
+    const b = _aiHashBucket();
+    const back = _aiReturnFocus;
+    _aiReturnFocus = null;
+    if (b) _aiOpen(b, focusPanel);
+    // After the router's own focus move (app.js, one frame after a mount).
+    if (back && !focusPanel) requestAnimationFrame(() => { const row = _aiRow(back); if (row) row.focus(); });
+  }
+
+  function _aiToggle(key) {
+    const b = window.AdvertIntervalAnalytics.parseBucketParam(key);
+    if (!b) return;
+    if (_aiBucket && _aiBucket.key === key) { _aiClose(); return; }
+    try {
+      const hash = URLState.updateHashParams({ bucket: key }, location.hash);
+      if (_aiHashBucket()) history.replaceState(history.state, '', hash);
+      else history.pushState(Object.assign({}, history.state, { [AI_BUCKET_PUSHED]: true }), '', hash);
+    } catch (e) { /* URL sync is best effort */ }
+    _aiOpen(b, true);
+  }
+
+  function _aiClose() {
+    const key = _aiBucket ? _aiBucket.key : null;
+    const st = history.state;
+    if (st && st[AI_BUCKET_PUSHED] && _aiHashBucket()) {
+      _aiReturnFocus = key;
+      history.back();
+      return;
+    }
+    try { history.replaceState(st, '', URLState.updateHashParams({ bucket: '' }, location.hash)); } catch (e) { /* best effort */ }
+    _aiLeave();
+    _aiClosePanels();
+    const row = key && _aiRow(key);
+    if (row) row.focus();
+  }
+
+  function _aiOnClick(e) {
+    if (_currentTab !== 'advert-intervals' || !e.target.closest) return;
+    const t = e.target;
+    const row = t.closest('[data-ai-bucket]');
+    if (row) { _aiToggle(row.dataset.aiBucket); return; }
+    if (t.closest('[data-ai-bucket-close]')) { _aiClose(); return; }
+    if (!_aiBucket) return;
+    if (t.closest('[data-ai-bucket-more]')) { _aiLoad(_aiBucket.shown); return; }
+    if (t.closest('[data-ai-bucket-retry]')) { _aiLoad(0); return; }
+    if (t.closest('[data-ai-bucket-refresh]')) { _aiBust = true; renderTab('advert-intervals'); }
+  }
+
+  // Escape inside the panel closes it.
+  function _aiOnKeydown(e) {
+    if (e.key !== 'Escape' || !_aiBucket || !e.target.closest || !e.target.closest('.ai-bucket-panel')) return;
+    e.preventDefault();
+    _aiClose();
+  }
+  // end #896 M1
 
   async function renderRolesTab(el) {
     el.innerHTML = '<div class="text-center text-muted" style="padding:40px">Loading roles…</div>';
