@@ -258,6 +258,7 @@ run test-issue-117-ws-watchdog.js
 run test-issue-937-ws-backoff.js
 run test-issue-111-drawer-version.js
 run test-issue-614-version-notice.js
+run test-883-version-autoreload.js
 
 # Previously run only by the JS unit step in deploy.yml (#174)
 run test-packet-filter-time.js
