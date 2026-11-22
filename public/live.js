@@ -4206,6 +4206,14 @@
       now: () => Date.now(),
       setTimeout: (fn, ms) => setTimeout(fn, ms),
       clearTimeout: (id) => clearTimeout(id),
+      // #883 M3: the in-place remount is the router's own destroy() + init()
+      // for the same hash; the document (and browser fullscreen) stays.
+      hash: () => location.hash,
+      remount: () => navigate(),
+      momentsVisible: () => !!(moments && moments.stats().visible),
+      reseed: () => { if (moments) moments.reseed(); },
+      wakeLock: (navigator.wakeLock && typeof navigator.wakeLock.request === 'function') ? navigator.wakeLock : null,
+      setAutoReload: (on) => { if (window.VersionNotice) window.VersionNotice.setAutoReload(on); },
     });
   }
 

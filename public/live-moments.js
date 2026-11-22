@@ -572,12 +572,16 @@
     };
     deps.onWS(wsHandler);
 
-    if (deps.fetchJSON) {
+    // The history: once at create, and again on reseed() (#883 M3: kiosk
+    // calls it on every socket open; seed() drops what is already shown).
+    function loadHistory() {
+      if (!deps.fetchJSON || destroyed) return;
       Promise.resolve()
         .then(function () { return destroyed ? null : deps.fetchJSON('/api/moments?limit=' + DRAWER_LEN, abort ? abort.signal : undefined); })
         .then(function (body) { if (body && !destroyed) seed(body.moments); })
         .catch(function () { /* drawer starts empty */ });
     }
+    loadHistory();
 
     function setPaused(v) {
       paused = !!v;
@@ -628,6 +632,7 @@
     return {
       ingest: ingest,
       seed: seed,
+      reseed: loadHistory,
       setPaused: setPaused,
       onModeChange: onModeChange,
       onSettingsChanged: onSettingsChanged,

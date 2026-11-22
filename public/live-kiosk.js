@@ -19,6 +19,16 @@
  * Nothing is persisted: kiosk is on by URL only, the tour never writes the
  * hash or localStorage, and exiting strips the kiosk params from the hash.
  *
+ * #883 M3, running for days: every 6 h (owner decision 6) the controller
+ * asks live.js to remount Live in place (destroy() + init() in the same
+ * document, so browser fullscreen stays), at a step boundary with no Moments
+ * card up; the step it was due to show carries over to the new mount through
+ * module state (a hard reload starts at step 1). The deadline is wall clock,
+ * checked by one heartbeat; a heartbeat that runs late means the machine
+ * slept, and the tour re-anchors from now. While visible it holds a Screen
+ * Wake Lock (re-taken when the browser drops it), re-seeds Moments on every
+ * socket (re)open, and turns on version-notice's auto-reload.
+ *
  * XSS: area keys and labels come from the operator's config and reach the
  * page through textContent only. No innerHTML.
  */
@@ -35,8 +45,20 @@
   var NOTE_MS = 10000;         // "Skipped: …" stays this long
   var RESUME_MIN_MS = 60000;
   var RESUME_MAX_MS = 300000;
+  var REMOUNT_MS_DEFAULT = 6 * 3600000;   // #883 M3, owner decision 6
+  var REMOUNT_MS_MIN = 3600000;
+  var REMOUNT_MS_MAX = 24 * 3600000;
+  var BEAT_MS = 60000;         // the heartbeat: remount deadline, sleep/wake
+  var WAKE_GAP_MS = 2 * BEAT_MS; // a heartbeat later than this: the machine slept
+  var CARRY_MS = 60000;        // a remount's step carry-over is used within this
   // Kiosk config values for the customizer later (#883 M4, AGENTS.md
-  // rule 8): every, the idle seconds and the resume delay.
+  // rule 8): every, the idle seconds, the resume delay and the remount
+  // interval.
+
+  // Module state, so it survives an in-place remount (not a reload).
+  var carry = null;            // { hash, step, at } from the mount that remounted
+  var remountOverrideMs = null; // test-only: the soak test's short interval
+  var remounts = 0;
 
   // ── URL ─────────────────────────────────────────────────────────────────
   // params: URLSearchParams (or anything with get()). Only kiosk=1 turns
@@ -63,6 +85,13 @@
     ['kiosk', 'tour', 'every'].forEach(function (k) { params.delete(k); });
     var rest = params.toString();
     return rest ? route + '?' + rest : route;
+  }
+
+  // The remount interval: 6 h unless given, clamped to 1–24 h.
+  function remountDelayMs(ms) {
+    var v = Number(ms);
+    if (!(v > 0)) return REMOUNT_MS_DEFAULT;
+    return Math.min(REMOUNT_MS_MAX, Math.max(REMOUNT_MS_MIN, v));
   }
 
   function resumeAfterMs(everyS) {
@@ -168,11 +197,21 @@
     }
 
     return {
-      start: function () {
+      // first: the step to start at (an in-place remount carries it over).
+      start: function (first) {
         if (started || stopped) return;
         started = true;
         if (n === 0) return;
-        go(0);
+        go(first > 0 && first < n ? first : 0);
+        arm(o.now() + every);
+      },
+      // After a sleep: a step overdue by the wall clock moves on now and the
+      // next one is a full step later. A step that already re-anchored itself
+      // (it fired late) is left alone, so a wake is never two moves.
+      reanchor: function () {
+        if (!started || stopped || n < 2 || paused() || stepTimer == null || nextAt > o.now()) return;
+        reanchors++;
+        go((index + 1) % n);
         arm(o.now() + every);
       },
       // An interaction pauses; quiet for resumeAfter resumes. One timer,
@@ -220,6 +259,14 @@
    *   exit()              leave kiosk (live.js navigates)
    *   warn(msg)
    *   now(), setTimeout, clearTimeout
+   * #883 M3, each optional (an M1 host passes none):
+   *   hash()              the current location.hash (the step carry-over)
+   *   remount()           remount Live in place (live.js: the router)
+   *   momentsVisible()    bool: a Moments card is on screen
+   *   reseed()            re-seed Moments (on every socket open)
+   *   wakeLock            navigator.wakeLock, or null (plain http)
+   *   setAutoReload(on)   version-notice's kiosk auto-reload
+   *   remountMs           the interval (M4 config), clamped to 1–24 h
    */
   var liveCount = 0; // controllers not yet destroyed (leak check)
 
@@ -240,6 +287,22 @@
     var stepEl = null, labelEl = null, countEl = null, progressEl = null;
     var exitBtn = null;
     var retryOff = null;
+    // #883 M3
+    var mountedAt = deps.now();
+    var mountHash = deps.hash ? deps.hash() : null;
+    var remountMs = remountDelayMs(deps.remountMs);
+    var remounting = false;
+    var beating = !!(deps.remount || deps.wakeLock);
+    var beatTimer = null, lastBeat = mountedAt, wakes = 0;
+    var lock = null, lockOff = null, lockPending = false;
+    var reseeds = 0;
+    var startStep = 0;
+    // An in-place remount of this same kiosk link: carry the step over, and
+    // do not offer the start overlay or the skipped note again (they were
+    // shown at the start; an unattended screen would get them every 6 h).
+    var fromRemount = !!(carry && mountHash != null && carry.hash === mountHash && mountedAt - carry.at < CARRY_MS);
+    if (fromRemount) startStep = carry.step;
+    carry = null;
     liveCount++;
 
     function later(fn, ms) {
@@ -345,6 +408,8 @@
     function showStep(i) {
       var s = steps[i];
       if (!s) return;
+      // #883 M3: a due remount takes this boundary; the new mount shows i.
+      if (remountNow(i)) return;
       labelEl.textContent = s.label;
       countEl.textContent = steps.length > 1 ? (i + 1) + ' / ' + steps.length : '';
       var reduced = !!(deps.reducedMotion && deps.reducedMotion());
@@ -374,7 +439,7 @@
         skipped.push(s.key);
         if (deps.warn) deps.warn('[kiosk] tour step skipped (' + s.reason + '): ' + s.key);
       });
-      if (skipped.length) {
+      if (skipped.length && !fromRemount) {
         var note = add(el('div', 'live-kiosk-note', 'Skipped: ' + skipped.join(', ')));
         note.setAttribute('role', 'status');
         later(function () { drop(note); }, NOTE_MS);
@@ -386,7 +451,7 @@
         show: showStep, now: deps.now, setTimeout: later,
         clearTimeout: function (id) { cancel(id); }
       });
-      tour.start();
+      tour.start(startStep);
       tour.setHidden(!!doc.hidden);
       onModeChange();
     }
@@ -407,6 +472,82 @@
           loadAreas(true);
         });
       });
+    }
+
+    // ── In-place remount, heartbeat, wake lock (#883 M3) ──────────────────
+    function remountEvery() { return remountOverrideMs > 0 ? remountOverrideMs : remountMs; }
+    function remountDue() {
+      return !!deps.remount && deps.now() - mountedAt >= remountEvery();
+    }
+    // Remount now if due and no Moments card is up (a card is somebody's
+    // moment; the next boundary will do). step: what the new mount shows.
+    function remountNow(step) {
+      if (remounting) return true;
+      if (!remountDue() || (deps.momentsVisible && deps.momentsVisible())) return false;
+      remounting = true;
+      remounts++;
+      carry = { hash: mountHash, step: step, at: deps.now() };
+      // Out of the tour's own call stack: the router destroys this controller.
+      later(function () { deps.remount(); }, 0);
+      return true;
+    }
+    // A tour that is stepping remounts at its next boundary (showStep). A
+    // static view, or a single step, remounts here. A paused tour (someone
+    // is using the screen, the VCR is out of LIVE) waits for its resume.
+    function remountIdle() {
+      if (tour && tour.stats().steps >= 2) return;
+      remountNow(tour ? Math.max(0, tour.stats().step) : 0);
+    }
+    function beat() {
+      beatTimer = null;
+      var t = deps.now();
+      if (t - lastBeat > WAKE_GAP_MS) onWake();
+      lastBeat = t;
+      remountIdle();
+      armBeat();
+    }
+    function armBeat() {
+      if (!beating || destroyed || doc.hidden || beatTimer != null) return;
+      lastBeat = deps.now();
+      beatTimer = later(beat, BEAT_MS);
+    }
+    // The machine slept (its timers did not run): move the tour on from now
+    // and take the lock again (an OS sleep drops it, maybe with no
+    // visibilitychange). #883 M2's numbers refresh joins here.
+    function onWake() {
+      wakes++;
+      if (tour) { tour.reanchor(); syncPaused(); }
+      acquireLock();
+    }
+    function acquireLock() {
+      var wl = deps.wakeLock;
+      if (destroyed || lock || lockPending || doc.hidden || !wl || typeof wl.request !== 'function') return;
+      lockPending = true;
+      var p;
+      try { p = wl.request('screen'); } catch (e) { p = Promise.reject(e); }
+      Promise.resolve(p).then(function (s) {
+        lockPending = false;
+        if (!s) return;
+        if (destroyed) { try { settle(s.release()); } catch (_) {} return; }
+        lock = s;
+        // The browser drops it when the page is hidden; re-taken on visible.
+        if (s.addEventListener) {
+          lockOff = listen(s, 'release', function () {
+            if (lockOff) { lockOff(); lockOff = null; }
+            if (lock === s) lock = null;
+          });
+        }
+      }, function () { lockPending = false; /* denied, or no secure context: next visible */ });
+    }
+    function releaseLock() {
+      var s = lock;
+      lock = null;
+      if (s) { try { settle(s.release()); } catch (_) {} }
+    }
+    function onWsOpen() {
+      reseeds++;
+      // #883 M2's numbers refresh joins here.
+      deps.reseed();
     }
 
     // ── Page events ───────────────────────────────────────────────────────
@@ -440,9 +581,10 @@
       if (!inUI(e.target)) interact();
     }
     function onVisibility() {
-      if (doc.hidden) idleTimer = cancel(idleTimer);
+      if (doc.hidden) { idleTimer = cancel(idleTimer); beatTimer = cancel(beatTimer); }
       else wake();
       if (tour) { tour.setHidden(!!doc.hidden); syncPaused(); }
+      if (!doc.hidden) { acquireLock(); remountIdle(); armBeat(); }
     }
     function onMapMove() { if (!ownMove) interact(); }
     function onModeChange() {
@@ -456,10 +598,12 @@
       destroyed = true;
       liveCount--;
       if (tour) tour.destroy();
+      releaseLock();
+      if (deps.setAutoReload) deps.setAutoReload(false);
       listeners.splice(0).forEach(unbind);
       timers.forEach(function (id) { deps.clearTimeout(id); });
       timers.clear();
-      idleTimer = overlayTimer = null;
+      idleTimer = overlayTimer = beatTimer = null;
       ui.splice(0).forEach(function (n) { if (n.parentNode) n.parentNode.removeChild(n); });
       overlay = stepEl = labelEl = countEl = progressEl = exitBtn = null;
       setIdle(false);
@@ -478,8 +622,12 @@
       listen(deps.map, 'dragstart', onMapMove);
       listen(deps.map, 'zoomstart', onMapMove);
     }
-    openOverlay();
+    if (deps.reseed) listen(deps.win, 'corescope:ws-open', onWsOpen);
+    if (deps.setAutoReload) deps.setAutoReload(true);
+    if (!fromRemount) openOverlay();
     wake();
+    acquireLock();
+    armBeat();
     if (params.tour.length) loadAreas(false);
 
     return {
@@ -491,7 +639,10 @@
         return { timers: timers.size, listeners: listeners.length, step: t ? t.step : -1, steps: steps.length,
           paused: !!(t && t.paused), reasons: t ? t.reasons : [], reanchors: t ? t.reanchors : 0,
           skipped: skipped.slice(), idle: idle, overlay: !!overlay, fetches: fetches, every: params.every,
-          destroyed: destroyed };
+          destroyed: destroyed,
+          // #883 M3
+          beat: beatTimer != null, wakes: wakes, wakeLock: !!lock, reseeds: reseeds,
+          remountDue: remountDue(), remounting: remounting, remountInMs: Math.max(0, mountedAt + remountEvery() - deps.now()) };
       }
     };
   }
@@ -504,6 +655,9 @@
     MAX_STEPS: MAX_STEPS,
     IDLE_MS: IDLE_MS,
     OVERLAY_MS: OVERLAY_MS,
+    REMOUNT_MS_DEFAULT: REMOUNT_MS_DEFAULT,
+    BEAT_MS: BEAT_MS,
+    remountDelayMs: remountDelayMs,
     parseKioskParams: parseKioskParams,
     stripKioskParams: stripKioskParams,
     resumeAfterMs: resumeAfterMs,
@@ -511,6 +665,11 @@
     resolveSteps: resolveSteps,
     createTour: createTour,
     create: create,
-    liveCount: function () { return liveCount; }
+    liveCount: function () { return liveCount; },
+    // In-place remounts asked for since the page loaded (soak test).
+    remounts: function () { return remounts; },
+    // Test-only (test-883-kiosk-soak-e2e.js): a short remount interval,
+    // unclamped, read on every check; null restores the normal one.
+    _setRemountOverrideMs: function (ms) { remountOverrideMs = ms > 0 ? ms : null; }
   };
 })();
