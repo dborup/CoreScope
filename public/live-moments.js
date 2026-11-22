@@ -223,9 +223,11 @@
     return dflt !== false;
   }
 
-  function visibleCap(isPhone, settings) {
+  // cap (#883 M2 kiosk: 2) only ever lowers the desktop stack.
+  function visibleCap(isPhone, settings, cap) {
     if (isPhone) return VISIBLE_PHONE;
-    return (settings || SETTINGS.DEFAULTS).visibleCards;
+    var n = (settings || SETTINGS.DEFAULTS).visibleCards;
+    return cap > 0 ? Math.min(n, cap) : n;
   }
 
   // ── Controller ──────────────────────────────────────────────────────────
@@ -243,6 +245,11 @@
    *   onFly(plan, target, moment)
    *   getSettings()  → the viewer's `moments` section (SETTINGS.resolve'd
    *                    on every read, so a customizer change applies live)
+   *   cardCap        optional: at most this many cards (#883 kiosk: 2)
+   *   timeRefreshMs  optional: refresh the shown times this often while a
+   *                  card or the drawer shows (#883 kiosk: 30 s)
+   *   onMoment(m)    optional: every valid moment, normalized, from the
+   *                  socket and the seed (the #883 kiosk record tiles)
    *
    * The per-viewer off switch lives in live.js: a viewer who turned Moments
    * off gets no controller at all (no fetch, no WS listener, no DOM).
@@ -259,6 +266,8 @@
     var cards = [];            // { m, el, timer, deadline, left, held }
     var timers = new Set();
     var renderTimer = null;
+    var timeTimer = null;      // timeRefreshMs only
+    var rows = [];             // { m, time } of the open drawer
     var abort = (typeof AbortController === 'function') ? new AbortController() : null;
     var drawerOpen = false;
     var keyHandler = null;
@@ -386,13 +395,13 @@
 
     // pump moves queued moments into free card slots.
     function pump() {
-      var cap = visibleCap(mq(PHONE_MQ), settings());
+      var cap = visibleCap(mq(PHONE_MQ), settings(), deps.cardCap);
       while (cards.length > cap) leave(cards[0], true);
       while (queue.length && cards.length < cap) show(queue.shift());
       moreChip.textContent = queue.length ? '+' + queue.length : '';
     }
 
-    function buildEntry(m, tag, cls, onActivate) {
+    function buildEntry(m, tag, cls, onActivate, refs) {
       var d = describe(m);
       var row = el(tag, cls);
       row.setAttribute('data-kind', m.kind);
@@ -404,7 +413,8 @@
       text.appendChild(el('span', 'live-moment-title', d.title));
       text.appendChild(el('span', 'live-moment-detail', d.detail));
       main.appendChild(text);
-      main.appendChild(el('span', 'live-moment-time', relTime(m.at, deps.now())));
+      var time = main.appendChild(el('span', 'live-moment-time', relTime(m.at, deps.now())));
+      if (refs) refs.time = time;
       main.setAttribute('aria-label', d.title + ': ' + d.detail);
       main.addEventListener('click', function () { onActivate(m); });
       var link = el('a', 'live-moment-link', 'Details');
@@ -416,8 +426,8 @@
     }
 
     function show(m) {
-      var card = { m: m, el: null, timer: null, deadline: 0, left: settings().dwellSeconds * 1000, held: false, hover: false, focus: false };
-      card.el = buildEntry(m, 'div', 'live-moment-card', activate);
+      var card = { m: m, el: null, time: null, timer: null, deadline: 0, left: settings().dwellSeconds * 1000, held: false, hover: false, focus: false };
+      card.el = buildEntry(m, 'div', 'live-moment-card', activate, card);
       // Hold for a hovering mouse and for keyboard focus only. A tap on a
       // phone also fires a compat mouseenter and focuses the button, and
       // neither is undone until the next tap elsewhere, so a tapped card
@@ -432,6 +442,28 @@
       var d = describe(m);
       announce.textContent = d.title + ': ' + d.detail;
       arm(card);
+      armTimes();
+    }
+
+    // ── Times ──
+    // refreshTimes rewrites a shown time only when its text changed, and
+    // says how many it rewrote.
+    function refreshTimes() {
+      if (destroyed) return 0;
+      var now = deps.now(), n = 0;
+      cards.concat(rows).forEach(function (c) {
+        var t = relTime(c.m.at, now);
+        if (c.time && c.time.textContent !== t) { c.time.textContent = t; n++; }
+      });
+      return n;
+    }
+    function armTimes() {
+      if (!(deps.timeRefreshMs > 0) || timeTimer !== null || destroyed) return;
+      timeTimer = later(function () {
+        timeTimer = null;
+        refreshTimes();
+        if (cards.length || drawerOpen) armTimes();
+      }, deps.timeRefreshMs);
     }
 
     function arm(card) {
@@ -489,10 +521,13 @@
     // ── Drawer ──
     function fillDrawer() {
       while (list.firstChild) list.removeChild(list.firstChild);
+      rows = [];
       var s = settings(), n = 0;
       for (var i = 0; i < history.length; i++) {
         if (!kindShown(history[i].kind, s)) continue;
-        list.appendChild(buildEntry(history[i], 'li', 'live-moment-row', activate));
+        var r = { m: history[i], time: null };
+        list.appendChild(buildEntry(history[i], 'li', 'live-moment-row', activate, r));
+        rows.push(r);
         n++;
       }
       if (!n) list.appendChild(el('li', 'live-moments-empty', 'No moments yet'));
@@ -506,6 +541,7 @@
       drawerBtn.setAttribute('aria-expanded', 'true');
       keyHandler = function (e) { if (e.key === 'Escape') closeDrawer(); };
       doc.addEventListener('keydown', keyHandler);
+      armTimes();
       // preventScroll: on phones the hidden node-detail sheet sits off to
       // the right, so .live-page is scrollable and a plain focus() can
       // shift the whole page sideways.
@@ -519,6 +555,7 @@
       drawerBtn.setAttribute('aria-expanded', 'false');
       if (keyHandler) { doc.removeEventListener('keydown', keyHandler); keyHandler = null; }
       while (list.firstChild) list.removeChild(list.firstChild);
+      rows = [];
     }
     drawerBtn.setAttribute('aria-expanded', 'false');
     drawerBtn.addEventListener('click', function () { if (drawerOpen) closeDrawer(); else openDrawer(); });
@@ -533,6 +570,11 @@
       if (seenOrder.length > SEEN_MAX) seen.delete(seenOrder.shift());
       return true;
     }
+    // tell hands a valid moment to the kiosk tiles; their bug is not ours.
+    function tell(m) {
+      if (!deps.onMoment) return;
+      try { deps.onMoment(m); } catch (_) { /* never break the cards */ }
+    }
     function addHistory(m) {
       history.unshift(m);
       if (history.length > DRAWER_LEN) history.length = DRAWER_LEN;
@@ -543,6 +585,7 @@
     function ingest(raw) {
       if (destroyed) return false;
       var m = normalize(raw);
+      if (m) tell(m);
       if (!m || !kindShown(m.kind, settings()) || !remember(m.id)) return false;
       addHistory(m);
       if (canShow()) {
@@ -559,6 +602,7 @@
       var add = [], s = settings();
       for (var i = 0; i < list.length && add.length < DRAWER_LEN; i++) {
         var m = normalize(list[i]);
+        if (m) tell(m);
         if (m && kindShown(m.kind, s) && remember(m.id)) add.push(m);
       }
       // WS frames that raced the fetch are newer; keep them first.
@@ -618,8 +662,8 @@
       closeDrawer();
       timers.forEach(function (id) { deps.clearTimeout(id); });
       timers.clear();
-      renderTimer = null;
-      cards.length = 0; queue.length = 0; history = [];
+      renderTimer = timeTimer = null;
+      cards.length = 0; queue.length = 0; history = []; rows = [];
       [wrap, backdrop, drawer].forEach(function (e) { if (e.parentNode) e.parentNode.removeChild(e); });
     }
 
@@ -633,6 +677,7 @@
       onSettingsChanged: onSettingsChanged,
       openDrawer: openDrawer,
       closeDrawer: closeDrawer,
+      refreshTimes: refreshTimes,
       destroy: destroy,
       wsHandler: wsHandler,
       // Test seam: counts, never the elements.

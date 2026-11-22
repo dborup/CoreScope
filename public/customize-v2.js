@@ -73,6 +73,8 @@
     momentCardBg: '--moment-card-bg', momentNewNode: '--moment-new-node',
     momentBackOnline: '--moment-back-online', momentRecordLink: '--moment-record-link',
     momentBusiest: '--moment-busiest',
+    // #883 M2 — the Live kiosk big-number tiles: the fill and the numbers.
+    kioskTileBg: '--kiosk-tile-bg', kioskNumber: '--kiosk-number',
     font: '--font', mono: '--mono'
   };
 
@@ -111,10 +113,12 @@
   // #881 M3 — likewise: the kind accents follow the colourblind preset
   // (cb-presets.js momentAccents), not the theme preset.
   var MOMENTS_COLOR_KEYS = ['momentCardBg', 'momentNewNode', 'momentBackOnline', 'momentRecordLink', 'momentBusiest'];
+  // #883 M2 — likewise outside preset detection: no preset defines them.
+  var KIOSK_COLOR_KEYS = ['kioskTileBg', 'kioskNumber'];
 
   var THEME_COLOR_KEYS = Object.keys(THEME_CSS_MAP).filter(function (k) {
     return k !== 'font' && k !== 'mono' && TERRAIN_COLOR_KEYS.indexOf(k) === -1 && MASTS_COLOR_KEYS.indexOf(k) === -1 &&
-      HEAT_COLOR_KEYS.indexOf(k) === -1 && MOMENTS_COLOR_KEYS.indexOf(k) === -1;
+      HEAT_COLOR_KEYS.indexOf(k) === -1 && MOMENTS_COLOR_KEYS.indexOf(k) === -1 && KIOSK_COLOR_KEYS.indexOf(k) === -1;
   });
 
   // ── Brand logo swap helper (PR #1137) ──
@@ -383,6 +387,7 @@
     heat1: 'Heat: low', heat2: 'Heat: low-mid', heat3: 'Heat: mid', heat4: 'Heat: high', heat5: 'Heat: peak',
     momentCardBg: 'Card Fill', momentNewNode: 'New Node', momentBackOnline: 'Back Online',
     momentRecordLink: 'Record Link', momentBusiest: 'Busiest Repeater',
+    kioskTileBg: 'Tile Fill', kioskNumber: 'Numbers',
     font: 'Body Font', mono: 'Mono Font'
   };
 
@@ -421,6 +426,8 @@
     momentBackOnline: 'Live: the icon and stripe of a back-online moment',
     momentRecordLink: 'Live: the icon and stripe of a record-link moment',
     momentBusiest: 'Live: the icon and stripe of a busiest-repeater moment',
+    kioskTileBg: 'Live kiosk (TV mode): the background of the big-number tiles',
+    kioskNumber: 'Live kiosk (TV mode): the big numbers in the tiles',
     font: 'System font stack for body text', mono: 'Monospace font for hex, code, hashes'
   };
 
@@ -2058,6 +2065,11 @@
       var mock = MOMENTS_COLOR_KEYS[moci];
       momentsRows += _renderColorRow(mock, section, current[mock] || _cssVarValue(mock), serverCurrent[mock]);
     }
+    var kioskRows = '';
+    for (var kci = 0; kci < KIOSK_COLOR_KEYS.length; kci++) {
+      var kck = KIOSK_COLOR_KEYS[kci];
+      kioskRows += _renderColorRow(kck, section, current[kck] || _cssVarValue(kck), serverCurrent[kck]);
+    }
 
     return '<div class="cust-panel' + (_activeTab === 'theme' ? ' active' : '') + '" data-panel="theme">' +
       _renderPresets() +
@@ -2069,6 +2081,7 @@
       '<details class="cust-masts-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Antenna sites map layer (' + MASTS_COLOR_KEYS.length + ' options)</summary>' + mastsRows + '</details>' +
       '<details class="cust-heat-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Heat map (' + HEAT_COLOR_KEYS.length + ' options)</summary>' + heatRows + '</details>' +
       '<details class="cust-moments-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live moments cards (' + MOMENTS_COLOR_KEYS.length + ' options)</summary>' + momentsRows + '</details>' +
+      '<details class="cust-kiosk-colors" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Live kiosk tiles (' + KIOSK_COLOR_KEYS.length + ' options)</summary>' + kioskRows + '</details>' +
       '<details class="cust-fonts" style="margin-top:12px"><summary style="font-size:12px;font-weight:600;cursor:pointer;color:var(--text-muted);margin:12px 0 8px">Fonts</summary>' + fontRows + '</details>' +
     '</div>';
   }
@@ -4268,6 +4281,8 @@
     renderSkraafotoSettings: _renderSkraafotoSettings,
     // #881 M3 — exposed for tests; see test-881-m3-customizer-moments.js.
     MOMENTS_COLOR_KEYS: MOMENTS_COLOR_KEYS,
+    // #883 M2 — exposed for tests; see test-883-kiosk-numbers.js.
+    KIOSK_COLOR_KEYS: KIOSK_COLOR_KEYS,
     isValidMomentsSetting: isValidMomentsSetting,
     momentsSettings: momentsSettings,
     renderMomentsSettings: _renderMomentsSettings,

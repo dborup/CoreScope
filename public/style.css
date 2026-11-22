@@ -246,6 +246,10 @@
   --moment-back-online: var(--mc-moment-back-online, #2e86c1);
   --moment-record-link: var(--mc-moment-record-link, #b8578a);
   --moment-busiest: var(--mc-moment-busiest, #d55e00);
+  /* #883 M2 — Live kiosk big-number tiles (customizer Theme tab): the tile
+     fill (shown at 92 % over the map) and the numbers. */
+  --kiosk-tile-bg: var(--card-bg);
+  --kiosk-number: var(--text);
   /* #792 — the colour-by-elevation ramp, one variable per stop in metres.
      They are the colours the server renders the tiles with
      (internal/dhm.ElevationRamp; cmd/server's
