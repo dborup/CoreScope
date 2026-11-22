@@ -26,8 +26,8 @@
  *      count flat (they held the whole previous page alive); after GC no
  *      detached .live-page is left, the first mount's included (the #1180
  *      once-per-page MediaQueryList handler kept it); leaving Live for a
- *      page without filters, and Packets ↔ Nodes round trips, leave no
- *      region or area filter listener behind.
+ *      page without filters leaves no Live (F key) or region/area filter
+ *      window/document listener behind, nor do Packets ↔ Nodes round trips.
  *
  * Usage: BASE_URL=http://localhost:13581 node test-883-live-teardown-e2e.js
  */
@@ -79,8 +79,8 @@ async function open(browser, opts) {
   };
   h.pkts = () => page.evaluate(() => document.getElementById('livePktCount').textContent);
   h.feedItems = () => page.evaluate(() => document.querySelectorAll('#liveFeed .live-feed-item').length);
-  await page.goto(BASE + '/#/live');
-  await h.ready();
+  await page.goto(BASE + '/' + (opts.start || '#/live'));
+  if (!opts.start) await h.ready();
   return h;
 }
 
@@ -308,11 +308,12 @@ function advert(hash) {
       assert(!h.errors.length, h.errors.join('; '));
       await h.ctx.close();
     });
-    await step('7 leaving Live for a page without filters, and Packets ↔ Nodes round trips, leave no region/area filter listener', async () => {
-      const h = await open(browser, { areas: true });
+    await step('7 leaving Live for a page without filters, and Packets ↔ Nodes round trips, leave no Live or region/area filter listener', async () => {
+      // Starts on Home: its count is the baseline no Live has touched.
+      const h = await open(browser, { areas: true, start: '#/home' });
       const cdp = await h.ctx.newCDPSession(h.page);
-      // Only the filters' own listeners: other pages have leaks of their own
-      // (Packets' filter-ux click handler), not in scope here.
+      // Only Live's and the filters' own window/document listeners: other
+      // pages have leaks of their own (Packets' filter-ux click handler).
       const scripts = {};
       cdp.on('Debugger.scriptParsed', (s) => { scripts[s.scriptId] = s.url; });
       await cdp.send('Debugger.enable');
@@ -320,7 +321,7 @@ function advert(hash) {
         const { result } = await cdp.send('Runtime.evaluate', { expression });
         const { listeners } = await cdp.send('DOMDebugger.getEventListeners', { objectId: result.objectId });
         await cdp.send('Runtime.releaseObject', { objectId: result.objectId });
-        return listeners.filter((l) => /\/(region|area)-filter\.js/.test(scripts[l.scriptId] || '')).length;
+        return listeners.filter((l) => /\/((region|area)-filter|live)\.js/.test(scripts[l.scriptId] || '')).length;
       };
       const both = async () => ({ win: await on('window'), doc: await on('document') });
       const goto = async (hash, sel) => {
@@ -328,15 +329,19 @@ function advert(hash) {
         await h.page.waitForFunction((s) => !!document.querySelector(s), sel, { timeout: 20000 });
         await h.page.waitForTimeout(800);   // the filters fetch, then render
       };
+      await h.page.waitForFunction(() => !!document.querySelector('.home-hero, .home-chooser'), null, { timeout: 20000 });
+      await h.page.waitForTimeout(800);
+      const home1 = await both();
+      // (live.js keeps one page-lifetime document visibilitychange listener.)
+      // Home → Live (both filter dropdowns) → Home: what Live bound must be gone.
+      await h.go('#/live');
       await h.page.waitForFunction(() => document.querySelectorAll('#liveAreaFilter .region-dropdown-trigger, #liveRegionFilter .region-dropdown-trigger').length === 2,
         null, { timeout: 20000 });   // both filter dropdowns rendered on Live
-      // Live → Home (no filter): what Live bound must be gone.
-      await goto('#/home', '.home-hero, .home-chooser');
-      const home1 = await both();
-      await h.go('#/live');
+      const onLive = await both();
+      assert(onLive.win > home1.win && onLive.doc > home1.doc, 'Live bound its listeners: ' + JSON.stringify({ home1, onLive }));
       await goto('#/home', '.home-hero, .home-chooser');
       const home2 = await both();
-      assert(home2.win === home1.win && home2.doc === home1.doc, 'Live → Home left listeners: ' + JSON.stringify({ home1, home2 }));
+      assert(home2.win === home1.win && home2.doc === home1.doc, 'Live → Home left Live or filter listeners: ' + JSON.stringify({ home1, home2 }));
       // Packets ↔ Nodes: each page's init() releases the previous container.
       await goto('#/packets', '#packetsRegionFilter');
       await goto('#/nodes', '#nodesRegionFilter');
