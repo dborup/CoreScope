@@ -1,5 +1,6 @@
 /**
- * E2E: Live kiosk mode (#883 M1 — shell, tour, start and exit).
+ * E2E: Live kiosk mode (#883 M1 — shell, tour, start and exit; #883 M2 —
+ * TV layout, big numbers, large Moments).
  *
  * /api/config/areas/polygons is stubbed with three areas (the fixture
  * config has none), the shared WebSocket is replaced by page.routeWebSocket
@@ -9,7 +10,7 @@
  *   1. #/live?kiosk=1&tour=aaa,BBB,nope,ccc&every=45: body.kiosk; the top
  *      nav, bottom nav, header, stats, controls, feed, legend, VCR bar and
  *      the map's zoom/layer/toggle controls are hidden; the map credit is
- *      visible, non-empty and inside the viewport at the bottom edge.
+ *      visible, non-empty and inside the 3 % safe inset (M2).
  *   2. The start overlay is up and focused; Enter starts it (and is not an
  *      interaction that pauses the tour).
  *   3. Step 1 is area AAA (exact key matched case-insensitively) with
@@ -40,6 +41,23 @@
  *  14. 375x560 and 360x640 touch, cold link, real taps: tap a node, tap the
  *      panel's close button. Kiosk stays, the panel closes ("Exit kiosk"
  *      is hidden while the panel is open and covers no part of it).
+ *
+ * M2 (stubbed /api/nodes/network-status, /api/analytics/areas, /api/moments
+ * and `moment` frames on the stubbed socket):
+ *  15. The tiles: packets/min, active nodes with the tour area's count,
+ *      the rolling records; a newer record_link frame updates the tile, an
+ *      older one does not; a step changes the area part with no request.
+ *  16. Request budget: at most 2 bulk calls per 60 s, 0 while the tab is
+ *      hidden (visibilitychange), one round on show; the tiles' DOM is not
+ *      written while nothing changes.
+ *  17. Large Moments: two cards at most (visibleCards 3), scaled sizes,
+ *      times refreshed on a held card; on without &moments= and not saved.
+ *  18. The kiosk theme: dark by default over a light viewer, never saved,
+ *      the viewer's back on exit; &theme=auto keeps it; &theme=light.
+ *  19. 1920x1080: --kiosk-scale 1.5, the credit inside the safe inset at
+ *      ≥ 14px, no nav-drawer shadow at the left edge.
+ *  20. Outside kiosk the Moments sizes are the old px (token defaults).
+ *  21. 375x560: the tiles are one row at the top, inside the viewport.
  *
  * Usage: BASE_URL=http://localhost:13581 node test-883-kiosk-e2e.js
  */
@@ -80,9 +98,15 @@ async function open(browser, opts) {
   opts = opts || {};
   const ctx = await browser.newContext(Object.assign({ viewport: opts.viewport || { width: 1280, height: 720 }, reducedMotion: 'reduce' },
     opts.touch ? { hasTouch: true, isMobile: true } : {}));
-  const h = { ctx, api: [], areaRequests: 0, errors: [], warnings: [] };
+  const h = { ctx, api: [], areaRequests: 0, errors: [], warnings: [], sockets: [] };
   await ctx.route(/\/api\/config\/areas\/polygons(\?|$)/, (route) => { h.areaRequests++; return route.fulfill({ json: AREAS }); });
-  await ctx.routeWebSocket(/.*/, () => {});
+  await ctx.routeWebSocket(/.*/, (ws) => { h.sockets.push(ws); });
+  // A frame on the app's (stubbed) socket.
+  h.send = (frame) => {
+    const ws = h.sockets[h.sockets.length - 1];
+    assert(ws, 'the app socket connected');
+    ws.send(JSON.stringify(frame));
+  };
   const page = await ctx.newPage();
   h.page = page;
   page.on('pageerror', (e) => h.errors.push(String(e.stack || e.message).split('\n').slice(0, 4).join(' | ')));
@@ -114,6 +138,11 @@ function chromeState(page, sels) {
     return { s, n: els.length, vis };
   }), sels);
 }
+// The 3 % safe inset (--kiosk-safe-inset: 3vmin) around the credit's corner.
+function inSafeCorner(c) {
+  const inset = 0.03 * Math.min(c.vw, c.vh);
+  return c.b <= c.vh - inset + 0.5 && c.b >= c.vh - inset - 2 && c.r <= c.vw - inset + 0.5 && c.r >= c.vw - inset - 2;
+}
 function credit(page) {
   return page.evaluate(() => {
     const a = document.querySelector('#liveMap .leaflet-control-attribution');
@@ -127,14 +156,14 @@ function credit(page) {
 // the history, so the Moments bar shows.
 const MOMENTS = [{ id: 'kiosk-1', kind: 'back_online', at: new Date(Date.now() - 600000).toISOString(), silentHours: 37,
   node: { publicKey: 'b'.repeat(64), name: 'Kiosk moment', role: 'repeater', lat: 37.3, lon: -121.9 } }];
-async function momentsOn(ctx) {
+async function momentsOn(ctx, history) {
   await ctx.route(/\/api\/config\/client(\?|$)/, async (route) => {
     const res = await route.fetch();
     const body = await res.json();
     body.moments = { enabled: true, historySize: 50 };
     await route.fulfill({ response: res, json: body });
   });
-  await ctx.route(/\/api\/moments(\?|$)/, (route) => route.fulfill({ json: { moments: MOMENTS } }));
+  await ctx.route(/\/api\/moments(\?|$)/, (route) => route.fulfill({ json: { moments: history || MOMENTS } }));
 }
 const MOMENT_BUTTONS = ['.live-moments-pause', '.live-moments-open'];
 // The middle of a node marker that a finger there would hit, clear of the
@@ -197,7 +226,8 @@ function readStorage(page) {
       assert(c && c.text.length > 0, 'credit text: ' + JSON.stringify(c));
       assert(c.w > 0 && c.h > 0 && c.vis !== 'hidden', 'credit visible: ' + JSON.stringify(c));
       assert(c.l >= 0 && c.t >= 0 && c.r <= c.vw + 0.5 && c.b <= c.vh + 0.5, 'credit inside the viewport: ' + JSON.stringify(c));
-      assert(c.b >= c.vh - 2, 'credit at the bottom edge, not 58px up: ' + JSON.stringify(c));
+      // M2: inside the 3 % safe inset, at its edge (not 58px up).
+      assert(inSafeCorner(c), 'credit at the safe inset\'s bottom-right corner: ' + JSON.stringify(c));
       assert(c.fs >= 11, 'credit font ≥ 11px: ' + c.fs);
       const vcr = await page.evaluate(() => getComputedStyle(document.querySelector('.live-page')).getPropertyValue('--vcr-bar-height').trim());
       assert(vcr === '0px', '--vcr-bar-height: ' + vcr);
@@ -455,11 +485,12 @@ function readStorage(page) {
       for (let i = 0; i < 100 && !release; i++) await m.page.waitForTimeout(50);
       const c = await m.page.evaluate(() => {
         const a = document.querySelector('#liveMap .leaflet-control-attribution').getBoundingClientRect();
-        return { inline: document.querySelector('.live-page').style.getPropertyValue('--vcr-bar-height'), b: a.bottom, h: a.height, vh: innerHeight };
+        return { inline: document.querySelector('.live-page').style.getPropertyValue('--vcr-bar-height'), b: a.bottom, h: a.height, vw: innerWidth, vh: innerHeight };
       });
       assert(release, 'the nodes request is held');
       assert(c.inline === '', 'Live has not measured the VCR bar yet: ' + JSON.stringify(c));
-      assert(c.h > 0 && c.b >= c.vh - 2 && c.b <= c.vh + 0.5, 'credit at the bottom edge before the measure: ' + JSON.stringify(c));
+      const inset = 0.03 * Math.min(c.vw, c.vh);
+      assert(c.h > 0 && c.b >= c.vh - inset - 2 && c.b <= c.vh - inset + 0.5, 'credit at the safe inset before the measure: ' + JSON.stringify(c));
       if (release) release();
       await m.ctx.close();
     });
@@ -526,6 +557,277 @@ function readStorage(page) {
         await m.ctx.close();
       });
     }
+
+    // ── #883 M2: TV layout, big numbers, large Moments ────────────────────
+    const PK = (c) => c.repeat(64);
+    const ago = (ms) => new Date(Date.now() - ms).toISOString();
+    const DENSITY = [{ areaKey: 'AAA', label: 'Kiosk Area A', total: 60, active: 41 },
+      { areaKey: 'BBB', label: 'Kiosk Area B', total: 30, active: 17 }];
+    const recLink = (id, km, agoMs) => ({ id, kind: 'record_link', at: ago(agoMs), previousKm: 30,
+      link: { a: { publicKey: PK('c'), name: 'Ridge-Rpt', role: 'repeater', lat: 37.3, lon: -121.9 },
+              b: { publicKey: PK('d'), name: 'Hill-Rpt', role: 'repeater', lat: 37.34, lon: -121.64 }, distanceKm: km } });
+    // at: the page's own (possibly fake) clock, in ms.
+    const newNode = (id, i, at) => ({ id, kind: 'new_node', at: new Date(at).toISOString(),
+      node: { publicKey: PK('e'), name: 'Kiosk node ' + i, role: 'repeater', lat: 37.3 + i / 100, lon: -121.9 } });
+    const HISTORY = [
+      { id: 'h-busy', kind: 'busiest_repeater', at: ago(300000), relays: 212, windowMinutes: 10,
+        node: { publicKey: PK('f'), name: 'Rpt-3', role: 'repeater', lat: 37.4, lon: -122 } },
+      recLink('h-link', 38.24, 3600000),
+    ];
+    const KIOSK_M2 = '#/live?kiosk=1&tour=aaa,BBB&every=' + EVERY;
+    async function openM2(o) {
+      o = o || {};
+      const m = await open(browser, { clock: o.clock, viewport: o.viewport, touch: o.touch });
+      m.status = 0; m.areaStats = 0;
+      await m.ctx.route(/\/api\/nodes\/network-status(\?|$)/, (r) => { m.status++;
+        return r.fulfill({ json: { total: 400, active: 318, degraded: 2, silent: 80, roleCounts: {} } }); });
+      await m.ctx.route(/\/api\/analytics\/areas(\?|$)/, (r) => { m.areaStats++; return r.fulfill({ json: { density: DENSITY } }); });
+      if (o.moments !== false) await momentsOn(m.ctx, HISTORY);
+      m.texts = (sel) => m.page.evaluate((sel) => [...document.querySelectorAll(sel)].map((e) => e.textContent), sel);
+      m.bulk = () => m.status + m.areaStats;
+      m.now = () => m.page.evaluate(() => Date.now());
+      return m;
+    }
+    async function enterKiosk(m, hash, seed) {
+      await m.page.goto(BASE + '/?r=' + Date.now() + '#/packets', { waitUntil: 'domcontentloaded' });
+      if (seed) await m.page.evaluate((s) => { for (const [k, v] of Object.entries(s)) localStorage.setItem(k, v); }, seed);
+      await m.page.evaluate((hash) => { location.hash = hash; }, hash);
+      await m.liveReady();
+      await m.kioskReady();
+    }
+    const fontPx = (page, sel) => page.evaluate((sel) => { const e = document.querySelector(sel); return e ? parseFloat(getComputedStyle(e).fontSize) : null; }, sel);
+
+    {
+      const m = await openM2({ clock: true });
+      const p = m.page;
+      let up = false;
+      await step('M2: the tiles show packets/min, active nodes (whole mesh · tour area) and the rolling records', async () => {
+        await enterKiosk(m, KIOSK_M2, { 'live-moments': 'false' });
+        await p.waitForFunction(() => window._liveMoments && window._liveMoments(), null, { timeout: 10000 });
+        await p.clock.runFor(2100); // Live's 2 s rate tick
+        await p.waitForFunction(() => { const v = document.querySelectorAll('.live-kiosk-record-value');
+          return v.length === 2 && v[1].textContent === 'Rpt-3' && document.querySelectorAll('.live-kiosk-tile-value')[1].textContent === '318'; },
+        null, { timeout: 10000 });
+        const v = await m.texts('.live-kiosk-tile-value');
+        assert(/^\d[\d,]*$/.test(v[0]), 'packets/min: ' + v[0]);
+        assert(v[1] === '318', 'active nodes from network-status: ' + v[1]);
+        assert((await m.texts('.live-kiosk-tile-area'))[0] === 'Kiosk Area A 41', 'area: ' + (await m.texts('.live-kiosk-tile-area')));
+        assert(JSON.stringify(await m.texts('.live-kiosk-tile-label')) === '["packets/min","active nodes"]', await m.texts('.live-kiosk-tile-label'));
+        assert(JSON.stringify(await m.texts('.live-kiosk-record-label')) === '["Longest link (24 h)","Busiest (10 min)"]', await m.texts('.live-kiosk-record-label'));
+        assert(JSON.stringify(await m.texts('.live-kiosk-record-value')) === '["38.2 km","Rpt-3"]', await m.texts('.live-kiosk-record-value'));
+        assert(JSON.stringify(await m.texts('.live-kiosk-record-detail')) === '["Ridge-Rpt ↔ Hill-Rpt","212 relays"]', await m.texts('.live-kiosk-record-detail'));
+        // The tiles sit above the credit, inside the safe inset.
+        const g = await p.evaluate(() => { const t = document.querySelector('.live-kiosk-tiles').getBoundingClientRect();
+          const a = document.querySelector('#liveMap .leaflet-control-attribution').getBoundingClientRect();
+          return { tb: t.bottom, tl: t.left, at: a.top, vw: innerWidth, vh: innerHeight }; });
+        assert(g.tb <= g.at && g.tl >= 0.03 * Math.min(g.vw, g.vh) - 0.5, 'tiles above the credit, inside the inset: ' + JSON.stringify(g));
+        up = true;
+      });
+
+      await step('M2: a newer record_link frame updates the tile; an older one does not; Moments on without &moments= and not saved', async () => {
+        assert(up, 'tiles up');
+        m.send({ type: 'moment', data: recLink('w-link', 61.2, 0) });
+        await p.waitForFunction(() => document.querySelector('.live-kiosk-record-value').textContent === '61.2 km', null, { timeout: 5000 });
+        m.send({ type: 'moment', data: recLink('w-old', 99, 7200000) });
+        await p.clock.runFor(2100);
+        assert((await m.texts('.live-kiosk-record-value'))[0] === '61.2 km', 'an older record does not replace the shown one');
+        assert(await p.evaluate(() => localStorage.getItem('live-moments')) === 'false', 'live-moments not written');
+      });
+
+      await step('M2: a tour step changes the area part with no request', async () => {
+        const before = m.bulk();
+        for (let i = 0; i < EVERY + 5; i++) {
+          await p.clock.runFor(1000);
+          if ((await m.texts('.live-kiosk-step-label'))[0] === 'Kiosk Area B') break;
+        }
+        assert((await m.texts('.live-kiosk-step-label'))[0] === 'Kiosk Area B', 'step 2');
+        assert((await m.texts('.live-kiosk-tile-area'))[0] === 'Kiosk Area B 17', 'area part: ' + (await m.texts('.live-kiosk-tile-area')));
+        assert(m.bulk() === before, 'no bulk request for the step: ' + (m.bulk() - before));
+      });
+
+      // Between two steps nothing on the tiles changes: twenty 2 s rate ticks
+      // and one poll with the same answers must not touch their DOM.
+      await step('M2: the tiles write nothing while no value changes (rate ticks and a poll with the same answers)', async () => {
+        await p.evaluate(() => {
+          window.__tileMuts = 0;
+          new MutationObserver((l) => { window.__tileMuts += l.length; })
+            .observe(document.querySelector('.live-kiosk-tiles'), { subtree: true, childList: true, characterData: true, attributes: true });
+        });
+        const w0 = (await m.stats()).tileWrites, b0 = m.bulk();
+        await p.clock.runFor(EVERY * 1000 - 5000);
+        await p.waitForTimeout(50);
+        assert((await m.stats()).step === 1, 'still step 2 (no area change in the window)');
+        assert(m.bulk() - b0 === 2, 'a poll ran in the window: ' + (m.bulk() - b0));
+        const muts = await p.evaluate(() => window.__tileMuts);
+        assert(muts === 0, 'tile DOM mutations: ' + muts);
+        assert((await m.stats()).tileWrites === w0, 'tileWrites: ' + w0 + ' → ' + (await m.stats()).tileWrites);
+      });
+
+      await step('M2: request budget: ≤ 2 bulk calls per 60 s, one network-status and one analytics/areas', async () => {
+        const per = [];
+        for (let i = 0; i < 3; i++) {
+          const b = m.bulk();
+          await p.clock.runFor(60000);
+          await p.waitForTimeout(50);
+          per.push(m.bulk() - b);
+        }
+        assert(per.every((n) => n <= 2) && per.every((n) => n === 2), 'bulk calls per 60 s: ' + per.join(', '));
+        assert(m.status === m.areaStats, 'one of each per round: ' + m.status + '/' + m.areaStats);
+        console.log('    bulk calls per 60 s: ' + per.join(', ') + ' (network-status ' + m.status + ', analytics/areas ' + m.areaStats + ' in total)');
+      });
+
+      await step('M2: hidden tab → 0 bulk calls; shown again → one round at once', async () => {
+        const vis = (hidden) => p.evaluate((hidden) => {
+          Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+          Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => (hidden ? 'hidden' : 'visible') });
+          document.dispatchEvent(new Event('visibilitychange'));
+        }, hidden);
+        await vis(true);
+        const b = m.bulk();
+        await p.clock.runFor(180000);
+        await p.waitForTimeout(50);
+        assert(m.bulk() === b, 'bulk calls while hidden: ' + (m.bulk() - b));
+        assert((await m.stats()).pollTimer === false, 'no poll timer while hidden');
+        await vis(false);
+        await p.waitForTimeout(100);
+        assert(m.bulk() - b === 2, 'one round on show: ' + (m.bulk() - b));
+      });
+
+      await step('M2: large Moments: two cards at most (visibleCards 3), kiosk sizes, a held card\'s time refreshes', async () => {
+        const t0 = await m.now();
+        for (let i = 0; i < 4; i++) m.send({ type: 'moment', data: newNode('w-n' + i, i, t0) });
+        await p.waitForFunction(() => document.querySelectorAll('.live-moment-card').length >= 2, null, { timeout: 5000 });
+        await p.clock.runFor(50);
+        const n = await p.evaluate(() => document.querySelectorAll('.live-moment-card:not(.is-leaving)').length);
+        assert(n === 2, 'cards: ' + n);
+        assert(await fontPx(p, '.live-moment-title') === 18 && await fontPx(p, '.live-moment-detail') === 16, 'kiosk sizes at scale 1: ' +
+          (await fontPx(p, '.live-moment-title')) + '/' + (await fontPx(p, '.live-moment-detail')));
+        const icon = await p.evaluate(() => document.querySelector('.live-moment-main .ph-icon').getBoundingClientRect().width);
+        assert(icon === 24, 'icon: ' + icon);
+        const box = await p.evaluate(() => { const r = document.querySelector('.live-moments').getBoundingClientRect(); return { t: r.top, r: r.right, vw: innerWidth }; });
+        assert(box.r <= box.vw - 0.03 * 720 + 0.5 && box.t < 200, 'top-right inside the inset: ' + JSON.stringify(box));
+        // Hold the first card with the mouse; its time follows the clock.
+        const c = await p.evaluate(() => { const r = document.querySelector('.live-moment-card').getBoundingClientRect(); return { x: r.left + 20, y: r.top + 10 }; });
+        await p.mouse.move(c.x, c.y);
+        assert((await m.texts('.live-moment-card .live-moment-time'))[0] === 'now', 'built as now');
+        await p.clock.runFor(30000);
+        const t = (await m.texts('.live-moment-card .live-moment-time'))[0];
+        assert(t === '30 s', 'refreshed after 30 s: ' + t);
+        await p.mouse.move(5, 5);
+      });
+
+      await step('M2: no page errors', async () => { assert(!m.errors.length, m.errors.join('; ')); });
+      await m.ctx.close();
+    }
+
+    await step('M2: the kiosk theme is dark over a light viewer, never saved, and the viewer\'s comes back on exit', async () => {
+      const m = await openM2({ moments: false });
+      const p = m.page;
+      await p.goto(BASE + '/?r=' + Date.now() + '#/packets', { waitUntil: 'domcontentloaded' });
+      await p.evaluate(() => localStorage.setItem('meshcore-theme', 'light'));
+      await p.reload({ waitUntil: 'domcontentloaded' });
+      const th = () => p.evaluate(() => ({ t: document.documentElement.getAttribute('data-theme'), s: localStorage.getItem('meshcore-theme'),
+        cb: (document.getElementById('darkModeCheckbox') || {}).checked }));
+      assert((await th()).t === 'light', 'viewer light');
+      const visit = async (hash) => { await p.evaluate((hash) => { location.hash = hash; }, hash); await m.liveReady();
+        await p.waitForFunction(() => window._liveKiosk && window._liveKiosk()); };
+      const leave = async () => { await p.keyboard.press('Escape');
+        await p.waitForFunction(() => !document.body.classList.contains('kiosk') && window._liveGetMap && window._liveGetMap(), null, { timeout: 20000 }); };
+      await visit('#/live?kiosk=1');
+      let s = await th();
+      assert(s.t === 'dark' && s.s === 'light', 'kiosk dark, storage light: ' + JSON.stringify(s));
+      // app.js's whole theme apply ran (the dark checkbox follows), not only data-theme.
+      assert(s.cb === true, 'the dark-mode checkbox follows the kiosk theme: ' + JSON.stringify(s));
+      await leave();
+      s = await th();
+      assert(s.t === 'light' && s.s === 'light' && s.cb === false, 'viewer back: ' + JSON.stringify(s));
+      await visit('#/live?kiosk=1&theme=auto');
+      assert((await th()).t === 'light', 'auto keeps the viewer\'s theme');
+      await leave();
+      await p.evaluate(() => localStorage.setItem('meshcore-theme', 'dark'));
+      await p.reload({ waitUntil: 'domcontentloaded' });
+      await m.liveReady();
+      await visit('#/live?kiosk=1&theme=light');
+      s = await th();
+      assert(s.t === 'light' && s.s === 'dark', 'theme=light over a dark viewer: ' + JSON.stringify(s));
+      await leave();
+      s = await th();
+      assert(s.t === 'dark' && s.s === 'dark', 'dark again: ' + JSON.stringify(s));
+      assert(!m.errors.length, m.errors.join('; '));
+      await m.ctx.close();
+    });
+
+    await step('M2: 1920x1080: scale 1.5, big type, the credit inside the safe inset at ≥ 14px, no nav-drawer shadow', async () => {
+      const m = await openM2({ viewport: { width: 1920, height: 1080 } });
+      await enterKiosk(m, KIOSK_M2);
+      const p = m.page;
+      await p.waitForFunction(() => document.querySelectorAll('.live-kiosk-tile-value')[1].textContent === '318', null, { timeout: 10000 });
+      const sc = await p.evaluate(() => getComputedStyle(document.body).getPropertyValue('--kiosk-scale').trim());
+      assert(sc === '1.5', '--kiosk-scale: ' + sc);
+      assert(await fontPx(p, '.live-kiosk-tile-value') === 84, 'numbers 56px × 1.5: ' + (await fontPx(p, '.live-kiosk-tile-value')));
+      assert(await fontPx(p, '.live-kiosk-tile-label') === 27, 'labels 18px × 1.5');
+      assert(await fontPx(p, '.live-kiosk-step-label') === 42, 'step label 28px × 1.5');
+      const c = await credit(p);
+      assert(c && c.text && inSafeCorner(c), 'credit in the safe corner: ' + JSON.stringify(c));
+      assert(c.fs >= 14, 'credit font ≥ 14px at 1080p: ' + c.fs);
+      const sh = await p.evaluate(() => { const d = document.querySelector('.nav-drawer'); return d ? getComputedStyle(d).boxShadow : 'none'; });
+      assert(sh === 'none', 'closed nav drawer shadow in kiosk: ' + sh);
+      m.send({ type: 'moment', data: newNode('big-1', 1, await m.now()) });
+      await p.waitForSelector('.live-moment-card');
+      assert(await fontPx(p, '.live-moment-title') === 27, 'Moments title 18px × 1.5: ' + (await fontPx(p, '.live-moment-title')));
+      assert(!m.errors.length, m.errors.join('; '));
+      await m.ctx.close();
+    });
+
+    await step('M2: outside kiosk the Moments sizes are the old px (the token defaults)', async () => {
+      const m = await openM2({ viewport: { width: 1280, height: 720 } });
+      const p = m.page;
+      await p.goto(BASE + '/?r=' + Date.now() + '#/live?moments=1', { waitUntil: 'domcontentloaded' });
+      await m.liveReady();
+      await p.waitForFunction(() => window._liveMoments && window._liveMoments(), null, { timeout: 10000 });
+      m.send({ type: 'moment', data: newNode('plain-1', 1, await m.now()) });
+      await p.waitForSelector('.live-moment-card');
+      const st = await p.evaluate(() => {
+        const cs = (s) => getComputedStyle(document.querySelector(s));
+        return { kiosk: document.body.classList.contains('kiosk'), title: cs('.live-moment-title').fontSize, detail: cs('.live-moment-detail').fontSize,
+          time: cs('.live-moment-time').fontSize, pad: cs('.live-moment-main').padding,
+          icon: document.querySelector('.live-moment-main .ph-icon').getBoundingClientRect().width,
+          width: document.querySelector('.live-moments').getBoundingClientRect().width };
+      });
+      assert(!st.kiosk, 'plain Live');
+      assert(JSON.stringify(st) === JSON.stringify({ kiosk: false, title: '12px', detail: '12px', time: '12px', pad: '6px 8px', icon: 16, width: 320 }),
+        'old px: ' + JSON.stringify(st));
+      assert(!m.errors.length, m.errors.join('; '));
+      await m.ctx.close();
+    });
+
+    await step('M2: 375x560: the tiles are one row at the top under the step label, inside the viewport', async () => {
+      const m = await openM2({ viewport: { width: 375, height: 560 }, touch: true });
+      const p = m.page;
+      await p.goto(BASE + '/?r=' + Date.now() + KIOSK_M2, { waitUntil: 'domcontentloaded' });
+      await m.liveReady();
+      await m.kioskReady();
+      await p.waitForFunction(() => document.querySelectorAll('.live-kiosk-tile-value')[1].textContent === '318', null, { timeout: 10000 });
+      const g = await p.evaluate(() => {
+        const r = (s) => { const b = document.querySelector(s).getBoundingClientRect(); return { l: b.left, t: b.top, r: b.right, b: b.bottom }; };
+        const tiles = [...document.querySelectorAll('.live-kiosk-tile:not([hidden])')].map((e) => e.getBoundingClientRect().top);
+        return { step: r('.live-kiosk-step'), tiles: r('.live-kiosk-tiles'), tops: tiles, sw: document.documentElement.scrollWidth, vw: innerWidth };
+      });
+      assert(g.sw <= g.vw, 'no sideways scroll: ' + JSON.stringify(g));
+      assert(g.tiles.l >= 0 && g.tiles.r <= g.vw && g.tiles.t >= g.step.b && g.tiles.b < 200, 'one row at the top under the label: ' + JSON.stringify(g));
+      assert(g.tops.length === 3 && g.tops.every((t) => Math.abs(t - g.tops[0]) < 1), 'one row: ' + JSON.stringify(g.tops));
+      const c = await credit(p);
+      assert(c && c.text && inSafeCorner(c), 'credit: ' + JSON.stringify(c));
+      // The phone's one Moments card stays above the credit, which kiosk
+      // lifted into the safe inset.
+      m.send({ type: 'moment', data: newNode('phone-1', 1, await m.now()) });
+      await p.waitForSelector('.live-moment-card');
+      await p.waitForTimeout(300);
+      const card = await p.evaluate(() => document.querySelector('.live-moment-card').getBoundingClientRect().bottom);
+      assert(card <= c.t, 'the card ends above the credit: card bottom ' + card + ', credit top ' + c.t);
+      assert(!m.errors.length, m.errors.join('; '));
+      await m.ctx.close();
+    });
   } finally {
     await browser.close();
   }

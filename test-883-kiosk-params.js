@@ -43,9 +43,9 @@ test('kiosk: only the exact value 1 turns it on', () => {
   assert.strictEqual(K.parseKioskParams(null).kiosk, false, 'no params at all');
 });
 
-test('defaults: no tour, every 60 s', () => {
-  eq(P('kiosk=1'), { kiosk: true, tour: [], every: 60 });
-  eq(K.parseKioskParams(null), { kiosk: false, tour: [], every: 60 });
+test('defaults: no tour, every 60 s, the dark theme (#883 M2)', () => {
+  eq(P('kiosk=1'), { kiosk: true, tour: [], every: 60, theme: 'dark' });
+  eq(K.parseKioskParams(null), { kiosk: false, tour: [], every: 60, theme: 'dark' });
 });
 
 test('every: parseInt, NaN or empty is 60, clamped to [15, 3600], fractions floored', () => {
@@ -74,7 +74,7 @@ test('tour: at most 12 steps', () => {
 });
 
 test('tour and every are parsed even without kiosk (the caller decides)', () => {
-  eq(P('tour=a,b&every=30'), { kiosk: false, tour: ['a', 'b'], every: 30 });
+  eq(P('tour=a,b&every=30'), { kiosk: false, tour: ['a', 'b'], every: 30, theme: 'dark' });
 });
 
 console.log('\n=== #883 live-kiosk: areaBounds ===');
