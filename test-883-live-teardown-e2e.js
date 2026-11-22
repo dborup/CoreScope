@@ -263,6 +263,9 @@ function advert(hash) {
         return listeners.length;
       };
       const snap = async () => {
+        // Let the last destroyed page's short timeouts (Leaflet's, on the
+        // installed clock) fire, or they keep it reachable for the snapshot.
+        assert(!(await h.run(2000)), 'settle');
         await cdp.send('HeapProfiler.collectGarbage');
         const m = await cdp.send('Performance.getMetrics');
         const g = (n) => m.metrics.find((x) => x.name === n).value;
