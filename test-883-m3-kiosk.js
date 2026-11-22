@@ -137,10 +137,36 @@ test('a touring kiosk remounts once at the first step boundary after 6 h, not be
   p.destroy();
 });
 
+// 6 h at every=60 over 3 steps always lands on step 1 (360 steps), which
+// a mount that ignores the carry-over shows as well: these take the
+// remount at the 2nd boundary (step 3, index 2) through the override.
+async function remountAtStep3(p) {
+  K._setRemountOverrideMs(100000);
+  try {
+    await flush();
+    p.clock.advance(90000);
+    await flush();
+    assert.deepStrictEqual(p.keys(), ['AAA', 'BBB']);
+    p.clock.advance(30000);            // the boundary at 120 s: due since 100 s
+    await flush();
+  } finally { K._setRemountOverrideMs(null); }
+}
+
 test('the step index survives the remount: the new mount shows the step the old one was due to show', async () => {
   const p = page();
+  await remountAtStep3(p);
+  assert.strictEqual(p.remountCalls, 1);
+  assert.deepStrictEqual(p.keys(), ['AAA', 'BBB', 'CCC'], 'step 3 is shown once');
+  assert.strictEqual(p.last().mount, 2, 'fitted by the new mount, not the old one');
+  assert.strictEqual(p.c.stats().step, 2);
+  p.clock.advance(60000);
+  assert.strictEqual(p.key(p.last().bounds), 'AAA', 'and tours on from there');
+  p.destroy();
+});
+
+test('at 6 h the remount takes the boundary: one fit of the due step, by the new mount', async () => {
+  const p = page();
   await flush();
-  // 6 h at every=60 over 3 steps: find the boundary right after 6 h.
   p.clock.advance(6 * H - 30000);
   await flush();
   const i0 = p.flights.length;
@@ -149,25 +175,17 @@ test('the step index survives the remount: the new mount shows the step the old 
   await flush();
   assert.strictEqual(p.remountCalls, 1);
   const order = ['AAA', 'BBB', 'CCC'];
-  const expected = order[(order.indexOf(shownLast) + 1) % 3];
   const after = p.flights.slice(i0);
-  assert.deepStrictEqual(after.map((f) => p.key(f.bounds)), [expected], 'one fit, by the new mount, of the next step');
-  assert.strictEqual(after[0].mount, 2, 'fitted by the new mount, not the old one');
-  assert.strictEqual(p.c.stats().step, order.indexOf(expected));
-  p.clock.advance(60000);
-  assert.strictEqual(p.key(p.last().bounds), order[(order.indexOf(expected) + 1) % 3], 'and tours on from there');
+  assert.deepStrictEqual(after.map((f) => p.key(f.bounds)), [order[(order.indexOf(shownLast) + 1) % 3]]);
+  assert.strictEqual(after[0].mount, 2);
   p.destroy();
 });
 
 test('the carried step applies only to the same kiosk URL, and only once', async () => {
   const p = page();
-  await flush();
-  p.clock.advance(6 * H - 30000);
-  await flush();
   // The remount lands on a different kiosk link (an operator edit): step 1.
   p.hash = '#/live?kiosk=1&tour=aaa,bbb,ccc&every=60&region=x';
-  p.clock.advance(60000);
-  await flush();
+  await remountAtStep3(p);
   assert.strictEqual(p.remountCalls, 1);
   assert.strictEqual(p.c.stats().step, 0, 'another URL starts at step 1');
   // A later plain mount (exit and re-enter) also starts at step 1.
@@ -422,13 +440,46 @@ test('a heartbeat late by more than 2 beats (a sleep) re-anchors the tour from n
   assert(s.wakes >= 1, 'a wake was detected: ' + JSON.stringify(s));
   assert.strictEqual(p.wakeLock.held.length, 1, 'lock re-taken');
   const woke = p.flights.length;
-  assert(woke - n <= 2, 'no catch-up burst: ' + (woke - n) + ' steps');
+  assert.strictEqual(woke - n, 1, 'one move on waking, no catch-up burst: ' + (woke - n) + ' steps');
   const t = p.clock.now();
   p.clock.advance(59000);
   assert.strictEqual(p.flights.length, woke, 'the next step is a full step after waking');
   p.clock.advance(1000);
   assert.strictEqual(p.flights.length, woke + 1);
   assert(Math.abs(p.last().at - t - 60000) <= 1, 'anchored to the wake: ' + (p.last().at - t));
+  p.destroy();
+});
+
+test('a real sleep (timers keep their remaining time): the first heartbeat after it moves the tour on at once', async () => {
+  // every=90: the step timer is due at 90 s, the heartbeat at 60 s.
+  const p = page({ hash: 'kiosk=1&tour=aaa,bbb,ccc&every=90' });
+  await flush();
+  p.clock.advance(10000);
+  const n = p.flights.length;
+  p.clock.sleep(3 * H);
+  p.clock.advance(50000);   // the heartbeat's remaining 50 s; the step has 30 s more
+  const s = p.c.stats();
+  assert.strictEqual(s.wakes, 1, 'the wake is seen: ' + JSON.stringify(s));
+  assert.strictEqual(p.flights.length, n + 1, 'the tour moved on at the heartbeat, not 30 s later with the old timer');
+  const woke = p.flights.length, t = p.clock.now();
+  p.clock.advance(89000);
+  assert.strictEqual(p.flights.length, woke, 'no second move: the old step timer was replaced');
+  p.clock.advance(1000);
+  assert.strictEqual(p.flights.length, woke + 1, 'a full step after waking');
+  assert(Math.abs(p.last().at - t - 90000) <= 1);
+  p.destroy();
+});
+
+test('a wake where the step timer fires first: one move, not two', async () => {
+  // every=45: at 70 s the step timer is due at 90 s, the heartbeat at 120 s.
+  const p = page({ hash: 'kiosk=1&tour=aaa,bbb,ccc&every=45' });
+  await flush();
+  p.clock.advance(70000);
+  const n = p.flights.length;
+  p.clock.jump(2 * H);      // both overdue; the step timer fires first
+  p.clock.advance(1);
+  assert.strictEqual(p.c.stats().wakes, 1);
+  assert.strictEqual(p.flights.length, n + 1, 'one move on waking: ' + (p.flights.length - n));
   p.destroy();
 });
 

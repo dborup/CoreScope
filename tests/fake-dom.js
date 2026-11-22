@@ -79,6 +79,13 @@ function makeClock() {
       now += ms;
       // A timer that was due during the jump fires on the next advance, late.
     },
+    // A machine that slept: the wall clock moves on, but timers keep their
+    // remaining time (Chromium's timers run on a monotonic clock that stops
+    // in suspend on Linux and macOS).
+    sleep(ms) {
+      now += ms;
+      for (const t of pending.values()) t.at += ms;
+    },
     advance(ms) {
       const end = now + ms;
       for (;;) {
