@@ -167,6 +167,41 @@ func TestCoverage941M2_NodesInReachOrderAndCounts(t *testing.T) {
 	}
 }
 
+// TestCoverage941M2_RadiusEdgeAndRoles: the list holds exactly the nodes
+// inside the radius, 20 m either side of its edge, and of the roles only
+// repeaters and rooms (owner decision 5): a sensor or a companion well
+// inside is not evaluated.
+func TestCoverage941M2_RadiusEdgeAndRoles(t *testing.T) {
+	env := newCoverageEnv(t, newFakeElevation(t, flatElev(3)), CoverageConfig{}, nil, nil)
+	addReachNode(t, env, reachPK('1'), "Just inside", "repeater", 0, 4980)
+	addReachNode(t, env, reachPK('2'), "Just outside", "repeater", 0, 5020)
+	addReachNode(t, env, reachPK('3'), "Room inside", "room", -3000, 0)
+	addReachNode(t, env, reachPK('4'), "Sensor inside", "sensor", 2000, 0)
+	addReachNode(t, env, reachPK('5'), "Companion inside", "companion", 0, -2500)
+	env.srv.store.InvalidateNodeCache()
+	w := env.get(reachQuery("56.1629,10.2039", "r=5"))
+	r := decodeCoverage(t, w).Reach
+	if r == nil {
+		t.Fatalf("no reach: %s", w.Body.String())
+	}
+	var got []string
+	for _, n := range r.Nodes {
+		got = append(got, n.Name)
+	}
+	sort.Strings(got)
+	if strings.Join(got, ",") != "Just inside,Room inside" || r.NoTerrain != 0 || r.Omitted != 0 {
+		t.Fatalf("listed %v (%+v)", got, r)
+	}
+	for _, n := range r.Nodes {
+		if n.Name == "Just inside" && (n.DistanceKm != 4.98 || math.IsNaN(n.LossDb)) {
+			t.Fatalf("edge node %+v", n)
+		}
+	}
+	if strings.Contains(w.Body.String(), "Sensor") || strings.Contains(w.Body.String(), "Companion") {
+		t.Fatalf("another role is in the response: %s", w.Body.String())
+	}
+}
+
 func reachTarget(t *testing.T, env *coverageEnv, pk string, h float64) dhm.ReachTarget {
 	t.Helper()
 	var lat, lon float64

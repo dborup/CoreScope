@@ -142,6 +142,27 @@ func TestReachLosses941_OutsideAndGaps(t *testing.T) {
 	}
 }
 
+// TestReachLosses941_RadiusEdge: the radius is the edge, 10 m either side
+// of it, on every bearing: just inside has a loss, just outside none.
+func TestReachLosses941_RadiusEdge(t *testing.T) {
+	e0, n0 := ToUTM32(covAarhusLat, covAarhusLon)
+	g := covGridFrom(e0, n0, 10000, 30, func(float64, float64) float32 { return 2 })
+	for _, bearing := range []float64{0, 45, 90, 200, 315} {
+		got, err := ReachLosses(context.Background(), g, reachSpec(10000, PathBullington), []ReachTarget{
+			reachAt(e0, n0, 9990, bearing, 10), reachAt(e0, n0, 10010, bearing, 10),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got[0].Inside || math.IsNaN(got[0].LossDb) || math.Abs(got[0].DistanceM-9990) > 0.01 {
+			t.Fatalf("bearing %v: just inside %+v", bearing, got[0])
+		}
+		if got[1].Inside || !math.IsNaN(got[1].LossDb) {
+			t.Fatalf("bearing %v: just outside %+v", bearing, got[1])
+		}
+	}
+}
+
 // reachTargets2000 is 2000 nodes spread over a 40 km disk.
 func reachTargets2000(e0, n0 float64) []ReachTarget {
 	rng := rand.New(rand.NewSource(2000))
