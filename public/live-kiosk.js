@@ -622,7 +622,8 @@
     }
     // The machine slept (its timers did not run): move the tour on from now
     // and take the lock again (an OS sleep drops it, maybe with no
-    // visibilitychange). #883 M2's numbers refresh joins here.
+    // visibilitychange). The numbers need nothing here: the overdue poll
+    // timer fires on waking too, and the socket's reopen reads them.
     function onWake() {
       wakes++;
       if (tour) { tour.reanchor(); syncPaused(); }
@@ -653,10 +654,15 @@
       lock = null;
       if (s) { try { settle(s.release()); } catch (_) {} }
     }
+    // Each socket (re)open: re-seed Moments and read the numbers once (plan
+    // §4.3); the 60 s poll then counts from that read. A hidden screen
+    // reads on its next show (pollOnShow).
     function onWsOpen() {
       reseeds++;
-      // #883 M2's numbers refresh joins here.
       deps.reseed();
+      if (destroyed || doc.hidden) return;
+      pollTimer = cancel(pollTimer);
+      poll();
     }
 
     // ── Big numbers ───────────────────────────────────────────────────────
