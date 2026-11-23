@@ -62,7 +62,10 @@ func ridgeEastElev(e, n float64) float32 {
 // dhm.ReachLosses' own.
 func TestCoverage941M2_NodesInReachOrderAndCounts(t *testing.T) {
 	radio := &RadioConfig{AntennaHeightsM: map[string]float64{reachPK('3'): 25}}
-	env := newCoverageEnv(t, newFakeElevation(t, ridgeEastElev), CoverageConfig{}, radio, nil)
+	// A 60 m grid: the same paths at a quarter of the cells, so the test
+	// stays quick under -race.
+	const res = 60
+	env := newCoverageEnv(t, newFakeElevation(t, ridgeEastElev), CoverageConfig{ResolutionM: intp(res)}, radio, nil)
 	centre := reachPK('c')
 	// 5 m off the point the centre snaps to (4 decimals): inside the
 	// radius by distance, so only its key keeps it out of its own list.
@@ -78,6 +81,18 @@ func TestCoverage941M2_NodesInReachOrderAndCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	env.srv.store.InvalidateNodeCache()
+	// The reference: the same terrain on the same grid, built once.
+	e0, n0 := dhm.ToUTM32(reachLat, reachLon)
+	grid := dhm.NewCoverageGrid(e0, n0, 12000, res)
+	for _, tl := range dhm.PlanCoverageTiles(e0, n0, 12000, res) {
+		vals := make([]float32, dhm.CoverageTileCells)
+		for row := 0; row < dhm.CoverageTilePx; row++ {
+			for col := 0; col < dhm.CoverageTilePx; col++ {
+				vals[row*dhm.CoverageTilePx+col] = ridgeEastElev(tl.Cell(res, col, row))
+			}
+		}
+		grid.Paste(tl, vals)
+	}
 
 	for _, model := range []string{"bullington", "delta"} {
 		w := env.get(reachQuery(centre, "r=12", "model="+model))
@@ -115,19 +130,8 @@ func TestCoverage941M2_NodesInReachOrderAndCounts(t *testing.T) {
 		}
 		budget := 22 + 3 + 3 - 0 + 130.0
 		var counts CoverageReachCounts
-		spec := dhm.CoverageSpec{Center: dhm.LatLon{Lat: reachLat, Lon: reachLon}, RadiusM: 12000, ResolutionM: 30,
+		spec := dhm.CoverageSpec{Center: dhm.LatLon{Lat: reachLat, Lon: reachLon}, RadiusM: 12000, ResolutionM: res,
 			TxHeightM: 10, FreqMHz: dhm.FirmwareFreqMHz, K: dhm.DefaultKFactor, Model: dhm.PathModel(model)}
-		e0, n0 := dhm.ToUTM32(reachLat, reachLon)
-		grid := dhm.NewCoverageGrid(e0, n0, 12000, 30)
-		for _, tl := range dhm.PlanCoverageTiles(e0, n0, 12000, 30) {
-			vals := make([]float32, dhm.CoverageTileCells)
-			for row := 0; row < dhm.CoverageTilePx; row++ {
-				for col := 0; col < dhm.CoverageTilePx; col++ {
-					vals[row*dhm.CoverageTilePx+col] = ridgeEastElev(tl.Cell(30, col, row))
-				}
-			}
-			grid.Paste(tl, vals)
-		}
 		for _, n := range r.Nodes {
 			w := want[n.PublicKey[:1]]
 			if n.Name != w.name || n.Role != w.role || math.Abs(n.DistanceKm-w.km) > 0.01 || n.HeightM != w.h || n.HeightSource != w.source {
@@ -314,30 +318,33 @@ func TestCoverage941M2_LookupFailureWithholdsAll(t *testing.T) {
 }
 
 // TestCoverage941M2_NoExtraUpstreamCalls: nodes in reach use the tiles the
-// raster already loaded. With 300 nodes in the disk a cold computation
+// raster already loaded. With 300 nodes in a 10 km disk a cold computation
 // makes exactly the planned tile fetches, the same as with none, and a
 // cache hit makes none.
 func TestCoverage941M2_NoExtraUpstreamCalls(t *testing.T) {
+	// A 60 m grid: several tiles to plan at a quarter of the cells, so the
+	// test stays quick under -race.
+	const res = 60
 	e0, n0 := dhm.ToUTM32(reachLat, reachLon)
-	planned := int64(len(dhm.PlanCoverageTiles(e0, n0, 20000, 30)))
+	planned := int64(len(dhm.PlanCoverageTiles(e0, n0, 10000, res)))
 	counts := map[bool]int64{}
 	for _, withNodes := range []bool{false, true} {
 		src := newFakeElevation(t, hillyElev)
-		env := newCoverageEnv(t, src, CoverageConfig{}, nil, nil)
+		env := newCoverageEnv(t, src, CoverageConfig{ResolutionM: intp(res)}, nil, nil)
 		if withNodes {
 			for i := 0; i < 300; i++ {
 				a := float64(i) * 2.399963
-				d := 19500 * math.Sqrt(float64(i+1)/300)
+				d := 9500 * math.Sqrt(float64(i+1)/300)
 				addReachNode(t, env, fmt.Sprintf("%064x", i+1), fmt.Sprintf("N%d", i), []string{"repeater", "room"}[i%2], d*math.Sin(a), d*math.Cos(a))
 			}
 			env.srv.store.InvalidateNodeCache()
 		}
-		resp := decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "r=20")))
+		resp := decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "r=10")))
 		counts[withNodes] = src.calls.Load()
 		if withNodes && (resp.Reach == nil || len(resp.Reach.Nodes)+resp.Reach.NoTerrain != 300) {
 			t.Fatalf("evaluated %+v", resp.Reach)
 		}
-		if w := env.get(reachQuery("56.1629,10.2039", "r=20")); w.Header().Get("X-CoreScope-Cache") != "hit" || src.calls.Load() != counts[withNodes] {
+		if w := env.get(reachQuery("56.1629,10.2039", "r=10")); w.Header().Get("X-CoreScope-Cache") != "hit" || src.calls.Load() != counts[withNodes] {
 			t.Fatal("a hit fetched")
 		}
 	}
