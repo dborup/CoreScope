@@ -35,8 +35,10 @@
  * module state (a hard reload starts at step 1). The deadline is wall clock,
  * checked by one heartbeat; a heartbeat that runs late means the machine
  * slept, and the tour re-anchors from now. While visible it holds a Screen
- * Wake Lock (re-taken when the browser drops it), re-seeds Moments on every
- * socket (re)open, and turns on version-notice's auto-reload.
+ * Wake Lock (re-taken when the browser drops it), re-seeds Moments and
+ * reads the numbers on every socket (re)open, and turns on version-notice's
+ * auto-reload. The remount hands the auto-reload and the kiosk theme to the
+ * next mount (handingOver()): no off/on, no theme flip and back.
  *
  * XSS: area keys and labels come from the operator's config, node names
  * from the mesh; all of them reach the page through textContent only. No
@@ -364,7 +366,8 @@
    *   momentsVisible()    bool: a Moments card is on screen
    *   reseed()            re-seed Moments (on every socket open)
    *   wakeLock            navigator.wakeLock, or null (plain http)
-   *   setAutoReload(on)   version-notice's kiosk auto-reload
+   *   setAutoReload(on)   version-notice's kiosk auto-reload (left on when
+   *                       destroy() is the in-place remount: handingOver())
    *   remountMs           the interval (M4 config), clamped to 1–24 h
    *   fetchStatus()       → Promise<{active,…}> (/api/nodes/network-status), optional
    *   fetchAreaStats()    → Promise<{density:[…]}> (/api/analytics/areas), optional
@@ -600,6 +603,13 @@
       later(function () { deps.remount(); }, 0);
       return true;
     }
+    // True while this controller is being destroyed by its own in-place
+    // remount: the router mounts the same kiosk link again at once, so the
+    // kiosk theme and the auto-reload stay on for the next mount (no theme
+    // flip and back, no banner, and a pending reload keeps its delay).
+    function handingOver() {
+      return remounting && !!deps.hash && deps.hash() === mountHash;
+    }
     // A tour that is stepping remounts at its next boundary (showStep). A
     // static view, or a single step, remounts here. A paused tour (someone
     // is using the screen, the VCR is out of LIVE) waits for its resume.
@@ -813,7 +823,7 @@
       liveCount--;
       if (tour) tour.destroy();
       releaseLock();
-      if (deps.setAutoReload) deps.setAutoReload(false);
+      if (deps.setAutoReload && !handingOver()) deps.setAutoReload(false);
       listeners.splice(0).forEach(unbind);
       timers.forEach(function (id) { deps.clearTimeout(id); });
       timers.clear();
@@ -850,6 +860,7 @@
 
     return {
       destroy: destroy,
+      handingOver: handingOver,
       onModeChange: onModeChange,
       setRate: setRate,
       onMoment: onMoment,

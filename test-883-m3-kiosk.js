@@ -10,7 +10,8 @@
  *   ws-open     each socket (re)open re-seeds Moments and reads M2's
  *               numbers once
  *   sleep/wake  a heartbeat that runs late re-anchors the tour from now
- *   autoReload  on while a kiosk controller is mounted
+ *   autoReload  on while a kiosk controller is mounted; an in-place
+ *               remount hands it over (no off/on)
  *   budget      at most 4 kiosk timers in the steady state (M2's numbers
  *               poll included)
  */
@@ -525,15 +526,42 @@ test('a heartbeat on time is not a wake', async () => {
 
 section('=== #883 M3 autoReload and budget ===');
 
-test('autoReload is on while a kiosk controller is mounted (off, on across a remount)', async () => {
+test('autoReload is on while a kiosk controller is mounted, and stays on across an in-place remount', async () => {
   const p = page();
   await flush();
   assert.deepStrictEqual(p.autoReload, [true]);
+  assert.strictEqual(p.c.handingOver(), false, 'not handing over while mounted');
+  let during = null;
+  const c0 = p.c;
+  const destroy0 = c0.destroy;
+  c0.destroy = () => { during = c0.handingOver(); destroy0(); };
   p.clock.advance(6 * H + 60000);
   await flush();
-  assert.deepStrictEqual(p.autoReload, [true, false, true]);
+  assert.strictEqual(p.remountCalls, 1);
+  assert.strictEqual(during, true, 'the remount destroy hands over');
+  // No off/on (#950 review 4): a pending reload keeps its delay, no banner.
+  assert.deepStrictEqual(p.autoReload, [true, true]);
   p.destroy();
-  assert.deepStrictEqual(p.autoReload.slice(-1), [false]);
+  assert.deepStrictEqual(p.autoReload.slice(-1), [false], 'off when kiosk is left');
+});
+
+test('a remount whose hash changed before it ran is not a handover: autoReload goes off', async () => {
+  const p = page();
+  await flush();
+  const c0 = p.c;
+  const destroy0 = c0.destroy;
+  let during = null;
+  c0.destroy = () => { during = c0.handingOver(); destroy0(); };
+  // The hash changes 30 s before the 6 h boundary that remounts.
+  p.clock.advance(6 * H - 30000);
+  assert.strictEqual(p.remountCalls, 0);
+  p.hash = '#/packets';
+  p.clock.advance(60000);
+  await flush();
+  assert.strictEqual(p.remountCalls, 1);
+  assert.strictEqual(during, false);
+  assert.deepStrictEqual(p.autoReload.slice(0, 2), [true, false]);
+  p.destroy();
 });
 
 test('steady state: at most 4 kiosk timers (step, cursor, heartbeat, numbers poll) at any time over 13 h', async () => {

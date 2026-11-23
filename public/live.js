@@ -1780,6 +1780,9 @@
   let kioskOn = false;
   let kiosk = null;
   let kioskThemeRestore = null; // #883 M2: puts the viewer's theme back
+  // #883 M3: the last mount was an in-place remount of this kiosk link and
+  // left its kiosk theme and auto-reload on; the next controller takes over.
+  let kioskHandover = false;
 
   async function init(app) {
     const generation = ++liveGeneration;
@@ -1787,11 +1790,14 @@
     if (kioskOn) {
       document.body.classList.add('kiosk');
       // #883 M2: the kiosk theme (dark unless &theme=), before the first
-      // paint, through app.js's non-persisting apply.
-      kioskThemeRestore = window.LiveKiosk.applyKioskTheme(window.LiveKiosk.parseKioskParams(getHashParams()).theme, {
-        get: () => document.documentElement.getAttribute('data-theme'),
-        apply: window.applyThemeTransient,
-      });
+      // paint, through app.js's non-persisting apply. After an in-place
+      // remount it is still showing, with the old mount's restore.
+      if (!kioskHandover) {
+        kioskThemeRestore = window.LiveKiosk.applyKioskTheme(window.LiveKiosk.parseKioskParams(getHashParams()).theme, {
+          get: () => document.documentElement.getAttribute('data-theme'),
+          apply: window.applyThemeTransient,
+        });
+      }
     }
     app.innerHTML = `
       <div class="live-page">
@@ -4229,8 +4235,13 @@
       momentsVisible: () => !!(moments && moments.stats().visible),
       reseed: () => { if (moments) moments.reseed(); },
       wakeLock: (navigator.wakeLock && typeof navigator.wakeLock.request === 'function') ? navigator.wakeLock : null,
-      setAutoReload: (on) => { if (window.VersionNotice) window.VersionNotice.setAutoReload(on); },
+      setAutoReload: setKioskAutoReload,
     });
+    kioskHandover = false;
+  }
+
+  function setKioskAutoReload(on) {
+    if (window.VersionNotice) window.VersionNotice.setAutoReload(on);
   }
 
   function startMoments() {
@@ -6144,8 +6155,12 @@
     if (moments) { moments.destroy(); moments = null; }
     clearMomentHighlight();
     // #883 — before map.remove(): the controller holds map listeners.
+    // M3: an in-place remount hands the kiosk theme and auto-reload over.
+    const handover = !!(kiosk && kiosk.handingOver());
     if (kiosk) { kiosk.destroy(); kiosk = null; }
-    if (kioskThemeRestore) { kioskThemeRestore(); kioskThemeRestore = null; }
+    else if (kioskHandover) setKioskAutoReload(false); // left before its controller came up
+    kioskHandover = handover;
+    if (kioskThemeRestore && !handover) { kioskThemeRestore(); kioskThemeRestore = null; }
     kioskOn = false;
     if (document.body) document.body.classList.remove('kiosk');
     if (regionFilterChangeHandler && window.RegionFilter && typeof RegionFilter.offChange === 'function') {
