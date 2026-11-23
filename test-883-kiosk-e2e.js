@@ -654,6 +654,7 @@ function readStorage(page) {
             .observe(document.querySelector('.live-kiosk-tiles'), { subtree: true, childList: true, characterData: true, attributes: true });
         });
         const w0 = (await m.stats()).tileWrites, b0 = m.bulk();
+        m.send({ type: 'heartbeat' }); // no stale-socket reconnect (and its read) in the window
         await p.clock.runFor(EVERY * 1000 - 5000);
         await p.waitForTimeout(50);
         assert((await m.stats()).step === 1, 'still step 2 (no area change in the window)');
@@ -665,15 +666,45 @@ function readStorage(page) {
 
       await step('M2: request budget: ≤ 2 bulk calls per 60 s, one network-status and one analytics/areas', async () => {
         const per = [];
+        const sockets = m.sockets.length;
         for (let i = 0; i < 3; i++) {
           const b = m.bulk();
+          // A silent socket is reopened after 75 s, and a reopen reads too
+          // (next step); the heartbeat keeps this to the 60 s poll.
+          m.send({ type: 'heartbeat' });
           await p.clock.runFor(60000);
           await p.waitForTimeout(50);
           per.push(m.bulk() - b);
         }
         assert(per.every((n) => n <= 2) && per.every((n) => n === 2), 'bulk calls per 60 s: ' + per.join(', '));
         assert(m.status === m.areaStats, 'one of each per round: ' + m.status + '/' + m.areaStats);
+        assert(m.sockets.length === sockets, 'the socket was reopened in the budget window');
         console.log('    bulk calls per 60 s: ' + per.join(', ') + ' (network-status ' + m.status + ', analytics/areas ' + m.areaStats + ' in total)');
+      });
+
+      // Plan §4.3: a socket reopen reads the numbers once (the last read is
+      // more than 30 s old here), and the 60 s poll counts from that read.
+      await step('M3: a socket reopen reads the numbers once; the next poll is 60 s after it', async () => {
+        m.send({ type: 'heartbeat' });
+        const b0 = m.bulk();                   // run to just after a poll …
+        for (let i = 0; i < 62 && m.bulk() === b0; i++) { await p.clock.runFor(1000); await p.waitForTimeout(20); }
+        assert(m.bulk() > b0, 'no poll within 61 s');
+        m.send({ type: 'heartbeat' });
+        await p.clock.runFor(40000);           // … so the last read is 40 s old
+        const sockets = m.sockets.length, b = m.bulk();
+        await m.sockets[sockets - 1].close();
+        for (let i = 0; i < 40 && m.sockets.length === sockets; i++) { await p.clock.runFor(500); await p.waitForTimeout(25); }
+        assert(m.sockets.length === sockets + 1, 'the app did not reconnect');
+        await p.waitForTimeout(100);
+        assert(m.bulk() - b === 2, 'bulk calls on the reopen: ' + (m.bulk() - b));
+        const b1 = m.bulk();
+        m.send({ type: 'heartbeat' });
+        await p.clock.runFor(59000);
+        await p.waitForTimeout(50);
+        assert(m.bulk() === b1, 'a poll within 60 s of the reopen read: ' + (m.bulk() - b1));
+        await p.clock.runFor(2000);
+        await p.waitForTimeout(50);
+        assert(m.bulk() - b1 === 2, 'the poll 60 s after the reopen read: ' + (m.bulk() - b1));
       });
 
       await step('M2: hidden tab → 0 bulk calls; shown again → one round at once', async () => {

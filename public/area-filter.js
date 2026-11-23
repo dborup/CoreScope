@@ -120,7 +120,15 @@
   function onChange(fn) { _listeners.push(fn); return fn; }
   function offChange(fn) { _listeners = _listeners.filter(function (f) { return f !== fn; }); }
 
+  // #883 M3: as RegionFilter.release(): the host's destroy() drops the
+  // document/window listeners; init() on a new container drops the old.
+  function release(container) {
+    if (container && container._areaCleanup) { container._areaCleanup(); container._areaCleanup = null; }
+    if (container && container === _container) _container = null;
+  }
+
   async function initFilter(container) {
+    if (_container && _container !== container) release(_container);
     _container = container;
     await fetchAreas();
     render(container);
@@ -129,6 +137,7 @@
   window.AreaFilter = {
     init: initFilter,
     render: render,
+    release: release,
     getSelected: getSelected,
     getSelectedLabel: getSelectedLabel,
     getAreaParam: getAreaParam,

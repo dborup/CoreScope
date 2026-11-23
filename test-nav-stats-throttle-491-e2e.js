@@ -10,8 +10,30 @@ const BASE = process.env.BASE_URL || 'http://127.0.0.1:13991';
 assert.ok(['localhost', '127.0.0.1', '[::1]'].includes(new URL(BASE).hostname), 'local server only');
 const measureOnly = process.argv.includes('--measure') || process.env.NAV_STATS_MEASURE === '1';
 
+// Waits for the app's in-flight api() requests. The page does the waiting and
+// the test reads a flag back with plain evaluates: an evaluate that awaits a
+// promise can fail as "Promise was collected" in Chromium when a GC lands
+// after that promise settles but before the result is sent (Playwright
+// reports it as "Execution context was destroyed ... navigation"), and Live's
+// node load allocates enough to hit that window (PR #950). A real reload or
+// navigation still fails here: the document token from open() is gone.
 async function settle(page) {
-  await page.evaluate(async () => { await Promise.allSettled([..._inflight.values()]); });
+  const replaced = 'the page document was replaced (a reload or navigation)';
+  const ticket = await page.evaluate(() => {
+    if (!window.__navTestDoc) return 0;
+    const n = window.__navTestSettles = (window.__navTestSettles || 0) + 1;
+    Promise.allSettled([..._inflight.values()]).then(() => { window.__navTestSettled = n; });
+    return n;
+  });
+  assert.ok(ticket, replaced);
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    const settled = await page.evaluate(n => window.__navTestDoc ? window.__navTestSettled >= n : null, ticket);
+    assert.notEqual(settled, null, replaced);
+    if (settled) return;
+    assert.ok(Date.now() < deadline, 'in-flight api() requests did not settle in 15 s');
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
 }
 async function open(browser, { hidden = false, mobile = false } = {}) {
   const context = await browser.newContext({ viewport: mobile ? { width: 390, height: 844 } : { width: 1440, height: 900 } });
@@ -34,14 +56,17 @@ async function open(browser, { hidden = false, mobile = false } = {}) {
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
   page.on('pageerror', error => errors.push(error.message));
+  const loads = [];
+  page.on('load', () => loads.push(page.url()));
   const date = new Date('2026-10-16T12:00:00Z');
   await page.clock.install({ time: date });
   await page.clock.pauseAt(new Date(date.getTime() + 1000));
   await page.goto(BASE + '/#/tools', { waitUntil: 'networkidle' });
+  await page.evaluate(() => { window.__navTestDoc = true; });
   await settle(page);
   assert.ok(sockets.length, 'app shared WebSocket must connect');
   return {
-    context, page, requests, errors,
+    context, page, requests, errors, loads,
     async ws() {
       await page.evaluate(() => {
         window.__navTestFrame = new Promise(resolve => {
@@ -62,7 +87,9 @@ async function traffic(h, seconds) {
 let passed = 0;
 async function check(name, fn) { await fn(); passed++; console.log((measureOnly ? '  measured: ' : '  ✓ ') + name); }
 (async () => {
-  const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH || undefined });
+  // --expose-gc: the settle() regression check below forces the GC that the
+  // Live mount only sometimes triggers.
+  const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH || undefined, args: ['--js-flags=--expose-gc'] });
   try {
     const visible = await open(browser);
     try {
@@ -105,7 +132,26 @@ async function check(name, fn) { await fn(); passed++; console.log((measureOnly 
           const start = visible.requests.length;
           await traffic(visible, 15); assert.equal(visible.requests.length, start + 1);
         });
+        await check('settle() survives a GC right after the requests it waits for settle (PR #950)', async () => {
+          // A request that settles and is followed by GCs in the next
+          // microtasks, as Live's node load does. An evaluate that awaited
+          // it failed here in every local run ("Execution context was destroyed").
+          await visible.page.evaluate(() => {
+            const request = new Promise(resolve => { window.__navTestRelease = resolve; });
+            _inflight.set('/__nav-test-gc', request);
+            request.finally(() => _inflight.delete('/__nav-test-gc'));
+            let next = request;
+            for (let i = 0; i < 12; i++) next = next.then(() => gc());
+          });
+          const settling = settle(visible.page);
+          await visible.page.evaluate(() => window.__navTestRelease());
+          await settling;
+          assert.equal(await visible.page.evaluate(() => _inflight.has('/__nav-test-gc')), false);
+        });
         await check('no browser exceptions', async () => { assert.deepEqual(visible.errors, []); });
+        await check('no reload or navigation: one document load for the whole run', async () => {
+          assert.equal(visible.loads.length, 1, 'document loads: ' + JSON.stringify(visible.loads));
+        });
       }
     } finally { await visible.context.close(); }
     const initiallyHidden = await open(browser, { hidden: true, mobile: true });
@@ -121,6 +167,7 @@ async function check(name, fn) { await fn(); passed++; console.log((measureOnly 
           // counters must still refresh, not become a visible mobile control.
           assert.match(await initiallyHidden.page.locator('#navStats').textContent(), /100 pkts/);
           assert.deepEqual(initiallyHidden.errors, []);
+          assert.equal(initiallyHidden.loads.length, 1, 'no reload or navigation');
         }
       });
     } finally { await initiallyHidden.context.close(); }

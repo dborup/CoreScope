@@ -5,6 +5,13 @@
  * dismissible banner when a later reading reports a different commit. It
  * never reloads by itself, and shows once per new commit.
  *
+ * Kiosk screens (#883 M3, owner decision 5) are the one exception: while
+ * Live's kiosk mode has set setAutoReload(true), a new commit reloads the
+ * page after a random 30–120 s delay instead of the banner, so a room of
+ * screens does not hit a freshly restarted server at once. A plain restart
+ * (same commit) never reloads. Leaving kiosk cancels a pending reload and
+ * shows the banner.
+ *
  * Checks piggyback on events that already happen: the tab becoming visible,
  * the shared WebSocket (re)opening (app.js dispatches `corescope:ws-open`),
  * and a slow interval for tabs that stay visible. All are throttled.
@@ -17,6 +24,8 @@
 (function () {
   var MIN_GAP_MS = 30 * 1000;        // floor between any two checks
   var INTERVAL_MS = 5 * 60 * 1000;   // periodic check for visible tabs
+  var RELOAD_MIN_MS = 30 * 1000;     // kiosk auto-reload window (#883)
+  var RELOAD_MAX_MS = 120 * 1000;
 
   function initialState() { return { baseline: null, notified: null }; }
 
@@ -33,6 +42,14 @@
       return { notify: false, commit: commit, state: state };
     }
     return { notify: true, commit: commit, state: { baseline: state.baseline, notified: commit } };
+  }
+
+  // random in [0, 1) → a delay in [RELOAD_MIN_MS, RELOAD_MAX_MS).
+  function reloadDelayMs(random) {
+    var r = Number(random);
+    if (!(r >= 0)) r = 0;
+    if (r > 1) r = 1;
+    return Math.round(RELOAD_MIN_MS + r * (RELOAD_MAX_MS - RELOAD_MIN_MS));
   }
 
   function shouldCheck(now, last, minGap) {
@@ -72,6 +89,9 @@
     var state = initialState();
     var lastCheck = 0;
     var banner = null;
+    var newVersion = false;    // a new commit was seen
+    var autoReload = false;    // kiosk mode is on
+    var reloadTimer = null;
 
     function hide() {
       if (banner) { banner.remove(); banner = null; }
@@ -82,6 +102,23 @@
         hide);
       document.body.appendChild(banner);
     }
+    function scheduleReload() {
+      hide();
+      if (reloadTimer) return;
+      reloadTimer = setTimeout(function () { reloadTimer = null; window.location.reload(); },
+        reloadDelayMs(Math.random()));
+    }
+    function onNewVersion() {
+      newVersion = true;
+      if (autoReload) scheduleReload();
+      else show();
+    }
+    function setAutoReload(on) {
+      autoReload = !!on;
+      if (autoReload) { if (newVersion) scheduleReload(); return; }
+      if (reloadTimer) { clearTimeout(reloadTimer); reloadTimer = null; }
+      if (newVersion) show();
+    }
     function check(baseline) {
       var now = Date.now();
       if (!baseline && !shouldCheck(now, lastCheck, MIN_GAP_MS)) return;
@@ -89,7 +126,7 @@
       (baseline ? reader.readOnce() : reader.read()).then(function (h) {
         var r = decide(state, h);
         state = r.state;
-        if (r.notify) show();
+        if (r.notify) onNewVersion();
       });
     }
 
@@ -99,11 +136,16 @@
     });
     window.addEventListener('corescope:ws-open', function () { check(false); });
     setInterval(function () { if (!document.hidden) check(false); }, INTERVAL_MS);
+    return { setAutoReload: setAutoReload };
   }
 
+  var notice = null;
   window.VersionNotice = {
     initialState: initialState, decide: decide,
     shouldCheck: shouldCheck, start: start,
+    RELOAD_MIN_MS: RELOAD_MIN_MS, RELOAD_MAX_MS: RELOAD_MAX_MS, reloadDelayMs: reloadDelayMs,
+    // Live's kiosk mode turns this on while it is mounted (#883).
+    setAutoReload: function (on) { if (notice) notice.setAutoReload(on); },
   };
-  if (typeof document !== 'undefined' && document.body !== undefined) start();
+  if (typeof document !== 'undefined' && document.body !== undefined) notice = start() || null;
 })();
