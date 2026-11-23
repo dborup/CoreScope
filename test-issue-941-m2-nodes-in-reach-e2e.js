@@ -23,10 +23,11 @@
  *      rmodel=delta in the address bar and names the model; a deep link
  *      with rmodel and rlist restores both;
  *   4. 375×560 with touch, from a cold #/map: real taps on the toggle and
- *      the map open the panel, a tap on a chip opens the list, a budget
- *      change recounts it with no request, there is no horizontal scroll,
- *      the chip and the first link are on screen and on top, and a tap on
- *      the link opens the node's page;
+ *      the map open the panel, a tap on a chip opens the list, the list
+ *      does not scroll on its own (a swipe that starts on it scrolls the
+ *      sheet), a budget change recounts it with no request, there is no
+ *      horizontal scroll, the chip and the first link are on screen and
+ *      on top, and a tap on the link opens the node's page;
  *   5. no console error, and no request leaves localhost.
  *
  * SHOTS_DIR, when set, receives small JPEG screenshots.
@@ -310,6 +311,31 @@ function rasterFor(c, radiusKm) {
         await page.tap('[data-testid="reach-nir-good"]');
         let l = await listed(page);
         assert(l.length === 2, 'phone list ' + JSON.stringify(l));
+        // The list is part of the sheet, not a scroller inside it: a swipe
+        // that starts on the list scrolls the sheet.
+        const nested = await page.evaluate(() => {
+          const cs = getComputedStyle(document.querySelector('[data-testid="reach-nir-list"]'));
+          return { overflowY: cs.overflowY, maxHeight: cs.maxHeight };
+        });
+        assert(nested.overflowY === 'visible' && nested.maxHeight === 'none', 'the list scrolls inside the sheet ' + JSON.stringify(nested));
+        const item = page.locator('[data-testid="reach-nir-item"]:not([hidden])').first();
+        await item.scrollIntoViewIfNeeded();
+        const sheetTop = () => page.evaluate(() => document.querySelector('[data-testid="reach-panel"]').scrollTop);
+        const fromTop = await sheetTop();
+        const ib = await item.boundingBox();
+        const cdp = await ctx.newCDPSession(page);
+        const at = { x: ib.x + ib.width / 2, y: ib.y + ib.height / 2 };
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] });
+        for (let k = 1; k <= 8; k++) {
+          await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: at.x, y: at.y - 10 * k }] });
+          await page.waitForTimeout(16);
+        }
+        await page.waitForTimeout(200); // held still: no fling
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+        await page.waitForTimeout(300);
+        const swiped = await sheetTop();
+        assert(swiped > fromTop + 30, `a swipe on the list did not scroll the sheet: ${fromTop} -> ${swiped}`);
+        await shot(page, `941-m2-nodes-phone-sheet-${theme}-375x560.jpg`);
         const before = rec.api.length;
         await setPower(page, 10);
         l = await listed(page);

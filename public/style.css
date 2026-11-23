@@ -6833,10 +6833,15 @@ body.embed .warmup-pills { display: none !important; }
 .reach-swatch-none { background: transparent; }
 @media (max-width: 640px) {
   /* A sheet along the bottom, its own scroller, so the map keeps the top. */
-  .reach-panel { left: 8px; right: 8px; bottom: 8px; width: auto; max-width: none; max-height: 46%; }
+  /* scroll-padding-top: an item scrolled into view (focus, a link) is not
+     left under the sticky head. */
+  .reach-panel { left: 8px; right: 8px; bottom: 8px; width: auto; max-width: none; max-height: 46%; scroll-padding-top: 64px; }
   /* Touch: the chips and list rows are full-size targets. */
   .reach-nir-chip { min-height: 44px; }
   .reach-nir-item { min-height: 44px; }
+  /* The list is part of the sheet, not a scroller inside it: a swipe on
+     it scrolls the sheet. */
+  .reach-nir-list { max-height: none; overflow-y: visible; }
   /* The head and its × stay at the top of the scrolled sheet; it covers
      the sheet's top padding so nothing scrolls past above it. */
   .reach-head {
