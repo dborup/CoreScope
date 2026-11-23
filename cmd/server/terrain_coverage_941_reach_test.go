@@ -447,6 +447,64 @@ func TestCoverage941M2_LookupFailureFailsClosed(t *testing.T) {
 	}
 }
 
+// TestCoverage941M2_LookupRunsWhateverTheKeys: the visibility lookup runs
+// even when no node is inside the radius, so a failed lookup serves reach
+// null whether or not a hidden node is there, the same bytes. A lookup
+// skipped for an empty key set would serve an empty reach without the
+// hidden node and null with it.
+func TestCoverage941M2_LookupRunsWhateverTheKeys(t *testing.T) {
+	outside := reachTestNode{reachPK('1'), "Outside", "repeater", 0, 8000} // beyond r=5
+	hidden := reachTestNode{strings.Repeat("ef", 32), "private-roof", "repeater", 1500, 0}
+	q := reachQuery("56.1629,10.2039", "r=5")
+	// With the lookup working, no node inside the radius is an empty
+	// reach, not null.
+	if r := decodeCoverage(t, reachHiddenEnv(t, []reachTestNode{outside}, nil).get(q)).Reach; r == nil || len(r.Nodes) != 0 || r.NoTerrain != 0 || r.Omitted != 0 {
+		t.Fatalf("reach with no node inside %+v", r)
+	}
+	var bodies []string
+	for _, nodes := range [][]reachTestNode{{outside}, {outside, hidden}} {
+		env := reachHiddenEnv(t, nodes, nil)
+		if _, err := env.srv.db.conn.Exec(`DROP TABLE observers`); err != nil {
+			t.Fatal(err)
+		}
+		for _, state := range []string{"miss", "hit"} {
+			w := env.get(q)
+			if w.Header().Get("X-CoreScope-Cache") != state || !strings.Contains(w.Body.String(), `"reach":null`) {
+				t.Fatalf("%d nodes, %s: %s", len(nodes), state, w.Body.String())
+			}
+			bodies = append(bodies, w.Body.String())
+		}
+	}
+	if bodies[0] != bodies[2] || bodies[1] != bodies[3] {
+		t.Fatalf("a hidden node changes a failed lookup's response:\n%s\n%s", bodies[0], bodies[2])
+	}
+}
+
+// TestCoverage941M2_NodeGoneFromTheSnapshotAfterTheHit: a node that leaves
+// the snapshot after its result was cached, listed or without terrain, is
+// in no list and no count on the hit: the response is the one without it.
+func TestCoverage941M2_NodeGoneFromTheSnapshotAfterTheHit(t *testing.T) {
+	nodes := []reachTestNode{
+		{reachPK('1'), "Stays", "repeater", 0, -2000},
+		{reachPK('2'), "Goes", "room", 2500, 0},
+		{reachPK('3'), "Goes past the gap", "repeater", 0, 4000}, // no terrain on its path
+	}
+	q := reachQuery("56.1629,10.2039", "r=5")
+	env := reachHiddenEnv(t, nodes, nil)
+	if r := decodeCoverage(t, env.get(q)).Reach; r == nil || len(r.Nodes) != 2 || r.NoTerrain != 1 {
+		t.Fatalf("reach before %+v", r)
+	}
+	if _, err := env.srv.db.conn.Exec(`DELETE FROM nodes WHERE public_key IN (?, ?)`, reachPK('2'), reachPK('3')); err != nil {
+		t.Fatal(err)
+	}
+	env.srv.store.InvalidateNodeCache()
+	a := env.get(q)
+	b := reachHiddenEnv(t, nodes[:1], nil).get(q)
+	if a.Header().Get("X-CoreScope-Cache") != "hit" || a.Body.String() != b.Body.String() {
+		t.Fatalf("gone after the hit (%s):\nhit     %s\nwithout %s", a.Header().Get("X-CoreScope-Cache"), a.Body.String(), b.Body.String())
+	}
+}
+
 // TestCoverage941M2_NoExtraUpstreamCalls: nodes in reach use the tiles the
 // raster already loaded. With 300 nodes in a 10 km disk a cold computation
 // makes exactly the planned tile fetches, the same as with none, and a
@@ -483,38 +541,48 @@ func TestCoverage941M2_NoExtraUpstreamCalls(t *testing.T) {
 	}
 }
 
-// TestCoverage941M2_ReachIsBounded: more nodes than the list holds keeps
-// the lowest losses and counts the rest as omitted; the cached result
-// stays within its byte bound.
-func TestCoverage941M2_ReachIsBounded(t *testing.T) {
+// reachBoundEnv is a reach over flat ground with the hidden-name prefix
+// "private-", holding n visible repeaters spread over a 10 km disk 200 to
+// 9700 m out, and the nodes of extra, inserted in one transaction.
+func reachBoundEnv(t *testing.T, n int, extra []reachTestNode) *coverageEnv {
+	t.Helper()
 	env := newCoverageEnv(t, newFakeElevation(t, flatElev(3)), CoverageConfig{}, nil, nil)
 	env.srv.cfg.SetHiddenNamePrefixes([]string{"private-"})
-	const n = coverageReachMaxNodes + 37
 	tx, err := env.srv.db.conn.Begin()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A hidden node with the lowest loss of all: it takes no place in the
-	// list and is not among the omitted.
-	hiddenPK := strings.Repeat("ab", 32)
-	lat, lon := reachPos(0, 100)
-	if _, err := tx.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
-		VALUES (?, 'private-closest', 'repeater', ?, ?, datetime('now'), datetime('now'), 1)`, hiddenPK, lat, lon); err != nil {
-		t.Fatal(err)
+	insert := func(pk, name, role string, dE, dN float64) {
+		lat, lon := reachPos(dE, dN)
+		if _, err := tx.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
+			VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'), 1)`, pk, name, role, lat, lon); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, x := range extra {
+		insert(x.pk, x.name, x.role, x.dE, x.dN)
 	}
 	for i := 0; i < n; i++ {
 		a := float64(i) * 2.399963
-		d := 200 + 9500*math.Sqrt(float64(i)/n)
-		lat, lon := reachPos(d*math.Sin(a), d*math.Cos(a))
-		if _, err := tx.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
-			VALUES (?, ?, 'repeater', ?, ?, datetime('now'), datetime('now'), 1)`, fmt.Sprintf("%064x", i+1), fmt.Sprintf("Node %d with a long name", i), lat, lon); err != nil {
-			t.Fatal(err)
-		}
+		d := 200 + 9500*math.Sqrt(float64(i)/float64(n))
+		insert(fmt.Sprintf("%064x", i+1), fmt.Sprintf("Node %d with a long name", i), "repeater", d*math.Sin(a), d*math.Cos(a))
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	env.srv.store.InvalidateNodeCache()
+	return env
+}
+
+// TestCoverage941M2_ReachIsBounded: more nodes than the list holds keeps
+// the lowest losses and counts the rest as omitted; the cached result
+// stays within its byte bound.
+func TestCoverage941M2_ReachIsBounded(t *testing.T) {
+	const n = coverageReachMaxNodes + 37
+	// A hidden node with the lowest loss of all: it takes no place in the
+	// list and is not among the omitted.
+	hiddenPK := strings.Repeat("ab", 32)
+	env := reachBoundEnv(t, n, []reachTestNode{{hiddenPK, "private-closest", "repeater", 0, 100}})
 	resp := decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "r=10")))
 	r := resp.Reach
 	if r == nil || len(r.Nodes) != coverageReachMaxNodes || r.Omitted != 37 {
@@ -534,6 +602,31 @@ func TestCoverage941M2_ReachIsBounded(t *testing.T) {
 	meta, _ := json.Marshal(e.meta.Reach)
 	if per := len(meta) / len(e.meta.Reach.Nodes); per > coverageReachEntryBytes {
 		t.Fatalf("%d B per kept node > %d", per, coverageReachEntryBytes)
+	}
+}
+
+// TestCoverage941M2_HiddenPastTheBoundIsNotOmitted: a hidden node farther
+// out than every visible one, so past the list's bound, is not among the
+// omitted either. The bound applies to visible nodes only; otherwise
+// omitted would count a hidden node whenever the radius holds more nodes
+// than the list.
+func TestCoverage941M2_HiddenPastTheBoundIsNotOmitted(t *testing.T) {
+	const n = coverageReachMaxNodes + 37
+	hiddenPK := strings.Repeat("ab", 32)
+	env := reachBoundEnv(t, n, []reachTestNode{{hiddenPK, "private-farthest", "repeater", 0, 9900}})
+	resp := decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "r=10")))
+	// The premise: the hidden node was evaluated, the lossiest of all.
+	data, ok := env.c.results.Get(resp.Key, env.c.now())
+	if !ok {
+		t.Fatal("no cached result")
+	}
+	e, _ := decodeCoverageEntry(data)
+	if kept := e.meta.Reach.Nodes; len(kept) != n+1 || kept[n].PubKey != hiddenPK {
+		t.Fatalf("the hidden node is not the lossiest of %d kept", len(kept))
+	}
+	r := resp.Reach
+	if r == nil || len(r.Nodes) != coverageReachMaxNodes || r.Omitted != 37 {
+		t.Fatalf("reach: %d listed, %d omitted (want %d, 37)", len(r.Nodes), r.Omitted, coverageReachMaxNodes)
 	}
 }
 
