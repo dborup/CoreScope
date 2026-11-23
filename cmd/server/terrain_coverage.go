@@ -24,7 +24,7 @@ package main
 //     shift the margin, so the browser applies them to the cached loss and
 //     a slider never asks the server again.
 //   - The propagation model (#941 M2) is the request's `model`
-//     (bullington or delta), else map.coverage.model, else Bullington; it
+//     (bullington or delta), else map.coverage.model, else delta; it
 //     is part of the cache key.
 //   - A point no source covers, an over-large radius, a hidden or unknown
 //     node and a cache hit make no upstream call.
@@ -149,8 +149,8 @@ type CoverageConfig struct {
 	// ElevationCacheMB bounds the elevation tile cache.
 	ElevationCacheMB *int `json:"elevationCacheMB"`
 	// Model is the default propagation model, "bullington" or "delta"
-	// (#941 M2); a request may name the other. Bullington until the
-	// validation report has run on real Danish links.
+	// (#941 M2); a request may name the other. Delta by default, as the
+	// validation report on real Danish links decided.
 	Model *string `json:"model"`
 }
 
@@ -186,15 +186,15 @@ func resolveCoverageSettings(cc CoverageConfig, logf func(string, ...interface{}
 }
 
 // coverageModelSetting is map.coverage.model: a served model, else
-// Bullington with a warning that echoes nothing.
+// delta with a warning that echoes nothing.
 func coverageModelSetting(v *string, logf func(string, ...interface{})) dhm.PathModel {
 	if v == nil {
-		return dhm.PathBullington
+		return dhm.PathDelta
 	}
 	m, ok := dhm.ParsePathModel(*v)
 	if !ok {
-		logf("[coverage] config map.coverage.model must be \"bullington\" or \"delta\"; using bullington")
-		return dhm.PathBullington
+		logf("[coverage] config map.coverage.model must be \"bullington\" or \"delta\"; using delta")
+		return dhm.PathDelta
 	}
 	return m
 }
