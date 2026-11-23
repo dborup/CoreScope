@@ -65,7 +65,12 @@ CORESCOPE_REACH_VALIDATION_FULL_FIXTURE=1 go test -count=1 \
    tiles around one end of each pair. The tiles come through the reach's
    own tile cache, its 2-slot DHM sub-budget and `map.coverage.upstreamPerMin`.
    When the budget is spent, the harness waits and goes on. Disks are
-   visited in tile order, so each tile is fetched once.
+   visited in tile order, so each tile is fetched once. The report's
+   `upstreamCalls` counts the requests the run made: DHM WCS requests, plus
+   the calls the GLO-30 fill reports (never fewer than the requests it sent;
+   a failed fill counts as one). A run that cannot count prints "upstream
+   calls not counted" in the markdown and `-1` in the JSON, never "-1
+   upstream calls".
 5. **Scores.** The margin of a pair is the link budget (`radio` config,
    default 158 dB) minus the loss. A pair counts as **reached** at a margin
    of 3 dB or more (the "marginal" class). The report gives these, per
