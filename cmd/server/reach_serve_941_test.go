@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,7 +31,7 @@ func TestReachServe941_Manual(t *testing.T) {
 	if v, err := strconv.Atoi(os.Getenv("CORESCOPE_941_SERVE_SECONDS")); err == nil && v > 0 {
 		secs = v
 	}
-	path := prepareReachFixture(t, 12)
+	path := prepareReachFixture(t, reachFixtureScale{radiusM: 40000, keepM: math.Inf(1), seeds: 12})
 	db, err := OpenDB(path)
 	if err != nil {
 		t.Fatal(err)

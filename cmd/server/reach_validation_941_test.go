@@ -18,7 +18,9 @@ package main
 //   - Nodes: repeaters and rooms (the reach's own roles, owner decision 5)
 //     with a valid position from their adverts, seen within the window
 //     before the newest node in the database, not hidden by the operator's
-//     blacklists or hidden-name prefixes. Antenna heights are the reach's
+//     blacklists or hidden-name prefixes, through any of its names (the
+//     serve path's alias-aware rule: hiddenIdentityNames, then
+//     identityHidden). Antenna heights are the reach's
 //     (coverageNodeHeight: operator per node, approved owner height, role).
 //   - Candidate pairs: two such nodes at most the radius apart.
 //   - Positives: an observer_neighbors row (the firmware's own zero-hop
@@ -147,6 +149,7 @@ func loadReachValidationInput(ctx context.Context, srv *Server, c *terrainCovera
 	if err != nil {
 		return nil, err
 	}
+	var active []*valNode
 	for rows.Next() {
 		var pk, name, role, seen string
 		var lat, lon sql.NullFloat64
@@ -161,17 +164,29 @@ func loadReachValidationInput(ctx context.Context, srv *Server, c *terrainCovera
 		if t := parseNodeTimestamp(seen); t.IsZero() || t.Before(in.asOf.Add(-window)) {
 			continue
 		}
-		if identityHidden(srv.cfg, pk, name) {
-			in.hidden++
-			continue
-		}
-		pt := dhm.LatLon{Lat: lat.Float64, Lon: lon.Float64}
-		h, src := srv.coverageNodeHeight(ctx, c, pk, role, pt)
-		in.nodes[pk] = &valNode{pk: pk, name: name, role: role, pt: pt, heightM: h, heightSource: src}
+		active = append(active, &valNode{pk: pk, name: name, role: role, pt: dhm.LatLon{Lat: lat.Float64, Lon: lon.Float64}})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+	// The serve path's visibility rule (coverageReachView): one bulk,
+	// alias-aware lookup (observer and inactive names), then identityHidden.
+	pks := make([]string, len(active))
+	for i, n := range active {
+		pks[i] = n.pk
+	}
+	aliases, err := srv.hiddenIdentityNames(ctx, pks)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range active {
+		if identityHidden(srv.cfg, n.pk, append([]string{n.name}, aliases[n.pk]...)...) {
+			in.hidden++
+			continue
+		}
+		n.heightM, n.heightSource = srv.coverageNodeHeight(ctx, c, n.pk, n.role, n.pt)
+		in.nodes[n.pk] = n
 	}
 
 	if err := optionalQuery(ctx, conn, `SELECT id, noise_floor FROM observers WHERE noise_floor IS NOT NULL`, func(r *sql.Rows) error {
@@ -794,18 +809,41 @@ func defaultReachValidationOptions(radiusM float64) reachValidationOptions {
 		upstream: func() int64 { return -1 }, sleep: time.Sleep}
 }
 
-// runReachValidation is the harness: read, pair, evaluate, score, write.
-func runReachValidation(ctx context.Context, srv *Server, c *terrainCoverage, conn *sql.DB, o reachValidationOptions) (reachValidationReport, error) {
+// reachValidationLabels are the harness's input and labelled candidate
+// pairs, before any terrain is read.
+type reachValidationLabels struct {
+	in           *reachValidationInput
+	pairs        []*valPair
+	beyond, weak int
+}
+
+// labelReachValidation reads the database and labels the candidate pairs:
+// everything of a run but the terrain.
+func labelReachValidation(ctx context.Context, srv *Server, c *terrainCoverage, conn *sql.DB, o reachValidationOptions) (reachValidationLabels, error) {
 	in, err := loadReachValidationInput(ctx, srv, c, conn, o.window, o.minEdgeCount)
 	if err != nil {
-		return reachValidationReport{}, err
+		return reachValidationLabels{}, err
 	}
 	pairs, beyond, weak := in.candidatePairs(o.radiusM)
-	tiles, partial, err := evaluatePairs(ctx, c, pairs, o.sleep)
+	return reachValidationLabels{in: in, pairs: pairs, beyond: beyond, weak: weak}, nil
+}
+
+// report scores the labelled pairs as they are (losses evaluated or not).
+func (l reachValidationLabels) report(c *terrainCoverage, o reachValidationOptions) reachValidationReport {
+	return buildReachValidationReport(l.in, c, l.pairs, o, l.beyond, l.weak)
+}
+
+// runReachValidation is the harness: read, pair, evaluate, score, write.
+func runReachValidation(ctx context.Context, srv *Server, c *terrainCoverage, conn *sql.DB, o reachValidationOptions) (reachValidationReport, error) {
+	l, err := labelReachValidation(ctx, srv, c, conn, o)
 	if err != nil {
 		return reachValidationReport{}, err
 	}
-	rep := buildReachValidationReport(in, c, pairs, o, beyond, weak)
+	tiles, partial, err := evaluatePairs(ctx, c, l.pairs, o.sleep)
+	if err != nil {
+		return reachValidationReport{}, err
+	}
+	rep := l.report(c, o)
 	rep.Terrain = reachValidationTerrain{Source: o.terrainSource, Tiles: tiles, Upstream: o.upstream(), Partial: partial}
 	outDir := o.outDir
 	if outDir != "" {
@@ -882,15 +920,41 @@ func TestReachValidation941_RealDB(t *testing.T) {
 // Jutland.
 var reachFixtureOrigin = dhm.LatLon{Lat: 56.15, Lon: 9.55}
 
+// reachFullFixtureEnv opts in to the full fixture run.
+const reachFullFixtureEnv = "CORESCOPE_REACH_VALIDATION_FULL_FIXTURE"
+
+// reachFixtureScale is the size of the fixture's terrain run. CI runs the
+// small one: every stage, model and band through the same code, on the
+// nodes within 25 km of the network's centre, a 10 km radius and a 60 m
+// grid, a few seconds under -race. With
+// CORESCOPE_REACH_VALIDATION_FULL_FIXTURE=1 it is the full one: every node,
+// 40 km on the 30 m grid, seconds without -race and minutes under it, so CI
+// never sets it (docs/predicted-reach-validation.md).
+type reachFixtureScale struct {
+	full        bool
+	radiusM     float64
+	resolutionM int
+	keepM       float64 // the nodes kept: this far from the network's centre
+	seeds       int     // firmware links seeded within the radius
+	minNodes    int     // candidate nodes the run must have
+}
+
+func reachFixtureScaleFromEnv() reachFixtureScale {
+	if os.Getenv(reachFullFixtureEnv) == "1" {
+		return reachFixtureScale{full: true, radiusM: 40000, resolutionM: 30, keepM: math.Inf(1), seeds: 12, minNodes: 100}
+	}
+	return reachFixtureScale{radiusM: 10000, resolutionM: 60, keepM: 25000, seeds: 8, minNodes: 50}
+}
+
 // prepareReachFixture copies e2e-fixture.db, brings it to the current
 // schema (dbschema.Apply, as CI prepares it), moves its nodes rigidly to
 // Jutland (equirectangular about the network's centre, so pair distances
-// keep within a fraction of a percent) and, since the fixture has no
-// firmware neighbour reports, seeds observer_neighbors and their SNR
-// history from its own resolved neighbor_edges: the first seeds of them
-// within 40 km, in key order. Test setup only: the harness opens the copy
-// read-only.
-func prepareReachFixture(t *testing.T, seeds int) string {
+// keep within a fraction of a percent), keeps the positioned nodes within
+// sc.keepM of its centre and, since the fixture has no firmware neighbour
+// reports, seeds observer_neighbors and their SNR history from its own
+// resolved neighbor_edges: the first sc.seeds of them within sc.radiusM,
+// in key order. Test setup only: the harness opens the copy read-only.
+func prepareReachFixture(t *testing.T, sc reachFixtureScale) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "fixture.db")
 	src, err := os.Open(filepath.Join("..", "..", "test-fixtures", "e2e-fixture.db"))
@@ -923,31 +987,57 @@ func prepareReachFixture(t *testing.T, seeds int) string {
 		reachFixtureOrigin.Lat, lat0, reachFixtureOrigin.Lon, lon0, c0, c1); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := rw.Query(`SELECT e.node_a, e.node_b FROM neighbor_edges e
+	if !math.IsInf(sc.keepM, 1) {
+		rows, err := rw.Query(`SELECT public_key, lat, lon FROM nodes WHERE lat IS NOT NULL AND lat != 0`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var far []string
+		for rows.Next() {
+			var pk string
+			var lat, lon float64
+			if err := rows.Scan(&pk, &lat, &lon); err != nil {
+				t.Fatal(err)
+			}
+			if dhm.GroundDistance(reachFixtureOrigin, dhm.LatLon{Lat: lat, Lon: lon}) > sc.keepM {
+				far = append(far, pk)
+			}
+		}
+		rows.Close()
+		for _, pk := range far {
+			if _, err := rw.Exec(`DELETE FROM nodes WHERE public_key = ?`, pk); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	rows, err := rw.Query(`SELECT e.node_a, e.node_b, a.lat, a.lon, b.lat, b.lon FROM neighbor_edges e
 		JOIN nodes a ON a.public_key = e.node_a JOIN nodes b ON b.public_key = e.node_b
 		WHERE a.lat != 0 AND b.lat != 0 AND a.role IN ('repeater', 'room') AND b.role IN ('repeater', 'room')
 		ORDER BY e.node_a, e.node_b`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	type edge struct{ a, b string }
+	type edge struct {
+		a, b string
+		d    float64
+	}
 	var es []edge
 	for rows.Next() {
 		var e edge
-		rows.Scan(&e.a, &e.b)
+		var la, oa, lb, ob float64
+		if err := rows.Scan(&e.a, &e.b, &la, &oa, &lb, &ob); err != nil {
+			t.Fatal(err)
+		}
+		e.d = dhm.GroundDistance(dhm.LatLon{Lat: la, Lon: oa}, dhm.LatLon{Lat: lb, Lon: ob})
 		es = append(es, e)
 	}
 	rows.Close()
 	n := 0
 	for _, e := range es {
-		if n == seeds {
+		if n == sc.seeds {
 			break
 		}
-		var la, oa, lb, ob float64
-		rw.QueryRow(`SELECT lat, lon FROM nodes WHERE public_key = ?`, e.a).Scan(&la, &oa)
-		rw.QueryRow(`SELECT lat, lon FROM nodes WHERE public_key = ?`, e.b).Scan(&lb, &ob)
-		d := dhm.GroundDistance(dhm.LatLon{Lat: la, Lon: oa}, dhm.LatLon{Lat: lb, Lon: ob})
-		if d > 40000 {
+		if e.d > sc.radiusM {
 			continue
 		}
 		// Observer ids arrive upper-case from MQTT topics.
@@ -956,7 +1046,7 @@ func prepareReachFixture(t *testing.T, seeds int) string {
 			t.Fatal(err)
 		}
 		for k := 0; k < 3; k++ {
-			snr := 12 - d/2500 + float64(k) // falls with distance
+			snr := 12 - e.d/2500 + float64(k) // falls with distance
 			if _, err := rw.Exec(`INSERT INTO observer_neighbor_metrics (observer_id, neighbor_pubkey, timestamp, snr, heard_secs_ago) VALUES (?, ?, ?, ?, 60)`,
 				strings.ToUpper(e.a), e.b, fmt.Sprintf("2026-05-17T1%d:00:00Z", k), snr); err != nil {
 				t.Fatal(err)
@@ -964,7 +1054,7 @@ func prepareReachFixture(t *testing.T, seeds int) string {
 		}
 		n++
 	}
-	if n < seeds {
+	if n < sc.seeds {
 		t.Fatalf("only %d fixture edges to seed from", n)
 	}
 	// The first seeded observer reports its noise floor.
@@ -992,9 +1082,19 @@ func rollingElev(e, n float64) float32 {
 	return float32(math.Max(0, 35+20*math.Sin(x/4.7)*math.Cos(y/6.1)+12*math.Sin(x/1.3+y/2.2)+5*math.Cos(x/0.41-y/0.67)))
 }
 
-// reachValidationEnv is the harness on a prepared fixture copy and a fake
-// ElevationSource, everywhere covered.
-func reachValidationEnv(t *testing.T, path string) (*Server, *terrainCoverage, *DB, *fakeElevation) {
+// reachValidationCoverage is the harness's reach on a fake
+// ElevationSource, everywhere covered, on a grid of resolutionM.
+func reachValidationCoverage(t *testing.T, resolutionM int) (*terrainCoverage, *fakeElevation) {
+	t.Helper()
+	src := newFakeElevation(t, rollingElev)
+	c := newTerrainCoverage(CoverageConfig{Enabled: true, ElevationCacheMB: intp(512), ResolutionM: intp(resolutionM)}, nil,
+		terrainCoverageDeps{src: src, logf: func(string, ...interface{}) {}, observers: func() ([]Observer, error) { return nil, nil }})
+	c.covers = func(e, n float64) bool { return true }
+	return c, src
+}
+
+// reachValidationEnv is the harness on a prepared fixture copy.
+func reachValidationEnv(t *testing.T, path string, resolutionM int) (*Server, *terrainCoverage, *DB, *fakeElevation) {
 	t.Helper()
 	db, err := OpenDB(path)
 	if err != nil {
@@ -1002,19 +1102,16 @@ func reachValidationEnv(t *testing.T, path string) (*Server, *terrainCoverage, *
 	}
 	t.Cleanup(func() { db.Close() })
 	cfg := &Config{}
-	src := newFakeElevation(t, rollingElev)
-	c := newTerrainCoverage(CoverageConfig{Enabled: true, ElevationCacheMB: intp(512)}, nil,
-		terrainCoverageDeps{src: src, logf: func(string, ...interface{}) {}, observers: func() ([]Observer, error) { return nil, nil }})
-	c.covers = func(e, n float64) bool { return true }
+	c, src := reachValidationCoverage(t, resolutionM)
 	srv := &Server{cfg: cfg, db: db}
 	srv.claims = newAntennaClaimService(cfg, db.conn, "")
 	return srv, c, db, src
 }
 
-// fixtureValidationOptions: 40 km, a week, and a minimum edge count of
-// one, since every resolved edge in the fixture was seen once.
-func fixtureValidationOptions(t *testing.T, src *fakeElevation) reachValidationOptions {
-	o := defaultReachValidationOptions(40000)
+// fixtureValidationOptions: the scale's radius, a week, and a minimum edge
+// count of one, since every resolved edge in the fixture was seen once.
+func fixtureValidationOptions(t *testing.T, src *fakeElevation, radiusM float64) reachValidationOptions {
+	o := defaultReachValidationOptions(radiusM)
 	o.minEdgeCount = 1
 	o.terrainSource = "fake (synthetic terrain)"
 	o.upstream = func() int64 { return src.calls.Load() }
@@ -1049,21 +1146,24 @@ func jsonShape(v interface{}) interface{} {
 	return fmt.Sprintf("%T", v)
 }
 
-// TestReachValidation941_FixtureMechanics runs the whole harness on the
-// fixture: it reads the copy read-only (the file is unchanged), labels
-// positives from observer_neighbors and resolved neighbor_edges and drops
-// the ambiguous ones, scores every model and band, names the reference
-// repeaters, fetches each elevation tile once, and writes a JSON report of
-// the golden shape and its markdown.
+// TestReachValidation941_FixtureMechanics runs the whole harness once on
+// the fixture and asserts on that one report: it reads the copy read-only
+// (the file is unchanged), labels positives from observer_neighbors and
+// resolved neighbor_edges and drops the ambiguous ones, scores every model
+// and band, names the reference repeaters, fetches each elevation tile
+// once, and writes a JSON report of the golden shape and its markdown. CI
+// runs it at the small scale (reachFixtureScale); the bands beyond the
+// radius are then empty, and every band holds pairs only at the full one.
 func TestReachValidation941_FixtureMechanics(t *testing.T) {
-	path := prepareReachFixture(t, 12)
+	sc := reachFixtureScaleFromEnv()
+	path := prepareReachFixture(t, sc)
 	before := fileSHA(t, path)
-	srv, c, db, src := reachValidationEnv(t, path)
+	srv, c, db, src := reachValidationEnv(t, path, sc.resolutionM)
 	out := t.TempDir()
 	if keep := os.Getenv("CORESCOPE_REACH_VALIDATION_FIXTURE_OUT"); keep != "" {
 		out = keep // to look at the fixture's report
 	}
-	o := fixtureValidationOptions(t, src)
+	o := fixtureValidationOptions(t, src, sc.radiusM)
 	o.outDir = out
 	rep, err := runReachValidation(context.Background(), srv, c, db.conn, o)
 	if err != nil {
@@ -1077,9 +1177,12 @@ func TestReachValidation941_FixtureMechanics(t *testing.T) {
 	}
 
 	p := rep.Pairs
-	t.Logf("pairs %+v; terrain %+v", p, rep.Terrain)
-	if p.Nodes < 100 || p.Positives < 12 || p.FromFirmware < 12 || p.FromEdges < 12 || p.Negatives < 100 || p.AmbiguousEdges < 50 ||
-		p.WithSNR < 12 || p.WithReportedNoise < 1 || p.Scored+p.NoTerrain != p.Candidates || p.Positives+p.Negatives != p.Scored {
+	t.Logf("scale %+v; pairs %+v; terrain %+v", sc, p, rep.Terrain)
+	if rep.Params.RadiusKm != sc.radiusM/1000 || rep.Params.ResolutionM != sc.resolutionM {
+		t.Fatalf("params %+v", rep.Params)
+	}
+	if p.Nodes < sc.minNodes || p.Positives < sc.seeds || p.FromFirmware < sc.seeds || p.FromEdges < sc.seeds || p.Negatives < 100 || p.AmbiguousEdges < 50 ||
+		p.WithSNR < sc.seeds || p.WithReportedNoise < 1 || p.Scored+p.NoTerrain != p.Candidates || p.Positives+p.Negatives != p.Scored {
 		t.Fatalf("pair counts %+v", p)
 	}
 	if p.PositivesBeyond == 0 {
@@ -1105,18 +1208,27 @@ func TestReachValidation941_FixtureMechanics(t *testing.T) {
 			}
 			sumP += b.Positives
 			sumN += b.Negatives
+			// A band that starts at or past the radius holds nothing; at
+			// the full scale every band holds pairs (the network spans
+			// about 80 km).
+			switch {
+			case reachValidationBands[i].lo*1000 >= sc.radiusM && b.Positives+b.Negatives > 0:
+				t.Fatalf("%s: band %s past the radius holds %+v", m.Model, b.Band, b)
+			case sc.full && b.Negatives == 0:
+				t.Fatalf("%s: band %s is empty", m.Model, b.Band)
+			}
 		}
 		if sumP != o.Positives || sumN != o.Negatives {
 			t.Fatalf("%s: bands hold %d/%d of %d/%d", m.Model, sumP, sumN, o.Positives, o.Negatives)
 		}
-		// The seeded firmware links are short and the network spans about
-		// 80 km: every band holds pairs, and the short band most positives.
-		for _, b := range m.Bands {
-			if b.Negatives == 0 {
-				t.Fatalf("%s: band %s is empty", m.Model, b.Band)
+		// The seeded firmware links are short: the short band holds the
+		// most positives.
+		for _, b := range m.Bands[1:] {
+			if b.Positives >= m.Bands[0].Positives || m.Bands[0].Negatives == 0 {
+				t.Fatalf("%s: bands %+v", m.Model, m.Bands)
 			}
 		}
-		if m.Bands[0].Positives < 10 || m.Bands[0].Negatives >= m.Bands[2].Negatives {
+		if sc.full && m.Bands[0].Negatives >= m.Bands[2].Negatives {
 			t.Fatalf("%s: bands %+v", m.Model, m.Bands)
 		}
 	}
@@ -1164,40 +1276,66 @@ func TestReachValidation941_FixtureMechanics(t *testing.T) {
 }
 
 // TestReachValidation941_HiddenAndInactiveNodesAreLeftOut: a node hidden
-// by the operator's config is not scored and never named in the report;
-// a node not seen within the window is not a candidate.
+// by the operator's config is not scored and never named in the report,
+// whether it is hidden by the node blacklist or only through an observer
+// alias with a hidden-name prefix (the serve path's alias-aware rule); a
+// node not seen within the window is not a candidate, and the default
+// minimum edge count finds no confident edge in the fixture. The labels
+// are all these depend on, so the report is scored without terrain.
 func TestReachValidation941_HiddenAndInactiveNodesAreLeftOut(t *testing.T) {
-	path := prepareReachFixture(t, 12)
-	srv, c, db, src := reachValidationEnv(t, path)
-	o := fixtureValidationOptions(t, src)
-	var hiddenPK, hiddenName string
-	if err := db.conn.QueryRow(`SELECT o.observer_id, n.name FROM observer_neighbors o JOIN nodes n ON n.public_key = lower(o.observer_id)
-		ORDER BY o.observer_id LIMIT 1`).Scan(&hiddenPK, &hiddenName); err != nil {
+	sc := reachFixtureScaleFromEnv()
+	path := prepareReachFixture(t, sc)
+	srv, c, db, src := reachValidationEnv(t, path, sc.resolutionM)
+	o := fixtureValidationOptions(t, src, sc.radiusM)
+	ctx := context.Background()
+	labels := func(srv *Server, o reachValidationOptions) reachValidationReport {
+		t.Helper()
+		l, err := labelReachValidation(ctx, srv, c, db.conn, o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return l.report(c, o)
+	}
+	full := labels(srv, o)
+	if len(full.References) < 2 {
+		t.Fatalf("references %+v", full.References)
+	}
+	// The top reference repeater is hidden only through its observer row's
+	// name; another firmware observer by the node blacklist.
+	alias := full.References[0]
+	var blk, blkName string
+	if err := db.conn.QueryRow(`SELECT lower(o.observer_id), n.name FROM observer_neighbors o JOIN nodes n ON n.public_key = lower(o.observer_id)
+		WHERE lower(o.observer_id) != ? ORDER BY o.observer_id LIMIT 1`, alias.PubKey).Scan(&blk, &blkName); err != nil {
 		t.Fatal(err)
 	}
-	full, err := runReachValidation(context.Background(), srv, c, db.conn, o)
+	rw, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.cfg.SetNodeBlacklist([]string{hiddenPK})
-	rep, err := runReachValidation(context.Background(), srv, c, db.conn, o)
-	if err != nil {
+	if _, err := rw.Exec(`INSERT INTO observers (id, name) VALUES (?, 'private-relay') ON CONFLICT(id) DO UPDATE SET name = 'private-relay'`,
+		strings.ToUpper(alias.PubKey)); err != nil {
 		t.Fatal(err)
 	}
-	if rep.Pairs.HiddenNodes != 1 || rep.Pairs.Nodes != full.Pairs.Nodes-1 || rep.Pairs.Candidates >= full.Pairs.Candidates {
+	rw.Close()
+	if got := labels(srv, o); got.Pairs.HiddenNodes != 0 || got.References[0].PubKey != alias.PubKey {
+		t.Fatalf("an alias hides nothing without a hidden prefix: %+v", got.Pairs)
+	}
+	srv.cfg.SetHiddenNamePrefixes([]string{"private-"})
+	srv.cfg.SetNodeBlacklist([]string{blk})
+	rep := labels(srv, o)
+	if rep.Pairs.HiddenNodes != 2 || rep.Pairs.Nodes != full.Pairs.Nodes-2 || rep.Pairs.Candidates >= full.Pairs.Candidates {
 		t.Fatalf("hidden: %+v vs %+v", rep.Pairs, full.Pairs)
 	}
 	js, _ := json.Marshal(rep)
-	md := rep.markdown()
-	if strings.Contains(strings.ToLower(string(js)), strings.ToLower(hiddenPK)) || (hiddenName != "" && (strings.Contains(string(js), hiddenName) || strings.Contains(md, hiddenName))) {
-		t.Fatal("the hidden node is in the report")
+	low := strings.ToLower(string(js) + rep.markdown())
+	for _, h := range []struct{ pk, name string }{{alias.PubKey, alias.Name}, {blk, blkName}} {
+		if strings.Contains(low, h.pk[:8]) || (h.name != "" && strings.Contains(low, strings.ToLower(h.name))) || strings.Contains(low, "private-relay") {
+			t.Fatalf("the hidden node %s (%q) is in the report:\n%s", h.pk[:8], h.name, rep.markdown())
+		}
 	}
 	// A one-minute window before the newest node keeps almost nobody.
 	o.window = time.Minute
-	short, err := runReachValidation(context.Background(), &Server{cfg: &Config{}, db: db, claims: srv.claims}, c, db.conn, o)
-	if err != nil {
-		t.Fatal(err)
-	}
+	short := labels(&Server{cfg: &Config{}, db: db, claims: srv.claims}, o)
 	if short.Pairs.Nodes >= full.Pairs.Nodes/2 {
 		t.Fatalf("window: %d nodes of %d", short.Pairs.Nodes, full.Pairs.Nodes)
 	}
@@ -1205,12 +1343,55 @@ func TestReachValidation941_HiddenAndInactiveNodesAreLeftOut(t *testing.T) {
 	// confident edge in the fixture: every resolved one is weak.
 	o.window = 7 * 24 * time.Hour
 	o.minEdgeCount = affinityMinObservations
-	def, err := runReachValidation(context.Background(), &Server{cfg: &Config{}, db: db, claims: srv.claims}, c, db.conn, o)
-	if err != nil {
-		t.Fatal(err)
-	}
+	def := labels(&Server{cfg: &Config{}, db: db, claims: srv.claims}, o)
 	if def.Pairs.FromEdges != 0 || def.Pairs.WeakEdges == 0 || def.Pairs.FromFirmware != full.Pairs.FromFirmware || def.Params.MinEdgeCount != 3 {
 		t.Fatalf("default edge count: %+v", def.Pairs)
+	}
+	if src.calls.Load() != 0 {
+		t.Fatal("labelling read terrain")
+	}
+}
+
+// TestReachValidation941_ReferencesAndBands on hand-made pairs: the
+// reference set is the repeaters with the most firmware neighbours, never
+// a room however many it has (owner decision 6), and a pair belongs to the
+// band [lo, hi) of its distance: a band's lower edge is in it, its upper
+// edge in the next.
+func TestReachValidation941_ReferencesAndBands(t *testing.T) {
+	c, _ := reachValidationCoverage(t, 60)
+	in := &reachValidationInput{nodes: map[string]*valNode{}, firmwareCount: map[string]int{}}
+	add := func(k byte, role string, neighbours int) *valNode {
+		n := &valNode{pk: reachPK(k), name: "Node " + string(k), role: role}
+		in.nodes[n.pk] = n
+		in.firmwareCount[n.pk] = neighbours
+		return n
+	}
+	room := add('a', "room", 9)
+	var reps []*valNode
+	for i, k := range []byte("123456") {
+		reps = append(reps, add(k, "repeater", 6-i))
+	}
+	loss := map[dhm.PathModel]float64{dhm.PathFreeSpace: 100, dhm.PathBullington: 110, dhm.PathDelta: 120}
+	var pairs []*valPair
+	for i, d := range []float64{0, 4999.9, 5000, 14999.9, 15000, 29999.9, 30000, 80000} {
+		pairs = append(pairs, &valPair{a: reps[i%len(reps)], b: room, positive: i%2 == 0, distanceM: d, loss: loss})
+	}
+	rep := buildReachValidationReport(in, c, pairs, defaultReachValidationOptions(40000), 0, 0)
+	var refs []string
+	for _, r := range rep.References {
+		refs = append(refs, r.PubKey[:1])
+	}
+	if strings.Join(refs, "") != "12345" {
+		t.Fatalf("references %v", refs)
+	}
+	for _, m := range rep.Models {
+		for i, b := range m.Bands {
+			// Two pairs per band: the lower edge (or 0) and one just
+			// below the upper edge; each band one positive.
+			if b.Positives != 1 || b.Negatives != 1 {
+				t.Fatalf("%s: band %s holds %d/%d, want 1/1 (%v)", m.Model, b.Band, b.Positives, b.Negatives, reachValidationBands[i])
+			}
+		}
 	}
 }
 

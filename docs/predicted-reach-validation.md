@@ -13,6 +13,19 @@ against real data. CI runs it only on the Californian e2e fixture, moved to
 Jutland, over synthetic terrain (`TestReachValidation941_FixtureMechanics`),
 to check how it works, not what it finds.
 
+CI runs the fixture at a small scale, so the test stays at a few seconds
+under `-race`: the nodes within 25 km of the network's centre, a 10 km
+radius and a 60 m grid. The code paths are the same as a full run. The
+full fixture run (every node, 40 km, the 30 m grid) is opt-in. It takes a
+few seconds without `-race` and several minutes with it, and CI never sets
+the variable:
+
+```bash
+cd cmd/server
+CORESCOPE_REACH_VALIDATION_FULL_FIXTURE=1 go test -count=1 \
+  -run 'TestReachValidation941_(FixtureMechanics|HiddenAndInactiveNodesAreLeftOut)$' -v .
+```
+
 ## What it does
 
 1. **Reads a database copy read-only.** It uses the server's own `OpenDB`
@@ -25,7 +38,10 @@ to check how it works, not what it finds.
      stored in `nodes`);
    - seen within the window before the newest `last_seen` in the database
      (default 7 days);
-   - not hidden by the operator's blacklists or hidden-name prefixes.
+   - not hidden by the operator's blacklists or hidden-name prefixes,
+     through any of their names: the node's own, an observer row's and an
+     inactive node's. This is the same alias-aware rule nodes in reach use
+     when they serve a list.
 
    Antenna heights follow the same rules as nodes in reach: the operator's
    per-node value (`radio.antennaHeightsM`), then the approved owner height
