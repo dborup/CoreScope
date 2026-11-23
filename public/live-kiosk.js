@@ -58,6 +58,9 @@
   var RESUME_MIN_MS = 60000;
   var RESUME_MAX_MS = 300000;
   var NUMBERS_POLL_MS = 60000; // network-status + analytics/areas, while visible
+  // A read this recent is not repeated on a socket reopen: live.js reads
+  // through api()'s 30 s client cache, so it would get the same answer.
+  var NUMBERS_FRESH_MS = 30000;
   // The server's default Moments recordWindowHours: a record older than
   // this is no longer the rolling record, and the label says "24 h".
   var RECORD_WINDOW_MS = 24 * 3600 * 1000;
@@ -665,12 +668,12 @@
       if (s) { try { settle(s.release()); } catch (_) {} }
     }
     // Each socket (re)open: re-seed Moments and read the numbers once (plan
-    // §4.3); the 60 s poll then counts from that read. A hidden screen
-    // reads on its next show (pollOnShow).
+    // §4.3), unless the last read is fresh; the 60 s poll then counts from
+    // that read. A hidden screen reads on its next show (pollOnShow).
     function onWsOpen() {
       reseeds++;
       deps.reseed();
-      if (destroyed || doc.hidden) return;
+      if (destroyed || doc.hidden || (polls && deps.now() - lastPoll < NUMBERS_FRESH_MS)) return;
       pollTimer = cancel(pollTimer);
       poll();
     }
@@ -890,6 +893,7 @@
     BEAT_MS: BEAT_MS,
     remountDelayMs: remountDelayMs,
     NUMBERS_POLL_MS: NUMBERS_POLL_MS,
+    NUMBERS_FRESH_MS: NUMBERS_FRESH_MS,
     RECORD_WINDOW_MS: RECORD_WINDOW_MS,
     THEMES: THEMES,
     parseKioskParams: parseKioskParams,

@@ -396,26 +396,31 @@ test('each corescope:ws-open re-seeds Moments once; none after destroy', async (
   assert.strictEqual(p.win.count(), 0, 'no window listener left');
 });
 
-test('each corescope:ws-open reads the numbers once and the poll counts from it; none while hidden or after destroy', async () => {
+test('each corescope:ws-open reads the numbers once and the poll counts from it; none while fresh, hidden or after destroy', async () => {
   const p = page({ numbers: true });
   await flush();
+  assert.strictEqual(K.NUMBERS_FRESH_MS, 30000);
   assert.strictEqual(p.statusReads, 1, 'the mount read');
-  p.clock.advance(20000);
+  p.clock.advance(K.NUMBERS_FRESH_MS - 1);
+  p.win.fire('corescope:ws-open');
+  assert.strictEqual(p.statusReads, 1, 'no read on a reopen while the last read is fresh');
+  p.clock.advance(1);
   p.win.fire('corescope:ws-open');
   assert.strictEqual(p.statusReads, 2, 'one read on the reopen');
   p.win.fire('corescope:ws-open');
-  assert.strictEqual(p.statusReads, 3, 'one per reopen');
-  // The 60 s poll restarted at the reopen (20 s), not at the mount (0 s).
+  assert.strictEqual(p.statusReads, 2, 'a second reopen at once: fresh, no read');
+  // The 60 s poll restarted at the reopen (30 s), not at the mount (0 s).
   p.clock.advance(K.NUMBERS_POLL_MS - 1);
-  assert.strictEqual(p.statusReads, 3, 'no poll at 60 s after the mount');
+  assert.strictEqual(p.statusReads, 2, 'no poll at 60 s after the mount');
   p.clock.advance(1);
-  assert.strictEqual(p.statusReads, 4, 'the poll 60 s after the reopen');
+  assert.strictEqual(p.statusReads, 3, 'the poll 60 s after the reopen');
   assert(p.c.stats().pollTimer, 'one poll armed');
+  p.clock.advance(K.NUMBERS_FRESH_MS);
   p.show(true);
   p.win.fire('corescope:ws-open');
-  assert.strictEqual(p.statusReads, 4, 'no read while hidden');
+  assert.strictEqual(p.statusReads, 3, 'no read while hidden');
   assert(!p.c.stats().pollTimer, 'no poll armed while hidden');
-  assert.strictEqual(p.reseeds, 3, 'Moments still re-seed while hidden');
+  assert.strictEqual(p.reseeds, 4, 'Moments re-seed on every reopen, hidden too');
   p.show(false);
   p.destroy();
   const n = p.statusReads;
