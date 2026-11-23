@@ -94,6 +94,20 @@ type advertIntervalBucketQuery struct {
 // parseAdvertIntervalBucketQuery validates the parameters; msg is the 400
 // message when they are not valid. interval_s has no upper bound: an
 // unsnapped estimate can lie above the longest setting.
+// allDigits reports whether s is only ASCII digits: strconv also accepts a
+// leading "+" (and "-"), which the endpoint's validation table rejects.
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func parseAdvertIntervalBucketQuery(v url.Values) (q advertIntervalBucketQuery, msg string) {
 	switch q.className = v.Get("class"); q.className {
 	case advertClassFlood:
@@ -104,7 +118,7 @@ func parseAdvertIntervalBucketQuery(v url.Values) (q advertIntervalBucketQuery, 
 		return q, "class must be flood or zero_hop"
 	}
 	n, err := strconv.ParseInt(v.Get("interval_s"), 10, 64)
-	if err != nil || n < 1 {
+	if err != nil || n < 1 || !allDigits(v.Get("interval_s")) {
 		return q, "interval_s must be a positive integer"
 	}
 	q.key.v = n
@@ -117,13 +131,13 @@ func parseAdvertIntervalBucketQuery(v url.Values) (q advertIntervalBucketQuery, 
 	}
 	q.limit = advertIntervalBucketDefaultLimit
 	if s := v.Get("limit"); s != "" {
-		if q.limit, err = strconv.Atoi(s); err != nil || q.limit < 1 {
+		if q.limit, err = strconv.Atoi(s); err != nil || q.limit < 1 || !allDigits(s) {
 			return q, "limit must be a positive integer"
 		}
 		q.limit = min(q.limit, advertIntervalBucketMaxLimit)
 	}
 	if s := v.Get("offset"); s != "" {
-		if q.offset, err = strconv.Atoi(s); err != nil || q.offset < 0 {
+		if q.offset, err = strconv.Atoi(s); err != nil || q.offset < 0 || !allDigits(s) {
 			return q, "offset must be a non-negative integer"
 		}
 	}

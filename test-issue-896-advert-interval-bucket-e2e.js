@@ -379,6 +379,29 @@ async function openTabCold(page) {
     await m.close();
   });
 
+  await step('375×560 touch: a region pill tap while a bucket is open refetches once with region= and narrows the list (#948 F1)', async () => {
+    const m = await browser.newContext({ viewport: { width: 375, height: 560 }, isMobile: true, hasTouch: true });
+    await m.addInitScript(MARK_THEME_REFRESH);
+    const mp = await m.newPage();
+    mp.setDefaultTimeout(15000);
+    mp.on('pageerror', (e) => errors.push(e.message));
+    await gotoSettled(mp, TAB + '&bucket=' + FLOOD_3H);
+    const before = await readPanel(mp, 'flood');
+    assert(before.members.join() === [ALPHA, BRAVO, SHORT].join(), 'unfiltered: ' + before.names);
+    const bucketUrls = [];
+    mp.on('request', (r) => { const u = new URL(r.url()); if (u.pathname === BUCKET_API) bucketUrls.push(u.search); });
+    await mp.evaluate(() => document.querySelector('#analyticsRegionFilter .region-pill[data-region="OAK"]').scrollIntoView({ block: 'center', inline: 'center' }));
+    await mp.tap('#analyticsRegionFilter .region-pill[data-region="OAK"]');
+    await mp.waitForFunction((k) => {
+      const l = document.querySelectorAll('#ai-bucket-panel-flood [data-ai-member]');
+      return l.length === 1 && l[0].dataset.aiMember === k;
+    }, BRAVO);
+    const p = await readPanel(mp, 'flood');
+    assert(p.members.join() === BRAVO && /Region OAK/.test(p.text) && /Showing 1 of 1/.test(p.text), JSON.stringify(p));
+    assert(bucketUrls.length === 1 && /[?&]region=OAK\b/.test(bucketUrls[0]), 'bucket requests: ' + bucketUrls);
+    await m.close();
+  });
+
   await step('no page errors', async () => {
     assert(errors.length === 0, errors.join(' | '));
   });

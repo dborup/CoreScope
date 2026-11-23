@@ -452,6 +452,7 @@ func TestAdvertIntervalBucket_Validation(t *testing.T) {
 		"class=flood&interval_s=-3600&snapped=true", "class=flood&interval_s=1.5&snapped=true",
 		"class=flood&interval_s=99999999999999999999&snapped=true",
 		"class=flood&interval_s=10800", "class=flood&interval_s=10800&snapped=yes", "class=flood&interval_s=10800&snapped=1",
+		"class=flood&interval_s=%2B10800&snapped=true", ok + "&limit=%2B5", ok + "&offset=%2B1",
 		ok + "&limit=0", ok + "&limit=-1", ok + "&limit=x", ok + "&offset=-1", ok + "&offset=x",
 		ok + "&region=" + strings.Repeat("X", analyticsFilterMaxLen+1), ok + "&area=nope",
 	} {
