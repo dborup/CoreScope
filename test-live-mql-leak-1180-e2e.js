@@ -8,9 +8,10 @@
  * against a process-global MediaQueryList instance, so listeners
  * accumulate without bound.
  *
- * live.js exposes a debug seam: window.__liveMQLBindCount is incremented
- * exactly when the MQL listener is registered. After 5 round-trips it
- * MUST be ≤ 1.
+ * live.js exposes a debug seam: window.__liveMQLBindCount is the number of
+ * MQL listeners bound now (+1 when one is registered, -1 when one is
+ * removed). After 5 round-trips it MUST be ≤ 1 on Live, and 0 once Live is
+ * left (#883 M3: the handler is bound per mount and dropped in destroy()).
  *
  * Run: BASE_URL=http://localhost:13581 node test-live-mql-leak-1180-e2e.js
  */
@@ -69,6 +70,13 @@ async function gotoHash(page, hash) {
       'window.__liveMQLBindCount missing after navigations');
     assert(count <= 1,
       `MQL listener leak: bind count after 5 round-trips = ${count}, expected ≤ 1`);
+  });
+
+  await step('leaving Live drops its MQL listener (bind count 0)', async () => {
+    await gotoHash(page, '#/packets');
+    await page.waitForFunction(() => !document.querySelector('.live-page'));
+    const count = await page.evaluate(() => window.__liveMQLBindCount);
+    assert(count === 0, `MQL listener left behind by Live: bind count ${count}, expected 0`);
   });
 
   await ctx.close();

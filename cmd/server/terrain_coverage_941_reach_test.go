@@ -711,8 +711,8 @@ func TestCoverage941M2_PerfBudget(t *testing.T) {
 		resp := decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", q)))
 		return time.Since(start), resp
 	}
-	bull, _ := timed("ha=12")
-	delta, resp := timed("ha=12&model=delta")
+	bull, _ := timed("ha=12&model=bullington")
+	delta, resp := timed("ha=12")
 	t.Logf("warm 40 km / 30 m with 2000 nodes: bullington %v, delta %v (%.2fx); %d listed, %d without terrain",
 		bull.Round(time.Millisecond), delta.Round(time.Millisecond), float64(delta)/float64(bull), len(resp.Reach.Nodes), resp.Reach.NoTerrain)
 	if len(resp.Reach.Nodes)+resp.Reach.Omitted+resp.Reach.NoTerrain != 2000 {

@@ -123,7 +123,7 @@ function rasterFor(c, radiusKm) {
     await ctx.route(BASE + '/api/config/client', async (route) => {
       const response = await route.fetch();
       const config = await response.json();
-      config.coverage = COVERAGE_BLOCK;
+      config.coverage = o.coverage || COVERAGE_BLOCK;
       await route.fulfill({ response, json: config });
     });
     const rasters = new Map();
@@ -297,6 +297,19 @@ function rasterFor(c, radiusKm) {
       assert(await page.inputValue('[data-testid="reach-model-select"]') === 'delta', 'select');
       const l = await listed(page);
       assert(l.length === 1 && l[0].name === 'Hill top' && l[0].cls === 'marginal', 'list ' + JSON.stringify(l));
+      noNetwork(rec);
+    } finally { await ctx.close(); }
+  });
+
+  await step('a config without a model offers delta as the default and sends no model', async () => {
+    const noModel = Object.assign({}, COVERAGE_BLOCK);
+    delete noModel.model;
+    const { ctx, page, rec } = await newCtx({ coverage: noModel });
+    try {
+      await page.goto(`${BASE}/#/map?reach=${AARHUS.lat},${AARHUS.lon}&rkm=25`, { waitUntil: 'domcontentloaded' });
+      await waitPanel(page);
+      assert(await page.inputValue('[data-testid="reach-model-select"]') === 'delta', 'select');
+      assert(rec.coverage.length === 1 && !new URLSearchParams(rec.coverage[0]).has('model'), 'request ' + rec.coverage);
       noNetwork(rec);
     } finally { await ctx.close(); }
   });

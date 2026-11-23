@@ -5,8 +5,20 @@ computes path loss from the terrain. This harness checks those numbers
 against the links the mesh has actually seen, and reports how well each
 propagation model separates real links from pairs that were never heard.
 Its output is what sets the default model (`map.coverage.model`) and the
-calibration offset. Until a report has been run on real Danish links, the
-default stays `bullington`.
+calibration offset.
+
+**Outcome (2026-11-23, real Danish links).** The default is `delta`
+(delta-Bullington, ITU-R P.526 §4.5.2). Overall ROC-AUC: free space 0.770,
+`bullington` 0.817, `delta` 0.830. False-reach rate (pairs never heard that
+the model still predicts as reached): free space 100.0 %, `bullington`
+91.4 %, `delta` 75.9 %. An operator can still set `map.coverage.model` to
+`bullington`, and a request's `model` parameter always wins.
+
+**No calibration offset is set yet.** The median SNR offset depends on the
+distance, not on one constant: about −40 dB at 0–5 km, −19 dB at 5–15 km,
+−4 dB at 15–30 km and +16 dB beyond 30 km. A single offset would be wrong
+in most bands, and only 178 SNR pairs back these numbers, too few to fit a
+distance-dependent correction. It waits for more data.
 
 The harness is **test code**: it is not in any binary and never runs in CI
 against real data. CI runs it only on the Californian e2e fixture, moved to
@@ -65,7 +77,12 @@ CORESCOPE_REACH_VALIDATION_FULL_FIXTURE=1 go test -count=1 \
    tiles around one end of each pair. The tiles come through the reach's
    own tile cache, its 2-slot DHM sub-budget and `map.coverage.upstreamPerMin`.
    When the budget is spent, the harness waits and goes on. Disks are
-   visited in tile order, so each tile is fetched once.
+   visited in tile order, so each tile is fetched once. The report's
+   `upstreamCalls` counts the requests the run made: DHM WCS requests, plus
+   the calls the GLO-30 fill reports (never fewer than the requests it sent;
+   a failed fill counts as one). A run that cannot count prints "upstream
+   calls not counted" in the markdown and `-1` in the JSON, never "-1
+   upstream calls".
 5. **Scores.** The margin of a pair is the link budget (`radio` config,
    default 158 dB) minus the loss. A pair counts as **reached** at a margin
    of 3 dB or more (the "marginal" class). The report gives these, per
@@ -144,8 +161,9 @@ it.
 
 Compare `bullington` with `delta`, first on ROC-AUC and the hit rate in the
 15–30 km and 30+ km bands (beyond the radio horizon, which is where the two
-models differ), then on Spearman ρ. Switch `map.coverage.model` to `delta`
-only if it is better there without losing the short bands. The median SNR
+models differ), then on Spearman ρ. The default is `delta`; it would go
+back to `bullington` only if a later report showed `delta` worse there or
+losing the short bands. The median SNR
 offset of the chosen model is the calibration constant for M2's follow-up.
 The fixture run in CI says nothing about this choice: its terrain is
 synthetic and its links are Californian.

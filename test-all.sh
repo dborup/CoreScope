@@ -126,6 +126,7 @@ run test-883-kiosk-params.js
 run test-883-kiosk-tour.js
 run test-883-kiosk-numbers.js
 run test-883-kiosk-moments.js
+run test-883-m3-kiosk.js
 run test-live-follow.js
 run test-map-last-heard-options.js
 run test-issue-124-rx-coverage-viewport.js
@@ -260,6 +261,7 @@ run test-issue-117-ws-watchdog.js
 run test-issue-937-ws-backoff.js
 run test-issue-111-drawer-version.js
 run test-issue-614-version-notice.js
+run test-883-version-autoreload.js
 
 # Previously run only by the JS unit step in deploy.yml (#174)
 run test-packet-filter-time.js

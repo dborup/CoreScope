@@ -517,6 +517,15 @@
     setQuickPickClass(container, _groups.length > 0);
   }
 
+  /** #883 M3: drop a container's document/window listeners (outside click,
+   *  menu re-placement). A host page calls it from its destroy(); init() on
+   *  a new container releases the previous one. Without it the listeners
+   *  outlive the page and keep its whole detached DOM alive. */
+  function release(container) {
+    if (container && container._regionCleanup) { container._regionCleanup(); container._regionCleanup = null; }
+    if (container && container === _container) _container = null;
+  }
+
   /** Subscribe to selection changes. Callback receives selected array or null */
   function onChange(fn) {
     _listeners.push(fn);
@@ -531,6 +540,7 @@
   /** Initialize filter in a container, fetch regions, render, return promise.
    *  Options: { dropdown: true } to force dropdown mode regardless of region count */
   async function initFilter(container, opts) {
+    if (_container && _container !== container) release(_container);
     _container = container;
     if (opts && opts.dropdown) container._forceDropdown = true;
     await fetchRegions();
@@ -592,6 +602,7 @@
   window.RegionFilter = {
     init: initFilter,
     render: render,
+    release: release,
     getSelected: getSelected,
     getRegionParam: getRegionParam,
     regionQueryString: regionQueryString,

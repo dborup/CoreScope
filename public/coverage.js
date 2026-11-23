@@ -663,7 +663,7 @@
     }
 
     function defaultModel() {
-      return Object.prototype.hasOwnProperty.call(MODELS, cfg.model) ? cfg.model : 'bullington';
+      return Object.prototype.hasOwnProperty.call(MODELS, cfg.model) ? cfg.model : 'delta';
     }
 
     function onModelChange() {

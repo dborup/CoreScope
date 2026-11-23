@@ -302,12 +302,29 @@
   const _initialSpeed = [0.25, 0.5, 1, 2, 4, 8].includes(_savedSpeed) ? _savedSpeed : 1;
   let rainCanvas = null, rainCtx = null, rainDrops = [], rainRAF = null;
   const propagationBuffer = new Map(); // hash -> {timer, packets[]}
+  function clearPropagationBuffer() {
+    for (const entry of propagationBuffer.values()) clearTimeout(entry.timer);
+    propagationBuffer.clear();
+  }
+  // #883 M3: one-shot timeouts that reach this mount's layers or state go
+  // through liveLater(), and destroy() clears them, so none fires into a
+  // torn-down map or into the next mount (kiosk remounts Live in place).
+  // Bounded: each entry leaves the set when it fires.
+  const liveTimeouts = new Set();
+  function liveLater(fn, ms) {
+    const id = setTimeout(() => { liveTimeouts.delete(id); fn(); }, ms);
+    liveTimeouts.add(id);
+    return id;
+  }
   let _onResize = null;
   // #428 — refs for document/window listeners bound in init() that must be
   // removed in destroy(); see their bind sites for why each can't just move
   // to .live-page (teardown/leak notes at each).
   let _onOrientationChange = null;
   let _onTileProviderChanged = null;
+  // #883 M3: the #1532 F / Escape handler, bound per mount so it closes over
+  // this mount's button (a once-per-page binding kept the first mount's).
+  let _fullscreenKeyHandler = null;
   let _onDragManagerResize = null;
   let _feedResizeHandlers = null;
   let _moreMenuDocClickHandler = null;
@@ -1283,10 +1300,7 @@
       // Tab restored — skip animating anything that queued while away
       _tabHidden = false;
       // Clear any pending propagation buffers so they don't all fire at once
-      for (const [hash, entry] of propagationBuffer) {
-        clearTimeout(entry.timer);
-      }
-      propagationBuffer.clear();
+      clearPropagationBuffer();
       // Batch-update timeline once on restore instead of per-packet while hidden
       updateTimeline();
     }
@@ -1766,6 +1780,18 @@
   let kioskOn = false;
   let kiosk = null;
   let kioskThemeRestore = null; // #883 M2: puts the viewer's theme back
+  // #883 M3: the last mount was an in-place remount of this kiosk link and
+  // left its kiosk theme and auto-reload on; the next controller takes over.
+  // Every destroy() sets it; only the next init() and, when that mount never
+  // made its controller, its destroy() read it.
+  let kioskHandover = false;
+  // The kiosk theme's get/apply, made once here and not in init(): the
+  // restore outlives its mount across in-place remounts, and a closure made
+  // in init() would keep that mount's scope, and its whole page, alive.
+  const kioskThemeIO = {
+    get: () => document.documentElement.getAttribute('data-theme'),
+    apply: (t) => window.applyThemeTransient(t),
+  };
 
   async function init(app) {
     const generation = ++liveGeneration;
@@ -1773,11 +1799,11 @@
     if (kioskOn) {
       document.body.classList.add('kiosk');
       // #883 M2: the kiosk theme (dark unless &theme=), before the first
-      // paint, through app.js's non-persisting apply.
-      kioskThemeRestore = window.LiveKiosk.applyKioskTheme(window.LiveKiosk.parseKioskParams(getHashParams()).theme, {
-        get: () => document.documentElement.getAttribute('data-theme'),
-        apply: window.applyThemeTransient,
-      });
+      // paint, through app.js's non-persisting apply. After an in-place
+      // remount it is still showing, with the old mount's restore.
+      if (!kioskHandover && typeof window.applyThemeTransient === 'function') {
+        kioskThemeRestore = window.LiveKiosk.applyKioskTheme(window.LiveKiosk.parseKioskParams(getHashParams()).theme, kioskThemeIO);
+      }
     }
     app.innerHTML = `
       <div class="live-page">
@@ -2324,10 +2350,10 @@
         // set VCR.mode='PAUSED' which froze anim.progress in
         // renderAnimations(), turning the replay into a blank, motionless map.
         suppressLive = true;
-        setTimeout(() => renderPacketTree(packets, true), 1500);
+        liveLater(() => renderPacketTree(packets, true), 1500);
         // Clear the suppression after the replay window has elapsed (the
         // longest animation duration plus a margin) so live traffic resumes.
-        setTimeout(() => { suppressLive = false; }, 12000);
+        liveLater(() => { suppressLive = false; }, 12000);
       } catch { }
     } else {
       // replayRecent(); // disabled — live page starts empty, fills from WS
@@ -2815,16 +2841,15 @@
       var controlsPair = pairs.find(function(p) { return p.rootId === 'liveControls'; });
       collapseLiveControls = function() { setExpanded(controlsPair, false); };
       initControlsFitTracker(); // #667
-      // #1180 — bind once across SPA re-mounts. MQL is process-global per
-      // query string; per-init binds accumulate handlers without bound.
-      if (!_liveNarrowMqlBound) {
-        if (narrowMql.addEventListener) narrowMql.addEventListener('change', applyForViewport);
-        else if (narrowMql.addListener) narrowMql.addListener(applyForViewport);
-        _liveNarrowMqlBound = true;
-        try {
-          window.__liveMQLBindCount = (window.__liveMQLBindCount || 0) + 1;
-        } catch (_) { /* sealed window */ }
-      }
+      // #1180 — one 'change' handler at a time. MQL is process-global per
+      // query string, so per-init binds accumulated; #883 M3: bound per mount
+      // and dropped in destroy(), because a once-per-page binding kept the
+      // first mount's closure, and with it that mount's whole page, alive.
+      unbindNarrowMql();
+      if (narrowMql.addEventListener) narrowMql.addEventListener('change', applyForViewport);
+      else if (narrowMql.addListener) narrowMql.addListener(applyForViewport);
+      _liveNarrowMql = { mql: narrowMql, fn: applyForViewport };
+      try { window.__liveMQLBindCount = (window.__liveMQLBindCount || 0) + 1; } catch (_) { /* sealed window */ }
     })();
     // ───────────────────────────────────────────────────────────────────────
 
@@ -2864,37 +2889,36 @@
       // Escape exits fullscreen (only when currently in fullscreen so we
       // don't shadow other Escape handlers, e.g. dropdown close on the
       // node-filter input).
-      if (!window.__liveFullscreenKeyBound) {
-        window.addEventListener('keydown', function (e) {
-          if (e.defaultPrevented) return;
-          if (typeof e.key !== 'string') return;
-          // Only act when on the live page.
-          if (!document.querySelector('.live-page')) return;
-          // Escape: exit fullscreen if currently in fullscreen. Don't
-          // gate on focus-in-input here — exiting fullscreen via Escape
-          // should always work when chrome is hidden. Do NOT fire when
-          // not currently in fullscreen so other handlers see the key.
-          if (e.key === 'Escape') {
-            if (document.body.classList.contains('live-fullscreen')) {
-              e.preventDefault();
-              setFullscreen(false);
-            }
-            return;
+      if (_fullscreenKeyHandler) window.removeEventListener('keydown', _fullscreenKeyHandler);
+      _fullscreenKeyHandler = function (e) {
+        if (e.defaultPrevented) return;
+        if (typeof e.key !== 'string') return;
+        // Only act when on the live page.
+        if (!document.querySelector('.live-page')) return;
+        // Escape: exit fullscreen if currently in fullscreen. Don't
+        // gate on focus-in-input here — exiting fullscreen via Escape
+        // should always work when chrome is hidden. Do NOT fire when
+        // not currently in fullscreen so other handlers see the key.
+        if (e.key === 'Escape') {
+          if (document.body.classList.contains('live-fullscreen')) {
+            e.preventDefault();
+            setFullscreen(false);
           }
-          if (e.altKey || e.ctrlKey || e.metaKey) return;
-          var isF = (e.key === 'f' || e.key === 'F' || e.key.toLowerCase() === 'f');
-          if (!isF) return;
-          var t = e.target;
-          if (t) {
-            var tag = (t.tagName || '').toUpperCase();
-            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-            if (t.isContentEditable) return;
-          }
-          e.preventDefault();
-          toggleFullscreen();
-        });
-        window.__liveFullscreenKeyBound = true;
-      }
+          return;
+        }
+        if (e.altKey || e.ctrlKey || e.metaKey) return;
+        var isF = (e.key === 'f' || e.key === 'F' || e.key.toLowerCase() === 'f');
+        if (!isF) return;
+        var t = e.target;
+        if (t) {
+          var tag = (t.tagName || '').toUpperCase();
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+          if (t.isContentEditable) return;
+        }
+        e.preventDefault();
+        toggleFullscreen();
+      };
+      window.addEventListener('keydown', _fullscreenKeyHandler);
     })();
     // ───────────────────────────────────────────────────────────────────────
 
@@ -3747,7 +3771,7 @@
 
       // Register in dedup map so replay and live updates work
       if (group.hash) {
-        feedDedup.set(group.hash, { element: item, count: group.count, pkt, packets: group.packets, createdAt: Date.now() });
+        rememberFeedItem(group.hash, { element: item, count: group.count, pkt, packets: group.packets, createdAt: Date.now() });
       }
     }
   }
@@ -4033,7 +4057,9 @@
     getPathCount: () => (typeof recentPaths !== 'undefined' ? recentPaths.length : 0),
     wake: wakeCanvasEngine,
     getPulses: () => activePulses,
-    triggerPulse: pulseNode
+    triggerPulse: pulseNode,
+    // #883 M3: liveLater() timeouts pending now (each leaves when it fires).
+    getLaterCount: () => liveTimeouts.size
   };
 
   async function replayRecent() {
@@ -4210,7 +4236,19 @@
       fetchStatus: () => api('/nodes/network-status', { ttl: 30000, retry503: false }),
       fetchAreaStats: () => api('/analytics/areas', { ttl: 30000, retry503: false }),
       momentsOn: () => !!moments,
+      // #883 M3: the in-place remount is the router's own destroy() + init()
+      // for the same hash; the document (and browser fullscreen) stays.
+      hash: () => location.hash,
+      remount: () => navigate(),
+      momentsVisible: () => !!(moments && moments.stats().visible),
+      reseed: () => { if (moments) moments.reseed(); },
+      wakeLock: (navigator.wakeLock && typeof navigator.wakeLock.request === 'function') ? navigator.wakeLock : null,
+      setAutoReload: setKioskAutoReload,
     });
+  }
+
+  function setKioskAutoReload(on) {
+    if (window.VersionNotice) window.VersionNotice.setAutoReload(on);
   }
 
   function startMoments() {
@@ -4513,6 +4551,11 @@
     var GHOST_TIMEOUT_MS = 10000;
     var ghostColor = getComputedStyle(document.documentElement).getPropertyValue('--trace-ghost-color').trim() || '#94a3b8';
     if (!pathsLayer) return;
+    // #883 M3: the layer of this mount, tracked so destroy() cancels it.
+    var layer = pathsLayer;
+    function dropLater(l) {
+      liveLater(function() { if (layer.hasLayer(l)) layer.removeLayer(l); }, GHOST_TIMEOUT_MS);
+    }
     for (var i = 0; i < hopPositions.length - 1; i++) {
       var from = hopPositions[i].pos;
       var to = hopPositions[i + 1].pos;
@@ -4526,11 +4569,11 @@
           var ghost = L.circleMarker(hp.pos, {
             radius: 3, fillColor: ghostColor, fillOpacity: 0.2, color: color, weight: 1, opacity: 0.3
           }).addTo(pathsLayer);
-          setTimeout((function(g) { return function() { if (pathsLayer.hasLayer(g)) pathsLayer.removeLayer(g); }; })(ghost), GHOST_TIMEOUT_MS);
+          dropLater(ghost);
         }
       }
       // Remove dashed line after timeout
-      setTimeout((function(l) { return function() { if (pathsLayer.hasLayer(l)) pathsLayer.removeLayer(l); }; })(line), GHOST_TIMEOUT_MS);
+      dropLater(line);
     }
     // Ghost marker for the final unreached hop
     var last = hopPositions[hopPositions.length - 1];
@@ -4538,7 +4581,7 @@
       var ghostEnd = L.circleMarker(last.pos, {
         radius: 4, fillColor: ghostColor, fillOpacity: 0.25, color: color, weight: 1, opacity: 0.35
       }).addTo(pathsLayer);
-      setTimeout(function() { if (pathsLayer.hasLayer(ghostEnd)) pathsLayer.removeLayer(ghostEnd); }, GHOST_TIMEOUT_MS);
+      dropLater(ghostEnd);
     }
   }
 
@@ -4711,10 +4754,13 @@
       }).addTo(nodesLayer);
       ghost._baseColor = '#6b7280'; ghost._baseSize = 5;
       nodeMarkers[key] = ghost;
-      setTimeout(() => {
-        nodesLayer.removeLayer(ghost);
-        if (ghost._glowMarker) nodesLayer.removeLayer(ghost._glowMarker);
-        delete nodeMarkers[key];
+      // #883 M3: this mount's layer, and only this ghost's entry (a real
+      // marker may have taken the key since).
+      const layer = nodesLayer;
+      liveLater(() => {
+        layer.removeLayer(ghost);
+        if (ghost._glowMarker) layer.removeLayer(ghost._glowMarker);
+        if (nodeMarkers[key] === ghost) delete nodeMarkers[key];
       }, 30000);
     }
 
@@ -5425,6 +5471,13 @@
   // packets[] stores all observations for replay.
   const feedDedup = new Map();
   const DEDUP_WINDOW = 30000;
+  // #883 M3: a hard cap (entries hold a DOM node and the packets). A Map
+  // iterates in insertion order, so the first key is the oldest.
+  const FEED_DEDUP_MAX = 200;
+  function rememberFeedItem(hash, entry) {
+    feedDedup.set(hash, entry);
+    while (feedDedup.size > FEED_DEDUP_MAX) feedDedup.delete(feedDedup.keys().next().value);
+  }
 
   function addFeedItem(icon, typeName, payload, hops, color, pkt) {
     const feedPanel = document.getElementById('liveFeed');
@@ -5513,7 +5566,7 @@
 
     // Register
     if (hash) {
-      feedDedup.set(hash, { element: item, count: incomingObs, pkt, packets: [pkt], createdAt: Date.now() });
+      rememberFeedItem(hash, { element: item, count: incomingObs, pkt, packets: [pkt], createdAt: Date.now() });
       // Prune stale entries
       if (feedDedup.size > 100) {
         const cutoff = Date.now() - DEDUP_WINDOW;
@@ -6082,6 +6135,13 @@
     _followSkewPromise = null;
     if (_followToastTimer) { clearTimeout(_followToastTimer); _followToastTimer = null; }
     stopReplay();
+    // #883 M3: nothing armed by this mount may fire after it.
+    clearPropagationBuffer();
+    liveTimeouts.forEach(clearTimeout);
+    liveTimeouts.clear();
+    suppressLive = false;
+    if (_fullscreenKeyHandler) { window.removeEventListener('keydown', _fullscreenKeyHandler); _fullscreenKeyHandler = null; }
+    unbindNarrowMql();
     if (_timelineRefreshInterval) { clearInterval(_timelineRefreshInterval); _timelineRefreshInterval = null; }
     if (_lcdClockInterval) { clearInterval(_lcdClockInterval); _lcdClockInterval = null; }
     if (_rateCounterInterval) { clearInterval(_rateCounterInterval); _rateCounterInterval = null; }
@@ -6102,14 +6162,21 @@
     if (moments) { moments.destroy(); moments = null; }
     clearMomentHighlight();
     // #883 — before map.remove(): the controller holds map listeners.
+    // M3: an in-place remount hands the kiosk theme and auto-reload over.
+    const handover = !!(kiosk && kiosk.handingOver());
     if (kiosk) { kiosk.destroy(); kiosk = null; }
-    if (kioskThemeRestore) { kioskThemeRestore(); kioskThemeRestore = null; }
+    else if (kioskHandover) setKioskAutoReload(false); // left before its controller came up
+    kioskHandover = handover;
+    if (kioskThemeRestore && !handover) { kioskThemeRestore(); kioskThemeRestore = null; }
     kioskOn = false;
     if (document.body) document.body.classList.remove('kiosk');
     if (regionFilterChangeHandler && window.RegionFilter && typeof RegionFilter.offChange === 'function') {
       RegionFilter.offChange(regionFilterChangeHandler);
       regionFilterChangeHandler = null;
     }
+    // #883 M3: their outside-click and resize listeners held this page.
+    if (window.RegionFilter && RegionFilter.release) RegionFilter.release(document.getElementById('liveRegionFilter'));
+    if (window.AreaFilter && AreaFilter.release) AreaFilter.release(document.getElementById('liveAreaFilter'));
     if (areaNodesChangeHandler) { AreaFilter.offChange(areaNodesChangeHandler); areaNodesChangeHandler = null; }
     if (areaOutlineChangeHandler) { AreaFilter.offChange(areaOutlineChangeHandler); areaOutlineChangeHandler = null; }
     if (map) { map.remove(); map = null; }
@@ -6179,13 +6246,21 @@
 
   let _themeRefreshHandler = null;
 
-  // #1180 — singleton guard for the wireLiveCollapseToggles() narrow-viewport
-  // MQL listener. MediaQueryList is process-global per query string; without
-  // this gate, every SPA re-mount of /live registers a new 'change' handler.
-  // The handler reads from current DOM each time, so a one-shot bind is safe
-  // across re-mounts. window.__liveMQLBindCount is a debug seam consumed by
+  // #1180 — the wireLiveCollapseToggles() narrow-viewport MQL listener.
+  // MediaQueryList is process-global per query string, so each mount drops
+  // the previous handler before binding its own, and destroy() drops it
+  // (#883 M3). window.__liveMQLBindCount (handlers bound now: +1 per bind,
+  // -1 per unbind, so a missed unbind shows) is a debug seam consumed by
   // test-live-mql-leak-1180-e2e.js and otherwise unused.
-  var _liveNarrowMqlBound = false;
+  var _liveNarrowMql = null;   // { mql, fn } of the current mount
+  function unbindNarrowMql() {
+    if (!_liveNarrowMql) return;
+    var b = _liveNarrowMql;
+    _liveNarrowMql = null;
+    if (b.mql.removeEventListener) b.mql.removeEventListener('change', b.fn);
+    else if (b.mql.removeListener) b.mql.removeListener(b.fn);
+    try { window.__liveMQLBindCount = (window.__liveMQLBindCount || 0) - 1; } catch (_) { /* sealed window */ }
+  }
   var _heatUnwatch = null;
   // #1514 S4 — single source of truth for window._liveTestSeams is at the
   // earlier exposure block (search for `window._liveTestSeams = {`). The
