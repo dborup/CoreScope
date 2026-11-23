@@ -14,8 +14,9 @@
  *      its time (no off/on: no banner, no new random delay), and does not
  *      touch data-theme (no flip to the viewer's theme and back, so the
  *      theme observers do not fire).
- *   3. After an in-place remount, leaving kiosk still puts the viewer's
- *      theme back (one data-theme change) and saves nothing.
+ *   3. In-place remounts keep no old page alive (the handed-over theme
+ *      restore must not hold the first mount), and leaving kiosk still puts
+ *      the viewer's theme back (one data-theme change) and saves nothing.
  *   4. Leaving during the remount gap (the new mount still waits for
  *      /api/nodes, so it has no controller yet) turns the auto-reload off:
  *      the banner shows and the page does not reload.
@@ -56,8 +57,10 @@ async function open(browser, hash) {
   page.on('pageerror', (e) => h.errors.push(String(e.message)));
   await page.clock.install();
   await page.goto(BASE + '/' + hash);
-  await page.waitForFunction(() => window._liveGetMap && window._liveGetMap() && !!document.querySelector('.live-page'), null, { timeout: 20000 });
-  if (hash.includes('kiosk=1')) await page.waitForFunction(() => window._liveKiosk && window._liveKiosk(), null, { timeout: 20000 });
+  // Each predicate returns a boolean: waitForFunction keeps a handle to its
+  // result, and a handle to a controller would keep its mount alive.
+  await page.waitForFunction(() => !!(window._liveGetMap && window._liveGetMap() && document.querySelector('.live-page')), null, { timeout: 20000 });
+  if (hash.includes('kiosk=1')) await page.waitForFunction(() => !!(window._liveKiosk && window._liveKiosk()), null, { timeout: 20000 });
   // A reload is a new document: 'load' (framenavigated also fires on a
   // hash change).
   page.on('load', () => { h.navs++; });
@@ -96,9 +99,22 @@ async function open(browser, hash) {
   h.remount = async () => {
     const before = await page.evaluate(() => { window.__k0 = window._liveKiosk(); window.LiveKiosk._setRemountOverrideMs(1000); return window.LiveKiosk.remounts(); });
     await page.clock.runFor(60000);
-    await page.waitForFunction((b) => window.LiveKiosk.remounts() === b + 1 && window._liveKiosk() && window._liveKiosk() !== window.__k0,
+    await page.waitForFunction((b) => window.LiveKiosk.remounts() === b + 1 && !!window._liveKiosk() && window._liveKiosk() !== window.__k0,
       before, { timeout: 20000 });
     await page.evaluate(() => { window.__k0 = null; window.LiveKiosk._setRemountOverrideMs(null); });
+  };
+  // After GC: .live-page elements no longer in the document (a closure
+  // that outlives its mount keeps that mount's whole page alive).
+  h.detachedPages = async () => {
+    const cdp = await ctx.newCDPSession(page);
+    await cdp.send('HeapProfiler.collectGarbage');
+    const { result: proto } = await cdp.send('Runtime.evaluate', { expression: 'HTMLDivElement.prototype' });
+    const { objects } = await cdp.send('Runtime.queryObjects', { prototypeObjectId: proto.objectId });
+    const { result } = await cdp.send('Runtime.callFunctionOn', { objectId: objects.objectId, returnByValue: true,
+      functionDeclaration: 'function () { return this.filter(function (d) { return d.classList.contains("live-page") && !d.isConnected; }).length; }' });
+    await cdp.send('Runtime.releaseObject', { objectId: objects.objectId });
+    await cdp.detach();
+    return result.value;
   };
   return h;
 }
@@ -153,15 +169,19 @@ async function open(browser, hash) {
       await h.ctx.close();
     });
 
-    await step('3 after an in-place remount, leaving kiosk puts the viewer\'s theme back once and saves nothing', async () => {
+    await step('3 after in-place remounts no old page is kept alive, and leaving kiosk puts the viewer\'s theme back once and saves nothing', async () => {
       const h = await open(browser, '#/live?kiosk=1');
       await h.remount();
       await h.remount();
       let s = await h.state();
       assert(s.remounts === 2 && s.themeChanges === 0 && s.theme === 'dark', JSON.stringify(s));
+      // The handed-over theme restore must not keep the first mount alive.
+      await h.page.clock.runFor(20000);     // the last mount's own timers settle
+      const detached = await h.detachedPages();
+      assert(detached === 0, detached + ' detached .live-page element(s) alive after 2 in-place remounts');
       await h.page.keyboard.press('Escape');
-      await h.page.waitForFunction(() => !document.body.classList.contains('kiosk') && window._liveKiosk && !window._liveKiosk() &&
-        window._liveGetMap && window._liveGetMap(), null, { timeout: 20000 });
+      await h.page.waitForFunction(() => !document.body.classList.contains('kiosk') && !!window._liveKiosk && !window._liveKiosk() &&
+        !!(window._liveGetMap && window._liveGetMap()), null, { timeout: 20000 });
       s = await h.state();
       assert(s.theme === 'light', 'theme after exit ' + s.theme);
       assert(s.themeChanges === 1, 'data-theme changes ' + s.themeChanges);

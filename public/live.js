@@ -1783,6 +1783,13 @@
   // #883 M3: the last mount was an in-place remount of this kiosk link and
   // left its kiosk theme and auto-reload on; the next controller takes over.
   let kioskHandover = false;
+  // The kiosk theme's get/apply, made once here and not in init(): the
+  // restore outlives its mount across in-place remounts, and a closure made
+  // in init() would keep that mount's scope, and its whole page, alive.
+  const kioskThemeIO = {
+    get: () => document.documentElement.getAttribute('data-theme'),
+    apply: (t) => window.applyThemeTransient(t),
+  };
 
   async function init(app) {
     const generation = ++liveGeneration;
@@ -1792,11 +1799,8 @@
       // #883 M2: the kiosk theme (dark unless &theme=), before the first
       // paint, through app.js's non-persisting apply. After an in-place
       // remount it is still showing, with the old mount's restore.
-      if (!kioskHandover) {
-        kioskThemeRestore = window.LiveKiosk.applyKioskTheme(window.LiveKiosk.parseKioskParams(getHashParams()).theme, {
-          get: () => document.documentElement.getAttribute('data-theme'),
-          apply: window.applyThemeTransient,
-        });
+      if (!kioskHandover && typeof window.applyThemeTransient === 'function') {
+        kioskThemeRestore = window.LiveKiosk.applyKioskTheme(window.LiveKiosk.parseKioskParams(getHashParams()).theme, kioskThemeIO);
       }
     }
     app.innerHTML = `
