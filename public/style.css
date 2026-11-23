@@ -6868,6 +6868,17 @@ body.embed .warmup-pills { display: none !important; }
      head (the sheet is 46% of the map), so a thumb's height of the sheet
      always shows beside it to swipe the sheet by. */
   .reach-nir-list { max-height: clamp(96px, calc(46vh - 150px), 220px); }
+  /* Landscape: the sheet at 46% leaves a body of about 60 px under the
+     head, shorter than the list's floor, so the list covered it and every
+     swipe scrolled the list. A taller sheet, and a list of what is left of
+     its body less a strip (about a chip's height and more) of sheet to
+     swipe by (the sheet is 80% of the map, which is the viewport less
+     about 107 px; the head is 55 px; the strip about 80 px). A row
+     (44 px) is the least the list shows. */
+  @media (max-height: 480px) {
+    .reach-panel { max-height: 80%; }
+    .reach-nir-list { max-height: max(44px, calc(80vh - 221px)); }
+  }
   /* The head and its × stay at the top of the scrolled sheet; it covers
      the sheet's top padding so nothing scrolls past above it. */
   .reach-head {

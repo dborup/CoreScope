@@ -22,7 +22,7 @@
  *   3. the model select asks again once, with model=delta, puts
  *      rmodel=delta in the address bar and names the model; a deep link
  *      with rmodel and rlist restores both;
- *   4. 375×560 and 360×640 with touch, from a cold #/map, with 66 nodes
+ *   4. 375×560, 360×640, 320×568 and, landscape, 640×360 and 568×320 with touch, from a cold #/map, with 66 nodes
  *      in Good: real taps on the toggle and the map open the panel, a tap
  *      on a chip opens the list, and with the list open the power slider
  *      is reached by touch swipes on the sheet alone (it sits at most
@@ -327,15 +327,18 @@ function rasterFor(c, radiusKm) {
       const list = document.querySelector('[data-testid="reach-nir-list"]');
       const s = sheet.getBoundingClientRect();
       const head = sheet.querySelector('.reach-head').getBoundingClientRect();
-      const x = s.left + s.width / 2;
       const hitAt = (px, py) => document.elementFromPoint(px, py);
       const offSliders = (px, py) => { const h = hitAt(px, py); return !h || !h.closest('input[type="range"]'); };
-      for (let y = s.bottom - 18; y > head.bottom + 18; y -= 4) {
-        const hit = hitAt(x, y);
-        if (!hit || !sheet.contains(hit) || list.contains(hit) || hit.closest('input, select')) continue;
-        if ([-16, 0, 16].every(dy => [-16, 0, 16].every(dx => offSliders(x + dx, y + dy)))) return { x, y, onList: false };
+      // Down the middle first, then the label column at the left and the
+      // edge at the right, where the fields leave room between them.
+      for (const x of [s.left + s.width / 2, s.left + 24, s.right - 12]) {
+        for (let y = s.bottom - 18; y > head.bottom + 18; y -= 4) {
+          const hit = hitAt(x, y);
+          if (!hit || !sheet.contains(hit) || list.contains(hit) || hit.closest('input, select')) continue;
+          if ([-16, 0, 16].every(dy => [-16, 0, 16].every(dx => offSliders(x + dx, y + dy)))) return { x, y, onList: false };
+        }
       }
-      return { x, y: (head.bottom + s.bottom) / 2, onList: true };
+      return { x: s.left + s.width / 2, y: (head.bottom + s.bottom) / 2, onList: true };
     });
   }
 
@@ -352,6 +355,16 @@ function rasterFor(c, radiusKm) {
     }, selector);
   }
 
+  /* geometry: where the sheet, its head, selector and the list are, for a
+   * failure message. */
+  function geometry(page, selector) {
+    return page.evaluate((sel) => {
+      const q = (x) => { const e = typeof x === 'string' ? document.querySelector(x) : x; if (!e) return null; const r = e.getBoundingClientRect(); return [Math.round(r.top), Math.round(r.bottom)]; };
+      const sheet = document.querySelector('[data-testid="reach-panel"]');
+      return JSON.stringify({ sheet: q(sheet), head: q('.reach-head'), el: q(sel), list: q('[data-testid="reach-nir-list"]'), scrollTop: sheet.scrollTop, scrollH: sheet.scrollHeight });
+    }, selector);
+  }
+
   /* touchScrollTo swipes the sheet, by touch only, until selector is in
    * view: up while it is below the head, down while above. The number of
    * swipes. */
@@ -364,12 +377,23 @@ function rasterFor(c, radiusKm) {
         return r.top >= head.bottom;
       }, selector);
       const at = await sheetGrip(page);
+      // A swipe on the node list scrolls the list, not the sheet: the trap.
+      if (at.onList) throw new Error(`no spot on the sheet off the node list and the sliders to swipe from on the way to ${selector} (the list covers its body) ${await geometry(page, selector)}`);
       const tops = () => page.evaluate(() => ['reach-panel', 'reach-nir-list'].map(id => document.querySelector(`[data-testid="${id}"]`).scrollTop).join());
       const was = await tops();
-      await swipe(page, cdp, at, below ? 80 : -80);
+      // Short enough that a body barely taller than the element is not
+      // overshot back and forth.
+      const room = await page.evaluate((sel) => {
+        const head = document.querySelector('[data-testid="reach-panel"] .reach-head').getBoundingClientRect();
+        const s = document.querySelector('[data-testid="reach-panel"]').getBoundingClientRect();
+        return s.bottom - head.bottom - document.querySelector(sel).getBoundingClientRect().height;
+      }, selector);
+      const dy = Math.max(16, Math.min(80, Math.floor(room - 8)));
+      await swipe(page, cdp, at, below ? dy : -dy);
       if (await tops() === was) throw new Error(`a swipe at ${JSON.stringify(at)} scrolled nothing on the way to ${selector}`);
     }
-    throw new Error(`${selector} not in view after ${max} swipes`);
+    const geo = await geometry(page, selector);
+    throw new Error(`${selector} not in view after ${max} swipes ${geo}`);
   }
 
   /* dragSlider touch-drags a range input's thumb to value v. */
@@ -394,6 +418,10 @@ function rasterFor(c, radiusKm) {
   const PHONES = [
     { theme: 'light', width: 375, height: 560 }, { theme: 'dark', width: 375, height: 560 },
     { theme: 'light', width: 360, height: 640 }, { theme: 'dark', width: 360, height: 640 },
+    { theme: 'light', width: 320, height: 568 },
+    // Landscape: the sheet's body is short, the list must leave room to swipe it.
+    { theme: 'light', width: 640, height: 360 }, { theme: 'dark', width: 640, height: 360 },
+    { theme: 'light', width: 568, height: 320 },
   ];
   for (const { theme, width, height } of PHONES) {
     await step(`${theme}: ${width}×${height} touch from a cold #/map: a chip opens the list, the budget is reached by touch and recounts it, a row opens the node`, async () => {
