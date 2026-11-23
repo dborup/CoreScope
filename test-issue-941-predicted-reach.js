@@ -13,7 +13,10 @@
  *   6. the node-detail chip's gate and DOM;
  *   7. the page wiring: the script tag, the CSS variables in all three
  *      theme blocks, no hard-coded colour in the module;
- *   8. a recolour of a 40 km raster stays well inside the 50 ms budget.
+ *   8. a recolour of a 40 km raster stays well inside the 50 ms budget;
+ *   9. #941 M2: the model and the list filter in the link and the request,
+ *      and the nodes in reach — order, margins, classes, counts, the
+ *      recount at another budget, the filter and the node links.
  *
  * Runs via: node test-issue-941-predicted-reach.js
  */
@@ -300,6 +303,126 @@ test('recolouring an 816×816 raster (table + paint) takes a few ms here', () =>
   const ms = Number(process.hrtime.bigint() - t0) / 1e6 / runs;
   console.log('     recolour 816×816: ' + ms.toFixed(2) + ' ms (desktop Node; the phone budget is 50 ms)');
   assert.ok(ms < 25, ms + ' ms');
+});
+
+// ── 9. M2: the model and the nodes in reach ──────────────────────────────
+
+test('the model and the list filter ride in the link, and junk is dropped', () => {
+  const st = PR.parseState('reach=56.1629,10.2039&rmodel=delta&rlist=marginal&rpwr=14');
+  assert.strictEqual(st.model, 'delta');
+  assert.strictEqual(st.list, 'marginal');
+  const qs = new URLSearchParams(PR.serializeState(st)).toString();
+  assert.ok(qs.includes('rmodel=delta') && qs.includes('rlist=marginal'), qs);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(PR.parseState(qs))), JSON.parse(JSON.stringify(st)));
+  for (const junk of ['rmodel=fspl', 'rmodel=Delta', 'rmodel=', 'rmodel=itm', 'rlist=none', 'rlist=<b>', 'rlist=']) {
+    const j = PR.parseState('reach=56.1,10.2&' + junk);
+    assert.ok(j && j.model === undefined && j.list === undefined, junk);
+  }
+  const h = PR.withReachParams('#/map?rmodel=delta&rlist=all&lat=55&reach=1,2', {});
+  assert.strictEqual(h, '#/map?lat=55');
+  assert.ok(!Object.values(PR.KEYS).includes('rmodel') && !Object.values(PR.KEYS).includes('rlist'));
+});
+
+test('the model reaches the server only when chosen; the list filter never does', () => {
+  const base = { at: { kind: 'point', lat: 56.1, lon: 10.2 } };
+  assert.ok(!PR.requestURL(base).includes('model'));
+  assert.ok(PR.requestURL(Object.assign({}, base, { model: 'delta' })).endsWith('&model=delta'));
+  const u = PR.requestURL(Object.assign({}, base, { model: 'nope', list: 'good', power: 30 }));
+  assert.ok(!u.includes('model') && !u.includes('list') && !u.includes('good') && !u.includes('30'), u);
+  // A model change is a new question; a list or budget change is not.
+  assert.strictEqual(PR.sameGeometry(base, Object.assign({}, base, { list: 'all', power: 10 })), true);
+  assert.strictEqual(PR.sameGeometry(base, Object.assign({}, base, { model: 'delta' })), false);
+  assert.strictEqual(PR.sameGeometry(Object.assign({}, base, { model: 'delta' }), Object.assign({}, base, { model: 'delta' })), true);
+  assert.deepStrictEqual(Object.keys(PR.MODELS), ['bullington', 'delta']);
+});
+
+const J = (v) => JSON.parse(JSON.stringify(v)); // vm arrays are another realm's
+const REACH = {
+  roles: ['repeater', 'room'], budgetDb: 158,
+  counts: { good: 1, marginal: 1, weak: 1, none: 1 },
+  nodes: [
+    { pubkey: '1'.repeat(64), name: 'Near mast', role: 'repeater', distanceKm: 2, heightM: 10, heightSource: 'role-default', lossDb: 120 },
+    { pubkey: 'AB'.repeat(32), name: '<img src=x onerror=alert(1)>', role: 'room', distanceKm: 6.25, heightM: 5, heightSource: 'role-default', lossDb: 150 },
+    { pubkey: '3'.repeat(64), name: 'Weak one', role: 'repeater', distanceKm: 9, heightM: 10, heightSource: 'owner', lossDb: 156 },
+    { pubkey: '4'.repeat(64), name: 'Beyond', role: 'repeater', distanceKm: 12, heightM: 10, heightSource: 'role-default', lossDb: 161 },
+    { pubkey: 'not-a-key', name: 'junk', role: 'repeater', lossDb: 100 },
+    { pubkey: '5'.repeat(64), name: 'no loss', role: 'repeater', lossDb: null },
+  ],
+  omitted: 0, noTerrain: 1,
+};
+
+test('reachRows keeps the server order with each margin and class; junk entries are dropped', () => {
+  const rows = PR.reachRows(REACH, 158);
+  assert.deepStrictEqual(J(rows.map(r => r.cls)), ['good', 'marginal', 'weak', 'none']);
+  assert.deepStrictEqual(J(rows.map(r => r.margin)), [38, 8, 2, -3]);
+  assert.strictEqual(rows[1].pubkey, 'ab'.repeat(32));
+  assert.strictEqual(rows[1].name, '<img src=x onerror=alert(1)>'); // text, never markup (DOM: textContent)
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(PR.reachCounts(rows))), { good: 1, marginal: 1, weak: 1, none: 1 });
+  // At the operator's budget the client's counts are the server's.
+  const c = PR.reachCounts(PR.reachRows(REACH, REACH.budgetDb));
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(c)), REACH.counts);
+  assert.deepStrictEqual(J(PR.reachRows(null, 158)), []);
+  assert.deepStrictEqual(J(PR.reachRows({ nodes: 'x' }, 158)), []);
+});
+
+test('reachNote states the list and its counts, and never a count of hidden nodes', () => {
+  const rows = PR.reachRows(REACH, 158);
+  const counts = PR.reachCounts(rows);
+  assert.strictEqual(PR.reachNote(REACH, rows, counts, '', 0),
+    '3 of 4 repeaters and rooms in the radius are in reach · 1 below 0 dB · 1 without terrain data.');
+  assert.strictEqual(PR.reachNote(Object.assign({}, REACH, { omitted: 2, noTerrain: 0 }), rows, counts, 'good', 1),
+    '3 of 4 repeaters and rooms in the radius are in reach · 1 below 0 dB · 2 more beyond the list.');
+  const none = PR.reachRows({ nodes: [{ pubkey: '1'.repeat(64), lossDb: 170 }] }, 158);
+  assert.strictEqual(PR.reachNote({}, none, PR.reachCounts(none), 'all', 0),
+    'None of the 1 repeaters and rooms in the radius is in reach · 1 below 0 dB · nothing to list.');
+  assert.strictEqual(PR.reachNote({}, [], PR.reachCounts([]), '', 0), 'No repeater or room with a position in the radius.');
+  // An older server's count of hidden nodes is not shown: it would tell a
+  // viewer that a hidden node is inside the radius (#941 M2 review).
+  const old = PR.reachNote(Object.assign({}, REACH, { withheld: 2 }), rows, counts, '', 0);
+  assert.ok(!/hidden|withheld|2 /.test(old), old);
+});
+
+test('a budget change recounts and recolours the same list, in the same order', () => {
+  const lower = PR.reachRows(REACH, 150); // 8 dB less: margins 30, 0, −6, −11
+  assert.deepStrictEqual(J(lower.map(r => r.cls)), ['good', 'weak', 'none', 'none']);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(PR.reachCounts(lower))), { good: 1, marginal: 0, weak: 1, none: 2 });
+  const higher = PR.reachRows(REACH, 171); // +13 dB: 51, 21, 15, 10
+  assert.deepStrictEqual(J(higher.map(r => r.cls)), ['good', 'good', 'good', 'good']);
+  assert.deepStrictEqual(J(higher.map(r => r.pubkey)), J(PR.reachRows(REACH, 158).map(r => r.pubkey)));
+  // Boundaries belong to the better class, as on the raster.
+  assert.deepStrictEqual(J(PR.reachRows({ nodes: [{ pubkey: '1'.repeat(64), lossDb: 148 }, { pubkey: '2'.repeat(64), lossDb: 155 },
+    { pubkey: '3'.repeat(64), lossDb: 158 }, { pubkey: '4'.repeat(64), lossDb: 158.01 }] }, 158).map(r => r.cls)),
+  ['good', 'marginal', 'weak', 'none']);
+});
+
+test('the list filter: a class, all in reach, or nothing; below 0 dB is never listed', () => {
+  assert.strictEqual(PR.listShows(undefined, 'good'), false);
+  assert.strictEqual(PR.listShows('good', 'good'), true);
+  assert.strictEqual(PR.listShows('good', 'weak'), false);
+  assert.strictEqual(PR.listShows('all', 'weak'), true);
+  assert.strictEqual(PR.listShows('all', 'none'), false);
+  assert.deepStrictEqual(Array.from(PR.LIST_FILTERS), ['good', 'marginal', 'weak', 'all']);
+});
+
+test('a listed node links to its node page, and only a 64-hex key does', () => {
+  assert.strictEqual(PR.nodeHref('AB'.repeat(32)), '#/nodes/' + 'ab'.repeat(32));
+  for (const bad of ['', 'javascript:alert(1)', 'ab'.repeat(31), 'zz'.repeat(32), null, undefined, '#/nodes/x']) {
+    assert.strictEqual(PR.nodeHref(bad), null, String(bad));
+  }
+});
+
+test('the list is DOM only: no node field reaches an HTML string, and the chip colours are CSS variables', () => {
+  const i = SRC.indexOf('function fillNodeList');
+  const j = SRC.indexOf('function syncNodeList');
+  const body = SRC.slice(i, SRC.indexOf('function setStatus', j));
+  assert.ok(i > 0 && j > i, 'list builders present');
+  assert.ok(!/innerHTML|insertAdjacentHTML|outerHTML/.test(body), 'an HTML sink in the list code');
+  assert.ok(/var href = nodeHref\(r\.pubkey\);\s*a\.setAttribute\('href', href\);/.test(body), 'href from nodeHref only');
+  assert.strictEqual((body.match(/setAttribute\('href'/g) || []).length, 1, 'one href, the checked one');
+  const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
+  const block = css.slice(css.indexOf('/* #941 M2 — nodes in reach'), css.indexOf('@media (max-width: 640px) {', css.indexOf('/* #941 M2 — nodes in reach')));
+  const rules = block.replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(rules.length > 200 && !/#[0-9a-f]{3,6}\b|rgb\(/i.test(rules), 'hard-coded colour in the nodes-in-reach CSS');
 });
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed\n');

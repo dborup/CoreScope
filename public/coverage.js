@@ -11,7 +11,15 @@
  * margin — transmit power, both antenna gains, cable loss, sensitivity —
  * is applied here, through a 256-entry lookup table built from CSS
  * variables, so moving those sliders recolours the same pixels without a
- * request. Heights, radius and frequency change the loss and ask again.
+ * request. Heights, radius, frequency and the model (Bullington or
+ * delta-Bullington, #941 M2) change the loss and ask again.
+ *
+ * #941 M2 — nodes in reach: the response lists the repeaters and rooms
+ * inside the radius with their predicted path loss. The panel counts them
+ * per margin class and lists them (each a link to its node page); the
+ * same budget sliders recount and recolour that list in place, with no
+ * request. Hidden nodes are in no list and no count: the server leaves
+ * them out of all of them.
  *
  * Nothing is fetched until the tool is armed or a link opens it. All DOM is
  * built with createElement/textContent: no server or node field ever passes
@@ -28,6 +36,11 @@
     tx: 'rtx', rx: 'rrx', radius: 'rkm', freq: 'rmhz',
     power: 'rpwr', txGain: 'rgtx', rxGain: 'rgrx', loss: 'rloss', sens: 'rsens'
   };
+  // The link's two words (#941 M2): the model, and which nodes in reach
+  // the list shows.
+  var MODEL_KEY = 'rmodel', LIST_KEY = 'rlist';
+  var MODELS = { bullington: 'Bullington (P.526 §4.5.1)', delta: 'Delta-Bullington (P.526 §4.5.2)' };
+  var LIST_FILTERS = ['good', 'marginal', 'weak', 'all'];
   // [min, max, decimals]. Request bounds mirror cmd/server's grammar;
   // budget bounds mirror resolveCoverageRadio.
   var BOUNDS = {
@@ -106,6 +119,10 @@
       var v = boundedNumber(f, params.get(KEYS[f]));
       if (v !== null) st[f] = v;
     });
+    var m = params.get(MODEL_KEY);
+    if (m && Object.prototype.hasOwnProperty.call(MODELS, m)) st.model = m;
+    var l = params.get(LIST_KEY);
+    if (l && LIST_FILTERS.indexOf(l) >= 0) st.list = l;
     return st;
   }
 
@@ -124,6 +141,8 @@
     Object.keys(KEYS).forEach(function (f) {
       if (typeof st[f] === 'number' && isFinite(st[f])) out[KEYS[f]] = String(st[f]);
     });
+    if (st.model && Object.prototype.hasOwnProperty.call(MODELS, st.model)) out[MODEL_KEY] = st.model;
+    if (st.list && LIST_FILTERS.indexOf(st.list) >= 0) out[LIST_KEY] = st.list;
     return out;
   }
 
@@ -135,6 +154,8 @@
     var base = qi >= 0 ? hash.slice(0, qi) : hash;
     var params = new URLSearchParams(qi >= 0 ? hash.slice(qi + 1) : '');
     params.delete(HASH_PARAM);
+    params.delete(MODEL_KEY);
+    params.delete(LIST_KEY);
     Object.keys(KEYS).forEach(function (f) { params.delete(KEYS[f]); });
     Object.keys(ser || {}).forEach(function (k) { params.set(k, ser[k]); });
     var qs = params.toString();
@@ -149,7 +170,14 @@
     REQUEST_FIELDS.forEach(function (f) {
       if (typeof st[f] === 'number') q += '&' + server[f] + '=' + encodeURIComponent(String(st[f]));
     });
+    if (st.model && Object.prototype.hasOwnProperty.call(MODELS, st.model)) q += '&model=' + st.model;
     return ENDPOINT + '?' + q;
+  }
+
+  /* sameGeometry: two states ask the server the same question. */
+  function sameGeometry(a, b) {
+    return !!(a && b && a.at && b.at) && atString(a.at) === atString(b.at) && (a.model || '') === (b.model || '')
+      && REQUEST_FIELDS.every(function (f) { return a[f] === b[f]; });
   }
 
   // ── Link budget and colours ──────────────────────────────────────────────
@@ -255,6 +283,66 @@
       out.total += hist[v];
     }
     return out;
+  }
+
+  // ── Nodes in reach ───────────────────────────────────────────────────────
+
+  /* nodeHref is a listed node's page; null for anything but a 64-hex key. */
+  function nodeHref(pk) {
+    var k = String(pk || '').toLowerCase();
+    return PUBKEY_RE.test(k) ? '#/nodes/' + k : null;
+  }
+
+  /* reachRows is the server's list at a budget, in its order (lowest loss
+   * first, so a budget change never reorders it): each node with its
+   * margin and class. Entries without a valid key or a finite loss are
+   * dropped. */
+  function reachRows(reach, budget) {
+    var nodes = reach && Array.isArray(reach.nodes) ? reach.nodes : [];
+    var out = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i] || {};
+      var loss = typeof n.lossDb === 'number' ? n.lossDb : NaN;
+      if (!nodeHref(n.pubkey) || !isFinite(loss)) continue;
+      var margin = budget - loss;
+      out.push({ pubkey: String(n.pubkey).toLowerCase(), name: typeof n.name === 'string' ? n.name : '', role: String(n.role || ''),
+        distanceKm: Number(n.distanceKm), heightM: Number(n.heightM), lossDb: loss, margin: margin, cls: marginClass(margin) });
+    }
+    return out;
+  }
+
+  /* reachCounts counts reachRows per class. */
+  function reachCounts(rows) {
+    var out = { good: 0, marginal: 0, weak: 0, none: 0 };
+    for (var i = 0; i < rows.length; i++) out[rows[i].cls]++;
+    return out;
+  }
+
+  /* listShows: whether the list filter shows a node of class cls. "all"
+   * is every node in reach; below 0 dB is never listed. */
+  function listShows(filter, cls) {
+    if (!filter || cls === 'none') return false;
+    return filter === 'all' || filter === cls;
+  }
+
+  function signedDb(m) { return (m >= 0 ? '+' : '−') + Math.abs(m).toFixed(0) + ' dB'; }
+
+  /* reachNote is the line under the list: how many of the listed nodes
+   * are in reach at the budget the rows were made at, and what the list
+   * leaves out (below 0 dB, past its bound, without terrain). The server
+   * leaves hidden nodes out of every count, and nothing here counts them:
+   * a count of hidden nodes would place one. */
+  function reachNote(reach, rows, counts, filter, shown) {
+    var inReach = counts.good + counts.marginal + counts.weak;
+    var note = [inReach ? inReach + ' of ' + rows.length + ' repeaters and rooms in the radius are in reach'
+      : (rows.length ? 'None of the ' + rows.length + ' repeaters and rooms in the radius is in reach' : 'No repeater or room with a position in the radius')];
+    if (counts.none) note.push(counts.none + ' below 0 dB');
+    var o = Number(reach && reach.omitted);
+    if (o > 0) note.push(o + ' more beyond the list');
+    var nt = Number(reach && reach.noTerrain);
+    if (nt > 0) note.push(nt + ' without terrain data');
+    if (filter && !shown && inReach === 0) note.push('nothing to list');
+    return note.join(' · ') + '.';
   }
 
   // ── Gates ────────────────────────────────────────────────────────────────
@@ -504,6 +592,7 @@
       });
       ui.legend.appendChild(el('p', 'reach-legend-note', 'Uncoloured: below 0 dB margin, outside the radius, or no terrain data.'));
       panel.appendChild(ui.legend);
+      buildNodeSection();
 
       var geo = el('fieldset', 'reach-group');
       geo.appendChild(el('legend', null, 'Geometry — recomputes'));
@@ -512,6 +601,19 @@
       field(geo, 'radius', 'Radius', 'km', 'number', 'reach-radius');
       field(geo, 'freq', 'Frequency', 'MHz', 'number', 'reach-freq');
       REQUEST_FIELDS.forEach(function (f) { ui[f].addEventListener('input', onGeometryInput); });
+      var mrow = el('label', 'reach-field');
+      mrow.appendChild(el('span', 'reach-field-label', 'Model'));
+      ui.modelSelect = el('select', 'reach-input reach-model-select');
+      ui.modelSelect.setAttribute('data-testid', 'reach-model-select');
+      ui.modelSelect.setAttribute('aria-label', 'Propagation model');
+      offeredModels().forEach(function (m) {
+        var o = el('option', null, MODELS[m]);
+        o.value = m;
+        ui.modelSelect.appendChild(o);
+      });
+      ui.modelSelect.addEventListener('change', onModelChange);
+      mrow.appendChild(ui.modelSelect);
+      geo.appendChild(mrow);
       panel.appendChild(geo);
 
       var bud = el('fieldset', 'reach-group');
@@ -554,6 +656,141 @@
       opts.mount.appendChild(panel);
     }
 
+    /* offeredModels: the server's models we know how to name. */
+    function offeredModels() {
+      var list = Array.isArray(cfg.models) && cfg.models.length ? cfg.models : ['bullington', 'delta'];
+      return list.filter(function (m) { return Object.prototype.hasOwnProperty.call(MODELS, m); });
+    }
+
+    function defaultModel() {
+      return Object.prototype.hasOwnProperty.call(MODELS, cfg.model) ? cfg.model : 'bullington';
+    }
+
+    function onModelChange() {
+      var v = ui.modelSelect.value;
+      if (!state || !Object.prototype.hasOwnProperty.call(MODELS, v)) return;
+      if (v === defaultModel()) delete state.model; else state.model = v;
+      writeHash();
+      scheduleRequest();
+    }
+
+    /* The nodes-in-reach section: class chips that open the list, a note,
+     * and the list itself, filled per response (fillNodeList) and
+     * recoloured in place (syncNodeList). */
+    function buildNodeSection() {
+      ui.nodes = el('section', 'reach-nir');
+      ui.nodes.setAttribute('data-testid', 'reach-nir');
+      ui.nodes.setAttribute('aria-label', 'Nodes in reach');
+      ui.nodes.appendChild(el('h3', 'reach-nir-title', 'Nodes in reach'));
+      var chips = el('div', 'reach-nir-chips');
+      chips.setAttribute('role', 'group');
+      chips.setAttribute('aria-label', 'List the nodes in reach by class');
+      ui.chips = {};
+      CLASSES.concat([{ id: 'all', label: 'All' }]).forEach(function (c) {
+        var b = el('button', 'reach-nir-chip');
+        b.type = 'button';
+        b.setAttribute('data-class', c.id);
+        b.setAttribute('data-testid', 'reach-nir-' + c.id);
+        b.setAttribute('aria-pressed', 'false');
+        if (c.id !== 'all') {
+          var sw = el('span', 'reach-swatch reach-swatch-' + c.id);
+          sw.setAttribute('aria-hidden', 'true');
+          b.appendChild(sw);
+        }
+        b.appendChild(el('span', 'reach-nir-chip-label', c.label));
+        var n = el('span', 'reach-nir-count');
+        n.setAttribute('data-testid', 'reach-nir-count-' + c.id);
+        b.appendChild(n);
+        b.addEventListener('click', function () { onChip(c.id); });
+        chips.appendChild(b);
+        ui.chips[c.id] = { btn: b, count: n };
+      });
+      ui.nodes.appendChild(chips);
+      ui.nodesNote = el('p', 'reach-nir-note');
+      ui.nodesNote.setAttribute('data-testid', 'reach-nir-note');
+      ui.nodes.appendChild(ui.nodesNote);
+      ui.nodesList = el('ol', 'reach-nir-list');
+      ui.nodesList.setAttribute('data-testid', 'reach-nir-list');
+      ui.nodesList.hidden = true;
+      ui.nodes.appendChild(ui.nodesList);
+      ui.nodes.hidden = true;
+      panel.appendChild(ui.nodes);
+    }
+
+    function onChip(id) {
+      if (!state) return;
+      if (state.list === id) delete state.list; else state.list = id;
+      syncNodeList();
+      writeHash();
+    }
+
+    /* fillNodeList builds one item per listed node of the response, in the
+     * server's order. Only DOM: the name and the key go through
+     * textContent and a checked href. */
+    function fillNodeList() {
+      if (!ui.nodesList) return;
+      ui.nodesList.textContent = '';
+      ui.nodeItems = [];
+      var reach = data && data.reach;
+      ui.nodes.hidden = !data;
+      if (!reach) return;
+      reachRows(reach, 0).forEach(function (r) {
+        var li = el('li', 'reach-nir-item');
+        li.setAttribute('data-testid', 'reach-nir-item');
+        var sw = el('span', 'reach-swatch');
+        sw.setAttribute('aria-hidden', 'true');
+        li.appendChild(sw);
+        var a = el('a', 'reach-nir-link', r.name || (r.pubkey.slice(0, 8) + '…'));
+        // reachRows kept only keys nodeHref accepts: '#/nodes/' + 64 hex.
+        var href = nodeHref(r.pubkey);
+        a.setAttribute('href', href);
+        li.appendChild(a);
+        var meta = [r.role, isFinite(r.distanceKm) ? r.distanceKm.toFixed(1) + ' km' : '', isFinite(r.heightM) ? r.heightM + ' m mast' : '']
+          .filter(Boolean).join(' · ');
+        li.appendChild(el('span', 'reach-nir-meta', meta));
+        var m = el('span', 'reach-nir-margin');
+        li.appendChild(m);
+        ui.nodesList.appendChild(li);
+        ui.nodeItems.push({ li: li, swatch: sw, margin: m });
+      });
+    }
+
+    /* syncNodeList recounts and recolours the list at the current budget:
+     * text, classes and visibility of the existing items, no rebuild. */
+    function syncNodeList() {
+      if (!ui.nodes || !state) return;
+      var reach = data && data.reach;
+      if (!data) { ui.nodes.hidden = true; return; }
+      ui.nodes.hidden = false;
+      if (!reach) {
+        Object.keys(ui.chips).forEach(function (k) { ui.chips[k].btn.hidden = true; });
+        ui.nodesNote.textContent = 'Nodes in reach are not available for this prediction yet. Try again in a few minutes.';
+        ui.nodesList.hidden = true;
+        return;
+      }
+      var rows = reachRows(reach, budgetOf(state, cfg.radio));
+      var counts = reachCounts(rows);
+      var inReach = counts.good + counts.marginal + counts.weak;
+      Object.keys(ui.chips).forEach(function (k) {
+        var c = ui.chips[k];
+        c.btn.hidden = false;
+        c.count.textContent = String(k === 'all' ? inReach : counts[k]);
+        c.btn.setAttribute('aria-pressed', state.list === k ? 'true' : 'false');
+        c.btn.classList.toggle('active', state.list === k);
+      });
+      var shown = 0;
+      for (var i = 0; i < rows.length && i < ui.nodeItems.length; i++) {
+        var it = ui.nodeItems[i], r = rows[i];
+        it.li.setAttribute('data-class', r.cls);
+        it.swatch.className = 'reach-swatch reach-swatch-' + r.cls;
+        it.margin.textContent = signedDb(r.margin);
+        it.li.hidden = !listShows(state.list, r.cls);
+        if (!it.li.hidden) shown++;
+      }
+      ui.nodesList.hidden = !shown;
+      ui.nodesNote.textContent = reachNote(reach, rows, counts, state.list, shown);
+    }
+
     function setStatus(text, isError) {
       if (!ui.status) return;
       ui.status.textContent = text || '';
@@ -578,6 +815,7 @@
         ui[f + 'Out'].textContent = fmt(bv[f], 0) + ' ' + ui[f + 'Unit'];
       });
       ui.budget.textContent = 'Maximum path loss ' + fmt(budgetOf(state, cfg.radio), 0) + ' dB';
+      if (ui.modelSelect && global.document.activeElement !== ui.modelSelect) ui.modelSelect.value = state.model || defaultModel();
     }
 
     function syncCentre() {
@@ -601,7 +839,10 @@
       if (!data) { ui.model.textContent = ''; return; }
       var p = data.params || {};
       var dsm = (data.sources || []).some(function (s) { return s && s.model === 'dsm'; });
-      ui.model.textContent = 'Free-space loss plus Bullington diffraction over the terrain (ITU-R P.526), '
+      var delta = typeof p.model === 'string' && p.model.indexOf('delta') === 0;
+      ui.model.textContent = (delta
+        ? 'Free-space loss plus delta-Bullington diffraction over the terrain (ITU-R P.526 §4.5.2: Bullington plus the smooth-earth term), '
+        : 'Free-space loss plus Bullington diffraction over the terrain (ITU-R P.526), ')
         + p.resolutionM + ' m grid, k ' + fmt(p.k, 2) + ', ' + fmt(p.freqMHz, 3) + ' MHz. '
         + (dsm ? 'Outside Denmark the terrain includes trees and buildings. ' : '')
         + 'No buildings or trees in Denmark yet: a prediction, not a measurement.';
@@ -653,6 +894,7 @@
         var cell = ui.legend && ui.legend.querySelector('[data-testid="reach-share-' + c.id + '"]');
         if (cell) cell.textContent = share.total ? Math.round(100 * share[c.id] / share.total) + ' %' : '';
       });
+      syncNodeList();
     }
 
     function draw() {
@@ -734,6 +976,7 @@
           meta = { width: r.width, height: r.height, bounds: r.bounds, lossBaseDb: r.lossBaseDb, lossStepDb: r.lossStepDb, noData: r.noData };
           setStatus(r.coveredPct < 100 ? 'Terrain data covers ' + Math.round(r.coveredPct) + ' % of the area.' : '');
           panel && panel.classList.remove('is-busy');
+          fillNodeList();
           draw();
           syncInputs();
           syncCentre();
@@ -798,16 +1041,15 @@
       if (!st || !st.at) return;
       if (opts.onOpen) opts.onOpen();
       buildPanel();
-      var sameGeometry = state && atString(state.at) === atString(st.at)
-        && REQUEST_FIELDS.every(function (f) { return state[f] === st[f]; });
+      var same = sameGeometry(state, st);
       state = Object.assign({}, st);
       fitPending = !!(o && o.fit);
       panel.hidden = false;
-      if (!sameGeometry) data = null;
+      if (!same) { data = null; fillNodeList(); }
       syncInputs();
       syncCentre();
       writeHash();
-      if (sameGeometry && raster) { recolor(); return; }
+      if (same && raster) { recolor(); return; }
       request();
     }
 
@@ -819,6 +1061,7 @@
       clearLayer();
       state = null;
       data = null;
+      fillNodeList();
       if (panel) panel.hidden = true;
       writeHash();
     }
@@ -865,6 +1108,14 @@
     serializeState: serializeState,
     withReachParams: withReachParams,
     requestURL: requestURL,
+    sameGeometry: sameGeometry,
+    MODELS: MODELS,
+    LIST_FILTERS: LIST_FILTERS,
+    nodeHref: nodeHref,
+    reachRows: reachRows,
+    reachCounts: reachCounts,
+    reachNote: reachNote,
+    listShows: listShows,
     budgetOf: budgetOf,
     marginClass: marginClass,
     parseColor: parseColor,

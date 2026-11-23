@@ -23,6 +23,9 @@ package main
 //     sensitivity are not parameters and not in the cache key: they only
 //     shift the margin, so the browser applies them to the cached loss and
 //     a slider never asks the server again.
+//   - The propagation model (#941 M2) is the request's `model`
+//     (bullington or delta), else map.coverage.model, else Bullington; it
+//     is part of the cache key.
 //   - A point no source covers, an over-large radius, a hidden or unknown
 //     node and a cache hit make no upstream call.
 //   - A cache miss is charged to the client's per-IP budget
@@ -43,6 +46,10 @@ package main
 //     text, and the token never appears in a response or a log line. A
 //     failed foreign fill leaves the reach partial and is kept only
 //     coveragePartialTTL, so a later request tries it again.
+//
+// With the raster comes the list of nodes in reach (#941 M2,
+// terrain_coverage_reach.go): repeaters and rooms evaluated point to point
+// over the same elevation grid, hidden identities left out at serve time.
 //
 // The endpoint reads node positions from the in-memory node snapshot and
 // observer radios through the profile's read-only query; it writes
@@ -106,9 +113,14 @@ const (
 	// coveragePartialTTL is how long a reach with a failed foreign fill is
 	// kept: briefly, so a later request tries the fill again.
 	coveragePartialTTL = 5 * time.Minute
-	// coverageResultMaxBytes bounds one cached result: the largest raster
-	// (1008², stored gzip) plus its metadata.
-	coverageResultMaxBytes = 1008*1008 + 64<<10
+	// coverageResultMaxBytes is the size budgeted for one cached result: the
+	// largest raster (1008², stored gzip) plus its metadata and
+	// coverageReachMaxNodes kept nodes in reach. It sizes the result
+	// cache's byte cap (cacheEntries times this). A result keeps every
+	// evaluated node, so one with more nodes in its radius can be larger;
+	// the cap still bounds the cache's memory as a whole, and the cache
+	// refuses a single result above it.
+	coverageResultMaxBytes = 1008*1008 + 64<<10 + coverageReachMaxNodes*coverageReachEntryBytes
 	// coverageRefusalLogEvery throttles the refusal and fill-failure logs.
 	coverageRefusalLogEvery = time.Minute
 	// coverageMaxInFlightCap bounds map.coverage.maxInFlight: each
@@ -136,6 +148,10 @@ type CoverageConfig struct {
 	CacheTTLHours *float64 `json:"cacheTTLHours"`
 	// ElevationCacheMB bounds the elevation tile cache.
 	ElevationCacheMB *int `json:"elevationCacheMB"`
+	// Model is the default propagation model, "bullington" or "delta"
+	// (#941 M2); a request may name the other. Bullington until the
+	// validation report has run on real Danish links.
+	Model *string `json:"model"`
 }
 
 // coverageSettings are map.coverage, resolved and bounded.
@@ -148,6 +164,7 @@ type coverageSettings struct {
 	cacheEntries        int
 	cacheTTL            time.Duration
 	elevationCacheBytes int
+	model               dhm.PathModel
 }
 
 // resolveCoverageSettings applies the defaults and bounds; an
@@ -164,7 +181,22 @@ func resolveCoverageSettings(cc CoverageConfig, logf func(string, ...interface{}
 		cacheTTL:        time.Duration(k.num("cacheTTLHours", cc.CacheTTLHours, 24, 0, 168, true) * float64(time.Hour)),
 		// 64 MB holds 128 tiles: about three 40 km disks.
 		elevationCacheBytes: k.integer("elevationCacheMB", cc.ElevationCacheMB, 64, 8, 1024) << 20,
+		model:               coverageModelSetting(cc.Model, logf),
 	}
+}
+
+// coverageModelSetting is map.coverage.model: a served model, else
+// Bullington with a warning that echoes nothing.
+func coverageModelSetting(v *string, logf func(string, ...interface{})) dhm.PathModel {
+	if v == nil {
+		return dhm.PathBullington
+	}
+	m, ok := dhm.ParsePathModel(*v)
+	if !ok {
+		logf("[coverage] config map.coverage.model must be \"bullington\" or \"delta\"; using bullington")
+		return dhm.PathBullington
+	}
+	return m
 }
 
 // CoverageRadio is the link budget the browser colours the loss with:
@@ -211,6 +243,10 @@ type CoverageClientConfig struct {
 	DHM bool `json:"dhm"`
 	// Fill is the Copernicus credit while the foreign fill is used.
 	Fill *DHMFillClientConfig `json:"fill,omitempty"`
+	// Model is the default propagation model, Models every model a
+	// request may name (#941 M2).
+	Model  string   `json:"model"`
+	Models []string `json:"models"`
 }
 
 // ── Service ────────────────────────────────────────────────────────────────
@@ -346,9 +382,18 @@ func newTerrainCoverageFromConfig(cfg *Config, proxy *dhmProxy, terrain *terrain
 func quietLogf(string, ...interface{}) {}
 
 // extractCoverageConfig lifts map.coverage out of the client-visible map;
-// only its canonical `enabled` switches it on (#884).
+// only its canonical `enabled` switches it on (#884), and only its
+// canonical `model` picks the model (#886): a case variant is reported
+// once and ignored, whatever the order of the keys.
 func (c *Config) extractCoverageConfig() {
-	liftMapBlock(c, "coverage", "predicted reach", &c.Coverage, func(cc *CoverageConfig) *bool { return &cc.Enabled })
+	if !liftMapBlock(c, "coverage", "predicted reach", &c.Coverage, func(cc *CoverageConfig) *bool { return &cc.Enabled }) || c.keys == nil {
+		return
+	}
+	var m *string // null or absent: the default
+	if json.Unmarshal(c.keys.Get("map", "coverage", "model"), &m) != nil {
+		m = nil
+	}
+	c.Coverage.Model = m
 }
 
 // ── Upstream budget ────────────────────────────────────────────────────────
@@ -401,13 +446,14 @@ func (e errCoverageBudget) Error() string { return "predicted reach busy" }
 // ── Request ────────────────────────────────────────────────────────────────
 
 // coverageParams are the only accepted query keys.
-var coverageParams = map[string]bool{"at": true, "ha": true, "hr": true, "r": true, "freq": true}
+var coverageParams = map[string]bool{"at": true, "ha": true, "hr": true, "r": true, "freq": true, "model": true}
 
 type coverageQuery struct {
 	at       terrainRef
 	ha, hr   *float64
 	radiusKm *float64
 	freq     *float64
+	model    dhm.PathModel // "": the operator's default
 }
 
 func parseCoverageQuery(q url.Values) (coverageQuery, error) {
@@ -420,6 +466,13 @@ func parseCoverageQuery(q url.Values) (coverageQuery, error) {
 	var err error
 	if cq.at, err = parseTerrainRef(q.Get("at")); err != nil {
 		return cq, err
+	}
+	if vs, ok := q["model"]; ok {
+		m, ok := dhm.ParsePathModel(vs[0])
+		if !ok {
+			return cq, errTerrainQuery
+		}
+		cq.model = m
 	}
 	for _, f := range []struct {
 		key   string
@@ -480,6 +533,9 @@ type coverageRequest struct {
 	txAssumed           bool
 	freqSource, kSource string
 	key                 string
+	// targets lists the nodes in reach to evaluate; only a computation
+	// calls it.
+	targets func(context.Context) ([]coverageReachTarget, bool)
 }
 
 // coverageRefusal is a refused request's body: the error, and the limit
@@ -523,16 +579,23 @@ func (s *Server) resolveCoverageRequest(ctx context.Context, c *terrainCoverage,
 	}
 	freq, freqSource := c.link.frequency(q.freq)
 	k, kSource := c.link.kFactor(nil)
+	model := c.set.model
+	if q.model != "" {
+		model = q.model
+	}
 	req.spec = dhm.CoverageSpec{Center: req.center, RadiusM: radiusM, ResolutionM: float64(c.set.resolutionM),
 		TxHeightM: snapHalf(tx), RxHeightM: snapHalf(rx), FreqMHz: freq, K: k,
-		OutPixelM: dhm.CoverageOutPixelFor(radiusM), Workers: c.workers}
+		OutPixelM: dhm.CoverageOutPixelFor(radiusM), Workers: c.workers, Model: model}
 	req.txSource, req.txAssumed, req.rxSource = txSource, assumed, rxSource
 	req.freqSource, req.kSource = freqSource, kSource
+	req.targets = func(ctx context.Context) ([]coverageReachTarget, bool) {
+		return s.coverageReachTargets(ctx, c, req.center, strings.ToLower(end.pubkey), radiusM)
+	}
 	req.key = coverageKey{
 		Lat: int64(math.Round(req.center.Lat * coverageSnap)), Lon: int64(math.Round(req.center.Lon * coverageSnap)),
 		RadiusDm: int64(math.Round(radiusM / 100)), TxHalfM: int64(math.Round(req.spec.TxHeightM * 2)), RxHalfM: int64(math.Round(req.spec.RxHeightM * 2)),
 		FreqKHz: int64(math.Round(freq * 1000)), KMilli: int64(math.Round(k * 1000)), ResolutionM: c.set.resolutionM,
-		Model: dhm.CoverageModel, DHM: c.dhm != nil, Fill: c.fill != nil,
+		Model: model.ID(), DHM: c.dhm != nil, Fill: c.fill != nil,
 	}.hash()
 	return req, 0, nil
 }
@@ -592,7 +655,9 @@ func (s *Server) handleTerrainCoverage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("X-CoreScope-Cache", state)
-	writeJSON(w, c.buildResponse(req, entry))
+	resp := c.buildResponse(req, entry)
+	resp.Reach = s.coverageReachView(r.Context(), c, entry.meta.Reach)
+	writeJSON(w, resp)
 }
 
 // handleTerrainCoverageRaster serves a cached reach's raster: the bytes
@@ -721,6 +786,15 @@ func (c *terrainCoverage) computeCall(req coverageRequest) func(context.Context)
 		}
 		entry := coverageEntry{meta: coverageEntryMeta{Width: res.Width, Height: res.Height, Bounds: res.Bounds,
 			CoveredPct: res.CoveredPct, DHM: used.dhm, Fill: used.fill}}
+		// Nodes in reach, from the same grid: no upstream call. Without a
+		// complete node snapshot the result has none and is kept briefly.
+		if targets, ok := req.targets(ctx); ok {
+			if entry.meta.Reach, err = evaluateReach(ctx, grid, spec, targets); err != nil {
+				return nil, dhm.ContextFailure(err)
+			}
+		} else {
+			partial = true
+		}
 		if !math.IsNaN(res.GroundM) {
 			g := round2(res.GroundM)
 			entry.meta.GroundM = &g
@@ -983,6 +1057,9 @@ type coverageEntryMeta struct {
 	CoveredPct float64       `json:"c"`
 	DHM        bool          `json:"d"`
 	Fill       bool          `json:"f"`
+	// Reach is the nodes in reach; nil when the node snapshot was not
+	// ready.
+	Reach *coverageReachMeta `json:"n,omitempty"`
 }
 
 // coverageEntry is one cached result: the metadata and the gzip raster.
@@ -1033,6 +1110,9 @@ type CoverageResponse struct {
 	// AttributionFill the Copernicus Art. 6(b) line when the fill was.
 	Attribution     string `json:"attribution,omitempty"`
 	AttributionFill string `json:"attributionFill,omitempty"`
+	// Reach is the nodes in reach (#941 M2); null when they could not be
+	// evaluated.
+	Reach *CoverageReach `json:"reach"`
 }
 
 // CoverageCenter is the transmitter's position, snapped to 4 decimals.
@@ -1092,7 +1172,7 @@ func (c *terrainCoverage) buildResponse(req coverageRequest, e coverageEntry) Co
 		Params: CoverageParams{RadiusKm: spec.RadiusM / 1000, ResolutionM: c.set.resolutionM,
 			TxHeightM: spec.TxHeightM, TxHeightSource: req.txSource, TxAssumed: req.txAssumed,
 			RxHeightM: spec.RxHeightM, RxHeightSource: req.rxSource,
-			FreqMHz: spec.FreqMHz, FreqSource: req.freqSource, K: spec.K, KSource: req.kSource, Model: dhm.CoverageModel},
+			FreqMHz: spec.FreqMHz, FreqSource: req.freqSource, K: spec.K, KSource: req.kSource, Model: spec.Model.ID()},
 		Raster: CoverageRaster{URL: coverageRasterRoute + "?key=" + req.key, Width: e.meta.Width, Height: e.meta.Height,
 			Bounds: e.meta.Bounds, Encoding: "loss-u8", LossBaseDb: dhm.CoverageLossBaseDb, LossStepDb: dhm.CoverageLossStepDb,
 			NoData: dhm.CoverageNoData, CoveredPct: e.meta.CoveredPct, Bytes: len(e.raster)},
@@ -1127,6 +1207,8 @@ func (s *Server) coverageClientConfig() *CoverageClientConfig {
 		PointAntenna: &DHMPointAntenna{M: h, Source: src},
 		Radio:        c.radio,
 		DHM:          c.dhm != nil,
+		Model:        string(c.set.model),
+		Models:       []string{string(dhm.PathBullington), string(dhm.PathDelta)},
 	}
 	if c.fill != nil {
 		out.Fill = &DHMFillClientConfig{
