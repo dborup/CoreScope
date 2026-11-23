@@ -148,3 +148,71 @@ INSERT INTO observations (transmission_id, observer_idx, direction, snr, rssi, s
   (-245124, 5, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
   (-245125, 5, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
   (-245126, 5, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER));
+
+-- #896 M1 (test-issue-896-advert-interval-bucket-e2e.js): three more
+-- repeaters for the bucket node lists, without positions like the M2 rows.
+--   "Alpha Flood E2E" (...06, SJC) and "bravo flood E2E" (...07, OAK): flood
+--       every 3 h x8 -> 10800, high. With "Short Flood E2E" (...05, SJC) the
+--       snapped Flood 3 h bucket holds three nodes, listed Alpha, bravo, Short
+--       (name order ignores case); region=SJC lists Alpha and Short.
+--   "Long Zero-hop E2E" (...08, OAK): zero-hop every 300 min x8 -> 18000,
+--       high, above the settable 60-240 min: the unsnapped Zero-hop 300 min
+--       bucket. (The estimator cannot produce an unsnapped flood value that
+--       rounds to a snapped one: flood candidates start at 2.7 h and snap up
+--       to 184.8 h. The Go and JS unit tests cover that collision.)
+INSERT INTO nodes (public_key, name, role, last_seen, first_seen, advert_count) VALUES
+  ('245e2e0000000000000000000000000000000000000000000000000000000006', 'Alpha Flood E2E', 'repeater', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-10 minutes'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-8 days'), 8),
+  ('245e2e0000000000000000000000000000000000000000000000000000000007', 'bravo flood E2E', 'repeater', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-10 minutes'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-8 days'), 8),
+  ('245e2e0000000000000000000000000000000000000000000000000000000008', 'Long Zero-hop E2E', 'repeater', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-10 minutes'), strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-8 days'), 8);
+
+INSERT INTO transmissions (id, raw_hex, hash, first_seen, route_type, payload_type, payload_version, decoded_json, channel_hash, from_pubkey, route_mask) VALUES
+  (-245201, '1100e2e20201', 'e2e896m1adv0001', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-60 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Alpha Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000006","timestamp":' || (CAST(strftime('%s', 'now', '-60 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000006', 2),
+  (-245202, '1100e2e20202', 'e2e896m1adv0002', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-240 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Alpha Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000006","timestamp":' || (CAST(strftime('%s', 'now', '-240 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000006', 2),
+  (-245203, '1100e2e20203', 'e2e896m1adv0003', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-420 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Alpha Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000006","timestamp":' || (CAST(strftime('%s', 'now', '-420 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000006', 2),
+  (-245204, '1100e2e20204', 'e2e896m1adv0004', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-600 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Alpha Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000006","timestamp":' || (CAST(strftime('%s', 'now', '-600 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000006', 2),
+  (-245205, '1100e2e20205', 'e2e896m1adv0005', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-780 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Alpha Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000006","timestamp":' || (CAST(strftime('%s', 'now', '-780 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000006', 2),
+  (-245206, '1100e2e20206', 'e2e896m1adv0006', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-960 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Alpha Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000006","timestamp":' || (CAST(strftime('%s', 'now', '-960 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000006', 2),
+  (-245207, '1100e2e20207', 'e2e896m1adv0007', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1140 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Alpha Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000006","timestamp":' || (CAST(strftime('%s', 'now', '-1140 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000006', 2),
+  (-245208, '1100e2e20208', 'e2e896m1adv0008', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1320 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"Alpha Flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000006","timestamp":' || (CAST(strftime('%s', 'now', '-1320 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000006', 2),
+  (-245209, '1100e2e20209', 'e2e896m1adv0009', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-150 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"bravo flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000007","timestamp":' || (CAST(strftime('%s', 'now', '-150 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000007', 2),
+  (-245210, '1100e2e2020a', 'e2e896m1adv0010', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-330 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"bravo flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000007","timestamp":' || (CAST(strftime('%s', 'now', '-330 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000007', 2),
+  (-245211, '1100e2e2020b', 'e2e896m1adv0011', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-510 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"bravo flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000007","timestamp":' || (CAST(strftime('%s', 'now', '-510 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000007', 2),
+  (-245212, '1100e2e2020c', 'e2e896m1adv0012', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-690 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"bravo flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000007","timestamp":' || (CAST(strftime('%s', 'now', '-690 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000007', 2),
+  (-245213, '1100e2e2020d', 'e2e896m1adv0013', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-870 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"bravo flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000007","timestamp":' || (CAST(strftime('%s', 'now', '-870 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000007', 2),
+  (-245214, '1100e2e2020e', 'e2e896m1adv0014', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1050 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"bravo flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000007","timestamp":' || (CAST(strftime('%s', 'now', '-1050 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000007', 2),
+  (-245215, '1100e2e2020f', 'e2e896m1adv0015', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1230 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"bravo flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000007","timestamp":' || (CAST(strftime('%s', 'now', '-1230 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000007', 2),
+  (-245216, '1100e2e20210', 'e2e896m1adv0016', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1410 minutes'), 1, 4, 0, '{"type":"ADVERT","name":"bravo flood E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000007","timestamp":' || (CAST(strftime('%s', 'now', '-1410 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000007', 2),
+  (-245217, '1200e2e20211', 'e2e896m1adv0017', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-20 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Long Zero-hop E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000008","timestamp":' || (CAST(strftime('%s', 'now', '-20 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000008', 4),
+  (-245218, '1200e2e20212', 'e2e896m1adv0018', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-320 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Long Zero-hop E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000008","timestamp":' || (CAST(strftime('%s', 'now', '-320 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000008', 4),
+  (-245219, '1200e2e20213', 'e2e896m1adv0019', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-620 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Long Zero-hop E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000008","timestamp":' || (CAST(strftime('%s', 'now', '-620 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000008', 4),
+  (-245220, '1200e2e20214', 'e2e896m1adv0020', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-920 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Long Zero-hop E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000008","timestamp":' || (CAST(strftime('%s', 'now', '-920 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000008', 4),
+  (-245221, '1200e2e20215', 'e2e896m1adv0021', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1220 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Long Zero-hop E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000008","timestamp":' || (CAST(strftime('%s', 'now', '-1220 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000008', 4),
+  (-245222, '1200e2e20216', 'e2e896m1adv0022', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1520 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Long Zero-hop E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000008","timestamp":' || (CAST(strftime('%s', 'now', '-1520 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000008', 4),
+  (-245223, '1200e2e20217', 'e2e896m1adv0023', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-1820 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Long Zero-hop E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000008","timestamp":' || (CAST(strftime('%s', 'now', '-1820 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000008', 4),
+  (-245224, '1200e2e20218', 'e2e896m1adv0024', strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-2120 minutes'), 2, 4, 0, '{"type":"ADVERT","name":"Long Zero-hop E2E","pubKey":"245e2e0000000000000000000000000000000000000000000000000000000008","timestamp":' || (CAST(strftime('%s', 'now', '-2120 minutes') AS INTEGER) - 1) || '}', NULL, '245e2e0000000000000000000000000000000000000000000000000000000008', 4);
+
+INSERT INTO observations (transmission_id, observer_idx, direction, snr, rssi, score, path_json, timestamp) VALUES
+  (-245201, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245202, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245203, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245204, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245205, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245206, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245207, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245208, 2, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245209, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245210, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245211, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245212, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245213, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245214, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245215, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245216, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245217, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245218, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245219, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245220, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245221, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245222, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245223, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER)),
+  (-245224, 3, 'rx', 5.0, -95, 0, '[]', CAST(strftime('%s', '2026-05-15T00:00:00Z') AS INTEGER));
