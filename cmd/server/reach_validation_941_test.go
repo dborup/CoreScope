@@ -64,9 +64,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/meshcore-analyzer/copdem"
 	"github.com/meshcore-analyzer/dbschema"
 	"github.com/meshcore-analyzer/dhm"
 )
@@ -444,7 +446,7 @@ type reachValidationParams struct {
 type reachValidationTerrain struct {
 	Source   string `json:"source"` // what supplied the elevation
 	Tiles    int    `json:"tilesGathered"`
-	Upstream int64  `json:"upstreamCalls"` // -1: not counted
+	Upstream int64  `json:"upstreamCalls"` // -1: not counted (the report says so)
 	Partial  bool   `json:"partial"`
 }
 
@@ -755,9 +757,9 @@ func fmtPtr(v *float64, pct bool) string {
 func (r reachValidationReport) markdown() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Predicted reach validation (#%s)\n\n", r.Issue)
-	fmt.Fprintf(&b, "Data as of %s. Radius %.0f km, %d m grid, %.3f MHz, k %.2f, link budget %.0f dB (reached: margin ≥ %.0f dB), window %.0f days. Terrain: %s, %d tiles gathered, %d upstream calls%s.\n\n",
+	fmt.Fprintf(&b, "Data as of %s. Radius %.0f km, %d m grid, %.3f MHz, k %.2f, link budget %.0f dB (reached: margin ≥ %.0f dB), window %.0f days. Terrain: %s, %d tiles gathered, %s%s.\n\n",
 		r.DataAsOf, r.Params.RadiusKm, r.Params.ResolutionM, r.Params.FreqMHz, r.Params.K, r.Params.BudgetDb, r.Params.ReachedMarginDb,
-		r.Params.WindowDays, r.Terrain.Source, r.Terrain.Tiles, r.Terrain.Upstream, map[bool]string{true: " (partial)", false: ""}[r.Terrain.Partial])
+		r.Params.WindowDays, r.Terrain.Source, r.Terrain.Tiles, upstreamText(r.Terrain.Upstream), map[bool]string{true: " (partial)", false: ""}[r.Terrain.Partial])
 	b.WriteString("## Pairs\n\n| Nodes | Hidden | Candidates | Scored | Positives | from observer_neighbors | from neighbor_edges | Negatives | Ambiguous edges | Weak edges | Positives beyond radius | No terrain | With SNR |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	p := r.Pairs
 	fmt.Fprintf(&b, "| %d | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d |\n\n", p.Nodes, p.HiddenNodes, p.Candidates, p.Scored,
@@ -791,6 +793,71 @@ func (r reachValidationReport) markdown() string {
 		b.WriteString("- " + n + "\n")
 	}
 	return b.String()
+}
+
+// countingFiller counts the upstream cost of the GLO-30 foreign fill: the
+// calls each Fill reports (never fewer than the requests it sent), and one
+// for a Fill that failed before reporting.
+type countingFiller struct {
+	terrainFiller
+	calls atomic.Int64
+}
+
+func (f *countingFiller) Fill(ctx context.Context, plan *dhm.Plan) (copdem.Result, error) {
+	res, err := f.terrainFiller.Fill(ctx, plan)
+	n := int64(res.Calls)
+	if err != nil && n < 1 {
+		n = 1
+	}
+	f.calls.Add(n)
+	return res, err
+}
+
+// countingSource counts the DHM WCS requests that pass through it.
+type countingSource struct {
+	dhm.ElevationSource
+	calls atomic.Int64
+}
+
+func (s *countingSource) FetchRaster(ctx context.Context, r dhm.RasterRequest) (dhm.Grid, error) {
+	s.calls.Add(1)
+	return s.ElevationSource.FetchRaster(ctx, r)
+}
+
+// countReachUpstream wraps the reach's terrain sources (DHM and the GLO-30
+// fill) so the run's upstream requests are counted, and returns the
+// counter for reachValidationOptions.upstream. It wraps the reach's own
+// fields, outside DHM's sub-budget, so a request is counted as it is made.
+func countReachUpstream(c *terrainCoverage) func() int64 {
+	var dh *countingSource
+	var fl *countingFiller
+	if c.dhm != nil {
+		dh = &countingSource{ElevationSource: c.dhm}
+		c.dhm = dh
+	}
+	if c.fill != nil {
+		fl = &countingFiller{terrainFiller: c.fill}
+		c.fill = fl
+	}
+	return func() int64 {
+		var n int64
+		if dh != nil {
+			n += dh.calls.Load()
+		}
+		if fl != nil {
+			n += fl.calls.Load()
+		}
+		return n
+	}
+}
+
+// upstreamText is the report's words for the upstream count: a negative
+// count means the run could not count, which is said, not printed.
+func upstreamText(n int64) string {
+	if n < 0 {
+		return "upstream calls not counted"
+	}
+	return fmt.Sprintf("%d upstream calls", n)
 }
 
 // reachValidationOptions are one run's settings.
@@ -907,6 +974,7 @@ func TestReachValidation941_RealDB(t *testing.T) {
 	}
 	o.terrainSource = map[[2]bool]string{{true, false}: "dhm", {true, true}: "dhm+glo30", {false, true}: "glo30"}[[2]bool{c.dhm != nil, c.fill != nil}]
 	o.outDir = outDir
+	o.upstream = countReachUpstream(c)
 	rep, err := runReachValidation(context.Background(), srv, c, db.conn, o)
 	if err != nil {
 		t.Fatal(err)
@@ -1114,7 +1182,6 @@ func fixtureValidationOptions(t *testing.T, src *fakeElevation, radiusM float64)
 	o := defaultReachValidationOptions(radiusM)
 	o.minEdgeCount = 1
 	o.terrainSource = "fake (synthetic terrain)"
-	o.upstream = func() int64 { return src.calls.Load() }
 	o.sleep = func(time.Duration) { t.Fatal("the upstream budget ran out") }
 	return o
 }
@@ -1165,9 +1232,14 @@ func TestReachValidation941_FixtureMechanics(t *testing.T) {
 	}
 	o := fixtureValidationOptions(t, src, sc.radiusM)
 	o.outDir = out
+	o.upstream = countReachUpstream(c) // the same wiring as the real-data run
 	rep, err := runReachValidation(context.Background(), srv, c, db.conn, o)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// The report's upstream count is the fake upstream's own request count.
+	if rep.Terrain.Upstream < 0 || rep.Terrain.Upstream != src.calls.Load() {
+		t.Fatalf("report counts %d upstream calls, the fake upstream saw %d", rep.Terrain.Upstream, src.calls.Load())
 	}
 	if fileSHA(t, path) != before {
 		t.Fatal("the harness changed the database copy")
@@ -1459,5 +1531,52 @@ func TestReachValidation941_Metrics(t *testing.T) {
 	// (−120) = 8 (fallback); offsets 5 and −3, median 1.
 	if m.SNRPairs != 2 || *m.MedianSNROffsetDb != 1 || m.Spearman != nil {
 		t.Fatalf("SNR %+v", m)
+	}
+}
+
+// TestReachValidation941_UpstreamCountWording: a run that cannot count says
+// so in words, never "-1 upstream calls"; a counted run prints its number.
+func TestReachValidation941_UpstreamCountWording(t *testing.T) {
+	for _, tc := range []struct {
+		n    int64
+		want string
+	}{{-1, "upstream calls not counted"}, {0, "0 upstream calls"}, {37, "37 upstream calls"}} {
+		md := reachValidationReport{Terrain: reachValidationTerrain{Source: "x", Upstream: tc.n}}.markdown()
+		if !strings.Contains(md, tc.want+".") && !strings.Contains(md, tc.want+" (partial)") {
+			t.Fatalf("n=%d: header lacks %q:\n%s", tc.n, tc.want, md[:300])
+		}
+		if strings.Contains(md, "-1") {
+			t.Fatalf("n=%d: the report prints -1", tc.n)
+		}
+	}
+}
+
+type nopSource struct{}
+
+func (nopSource) FetchRaster(context.Context, dhm.RasterRequest) (dhm.Grid, error) {
+	return dhm.Grid{}, nil
+}
+
+type fakeFiller struct {
+	res copdem.Result
+	err error
+}
+
+func (f fakeFiller) Fill(context.Context, *dhm.Plan) (copdem.Result, error) { return f.res, f.err }
+
+// TestReachValidation941_CountsFillUpstream: the GLO-30 fill's cost is part
+// of the count, and a failed fill counts as one attempt.
+func TestReachValidation941_CountsFillUpstream(t *testing.T) {
+	c := &terrainCoverage{dhm: nopSource{}, fill: fakeFiller{res: copdem.Result{Calls: 3}}}
+	n := countReachUpstream(c)
+	_, _ = c.dhm.FetchRaster(context.Background(), dhm.RasterRequest{})
+	_, _ = c.fill.Fill(context.Background(), nil)
+	c.fill.(*countingFiller).terrainFiller = fakeFiller{err: errors.New("down")}
+	_, _ = c.fill.Fill(context.Background(), nil)
+	if got := n(); got != 1+3+1 {
+		t.Fatalf("count %d, want DHM 1 + fill 3 + failed fill 1", got)
+	}
+	if got := countReachUpstream(&terrainCoverage{})(); got != 0 {
+		t.Fatalf("no sources: %d", got)
 	}
 }
