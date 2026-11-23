@@ -6818,6 +6818,7 @@ body.embed .warmup-pills { display: none !important; }
 .reach-nir-list { list-style: none; margin: 4px 0; padding: 0; max-height: 220px; overflow-y: auto; border-top: 1px solid var(--border); }
 .reach-nir-list[hidden] { display: none; }
 .reach-nir-item {
+  position: relative;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   column-gap: 8px;
@@ -6828,6 +6829,8 @@ body.embed .warmup-pills { display: none !important; }
 .reach-nir-item[hidden] { display: none; }
 .reach-nir-item .reach-swatch { grid-row: 1 / span 2; }
 .reach-nir-link { grid-column: 2; color: var(--link-color); overflow-wrap: anywhere; }
+/* The whole row is the link's tap target, not just its text. */
+.reach-nir-link::after { content: ''; position: absolute; inset: 0; }
 .reach-nir-meta { grid-column: 2; color: var(--text-muted); font-size: 0.9em; }
 .reach-nir-margin { grid-column: 3; grid-row: 1 / span 2; font-variant-numeric: tabular-nums; }
 .reach-swatch-none { background: transparent; }

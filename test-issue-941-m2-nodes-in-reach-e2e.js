@@ -28,9 +28,9 @@
  *      is reached by touch swipes on the sheet alone (it sits at most
  *      700 px below the chip) and touch-dragged; that recounts the list
  *      with no request; there is no horizontal scroll; the chip and the
- *      node rows are on screen and on top, a row given keyboard focus is
- *      not left under the sheet's sticky head, and a tap on a row's link
- *      opens the node;
+ *      node rows are on screen and on top, a row is one tap target of at
+ *      least 44 px, a row given keyboard focus is not left under the
+ *      sheet's sticky head, and a tap on a row's margin opens the node;
  *   5. no console error, and no request leaves localhost.
  *
  * SHOTS_DIR, when set, receives small JPEG screenshots.
@@ -449,6 +449,17 @@ function rasterFor(c, radiusKm) {
         l = await listed(page);
         assert(l.length === 27 && l[0].name === 'Near mast' && l[0].cls === 'marginal', 'All at −10 dBm ' + JSON.stringify(l.slice(0, 2)));
         await touchScrollTo(page, cdp, ROW, 8);
+        // The whole row is the link's tap target: the swatch, the meta line
+        // and the margin hit the link, and the row is at least 44 px tall.
+        const row = await page.evaluate((sel) => {
+          const li = document.querySelector(sel);
+          const a = li.querySelector('a');
+          const r = li.getBoundingClientRect();
+          const at = (x, y) => { const h = document.elementFromPoint(x, y); return !!h && (h === a || a.contains(h)); };
+          return { h: r.height, swatch: at(r.left + 4, r.top + r.height / 2), meta: at(r.left + r.width / 2, r.bottom - 4),
+            margin: at(r.right - 4, r.top + r.height / 2) };
+        }, ROW);
+        assert(row.h >= 44 && row.swatch && row.meta && row.margin, 'row target ' + JSON.stringify(row));
         await shot(page, `941-m2-nodes-phone-${theme}-${width}x${height}.jpg`);
         // Keyboard focus on a row under the sticky head brings it out from
         // under the head (the sheet's scroll-padding-top).
@@ -463,7 +474,8 @@ function rasterFor(c, radiusKm) {
         }, ROW);
         assert(focused.under && focused.top >= focused.headBottom, 'a focused row stays under the head ' + JSON.stringify(focused));
         await touchScrollTo(page, cdp, ROW, 8);
-        await page.locator(ROW + ' a').first().tap();
+        const tapAt = await page.evaluate((sel) => { const r = document.querySelector(sel).getBoundingClientRect(); return { x: r.right - 4, y: r.bottom - 4 }; }, ROW);
+        await page.touchscreen.tap(tapAt.x, tapAt.y);
         await page.waitForFunction(() => location.hash.indexOf('#/nodes/' + '1'.repeat(64)) === 0, null, { timeout: 5000 });
         noNetwork(rec);
       } finally { await ctx.close(); }
