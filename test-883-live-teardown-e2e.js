@@ -14,6 +14,7 @@
  *      teardown (pathsLayer is null then).
  *   3. pulseNode(): the ghost-marker timeout raises no TypeError after
  *      teardown, and never deletes the next mount's marker for the key.
+ *      A fired liveLater() timeout leaves its set.
  *   4. The replay hand-off: the 1.5 s replay render (real fixture packets
  *      with a path) is not drawn by the next mount, and its 12 s
  *      suppressLive does not mute the next mount's live packets.
@@ -156,11 +157,16 @@ function advert(hash) {
       await h.remount();
       assert(!(await h.run(10000)), 'run 10 s');
       // The new mount's own ghost for the same key lives 30 s from now.
+      const later = () => h.page.evaluate(() => window._liveTestSeams.getLaterCount());
+      const idle = await later();
       await h.page.evaluate(() => window._liveTestSeams.triggerPulse('ghost-remount', [37.3, -122.0], 'ADVERT'));
+      assert(await later() > idle, 'the ghost timeout is tracked');
       assert(!(await h.run(21000)), 'run past the old ghost\'s 30 s');
       assert(await h.page.evaluate(() => !!window._liveNodeMarkers()['ghost-remount']), 'the new mount\'s marker was deleted by the old mount\'s timeout');
       assert(!(await h.run(10000)), 'run past the new ghost\'s 30 s');
       assert(await h.page.evaluate(() => !window._liveNodeMarkers()['ghost-remount']), 'the new ghost expires on its own');
+      // Bounded: a fired timeout leaves the set.
+      assert(await later() === idle, 'fired liveLater timeouts stay in the set: ' + idle + ' → ' + await later());
       assert(!h.errors.length, h.errors.join('; '));
       await h.ctx.close();
     });

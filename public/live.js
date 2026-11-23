@@ -4051,7 +4051,9 @@
     getPathCount: () => (typeof recentPaths !== 'undefined' ? recentPaths.length : 0),
     wake: wakeCanvasEngine,
     getPulses: () => activePulses,
-    triggerPulse: pulseNode
+    triggerPulse: pulseNode,
+    // #883 M3: liveLater() timeouts pending now (each leaves when it fires).
+    getLaterCount: () => liveTimeouts.size
   };
 
   async function replayRecent() {
