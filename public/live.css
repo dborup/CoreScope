@@ -615,12 +615,32 @@ body.live-fullscreen:not(.nav-pinned) .live-header {
    the top nav (even when pinned), the bottom nav reserve, the map's
    top controls (zoom, layers, fullscreen, settings, legend), the beacon
    strip, the stats pills and the Moments pause and drawer buttons. The map
-   credit (.leaflet-bottom) stays visible: --vcr-bar-height is 0 here, so it
-   sits at the bottom edge. live.js publishes the same 0 inline once it
-   measures the bar, but Live awaits its nodes before that, and the credit
-   is on screen by then: this rule keeps it off the 58px fallback. */
-body.kiosk { --bottom-nav-reserve: 0px; }
+   credit (.leaflet-bottom) stays visible. --vcr-bar-height is 0 here: live.js
+   publishes the same 0 inline once it measures the bar, but Live awaits its
+   nodes before that, and whatever sits on the bar height (the Moments on a
+   phone) is on screen by then: this rule keeps it off the 58px fallback.
+   #883 M2 — the TV layout. Two tokens size it (the customizer later, M4):
+   --kiosk-scale multiplies the kiosk type and the large Moments (1 up to
+   1280x720 and on phones, 1.5 at 1080p, 2 at 1440p and up), and
+   --kiosk-safe-inset (3 % of the short side, owner decision 8) keeps every
+   kiosk element and the map credit clear of TV overscan. */
+body.kiosk {
+  --bottom-nav-reserve: 0px;
+  --kiosk-scale: 1;
+  --kiosk-safe-inset: 3vmin;
+}
+@media (min-width: 1200px) and (min-height: 800px) { body.kiosk { --kiosk-scale: 1.25; } }
+@media (min-width: 1600px) and (min-height: 1000px) { body.kiosk { --kiosk-scale: 1.5; } }
+@media (min-width: 2400px) and (min-height: 1350px) { body.kiosk { --kiosk-scale: 2; } }
 body.kiosk .live-page { --vcr-bar-height: 0px; }
+/* The credit is never hidden, faded or collapsed (OSM, CARTO terms): inside
+   the safe inset at the bottom-right corner, its type scaled for distance. */
+body.kiosk #liveMap .leaflet-bottom { bottom: max(var(--kiosk-safe-inset), env(safe-area-inset-bottom, 0px)); }
+body.kiosk #liveMap .leaflet-right { right: max(var(--kiosk-safe-inset), env(safe-area-inset-right, 0px)); }
+body.kiosk #liveMap .leaflet-control-attribution { font-size: calc(11px * var(--kiosk-scale)); }
+/* The closed nav drawer sits off-screen left, but its shadow reached ~20px
+   into the picture; kiosk has no way to open it. */
+body.kiosk .nav-drawer:not(.is-open) { box-shadow: none; }
 /* No top nav, no bottom nav: the page is the whole viewport from the first
    paint, before live.js measures it (the base rule keeps 52px for the nav). */
 body.kiosk:has(.live-page) #app:has(.live-page),
@@ -659,8 +679,8 @@ body.kiosk.kiosk-idle * { cursor: none !important; }
 /* Step label and "2 / 3", top-left inside a 3 % inset (TV overscan). */
 .live-kiosk-step {
   position: absolute;
-  top: max(3vmin, env(safe-area-inset-top, 0px));
-  left: max(3vmin, env(safe-area-inset-left, 0px));
+  top: max(var(--kiosk-safe-inset), env(safe-area-inset-top, 0px));
+  left: max(var(--kiosk-safe-inset), env(safe-area-inset-left, 0px));
   z-index: 950;
   max-width: calc(100% - 6vmin - 140px);
   padding: 10px 16px 12px;
@@ -672,14 +692,14 @@ body.kiosk.kiosk-idle * { cursor: none !important; }
   pointer-events: none;
 }
 .live-kiosk-step-label {
-  font-size: 28px;
+  font-size: calc(28px * var(--kiosk-scale));
   font-weight: 700;
   line-height: 1.15;
   overflow-wrap: anywhere;
 }
 .live-kiosk-step-count {
   margin-top: 2px;
-  font-size: 16px;
+  font-size: calc(16px * var(--kiosk-scale));
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
 }
@@ -700,7 +720,7 @@ body.kiosk.kiosk-idle * { cursor: none !important; }
 /* "Skipped: …" for 10 s at start. */
 .live-kiosk-note {
   position: absolute;
-  top: max(3vmin, env(safe-area-inset-top, 0px));
+  top: max(var(--kiosk-safe-inset), env(safe-area-inset-top, 0px));
   left: 50%;
   transform: translateX(-50%);
   z-index: 950;
@@ -717,8 +737,8 @@ body.kiosk.kiosk-idle * { cursor: none !important; }
 /* Exit button: shown with the cursor, hidden when idle. */
 .live-kiosk-exit {
   position: absolute;
-  top: max(3vmin, env(safe-area-inset-top, 0px));
-  right: max(3vmin, env(safe-area-inset-right, 0px));
+  top: max(var(--kiosk-safe-inset), env(safe-area-inset-top, 0px));
+  right: max(var(--kiosk-safe-inset), env(safe-area-inset-right, 0px));
   z-index: 1150;
   min-height: 44px;
   padding: 0 16px;
@@ -741,6 +761,121 @@ body.kiosk.kiosk-idle .live-kiosk-exit { opacity: 0; visibility: hidden; }
    .live-page and the button comes later, so a sibling selector does it.
    display, not visibility: no 0.3 s fade during which it still takes taps. */
 body.kiosk .live-node-detail:not(.hidden) ~ .live-kiosk-exit { display: none; }
+
+/* #883 M2 — big numbers (plan §4.3). The HUD only groups the step label
+   and the tiles for the phone layout below; on a desktop or a TV each is
+   placed on its own: the tiles along the bottom, above the map credit. */
+.live-kiosk-hud { display: contents; }
+.live-kiosk-tiles {
+  position: absolute;
+  left: max(var(--kiosk-safe-inset), env(safe-area-inset-left, 0px));
+  right: max(var(--kiosk-safe-inset), env(safe-area-inset-right, 0px));
+  bottom: calc(max(var(--kiosk-safe-inset), env(safe-area-inset-bottom, 0px)) + var(--live-credit-height, 0px) + 8px);
+  z-index: 950;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: calc(12px * var(--kiosk-scale));
+  pointer-events: none;
+}
+.live-kiosk-tile {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
+  padding: calc(10px * var(--kiosk-scale)) calc(18px * var(--kiosk-scale));
+  border-radius: calc(10px * var(--kiosk-scale));
+  background: color-mix(in srgb, var(--kiosk-tile-bg) 92%, transparent);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 10px var(--shadow);
+}
+.live-kiosk-tile[hidden] { display: none; }
+.live-kiosk-tile-line {
+  display: flex;
+  align-items: baseline;
+  gap: calc(10px * var(--kiosk-scale));
+  min-width: 0;
+}
+.live-kiosk-tile-value {
+  font-size: calc(56px * var(--kiosk-scale));
+  font-weight: 700;
+  line-height: 1.05;
+  color: var(--kiosk-number);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.live-kiosk-tile-area {
+  min-width: 0;
+  max-width: calc(360px * var(--kiosk-scale)); /* a long area label ellipsizes; the tiles stay on one row */
+  font-size: calc(28px * var(--kiosk-scale));
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-kiosk-tile-area::before { content: '· '; }
+.live-kiosk-tile-area:empty { display: none; }
+.live-kiosk-tile-label {
+  margin-top: calc(4px * var(--kiosk-scale));
+  font-size: calc(18px * var(--kiosk-scale));
+  color: var(--text-muted);
+}
+.live-kiosk-tile--records {
+  gap: calc(8px * var(--kiosk-scale));
+  max-width: min(calc(560px * var(--kiosk-scale)), 100%);
+}
+.live-kiosk-record { display: flex; flex-direction: column; min-width: 0; }
+.live-kiosk-record-label {
+  font-size: calc(16px * var(--kiosk-scale));
+  color: var(--text-muted);
+}
+.live-kiosk-record-line {
+  display: flex;
+  align-items: baseline;
+  gap: calc(10px * var(--kiosk-scale));
+  min-width: 0;
+}
+.live-kiosk-record-value {
+  max-width: 100%;
+  font-size: calc(28px * var(--kiosk-scale));
+  font-weight: 700;
+  color: var(--kiosk-number);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-kiosk-record-detail {
+  min-width: 0;
+  font-size: calc(16px * var(--kiosk-scale));
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.live-kiosk-record-detail:empty { display: none; }
+
+/* Large Moments (plan §4.3): top-right inside the inset, under the exit
+   button's spot, at most two cards (live.js cardCap). The size tokens are
+   the #881 card's; on a phone the existing one-card rule stays. */
+@media (min-width: 641px) {
+  body.kiosk .live-moments {
+    --moment-stack-width: calc(420px * var(--kiosk-scale));
+    --moment-title-size: calc(18px * var(--kiosk-scale));
+    --moment-detail-size: calc(16px * var(--kiosk-scale));
+    --moment-icon-size: calc(24px * var(--kiosk-scale));
+    --moment-pad: calc(10px * var(--kiosk-scale)) calc(14px * var(--kiosk-scale));
+    top: calc(max(var(--kiosk-safe-inset), env(safe-area-inset-top, 0px)) + 56px);
+    right: max(var(--kiosk-safe-inset), env(safe-area-inset-right, 0px));
+    bottom: auto;
+    left: auto;
+    transform: none;
+  }
+  body.kiosk .live-moments-bar { align-self: flex-end; font-size: calc(13px * var(--kiosk-scale)); }
+  body.kiosk .live-moment-link { font-size: calc(12px * var(--kiosk-scale)); }
+}
 
 /* Start overlay: the Fullscreen API needs a click or a key. */
 .live-kiosk-overlay {
@@ -784,6 +919,34 @@ body.kiosk .live-node-detail:not(.hidden) ~ .live-kiosk-exit { display: none; }
 @media (max-width: 640px) {
   /* Here the Moments bar holds only the drawer button, hidden above. */
   body.kiosk .live-moments-bar { display: none !important; }
+  /* The one card stays clear of the credit, which kiosk lifts into the
+     safe inset. */
+  body.kiosk .live-moments { bottom: calc(max(var(--kiosk-safe-inset), env(safe-area-inset-bottom, 0px)) + var(--live-credit-height, 0px) + 10px); }
+  /* One column at the top: the step label, then one compact row of tiles
+     (the Moments card and the credit keep the bottom). */
+  .live-kiosk-hud {
+    position: absolute;
+    top: max(var(--kiosk-safe-inset), env(safe-area-inset-top, 0px));
+    left: max(var(--kiosk-safe-inset), env(safe-area-inset-left, 0px));
+    right: max(var(--kiosk-safe-inset), env(safe-area-inset-right, 0px));
+    z-index: 950;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    pointer-events: none;
+  }
+  .live-kiosk-hud > .live-kiosk-step { position: static; }
+  .live-kiosk-tiles { position: static; order: 1; align-self: stretch; align-items: stretch; flex-wrap: nowrap; gap: 6px; }
+  .live-kiosk-tile { flex: 1 1 0; padding: 6px 8px; border-radius: 8px; }
+  .live-kiosk-tile--records { flex-grow: 1.6; gap: 2px; }
+  .live-kiosk-tile-line { flex-wrap: wrap; gap: 0 4px; }
+  .live-kiosk-tile-value { font-size: 20px; }
+  .live-kiosk-tile-area { font-size: 12px; }
+  .live-kiosk-tile-label { margin-top: 2px; font-size: 11px; }
+  .live-kiosk-record-label { font-size: 10px; }
+  .live-kiosk-record-value { font-size: 13px; }
+  .live-kiosk-record-detail { display: none; }
   .live-kiosk-step { padding: 6px 10px 8px; max-width: calc(100% - 6vmin - 120px); }
   .live-kiosk-step-label { font-size: 20px; }
   .live-kiosk-step-count { font-size: 13px; }
@@ -1899,13 +2062,24 @@ select.live-heard-select {
  * --live-ctrl-rail so a card can never reach the Leaflet control rail.
  * Colours are theme variables; the card fill and the per-kind accents are
  * the --moment-* tokens (style.css, customizer Theme tab). Visible cards and
- * the dwell are viewer settings (live-moments.js SETTINGS). */
+ * the dwell are viewer settings (live-moments.js SETTINGS).
+ * #883 M2: the card sizes are tokens too, so Live's kiosk mode can show
+ * large cards. These defaults are the px the cards always had; only
+ * body.kiosk scales them (the kiosk rules near the top of this file). */
+.live-moments,
+.live-moments-drawer {
+  --moment-stack-width: 320px;
+  --moment-title-size: 12px;
+  --moment-detail-size: 12px;
+  --moment-icon-size: 16px;
+  --moment-pad: 6px 8px;
+}
 .live-moments {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
   bottom: calc(var(--vcr-bar-height, 58px) + var(--live-credit-height, 0px) + 10px);
-  width: min(320px, calc(100% - 24px));
+  width: min(var(--moment-stack-width), calc(100% - 24px));
   z-index: 900;
   display: flex;
   flex-direction: column;
@@ -1992,7 +2166,7 @@ select.live-heard-select {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 8px;
+  padding: var(--moment-pad);
   border: 0;
   background: transparent;
   color: inherit;
@@ -2002,11 +2176,11 @@ select.live-heard-select {
 }
 .live-moment-main:hover,
 .live-moment-main:focus-visible { background: var(--accent-bg); }
-.live-moment-main .ph-icon { flex: none; color: var(--moment-accent, var(--accent)); }
+.live-moment-main .ph-icon { flex: none; color: var(--moment-accent, var(--accent)); font-size: var(--moment-icon-size); }
 .live-moment-text { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
-.live-moment-title { font-size: 12px; font-weight: 600; }
+.live-moment-title { font-size: var(--moment-title-size); font-weight: 600; }
 .live-moment-detail,
-.live-moment-time { font-size: 12px; color: var(--text-muted); }
+.live-moment-time { font-size: var(--moment-detail-size); color: var(--text-muted); }
 .live-moment-detail { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .live-moment-time { flex: none; white-space: nowrap; }
 .live-moment-link {

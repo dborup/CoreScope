@@ -10,7 +10,8 @@
  *   ws-open     each socket (re)open re-seeds Moments
  *   sleep/wake  a heartbeat that runs late re-anchors the tour from now
  *   autoReload  on while a kiosk controller is mounted
- *   budget      at most 3 kiosk timers in the steady state
+ *   budget      at most 4 kiosk timers in the steady state (M2's numbers
+ *               poll included)
  */
 'use strict';
 const assert = require('assert');
@@ -63,7 +64,7 @@ function page(opts) {
   if (opts.hidden) doc.hidden = true;
   const win = new Target();
   const p = { clock, doc, win, hash: '#/live?' + (opts.hash || TOUR), flights: [], mounts: 0, remountCalls: 0,
-    reseeds: 0, cards: 0, mode: 'LIVE', autoReload: [], c: null, wakeLock: opts.wakeLock === undefined ? makeWakeLock() : opts.wakeLock };
+    reseeds: 0, cards: 0, mode: 'LIVE', autoReload: [], statusReads: 0, c: null, wakeLock: opts.wakeLock === undefined ? makeWakeLock() : opts.wakeLock };
   p.mount = () => {
     p.mounts++;
     const root = new El('div');
@@ -91,6 +92,9 @@ function page(opts) {
       wakeLock: p.wakeLock,
       setAutoReload: (on) => p.autoReload.push(!!on),
       remountMs: opts.remountMs,
+      // #883 M2 numbers (an M1/M3-only host passes none)
+      fetchStatus: opts.numbers ? () => { p.statusReads++; return Promise.resolve({ active: 7 }); } : undefined,
+      fetchAreaStats: opts.numbers ? () => Promise.resolve({ density: [] }) : undefined,
     });
     return p.c;
   };
@@ -504,8 +508,8 @@ test('autoReload is on while a kiosk controller is mounted (off, on across a rem
   assert.deepStrictEqual(p.autoReload.slice(-1), [false]);
 });
 
-test('steady state: at most 3 kiosk timers (step, cursor, heartbeat) at any time over 13 h', async () => {
-  const p = page();
+test('steady state: at most 4 kiosk timers (step, cursor, heartbeat, numbers poll) at any time over 13 h', async () => {
+  const p = page({ numbers: true });
   await flush();
   let max = 0;
   for (let t = 0; t < 13 * 60; t++) {           // one sample a minute
@@ -515,7 +519,7 @@ test('steady state: at most 3 kiosk timers (step, cursor, heartbeat) at any time
     if (t % 7 === 0) p.doc.fire('pointermove', {});
   }
   assert.strictEqual(p.remountCalls, 2, 'two remounts in 13 h');
-  assert(max <= 3, 'timers ' + max);
+  assert(max <= 4, 'timers ' + max);
   p.destroy();
   assert.strictEqual(p.c.stats().timers, 0);
   assert.strictEqual(K.liveCount(), 0);

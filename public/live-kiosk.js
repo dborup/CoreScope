@@ -1,5 +1,7 @@
 /* === CoreScope — live-kiosk.js === */
 /* #883 M1 — Live TV/kiosk mode: #/live?kiosk=1&tour=<areaKey>,…&every=60.
+ * #883 M2 — the TV layout: big-number tiles, large Moments and a kiosk
+ * theme (&theme=dark|light|auto, dark by default, never saved).
  *
  * live.js owns the page, the map and body.kiosk (the CSS that hides the
  * chrome); this module owns the tour, the idle cursor, the start overlay
@@ -16,6 +18,13 @@
  * setTimeout per step (no setInterval), the areas are fetched once per
  * mount, and a step makes no request. Pointer moves only store a time.
  *
+ * Big numbers (M2, plan §4.3): packets/min is Live's own 60 s count, handed
+ * in on its 2 s tick (setRate); active nodes come from two bulk reads,
+ * /api/nodes/network-status (whole mesh) and the cached /api/analytics/areas
+ * (the current tour area), once per 60 s while the tab shows and never
+ * while it is hidden; the records are the newest rolling Moments
+ * (onMoment). A tile writes its text only when the text changes.
+ *
  * Nothing is persisted: kiosk is on by URL only, the tour never writes the
  * hash or localStorage, and exiting strips the kiosk params from the hash.
  *
@@ -29,8 +38,9 @@
  * Wake Lock (re-taken when the browser drops it), re-seeds Moments on every
  * socket (re)open, and turns on version-notice's auto-reload.
  *
- * XSS: area keys and labels come from the operator's config and reach the
- * page through textContent only. No innerHTML.
+ * XSS: area keys and labels come from the operator's config, node names
+ * from the mesh; all of them reach the page through textContent only. No
+ * innerHTML.
  */
 'use strict';
 
@@ -45,6 +55,12 @@
   var NOTE_MS = 10000;         // "Skipped: …" stays this long
   var RESUME_MIN_MS = 60000;
   var RESUME_MAX_MS = 300000;
+  var NUMBERS_POLL_MS = 60000; // network-status + analytics/areas, while visible
+  // The server's default Moments recordWindowHours: a record older than
+  // this is no longer the rolling record, and the label says "24 h".
+  var RECORD_WINDOW_MS = 24 * 3600 * 1000;
+  var THEMES = ['dark', 'light', 'auto'];
+  var THEME_DEFAULT = 'dark';
   var REMOUNT_MS_DEFAULT = 6 * 3600000;   // #883 M3, owner decision 6
   var REMOUNT_MS_MIN = 3600000;
   var REMOUNT_MS_MAX = 24 * 3600000;
@@ -52,8 +68,9 @@
   var WAKE_GAP_MS = 2 * BEAT_MS; // a heartbeat later than this: the machine slept
   var CARRY_MS = 60000;        // a remount's step carry-over is used within this
   // Kiosk config values for the customizer later (#883 M4, AGENTS.md
-  // rule 8): every, the idle seconds, the resume delay and the remount
-  // interval.
+  // rule 8): every, the idle seconds, the resume delay, the number poll,
+  // the theme, the scale and the safe inset (live.css --kiosk-*), which
+  // tiles show, and the remount interval.
 
   // Module state, so it survives an in-place remount (not a reload).
   var carry = null;            // { hash, step, at } from the mount that remounted
@@ -72,7 +89,9 @@
     var every = parseInt(get('every'), 10);
     if (isNaN(every)) every = EVERY_DEFAULT;
     every = Math.min(EVERY_MAX, Math.max(EVERY_MIN, every));
-    return { kiosk: get('kiosk') === '1', tour: tour, every: every };
+    var theme = get('theme');
+    if (THEMES.indexOf(theme) === -1) theme = THEME_DEFAULT;
+    return { kiosk: get('kiosk') === '1', tour: tour, every: every, theme: theme };
   }
 
   // The hash to leave kiosk by: the same route without kiosk/tour/every.
@@ -82,7 +101,7 @@
     var route = (q === -1 ? h : h.slice(0, q)) || '#/live';
     if (q === -1) return route;
     var params = new URLSearchParams(h.slice(q + 1));
-    ['kiosk', 'tour', 'every'].forEach(function (k) { params.delete(k); });
+    ['kiosk', 'tour', 'every', 'theme'].forEach(function (k) { params.delete(k); });
     var rest = params.toString();
     return rest ? route + '?' + rest : route;
   }
@@ -96,6 +115,86 @@
 
   function resumeAfterMs(everyS) {
     return Math.min(RESUME_MAX_MS, Math.max(RESUME_MIN_MS, 2 * everyS * 1000));
+  }
+
+  // ── Theme ───────────────────────────────────────────────────────────────
+  /* o: { get() → 'dark'|'light', apply(theme) } — apply must not persist
+   * (app.js applyThemeTransient). auto keeps the viewer's theme. Returns
+   * the restore for destroy(), or null when nothing changed. restore puts
+   * the viewer's theme back once, and only while kiosk's is still the one
+   * showing (a toggle in another tab meanwhile wins). */
+  function applyKioskTheme(theme, o) {
+    if ((theme !== 'dark' && theme !== 'light') || !o || typeof o.apply !== 'function' || typeof o.get !== 'function') return null;
+    var prev = o.get();
+    if (prev === theme) return null;
+    o.apply(theme);
+    var done = false;
+    return function restore() {
+      if (done) return;
+      done = true;
+      if (prev && o.get() === theme) o.apply(prev);
+    };
+  }
+
+  // ── Big numbers: formatting and the view model ──────────────────────────
+  function count(v) {
+    var n = typeof v === 'number' ? v : (typeof v === 'string' && v !== '' ? Number(v) : NaN);
+    return isFinite(n) && n >= 0 ? n : null;
+  }
+  function fmtCount(v) {
+    var n = count(v);
+    return n === null ? '—' : String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+  function fmtKm(v) {
+    var n = count(v);
+    return n === null ? '—' : n.toFixed(1) + ' km';
+  }
+  function nodeName(n) {
+    return (n && (n.name || (typeof n.publicKey === 'string' ? n.publicKey.slice(0, 8) : ''))) || '?';
+  }
+  // A record shown as "24 h" must be at most 24 h old, by its own time.
+  function fresh(m, now) {
+    return !!(m && typeof m.at === 'number' && isFinite(m.at) && now - m.at <= RECORD_WINDOW_MS);
+  }
+  // How old a moment is, for the busiest tile: it is a rolling record up to
+  // 24 h old, so the tile must not read as "right now" when it is not.
+  function ageText(at, now) {
+    var s = Math.max(0, Math.round((now - at) / 1000));
+    if (s < 5) return 'just now';
+    if (s < 60) return s + ' s ago';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    return Math.round(s / 3600) + ' h ago';
+  }
+  var NO_RECORD = { value: '—', detail: 'since restart' };
+
+  /* in: { rate, status ({active}), density ([{areaKey,label,active}]),
+   *       area ({key,label} of the tour step, or null), momentsOn,
+   *       link, busiest (LiveMoments.normalize() moments), now }
+   * out: strings only — { rate, active, area, records: null | {link, busiest} } */
+  function numbersModel(i) {
+    var area = '';
+    if (i.area && Array.isArray(i.density)) {
+      for (var k = 0; k < i.density.length; k++) {
+        var d = i.density[k];
+        if (d && d.areaKey === i.area.key && count(d.active) !== null) {
+          area = ((typeof d.label === 'string' && d.label) || i.area.label) + ' ' + fmtCount(d.active);
+          break;
+        }
+      }
+    }
+    var out = { rate: fmtCount(i.rate), active: fmtCount(i.status && i.status.active), area: area, records: null };
+    if (!i.momentsOn) return out;
+    var l = fresh(i.link, i.now) && i.link.link ? i.link : null;
+    var b = fresh(i.busiest, i.now) && i.busiest.node ? i.busiest : null;
+    var win = b && count(b.windowMinutes);
+    out.records = {
+      link: l ? { label: 'Longest link (24 h)', value: fmtKm(l.link.distanceKm), detail: nodeName(l.link.a) + ' ↔ ' + nodeName(l.link.b) }
+        : { label: 'Longest link (24 h)', value: NO_RECORD.value, detail: NO_RECORD.detail },
+      busiest: b ? { label: (win !== null ? 'Busiest (' + fmtCount(win) + ' min)' : 'Busiest repeater') + ' · ' + ageText(b.at, i.now), value: nodeName(b.node),
+        detail: count(b.relays) !== null ? fmtCount(b.relays) + ' relays' : '' }
+        : { label: 'Busiest repeater', value: NO_RECORD.value, detail: NO_RECORD.detail }
+    };
+    return out;
   }
 
   // ── Geometry ────────────────────────────────────────────────────────────
@@ -267,6 +366,11 @@
    *   wakeLock            navigator.wakeLock, or null (plain http)
    *   setAutoReload(on)   version-notice's kiosk auto-reload
    *   remountMs           the interval (M4 config), clamped to 1–24 h
+   *   fetchStatus()       → Promise<{active,…}> (/api/nodes/network-status), optional
+   *   fetchAreaStats()    → Promise<{density:[…]}> (/api/analytics/areas), optional
+   *   momentsOn()         bool: Live has a Moments controller (records tile)
+   * Live calls setRate(n) on its 2 s rate tick and onMoment(m) for every
+   * moment its Moments controller takes (LiveMoments.normalize() shape).
    */
   var liveCount = 0; // controllers not yet destroyed (leak check)
 
@@ -303,6 +407,10 @@
     var fromRemount = !!(carry && mountHash != null && carry.hash === mountHash && mountedAt - carry.at < CARRY_MS);
     if (fromRemount) startStep = carry.step;
     carry = null;
+    var hud = null;            // top-left on a phone: step label, then tiles
+    var tiles = null;          // { el, records, slots: {name: el}, last: {name: text} }
+    var rate = null, status = null, density = null, rec = { link: null, busiest: null };
+    var pollTimer = null, lastPoll = 0, polls = 0, tileWrites = 0;
     liveCount++;
 
     function later(fn, ms) {
@@ -400,7 +508,7 @@
 
     // ── Step label ────────────────────────────────────────────────────────
     function buildStepUI() {
-      stepEl = add(el('div', 'live-kiosk-step'));
+      stepEl = hud.appendChild(el('div', 'live-kiosk-step'));
       stepEl.setAttribute('aria-live', 'polite');
       labelEl = stepEl.appendChild(el('div', 'live-kiosk-step-label'));
       countEl = stepEl.appendChild(el('div', 'live-kiosk-step-count'));
@@ -423,6 +531,7 @@
       ownMove = true;
       try { deps.fly(s.bounds, { animate: !reduced }); } catch (_) { /* a map mid-teardown */ }
       finally { ownMove = false; }
+      renderNumbers();
     }
     function syncPaused() {
       if (stepEl && tour) stepEl.classList.toggle('is-paused', tour.stats().paused);
@@ -550,6 +659,105 @@
       deps.reseed();
     }
 
+    // ── Big numbers ───────────────────────────────────────────────────────
+    function buildTiles() {
+      var box = hud.appendChild(el('div', 'live-kiosk-tiles'));
+      box.setAttribute('role', 'group');
+      box.setAttribute('aria-label', 'Mesh numbers');
+      var slots = {};
+      function tile(name) {
+        var t = box.appendChild(el('div', 'live-kiosk-tile live-kiosk-tile--' + name));
+        t.setAttribute('data-tile', name);
+        return t;
+      }
+      function slot(parent, name, cls, text) { slots[name] = parent.appendChild(el('span', cls, text)); }
+      var r = tile('rate');
+      slot(r, 'rate', 'live-kiosk-tile-value');
+      r.appendChild(el('span', 'live-kiosk-tile-label', 'packets/min'));
+      var a = tile('active');
+      var line = a.appendChild(el('span', 'live-kiosk-tile-line'));
+      slot(line, 'active', 'live-kiosk-tile-value');
+      slot(line, 'area', 'live-kiosk-tile-area');
+      a.appendChild(el('span', 'live-kiosk-tile-label', 'active nodes'));
+      var recs = tile('records');
+      ['link', 'busiest'].forEach(function (k) {
+        var row = recs.appendChild(el('div', 'live-kiosk-record'));
+        row.setAttribute('data-record', k);
+        slot(row, k + 'Label', 'live-kiosk-record-label');
+        var v = row.appendChild(el('span', 'live-kiosk-record-line'));
+        slot(v, k + 'Value', 'live-kiosk-record-value');
+        slot(v, k + 'Detail', 'live-kiosk-record-detail');
+      });
+      tiles = { el: box, records: recs, slots: slots, last: {}, recordsHidden: null };
+    }
+    // put writes a text only when it changed (the rate ticks every 2 s).
+    function put(name, text) {
+      if (tiles.last[name] === text) return;
+      tiles.last[name] = text;
+      tiles.slots[name].textContent = text;
+      tileWrites++;
+    }
+    function renderNumbers() {
+      if (!tiles || destroyed) return;
+      var step = tour && steps[tour.stats().step];
+      var m = numbersModel({ rate: rate, status: status, density: density, area: step ? { key: step.key, label: step.label } : null,
+        momentsOn: !!(deps.momentsOn && deps.momentsOn()), link: rec.link, busiest: rec.busiest, now: deps.now() });
+      put('rate', m.rate);
+      put('active', m.active);
+      put('area', m.area);
+      var hide = !m.records;
+      if (tiles.recordsHidden !== hide) { tiles.recordsHidden = hide; tiles.records.hidden = hide; }
+      if (hide) return;
+      ['link', 'busiest'].forEach(function (k) {
+        put(k + 'Label', m.records[k].label);
+        put(k + 'Value', m.records[k].value);
+        put(k + 'Detail', m.records[k].detail);
+      });
+    }
+    function setRate(n) {
+      if (destroyed) return;
+      rate = n;
+      renderNumbers();
+    }
+    // Keeps the newest record of each kind, whatever order the socket and
+    // the REST seed (newest first) deliver them in.
+    function onMoment(m) {
+      if (destroyed || !m || typeof m !== 'object') return;
+      var k = m.kind === 'record_link' ? 'link' : m.kind === 'busiest_repeater' ? 'busiest' : null;
+      if (!k || typeof m.at !== 'number') return;
+      if (rec[k] && rec[k].at >= m.at) return;
+      rec[k] = m;
+      renderNumbers();
+    }
+    // One bulk read of each source per NUMBERS_POLL_MS while visible; the
+    // areas analytics only with a tour. A failed or odd answer keeps the
+    // last number rather than blank the screen.
+    function read(fn, take) {
+      if (!fn) return;
+      var p;
+      try { p = fn(); } catch (e) { p = Promise.reject(e); }
+      Promise.resolve(p).then(function (body) {
+        if (destroyed || !body || typeof body !== 'object') return;
+        take(body);
+        renderNumbers();
+      }, function () { /* keep the last value */ });
+    }
+    function poll() {
+      pollTimer = null;
+      if (destroyed || doc.hidden) return;
+      lastPoll = deps.now();
+      polls++;
+      read(deps.fetchStatus, function (b) { status = b; });
+      if (params.tour.length) read(deps.fetchAreaStats, function (b) { if (Array.isArray(b.density)) density = b.density; });
+      pollTimer = later(poll, NUMBERS_POLL_MS);
+    }
+    function pollOnShow() {
+      if (pollTimer != null || destroyed) return;
+      var since = deps.now() - lastPoll;
+      if (!polls || since >= NUMBERS_POLL_MS) poll();
+      else pollTimer = later(poll, NUMBERS_POLL_MS - since);
+    }
+
     // ── Page events ───────────────────────────────────────────────────────
     function interact() {
       if (!tour) return;
@@ -581,8 +789,8 @@
       if (!inUI(e.target)) interact();
     }
     function onVisibility() {
-      if (doc.hidden) { idleTimer = cancel(idleTimer); beatTimer = cancel(beatTimer); }
-      else wake();
+      if (doc.hidden) { idleTimer = cancel(idleTimer); beatTimer = cancel(beatTimer); pollTimer = cancel(pollTimer); }
+      else { wake(); pollOnShow(); }
       if (tour) { tour.setHidden(!!doc.hidden); syncPaused(); }
       if (!doc.hidden) { acquireLock(); remountIdle(); armBeat(); }
     }
@@ -603,13 +811,15 @@
       listeners.splice(0).forEach(unbind);
       timers.forEach(function (id) { deps.clearTimeout(id); });
       timers.clear();
-      idleTimer = overlayTimer = beatTimer = null;
+      idleTimer = overlayTimer = beatTimer = pollTimer = null;
       ui.splice(0).forEach(function (n) { if (n.parentNode) n.parentNode.removeChild(n); });
-      overlay = stepEl = labelEl = countEl = progressEl = exitBtn = null;
+      overlay = stepEl = labelEl = countEl = progressEl = exitBtn = hud = tiles = null;
       setIdle(false);
     }
 
     // ── Mount ─────────────────────────────────────────────────────────────
+    hud = add(el('div', 'live-kiosk-hud'));
+    buildTiles();
     exitBtn = add(el('button', 'live-kiosk-exit', 'Exit kiosk'));
     exitBtn.type = 'button';
     listen(exitBtn, 'click', function () { deps.exit(); });
@@ -629,17 +839,21 @@
     acquireLock();
     armBeat();
     if (params.tour.length) loadAreas(false);
+    renderNumbers();
+    if (!doc.hidden) poll();
 
     return {
       destroy: destroy,
       onModeChange: onModeChange,
+      setRate: setRate,
+      onMoment: onMoment,
       // Test seam: counts and state, never the elements.
       stats: function () {
         var t = tour ? tour.stats() : null;
         return { timers: timers.size, listeners: listeners.length, step: t ? t.step : -1, steps: steps.length,
           paused: !!(t && t.paused), reasons: t ? t.reasons : [], reanchors: t ? t.reanchors : 0,
           skipped: skipped.slice(), idle: idle, overlay: !!overlay, fetches: fetches, every: params.every,
-          destroyed: destroyed,
+          polls: polls, pollTimer: pollTimer != null, tileWrites: tileWrites, destroyed: destroyed,
           // #883 M3
           beat: beatTimer != null, wakes: wakes, wakeLock: !!lock, reseeds: reseeds,
           remountDue: remountDue(), remounting: remounting, remountInMs: Math.max(0, mountedAt + remountEvery() - deps.now()) };
@@ -658,12 +872,19 @@
     REMOUNT_MS_DEFAULT: REMOUNT_MS_DEFAULT,
     BEAT_MS: BEAT_MS,
     remountDelayMs: remountDelayMs,
+    NUMBERS_POLL_MS: NUMBERS_POLL_MS,
+    RECORD_WINDOW_MS: RECORD_WINDOW_MS,
+    THEMES: THEMES,
     parseKioskParams: parseKioskParams,
     stripKioskParams: stripKioskParams,
     resumeAfterMs: resumeAfterMs,
     areaBounds: areaBounds,
     resolveSteps: resolveSteps,
     createTour: createTour,
+    applyKioskTheme: applyKioskTheme,
+    fmtCount: fmtCount,
+    fmtKm: fmtKm,
+    numbersModel: numbersModel,
     create: create,
     liveCount: function () { return liveCount; },
     // In-place remounts asked for since the page loaded (soak test).

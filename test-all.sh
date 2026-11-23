@@ -124,6 +124,8 @@ run test-881-live-moments.js
 run test-881-m3-customizer-moments.js
 run test-883-kiosk-params.js
 run test-883-kiosk-tour.js
+run test-883-kiosk-numbers.js
+run test-883-kiosk-moments.js
 run test-883-m3-kiosk.js
 run test-live-follow.js
 run test-map-last-heard-options.js
