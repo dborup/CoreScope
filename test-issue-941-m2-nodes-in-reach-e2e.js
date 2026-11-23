@@ -7,15 +7,16 @@
  * now with `model` and `models`), and /api/terrain/coverage and its raster
  * are a stub in the server's shape (CoverageResponse), here with `reach`:
  * five repeaters and rooms with their path loss, one of them named with
- * markup, and two withheld. Nothing here reaches a real network.
+ * markup, and one without terrain. Hidden nodes are in no count (the
+ * server leaves them out). Nothing here reaches a real network.
  *
  * Asserts, light and dark:
  *   1. desktop: the class chips count the nodes at the operator's budget
  *      (good 2, marginal 1, weak 1, all 4), the note says one is below
- *      0 dB and two hidden nodes are not shown; the Good chip opens the
- *      list (rlist=good in the address bar) with node-page links, the
- *      marked-up name as text; All lists every node in reach in loss
- *      order;
+ *      0 dB and one has no terrain, and says nothing of hidden nodes;
+ *      the Good chip opens the list (rlist=good in the address bar) with
+ *      node-page links, the marked-up name as text; All lists every node
+ *      in reach in loss order;
  *   2. moving the power slider recounts and recolours the chips and the
  *      list with no new request of any kind to /api/;
  *   3. the model select asks again once, with model=delta, puts
@@ -59,7 +60,7 @@ const NODES = [
   { pubkey: '4'.repeat(64), name: 'Far valley', role: 'repeater', distanceKm: 17.2, heightM: 10, heightSource: 'role-default', lossDb: 156 },
   { pubkey: '5'.repeat(64), name: 'Behind the ridge', role: 'repeater', distanceKm: 23, heightM: 10, heightSource: 'role-default', lossDb: 161 },
 ];
-const REACH = { roles: ['repeater', 'room'], budgetDb: 158, counts: { good: 2, marginal: 1, weak: 1, none: 1 }, nodes: NODES, withheld: 2, omitted: 0, noTerrain: 0 };
+const REACH = { roles: ['repeater', 'room'], budgetDb: 158, counts: { good: 2, marginal: 1, weak: 1, none: 1 }, nodes: NODES, omitted: 0, noTerrain: 1 };
 
 let passed = 0, failed = 0;
 async function step(name, fn) {
@@ -226,7 +227,7 @@ function rasterFor(c, radiusKm) {
         assert(c.good.n === '2' && c.marginal.n === '1' && c.weak.n === '1' && c.all.n === '4', 'chips ' + JSON.stringify(c));
         assert(['good', 'marginal', 'weak', 'all'].every(k => c[k].pressed === 'false'), 'a chip pressed before a click');
         const note = await page.textContent('[data-testid="reach-nir-note"]');
-        assert(/4 of 5 repeaters and rooms/.test(note) && /1 below 0 dB/.test(note) && /2 hidden nodes not shown/.test(note), 'note ' + note);
+        assert(/4 of 5 repeaters and rooms/.test(note) && /1 below 0 dB/.test(note) && /1 without terrain data/.test(note) && !/hidden/.test(note), 'note ' + note);
         assert(await page.isHidden('[data-testid="reach-nir-list"]'), 'the list is open before a chip is clicked');
 
         await page.click('[data-testid="reach-nir-good"]');

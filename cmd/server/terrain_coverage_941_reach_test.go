@@ -20,7 +20,7 @@ import (
 
 // #941 M2 — nodes in reach (terrain_coverage_reach.go): repeaters and
 // rooms within the radius, evaluated point to point over the raster's own
-// elevation grid, hidden identities withheld at serve time. Every test
+// elevation grid, hidden identities left out at serve time. Every test
 // runs on a fake ElevationSource.
 
 const reachLat, reachLon = 56.1629, 10.2039
@@ -114,7 +114,7 @@ func TestCoverage941M2_NodesInReachOrderAndCounts(t *testing.T) {
 		if got := strings.Join(keys, ""); got != order {
 			t.Fatalf("%s: order %q: %+v", model, got, r.Nodes)
 		}
-		if r.Withheld != 0 || r.Omitted != 0 || r.NoTerrain != 0 || strings.Join(r.Roles, ",") != "repeater,room" {
+		if r.Omitted != 0 || r.NoTerrain != 0 || strings.Join(r.Roles, ",") != "repeater,room" {
 			t.Fatalf("%s: %+v", model, r)
 		}
 		want := map[string]struct {
@@ -219,14 +219,14 @@ func TestCoverage941M2_OwnerHeightsReachTheList(t *testing.T) {
 	}
 }
 
-// TestCoverage941M2_HiddenNodesAreWithheld: the raw response bytes never
+// TestCoverage941M2_HiddenNodesAreNeverNamed: the raw response bytes never
 // carry a hidden identity's key (in any case) or name, whether it is
 // hidden by the node blacklist, the observer blacklist, a hidden-name
-// prefix on the node or only through an observer alias; each is counted
-// as withheld. Visibility is decided at serve time, so a rename into a
-// hidden prefix hides a node of a cached result on the next request, with
-// no new computation and no upstream call.
-func TestCoverage941M2_HiddenNodesAreWithheld(t *testing.T) {
+// prefix on the node or only through an observer alias. Visibility is
+// decided at serve time, so a rename into a hidden prefix hides a node of
+// a cached result on the next request, with no new computation and no
+// upstream call.
+func TestCoverage941M2_HiddenNodesAreNeverNamed(t *testing.T) {
 	src := newFakeElevation(t, flatElev(3))
 	env := newCoverageEnv(t, src, CoverageConfig{}, nil, nil)
 	env.srv.cfg.SetHiddenNamePrefixes([]string{"private-"})
@@ -251,12 +251,12 @@ func TestCoverage941M2_HiddenNodesAreWithheld(t *testing.T) {
 	}
 	env.srv.store.InvalidateNodeCache()
 
-	check := func(label string, wantVisible bool, wantWithheld int) []byte {
+	check := func(label string, wantVisible bool) []byte {
 		t.Helper()
 		w := env.get(reachQuery("56.1629,10.2039", "r=5"))
 		body := w.Body.Bytes()
 		r := decodeCoverage(t, w).Reach
-		if r == nil || r.Withheld != wantWithheld || (len(r.Nodes) == 1) != wantVisible {
+		if r == nil || (len(r.Nodes) == 1) != wantVisible || r.Omitted != 0 || r.NoTerrain != 0 {
 			t.Fatalf("%s: reach %+v", label, r)
 		}
 		low := strings.ToLower(string(body))
@@ -270,9 +270,9 @@ func TestCoverage941M2_HiddenNodesAreWithheld(t *testing.T) {
 		}
 		return body
 	}
-	check("miss", true, 4)
+	check("miss", true)
 	calls := src.calls.Load()
-	check("hit", true, 4)
+	check("hit", true)
 	// Rename the visible node into the hidden prefix: hidden on the next
 	// request, from the same cached result.
 	if _, err := env.srv.db.conn.Exec(`UPDATE nodes SET name = 'private-now' WHERE public_key = ?`, visible); err != nil {
@@ -280,7 +280,7 @@ func TestCoverage941M2_HiddenNodesAreWithheld(t *testing.T) {
 	}
 	env.srv.store.InvalidateNodeCache()
 	hidden[visible] = "private-now"
-	body := check("renamed", false, 5)
+	body := check("renamed", false)
 	if src.calls.Load() != calls {
 		t.Fatal("the visibility change recomputed")
 	}
@@ -289,31 +289,126 @@ func TestCoverage941M2_HiddenNodesAreWithheld(t *testing.T) {
 	}
 }
 
-// TestCoverage941M2_LookupFailureWithholdsAll: when the visibility lookup
-// fails, every node is withheld and none is named (fail closed); the
-// raster is still served, and the failure is logged without detail.
-func TestCoverage941M2_LookupFailureWithholdsAll(t *testing.T) {
-	env := newCoverageEnv(t, newFakeElevation(t, flatElev(3)), CoverageConfig{}, nil, nil)
+// gapNorthElev is flat ground at 3 m with a strip without terrain 3 km
+// north of the reach centre.
+func gapNorthElev(e, n float64) float32 {
+	_, n0 := dhm.ToUTM32(reachLat, reachLon)
+	if d := n - n0; d > 3000 && d < 3100 {
+		return -9999
+	}
+	return 3
+}
+
+type reachTestNode struct {
+	pk, name, role string
+	dE, dN         float64
+}
+
+// reachHiddenEnv is a reach over gapNorthElev with the hidden-name prefix
+// "private-" and a node blacklist, holding nodes; an alias is an observer
+// row naming a node's key.
+func reachHiddenEnv(t *testing.T, nodes []reachTestNode, aliases map[string]string) *coverageEnv {
+	t.Helper()
+	env := newCoverageEnv(t, newFakeElevation(t, gapNorthElev), CoverageConfig{}, nil, nil)
 	env.srv.cfg.SetHiddenNamePrefixes([]string{"private-"})
-	addReachNode(t, env, reachPK('1'), "Visible one", "repeater", 0, 2000)
-	addReachNode(t, env, reachPK('2'), "Visible two", "room", 0, -2000)
+	env.srv.cfg.SetNodeBlacklist([]string{strings.Repeat("cd", 32)})
+	for _, n := range nodes {
+		addReachNode(t, env, n.pk, n.name, n.role, n.dE, n.dN)
+	}
+	for pk, name := range aliases {
+		if _, err := env.srv.db.conn.Exec(`INSERT INTO observers (id, name) VALUES (?, ?)`, strings.ToUpper(pk), name); err != nil {
+			t.Fatal(err)
+		}
+	}
 	env.srv.store.InvalidateNodeCache()
-	if _, err := env.srv.db.conn.Exec(`DROP TABLE observers`); err != nil {
+	return env
+}
+
+// TestCoverage941M2_HiddenNodesLeaveNoTrace: a hidden node inside the
+// radius changes nothing in the response, byte for byte, on a miss and on
+// a hit: it is not named, and no count (the classes, omitted, noTerrain)
+// includes it. The client picks the centre and the radius, so a count of
+// hidden nodes would bracket one's distance from any point (#743, #410).
+// A node hidden after its result was cached is gone the same way.
+func TestCoverage941M2_HiddenNodesLeaveNoTrace(t *testing.T) {
+	visible := []reachTestNode{
+		{reachPK('1'), "Visible mast", "repeater", 0, -2000},
+		{reachPK('2'), "Visible room", "room", 2500, 0},
+		{reachPK('3'), "Visible past the gap", "repeater", 0, 4000}, // no terrain on its path
+	}
+	hidden := []reachTestNode{
+		{strings.Repeat("ab", 32), "private-near", "repeater", 0, -1000}, // the lowest loss
+		{strings.Repeat("cd", 32), "Blacklisted room", "room", -3000, 0},
+		{strings.Repeat("ef", 32), "private-gap", "repeater", 500, 4000}, // no terrain on its path
+		{strings.Repeat("fa", 32), "Alias hidden", "repeater", -1000, -1000},
+	}
+	aliases := map[string]string{strings.Repeat("fa", 32): "private-observer"}
+	q := reachQuery("56.1629,10.2039", "r=5")
+	with := reachHiddenEnv(t, append(append([]reachTestNode{}, visible...), hidden...), aliases)
+	without := reachHiddenEnv(t, visible, nil)
+	for _, state := range []string{"miss", "hit"} {
+		a, b := with.get(q), without.get(q)
+		if a.Header().Get("X-CoreScope-Cache") != state || b.Header().Get("X-CoreScope-Cache") != state {
+			t.Fatalf("%s: %s / %s", state, a.Header().Get("X-CoreScope-Cache"), b.Header().Get("X-CoreScope-Cache"))
+		}
+		if a.Body.String() != b.Body.String() {
+			t.Fatalf("%s: a hidden node changes the response:\nwith    %s\nwithout %s", state, a.Body.String(), b.Body.String())
+		}
+	}
+	r := decodeCoverage(t, without.get(q)).Reach
+	if r == nil || len(r.Nodes) != 2 || r.NoTerrain != 1 || r.Omitted != 0 {
+		t.Fatalf("reference reach %+v", r)
+	}
+	// Renamed into the hidden prefix after the result was cached: served
+	// from the same cached result as if it had never been there.
+	if _, err := with.srv.db.conn.Exec(`UPDATE nodes SET name = 'private-now' WHERE public_key = ?`, reachPK('2')); err != nil {
 		t.Fatal(err)
 	}
-	w := env.get(reachQuery("56.1629,10.2039", "r=5"))
-	resp := decodeCoverage(t, w)
-	if resp.Reach == nil || resp.Reach.Withheld != 2 || len(resp.Reach.Nodes) != 0 || resp.Reach.Counts != (CoverageReachCounts{}) {
-		t.Fatalf("reach %+v", resp.Reach)
+	with.srv.store.InvalidateNodeCache()
+	a := with.get(q)
+	b := reachHiddenEnv(t, []reachTestNode{visible[0], visible[2]}, nil).get(q)
+	if a.Header().Get("X-CoreScope-Cache") != "hit" || a.Body.String() != b.Body.String() {
+		t.Fatalf("hidden after the hit (%s):\nwith    %s\nwithout %s", a.Header().Get("X-CoreScope-Cache"), a.Body.String(), b.Body.String())
 	}
-	if strings.Contains(w.Body.String(), "Visible") || strings.Contains(w.Body.String(), reachPK('1')) {
-		t.Fatalf("a node was named after a failed lookup: %s", w.Body.String())
+}
+
+// TestCoverage941M2_LookupFailureFailsClosed: when the visibility lookup
+// fails, no node is named and nothing is counted: reach is null, the same
+// bytes whether a hidden node is in the radius or not. The raster is still
+// served, and the failure is logged without detail.
+func TestCoverage941M2_LookupFailureFailsClosed(t *testing.T) {
+	visible := []reachTestNode{
+		{reachPK('1'), "Visible one", "repeater", 0, 2000},
+		{reachPK('2'), "Visible two", "room", 0, -2000},
 	}
-	if !strings.Contains(env.logs.String(), "visibility lookup failed") || strings.Contains(env.logs.String(), "observers") {
-		t.Fatalf("log %q", env.logs.String())
+	q := reachQuery("56.1629,10.2039", "r=5")
+	var bodies []string
+	for _, nodes := range [][]reachTestNode{visible, append(append([]reachTestNode{}, visible...),
+		reachTestNode{strings.Repeat("ef", 32), "private-roof", "repeater", 1500, 0})} {
+		env := reachHiddenEnv(t, nodes, nil)
+		if _, err := env.srv.db.conn.Exec(`DROP TABLE observers`); err != nil {
+			t.Fatal(err)
+		}
+		for _, state := range []string{"miss", "hit"} {
+			w := env.get(q)
+			resp := decodeCoverage(t, w)
+			if w.Header().Get("X-CoreScope-Cache") != state || resp.Reach != nil || !strings.Contains(w.Body.String(), `"reach":null`) {
+				t.Fatalf("%s: reach %+v", state, resp.Reach)
+			}
+			if strings.Contains(w.Body.String(), "Visible") || strings.Contains(w.Body.String(), reachPK('1')) {
+				t.Fatalf("a node was named after a failed lookup: %s", w.Body.String())
+			}
+			if env.raster(resp.Raster.URL, true).Code != 200 {
+				t.Fatal("the raster is not served")
+			}
+			bodies = append(bodies, w.Body.String())
+		}
+		if !strings.Contains(env.logs.String(), "visibility lookup failed") || strings.Contains(env.logs.String(), "observers") {
+			t.Fatalf("log %q", env.logs.String())
+		}
 	}
-	if env.raster(resp.Raster.URL, true).Code != 200 {
-		t.Fatal("the raster is not served")
+	if bodies[0] != bodies[2] || bodies[1] != bodies[3] {
+		t.Fatalf("a hidden node changes a failed lookup's response:\n%s\n%s", bodies[0], bodies[2])
 	}
 }
 
@@ -358,9 +453,18 @@ func TestCoverage941M2_NoExtraUpstreamCalls(t *testing.T) {
 // stays within its byte bound.
 func TestCoverage941M2_ReachIsBounded(t *testing.T) {
 	env := newCoverageEnv(t, newFakeElevation(t, flatElev(3)), CoverageConfig{}, nil, nil)
+	env.srv.cfg.SetHiddenNamePrefixes([]string{"private-"})
 	const n = coverageReachMaxNodes + 37
 	tx, err := env.srv.db.conn.Begin()
 	if err != nil {
+		t.Fatal(err)
+	}
+	// A hidden node with the lowest loss of all: it takes no place in the
+	// list and is not among the omitted.
+	hiddenPK := strings.Repeat("ab", 32)
+	lat, lon := reachPos(0, 100)
+	if _, err := tx.Exec(`INSERT INTO nodes (public_key, name, role, lat, lon, last_seen, first_seen, advert_count)
+		VALUES (?, 'private-closest', 'repeater', ?, ?, datetime('now'), datetime('now'), 1)`, hiddenPK, lat, lon); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < n; i++ {
@@ -381,6 +485,9 @@ func TestCoverage941M2_ReachIsBounded(t *testing.T) {
 	if r == nil || len(r.Nodes) != coverageReachMaxNodes || r.Omitted != 37 {
 		t.Fatalf("reach: %d listed, %d omitted", len(r.Nodes), r.Omitted)
 	}
+	if r.Nodes[0].PublicKey == hiddenPK || strings.Contains(strings.ToLower(fmt.Sprint(resp)), "private-closest") {
+		t.Fatal("the hidden node is listed")
+	}
 	if !sort.SliceIsSorted(r.Nodes, func(a, b int) bool { return r.Nodes[a].LossDb < r.Nodes[b].LossDb }) {
 		t.Fatal("not in loss order")
 	}
@@ -390,7 +497,7 @@ func TestCoverage941M2_ReachIsBounded(t *testing.T) {
 	}
 	e, _ := decodeCoverageEntry(data)
 	meta, _ := json.Marshal(e.meta.Reach)
-	if per := len(meta) / coverageReachMaxNodes; per > coverageReachEntryBytes {
+	if per := len(meta) / len(e.meta.Reach.Nodes); per > coverageReachEntryBytes {
 		t.Fatalf("%d B per kept node > %d", per, coverageReachEntryBytes)
 	}
 }
@@ -488,13 +595,17 @@ func TestCoverage941M2_PerfBudget(t *testing.T) {
 	}
 }
 
-// TestCoverage941M2_OpenAPIReach: the nodes in reach are documented.
+// TestCoverage941M2_OpenAPIReach: the nodes in reach are documented, and
+// hidden identities are left out of every count, not counted on their own.
 func TestCoverage941M2_OpenAPIReach(t *testing.T) {
 	d := routeDescriptions()["GET "+coverageRoute].Description
-	for _, w := range []string{"reach", "withheld", "budgetDb", "lossDb", "repeater and room"} {
+	for _, w := range []string{"reach", "budgetDb", "lossDb", "repeater and room", "is in no count"} {
 		if !strings.Contains(d, w) {
 			t.Fatalf("%q undocumented", w)
 		}
+	}
+	if strings.Contains(d, "withheld") {
+		t.Fatal("the description still documents a count of hidden nodes")
 	}
 }
 

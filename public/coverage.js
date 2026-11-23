@@ -18,7 +18,8 @@
  * inside the radius with their predicted path loss. The panel counts them
  * per margin class and lists them (each a link to its node page); the
  * same budget sliders recount and recolour that list in place, with no
- * request. Hidden nodes are never in the list, only counted.
+ * request. Hidden nodes are in no list and no count: the server leaves
+ * them out of all of them.
  *
  * Nothing is fetched until the tool is armed or a link opens it. All DOM is
  * built with createElement/textContent: no server or node field ever passes
@@ -325,6 +326,24 @@
   }
 
   function signedDb(m) { return (m >= 0 ? '+' : '−') + Math.abs(m).toFixed(0) + ' dB'; }
+
+  /* reachNote is the line under the list: how many of the listed nodes
+   * are in reach at the budget the rows were made at, and what the list
+   * leaves out (below 0 dB, past its bound, without terrain). The server
+   * leaves hidden nodes out of every count, and nothing here counts them:
+   * a count of hidden nodes would place one. */
+  function reachNote(reach, rows, counts, filter, shown) {
+    var inReach = counts.good + counts.marginal + counts.weak;
+    var note = [inReach ? inReach + ' of ' + rows.length + ' repeaters and rooms in the radius are in reach'
+      : (rows.length ? 'None of the ' + rows.length + ' repeaters and rooms in the radius is in reach' : 'No repeater or room with a position in the radius')];
+    if (counts.none) note.push(counts.none + ' below 0 dB');
+    var o = Number(reach && reach.omitted);
+    if (o > 0) note.push(o + ' more beyond the list');
+    var nt = Number(reach && reach.noTerrain);
+    if (nt > 0) note.push(nt + ' without terrain data');
+    if (filter && !shown && inReach === 0) note.push('nothing to list');
+    return note.join(' · ') + '.';
+  }
 
   // ── Gates ────────────────────────────────────────────────────────────────
 
@@ -769,18 +788,7 @@
         if (!it.li.hidden) shown++;
       }
       ui.nodesList.hidden = !shown;
-      var note = [];
-      note.push(inReach ? inReach + ' of ' + rows.length + ' repeaters and rooms in the radius are in reach'
-        : (rows.length ? 'None of the ' + rows.length + ' repeaters and rooms in the radius is in reach' : 'No repeater or room with a position in the radius'));
-      if (counts.none) note.push(counts.none + ' below 0 dB');
-      var w = Number(reach.withheld);
-      if (w > 0) note.push(w + ' hidden ' + (w === 1 ? 'node' : 'nodes') + ' not shown');
-      var o = Number(reach.omitted);
-      if (o > 0) note.push(o + ' more beyond the list');
-      var nt = Number(reach.noTerrain);
-      if (nt > 0) note.push(nt + ' without terrain data');
-      if (state.list && !shown && inReach === 0) note.push('nothing to list');
-      ui.nodesNote.textContent = note.join(' · ') + '.';
+      ui.nodesNote.textContent = reachNote(reach, rows, counts, state.list, shown);
     }
 
     function setStatus(text, isError) {
@@ -1106,6 +1114,7 @@
     nodeHref: nodeHref,
     reachRows: reachRows,
     reachCounts: reachCounts,
+    reachNote: reachNote,
     listShows: listShows,
     budgetOf: budgetOf,
     marginClass: marginClass,

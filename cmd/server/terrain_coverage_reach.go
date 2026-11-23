@@ -11,13 +11,16 @@ package main
 //     profile's rules without measuring anything: the operator's
 //     per-node value, the owner's approved height (#789), the role.
 //   - When: during the computation, after the tiles are gathered, so it
-//     makes no upstream call of its own (dhm.ReachLosses). The losses are
-//     kept with the cached result; names are not.
+//     makes no upstream call of its own (dhm.ReachLosses). The losses of
+//     every evaluated node are kept with the cached result, hidden or not,
+//     with the keys of those without terrain; names are not.
 //   - What a viewer gets: the alias-aware visibility check (identityHidden
 //     over hiddenIdentityNames, one bulk lookup) runs on every response,
-//     cached or not. A hidden identity is never named, only counted as
-//     withheld; a node gone from the snapshot is withheld too, and a
-//     failed lookup withholds every node (fail closed).
+//     cached or not, over every kept key. A hidden identity, or a node gone
+//     from the snapshot, is in no list and no count: the response is the
+//     one it would be without that node, so the centre and the radius,
+//     which the client picks, cannot locate it (#743, #410). A failed
+//     lookup serves no nodes in reach at all (fail closed).
 //   - The counts per class are at the operator's link budget (config
 //     radio); the browser recounts and recolours the list with the
 //     viewer's own budget from the same losses, without a request.
@@ -32,8 +35,10 @@ import (
 )
 
 const (
-	// coverageReachMaxNodes bounds the nodes in reach a result keeps and
-	// serves, the lowest losses first.
+	// coverageReachMaxNodes bounds the nodes in reach a response lists,
+	// the lowest losses first. A result keeps every evaluated node (the
+	// positioned repeaters and rooms of the snapshot inside the radius), so
+	// the list and its counts are decided over visible nodes only.
 	coverageReachMaxNodes = 1000
 	// coverageReachEntryBytes bounds one kept node in a cached result.
 	coverageReachEntryBytes = 192
@@ -69,13 +74,16 @@ type coverageReachEntry struct {
 	LossDb       float64 `json:"l"`
 }
 
-// coverageReachMeta is the nodes in reach of a cached result.
+// coverageReachMeta is the nodes in reach of a cached result: every
+// evaluated node, hidden or not, so that visibility is decided per
+// response for every count.
 type coverageReachMeta struct {
+	// Nodes are the nodes inside the radius with terrain on their path,
+	// lowest loss first.
 	Nodes []coverageReachEntry `json:"n"`
-	// Omitted are evaluated nodes beyond coverageReachMaxNodes.
-	Omitted int `json:"o"`
-	// NoTerrain are nodes inside the radius whose path has a gap.
-	NoTerrain int `json:"t"`
+	// NoTerrain are the keys of the nodes inside the radius whose path has
+	// a gap.
+	NoTerrain []string `json:"t,omitempty"`
 }
 
 // CoverageReach is the response's nodes in reach.
@@ -87,13 +95,13 @@ type CoverageReach struct {
 	Counts   CoverageReachCounts `json:"counts"`
 	// Nodes are the visible evaluated nodes, lowest loss first, whatever
 	// their class: a larger budget may bring a "none" node into reach.
+	// Hidden identities are in no list and no count.
 	Nodes []CoverageReachNode `json:"nodes"`
-	// Withheld are evaluated nodes that are hidden (or whose visibility
-	// could not be checked): counted, never named.
-	Withheld int `json:"withheld"`
-	// Omitted are evaluated nodes past the list's bound, the lossiest.
+	// Omitted are visible evaluated nodes past the list's bound, the
+	// lossiest.
 	Omitted int `json:"omitted"`
-	// NoTerrain are nodes inside the radius without terrain on the path.
+	// NoTerrain are visible nodes inside the radius without terrain on the
+	// path.
 	NoTerrain int `json:"noTerrain"`
 }
 
@@ -170,9 +178,8 @@ func (s *Server) coverageNodeHeight(ctx context.Context, c *terrainCoverage, pk,
 	return h, source
 }
 
-// evaluateReach computes the nodes in reach of spec over grid: the
-// lowest losses first (then the nearest, then the key), at most
-// coverageReachMaxNodes.
+// evaluateReach computes the nodes in reach of spec over grid, all of
+// them: the lowest losses first (then the nearest, then the key).
 func evaluateReach(ctx context.Context, grid *dhm.CoverageGrid, spec dhm.CoverageSpec, targets []coverageReachTarget) (*coverageReachMeta, error) {
 	pts := make([]dhm.ReachTarget, len(targets))
 	for i, t := range targets {
@@ -188,7 +195,7 @@ func evaluateReach(ctx context.Context, grid *dhm.CoverageGrid, spec dhm.Coverag
 		case !l.Inside:
 			continue
 		case math.IsNaN(l.LossDb):
-			out.NoTerrain++
+			out.NoTerrain = append(out.NoTerrain, targets[i].pubkey)
 			continue
 		}
 		t := targets[i]
@@ -206,10 +213,6 @@ func evaluateReach(ctx context.Context, grid *dhm.CoverageGrid, spec dhm.Coverag
 		}
 		return x.PubKey < y.PubKey
 	})
-	if len(out.Nodes) > coverageReachMaxNodes {
-		out.Omitted = len(out.Nodes) - coverageReachMaxNodes
-		out.Nodes = out.Nodes[:coverageReachMaxNodes]
-	}
 	return out, nil
 }
 
@@ -231,38 +234,56 @@ func (r CoverageRadio) budgetDb() float64 {
 }
 
 // coverageReachView is what one viewer may see of a cached result's
-// nodes in reach: hidden identities withheld, names from the current
-// snapshot, counts at the operator's budget. nil when the result has
-// none (the snapshot was not ready when it was computed).
+// nodes in reach: the visible nodes in the current snapshot, named from
+// it, with counts at the operator's budget. Hidden identities and nodes
+// gone from the snapshot are in no list and no count. nil when the result
+// has none (the snapshot was not ready when it was computed) or when the
+// visibility lookup fails (fail closed).
 func (s *Server) coverageReachView(ctx context.Context, c *terrainCoverage, m *coverageReachMeta) *CoverageReach {
 	if m == nil {
 		return nil
 	}
-	out := &CoverageReach{Roles: coverageReachRoles, BudgetDb: c.radio.budgetDb(), Nodes: []CoverageReachNode{},
-		Omitted: m.Omitted, NoTerrain: m.NoTerrain}
-	if len(m.Nodes) == 0 {
-		return out
+	pks := make([]string, 0, len(m.Nodes)+len(m.NoTerrain))
+	for _, e := range m.Nodes {
+		pks = append(pks, e.PubKey)
 	}
-	pks := make([]string, len(m.Nodes))
-	for i, e := range m.Nodes {
-		pks[i] = e.PubKey
+	pks = append(pks, m.NoTerrain...)
+	// The lookup runs whatever the key set, so neither its work nor its
+	// failure depends on whether a hidden node is in the radius.
+	names, err := s.lookupHiddenIdentityNames(ctx, pks)
+	if err != nil {
+		c.logf("[coverage] predicted reach: node visibility lookup failed; nodes in reach not served")
+		return nil
 	}
-	names, err := s.hiddenIdentityNames(ctx, pks)
 	var byKey map[string]*nodeInfo
-	if err == nil && s.store != nil {
+	if s.store != nil {
 		nodes, _ := s.store.getCachedNodesAndPM()
 		byKey = make(map[string]*nodeInfo, len(nodes))
 		for i := range nodes {
 			byKey[strings.ToLower(nodes[i].PublicKey)] = &nodes[i]
 		}
 	}
-	if err != nil {
-		c.logf("[coverage] predicted reach: node visibility lookup failed; %d node(s) withheld", len(m.Nodes))
+	// visible is the node of key pk when a viewer may see it.
+	visible := func(pk string) *nodeInfo {
+		n := byKey[pk]
+		if n == nil || identityHidden(s.cfg, pk, append([]string{n.Name}, names[pk]...)...) {
+			return nil
+		}
+		return n
+	}
+	out := &CoverageReach{Roles: coverageReachRoles, BudgetDb: c.radio.budgetDb(), Nodes: []CoverageReachNode{}}
+	for _, pk := range m.NoTerrain {
+		if visible(pk) != nil {
+			out.NoTerrain++
+		}
 	}
 	for _, e := range m.Nodes {
-		n := byKey[e.PubKey] // nil after a failed lookup: withheld
-		if n == nil || identityHidden(s.cfg, e.PubKey, append([]string{n.Name}, names[e.PubKey]...)...) {
-			out.Withheld++
+		n := visible(e.PubKey)
+		if n == nil {
+			continue
+		}
+		if len(out.Nodes) == coverageReachMaxNodes {
+			out.Omitted++
 			continue
 		}
 		out.Nodes = append(out.Nodes, CoverageReachNode{PublicKey: e.PubKey, Name: n.Name, Role: e.Role,

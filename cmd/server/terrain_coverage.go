@@ -49,7 +49,7 @@ package main
 //
 // With the raster comes the list of nodes in reach (#941 M2,
 // terrain_coverage_reach.go): repeaters and rooms evaluated point to point
-// over the same elevation grid, hidden identities withheld at serve time.
+// over the same elevation grid, hidden identities left out at serve time.
 //
 // The endpoint reads node positions from the in-memory node snapshot and
 // observer radios through the profile's read-only query; it writes

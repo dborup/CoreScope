@@ -348,7 +348,7 @@ const REACH = {
     { pubkey: 'not-a-key', name: 'junk', role: 'repeater', lossDb: 100 },
     { pubkey: '5'.repeat(64), name: 'no loss', role: 'repeater', lossDb: null },
   ],
-  withheld: 2, omitted: 0, noTerrain: 1,
+  omitted: 0, noTerrain: 1,
 };
 
 test('reachRows keeps the server order with each margin and class; junk entries are dropped', () => {
@@ -363,6 +363,23 @@ test('reachRows keeps the server order with each margin and class; junk entries 
   assert.deepStrictEqual(JSON.parse(JSON.stringify(c)), REACH.counts);
   assert.deepStrictEqual(J(PR.reachRows(null, 158)), []);
   assert.deepStrictEqual(J(PR.reachRows({ nodes: 'x' }, 158)), []);
+});
+
+test('reachNote states the list and its counts, and never a count of hidden nodes', () => {
+  const rows = PR.reachRows(REACH, 158);
+  const counts = PR.reachCounts(rows);
+  assert.strictEqual(PR.reachNote(REACH, rows, counts, '', 0),
+    '3 of 4 repeaters and rooms in the radius are in reach · 1 below 0 dB · 1 without terrain data.');
+  assert.strictEqual(PR.reachNote(Object.assign({}, REACH, { omitted: 2, noTerrain: 0 }), rows, counts, 'good', 1),
+    '3 of 4 repeaters and rooms in the radius are in reach · 1 below 0 dB · 2 more beyond the list.');
+  const none = PR.reachRows({ nodes: [{ pubkey: '1'.repeat(64), lossDb: 170 }] }, 158);
+  assert.strictEqual(PR.reachNote({}, none, PR.reachCounts(none), 'all', 0),
+    'None of the 1 repeaters and rooms in the radius is in reach · 1 below 0 dB · nothing to list.');
+  assert.strictEqual(PR.reachNote({}, [], PR.reachCounts([]), '', 0), 'No repeater or room with a position in the radius.');
+  // An older server's count of hidden nodes is not shown: it would tell a
+  // viewer that a hidden node is inside the radius (#941 M2 review).
+  const old = PR.reachNote(Object.assign({}, REACH, { withheld: 2 }), rows, counts, '', 0);
+  assert.ok(!/hidden|withheld|2 /.test(old), old);
 });
 
 test('a budget change recounts and recolours the same list, in the same order', () => {
