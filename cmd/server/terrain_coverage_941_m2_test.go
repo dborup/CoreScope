@@ -14,7 +14,7 @@ import (
 
 // #941 M2 — the propagation model of GET /api/terrain/coverage: a
 // request's `model` (bullington or delta), else map.coverage.model, else
-// Bullington; the model is part of the cache key. Every test runs on a
+// delta (the default since the validation report); the model is part of the cache key. Every test runs on a
 // fake ElevationSource.
 
 func rasterBytes(t *testing.T, env *coverageEnv, resp CoverageResponse) []byte {
@@ -35,18 +35,18 @@ func rasterBytes(t *testing.T, env *coverageEnv, resp CoverageResponse) []byte {
 }
 
 // TestCoverage941M2_ModelIsInTheCacheKey: each model is its own cached
-// result with its own versioned id, naming the default explicitly is the
-// default's key, the second model reuses the elevation tiles (no upstream
+// result with its own versioned id, naming a model explicitly is that
+// model's key (the default, delta, included), the second model reuses the elevation tiles (no upstream
 // call), and the delta raster is never less lossy than Bullington's and
 // lossier somewhere (a 2 m receiver on gently rolling ground).
 func TestCoverage941M2_ModelIsInTheCacheKey(t *testing.T) {
 	src := newFakeElevation(t, hillyElev)
 	env := newCoverageEnv(t, src, CoverageConfig{}, nil, nil)
 	at := "56.1629,10.2039"
-	w := env.get(reachQuery(at, "r=8"))
+	w := env.get(reachQuery(at, "r=8", "model=bullington"))
 	bull := decodeCoverage(t, w)
 	if w.Header().Get("X-CoreScope-Cache") != "miss" || bull.Params.Model != dhm.CoverageModel {
-		t.Fatalf("default: %s %+v", w.Header().Get("X-CoreScope-Cache"), bull.Params)
+		t.Fatalf("bullington: %s %+v", w.Header().Get("X-CoreScope-Cache"), bull.Params)
 	}
 	calls := src.calls.Load()
 	w = env.get(reachQuery(at, "r=8", "model=delta"))
@@ -97,36 +97,36 @@ func TestCoverage941M2_ModelIsInTheCacheKey(t *testing.T) {
 
 // TestCoverage941M2_ConfigModel: map.coverage.model is the default a
 // request without `model` gets, a request may still name the other, a
-// junk value warns (echoing nothing) and falls back to Bullington, and
+// junk value warns (echoing nothing) and falls back to delta, and
 // the client config offers both models with the default.
 func TestCoverage941M2_ConfigModel(t *testing.T) {
-	env := newCoverageEnv(t, newFakeElevation(t, flatElev(4)), CoverageConfig{Model: strp("delta")}, nil, nil)
-	if got := decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "r=5"))); got.Params.Model != dhm.CoverageModelDelta {
-		t.Fatalf("configured delta: %+v", got.Params)
+	env := newCoverageEnv(t, newFakeElevation(t, flatElev(4)), CoverageConfig{Model: strp("bullington")}, nil, nil)
+	if got := decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "r=5"))); got.Params.Model != dhm.CoverageModel {
+		t.Fatalf("configured bullington: %+v", got.Params)
 	}
-	if got := decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "r=5", "model=bullington"))); got.Params.Model != dhm.CoverageModel {
-		t.Fatalf("requested bullington: %+v", got.Params)
+	if got := decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "r=5", "model=delta"))); got.Params.Model != dhm.CoverageModelDelta {
+		t.Fatalf("requested delta: %+v", got.Params)
 	}
 	cc := env.srv.coverageClientConfig()
-	if cc.Model != "delta" || strings.Join(cc.Models, ",") != "bullington,delta" {
+	if cc.Model != "bullington" || strings.Join(cc.Models, ",") != "bullington,delta" {
 		t.Fatalf("client config %+v", cc)
 	}
 	b, _ := json.Marshal(cc)
-	if !strings.Contains(string(b), `"model":"delta"`) || !strings.Contains(string(b), `"models":["bullington","delta"]`) {
+	if !strings.Contains(string(b), `"model":"bullington"`) || !strings.Contains(string(b), `"models":["bullington","delta"]`) {
 		t.Fatalf("client config JSON %s", b)
 	}
 
 	logs := &dhmLogSink{}
-	if s := resolveCoverageSettings(CoverageConfig{Model: strp("itm<x>")}, logs.logf); s.model != dhm.PathBullington ||
+	if s := resolveCoverageSettings(CoverageConfig{Model: strp("itm<x>")}, logs.logf); s.model != dhm.PathDelta ||
 		!strings.Contains(logs.String(), "map.coverage.model") || strings.Contains(logs.String(), "itm") {
 		t.Fatalf("junk model: %v, log %q", s.model, logs.String())
 	}
-	if s := resolveCoverageSettings(CoverageConfig{}, logs.logf); s.model != dhm.PathBullington {
+	if s := resolveCoverageSettings(CoverageConfig{}, logs.logf); s.model != dhm.PathDelta {
 		t.Fatalf("default model %v", s.model)
 	}
-	// The default stays Bullington until the validation report has run.
+	// The default is delta (see terrain_coverage_941_default_delta_test.go).
 	env = newCoverageEnv(t, newFakeElevation(t, flatElev(4)), CoverageConfig{}, nil, nil)
-	if cc := env.srv.coverageClientConfig(); cc.Model != "bullington" {
+	if cc := env.srv.coverageClientConfig(); cc.Model != "delta" {
 		t.Fatalf("default client model %q", cc.Model)
 	}
 	w := httptest.NewRecorder()
@@ -147,12 +147,13 @@ func TestCoverage941M2_ModelReadsTheCanonicalKeyOnly(t *testing.T) {
 		warnings    int
 	}{
 		{"canonical delta", `"model":"delta"`, dhm.PathDelta, 0},
-		{"Model alone", `"Model":"delta"`, dhm.PathBullington, 1},
+		{"Model alone", `"Model":"bullington"`, dhm.PathDelta, 1},
 		{"MODEL after canonical bullington", `"model":"bullington","MODEL":"delta"`, dhm.PathBullington, 1},
 		{"Model before canonical bullington", `"Model":"delta","model":"bullington"`, dhm.PathBullington, 1},
 		{"Model after canonical delta", `"model":"delta","Model":"bullington"`, dhm.PathDelta, 1},
-		{"absent", `"radiusKm":20`, dhm.PathBullington, 0},
-		{"null", `"model":null`, dhm.PathBullington, 0},
+		{"Model after canonical bullington", `"model":"bullington","Model":"delta"`, dhm.PathBullington, 1},
+		{"absent", `"radiusKm":20`, dhm.PathDelta, 0},
+		{"null", `"model":null`, dhm.PathDelta, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

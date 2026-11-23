@@ -219,7 +219,7 @@ func TestCoverage941_ComputesAndServesTheRaster(t *testing.T) {
 	}
 	p := resp.Params
 	if p.RadiusKm != 8 || p.ResolutionM != 30 || p.TxHeightM != 10 || p.TxHeightSource != "request" || p.RxHeightM != 2 ||
-		p.FreqMHz != dhm.FirmwareFreqMHz || p.FreqSource != "firmware" || p.K != dhm.DefaultKFactor || p.Model != dhm.CoverageModel {
+		p.FreqMHz != dhm.FirmwareFreqMHz || p.FreqSource != "firmware" || p.K != dhm.DefaultKFactor || p.Model != dhm.CoverageModelDelta {
 		t.Fatalf("params %+v", p)
 	}
 	r := resp.Raster
@@ -708,9 +708,14 @@ func TestCoverage941_PerfBudget(t *testing.T) {
 	start := time.Now()
 	resp := decodeCoverage(t, env.get(reachQuery("56.1629,10.2039")))
 	cold := time.Since(start)
+	// The M0 budget is the Bullington computation's; the default (delta,
+	// about 1.4x) has its own, measured on this branch.
+	start = time.Now()
+	decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "ha=12", "model=bullington")))
+	warm := time.Since(start)
 	start = time.Now()
 	resp = decodeCoverage(t, env.get(reachQuery("56.1629,10.2039", "ha=12")))
-	warm := time.Since(start)
+	warmDefault := time.Since(start)
 	start = time.Now()
 	hit := env.get(reachQuery("56.1629,10.2039", "ha=12"))
 	ras := env.raster(resp.Raster.URL, true)
@@ -718,14 +723,17 @@ func TestCoverage941_PerfBudget(t *testing.T) {
 	if hit.Code != 200 || ras.Code != 200 {
 		t.Fatal("hit failed")
 	}
-	t.Logf("40 km / 30 m, %dx%d raster: cold (fake source, no latency) %v, warm compute %v, cache hit %v, payload %d B gzip (%.0f %% of raw), JSON %d B",
-		resp.Raster.Width, resp.Raster.Height, cold.Round(time.Millisecond), warm.Round(time.Millisecond), hitTime.Round(time.Microsecond),
+	t.Logf("40 km / 30 m, %dx%d raster: cold (fake source, no latency) %v, warm compute %v (default delta %v), cache hit %v, payload %d B gzip (%.0f %% of raw), JSON %d B",
+		resp.Raster.Width, resp.Raster.Height, cold.Round(time.Millisecond), warm.Round(time.Millisecond), warmDefault.Round(time.Millisecond), hitTime.Round(time.Microsecond),
 		ras.Body.Len(), 100*float64(ras.Body.Len())/float64(resp.Raster.Width*resp.Raster.Height), hit.Body.Len())
 	if hitTime > 300*time.Millisecond {
 		t.Fatalf("cache hit %v > 300 ms", hitTime)
 	}
 	if warm > 3*time.Second {
 		t.Fatalf("warm compute %v > 3 s", warm)
+	}
+	if warmDefault > 4500*time.Millisecond || float64(warmDefault) > 2.2*float64(warm) {
+		t.Fatalf("default (delta) warm compute %v > 4.5 s or > 2.2 x bullington %v", warmDefault, warm)
 	}
 	if ras.Body.Len() > 400<<10 {
 		t.Fatalf("payload %d B > 400 KB", ras.Body.Len())
@@ -738,7 +746,7 @@ func TestCoverage941_SettingsDefaultsAndClamps(t *testing.T) {
 	logs := &dhmLogSink{}
 	s := resolveCoverageSettings(CoverageConfig{}, logs.logf)
 	want := coverageSettings{maxRadiusM: 40000, resolutionM: 30, maxInFlight: 1, rateLimitPerMin: 2, upstreamPerMin: 240,
-		cacheEntries: 32, cacheTTL: 24 * time.Hour, elevationCacheBytes: 64 << 20, model: dhm.PathBullington}
+		cacheEntries: 32, cacheTTL: 24 * time.Hour, elevationCacheBytes: 64 << 20, model: dhm.PathDelta}
 	if s != want || logs.String() != "" {
 		t.Fatalf("defaults %+v (log %q)", s, logs.String())
 	}
