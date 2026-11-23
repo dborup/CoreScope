@@ -166,6 +166,21 @@ test('entering kiosk after a new commit was seen schedules the reload (one timer
   assert.strictEqual(b.reloads(), 1);
 });
 
+test('setAutoReload(true) again while a reload is pending keeps that timer and its delay', async () => {
+  const b = load([H('aaa'), H('bbb')], 0.5);
+  await flush();
+  b.VN.setAutoReload(true);
+  await newReading(b);
+  const [pendingTimer] = b.timers();
+  b.advance(50000);
+  b.VN.setAutoReload(true);
+  assert.deepStrictEqual(b.timers(), [pendingTimer], 'the same timer, not a new one');
+  b.advance(24999);
+  assert.strictEqual(b.reloads(), 0, 'not before the first draw\'s 75 s');
+  b.advance(1);
+  assert.strictEqual(b.reloads(), 1, 'at 75 s from the commit, not restarted at the second call');
+});
+
 test('a later commit while a reload is pending keeps the one timer', async () => {
   const b = load([H('aaa'), H('bbb'), H('ccc')], 0.5);
   await flush();
