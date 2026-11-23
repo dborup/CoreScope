@@ -91,9 +91,6 @@ type advertIntervalBucketQuery struct {
 	offset, limit int
 }
 
-// parseAdvertIntervalBucketQuery validates the parameters; msg is the 400
-// message when they are not valid. interval_s has no upper bound: an
-// unsnapped estimate can lie above the longest setting.
 // allDigits reports whether s is only ASCII digits: strconv also accepts a
 // leading "+" (and "-"), which the endpoint's validation table rejects.
 func allDigits(s string) bool {
@@ -108,6 +105,9 @@ func allDigits(s string) bool {
 	return true
 }
 
+// parseAdvertIntervalBucketQuery validates the parameters; msg is the 400
+// message when they are not valid. interval_s has no upper bound: an
+// unsnapped estimate can lie above the longest setting.
 func parseAdvertIntervalBucketQuery(v url.Values) (q advertIntervalBucketQuery, msg string) {
 	switch q.className = v.Get("class"); q.className {
 	case advertClassFlood:
