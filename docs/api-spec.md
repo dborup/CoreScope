@@ -2387,6 +2387,12 @@ new-install default; MeshCore `src/helpers/CommonCLI.cpp:486-505`,
   less 10 % (flood 3 h, zero-hop 60 min) — manual or scripted adverts, a
   reboot loop, other firmware — or the zero-hop estimate is the 2-minute
   new-install default.
+  Outliers name nodes, so they are checked against the identity visibility
+  rules on every request (#896), including observer and inactive-node names
+  the snapshot's pass does not see. A hidden identity's rows are left out
+  of `outliers` and counted in `outliers_withheld`; `outliers_total` and the
+  distributions keep counting them. If that check cannot read the identity
+  metadata the request fails with `500` (fail closed).
 - **Flood re-arm** (`flood_re_arm`). A flood advert re-arms the zero-hop
   timer (`examples/simple_repeater/MyMesh.cpp:1294-1306`).
   `zero_hop_paced_by_flood` counts zero-hop estimates equal to the flood
@@ -2434,6 +2440,7 @@ new-install default; MeshCore `src/helpers/CommonCLI.cpp:486-505`,
     }
   ],
   "outliers_total": number,
+  "outliers_withheld": number,     // outlier rows hidden at serve time (#896), still in outliers_total
   "flood_re_arm": { "zero_hop_paced_by_flood": number, "zero_hop_maybe_suppressed": number },
   "scan": { "generated_at": string (ISO), "rows": number, "truncated": boolean }
 }
@@ -2448,6 +2455,87 @@ new-install default; MeshCore `src/helpers/CommonCLI.cpp:486-505`,
   "buckets": [ { "interval_s": number, "snapped": boolean, "nodes": number } ]  // interval_s ascending
 }
 ```
+
+---
+
+## GET /api/analytics/advert-intervals/bucket
+
+The nodes one Flood or Zero-hop distribution bucket of
+[`GET /api/analytics/advert-intervals`](#get-apianalyticsadvert-intervals)
+counts (#896, the list under a bar of Analytics → Advert Intervals). These
+are observed interval estimates, not confirmed firmware settings.
+
+- **Same rule as the bar.** A node is a member when its class estimate
+  counts in the distributions (medium or high confidence) and falls in the
+  bucket: `interval_s` and `snapped` together, so a snapped 3 h bucket and
+  an unsnapped estimate rounded to 3 h are two lists. Membership runs over
+  the same snapshot rows and `region`/`area` filter as the histogram, so
+  `nodes` is the bar's count.
+- **Snapshot only.** Answered from the published analytics snapshot; before
+  the first one it is `503` with `Retry-After`. It never scans the
+  database. `generated_at` is that snapshot's `scan.generated_at`.
+- **Paging.** Members are sorted by name case-insensitively, then name, then
+  public key. Pass the first page's `generated_at` as `snapshot=` when asking
+  for further pages: once another snapshot is published the answer is `409`
+  with the current `generated_at`, and the client starts again from
+  `offset=0`, so a list never mixes two snapshots.
+- **Visibility.** Every member's identity is checked on every request with
+  the canonical rules (node blacklist, observer blacklist, hidden-name
+  prefix on the node, inactive-node or observer name, in one bulk lookup
+  over all members). Hidden identities are never listed: they count in
+  `withheld` (`nodes` = `visible` + `withheld`). If the lookup fails the
+  answer is `500` with no list.
+- **Cost.** One pass over the snapshot rows, a sort of the bucket's
+  members, and with hidden-name prefixes configured one bulk primary-key
+  lookup. No packet store lock. Page size is hardcoded (default 50, at most
+  200).
+
+### Query Parameters
+
+| Param        | Type    | Default | Description |
+|--------------|---------|---------|-------------|
+| `class`      | string  | —       | Required: `flood` or `zero_hop` |
+| `interval_s` | integer | —       | Required: the bucket's `interval_s` (positive; an unsnapped bucket can lie above 168 h) |
+| `snapped`    | boolean | —       | Required: the bucket's `snapped` (`true` or `false`) |
+| `region`     | string  | —       | As for `GET /api/analytics/advert-intervals` |
+| `area`       | string  | —       | As for `GET /api/analytics/advert-intervals` (unknown key: `400`) |
+| `offset`     | integer | `0`     | Visible members to skip |
+| `limit`      | integer | `50`    | Page size, at most `200` (larger values are capped) |
+| `snapshot`   | string  | —       | `generated_at` the client paged from; `409` when it is no longer current |
+
+### Response `200`
+
+```jsonc
+{
+  "class": "flood" | "zero_hop",
+  "interval_s": number,            // as requested
+  "snapped": boolean,
+  "generated_at": string (ISO),    // snapshot served
+  "nodes": number,                 // the bucket's count (the histogram's)
+  "visible": number,               // listable members, all pages
+  "withheld": number,              // nodes - visible: hidden identities, never listed
+  "offset": number,
+  "limit": number,                 // page size served
+  "members": [                     // [] past the end
+    {
+      "public_key": string, "name": string, "role": string, "regions": [string],
+      "interval_s": number,        // the node's own estimate (unsnapped: not rounded)
+      "snapped": boolean,
+      "confidence": "high" | "medium",
+      "samples": number, "gaps_used": number
+    }
+  ]
+}
+```
+
+### Errors
+
+| Status | When |
+|--------|------|
+| `400`  | Missing or invalid `class`, `interval_s`, `snapped`, `offset`, `limit`, or an invalid `region`/`area` |
+| `409`  | `snapshot=` is not the published snapshot: `{ "error": string, "generated_at": string }` |
+| `500`  | Identity metadata could not be read (fail closed) |
+| `503`  | No snapshot published yet (warming up) |
 
 ---
 

@@ -44,6 +44,12 @@
   }
 
   function getSelected() { return _selected; }
+  /** The selected area's label (its key until the areas load), or '' for all. */
+  function getSelectedLabel() {
+    if (!_selected) return '';
+    var area = _areas.find(function (a) { return a.key === _selected; });
+    return area ? area.label : _selected;
+  }
   function getAreaParam() { return _selected || ''; }
   function areaQueryString() { return _selected ? '&area=' + encodeURIComponent(_selected) : ''; }
 
@@ -124,6 +130,7 @@
     init: initFilter,
     render: render,
     getSelected: getSelected,
+    getSelectedLabel: getSelectedLabel,
     getAreaParam: getAreaParam,
     areaQueryString: areaQueryString,
     onChange: onChange,

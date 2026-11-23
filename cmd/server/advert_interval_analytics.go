@@ -88,9 +88,13 @@ type AdvertIntervalAnalyticsResponse struct {
 	ByRegion      []AdvertIntervalGroup      `json:"by_region"`
 	// RegionsTruncated: by_region holds the advertIntervalRegionLimit
 	// largest regions only.
-	RegionsTruncated bool                     `json:"regions_truncated"`
-	Outliers         []AdvertIntervalOutlier  `json:"outliers"`
-	OutliersTotal    int                      `json:"outliers_total"`
+	RegionsTruncated bool                    `json:"regions_truncated"`
+	Outliers         []AdvertIntervalOutlier `json:"outliers"`
+	OutliersTotal    int                     `json:"outliers_total"`
+	// OutliersWithheld: outlier rows left out of outliers at serve time
+	// because the instance hides their identity (#896); still counted in
+	// outliers_total.
+	OutliersWithheld int                      `json:"outliers_withheld"`
 	FloodReArm       AdvertIntervalFloodReArm `json:"flood_re_arm"`
 	Scan             AdvertIntervalScanInfo   `json:"scan"`
 }
@@ -165,6 +169,14 @@ type advertIntervalNodeRow struct {
 	floodGapS, zeroHopGapS float64
 }
 
+// estimate is r's estimate of class.
+func (r *advertIntervalNodeRow) estimate(class advertIntervalClass) AdvertIntervalEstimate {
+	if class == advertIntervalZeroHop {
+		return r.zeroHop
+	}
+	return r.flood
+}
+
 // advertIntervalSnapshot is what the recomputer stores: the rows the
 // filtered requests aggregate and the unfiltered response.
 type advertIntervalSnapshot struct {
@@ -214,6 +226,17 @@ type advertIntervalBucketKey struct {
 	snapped bool
 }
 
+// advertIntervalBucketOf is e's distribution bucket; ok is false when e does
+// not count in the distributions (advertIntervalCounted). The histogram and
+// the bucket member lists (#896) both use it, so a count and its list
+// follow one rule.
+func advertIntervalBucketOf(e AdvertIntervalEstimate, class advertIntervalClass) (advertIntervalBucketKey, bool) {
+	if !advertIntervalCounted(e) {
+		return advertIntervalBucketKey{}, false
+	}
+	return advertIntervalBucketKey{advertIntervalBucketValue(e, class), e.Snapped}, true
+}
+
 // advertIntervalClassAcc accumulates one AdvertIntervalClassSummary.
 type advertIntervalClassAcc struct {
 	sum     AdvertIntervalClassSummary
@@ -229,7 +252,8 @@ func (a *advertIntervalClassAcc) add(e AdvertIntervalEstimate, class advertInter
 	case advertIntervalIrregular:
 		a.sum.Irregular++
 	case advertIntervalEstimated:
-		if !advertIntervalCounted(e) {
+		k, ok := advertIntervalBucketOf(e, class)
+		if !ok {
 			a.sum.LowConfidence++
 			return
 		}
@@ -237,7 +261,7 @@ func (a *advertIntervalClassAcc) add(e AdvertIntervalEstimate, class advertInter
 		if a.buckets == nil {
 			a.buckets = map[advertIntervalBucketKey]int{}
 		}
-		a.buckets[advertIntervalBucketKey{advertIntervalBucketValue(e, class), e.Snapped}]++
+		a.buckets[k]++
 	}
 }
 
@@ -751,7 +775,8 @@ func (s *PacketStore) GetAdvertIntervalAnalytics(region, area string) AdvertInte
 
 // handleAnalyticsAdvertIntervals serves GET /api/analytics/advert-intervals.
 // Every shape reads the recomputer's snapshot, so every response carries
-// its #492 headers.
+// its #492 headers. The outliers name nodes, so they pass the serve-time
+// visibility filter (#896); a failed lookup fails closed.
 func (s *Server) handleAnalyticsAdvertIntervals(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
 	area := r.URL.Query().Get("area")
@@ -763,5 +788,11 @@ func (s *Server) handleAnalyticsAdvertIntervals(w http.ResponseWriter, r *http.R
 		return
 	}
 	setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompAdvertIntervals)) // #492
-	writeJSON(w, s.store.GetAdvertIntervalAnalytics(region, area))
+	resp, err := s.visibleAdvertIntervalOutliers(r.Context(), s.store.GetAdvertIntervalAnalytics(region, area))
+	if err != nil {
+		log.Printf("[advert-intervals] identity metadata: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not read identity metadata")
+		return
+	}
+	writeJSON(w, resp)
 }

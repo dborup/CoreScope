@@ -153,5 +153,162 @@ test('theming: colours only through CSS variables', () => {
   assert.ok(/var\(--accent\)/.test(block), 'bars use the theme accent');
 });
 
+// ── #896 M1: the nodes of a distribution bucket ──
+
+const ANALYTICS_SRC = fs.readFileSync(path.join(__dirname, 'public', 'analytics.js'), 'utf8');
+const B_FLOOD = { cls: 'flood', intervalS: 10800, snapped: true };
+function member(over) {
+  return Object.assign({ public_key: 'ab12cd34ef56', name: 'Relay One', role: 'repeater', regions: ['SJC'],
+    interval_s: 10800, snapped: true, confidence: 'high', samples: 10, gaps_used: 8 }, over || {});
+}
+function resp(over) {
+  return Object.assign({ class: 'flood', interval_s: 10800, snapped: true, generated_at: '2026-10-25T08:00:00Z',
+    nodes: 3, visible: 3, withheld: 0, offset: 0, limit: 50, members: [member(), member({ public_key: 'ff00', name: 'Relay Two', confidence: 'medium' })] }, over || {});
+}
+function view(over) {
+  return Object.assign({ bucket: B_FLOOD, status: 'ready', resp: resp(), shown: 2,
+    chart: { generated_at: '2026-10-25T08:00:00Z', nodes: 3 }, scope: { region: '', area: '' } }, over || {});
+}
+
+test('#896 distribution rows are buttons naming their bucket', () => {
+  const html = AI.render(data());
+  const flood = section(html, 'data-ai-section="dist-flood"');
+  const rows = flood.match(/<button[^>]*class="ai-dist-row"[^>]*>/g) || [];
+  assert.strictEqual(rows.length, 3, flood);
+  const r47 = rows.find((r) => /data-interval="169200"/.test(r));
+  assert.ok(/type="button"/.test(r47) && /data-ai-bucket="flood\.169200\.s"/.test(r47) && /data-class="flood"/.test(r47) && /data-snapped="true"/.test(r47), r47);
+  assert.ok(/aria-expanded="false"/.test(r47) && /aria-controls="ai-bucket-panel-flood"/.test(r47), r47);
+  assert.ok(/aria-label="47 h: 3 nodes with an estimated flood advert interval of 47 h\. Show nodes"/.test(r47), r47);
+  const r12 = rows.find((r) => /data-interval="43200"/.test(r));
+  assert.ok(/aria-label="12 h: 1 node with an estimated flood advert interval of 12 h\. Show nodes"/.test(r12), 'singular: ' + r12);
+  const un = rows.find((r) => /data-interval="1080000"/.test(r));
+  assert.ok(/data-ai-bucket="flood\.1080000\.u"/.test(un) && /data-snapped="false"/.test(un) && /outside the settable range/.test(un), un);
+  assert.ok(/<section[^>]*id="ai-bucket-panel-flood"[^>]*hidden/.test(flood), 'closed panel placeholder: ' + flood);
+  const zh = section(html, 'data-ai-section="dist-zero_hop"');
+  assert.ok(/data-ai-bucket="zero_hop\.7200\.s"[^>]*aria-controls="ai-bucket-panel-zero_hop"/.test(zh) && /zero-hop advert interval of 120 min/.test(zh), zh);
+});
+
+test('#896 bucket parameter: round trip, anything else ignored', () => {
+  for (const b of [B_FLOOD, { cls: 'zero_hop', intervalS: 3600, snapped: false }, { cls: 'flood', intervalS: 1080000, snapped: false }]) {
+    const p = AI.formatBucketParam(b);
+    assert.ok(/^[a-z_]+\.[0-9]+\.[su]$/.test(p) && encodeURIComponent(p) === p, p);
+    assert.deepStrictEqual(Object.assign({}, AI.parseBucketParam(p)), b);
+  }
+  assert.strictEqual(AI.formatBucketParam(B_FLOOD), 'flood.10800.s');
+  for (const bad of [null, undefined, '', 'flood', 'flood.10800', 'mixed.10800.s', 'FLOOD.10800.s', 'flood.0.s', 'flood.-1.s',
+    'flood.1e3.s', 'flood.010800.s', 'flood.10800.x', 'flood.10800.s.u', ' flood.10800.s', 'flood.10800.s ', '__proto__',
+    'flood.99999999999999999999.s', 'flood.10800.s"><img src=x>']) {
+    assert.strictEqual(AI.parseBucketParam(bad), null, String(bad));
+  }
+});
+
+test('#896 heading: class and interval in words, unsnapped marked', () => {
+  assert.strictEqual(AI.bucketHeading(B_FLOOD), 'Nodes with an estimated flood advert interval of 3 h');
+  assert.strictEqual(AI.bucketHeading({ cls: 'zero_hop', intervalS: 7200, snapped: true }), 'Nodes with an estimated zero-hop advert interval of 120 min');
+  assert.strictEqual(AI.bucketHeading({ cls: 'flood', intervalS: 10800, snapped: false }), 'Nodes with an estimated flood advert interval of 3 h (outside the settable range)');
+});
+
+test('#896 panel: heading, snapshot and scope, observed-estimate wording', () => {
+  const html = AI.renderBucketPanel(view());
+  assert.ok(/<h4 id="ai-bucket-heading-flood" tabindex="-1">Nodes with an estimated flood advert interval of 3 h<\/h4>/.test(html), html);
+  const t = text(html);
+  assert.ok(/Snapshot 2026-10-25 08:00 UTC · All regions · All areas/.test(t), t);
+  assert.ok(/Observed estimates from the adverts CoreScope heard, not confirmed firmware settings\./.test(t), t);
+  assert.ok(/data-ai-bucket-close/.test(html) && /Close/.test(t), 'close button');
+  const scoped = text(AI.renderBucketPanel(view({ scope: { region: 'SJC,OAK', area: 'Fyn <b>' } })));
+  assert.ok(/Region SJC, OAK · Area Fyn &lt;b&gt;/.test(scoped), scoped);
+  assert.ok(!/<b>/.test(AI.renderBucketPanel(view({ scope: { region: '', area: 'Fyn <b>' } }))), 'area label escaped');
+});
+
+test('#896 members: escaped, linked to the node adverts, key prefix, role, estimate, confidence', () => {
+  const evil = member({ public_key: 'ab<cd"ef0123456789', name: '<img src=x onerror=alert(1)>', role: '<i>r</i>', confidence: 'medium', interval_s: 10500, snapped: false });
+  const html = AI.bucketMembersHtml([evil, member({ name: '', public_key: '0123456789abcdef0123' })], 'zero_hop');
+  assert.ok(!/<img|<i>/.test(html), 'escaped: ' + html);
+  assert.ok(/href="#\/nodes\/ab%3Ccd%22ef0123456789\?section=node-packets&amp;adverts=zero_hop"/.test(html), html);
+  assert.ok(/data-ai-member="ab&lt;cd&quot;ef0123456789"/.test(html), html);
+  const t = text(html);
+  assert.ok(/&lt;img src=x onerror=alert\(1\)&gt;/.test(html) && /ab&lt;cd&quot;e/.test(html), html);
+  assert.ok(/≈ 175 min/.test(t) && /medium confidence/.test(t), t);
+  assert.ok(/0123456789abcdef/.test(t), 'a nameless node shows its key: ' + t);
+  assert.strictEqual((html.match(/<li /g) || []).length, 2);
+  const flood = text(AI.bucketMembersHtml([member()], 'flood'));
+  assert.ok(/Relay One ab12cd34 repeater · ≈ 3 h · high confidence/.test(flood), flood);
+  assert.ok(/adverts=flood"/.test(AI.bucketMembersHtml([member()], 'flood')));
+  assert.ok(/adverts=flood"/.test(AI.bucketMembersHtml([member()], 'bogus')), 'unknown class falls back to flood');
+});
+
+test('#896 panel states: loading, error, warming up, empty', () => {
+  const loading = AI.renderBucketPanel(view({ status: 'loading', resp: null }));
+  assert.ok(/aria-busy="true"/.test(loading) && /Loading nodes…/.test(text(loading)) && !/<li /.test(loading), loading);
+  const err = AI.renderBucketPanel(view({ status: 'error', resp: null, error: { status: 500 } }));
+  assert.ok(/role="alert"/.test(err) && /Could not load the nodes of this bucket/.test(text(err)) && /data-ai-bucket-retry/.test(err) && !/<li /.test(err), err);
+  const warm = text(AI.renderBucketPanel(view({ status: 'error', resp: null, error: { status: 503 } })));
+  assert.ok(/still warming up/.test(warm), warm);
+  const empty = AI.renderBucketPanel(view({ resp: resp({ nodes: 0, visible: 0, members: [] }), shown: 0, chart: { generated_at: '2026-10-25T08:00:00Z', nodes: 0 } }));
+  assert.ok(/No listed nodes in this bucket for the current selection\./.test(text(empty)) && !/<ul/.test(empty) && !/Showing/.test(text(empty)), empty);
+});
+
+test('#896 withheld identities are stated, never shown', () => {
+  let t = text(AI.renderBucketPanel(view({ resp: resp({ nodes: 89, visible: 87, withheld: 2 }), chart: { generated_at: '2026-10-25T08:00:00Z', nodes: 89 } })));
+  assert.ok(/2 of the 89 nodes in this bucket are not listed because this instance hides their identity\./.test(t), t);
+  t = text(AI.renderBucketPanel(view({ resp: resp({ nodes: 3, visible: 2, withheld: 1 }) })));
+  assert.ok(/1 of the 3 nodes in this bucket is not listed because this instance hides their identity\./.test(t), t);
+  t = text(AI.renderBucketPanel(view({ resp: resp({ nodes: 1, visible: 0, withheld: 1, members: [] }), shown: 0, chart: { generated_at: '2026-10-25T08:00:00Z', nodes: 1 } })));
+  assert.ok(/1 of the 1 nodes/.test(t) === false && /The 1 node in this bucket is not listed because this instance hides its identity\./.test(t), t);
+  assert.ok(!/not listed/.test(text(AI.renderBucketPanel(view()))), 'nothing withheld, nothing said');
+});
+
+test('#896 footer: showing X of Y and the next page size', () => {
+  let html = AI.renderBucketPanel(view({ resp: resp({ nodes: 312, visible: 312 }), shown: 50, chart: { generated_at: '2026-10-25T08:00:00Z', nodes: 312 } }));
+  assert.ok(/Showing 50 of 312/.test(text(html)) && /data-ai-bucket-more[^>]*>Show 50 more</.test(html), html);
+  html = AI.bucketFooterHtml(300, 312, 50);
+  assert.ok(/Showing 300 of 312/.test(text(html)) && />Show 12 more</.test(html), html);
+  html = AI.bucketFooterHtml(312, 312, 50);
+  assert.ok(/Showing 312 of 312/.test(text(html)) && !/data-ai-bucket-more/.test(html), html);
+  assert.ok(/Showing 2 of 3/.test(text(AI.renderBucketPanel(view()))), 'shown counts the members loaded');
+});
+
+test('#896 a refreshed snapshot is explained, not mixed in silently', () => {
+  assert.ok(!/refreshed/.test(text(AI.renderBucketPanel(view()))), 'same snapshot and count: no notice');
+  const html = AI.renderBucketPanel(view({ resp: resp({ generated_at: '2026-10-25T08:05:00Z', nodes: 4, visible: 4 }) }));
+  const t = text(html);
+  assert.ok(/The analytics were refreshed at 2026-10-25 08:05 UTC; this bucket now holds 4 nodes \(the chart shows 3\)\./.test(t), t);
+  assert.ok(/role="status"/.test(html) && /data-ai-bucket-refresh/.test(html) && /Refresh chart/.test(t), html);
+  assert.ok(/Snapshot 2026-10-25 08:05 UTC/.test(t), 'the subtitle names the list\'s own snapshot: ' + t);
+});
+
+test('#896 outliers state the withheld rows', () => {
+  let t = text(section(AI.render(data({ outliers_withheld: 1 })), 'data-ai-section="outliers"'));
+  assert.ok(/1 outlier is not listed because this instance hides its identity\./.test(t), t);
+  t = text(section(AI.render(data({ outliers: [], outliers_total: 2, outliers_withheld: 2 })), 'data-ai-section="outliers"'));
+  assert.ok(/2 outliers are not listed because this instance hides their identity\./.test(t) && !/No outliers/.test(t), t);
+  assert.ok(!/not listed/.test(text(AI.render(data()))), 'nothing withheld');
+});
+
+test('#896 theming: the bucket styles use CSS variables only', () => {
+  const css = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
+  const block = css.slice(css.indexOf('/* #896 — distribution rows'), css.indexOf('/* end #896 */'));
+  assert.ok(block.length > 0 && /\.ai-bucket-panel/.test(block), 'style.css block missing');
+  assert.ok(!/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/.test(block.replace(/\/\*[\s\S]*?\*\//g, '')), 'hardcoded colour: ' + block);
+  assert.ok(/\.ai-dist-row \{ min-height: 48px; \}/.test(block), 'touch-size rows on phones');
+});
+
+test('#896 neutral wording: observed estimates, nobody named and shamed', () => {
+  const code = SRC.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  for (const w of [/misconfigur/i, /\bwrong\b/i, /violat/i, /\bshame/i, /\bbad\b/i, /\boffend/i, /\bculprit/i]) {
+    assert.ok(!w.test(code), 'wording ' + w);
+  }
+});
+
+test('#896 analytics.js: bucket= belongs to the tab, one request per open, no per-node calls', () => {
+  assert.ok(/'advert-intervals': \['bucket'\]/.test(ANALYTICS_SRC), 'TAB_URL_PARAMS drops bucket= on a tab switch');
+  const i = ANALYTICS_SRC.indexOf('// #896 M1');
+  assert.ok(i >= 0, '#896 block in analytics.js');
+  const block = ANALYTICS_SRC.slice(i, ANALYTICS_SRC.indexOf('// end #896 M1'));
+  assert.ok(/\/analytics\/advert-intervals\/bucket/.test(block), 'fetches the bucket endpoint');
+  assert.ok(!/\/nodes\//.test(block.replace(/#\/nodes\//g, '')) && !/api\(\s*['"`]\/nodes/.test(block), 'no /api/nodes calls');
+  assert.ok(/history\.pushState/.test(block) && /history\.replaceState/.test(block) && /history\.back\(\)/.test(block), 'history wiring');
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

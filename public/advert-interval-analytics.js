@@ -10,6 +10,12 @@
  *
  * render() returns an HTML string built only from escaped values. Nothing
  * here fetches; analytics.js passes the response in.
+ *
+ * #896: every distribution row is a button for its bucket; analytics.js
+ * opens the bucket's nodes (GET /api/analytics/advert-intervals/bucket) in
+ * the card's panel, rendered by renderBucketPanel / bucketMembersHtml /
+ * bucketFooterHtml. A bucket is named in the URL as bucket=<class>.<interval_s>.<s|u>
+ * (parseBucketParam / formatBucketParam).
  */
 (function (root) {
   'use strict';
@@ -74,23 +80,143 @@
       ' · too few adverts ' + num(s.too_few) + ' · ' + notObserved + ' ' + num(s.not_observed) + '</div>';
   }
 
+  function classOf(key) {
+    return CLASSES.filter(function (c) { return c.key === key; })[0] || CLASSES[0];
+  }
+
+  function plural(n, one, many) { return n === 1 ? one : many; }
+
+  /** The bucket a bucket= value names, or null for anything else. */
+  function parseBucketParam(v) {
+    var m = /^(flood|zero_hop)\.([1-9][0-9]{0,15})\.([su])$/.exec(typeof v === 'string' ? v : '');
+    if (!m || Number(m[2]) > Number.MAX_SAFE_INTEGER) return null;
+    return { cls: m[1], intervalS: Number(m[2]), snapped: m[3] === 's' };
+  }
+
+  function formatBucketParam(b) {
+    return classOf(b.cls).key + '.' + Math.round(num(b.intervalS)) + '.' + (b.snapped ? 's' : 'u');
+  }
+
+  var UNSNAPPED = 'outside the settable range';
+
+  function intervalPhrase(cls, intervalS) {
+    return 'an estimated ' + classOf(cls).label.toLowerCase() + ' advert interval of ' + fmt(intervalS, classOf(cls).key);
+  }
+
+  /** "Nodes with an estimated flood advert interval of 3 h", unescaped. */
+  function bucketHeading(b) {
+    return 'Nodes with ' + intervalPhrase(b.cls, b.intervalS) + (b.snapped ? '' : ' (' + UNSNAPPED + ')');
+  }
+
   function distributionHtml(s, c) {
     s = s || {};
     var buckets = Array.isArray(s.buckets) ? s.buckets : [];
     var max = buckets.reduce(function (m, b) { return Math.max(m, num(b.nodes)); }, 0) || 1;
+    var panelId = 'ai-bucket-panel-' + c.key;
     var rows = buckets.map(function (b) {
       var pct = Math.round(num(b.nodes) / max * 100);
-      return '<div class="ai-dist-row" data-interval="' + num(b.interval_s) + '">' +
-        '<span class="ai-dist-label">' + esc(fmt(b.interval_s, c.key)) +
-        (b.snapped ? '' : ' <span class="text-muted">(outside the settable range)</span>') + '</span>' +
+      var n = num(b.nodes);
+      var label = fmt(b.interval_s, c.key);
+      var name = label + ': ' + n + ' ' + plural(n, 'node', 'nodes') + ' with ' + intervalPhrase(c.key, b.interval_s) +
+        (b.snapped ? '' : ' (' + UNSNAPPED + ')') + '. Show nodes';
+      return '<button type="button" class="ai-dist-row" data-ai-bucket="' + esc(formatBucketParam({ cls: c.key, intervalS: b.interval_s, snapped: b.snapped })) +
+        '" data-class="' + c.key + '" data-interval="' + num(b.interval_s) + '" data-snapped="' + (b.snapped ? 'true' : 'false') +
+        '" aria-expanded="false" aria-controls="' + panelId + '" aria-label="' + esc(name) + '">' +
+        '<span class="ai-dist-label">' + esc(label) +
+        (b.snapped ? '' : ' <span class="text-muted">(' + UNSNAPPED + ')</span>') + '</span>' +
         '<span class="ai-dist-bar"><span class="ai-dist-fill" style="width:' + pct + '%"></span></span>' +
-        '<span class="ai-dist-count">' + num(b.nodes) + '</span></div>';
+        '<span class="ai-dist-count">' + n + '</span></button>';
     }).join('');
     if (!rows) rows = '<div class="text-muted">No medium or high confidence estimates.</div>';
     return '<div class="analytics-card" data-ai-section="dist-' + c.key + '">' +
       '<h3>' + c.label + ' advert interval</h3>' +
       '<div class="ai-dist" title="Nodes per estimated ' + c.setting + ' value">' + rows + '</div>' +
-      classCounts(s, c) + '</div>';
+      classCounts(s, c) +
+      '<section class="ai-bucket-panel" id="' + panelId + '" aria-labelledby="ai-bucket-heading-' + c.key + '" hidden></section></div>';
+  }
+
+  // --- #896: the nodes of one bucket ---------------------------------------
+
+  /** "2026-10-25 08:00 UTC" for an RFC3339 UTC time; other text as it is. */
+  function snapshotTime(v) {
+    var m = /^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(:\d{2}(\.\d+)?)?Z$/.exec(String(v || ''));
+    return m ? m[1] + ' ' + m[2] + ' UTC' : String(v || '—');
+  }
+
+  function scopeText(scope) {
+    scope = scope || {};
+    var region = String(scope.region || '').split(',').filter(Boolean).join(', ');
+    return (region ? 'Region ' + region : 'All regions') + ' · ' + (scope.area ? 'Area ' + scope.area : 'All areas');
+  }
+
+  /** One <li> per member, linked to its node's adverts of class cls. */
+  function bucketMembersHtml(members, cls) {
+    var c = classOf(cls);
+    return (Array.isArray(members) ? members : []).map(function (m) {
+      var pk = String(m.public_key || '');
+      var label = m.name ? esc(m.name) : '<span class="mono">' + esc(pk.slice(0, 16)) + '</span>';
+      return '<li class="ai-bucket-member" data-ai-member="' + esc(pk) + '">' +
+        '<a href="#/nodes/' + encodeURIComponent(pk) + '?section=node-packets&amp;adverts=' + c.key + '">' + label + '</a> ' +
+        '<span class="mono text-muted ai-bucket-key">' + esc(pk.slice(0, 8)) + '</span> ' +
+        '<span class="text-muted">' + esc(m.role || 'unknown') + ' · ≈ ' + esc(fmt(m.interval_s, c.key)) + ' · ' + esc(m.confidence) + ' confidence</span></li>';
+    }).join('');
+  }
+
+  /** "Showing X of Y" and, while more are visible, the next page's button. */
+  function bucketFooterHtml(shown, visible, limit) {
+    shown = num(shown); visible = num(visible);
+    var next = Math.min(num(limit) || 50, visible - shown);
+    return '<span class="text-muted">Showing ' + shown + ' of ' + visible + '</span>' +
+      (next > 0 ? ' <button type="button" class="btn-secondary" data-ai-bucket-more>Show ' + next + ' more</button>' : '');
+  }
+
+  function withheldText(nodes, withheld) {
+    if (withheld <= 0) return '';
+    var why = ' because this instance hides ';
+    var t = withheld === nodes
+      ? (withheld === 1 ? 'The 1 node in this bucket is not listed' + why + 'its identity.'
+        : 'The ' + withheld + ' nodes in this bucket are not listed' + why + 'their identity.')
+      : withheld + ' of the ' + nodes + ' nodes in this bucket ' + plural(withheld, 'is', 'are') + ' not listed' + why + 'their identity.';
+    return '<p class="text-muted ai-note" data-ai-bucket-withheld>' + esc(t) + '</p>';
+  }
+
+  /**
+   * The panel's content. view: { bucket, status: 'loading' | 'error' |
+   * 'ready', resp (the bucket response), shown (members loaded so far),
+   * chart: { generated_at, nodes } (the histogram the bucket was opened
+   * from), scope: { region, area } (labels of the active filters),
+   * error: { status } }.
+   */
+  function renderBucketPanel(view) {
+    var b = view.bucket, c = classOf(b.cls), r = view.resp || {};
+    var chart = view.chart || {};
+    var stamp = view.status === 'ready' ? r.generated_at : chart.generated_at;
+    var head = '<div class="ai-bucket-head"><h4 id="ai-bucket-heading-' + c.key + '" tabindex="-1">' + esc(bucketHeading(b)) + '</h4>' +
+      '<button type="button" class="btn-secondary" data-ai-bucket-close>Close</button></div>' +
+      '<p class="text-muted ai-note">Snapshot ' + esc(snapshotTime(stamp)) + ' · ' + esc(scopeText(view.scope)) + '. ' +
+      'Observed estimates from the adverts CoreScope heard, not confirmed firmware settings.</p>';
+    if (view.status === 'loading') {
+      return head + '<div class="ai-bucket-body text-muted" aria-busy="true">Loading nodes…</div>';
+    }
+    if (view.status === 'error') {
+      var warm = view.error && view.error.status === 503;
+      return head + '<div class="ai-bucket-body" role="alert">' +
+        (warm ? 'Advert interval analytics are still warming up on the server. Try again in a moment.' : 'Could not load the nodes of this bucket.') +
+        ' <button type="button" class="btn-secondary" data-ai-bucket-retry>Retry</button></div>';
+    }
+    var nodes = num(r.nodes), visible = num(r.visible);
+    var notice = '';
+    if (r.generated_at !== chart.generated_at || nodes !== num(chart.nodes)) {
+      notice = '<div class="ai-bucket-notice" role="status">' +
+        esc('The analytics were refreshed at ' + snapshotTime(r.generated_at) + '; this bucket now holds ' + nodes + ' ' +
+          plural(nodes, 'node', 'nodes') + ' (the chart shows ' + num(chart.nodes) + ').') +
+        ' <button type="button" class="btn-secondary" data-ai-bucket-refresh>Refresh chart</button></div>';
+    }
+    var body = visible
+      ? '<ul class="ai-bucket-list">' + bucketMembersHtml(r.members, c.key) + '</ul>' +
+        '<div class="ai-bucket-foot">' + bucketFooterHtml(view.shown, visible, r.limit) + '</div>'
+      : '<p class="text-muted">No listed nodes in this bucket for the current selection.</p>';
+    return head + notice + withheldText(nodes, num(r.withheld)) + '<div class="ai-bucket-body" aria-busy="false">' + body + '</div>';
   }
 
   function topValues(s, key) {
@@ -130,10 +256,13 @@
       '</div>';
   }
 
-  function outliersHtml(list, total) {
+  function outliersHtml(list, total, withheld) {
     list = Array.isArray(list) ? list : [];
-    var head = '<div class="analytics-card" id="ai-outliers" data-ai-section="outliers"><h3>Outliers: very frequent adverts</h3>';
-    if (!list.length) return head + '<div class="text-muted">No outliers.</div></div>';
+    withheld = num(withheld);
+    var head = '<div class="analytics-card" id="ai-outliers" data-ai-section="outliers"><h3>Outliers: very frequent adverts</h3>' +
+      (withheld ? '<p class="text-muted ai-note">' + (withheld === 1 ? '1 outlier is not listed because this instance hides its identity.'
+        : withheld + ' outliers are not listed because this instance hides their identity.') + '</p>' : '');
+    if (!list.length) return head + (withheld ? '' : '<div class="text-muted">No outliers.</div>') + '</div>';
     var rows = list.map(function (o) {
       var cls = o.class === 'zero_hop' ? 'zero_hop' : 'flood';
       var name = o.name ? esc(o.name) : '<span class="mono">' + esc(String(o.public_key || '').slice(0, 16)) + '</span>';
@@ -175,10 +304,14 @@
       groupsHtml('by-role', 'By role', 'Role', d.by_role, function (k) { return k; }) +
       groupsHtml('by-region', 'By region', 'Region', d.by_region, function (k) { return k === 'unknown' ? 'No observer region' : k; },
         d.regions_truncated ? '<p class="text-muted ai-note">Only the 50 largest regions are listed.</p>' : '') +
-      outliersHtml(d.outliers, d.outliers_total) +
+      outliersHtml(d.outliers, d.outliers_total, d.outliers_withheld) +
       methodHtml(d) +
       '</div>';
   }
 
-  root.AdvertIntervalAnalytics = { render: render, topBuckets: topBuckets };
+  root.AdvertIntervalAnalytics = {
+    render: render, topBuckets: topBuckets,
+    parseBucketParam: parseBucketParam, formatBucketParam: formatBucketParam, bucketHeading: bucketHeading,
+    renderBucketPanel: renderBucketPanel, bucketMembersHtml: bucketMembersHtml, bucketFooterHtml: bucketFooterHtml
+  };
 })(typeof window !== 'undefined' ? window : this);

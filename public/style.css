@@ -3950,6 +3950,24 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
 .ai-class-counts { margin-top: 10px; font-size: 12px; }
 .ai-rearm-row { font-size: 13px; margin: 4px 0; }
 /* end #245 M2 */
+/* #896 — distribution rows are bucket buttons; the bucket's node list (advert-interval-analytics.js) */
+.ai-dist-row { width: 100%; margin: 0; padding: 2px 4px; border: 0; border-radius: var(--radius-sm); background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.ai-dist-row:hover { background: var(--row-hover); }
+.ai-dist-row[aria-expanded="true"] { background: var(--selected-bg); box-shadow: inset 0 0 0 1px var(--accent); }
+.ai-bucket-panel { margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--detail-bg); min-width: 0; scroll-margin: 64px 0 72px; }
+.ai-bucket-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.ai-bucket-head h4 { margin: 0; font-size: var(--fs-md); flex: 1 1 auto; min-width: 0; }
+.ai-bucket-head .btn-secondary { flex: none; }
+.ai-bucket-list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ai-bucket-member { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-size: 13px; min-width: 0; }
+.ai-bucket-member a { overflow-wrap: anywhere; }
+.ai-bucket-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; }
+.ai-bucket-notice { margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--status-amber); background: var(--surface-2); font-size: 13px; }
+@media (max-width: 640px), (pointer: coarse) {
+  .ai-dist-row { min-height: 48px; }
+  .ai-bucket-member a { display: inline-flex; align-items: center; min-height: 44px; }
+}
+/* end #896 */
 
 /* #206 — Analytics/Compare tables scroll wrappers on mobile */
 .analytics-table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
