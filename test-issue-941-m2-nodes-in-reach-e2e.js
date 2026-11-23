@@ -22,12 +22,15 @@
  *   3. the model select asks again once, with model=delta, puts
  *      rmodel=delta in the address bar and names the model; a deep link
  *      with rmodel and rlist restores both;
- *   4. 375×560 with touch, from a cold #/map: real taps on the toggle and
- *      the map open the panel, a tap on a chip opens the list, the list
- *      does not scroll on its own (a swipe that starts on it scrolls the
- *      sheet), a budget change recounts it with no request, there is no
- *      horizontal scroll, the chip and the first link are on screen and
- *      on top, and a tap on the link opens the node's page;
+ *   4. 375×560 and 360×640 with touch, from a cold #/map, with 66 nodes
+ *      in Good: real taps on the toggle and the map open the panel, a tap
+ *      on a chip opens the list, and with the list open the power slider
+ *      is reached by touch swipes on the sheet alone (it sits at most
+ *      700 px below the chip) and touch-dragged; that recounts the list
+ *      with no request; there is no horizontal scroll; the chip and the
+ *      node rows are on screen and on top, a row given keyboard focus is
+ *      not left under the sheet's sticky head, and a tap on a row's link
+ *      opens the node;
  *   5. no console error, and no request leaves localhost.
  *
  * SHOTS_DIR, when set, receives small JPEG screenshots.
@@ -62,6 +65,17 @@ const NODES = [
   { pubkey: '5'.repeat(64), name: 'Behind the ridge', role: 'repeater', distanceKm: 23, heightM: 10, heightSource: 'role-default', lossDb: 161 },
 ];
 const REACH = { roles: ['repeater', 'room'], budgetDb: 158, counts: { good: 2, marginal: 1, weak: 1, none: 1 }, nodes: NODES, omitted: 0, noTerrain: 1 };
+// The phone's reach: 64 more repeaters between Near mast and the room, at
+// 121–133.6 dB, so Good lists 66 nodes at 158 dB, as a busy area does. At
+// −10 dBm (126 dB) Good is empty and 27 nodes are in reach, Near mast first.
+const PHONE_NODES = NODES.slice(0, 1).concat(Array.from({ length: 64 }, (_, i) => ({
+  pubkey: ('e' + i.toString(16).padStart(3, '0')).repeat(16), name: 'Mast ' + (i + 1), role: 'repeater',
+  distanceKm: 2.5 + i * 0.1, heightM: 10, heightSource: 'role-default', lossDb: Math.round((121 + i * 0.2) * 10) / 10,
+})), NODES.slice(1));
+const PHONE_REACH = { roles: ['repeater', 'room'], budgetDb: 158, counts: { good: 66, marginal: 1, weak: 1, none: 1 }, nodes: PHONE_NODES, omitted: 0, noTerrain: 1 };
+// The furthest the power slider may sit below the Good chip with the list
+// open: about three sheets' worth of swiping at 375×560.
+const PHONE_SLIDER_MAX_PX = 700;
 
 let passed = 0, failed = 0;
 async function step(name, fn) {
@@ -130,7 +144,7 @@ function rasterFor(c, radiusKm) {
         raster: { url: RASTER_PATH + '?key=' + key, width: ras.W, height: ras.H, bounds: ras.bounds, encoding: 'loss-u8',
           lossBaseDb: 60, lossStepDb: 0.5, noData: 255, coveredPct: 100, bytes: ras.bytes.length },
         sources: [{ id: 'dhm-dtm', resolutionM: 30, model: 'dtm' }],
-        reach: REACH,
+        reach: o.reach || REACH,
       };
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
     });
@@ -288,9 +302,102 @@ function rasterFor(c, radiusKm) {
   });
 
   // ── 4: phone, touch, from a cold #/map ──────────────────────────────────
-  for (const theme of ['light', 'dark']) {
-    await step(`${theme}: 375×560 touch from a cold #/map: taps open the list, the budget recounts it, a link opens the node`, async () => {
-      const { ctx, page, rec } = await newCtx({ theme, viewport: { width: 375, height: 560 }, touch: true });
+  /* swipe moves a finger up (dy > 0) or down the screen from `at`, slowly
+   * and held still at the end, so there is no fling. */
+  async function swipe(page, cdp, at, dy) {
+    const steps = 8;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] });
+    for (let k = 1; k <= steps; k++) {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: at.x, y: at.y - dy * k / steps }] });
+      await page.waitForTimeout(16);
+    }
+    await page.waitForTimeout(150);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.waitForTimeout(150);
+  }
+
+  /* sheetGrip is where a thumb would push the sheet: the lowest spot of
+   * its visible body, below the sticky head, off the node list (a swipe
+   * there scrolls the list) and a thumb's width (±16 px) clear of every
+   * slider (the browser snaps a touch near one onto it, and a swipe then
+   * moves it). The list itself when no such spot shows. */
+  function sheetGrip(page) {
+    return page.evaluate(() => {
+      const sheet = document.querySelector('[data-testid="reach-panel"]');
+      const list = document.querySelector('[data-testid="reach-nir-list"]');
+      const s = sheet.getBoundingClientRect();
+      const head = sheet.querySelector('.reach-head').getBoundingClientRect();
+      const x = s.left + s.width / 2;
+      const hitAt = (px, py) => document.elementFromPoint(px, py);
+      const offSliders = (px, py) => { const h = hitAt(px, py); return !h || !h.closest('input[type="range"]'); };
+      for (let y = s.bottom - 18; y > head.bottom + 18; y -= 4) {
+        const hit = hitAt(x, y);
+        if (!hit || !sheet.contains(hit) || list.contains(hit) || hit.closest('input, select')) continue;
+        if ([-16, 0, 16].every(dy => [-16, 0, 16].every(dx => offSliders(x + dx, y + dy)))) return { x, y, onList: false };
+      }
+      return { x, y: (head.bottom + s.bottom) / 2, onList: true };
+    });
+  }
+
+  /* inView: the element is wholly on screen in the sheet, below its head,
+   * and on top at its centre. */
+  function inView(page, selector) {
+    return page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      const sheet = document.querySelector('[data-testid="reach-panel"]');
+      const r = el.getBoundingClientRect(), s = sheet.getBoundingClientRect();
+      const head = sheet.querySelector('.reach-head').getBoundingClientRect();
+      const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return r.height > 0 && r.top >= head.bottom && r.bottom <= Math.min(s.bottom, innerHeight) && !!hit && (hit === el || el.contains(hit));
+    }, selector);
+  }
+
+  /* touchScrollTo swipes the sheet, by touch only, until selector is in
+   * view: up while it is below the head, down while above. The number of
+   * swipes. */
+  async function touchScrollTo(page, cdp, selector, max) {
+    for (let n = 0; n <= max; n++) {
+      if (await inView(page, selector)) return n;
+      const below = await page.evaluate((sel) => {
+        const r = document.querySelector(sel).getBoundingClientRect();
+        const head = document.querySelector('[data-testid="reach-panel"] .reach-head').getBoundingClientRect();
+        return r.top >= head.bottom;
+      }, selector);
+      const at = await sheetGrip(page);
+      const tops = () => page.evaluate(() => ['reach-panel', 'reach-nir-list'].map(id => document.querySelector(`[data-testid="${id}"]`).scrollTop).join());
+      const was = await tops();
+      await swipe(page, cdp, at, below ? 80 : -80);
+      if (await tops() === was) throw new Error(`a swipe at ${JSON.stringify(at)} scrolled nothing on the way to ${selector}`);
+    }
+    throw new Error(`${selector} not in view after ${max} swipes`);
+  }
+
+  /* dragSlider touch-drags a range input's thumb to value v. */
+  async function dragSlider(page, cdp, selector, v) {
+    const g = await page.evaluate((sel) => {
+      const s = document.querySelector(sel);
+      const r = s.getBoundingClientRect();
+      return { left: r.left, width: r.width, y: r.top + r.height / 2, min: Number(s.min), max: Number(s.max), value: Number(s.value) };
+    }, selector);
+    const thumb = 16; // Chromium's thumb, about
+    const xOf = val => g.left + thumb / 2 + (g.width - thumb) * (val - g.min) / (g.max - g.min);
+    const from = { x: xOf(g.value), y: g.y };
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [from] });
+    for (let k = 1; k <= 10; k++) {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: from.x + (xOf(v) - from.x) * k / 10, y: g.y }] });
+      await page.waitForTimeout(16);
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.waitForTimeout(800); // past the request debounce
+  }
+
+  const PHONES = [
+    { theme: 'light', width: 375, height: 560 }, { theme: 'dark', width: 375, height: 560 },
+    { theme: 'light', width: 360, height: 640 }, { theme: 'dark', width: 360, height: 640 },
+  ];
+  for (const { theme, width, height } of PHONES) {
+    await step(`${theme}: ${width}×${height} touch from a cold #/map: a chip opens the list, the budget is reached by touch and recounts it, a row opens the node`, async () => {
+      const { ctx, page, rec } = await newCtx({ theme, viewport: { width, height }, touch: true, reach: PHONE_REACH });
       try {
         await page.goto(`${BASE}/#/map?lat=${AARHUS.lat}&lon=${AARHUS.lon}&zoom=10`, { waitUntil: 'domcontentloaded' });
         await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
@@ -300,59 +407,63 @@ function rasterFor(c, radiusKm) {
         await page.touchscreen.tap(box.x + box.width / 2, box.y + box.height / 3);
         await waitPanel(page);
         assert(rec.coverage.length === 1, 'requests ' + rec.coverage.length);
-        await page.locator('[data-testid="reach-nir-good"]').scrollIntoViewIfNeeded();
-        const onTop = await page.evaluate(() => {
-          const b = document.querySelector('[data-testid="reach-nir-good"]');
-          const r = b.getBoundingClientRect();
-          const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-          return { top: r.top, bottom: r.bottom, h: r.height, ok: !!hit && (hit === b || b.contains(hit)) };
-        });
-        assert(onTop.ok && onTop.top >= 0 && onTop.bottom <= 560 && onTop.h >= 44, 'Good chip ' + JSON.stringify(onTop));
-        await page.tap('[data-testid="reach-nir-good"]');
-        let l = await listed(page);
-        assert(l.length === 2, 'phone list ' + JSON.stringify(l));
-        // The list is part of the sheet, not a scroller inside it: a swipe
-        // that starts on the list scrolls the sheet.
-        const nested = await page.evaluate(() => {
-          const cs = getComputedStyle(document.querySelector('[data-testid="reach-nir-list"]'));
-          return { overflowY: cs.overflowY, maxHeight: cs.maxHeight };
-        });
-        assert(nested.overflowY === 'visible' && nested.maxHeight === 'none', 'the list scrolls inside the sheet ' + JSON.stringify(nested));
-        const item = page.locator('[data-testid="reach-nir-item"]:not([hidden])').first();
-        await item.scrollIntoViewIfNeeded();
-        const sheetTop = () => page.evaluate(() => document.querySelector('[data-testid="reach-panel"]').scrollTop);
-        const fromTop = await sheetTop();
-        const ib = await item.boundingBox();
         const cdp = await ctx.newCDPSession(page);
-        const at = { x: ib.x + ib.width / 2, y: ib.y + ib.height / 2 };
-        await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] });
-        for (let k = 1; k <= 8; k++) {
-          await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: at.x, y: at.y - 10 * k }] });
-          await page.waitForTimeout(16);
-        }
-        await page.waitForTimeout(200); // held still: no fling
-        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-        await page.waitForTimeout(300);
-        const swiped = await sheetTop();
-        assert(swiped > fromTop + 30, `a swipe on the list did not scroll the sheet: ${fromTop} -> ${swiped}`);
-        await shot(page, `941-m2-nodes-phone-sheet-${theme}-375x560.jpg`);
+        const GOOD = '[data-testid="reach-nir-good"]';
+        await touchScrollTo(page, cdp, GOOD, 8);
+        const onTop = await page.evaluate((sel) => {
+          const b = document.querySelector(sel);
+          const r = b.getBoundingClientRect();
+          return { top: r.top, bottom: r.bottom, h: r.height };
+        }, GOOD);
+        assert(onTop.h >= 44, 'Good chip ' + JSON.stringify(onTop));
+        await page.tap(GOOD);
+        let l = await listed(page);
+        assert(l.length === 66, 'phone list ' + l.length);
+        const ROW = '[data-testid="reach-nir-item"]:not([hidden])';
+        // The list is a short window of its own, wholly on screen in the sheet.
+        await touchScrollTo(page, cdp, '[data-testid="reach-nir-list"]', 8);
+        await shot(page, `941-m2-nodes-phone-list-${theme}-${width}x${height}.jpg`);
+
+        // With the list open, the power slider is reached by touch on the
+        // sheet, and it is not pushed far down by the list.
+        const POWER = '[data-testid="reach-power"]';
+        const gap = await page.evaluate(([chip, slider]) =>
+          Math.round(document.querySelector(slider).getBoundingClientRect().top - document.querySelector(chip).getBoundingClientRect().top), [GOOD, POWER]);
+        assert(gap <= PHONE_SLIDER_MAX_PX, `with the list open the power slider is ${gap} px below the Good chip; at most ${PHONE_SLIDER_MAX_PX}`);
+        const swipes = await touchScrollTo(page, cdp, POWER, 12);
+        console.log(`    ${width}×${height}: the power slider ${gap} px below the chip, reached in ${swipes} swipes`);
+        await shot(page, `941-m2-nodes-phone-slider-${theme}-${width}x${height}.jpg`);
         const before = rec.api.length;
-        await setPower(page, 10);
-        l = await listed(page);
-        assert(l.length === 1 && l[0].name === 'Near mast', 'phone list at 10 dBm ' + JSON.stringify(l));
+        await dragSlider(page, cdp, POWER, -10);
+        assert(await page.inputValue(POWER) === '-10', 'power after the drag ' + await page.inputValue(POWER));
+        const c = await chips(page);
+        assert(c.good.n === '0' && c.marginal.n === '12' && c.weak.n === '15' && c.all.n === '27', 'chips at −10 dBm ' + JSON.stringify(c));
         assert(rec.api.length === before, 'a budget change asked the server: ' + rec.api.slice(before).join(', '));
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
         assert(overflow <= 0, 'horizontal scroll ' + overflow);
-        const link = page.locator('[data-testid="reach-nir-item"]:not([hidden]) a').first();
-        await link.scrollIntoViewIfNeeded();
-        const lk = await link.evaluate(a => {
-          const r = a.getBoundingClientRect();
-          const hit = document.elementFromPoint(r.left + Math.min(r.width / 2, 20), r.top + r.height / 2);
-          return { top: r.top, bottom: r.bottom, ok: !!hit && (hit === a || a.contains(hit)) };
-        });
-        assert(lk.ok && lk.top >= 0 && lk.bottom <= 560, 'link ' + JSON.stringify(lk));
-        await shot(page, `941-m2-nodes-phone-${theme}-375x560.jpg`);
-        await link.tap();
+
+        // Back up to the chips by touch; All lists the 27, Near mast first.
+        const ALL = '[data-testid="reach-nir-all"]';
+        await touchScrollTo(page, cdp, ALL, 12);
+        await page.tap(ALL);
+        l = await listed(page);
+        assert(l.length === 27 && l[0].name === 'Near mast' && l[0].cls === 'marginal', 'All at −10 dBm ' + JSON.stringify(l.slice(0, 2)));
+        await touchScrollTo(page, cdp, ROW, 8);
+        await shot(page, `941-m2-nodes-phone-${theme}-${width}x${height}.jpg`);
+        // Keyboard focus on a row under the sticky head brings it out from
+        // under the head (the sheet's scroll-padding-top).
+        const focused = await page.evaluate((sel) => {
+          const sheet = document.querySelector('[data-testid="reach-panel"]');
+          const head = sheet.querySelector('.reach-head').getBoundingClientRect();
+          const li = document.querySelector(sel);
+          sheet.scrollTop += li.getBoundingClientRect().top - (head.top + 12);
+          const under = li.getBoundingClientRect().top < head.bottom;
+          li.querySelector('a').focus();
+          return { under, top: li.getBoundingClientRect().top, headBottom: sheet.querySelector('.reach-head').getBoundingClientRect().bottom };
+        }, ROW);
+        assert(focused.under && focused.top >= focused.headBottom, 'a focused row stays under the head ' + JSON.stringify(focused));
+        await touchScrollTo(page, cdp, ROW, 8);
+        await page.locator(ROW + ' a').first().tap();
         await page.waitForFunction(() => location.hash.indexOf('#/nodes/' + '1'.repeat(64)) === 0, null, { timeout: 5000 });
         noNetwork(rec);
       } finally { await ctx.close(); }

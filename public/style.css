@@ -6839,9 +6839,10 @@ body.embed .warmup-pills { display: none !important; }
   /* Touch: the chips and list rows are full-size targets. */
   .reach-nir-chip { min-height: 44px; }
   .reach-nir-item { min-height: 44px; }
-  /* The list is part of the sheet, not a scroller inside it: a swipe on
-     it scrolls the sheet. */
-  .reach-nir-list { max-height: none; overflow-y: visible; }
+  /* The list scrolls on its own, shorter than the sheet's body below the
+     head (the sheet is 46% of the map), so a thumb's height of the sheet
+     always shows beside it to swipe the sheet by. */
+  .reach-nir-list { max-height: clamp(96px, calc(46vh - 150px), 220px); }
   /* The head and its × stay at the top of the scrolled sheet; it covers
      the sheet's top padding so nothing scrolls past above it. */
   .reach-head {
