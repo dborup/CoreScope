@@ -1765,11 +1765,20 @@
   // chrome from the first paint. The controller exists while Live does.
   let kioskOn = false;
   let kiosk = null;
+  let kioskThemeRestore = null; // #883 M2: puts the viewer's theme back
 
   async function init(app) {
     const generation = ++liveGeneration;
     kioskOn = !!(window.LiveKiosk && getHashParams && window.LiveKiosk.parseKioskParams(getHashParams()).kiosk);
-    if (kioskOn) document.body.classList.add('kiosk');
+    if (kioskOn) {
+      document.body.classList.add('kiosk');
+      // #883 M2: the kiosk theme (dark unless &theme=), before the first
+      // paint, through app.js's non-persisting apply.
+      kioskThemeRestore = window.LiveKiosk.applyKioskTheme(window.LiveKiosk.parseKioskParams(getHashParams()).theme, {
+        get: () => document.documentElement.getAttribute('data-theme'),
+        apply: window.applyThemeTransient,
+      });
+    }
     app.innerHTML = `
       <div class="live-page">
         <div id="liveMap" style="width:100%;height:100%;position:absolute;top:0;left:0;z-index:1"></div>
@@ -3298,6 +3307,7 @@
       pktTimestamps = pktTimestamps.filter(t => now - t < 60000);
       const el = document.getElementById('livePktRate');
       if (el) el.textContent = pktTimestamps.length;
+      if (kiosk) kiosk.setRate(pktTimestamps.length); // #883 M2 tile, same tick
     }, 2000);
   }
 
@@ -4109,7 +4119,8 @@
     let stored = null;
     try { stored = localStorage.getItem(M.STORAGE_KEY); } catch (_) { /* private mode */ }
     const fromHash = getHashParams ? getHashParams().get(M.HASH_PARAM) : null;
-    const enabled = M.resolveInitialEnabled(fromHash, stored, momentSettings().enabled);
+    // #883 M2: Moments are on in kiosk unless the link says moments=0.
+    const enabled = M.resolveInitialEnabled(kioskOn && fromHash !== '0' ? '1' : fromHash, stored, momentSettings().enabled);
     // #883: a kiosk link applies ?moments= without saving it.
     if (!kioskOn && (fromHash === '0' || fromHash === '1')) {
       try { localStorage.setItem(M.STORAGE_KEY, enabled ? 'true' : 'false'); } catch (_) { /* quota */ }
@@ -4194,6 +4205,11 @@
       now: () => Date.now(),
       setTimeout: (fn, ms) => setTimeout(fn, ms),
       clearTimeout: (id) => clearTimeout(id),
+      // #883 M2 big numbers: bulk reads through the client cache, polled by
+      // the controller (60 s, visible only); the records come from Moments.
+      fetchStatus: () => api('/nodes/network-status', { ttl: 30000, retry503: false }),
+      fetchAreaStats: () => api('/analytics/areas', { ttl: 30000, retry503: false }),
+      momentsOn: () => !!moments,
     });
   }
 
@@ -4225,6 +4241,11 @@
         window.TerrainProfile.offered(window.MC_DHM_CFG)),
       navigate: (href) => { location.hash = href; },
       onFly: momentFly,
+      // #883 M2: large Moments in kiosk, two cards at most, times kept
+      // fresh; every moment also feeds the kiosk's record tile.
+      cardCap: kioskOn ? 2 : 0,
+      timeRefreshMs: kioskOn ? 30000 : 0,
+      onMoment: (m) => { if (kiosk) kiosk.onMoment(m); },
     });
   }
 
@@ -6082,6 +6103,7 @@
     clearMomentHighlight();
     // #883 — before map.remove(): the controller holds map listeners.
     if (kiosk) { kiosk.destroy(); kiosk = null; }
+    if (kioskThemeRestore) { kioskThemeRestore(); kioskThemeRestore = null; }
     kioskOn = false;
     if (document.body) document.body.classList.remove('kiosk');
     if (regionFilterChangeHandler && window.RegionFilter && typeof RegionFilter.offChange === 'function') {

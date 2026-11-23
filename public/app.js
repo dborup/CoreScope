@@ -1677,12 +1677,19 @@ window.addEventListener('DOMContentLoaded', () => {
   const darkCheckbox = document.getElementById('darkModeCheckbox');
   const savedTheme = localStorage.getItem('meshcore-theme');
   function applyTheme(theme) {
+    applyThemeTransient(theme);
+    localStorage.setItem('meshcore-theme', theme);
+  }
+  // #883 M2: the same without saving the viewer's choice. Live's kiosk mode
+  // shows its own theme (&theme=, dark by default) and puts the viewer's
+  // back on exit (LiveKiosk.applyKioskTheme).
+  function applyThemeTransient(theme) {
     document.documentElement.setAttribute('data-theme', theme);
     if (darkCheckbox) darkCheckbox.checked = theme === 'dark';
-    localStorage.setItem('meshcore-theme', theme);
     // Re-apply user theme CSS vars for the correct mode (light/dark)
     reapplyUserThemeVars(theme === 'dark');
   }
+  window.applyThemeTransient = applyThemeTransient;
   function reapplyUserThemeVars(dark) {
     try {
       var userTheme = JSON.parse(localStorage.getItem('meshcore-user-theme') || '{}');
