@@ -113,8 +113,13 @@ const (
 	// coveragePartialTTL is how long a reach with a failed foreign fill is
 	// kept: briefly, so a later request tries the fill again.
 	coveragePartialTTL = 5 * time.Minute
-	// coverageResultMaxBytes bounds one cached result: the largest raster
-	// (1008², stored gzip) plus its metadata and nodes in reach.
+	// coverageResultMaxBytes is the size budgeted for one cached result: the
+	// largest raster (1008², stored gzip) plus its metadata and
+	// coverageReachMaxNodes kept nodes in reach. It sizes the result
+	// cache's byte cap (cacheEntries times this). A result keeps every
+	// evaluated node, so one with more nodes in its radius can be larger;
+	// the cap still bounds the cache's memory as a whole, and the cache
+	// refuses a single result above it.
 	coverageResultMaxBytes = 1008*1008 + 64<<10 + coverageReachMaxNodes*coverageReachEntryBytes
 	// coverageRefusalLogEvery throttles the refusal and fill-failure logs.
 	coverageRefusalLogEvery = time.Minute

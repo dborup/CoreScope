@@ -40,7 +40,9 @@ const (
 	// positioned repeaters and rooms of the snapshot inside the radius), so
 	// the list and its counts are decided over visible nodes only.
 	coverageReachMaxNodes = 1000
-	// coverageReachEntryBytes bounds one kept node in a cached result.
+	// coverageReachEntryBytes is the size budgeted for one kept node in a
+	// cached result (TestCoverage941M2_ReachIsBounded); see
+	// coverageResultMaxBytes.
 	coverageReachEntryBytes = 192
 )
 
