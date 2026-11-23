@@ -613,7 +613,7 @@ function readStorage(page) {
         assert(v[1] === '318', 'active nodes from network-status: ' + v[1]);
         assert((await m.texts('.live-kiosk-tile-area'))[0] === 'Kiosk Area A 41', 'area: ' + (await m.texts('.live-kiosk-tile-area')));
         assert(JSON.stringify(await m.texts('.live-kiosk-tile-label')) === '["packets/min","active nodes"]', await m.texts('.live-kiosk-tile-label'));
-        assert(JSON.stringify(await m.texts('.live-kiosk-record-label')) === '["Longest link (24 h)","Busiest (10 min)"]', await m.texts('.live-kiosk-record-label'));
+        assert(JSON.stringify(await m.texts('.live-kiosk-record-label')) === '["Longest link (24 h)","Busiest (10 min) · 5 min ago"]', await m.texts('.live-kiosk-record-label'));
         assert(JSON.stringify(await m.texts('.live-kiosk-record-value')) === '["38.2 km","Rpt-3"]', await m.texts('.live-kiosk-record-value'));
         assert(JSON.stringify(await m.texts('.live-kiosk-record-detail')) === '["Ridge-Rpt ↔ Hill-Rpt","212 relays"]', await m.texts('.live-kiosk-record-detail'));
         // The tiles sit above the credit, inside the safe inset.
@@ -775,6 +775,55 @@ function readStorage(page) {
       m.send({ type: 'moment', data: newNode('big-1', 1, await m.now()) });
       await p.waitForSelector('.live-moment-card');
       assert(await fontPx(p, '.live-moment-title') === 27, 'Moments title 18px × 1.5: ' + (await fontPx(p, '.live-moment-title')));
+      assert(!m.errors.length, m.errors.join('; '));
+      await m.ctx.close();
+    });
+
+    // #949 review #1: the kiosk default is Moments on, and &moments=0 is the opt-out.
+    await step('M2: &moments=0 in kiosk: no Moments controller and no records tile; without it both exist', async () => {
+      const state = (m) => m.page.evaluate(() => { const t = document.querySelector('[data-tile="records"]');
+        return { ctl: !!(window._liveMoments && window._liveMoments()), tile: !!t && !t.hidden && t.getBoundingClientRect().width > 0,
+          bar: !!document.querySelector('.live-moments-bar') }; });
+      const off = await openM2({ clock: true });
+      await enterKiosk(off, KIOSK_M2 + '&moments=0');
+      await off.page.clock.runFor(2100);
+      const so = await state(off);
+      assert(!so.ctl && !so.tile && !so.bar, 'moments=0: no controller, tile or bar: ' + JSON.stringify(so));
+      assert(!off.errors.length, off.errors.join('; '));
+      await off.ctx.close();
+      const on = await openM2({ clock: true });
+      await enterKiosk(on, KIOSK_M2);
+      await on.page.waitForFunction(() => window._liveMoments && window._liveMoments(), null, { timeout: 10000 });
+      await on.page.waitForFunction(() => { const t = document.querySelector('[data-tile="records"]'); return t && !t.hidden; }, null, { timeout: 10000 });
+      const sn = await state(on);
+      assert(sn.ctl && sn.tile, 'no moments param: controller and tile: ' + JSON.stringify(sn));
+      await on.ctx.close();
+    });
+
+    // #949 review #2: a long area label ellipsizes; the tiles stay on one row.
+    const LONG_AREA = 'Kiosk Area With A Very Long Label X'.padEnd(40, 'Y');
+    const longAreaBoxes = (p) => p.evaluate(() => {
+      const tiles = [...document.querySelectorAll('.live-kiosk-tiles > .live-kiosk-tile')].filter((t) => !t.hidden);
+      const a = document.querySelector('.live-kiosk-tile-area');
+      const box = document.querySelector('.live-kiosk-tiles').getBoundingClientRect();
+      return { bottoms: tiles.map((t) => Math.round(t.getBoundingClientRect().bottom)), areaW: Math.round(a.getBoundingClientRect().width), n: tiles.length, areaText: a.textContent,
+        clipped: a.scrollWidth > a.clientWidth, right: Math.max(...tiles.map((t) => t.getBoundingClientRect().right)), boxRight: box.right, vw: innerWidth };
+    });
+    await step('M2: 1920x1080: a 40-character area label ellipsizes and the tiles stay on one row', async () => {
+      assert(LONG_AREA.length === 40, 'label length ' + LONG_AREA.length);
+      const m = await openM2({ viewport: { width: 1920, height: 1080 } });
+      await m.ctx.route(/\/api\/analytics\/areas(\?|$)/, (r) => r.fulfill({ json: { density: [
+        { areaKey: 'AAA', label: LONG_AREA, total: 60, active: 41 }, { areaKey: 'BBB', label: 'Kiosk Area B', total: 30, active: 17 }] } }));
+      await enterKiosk(m, KIOSK_M2);
+      const p = m.page;
+      await p.waitForFunction(() => { const t = document.querySelector('[data-tile="records"]'); return t && !t.hidden
+        && document.querySelector('.live-kiosk-tile-area').textContent.length > 0; }, null, { timeout: 10000 });
+      const g = await longAreaBoxes(p);
+      assert(g.areaText.startsWith(LONG_AREA), 'the long label is shown: ' + g.areaText);
+      assert(g.n === 3 && new Set(g.bottoms).size === 1, 'tiles on one row (bottom-aligned): ' + JSON.stringify(g));
+      assert(g.clipped && g.areaW <= 360 * 1.5 + 1, 'the label ellipsizes within its cap (360px × 1.5): ' + JSON.stringify(g));
+      assert(g.right <= g.vw, 'inside the viewport: ' + JSON.stringify(g));
+      if (process.env.KIOSK_SHOT) await p.screenshot({ path: process.env.KIOSK_SHOT, type: 'jpeg', quality: 80 });
       assert(!m.errors.length, m.errors.join('; '));
       await m.ctx.close();
     });

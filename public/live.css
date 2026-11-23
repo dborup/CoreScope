@@ -807,6 +807,7 @@ body.kiosk .live-node-detail:not(.hidden) ~ .live-kiosk-exit { display: none; }
 }
 .live-kiosk-tile-area {
   min-width: 0;
+  max-width: calc(360px * var(--kiosk-scale)); /* a long area label ellipsizes; the tiles stay on one row */
   font-size: calc(28px * var(--kiosk-scale));
   font-weight: 600;
   color: var(--text-muted);

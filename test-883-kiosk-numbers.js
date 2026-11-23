@@ -188,10 +188,21 @@ test('records: the newest record_link and busiest_repeater, labelled as rolling'
   const m = K.numbersModel(base({ link: link(38.24, H, 'Odense-Rpt', ''), busiest: busy('Rpt-3', 212, 10, 60000) }));
   assert.deepStrictEqual(plain(m.records), {
     link: { label: 'Longest link (24 h)', value: '38.2 km', detail: 'Odense-Rpt ↔ bbbbbbbb' },
-    busiest: { label: 'Busiest (10 min)', value: 'Rpt-3', detail: '212 relays' },
+    busiest: { label: 'Busiest (10 min) · 1 min ago', value: 'Rpt-3', detail: '212 relays' },
   });
   const nw = K.numbersModel(base({ busiest: busy('', null, null, 0) })).records.busiest;
-  assert.deepStrictEqual(plain(nw), { label: 'Busiest repeater', value: 'cccccccc', detail: '' });
+  assert.deepStrictEqual(plain(nw), { label: 'Busiest repeater · just now', value: 'cccccccc', detail: '' });
+});
+
+test('busiest tile shows the moment\'s age, so an old record never reads as "right now" (#949 review #3)', () => {
+  const age = (agoMs, win) => K.numbersModel(base({ busiest: busy('Rpt-3', 9, win, agoMs) })).records.busiest.label;
+  assert.strictEqual(age(3 * H, 10), 'Busiest (10 min) · 3 h ago');
+  assert.strictEqual(age(3 * H, null), 'Busiest repeater · 3 h ago');
+  assert.strictEqual(age(42 * 60000, 10), 'Busiest (10 min) · 42 min ago');
+  assert.strictEqual(age(24 * H, 10), 'Busiest (10 min) · 24 h ago');
+  assert.strictEqual(age(2000, 10), 'Busiest (10 min) · just now');
+  // The link tile keeps its plain "24 h" label (it is a record, not a moment in time).
+  assert.strictEqual(K.numbersModel(base({ link: link(38, 3 * H) })).records.link.label, 'Longest link (24 h)');
 });
 
 test('records older than 24 h are dropped (rolling window); empty shows "—" since restart', () => {
@@ -251,7 +262,7 @@ test('tiles render from the injected sources: rate, active (whole mesh + tour ar
   assert.strictEqual(h.text('live-kiosk-tile-value'), '142|318', 'rate and active');
   assert.strictEqual(h.text('live-kiosk-tile-area'), 'Fyn 41', 'step 1 is FYN');
   assert.strictEqual(h.text('live-kiosk-tile-label'), 'packets/min|active nodes');
-  assert.strictEqual(h.text('live-kiosk-record-label'), 'Longest link (24 h)|Busiest (10 min)');
+  assert.strictEqual(h.text('live-kiosk-record-label'), 'Longest link (24 h)|Busiest (10 min) · 1 min ago');
   assert.strictEqual(h.text('live-kiosk-record-value'), '38.2 km|Rpt-3');
   assert.strictEqual(h.tile('records').hidden, false);
   // The next tour step changes the area part with no request.

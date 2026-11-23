@@ -128,6 +128,15 @@
   function fresh(m, now) {
     return !!(m && typeof m.at === 'number' && isFinite(m.at) && now - m.at <= RECORD_WINDOW_MS);
   }
+  // How old a moment is, for the busiest tile: it is a rolling record up to
+  // 24 h old, so the tile must not read as "right now" when it is not.
+  function ageText(at, now) {
+    var s = Math.max(0, Math.round((now - at) / 1000));
+    if (s < 5) return 'just now';
+    if (s < 60) return s + ' s ago';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    return Math.round(s / 3600) + ' h ago';
+  }
   var NO_RECORD = { value: '—', detail: 'since restart' };
 
   /* in: { rate, status ({active}), density ([{areaKey,label,active}]),
@@ -153,7 +162,7 @@
     out.records = {
       link: l ? { label: 'Longest link (24 h)', value: fmtKm(l.link.distanceKm), detail: nodeName(l.link.a) + ' ↔ ' + nodeName(l.link.b) }
         : { label: 'Longest link (24 h)', value: NO_RECORD.value, detail: NO_RECORD.detail },
-      busiest: b ? { label: win !== null ? 'Busiest (' + fmtCount(win) + ' min)' : 'Busiest repeater', value: nodeName(b.node),
+      busiest: b ? { label: (win !== null ? 'Busiest (' + fmtCount(win) + ' min)' : 'Busiest repeater') + ' · ' + ageText(b.at, i.now), value: nodeName(b.node),
         detail: count(b.relays) !== null ? fmtCount(b.relays) + ' relays' : '' }
         : { label: 'Busiest repeater', value: NO_RECORD.value, detail: NO_RECORD.detail }
     };
