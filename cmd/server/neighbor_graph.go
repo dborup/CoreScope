@@ -350,7 +350,17 @@ func buildFromStoreWithNodes(store *PacketStore, opts BuildOptions, allNodes []n
 				}
 			}
 
-			// Edge 2: observer ↔ path[last] — ALL packet types
+			// Edge 2: observer ↔ path[last] — flood routes only (#952).
+			// Flood forwarders append their hash (MeshCore Mesh.cpp
+			// routeRecvPacket), so the last hop is the node the observer
+			// heard. A direct path is the remaining planned route, from
+			// which each forwarder strips itself (removeSelfFromPath), so
+			// its last hop is the route's far end; TRACE is sent direct.
+			// The route type is the observation's own; an unknown one adds
+			// no edge, as in the ingestor's neighbour builder.
+			if !isFloodObservation(obs, tx) {
+				continue
+			}
 			lastHop := cachedToLower(lowerCache, path[len(path)-1])
 			if observerPK != lastHop { // self-edge guard
 				candidates := pm.m[lastHop]

@@ -82,6 +82,14 @@ func observationRouteType(o *StoreObs, tx *StoreTx) (int, bool) {
 	return *tx.RouteType, true
 }
 
+// isFloodObservation reports whether observation o of tx was received on a
+// flood route (FLOOD or TRANSPORT_FLOOD). An unknown route type is not flood,
+// as in the ingestor's isFloodRoute(observationRouteType(...)) (#952).
+func isFloodObservation(o *StoreObs, tx *StoreTx) bool {
+	rt, ok := observationRouteType(o, tx)
+	return ok && (rt == RouteFlood || rt == RouteTransportFlood)
+}
+
 // pathLastHop returns the last hop and hop count of a path_json array. ok is
 // false for a missing or unparseable path, which is never read as zero hop.
 func pathLastHop(pathJSON string) (last string, hops int, ok bool) {
