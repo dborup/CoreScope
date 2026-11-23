@@ -2843,7 +2843,7 @@
       if (narrowMql.addEventListener) narrowMql.addEventListener('change', applyForViewport);
       else if (narrowMql.addListener) narrowMql.addListener(applyForViewport);
       _liveNarrowMql = { mql: narrowMql, fn: applyForViewport };
-      try { window.__liveMQLBindCount = 1; } catch (_) { /* sealed window */ }
+      try { window.__liveMQLBindCount = (window.__liveMQLBindCount || 0) + 1; } catch (_) { /* sealed window */ }
     })();
     // ───────────────────────────────────────────────────────────────────────
 
@@ -6242,8 +6242,9 @@
   // #1180 — the wireLiveCollapseToggles() narrow-viewport MQL listener.
   // MediaQueryList is process-global per query string, so each mount drops
   // the previous handler before binding its own, and destroy() drops it
-  // (#883 M3). window.__liveMQLBindCount (handlers bound now, 0 or 1) is a
-  // debug seam consumed by test-live-mql-leak-1180-e2e.js and otherwise unused.
+  // (#883 M3). window.__liveMQLBindCount (handlers bound now: +1 per bind,
+  // -1 per unbind, so a missed unbind shows) is a debug seam consumed by
+  // test-live-mql-leak-1180-e2e.js and otherwise unused.
   var _liveNarrowMql = null;   // { mql, fn } of the current mount
   function unbindNarrowMql() {
     if (!_liveNarrowMql) return;
@@ -6251,7 +6252,7 @@
     _liveNarrowMql = null;
     if (b.mql.removeEventListener) b.mql.removeEventListener('change', b.fn);
     else if (b.mql.removeListener) b.mql.removeListener(b.fn);
-    try { window.__liveMQLBindCount = 0; } catch (_) { /* sealed window */ }
+    try { window.__liveMQLBindCount = (window.__liveMQLBindCount || 0) - 1; } catch (_) { /* sealed window */ }
   }
   var _heatUnwatch = null;
   // #1514 S4 — single source of truth for window._liveTestSeams is at the
