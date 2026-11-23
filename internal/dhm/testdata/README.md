@@ -46,6 +46,18 @@ eqs. 12-21) on the test's synthetic profiles. Standard library only;
 `python3 internal/dhm/testdata/bullington_941_vectors.py` prints the
 test's table rows. No test runs it.
 
+## delta_bullington_941_vectors.py
+
+The generator of the reference vectors in
+`TestDeltaBullington941_MatchesP1812Reference` (#941 M2): a plain-Python
+transcription of OFCOM's Py1812 `dl_delta_bull`, `dl_bull`, `dl_se`,
+`dl_se_ft_inner` and the diffraction heights of `smooth_earth_heights`
+(ITU-R P.1812-6 §4.3.1-4.3.4 and Attachment 1 §5.6.1-5.6.2, the method of
+ITU-R P.526-16 §4.5.2) on hilly and flat profiles from 1 to 40 km. Land,
+vertical polarisation, the exact speed of light, no clutter. Standard
+library only; `python3 internal/dhm/testdata/delta_bullington_941_vectors.py`
+prints the test's table rows. No test runs it.
+
 ## Copernicus data
 
 `glo30-n55e012-ifds.bin` and `dk_land_hist_860.txt`: © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided
