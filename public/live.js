@@ -1782,6 +1782,8 @@
   let kioskThemeRestore = null; // #883 M2: puts the viewer's theme back
   // #883 M3: the last mount was an in-place remount of this kiosk link and
   // left its kiosk theme and auto-reload on; the next controller takes over.
+  // Every destroy() sets it; only the next init() and, when that mount never
+  // made its controller, its destroy() read it.
   let kioskHandover = false;
   // The kiosk theme's get/apply, made once here and not in init(): the
   // restore outlives its mount across in-place remounts, and a closure made
@@ -4243,7 +4245,6 @@
       wakeLock: (navigator.wakeLock && typeof navigator.wakeLock.request === 'function') ? navigator.wakeLock : null,
       setAutoReload: setKioskAutoReload,
     });
-    kioskHandover = false;
   }
 
   function setKioskAutoReload(on) {
