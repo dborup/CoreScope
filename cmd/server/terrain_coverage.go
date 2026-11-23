@@ -377,9 +377,18 @@ func newTerrainCoverageFromConfig(cfg *Config, proxy *dhmProxy, terrain *terrain
 func quietLogf(string, ...interface{}) {}
 
 // extractCoverageConfig lifts map.coverage out of the client-visible map;
-// only its canonical `enabled` switches it on (#884).
+// only its canonical `enabled` switches it on (#884), and only its
+// canonical `model` picks the model (#886): a case variant is reported
+// once and ignored, whatever the order of the keys.
 func (c *Config) extractCoverageConfig() {
-	liftMapBlock(c, "coverage", "predicted reach", &c.Coverage, func(cc *CoverageConfig) *bool { return &cc.Enabled })
+	if !liftMapBlock(c, "coverage", "predicted reach", &c.Coverage, func(cc *CoverageConfig) *bool { return &cc.Enabled }) || c.keys == nil {
+		return
+	}
+	var m *string // null or absent: the default
+	if json.Unmarshal(c.keys.Get("map", "coverage", "model"), &m) != nil {
+		m = nil
+	}
+	c.Coverage.Model = m
 }
 
 // ── Upstream budget ────────────────────────────────────────────────────────

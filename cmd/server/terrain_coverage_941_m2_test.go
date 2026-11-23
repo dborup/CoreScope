@@ -136,6 +136,43 @@ func TestCoverage941M2_ConfigModel(t *testing.T) {
 	}
 }
 
+// TestCoverage941M2_ModelReadsTheCanonicalKeyOnly: map.coverage.model is
+// read by its exact-case key (#884/#886), like the block's gate. A case
+// variant never picks the model, whatever the order of the keys, and is
+// reported once with the other ignored keys.
+func TestCoverage941M2_ModelReadsTheCanonicalKeyOnly(t *testing.T) {
+	cases := []struct {
+		name, block string
+		want        dhm.PathModel
+		warnings    int
+	}{
+		{"canonical delta", `"model":"delta"`, dhm.PathDelta, 0},
+		{"Model alone", `"Model":"delta"`, dhm.PathBullington, 1},
+		{"MODEL after canonical bullington", `"model":"bullington","MODEL":"delta"`, dhm.PathBullington, 1},
+		{"Model before canonical bullington", `"Model":"delta","model":"bullington"`, dhm.PathBullington, 1},
+		{"Model after canonical delta", `"model":"delta","Model":"bullington"`, dhm.PathDelta, 1},
+		{"absent", `"radiusKm":20`, dhm.PathBullington, 0},
+		{"null", `"model":null`, dhm.PathBullington, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, logged := loadConfigLogged(t, `{"map":{"coverage":{"enabled":true,`+tc.block+`}}}`)
+			if !cfg.Coverage.Enabled {
+				t.Fatal("the reach is off")
+			}
+			if got := resolveCoverageSettings(cfg.Coverage, quietLogf).model; got != tc.want {
+				t.Fatalf("model %q, want %q", got, tc.want)
+			}
+			if n := ignoredWarnings(logged); n != tc.warnings {
+				t.Fatalf("%d warnings, want %d:\n%s", n, tc.warnings, logged)
+			}
+			if tc.warnings > 0 && !strings.Contains(logged, "map.coverage.") {
+				t.Fatalf("the warning does not name the key:\n%s", logged)
+			}
+		})
+	}
+}
+
 // TestCoverage941M2_OpenAPIModel: the model parameter is documented.
 func TestCoverage941M2_OpenAPIModel(t *testing.T) {
 	m := routeDescriptions()["GET "+coverageRoute]
