@@ -195,6 +195,7 @@ run test-issue-728-dhm-tile-retry.js
 run test-issue-728-ortho-followups.js
 run test-packets-window-pinned.js
 run test-tap-when-settled.js
+run test-touch-swipe-helper.js
 run test-live-settle.js
 run test-issue-733-dhm-credit.js
 run test-issue-734-dhm-overlays.js
