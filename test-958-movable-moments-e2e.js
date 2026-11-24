@@ -26,8 +26,8 @@
  *      stack; it has no drag hooks and is not registered.
  *   9. Touch tablet 1024x768 (gate off): the bar shows, its corner button
  *      is in the DOM but not visible.
- *  10. Order: with live.js served without initMoments' MeshConfigReady
- *      await, Moments start before init() makes the DragManager; on a first
+ *  10. Order: with MeshConfigReady cleared once the config is in,
+ *      Moments start before init() makes the DragManager; on a first
  *      mount and on a remount the window still joins that mount's manager
  *      (not none, not the last mount's) and drags.
  *  11. Phone 375x560 with touch, cold from Home and the bottom-nav Live tab:
@@ -369,33 +369,37 @@ function near(a, b, tol) { return Math.abs(a - b) <= (tol || 2); }
     });
 
     await step('Moments started before the DragManager exists still join this mount\'s manager', async () => {
-      // live.js served without initMoments' MeshConfigReady await, so
-      // startMoments() runs inside init(), before its DragManager block. It
-      // records the manager it saw (none, or the last mount's).
-      const AWAIT = 'try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}';
-      const START = '  function startMoments() {\n';
+      // With the config loaded, MeshConfigReady is cleared, so initMoments()
+      // skips its await and startMoments() runs inside init(), before its
+      // DragManager block. A wrapped DragManager records, as it is made,
+      // whether Moments are up and the manager it replaces (none, or the
+      // last mount's). No served source is changed: CI serves live.js
+      // instrumented.
       const o = await open(browser);
-      let patched = 0;
-      await o.ctx.route(/\/live\.js(\?|$)/, async (route) => {
-        const res = await route.fetch();
-        const src = await res.text();
-        if (src.includes(AWAIT) && src.includes(START)) patched++;
-        await route.fulfill({ response: res, body: src.replace(AWAIT, '')
-          .replace(START, START + '    (window.__e2eSeenMgr = window.__e2eSeenMgr || []).push(window._liveDragMgr || null);\n') });
-      });
       await o.page.goto(BASE + '/?r=' + Date.now() + '#/packets', { waitUntil: 'domcontentloaded' });
-      await o.page.waitForFunction(() => window.MC_MOMENTS_CFG, null, { timeout: 20000 });
-      assert(patched === 1, 'live.js patched: ' + patched);
+      await o.page.waitForFunction(() => window.MC_MOMENTS_CFG && window.DragManager && window._liveMoments, null, { timeout: 20000 });
+      await o.page.evaluate(() => {
+        window.MeshConfigReady = null; // resolved; every reader skips a falsy one
+        const DM = window.DragManager;
+        window.__e2eMade = [];
+        function Wrapped() {
+          window.__e2eMade.push({ moments: !!window._liveMoments(), prev: window._liveDragMgr || null });
+          return new DM();
+        }
+        Wrapped.prototype = DM.prototype;
+        Object.assign(Wrapped, DM); // clearPanel
+        window.DragManager = Wrapped;
+      });
       for (let mount = 1; mount <= 2; mount++) {
         await o.page.evaluate((v) => { location.hash = '#/live?' + v; }, VIEW);
         await o.ready();
         const r = await o.page.evaluate(() => {
-          const m = window._liveDragMgr, seen = window.__e2eSeenMgr;
-          return { starts: seen.length, before: seen[seen.length - 1] !== m,
+          const m = window._liveDragMgr, made = window.__e2eMade, last = made[made.length - 1];
+          return { made: made.length, before: !!(last && last.moments),
             ids: m._panels.map((p) => p.id).sort().join(','), connected: m._panels.every((p) => p.isConnected),
-            prev: seen.length > 1 && seen[seen.length - 1] ? seen[seen.length - 1]._panels.length : 0 };
+            prev: last && last.prev ? last.prev._panels.length : 0 };
         });
-        assert(r.starts === mount && r.before, 'mount ' + mount + ': Moments started before this mount\'s manager: ' + JSON.stringify(r));
+        assert(r.made === mount && r.before, 'mount ' + mount + ': Moments started before this mount\'s manager: ' + JSON.stringify(r));
         assert(r.ids === 'liveFeed,liveLegend,liveMoments,liveNodeDetail' && r.connected && r.prev <= 3, 'mount ' + mount + ': ' + JSON.stringify(r));
         const s0 = await state(o.page);
         const c = await centre(o.page, '.live-moments-bar .live-moments-count');
