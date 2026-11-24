@@ -746,7 +746,7 @@ func TestCoverage941_SettingsDefaultsAndClamps(t *testing.T) {
 	logs := &dhmLogSink{}
 	s := resolveCoverageSettings(CoverageConfig{}, logs.logf)
 	want := coverageSettings{maxRadiusM: 40000, resolutionM: 30, maxInFlight: 1, rateLimitPerMin: 2, upstreamPerMin: 240,
-		cacheEntries: 32, cacheTTL: 24 * time.Hour, elevationCacheBytes: 64 << 20, model: dhm.PathDelta, envLossDb: 20}
+		cacheEntries: 32, cacheTTL: 24 * time.Hour, elevationCacheBytes: 64 << 20, model: dhm.PathDelta, envLossDb: 25}
 	if s != want || logs.String() != "" {
 		t.Fatalf("defaults %+v (log %q)", s, logs.String())
 	}

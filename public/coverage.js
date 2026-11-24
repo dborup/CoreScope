@@ -55,8 +55,8 @@
     env: 'environmentLossDb' };
   // The environment loss (#962): the buildings, trees and other clutter the
   // terrain model does not include. map.coverage.environmentLossDb sets it
-  // (cmd/server's coverageEnvLossDefaultDb is the same 20 dB).
-  var DEFAULT_ENV_LOSS_DB = 20;
+  // (cmd/server's coverageEnvLossDefaultDb is the same 25 dB).
+  var DEFAULT_ENV_LOSS_DB = 25;
   var DEFAULT_RADIO = { txPowerDbm: 22, antennaGainDbi: 3, rxGainDbi: 3, lossDb: 0, sensitivityDbm: -130,
     environmentLossDb: DEFAULT_ENV_LOSS_DB };
 

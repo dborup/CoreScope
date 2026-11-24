@@ -126,7 +126,7 @@ const (
 	// coverageEnvLossDefaultDb is map.coverage.environmentLossDb's default
 	// (#962): the #941 validation saw observed SNR a median ~27 dB below
 	// the bare-terrain prediction, worst on short links.
-	coverageEnvLossDefaultDb = 20
+	coverageEnvLossDefaultDb = 25
 	// coverageMaxInFlightCap bounds map.coverage.maxInFlight: each
 	// computation uses half the CPUs (dhm.CoverageWorkers) and up to
 	// ~64 MB.

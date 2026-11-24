@@ -10,12 +10,12 @@
  *
  * Asserts:
  *   1. desktop, light and dark, from a cold link: the "Environment loss"
- *      field starts at the operator's 20 dB with its hint, the budget is
- *      158 − 20 = 138 dB and the chips and the list classes are at 138 dB;
+ *      field starts at the operator's 25 dB with its hint, the budget is
+ *      158 − 25 = 133 dB and the chips and the list classes are at 133 dB;
  *      setting the field to 0 recolours the layer's shares and recounts
  *      the chips and the list classes at 158 dB with no new request of
  *      any kind to /api/, and writes renv=0; the reset returns it to the
- *      operator's 20 dB, drops renv, again with no request;
+ *      operator's 25 dB, drops renv, again with no request;
  *   2. an operator value of 0 gives today's budget and classes; a link
  *      without renv uses the operator's value; renv in a link wins;
  *   3. 375×560 with touch, from a cold #/map, real taps only: a node's
@@ -24,7 +24,7 @@
  *      change recounts with no request, and nothing scrolls sideways;
  *   4. no console error, and no request leaves localhost.
  *
- * SHOTS_DIR, when set, receives small JPEG screenshots (default 20 dB vs
+ * SHOTS_DIR, when set, receives small JPEG screenshots (default 25 dB vs
  * 0 dB, desktop and phone).
  *
  * Usage:
@@ -51,15 +51,15 @@ function coverageBlock(env) {
   return b;
 }
 const AARHUS = { lat: 56.1629, lon: 10.2039 };
-// Lowest loss first. At 138 dB (20 dB environment loss): margins 18, 8, 2,
+// Lowest loss first. At 133 dB (25 dB environment loss): margins 18, 8, 2,
 // −2, −12 → good, marginal, weak, none, none. At 158 dB (0 dB): 38, 28,
 // 22, 18, 8 → good ×4, marginal.
-const NODES = [120, 130, 136, 140, 150].map((loss, i) => ({
+const NODES = [115, 125, 131, 135, 150].map((loss, i) => ({
   pubkey: String(i + 1).repeat(64), name: 'Mast ' + (i + 1), role: 'repeater', distanceKm: 2 + i * 3,
   heightM: 10, heightSource: 'role-default', lossDb: loss,
 }));
 const REACH = { roles: ['repeater', 'room'], budgetDb: 158, counts: { good: 4, marginal: 1, weak: 0, none: 0 }, nodes: NODES, omitted: 0, noTerrain: 0 };
-const AT_138 = { good: '1', marginal: '1', weak: '1', all: '3' };
+const AT_133 = { good: '1', marginal: '1', weak: '1', all: '3' };
 const AT_158 = { good: '4', marginal: '1', weak: '0', all: '5' };
 
 let passed = 0, failed = 0;
@@ -123,7 +123,7 @@ function rasterFor(c, radiusKm) {
     await ctx.route(BASE + '/api/config/client', async (route) => {
       const response = await route.fetch();
       const config = await response.json();
-      config.coverage = o.coverage || coverageBlock(20);
+      config.coverage = o.coverage || coverageBlock(25);
       await route.fulfill({ response, json: config });
     });
     const rasters = new Map();
@@ -236,24 +236,24 @@ function rasterFor(c, radiusKm) {
 
   // ── 1: desktop ─────────────────────────────────────────────────────────
   for (const theme of ['light', 'dark']) {
-    await step(`${theme}: 20 dB by default; 0 dB recolours and recounts with no request; the reset returns to 20 dB`, async () => {
+    await step(`${theme}: 25 dB by default; 0 dB recolours and recounts with no request; the reset returns to 25 dB`, async () => {
       const { ctx, page, rec } = await newCtx({ theme });
       try {
         await page.goto(`${BASE}/#/map?reach=${AARHUS.lat},${AARHUS.lon}&rkm=25`, { waitUntil: 'domcontentloaded' });
         await waitPanel(page);
         await page.click('[data-testid="reach-nir-all"]');
         let s = await panelState(page);
-        assert(s.env === '20' && s.envOut === '20 dB' && s.budget === 'Maximum path loss 138 dB', 'default ' + JSON.stringify(s));
+        assert(s.env === '25' && s.envOut === '25 dB' && s.budget === 'Maximum path loss 133 dB', 'default ' + JSON.stringify(s));
         assert(/buildings, trees and other clutter the terrain model does not include/i.test(s.hint), 'hint ' + s.hint);
         assert(s.resetDisabled, 'the reset is offered at the default');
-        assert(JSON.stringify(s.chips) === JSON.stringify(AT_138), 'chips at 138 dB ' + JSON.stringify(s.chips));
-        assert(JSON.stringify(s.classes) === JSON.stringify(['good', 'marginal', 'weak', 'none', 'none']), 'classes at 138 dB ' + s.classes);
+        assert(JSON.stringify(s.chips) === JSON.stringify(AT_133), 'chips at 133 dB ' + JSON.stringify(s.chips));
+        assert(JSON.stringify(s.classes) === JSON.stringify(['good', 'marginal', 'weak', 'none', 'none']), 'classes at 133 dB ' + s.classes);
         assert(!/renv=/.test(s.hash), 'renv written for the default: ' + s.hash);
-        const at20 = s.shares;
-        await shot(page, `962-desktop-${theme}-20db.jpg`);
-        await shot(page, `962-panel-${theme}-20db.jpg`, '[data-testid="reach-panel"]');
+        const at25 = s.shares;
+        await shot(page, `962-desktop-${theme}-25db.jpg`);
+        await shot(page, `962-panel-${theme}-25db.jpg`, '[data-testid="reach-panel"]');
         await page.evaluate(() => document.querySelector('[data-testid="reach-env"]').scrollIntoView({ block: 'center' }));
-        await shot(page, `962-budget-${theme}-20db.jpg`, 'fieldset:has([data-testid="reach-env"])');
+        await shot(page, `962-budget-${theme}-25db.jpg`, 'fieldset:has([data-testid="reach-env"])');
 
         const api = rec.api.length, cov = rec.coverage.length;
         await setEnv(page, 0);
@@ -261,7 +261,7 @@ function rasterFor(c, radiusKm) {
         assert(s.env === '0' && s.envOut === '0 dB' && s.budget === 'Maximum path loss 158 dB', 'at 0 ' + JSON.stringify(s));
         assert(JSON.stringify(s.chips) === JSON.stringify(AT_158), 'chips at 158 dB ' + JSON.stringify(s.chips));
         assert(JSON.stringify(s.classes) === JSON.stringify(['good', 'good', 'good', 'good', 'marginal']), 'classes at 158 dB ' + s.classes);
-        assert(pct(s.shares.good) > pct(at20.good), 'the shares did not move: ' + JSON.stringify([at20, s.shares]));
+        assert(pct(s.shares.good) > pct(at25.good), 'the shares did not move: ' + JSON.stringify([at25, s.shares]));
         assert(/[?&]renv=0(&|$)/.test(s.hash), 'renv=0 not in the link: ' + s.hash);
         assert(!s.resetDisabled, 'no reset away from the default');
         assert(rec.api.length === api && rec.coverage.length === cov, 'a budget change asked the server: ' + rec.api.slice(api).join(' '));
@@ -273,8 +273,8 @@ function rasterFor(c, radiusKm) {
         await page.click('[data-testid="reach-env-reset"]');
         await page.waitForTimeout(800);
         s = await panelState(page);
-        assert(s.env === '20' && s.budget === 'Maximum path loss 138 dB' && s.resetDisabled, 'after reset ' + JSON.stringify(s));
-        assert(JSON.stringify(s.chips) === JSON.stringify(AT_138) && JSON.stringify(s.shares) === JSON.stringify(at20), 'not back at 138 dB ' + JSON.stringify(s));
+        assert(s.env === '25' && s.budget === 'Maximum path loss 133 dB' && s.resetDisabled, 'after reset ' + JSON.stringify(s));
+        assert(JSON.stringify(s.chips) === JSON.stringify(AT_133) && JSON.stringify(s.shares) === JSON.stringify(at25), 'not back at 133 dB ' + JSON.stringify(s));
         assert(!/renv=/.test(s.hash), 'renv left in the link after the reset: ' + s.hash);
         assert(rec.api.length === api && rec.coverage.length === cov, 'the reset asked the server');
         noNetwork(rec);
@@ -287,7 +287,7 @@ function rasterFor(c, radiusKm) {
     { name: 'an operator 0 dB is today\'s budget and classes', env: 0, link: '', budget: 158, chips: AT_158, field: '0' },
     { name: 'a link without renv uses the operator\'s 35 dB', env: 35, link: '', budget: 123, chips: { good: '0', marginal: '1', weak: '0', all: '1' }, field: '35' },
     { name: 'renv in a link wins over the operator\'s 35 dB', env: 35, link: '&renv=5', budget: 153, chips: { good: '4', marginal: '1', weak: '0', all: '5' }, field: '5' },
-    { name: 'a server without the key: 20 dB', env: undefined, link: '', budget: 138, chips: AT_138, field: '20' },
+    { name: 'a server without the key: 25 dB', env: undefined, link: '', budget: 133, chips: AT_133, field: '25' },
   ]) {
     await step(c.name, async () => {
       const { ctx, page, rec } = await newCtx({ coverage: coverageBlock(c.env) });
@@ -334,10 +334,10 @@ function rasterFor(c, radiusKm) {
         await waitPanel(page);
         assert(new URLSearchParams(rec.coverage[0]).get('at') === pk, 'not the node\'s reach: ' + rec.coverage[0]);
         let s = await panelState(page);
-        assert(s.budget === 'Maximum path loss 138 dB' && JSON.stringify(s.chips) === JSON.stringify(AT_138), 'phone default ' + JSON.stringify(s));
+        assert(s.budget === 'Maximum path loss 133 dB' && JSON.stringify(s.chips) === JSON.stringify(AT_133), 'phone default ' + JSON.stringify(s));
         await page.evaluate(() => document.querySelector('[data-testid="reach-env"]').scrollIntoView({ block: 'center' }));
         await page.waitForTimeout(300);
-        await shot(page, `962-phone-${theme}-375x560-20db.jpg`);
+        await shot(page, `962-phone-${theme}-375x560-25db.jpg`);
 
         // A tap at the slider's left end puts it at 0 dB.
         const api = rec.api.length, cov = rec.coverage.length;
@@ -358,7 +358,7 @@ function rasterFor(c, radiusKm) {
         await tapWhenSettled(page, '[data-testid="reach-env-reset"]');
         await page.waitForTimeout(800);
         s = await panelState(page);
-        assert(s.env === '20' && s.budget === 'Maximum path loss 138 dB' && JSON.stringify(s.chips) === JSON.stringify(AT_138) && !/renv=/.test(s.hash),
+        assert(s.env === '25' && s.budget === 'Maximum path loss 133 dB' && JSON.stringify(s.chips) === JSON.stringify(AT_133) && !/renv=/.test(s.hash),
           'phone after reset ' + JSON.stringify(s));
         assert(rec.api.length === api && rec.coverage.length === cov, 'a budget change asked the server: ' + rec.api.slice(api).join(' '));
         const sideways = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

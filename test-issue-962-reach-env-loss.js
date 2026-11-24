@@ -4,11 +4,11 @@
  * Covers:
  *   1. budgetOf with the new term: power + both gains − cable loss −
  *      sensitivity − environment loss; the state, else the operator's
- *      value (the client config's coverage.environmentLossDb), else 20 dB;
+ *      value (the client config's coverage.environmentLossDb), else 25 dB;
  *   2. the link: renv round-trips, is bounded 0–60 and a link without it
  *      uses the operator's value; the request never carries it;
  *   3. an environment loss of 0 gives today's colour table, shares and
- *      node classes byte for byte, and 20 dB moves every class by 20 dB.
+ *      node classes byte for byte, and 25 dB moves every class by 25 dB.
  *
  * Runs via: node test-issue-962-reach-env-loss.js
  */
@@ -45,11 +45,11 @@ console.log('\n=== #962 Predicted reach: the environment loss ===\n');
 
 // ── 1. The budget ────────────────────────────────────────────────────────
 
-test('the default budget 158 dB less the default 20 dB environment loss is 138 dB', () => {
-  assert.strictEqual(PR.DEFAULT_ENV_LOSS_DB, 20);
-  assert.strictEqual(PR.budgetOf({}, PR.operatorRadio({ radio: RADIO, environmentLossDb: 20 })), 138);
-  assert.strictEqual(PR.budgetOf({}, PR.operatorRadio({ radio: RADIO })), 138, 'no operator value: 20 dB');
-  assert.strictEqual(PR.budgetOf({}, null), 138, 'no config at all: 20 dB');
+test('the default budget 158 dB less the default 25 dB environment loss is 133 dB', () => {
+  assert.strictEqual(PR.DEFAULT_ENV_LOSS_DB, 25);
+  assert.strictEqual(PR.budgetOf({}, PR.operatorRadio({ radio: RADIO, environmentLossDb: 25 })), 133);
+  assert.strictEqual(PR.budgetOf({}, PR.operatorRadio({ radio: RADIO })), 133, 'no operator value: 25 dB');
+  assert.strictEqual(PR.budgetOf({}, null), 133, 'no config at all: 25 dB');
 });
 
 test('the operator value is the budget term, and the state overrides it', () => {
@@ -57,7 +57,7 @@ test('the operator value is the budget term, and the state overrides it', () => 
   assert.strictEqual(PR.budgetOf({}, op), 123);
   assert.strictEqual(PR.budgetOf({ env: 5 }, op), 153);
   assert.strictEqual(PR.budgetOf({ env: 0 }, op), 158, 'a state of 0 is 0, not the operator value');
-  assert.strictEqual(PR.budgetOf({}, PR.operatorRadio({ radio: RADIO, environmentLossDb: 0 })), 158, 'an operator 0 is 0, not 20');
+  assert.strictEqual(PR.budgetOf({}, PR.operatorRadio({ radio: RADIO, environmentLossDb: 0 })), 158, 'an operator 0 is 0, not 25');
   assert.strictEqual(PR.budgetOf({ power: 10, loss: 4, env: 12 },
     PR.operatorRadio({ radio: { txPowerDbm: 20, antennaGainDbi: 5, rxGainDbi: 3, lossDb: 1, sensitivityDbm: -125 }, environmentLossDb: 30 })), 127);
 });
@@ -66,8 +66,8 @@ test('operatorRadio keeps the radio block and adds only the environment loss', (
   const op = PR.operatorRadio({ radio: RADIO, environmentLossDb: 7 });
   assert.deepStrictEqual(J(op), Object.assign({}, RADIO, { environmentLossDb: 7 }));
   assert.deepStrictEqual(J(RADIO), { txPowerDbm: 22, antennaGainDbi: 3, rxGainDbi: 3, lossDb: 0, sensitivityDbm: -130 }, 'radio mutated');
-  assert.strictEqual(PR.budgetOf({}, PR.operatorRadio({ radio: RADIO, environmentLossDb: 'x' })), 138, 'junk operator value: 20 dB');
-  assert.strictEqual(PR.budgetOf({}, PR.operatorRadio(null)), 138);
+  assert.strictEqual(PR.budgetOf({}, PR.operatorRadio({ radio: RADIO, environmentLossDb: 'x' })), 133, 'junk operator value: 25 dB');
+  assert.strictEqual(PR.budgetOf({}, PR.operatorRadio(null)), 133);
 });
 
 // ── 2. The link and the request ──────────────────────────────────────────
@@ -140,11 +140,11 @@ test('a link\'s renv=0 gives today\'s classes over any operator value', () => {
   assert.strictEqual(PR.budgetOf(st, PR.operatorRadio({ radio: RADIO, environmentLossDb: 45 })), todayBudget(st, RADIO));
 });
 
-test('20 dB shifts every class by exactly 20 dB, in the table and in the list', () => {
-  const op = PR.operatorRadio({ radio: RADIO, environmentLossDb: 20 });
-  assert.deepStrictEqual(Array.from(PR.buildLut(PR.budgetOf({}, op), META, COLORS)), Array.from(PR.buildLut(138, META, COLORS)));
-  const rows = PR.reachRows({ nodes: [{ pubkey: '1'.repeat(64), lossDb: 120 }, { pubkey: '2'.repeat(64), lossDb: 130 },
-    { pubkey: '3'.repeat(64), lossDb: 136 }, { pubkey: '4'.repeat(64), lossDb: 140 }] }, PR.budgetOf({}, op));
+test('25 dB shifts every class by exactly 25 dB, in the table and in the list', () => {
+  const op = PR.operatorRadio({ radio: RADIO, environmentLossDb: 25 });
+  assert.deepStrictEqual(Array.from(PR.buildLut(PR.budgetOf({}, op), META, COLORS)), Array.from(PR.buildLut(133, META, COLORS)));
+  const rows = PR.reachRows({ nodes: [{ pubkey: '1'.repeat(64), lossDb: 115 }, { pubkey: '2'.repeat(64), lossDb: 125 },
+    { pubkey: '3'.repeat(64), lossDb: 131 }, { pubkey: '4'.repeat(64), lossDb: 135 }] }, PR.budgetOf({}, op));
   assert.deepStrictEqual(J(rows.map(r => [r.margin, r.cls])), [[18, 'good'], [8, 'marginal'], [2, 'weak'], [-2, 'none']]);
 });
 

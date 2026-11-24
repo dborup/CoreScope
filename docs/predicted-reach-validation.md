@@ -86,7 +86,7 @@ CORESCOPE_REACH_VALIDATION_FULL_FIXTURE=1 go test -count=1 \
 5. **Scores.** The margin of a pair is the link budget (`radio` config,
    default 158 dB) minus the loss. The losses and the budget are raw: the
    environment loss the panel subtracts by default
-   (`map.coverage.environmentLossDb`, 20 dB, #962) is not applied, so the
+   (`map.coverage.environmentLossDb`, 25 dB, #962) is not applied, so the
    report measures the terrain model itself. The report names the value in
    use (`params.environmentLossDb`) so a reader can relate the two. A pair counts as **reached** at a margin
    of 3 dB or more (the "marginal" class). The report gives these, per

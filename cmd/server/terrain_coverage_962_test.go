@@ -15,14 +15,14 @@ import (
 // browser's link budget for the buildings, trees and other clutter the
 // terrain model does not include. The server only resolves the operator's
 // value (map.coverage.environmentLossDb, canonical key only, 0–60 dB,
-// default 20) and passes it to the client config; the raster, the losses,
+// default 25) and passes it to the client config; the raster, the losses,
 // the server's own counts and the validation harness stay raw.
 
-// TestCoverage962_EnvironmentLossDefaultAndBounds: 20 dB by default, 0 and
+// TestCoverage962_EnvironmentLossDefaultAndBounds: 25 dB by default, 0 and
 // 60 accepted, anything else one warning and the default.
 func TestCoverage962_EnvironmentLossDefaultAndBounds(t *testing.T) {
 	logs := &dhmLogSink{}
-	if got := resolveCoverageSettings(CoverageConfig{}, logs.logf).envLossDb; got != 20 || logs.String() != "" {
+	if got := resolveCoverageSettings(CoverageConfig{}, logs.logf).envLossDb; got != 25 || logs.String() != "" {
 		t.Fatalf("default %v (log %q)", got, logs.String())
 	}
 	for _, v := range []float64{0, 12.5, 60} {
@@ -34,8 +34,8 @@ func TestCoverage962_EnvironmentLossDefaultAndBounds(t *testing.T) {
 	for _, v := range []float64{-0.5, 60.5, 1000, math.NaN(), math.Inf(1)} {
 		logs := &dhmLogSink{}
 		got := resolveCoverageSettings(CoverageConfig{EnvironmentLossDb: floatp(v)}, logs.logf).envLossDb
-		if got != 20 {
-			t.Fatalf("%v: got %v, want the default 20", v, got)
+		if got != 25 {
+			t.Fatalf("%v: got %v, want the default 25", v, got)
 		}
 		if n := strings.Count(logs.String(), "map.coverage.environmentLossDb"); n != 1 {
 			t.Fatalf("%v: %d warnings, want 1: %q", v, n, logs.String())
@@ -54,12 +54,12 @@ func TestCoverage962_EnvironmentLossReadsTheCanonicalKeyOnly(t *testing.T) {
 	}{
 		{"canonical", `"environmentLossDb":7`, 7, 0},
 		{"canonical 0", `"environmentLossDb":0`, 0, 0},
-		{"EnvironmentLossDb alone", `"EnvironmentLossDb":7`, 20, 1},
+		{"EnvironmentLossDb alone", `"EnvironmentLossDb":7`, 25, 1},
 		{"variant after canonical", `"environmentLossDb":7,"ENVIRONMENTLOSSDB":30`, 7, 1},
 		{"variant before canonical", `"environmentlossdb":30,"environmentLossDb":7`, 7, 1},
 		{"variant 0 after canonical", `"environmentLossDb":7,"EnvironmentLossDb":0`, 7, 1},
-		{"absent", `"radiusKm":20`, 20, 0},
-		{"null", `"environmentLossDb":null`, 20, 0},
+		{"absent", `"radiusKm":20`, 25, 0},
+		{"null", `"environmentLossDb":null`, 25, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,7 +87,7 @@ func TestCoverage962_ClientConfigCarriesTheEnvironmentLoss(t *testing.T) {
 	for _, tc := range []struct {
 		cc   CoverageConfig
 		want float64
-	}{{CoverageConfig{}, 20}, {CoverageConfig{EnvironmentLossDb: floatp(0)}, 0}, {CoverageConfig{EnvironmentLossDb: floatp(35)}, 35}} {
+	}{{CoverageConfig{}, 25}, {CoverageConfig{EnvironmentLossDb: floatp(0)}, 0}, {CoverageConfig{EnvironmentLossDb: floatp(35)}, 35}} {
 		env := newCoverageEnv(t, newFakeElevation(t, flatElev(4)), tc.cc, nil, nil)
 		cc := env.srv.coverageClientConfig()
 		if cc.EnvironmentLossDb != tc.want {
@@ -129,7 +129,7 @@ func TestCoverage962_ServerLossesStayRaw(t *testing.T) {
 	if len(base.raster) == 0 {
 		t.Fatal("empty raster")
 	}
-	for _, v := range []*float64{nil, floatp(20), floatp(60)} {
+	for _, v := range []*float64{nil, floatp(25), floatp(60)} {
 		got := get(v)
 		if got.key != base.key || !bytes.Equal(got.raster, base.raster) || !bytes.Equal(got.reach, base.reach) {
 			t.Fatalf("environment loss %v changed what the server serves: key %s/%s, raster equal %v, reach %s vs %s",
