@@ -929,6 +929,36 @@
     // #1407 — both are now live getters; no manual sync needed. Kept as no-op for clarity.
   }).catch(function () { /* use defaults */ });
 
+  /* Node actions owned by other modules: #681 M5 "Terrain profile"
+   * (terrain-profile.js) and #941 "Predicted reach" (coverage.js), in node
+   * detail's order. Each module owns its button and its gate (feature
+   * switched on, node has a fix); build() reads the client config when it
+   * runs, so mount it with mountConfigAction. Node detail and the Map page
+   * popup (#959) both list them here, so each shows the same actions. */
+  window.nodeToolActions = function (node, env) {
+    var w = env || window, out = [];
+    var tp = w.TerrainProfile, pr = w.PredictedReach;
+    if (tp && typeof tp.nodeEntryAction === 'function') {
+      out.push({ testid: 'node-terrain-profile', build: function () { return tp.nodeEntryAction(node, w.MC_DHM_CFG); } });
+    }
+    if (pr && typeof pr.nodeEntryAction === 'function') {
+      out.push({ testid: 'node-predicted-reach', build: function () { return pr.nodeEntryAction(node, w.MC_COVERAGE_CFG); } });
+    }
+    return out;
+  };
+
+  /* mountConfigAction waits for the client config and appends what build()
+   * hands back. A row that left the page, or already holds that test id,
+   * gets nothing. Resolves to the appended action, or null. */
+  window.mountConfigAction = function (row, testid, build) {
+    return Promise.resolve(window.MeshConfigReady).catch(function () {}).then(function () {
+      if (!row.isConnected || row.querySelector('[data-testid="' + testid + '"]')) return null;
+      var action = build();
+      if (action) row.appendChild(action);
+      return action || null;
+    });
+  };
+
   // ─── Built-in IATA airport code → city name mapping ───
   window.IATA_CITIES = {
     // United States

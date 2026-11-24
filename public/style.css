@@ -6899,6 +6899,11 @@ body.embed .warmup-pills { display: none !important; }
     .reach-panel { left: 68px; right: 68px; bottom: 30px; max-height: calc(100% - 42px); }
     .reach-nir-list { max-height: max(45px, calc(100vh - 285px)); }
   }
+  /* #959: a map popup is taller than the map above the sheet, and the
+     sheet sits above Leaflet's panes, so it would cover the popup's links.
+     It steps aside while a popup is open (map.js onPopupSheet); the reach
+     stays on the map and the sheet comes back when the popup closes. */
+  .has-map-popup .reach-panel { display: none; }
   /* The head and its × stay at the top of the scrolled sheet; it covers
      the sheet's top padding so nothing scrolls past above it. */
   .reach-head {
@@ -7366,6 +7371,12 @@ body.embed .warmup-pills { display: none !important; }
 @media (max-width: 768px) {
   .node-action-chip { min-height: 44px; min-width: 44px; justify-content: center; }
 }
+/* #959: the same chips in the Map page's node popup, a row under View Node
+   and Show Neighbors. Leaflet colours every popup link, so the chip text
+   is set again here. */
+.map-popup-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: flex-start; }
+.map-popup-tools:empty { display: none; }
+.leaflet-container .map-popup-tools .node-action-chip { color: var(--text-on-accent); }
 
 /* #737 M2 — "Oblique photo": the node-detail button is a node action chip
    (#920) beside "Terrain profile"; in the Path profile a row of

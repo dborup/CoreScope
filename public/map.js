@@ -360,6 +360,9 @@
       }
     }
     map = L.map('leaflet-map', { zoomControl: true }).setView(initCenter, initZoom);
+    // #959: the node popup's Terrain profile and Predicted reach, on open.
+    map.on('popupopen', onNodePopupOpen);
+    map.on('popupopen popupclose', onPopupSheet);
 
     // If navigated with ?node=PUBKEY, highlight that node after markers load
     targetNodeKey = urlParams.get('node') || null;
@@ -2585,7 +2588,7 @@
     }
 
     return `
-      <div class="map-popup" style="font-family:var(--font);min-width:180px;">
+      <div class="map-popup" data-node-popup style="font-family:var(--font);min-width:180px;">
         <h3 style="font-weight:700;font-size:14px;margin:0 0 4px;">${safeEsc(node.name || 'Unknown')}</h3>
         ${roleBadge}${obsBadge}
         <dl style="margin-top:8px;font-size:12px;">
@@ -2605,6 +2608,85 @@
           ${node.public_key ? ` · <a href="javascript:void(0)" role="button" data-show-neighbors data-pubkey="${escapeHtml(node.public_key)}" data-name="${escapeHtml(node.name || 'Unknown')}" style="color:var(--link-color);font-size:12px;cursor:pointer;">Show Neighbors</a>` : ''}
         </div>
       </div>`;
+  }
+
+  /* findNodeByKey answers the Map page's node with that public key, any
+   * case, or null. One O(n) scan, only ever on a user's action. */
+  function findNodeByKey(key) {
+    var want = String(key || '').toLowerCase();
+    for (var i = 0; i < nodes.length; i++) {
+      if ((nodes[i].public_key || '').toLowerCase() === want) return nodes[i];
+    }
+    return null;
+  }
+
+  /* #959: the node popup offers node detail's Terrain profile and
+   * Predicted reach (roles.js nodeToolActions), built as DOM when a popup
+   * opens: the popup string never carries a node field into an action, and
+   * a marker that is never opened costs nothing. One lookup per open. */
+  function onNodePopupOpen(e) {
+    var box = e.popup && e.popup.getElement() && e.popup.getElement().querySelector('.map-popup[data-node-popup]');
+    var key = e.popup && e.popup._source && e.popup._source._nodeKey;
+    if (!box || !key || typeof window.nodeToolActions !== 'function') return;
+    var node = findNodeByKey(key);
+    if (!node) return;
+    var popup = e.popup, row = document.createElement('div');
+    row.className = 'map-popup-tools';
+    box.appendChild(row);
+    Promise.all(window.nodeToolActions(node).map(function (a) {
+      return window.mountConfigAction(row, a.testid, function () {
+        var action = a.build();
+        if (action) action.addEventListener('click', function (ev) { onPopupToolClick(ev, a.testid, action); });
+        return action;
+      });
+    })).then(function () {
+      if (row.firstChild && popup.isOpen()) popupRefit(popup);
+    });
+  }
+
+  /* onPopupSheet marks #map-wrap while a popup is open. On a phone the
+   * reach's bottom sheet (z-index above Leaflet's panes) covers the lower
+   * half of the map, and a node popup with its actions is taller than the
+   * map left above the sheet, so no pan can clear it: the sheet steps aside
+   * (style.css) until the popup closes, and the reach stays on the map. */
+  function onPopupSheet(e) {
+    var wrap = document.getElementById('map-wrap');
+    if (wrap) wrap.classList.toggle('has-map-popup', e.type === 'popupopen');
+  }
+
+  /* popupRefit is Leaflet 1.9.4's Popup.update() without its content step,
+   * which would render the string again and drop the actions: the popup
+   * grew after Leaflet had laid it out and panned it into view, so it is
+   * sized, placed and panned again, or its top is cut off on a phone. */
+  function popupRefit(popup) {
+    popup._updateLayout();
+    popup._updatePosition();
+    popup._adjustPan();
+  }
+
+  /* onPopupToolClick opens the tool in place. Following the action's
+   * #/map?… link from #/map would rebuild the page (app.js navigate()
+   * re-inits a page on every hashchange) and lose the view, so the link is
+   * read instead: the module stays the one owner of its parameters. The
+   * reach opens as the tool's own map pick does, in the current view; the
+   * profile starts as node detail's half link does. A click for a new tab,
+   * or a tool that is not there, follows the link. */
+  function onPopupToolClick(e, testid, action) {
+    if (e.button > 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || !map) return;
+    var qs = (action.getAttribute('href') || '').split('?')[1] || '';
+    if (testid === 'node-predicted-reach') {
+      var st = reachTool && window.PredictedReach.parseState(qs);
+      if (!st) return;
+      e.preventDefault();
+      map.closePopup();
+      reachTool.open(st);
+    } else if (testid === 'node-terrain-profile') {
+      var start = window.TerrainProfile.parseStart(qs);
+      if (!start || !ensureProfileTool()) return;
+      e.preventDefault();
+      map.closePopup();
+      profileStartAt(start);
+    }
   }
 
   function fitBounds() {
@@ -2794,13 +2876,8 @@
   function profileResolveNode(pubkey) {
     if (!pubkey) return null;
     var want = String(pubkey).toLowerCase();
-    var i, n;
-    for (i = 0; i < nodes.length; i++) {
-      n = nodes[i];
-      if ((n.public_key || '').toLowerCase() === want) {
-        return { name: n.name || n.adv_name || null, lat: n.lat, lon: n.lon, role: n.role || null };
-      }
-    }
+    var i, n = findNodeByKey(want);
+    if (n) return { name: n.name || n.adv_name || null, lat: n.lat, lon: n.lon, role: n.role || null };
     for (i = 0; i < observers.length; i++) {
       n = observers[i];
       if ((n.id || '').toLowerCase() === want) {
@@ -2832,11 +2909,7 @@
    * both honest and useful: the profile is measured from exactly where
    * the observer sits, it just is not labelled with its name. */
   function profileIsNode(pubkey) {
-    var want = String(pubkey || '').toLowerCase();
-    for (var i = 0; i < nodes.length; i++) {
-      if ((nodes[i].public_key || '').toLowerCase() === want) return true;
-    }
-    return false;
+    return !!findNodeByKey(pubkey);
   }
 
   function profileRefLatLng(ref) {
@@ -3252,9 +3325,7 @@
       if (!ensureProfileTool()) return;
       await profileLoadExtraNode(start.pubkey);
       if (!alive() || !ensureProfileTool()) return;
-      profileArmFor('a');
-      profilePick(start);
-      if (profileAnchor && map) profileLinkMove(function () { map.panTo(profileAnchor); });
+      profileStartAt(start);
       return;
     }
     var tool = ensureProfileTool();
@@ -3262,6 +3333,15 @@
     tool.setState(st);
     profileDrawLine();
     profileFitPath();
+  }
+
+  /* profileStartAt starts a measurement from node detail's half link or
+   * the Map popup (#959): start is A, the picker is armed for B, exactly as
+   * if A had just been clicked, and the map pans to A. */
+  function profileStartAt(start) {
+    profileArmFor('a');
+    profilePick(start);
+    if (profileAnchor && map) profileLinkMove(function () { map.panTo(profileAnchor); });
   }
 
   /* profileBadLink answers a link whose profile cannot be read (#839 §7),
