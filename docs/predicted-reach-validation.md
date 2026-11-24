@@ -220,8 +220,42 @@ transmitter is 10 m above the ground and its receiver 2 m. Optional settings:
 |---|---|---|
 | `CORESCOPE_REACH_VALIDATION_963_POINT` | `56.136,8.975` (open Jutland) | the reach-radius point |
 | `CORESCOPE_REACH_VALIDATION_963_SNR_CAP` | 10 | the SNR cap of the capped offset, in dB; set it from the report's observed SNR summary |
+| `CORESCOPE_REACH_VALIDATION_963_FETCH_TIMEOUT` | `60s` | one DHM tile attempt, a Go duration (`90s`, `2m`) or seconds; also the DHM client's per-request timeout for this run |
+| `CORESCOPE_REACH_VALIDATION_963_FETCH_RETRIES` | 3 | retries of a failed tile, after 5 s, 10 s, 20 s, …; then the tile has no terrain |
+| `CORESCOPE_REACH_VALIDATION_963_PROGRESS_EVERY` | 25 | a progress line every this many disks (one disk per transmitting node); 0 for none |
 
 The radius, window and minimum edge count of the #941 run apply too.
+
+**Slow or failing tiles do not abort the run.** The live reach gives
+each tile 10 s, including the wait for one of its 2 DHM slots, and fails
+the whole computation on one failure. DSM rasters can take longer than
+that. The harness therefore fetches each DHM tile itself, two at a time,
+with the timeout above, through the same sub-budget and
+`upstreamPerMin`. A tile that fails is retried with a doubling backoff.
+If it still fails after the last retry, it has no terrain, like a gap
+in #941: the pairs over it count as "without terrain" and the rest are
+scored. The report's header gives the fetches per source: for example,
+`DHM tile fetches (60 s timeout, up to 3 retries; …): DTM 212 fetched,
+0 retries, 0 failed; DSM 209 fetched, 6 retries, 3 failed (timeout ×12)`.
+Both reports have them in `terrain.fetch` (JSON) as well. A run with
+failed tiles is marked partial. If many tiles fail, rerun with a longer
+timeout: tiles fetched before are not cached between runs, so the
+whole run is repeated. Only an error that no retry can fix stops the
+run: a refused token (`status 401`/`403`), a request the client refuses,
+or the run's own deadline (`-timeout`). The error names the stage (`DTM`
+or `DSM`; the clutter class is computed from these two grids, with no
+fetch of its own), the disk, the tile and its EPSG:25832 bounding box,
+and the reason, for example:
+
+```
+disk 41/312: DSM fetch, disk of 5f0c1a2b: DSM tile 33,404 (EPSG:25832 bbox 506880,6205440,522240,6220800), attempt 1: status 403
+```
+
+With `-v`, the progress lines show that a long run is alive:
+
+```
+963: disk 50/312, 1210/7034 pairs, 118 + 118 tiles; tile fetches DTM 61 fetched, 0 retries, 0 failed; DSM 60 fetched, 2 retries, 1 failed (timeout ×4), 125 upstream calls; 3m12s elapsed
+```
 
 **Without a token**, the fixture moved to Jutland and the reach radius can
 run over the public Copernicus GLO-30 tiles. This is opt-in, because it

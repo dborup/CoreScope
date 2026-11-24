@@ -989,6 +989,14 @@ func TestReachValidation941_RealDB(t *testing.T) {
 // CORESCOPE_REACH_VALIDATION_DB.
 func openRealReachValidation(t *testing.T) (*Server, *terrainCoverage, *DB, *Config, reachValidationOptions) {
 	t.Helper()
+	return openRealReachValidationTimeout(t, 0)
+}
+
+// openRealReachValidationTimeout is openRealReachValidation with the DHM
+// client's per-request timeout set to dhmTimeout (0: the client's
+// default), for a run that fetches its tiles with a longer timeout (#963).
+func openRealReachValidationTimeout(t *testing.T, dhmTimeout time.Duration) (*Server, *terrainCoverage, *DB, *Config, reachValidationOptions) {
+	t.Helper()
 	dbPath := os.Getenv("CORESCOPE_REACH_VALIDATION_DB")
 	if dbPath == "" {
 		t.Skip("CORESCOPE_REACH_VALIDATION_DB not set: the real-data run is manual (docs/predicted-reach-validation.md)")
@@ -1013,6 +1021,11 @@ func openRealReachValidation(t *testing.T) (*Server, *terrainCoverage, *DB, *Con
 	}
 	t.Cleanup(func() { db.Close() })
 	proxy := newDHMProxyFromConfig(cfg)
+	if proxy != nil && dhmTimeout > 0 {
+		co := dhm.DefaultClientOptions()
+		co.Timeout = dhmTimeout
+		proxy.client = dhm.NewClient(cfg.DHM, co)
+	}
 	terrain := newTerrainProfilerFromConfig(cfg, proxy, db)
 	c := newTerrainCoverageFromConfig(cfg, proxy, terrain, db)
 	if c == nil {

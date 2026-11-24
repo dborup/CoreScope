@@ -11,6 +11,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -18,9 +19,11 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/meshcore-analyzer/dhm"
+	"golang.org/x/sync/errgroup"
 )
 
 // reachValidation963Heights split the pairs by the lower antenna above
@@ -69,42 +72,361 @@ func countReach963Upstream(c, cs *terrainCoverage) func() int64 {
 	return func() int64 { return a() + b() }
 }
 
-// gatherBoth963 is a disk's DTM and DSM grids; the DSM is the DTM without
-// a surface coverage.
-func gatherBoth963(ctx context.Context, c, cs *terrainCoverage, d reachDisk, sleep func(time.Duration)) (tg, sg *dhm.CoverageGrid, tiles, surfTiles int, partial bool, err error) {
-	tg, tiles, partial, err = gatherReachDisk(ctx, c, d, sleep)
-	if err != nil || cs == nil {
-		return tg, tg, tiles, 0, partial, err
+// ── Gathering: the harness's own tile fetch ───────────────────────────────
+
+// The harness's stages, as errors, logs and the report name them. The
+// clutter class (land cover) has no stage of its own: it is computed from
+// the DTM and DSM grids, with no upstream call.
+const (
+	stageDTM963 = "DTM"
+	stageDSM963 = "DSM"
+)
+
+// gather963 is how the harness gathers terrain. A long run must not end
+// on one slow tile, and the reach's own gather would: it bounds each tile
+// at coveragePerCall (10 s, the wait for one of the reach's 2 upstream
+// slots included) and fails the whole disk on one failure. So the harness
+// fetches each DHM tile itself first (fetchTiles963) and gather then
+// reads them all from the coverage's cache.
+type gather963 struct {
+	timeout time.Duration                // one tile attempt
+	retries int                          // attempts after the first
+	backoff time.Duration                // before the first retry; doubles per retry
+	sleep   func(time.Duration)          // waits for the upstream budget and the backoff
+	logf    func(string, ...interface{}) // progress, and each tile given up; nil: silent
+	every   int                          // a progress line every this many disks; 0: none
+	// upstream counts the upstream calls so far, for the progress line;
+	// nil: not shown.
+	upstream func() int64
+}
+
+const (
+	fetchTimeout963  = 60 * time.Second
+	fetchRetries963  = 3
+	fetchBackoff963  = 5 * time.Second
+	progressEvery963 = 25
+)
+
+// defaultGather963 is the harness's gathering with the default policy,
+// waiting with sleep and silent.
+func defaultGather963(sleep func(time.Duration)) gather963 {
+	return gather963{timeout: fetchTimeout963, retries: fetchRetries963, backoff: fetchBackoff963, sleep: sleep}
+}
+
+// gather963FromEnv is defaultGather963(time.Sleep) with the opt-in runs'
+// settings: CORESCOPE_REACH_VALIDATION_963_FETCH_TIMEOUT (a Go duration
+// such as 90s, or seconds), _FETCH_RETRIES and _PROGRESS_EVERY (disks).
+func gather963FromEnv(logf func(string, ...interface{})) (gather963, error) {
+	g := defaultGather963(time.Sleep)
+	g.logf, g.every = logf, progressEvery963
+	if v := os.Getenv("CORESCOPE_REACH_VALIDATION_963_FETCH_TIMEOUT"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			s, ferr := strconv.ParseFloat(v, 64)
+			if ferr != nil {
+				return g, fmt.Errorf("CORESCOPE_REACH_VALIDATION_963_FETCH_TIMEOUT %q: want a duration such as 90s, or seconds", v)
+			}
+			d = time.Duration(s * float64(time.Second))
+		}
+		if d <= 0 {
+			return g, fmt.Errorf("CORESCOPE_REACH_VALIDATION_963_FETCH_TIMEOUT %q: must be positive", v)
+		}
+		g.timeout = d
 	}
-	sg, surfTiles, p2, err := gatherReachDisk(ctx, cs, d, sleep)
-	return tg, sg, tiles, surfTiles, partial || p2, err
+	for _, e := range []struct {
+		name string
+		to   *int
+	}{{"CORESCOPE_REACH_VALIDATION_963_FETCH_RETRIES", &g.retries}, {"CORESCOPE_REACH_VALIDATION_963_PROGRESS_EVERY", &g.every}} {
+		if v := os.Getenv(e.name); v != "" {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 {
+				return g, fmt.Errorf("%s %q: want a whole number ≥ 0", e.name, v)
+			}
+			*e.to = n
+		}
+	}
+	return g, nil
+}
+
+func (g gather963) log(format string, args ...interface{}) {
+	if g.logf != nil {
+		g.logf(format, args...)
+	}
+}
+
+// reachFetch963Stats counts one source's tile fetches by the harness.
+type reachFetch963Stats struct {
+	Fetched int `json:"tilesFetched"` // on the first attempt or a retry
+	Retried int `json:"retries"`      // failed attempts tried again
+	Failed  int `json:"tilesFailed"`  // given up: no terrain there
+	// Reasons counts every failed attempt by its category (timeout,
+	// status 503, ...).
+	Reasons map[string]int `json:"failureReasons,omitempty"`
+}
+
+func (s *reachFetch963Stats) add(o reachFetch963Stats) {
+	s.Fetched += o.Fetched
+	s.Retried += o.Retried
+	s.Failed += o.Failed
+	for k, v := range o.Reasons {
+		if s.Reasons == nil {
+			s.Reasons = map[string]int{}
+		}
+		s.Reasons[k] += v
+	}
+}
+
+func (s reachFetch963Stats) text() string {
+	out := fmt.Sprintf("%d fetched, %d retries, %d failed", s.Fetched, s.Retried, s.Failed)
+	if len(s.Reasons) == 0 {
+		return out
+	}
+	keys := make([]string, 0, len(s.Reasons))
+	for k := range s.Reasons {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for i, k := range keys {
+		keys[i] = fmt.Sprintf("%s ×%d", k, s.Reasons[k])
+	}
+	return out + " (" + strings.Join(keys, ", ") + ")"
+}
+
+// reachFetch963 is the harness's tile fetches per source.
+type reachFetch963 struct {
+	DTM reachFetch963Stats `json:"dtm"`
+	DSM reachFetch963Stats `json:"dsm"`
+}
+
+func (f *reachFetch963) add(o reachFetch963) {
+	f.DTM.add(o.DTM)
+	f.DSM.add(o.DSM)
+}
+
+func (f reachFetch963) failed() bool { return f.DTM.Failed+f.DSM.Failed > 0 }
+
+func (f reachFetch963) text() string {
+	return "DTM " + f.DTM.text() + "; DSM " + f.DSM.text()
+}
+
+// tileError963 is a fatal tile fetch, with where it happened.
+type tileError963 struct {
+	stage    string
+	tile     dhm.CoverageTile
+	bbox     [4]float64 // EPSG:25832
+	attempts int
+	err      error
+}
+
+func (e tileError963) Error() string {
+	return fmt.Sprintf("%s tile %d,%d (EPSG:25832 bbox %.0f,%.0f,%.0f,%.0f), attempt %d: %v",
+		e.stage, e.tile.X, e.tile.Y, e.bbox[0], e.bbox[1], e.bbox[2], e.bbox[3], e.attempts, e.err)
+}
+
+func (e tileError963) Unwrap() error { return e.err }
+
+// retryable963 reports whether a failed tile fetch may be retried and,
+// failing that, left without terrain: every upstream failure but a
+// refused token. A request the client refuses (dhm.ErrBadRequest) is a
+// harness bug and fatal.
+func retryable963(err error) bool {
+	var fe dhm.FetchError
+	if !errors.As(err, &fe) {
+		return false
+	}
+	return fe.Reason != "status 401" && fe.Reason != "status 403"
+}
+
+// fetchTiles963 fetches the plan's DHM tiles that cov's gather would
+// fetch (in the raster extent, partly Danish, not cached) and caches them,
+// so that gather finds every one in the cache. Each attempt has
+// g.timeout, through cov's DHM sub-budget and per-minute upstream budget,
+// with at most coverageUpstreamSlots tiles at once (the sub-budget's
+// slots, so an attempt never waits for one). A failed attempt is retried
+// up to g.retries times, the backoff doubling each time. A tile that
+// still fails is cached empty, as a tile outside Denmark is: no terrain,
+// so the pairs over it count as without terrain, as #941 counts a gap.
+// Fatal, with stage and tile: the run's context ending, or a failure no
+// retry mends (retryable963).
+func fetchTiles963(ctx context.Context, cov *terrainCoverage, stage string, plan []dhm.CoverageTile, res float64, g gather963) (reachFetch963Stats, error) {
+	var st reachFetch963Stats
+	if cov.dhm == nil {
+		return st, nil
+	}
+	now := cov.now()
+	var todo []dhm.CoverageTile
+	for _, t := range plan {
+		if _, ok := t.Raster(res); !ok {
+			continue
+		}
+		if _, need := cov.cachedTile(coverageTileKey{Res: int(res), X: t.X, Y: t.Y}, now); !need {
+			continue
+		}
+		if some, _ := cov.tileCoverage(t, res); some {
+			todo = append(todo, t)
+		}
+	}
+	var mu sync.Mutex
+	eg, ectx := errgroup.WithContext(ctx)
+	eg.SetLimit(coverageUpstreamSlots)
+	for _, t := range todo {
+		eg.Go(func() error {
+			one, err := fetchTile963(ectx, cov, stage, t, res, g)
+			mu.Lock()
+			st.add(one)
+			mu.Unlock()
+			return err
+		})
+	}
+	err := eg.Wait()
+	if err == nil {
+		err = ctx.Err()
+	}
+	return st, err
+}
+
+// fetchTile963 is one tile of fetchTiles963.
+func fetchTile963(ctx context.Context, cov *terrainCoverage, stage string, t dhm.CoverageTile, res float64, g gather963) (reachFetch963Stats, error) {
+	var st reachFetch963Stats
+	k := coverageTileKey{Res: int(res), X: t.X, Y: t.Y}
+	r, _ := t.Raster(res)
+	for attempt := 1; ; attempt++ {
+		for {
+			ok, retry := cov.budget.take(1)
+			if ok {
+				break
+			}
+			g.sleep(max(time.Second, retry))
+		}
+		actx, cancel := context.WithTimeout(ctx, g.timeout)
+		grid, err := cov.dhm.FetchRaster(actx, r)
+		cancel()
+		if err == nil {
+			cov.tiles.Put(k, dhm.EncodeCoverageTile(dhm.CoverageTileFromGrid(&grid, t, res, cov.covers)), cov.now())
+			st.Fetched++
+			return st, nil
+		}
+		fatal := tileError963{stage: stage, tile: t, bbox: r.BBox, attempts: attempt, err: err}
+		if ctx.Err() != nil {
+			fatal.err = fmt.Errorf("run stopped (%v) while fetching: %w", ctx.Err(), err)
+			return st, fatal
+		}
+		if !retryable963(err) {
+			return st, fatal
+		}
+		if st.Reasons == nil {
+			st.Reasons = map[string]int{}
+		}
+		st.Reasons[err.Error()]++
+		if attempt > g.retries {
+			cov.tiles.Put(k, []byte{}, cov.now())
+			st.Failed++
+			g.log("963: %s tile %d,%d given up after %d attempts (%v): no terrain there", stage, t.X, t.Y, attempt, err)
+			return st, nil
+		}
+		st.Retried++
+		g.sleep(g.backoff << (attempt - 1))
+	}
+}
+
+// diskError963 is a fatal error gathering a disk, with stage and where.
+func diskError963(stage string, d reachDisk, res float64, err error) error {
+	e, n := dhm.ToUTM32(d.a.pt.Lat, d.a.pt.Lon)
+	m := d.radiusM + 2*res
+	return fmt.Errorf("%s gather, disk of %.0f km around %s at %.5f,%.5f (EPSG:25832 bbox %.0f,%.0f,%.0f,%.0f): %w",
+		stage, d.radiusM/1000, pkPrefix963(d.a.pk), d.a.pt.Lat, d.a.pt.Lon, e-m, n-m, e+m, n+m, err)
+}
+
+// pkPrefix963 is a node key's prefix for errors and logs; "point" for the
+// reach-radius point, which has none.
+func pkPrefix963(pk string) string {
+	switch {
+	case pk == "":
+		return "point"
+	case len(pk) > 8:
+		return pk[:8]
+	}
+	return pk
+}
+
+// gathered963 is what gathering a disk's DTM and DSM took.
+type gathered963 struct {
+	tiles, surfTiles int
+	partial          bool
+	fetch            reachFetch963
+}
+
+// gatherBoth963 is a disk's DTM and DSM grids, each fetched by
+// fetchTiles963 and gathered through its coverage; the DSM is the DTM
+// without a surface coverage.
+func gatherBoth963(ctx context.Context, c, cs *terrainCoverage, d reachDisk, g gather963) (tg, sg *dhm.CoverageGrid, out gathered963, err error) {
+	one := func(cov *terrainCoverage, stage string, st *reachFetch963Stats) (*dhm.CoverageGrid, int, bool, error) {
+		res := float64(cov.set.resolutionM)
+		e, n := dhm.ToUTM32(d.a.pt.Lat, d.a.pt.Lon)
+		f, err := fetchTiles963(ctx, cov, stage, dhm.PlanCoverageTiles(e, n, d.radiusM, res), res, g)
+		st.add(f)
+		if err != nil {
+			return nil, 0, false, fmt.Errorf("%s fetch, disk of %s: %w", stage, pkPrefix963(d.a.pk), err)
+		}
+		grid, tiles, part, err := gatherReachDisk(ctx, cov, d, g.sleep)
+		if err != nil {
+			return nil, 0, false, diskError963(stage, d, res, err)
+		}
+		return grid, tiles, part, nil
+	}
+	tg, out.tiles, out.partial, err = one(c, stageDTM963, &out.fetch.DTM)
+	if err != nil || cs == nil {
+		return tg, tg, out, err
+	}
+	sg, n, part, err := one(cs, stageDSM963, &out.fetch.DSM)
+	out.surfTiles, out.partial = n, out.partial || part
+	return tg, sg, out, err
+}
+
+// evaluated963 is what evaluating the candidates gathered and found.
+type evaluated963 struct {
+	gathered963
+	classes map[string]clutterClass963 // each scored node's clutter class
 }
 
 // evaluateCandidates963 computes every candidate's loss for every pair
 // into p.loss (keyed by the candidate id), sampling each path exactly as
-// dhm.ReachLosses does, and returns each scored node's clutter class.
-func evaluateCandidates963(ctx context.Context, c, cs *terrainCoverage, pairs []*valPair, sleep func(time.Duration)) (tiles, surfTiles int, partial bool, classes map[string]clutterClass963, err error) {
+// dhm.ReachLosses does, and returns each scored node's clutter class. It
+// logs progress every g.every disks.
+func evaluateCandidates963(ctx context.Context, c, cs *terrainCoverage, pairs []*valPair, g gather963) (ev evaluated963, err error) {
 	res := float64(c.set.resolutionM)
 	freq, _ := c.link.frequency(nil)
 	k, _ := c.link.kFactor(nil)
-	classes = map[string]clutterClass963{}
-	for _, d := range reachDisks(c, pairs) {
-		tg, sg, n, ns, part, gerr := gatherBoth963(ctx, c, cs, d, sleep)
+	ev.classes = map[string]clutterClass963{}
+	disks := reachDisks(c, pairs)
+	start, donePairs := time.Now(), 0
+	for di, d := range disks {
+		tg, sg, got, gerr := gatherBoth963(ctx, c, cs, d, g)
+		ev.fetch.add(got.fetch)
 		if gerr != nil {
-			return tiles, surfTiles, partial, classes, gerr
+			return ev, fmt.Errorf("disk %d/%d: %w", di+1, len(disks), gerr)
 		}
-		tiles, surfTiles, partial = tiles+n, surfTiles+ns, partial || part
+		ev.tiles, ev.surfTiles, ev.partial = ev.tiles+got.tiles, ev.surfTiles+got.surfTiles, ev.partial || got.partial || got.fetch.failed()
+		donePairs += len(d.pairs)
+		if g.every > 0 && ((di+1)%g.every == 0 || di+1 == len(disks)) {
+			up := ""
+			if g.upstream != nil {
+				up = ", " + upstreamText(g.upstream())
+			}
+			g.log("963: disk %d/%d, %d/%d pairs, %d + %d tiles; tile fetches %s%s; %v elapsed",
+				di+1, len(disks), donePairs, len(pairs), ev.tiles, ev.surfTiles, ev.fetch.text(), up, time.Since(start).Round(time.Second))
+		}
 		e0, n0 := dhm.ToUTM32(d.a.pt.Lat, d.a.pt.Lon)
 		txClass := clutterAt963(tg, sg, e0, n0, res)
-		classes[d.a.pk] = txClass
+		ev.classes[d.a.pk] = txClass
 		for _, p := range d.pairs {
 			if err := ctx.Err(); err != nil {
-				return tiles, surfTiles, partial, classes, err
+				return ev, err
 			}
 			e1, n1 := dhm.ToUTM32(p.b.pt.Lat, p.b.pt.Lon)
 			dist := math.Hypot(e1-e0, n1-n0)
 			rxClass := clutterAt963(tg, sg, e1, n1, res)
-			classes[p.b.pk] = rxClass
+			ev.classes[p.b.pk] = rxClass
 			p.loss = map[dhm.PathModel]float64{}
 			if dist < 1 {
 				for _, id := range candidates963 {
@@ -126,7 +448,7 @@ func evaluateCandidates963(ctx context.Context, c, cs *terrainCoverage, pairs []
 			}
 		}
 	}
-	return tiles, surfTiles, partial, classes, nil
+	return ev, nil
 }
 
 // ── Report ─────────────────────────────────────────────────────────────────
@@ -151,6 +473,11 @@ type reachValidation963Terrain struct {
 	SurfaceTiles  int    `json:"surfaceTilesGathered"`
 	Upstream      int64  `json:"upstreamCalls"`
 	Partial       bool   `json:"partial"`
+	// Fetch is the harness's DHM tile fetches per source; a failed tile
+	// has no terrain, and its pairs count as without terrain.
+	Fetch         reachFetch963 `json:"fetch"`
+	FetchTimeoutS float64       `json:"fetchTimeoutS"`
+	FetchRetries  int           `json:"fetchRetries"`
 }
 
 // reachValidation963Classes counts the scored nodes by clutter class.
@@ -305,6 +632,7 @@ func (r reachValidation963Report) markdown() string {
 		r.Terrain.Source, r.Terrain.SurfaceSource, r.Terrain.Tiles, r.Terrain.SurfaceTiles, upstreamText(r.Terrain.Upstream),
 		map[bool]string{true: " (partial)", false: ""}[r.Terrain.Partial])
 	p := r.Pairs
+	fmt.Fprintf(&b, "DHM tile fetches (%g s timeout, up to %d retries; a failed tile has no terrain): %s.\n\n", r.Terrain.FetchTimeoutS, r.Terrain.FetchRetries, r.Terrain.Fetch.text())
 	fmt.Fprintf(&b, "Pairs: %d nodes, %d scored (%d positives, %d negatives), %d with SNR, %d without terrain.\n\n", p.Nodes, p.Scored, p.Positives, p.Negatives, p.WithSNR, p.NoTerrain)
 	fmt.Fprintf(&b, "## Clutter classes at the ends\n\n| Open | Suburban | Urban / forest |\n|---|---|---|\n| %d | %d | %d |\n\n", r.EndClasses.Open, r.EndClasses.Suburban, r.EndClasses.Urban)
 	sn := r.SNR
@@ -360,18 +688,20 @@ func (r reachValidation963Report) markdown() string {
 
 // runReachValidation963 is the candidate harness: read and label (#941),
 // evaluate every candidate, score, write reach-validation-963.{json,md}.
-func runReachValidation963(ctx context.Context, srv *Server, c, cs *terrainCoverage, conn *sql.DB, o reachValidationOptions) (reachValidation963Report, error) {
+// A tile that fails after g's retries leaves its pairs without terrain;
+// a fatal error names its stage and where.
+func runReachValidation963(ctx context.Context, srv *Server, c, cs *terrainCoverage, conn *sql.DB, o reachValidationOptions, g gather963) (reachValidation963Report, error) {
 	l, err := labelReachValidation(ctx, srv, c, conn, o)
 	if err != nil {
-		return reachValidation963Report{}, err
+		return reachValidation963Report{}, fmt.Errorf("labels (database): %w", err)
 	}
-	tiles, surfTiles, partial, classes, err := evaluateCandidates963(ctx, c, cs, l.pairs, o.sleep)
+	ev, err := evaluateCandidates963(ctx, c, cs, l.pairs, g)
 	if err != nil {
 		return reachValidation963Report{}, err
 	}
-	rep := buildReachValidation963Report(l, c, o, classes)
-	rep.Terrain = reachValidation963Terrain{Source: o.terrainSource, Tiles: tiles, SurfaceTiles: surfTiles, Upstream: o.upstream(), Partial: partial,
-		SurfaceSource: "none (the DTM grid; GLO-30 is a surface model)"}
+	rep := buildReachValidation963Report(l, c, o, ev.classes)
+	rep.Terrain = reachValidation963Terrain{Source: o.terrainSource, Tiles: ev.tiles, SurfaceTiles: ev.surfTiles, Upstream: o.upstream(), Partial: ev.partial,
+		SurfaceSource: "none (the DTM grid; GLO-30 is a surface model)", Fetch: ev.fetch, FetchTimeoutS: g.timeout.Seconds(), FetchRetries: g.retries}
 	if cs != nil {
 		rep.Terrain.SurfaceSource = "dhm surface (dhm_overflade)"
 	}
@@ -416,6 +746,7 @@ type reachRadius963Report struct {
 	Terrain     string              `json:"terrain"`
 	TxClass     string              `json:"txClass"`
 	Upstream    int64               `json:"upstreamCalls"`
+	Fetch       reachFetch963       `json:"fetch"`
 	Rows        []reachRadius963Row `json:"rows"`
 }
 
@@ -445,11 +776,11 @@ func reachRadiusRows963(rr map[string][][]float64, res float64) []reachRadius963
 
 // reachRadiusAt963 is the reach radius of every candidate from pt, with
 // antennas txH and rxH above the ground, over the coverages' terrain.
-func reachRadiusAt963(ctx context.Context, c, cs *terrainCoverage, pt dhm.LatLon, txH, rxH, radiusM float64, bearings int, sleep func(time.Duration)) (reachRadius963Report, error) {
+func reachRadiusAt963(ctx context.Context, c, cs *terrainCoverage, pt dhm.LatLon, txH, rxH, radiusM float64, bearings int, g gather963) (reachRadius963Report, error) {
 	res := float64(c.set.resolutionM)
-	tg, sg, _, _, _, err := gatherBoth963(ctx, c, cs, reachDisk{a: &valNode{pt: pt}, radiusM: radiusM*1.01 + 2*res}, sleep)
+	tg, sg, got, err := gatherBoth963(ctx, c, cs, reachDisk{a: &valNode{pt: pt}, radiusM: radiusM*1.01 + 2*res}, g)
 	if err != nil {
-		return reachRadius963Report{}, err
+		return reachRadius963Report{}, fmt.Errorf("reach radius: %w", err)
 	}
 	freq, _ := c.link.frequency(nil)
 	k, _ := c.link.kFactor(nil)
@@ -457,13 +788,14 @@ func reachRadiusAt963(ctx context.Context, c, cs *terrainCoverage, pt dhm.LatLon
 	rr := reachLosses963(tg, sg, e0, n0, txH, rxH, freq, k, radiusM, res, bearings)
 	return reachRadius963Report{Lat: pt.Lat, Lon: pt.Lon, TxHeightM: txH, RxHeightM: rxH, RadiusKm: radiusM / 1000, ResolutionM: c.set.resolutionM,
 		Bearings: bearings, BudgetsDb: reachRadius963Budgets, TxClass: clutterNames963[clutterAt963(tg, sg, e0, n0, res)],
-		Rows: reachRadiusRows963(rr, res)}, nil
+		Fetch: got.fetch, Rows: reachRadiusRows963(rr, res)}, nil
 }
 
 func (r reachRadius963Report) markdown() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Reach radius (#963 M0)\n\nPoint %.4f, %.4f (clutter class %s), transmitter %.0f m, receiver %.0f m above the ground, %d bearings to %.0f km on a %d m grid. Terrain: %s. Reached: margin ≥ 3 dB.\n\n",
 		r.Lat, r.Lon, r.TxClass, r.TxHeightM, r.RxHeightM, r.Bearings, r.RadiusKm, r.ResolutionM, r.Terrain)
+	fmt.Fprintf(&b, "DHM tile fetches of this run (tiles cached by the validation run are not counted; a failed tile has no terrain): %s.\n\n", r.Fetch.text())
 	fmt.Fprintf(&b, "| Candidate | median km at %.0f dB | min–max km | median km at %.0f dB | min–max km |\n|---|---|---|---|---|\n", r.BudgetsDb[0], r.BudgetsDb[1])
 	for _, row := range r.Rows {
 		fmt.Fprintf(&b, "| %s | %.2f | %.2f–%.2f | %.2f | %.2f–%.2f |\n", row.Candidate, row.MedianKm[0], row.MinKm[0], row.MaxKm[0], row.MedianKm[1], row.MinKm[1], row.MaxKm[1])

@@ -8,13 +8,19 @@ package main
 //	CORESCOPE_REACH_VALIDATION_963_GLO30=1           the fixture and the reach radius over real GLO-30
 //	CORESCOPE_REACH_VALIDATION_963_OUT=<dir>         where the fixture and GLO-30 runs write reports
 //	CORESCOPE_REACH_VALIDATION_963_POINT=lat,lon     the reach-radius point (default 56.136,8.975)
+//	CORESCOPE_REACH_VALIDATION_963_FETCH_TIMEOUT     one DHM tile attempt (default 60s; also the DHM client's timeout)
+//	CORESCOPE_REACH_VALIDATION_963_FETCH_RETRIES     retries of a failed tile before it has no terrain (default 3)
+//	CORESCOPE_REACH_VALIDATION_963_PROGRESS_EVERY    a progress line every this many disks (default 25; 0: none)
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -66,7 +72,7 @@ func TestReachValidation963_FixtureMechanics(t *testing.T) {
 	o := fixtureValidationOptions(t, src, sc.radiusM)
 	o.outDir = out
 	o.upstream = countReach963Upstream(c, cs)
-	rep, err := runReachValidation963(context.Background(), srv, c, cs, db.conn, o)
+	rep, err := runReachValidation963(context.Background(), srv, c, cs, db.conn, o, defaultGather963(o.sleep))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,6 +88,10 @@ func TestReachValidation963_FixtureMechanics(t *testing.T) {
 	}
 	if rep.Terrain.SurfaceSource != "dhm surface (dhm_overflade)" || rep.Terrain.SurfaceTiles != rep.Terrain.Tiles {
 		t.Fatalf("terrain %+v", rep.Terrain)
+	}
+	// Every upstream raster went through the harness's own fetch, once.
+	if f := rep.Terrain.Fetch; f.DTM.Fetched != dtmCalls || f.DSM.Fetched != dsmCalls || f.failed() || f.DTM.Retried+f.DSM.Retried != 0 || rep.Terrain.Partial {
+		t.Fatalf("fetches %+v for %d DTM and %d DSM rasters", f, dtmCalls, dsmCalls)
 	}
 	ec := rep.EndClasses
 	if ec.Open == 0 || ec.Suburban == 0 || ec.Urban == 0 {
@@ -171,7 +181,7 @@ func TestReachValidation963_ReachRadiusReport(t *testing.T) {
 	c, src := reachValidationCoverage(t, 60)
 	src.surface = func(e, n float64) float32 { return rollingElev(e, n) + syntheticCanopy963(e, n) }
 	cs := surfaceCoverage963(c, reachValidationCoverageConfig(60))
-	rep, err := reachRadiusAt963(context.Background(), c, cs, reachFixtureOrigin, 10, 2, 10000, 8, func(time.Duration) { t.Fatal("the upstream budget ran out") })
+	rep, err := reachRadiusAt963(context.Background(), c, cs, reachFixtureOrigin, 10, 2, 10000, 8, defaultGather963(func(time.Duration) { t.Fatal("the upstream budget ran out") }))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,19 +217,26 @@ func TestReachValidation963_ReachRadiusReport(t *testing.T) {
 // reach-radius-963.{json,md}, to CORESCOPE_REACH_VALIDATION_OUT. It skips
 // without CORESCOPE_REACH_VALIDATION_DB.
 func TestReachValidation963_RealDB(t *testing.T) {
-	srv, c, db, cfg, o := openRealReachValidation(t)
+	g, err := gather963FromEnv(t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The DHM client's own per-request timeout is the attempt's too.
+	srv, c, db, cfg, o := openRealReachValidationTimeout(t, g.timeout)
 	pt, err := reachPoint963()
 	if err != nil {
 		t.Fatal(err)
 	}
 	cs := surfaceCoverage963(c, cfg.Coverage)
 	o.upstream = countReach963Upstream(c, cs)
-	rep, err := runReachValidation963(context.Background(), srv, c, cs, db.conn, o)
+	g.upstream = o.upstream
+	rep, err := runReachValidation963(context.Background(), srv, c, cs, db.conn, o, g)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("report in %s: %d scored pairs (%d positives), %s", o.outDir, rep.Pairs.Scored, rep.Pairs.Positives, upstreamText(o.upstream()))
-	writeReachRadius963(t, c, cs, pt, o.terrainSource+map[bool]string{true: " + dhm surface", false: ""}[cs != nil], o.upstream, o.outDir)
+	t.Logf("report in %s: %d scored pairs (%d positives), %d without terrain, %s; tile fetches %s",
+		o.outDir, rep.Pairs.Scored, rep.Pairs.Positives, rep.Pairs.NoTerrain, upstreamText(o.upstream()), rep.Terrain.Fetch.text())
+	writeReachRadius963(t, c, cs, pt, o.terrainSource+map[bool]string{true: " + dhm surface", false: ""}[cs != nil], o.upstream, o.outDir, g)
 }
 
 // TestReachValidation963_GLO30 is the opt-in run over real terrain without
@@ -238,6 +255,10 @@ func TestReachValidation963_GLO30(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	g, err := gather963FromEnv(t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sc := reachFixtureScaleFromEnv()
 	cc := reachValidationCoverageConfig(sc.resolutionM)
 	set := resolveTerrainSettings(dhm.ProfileConfig{}, quietLogf)
@@ -250,7 +271,7 @@ func TestReachValidation963_GLO30(t *testing.T) {
 	// The reach radius on the reach's default 30 m grid.
 	cr := newTerrainCoverage(reachValidationCoverageConfig(30), nil, terrainCoverageDeps{fill: c.fill, logf: quietLogf,
 		observers: func() ([]Observer, error) { return nil, nil }})
-	writeReachRadius963(t, cr, nil, pt, "glo30", upstream, out)
+	writeReachRadius963(t, cr, nil, pt, "glo30", upstream, out, g)
 
 	path := prepareReachFixture(t, sc)
 	db, err := OpenDB(path)
@@ -265,7 +286,7 @@ func TestReachValidation963_GLO30(t *testing.T) {
 	o.terrainSource = "glo30 (fixture moved to Jutland)"
 	o.outDir = out
 	o.upstream = upstream
-	rep, err := runReachValidation963(context.Background(), srv, c, nil, db.conn, o)
+	rep, err := runReachValidation963(context.Background(), srv, c, nil, db.conn, o, g)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,11 +294,12 @@ func TestReachValidation963_GLO30(t *testing.T) {
 }
 
 // writeReachRadius963 computes the 10 m / 2 m reach radius at pt to 40 km
-// over 72 bearings and writes reach-radius-963.{json,md} to dir.
-func writeReachRadius963(t *testing.T, c, cs *terrainCoverage, pt dhm.LatLon, terrain string, upstream func() int64, dir string) {
+// over 72 bearings, gathering as g does, and writes
+// reach-radius-963.{json,md} to dir.
+func writeReachRadius963(t *testing.T, c, cs *terrainCoverage, pt dhm.LatLon, terrain string, upstream func() int64, dir string, g gather963) {
 	t.Helper()
 	start := time.Now()
-	rr, err := reachRadiusAt963(context.Background(), c, cs, pt, 10, 2, 40000, 72, time.Sleep)
+	rr, err := reachRadiusAt963(context.Background(), c, cs, pt, 10, 2, 40000, 72, g)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,5 +357,192 @@ func TestReachValidation963_ScoredPairs(t *testing.T) {
 	want := reachValidationPairCounts{Scored: 3, Positives: 2, FromFirmware: 1, FromEdges: 1, Negatives: 1, NoTerrain: 1, WithSNR: 1}
 	if len(ps) != 3 || c != want {
 		t.Fatalf("%d scored, counts %+v, want %+v", len(ps), c, want)
+	}
+}
+
+// tileOf963 is the coverage tile a raster request of the harness fetches.
+func tileOf963(r dhm.RasterRequest, res float64) dhm.CoverageTile {
+	span := dhm.CoverageTilePx * res
+	return dhm.CoverageTile{X: int(math.Floor((r.BBox[0] + r.BBox[2]) / 2 / span)), Y: int(math.Floor((r.BBox[1] + r.BBox[3]) / 2 / span))}
+}
+
+// TestReachValidation963_TileTimeoutsDoNotAbort is the coordinator's
+// failed run in small: the fake upstream lets the DSM tile under the
+// network's origin time out on every attempt and every other DSM tile time
+// out once. The run completes, retries with a doubling backoff, gives up
+// on that one tile, counts it per source in the report's header, scores
+// the pairs it does not touch and counts the rest as without terrain, and
+// logs progress per disk. A harness that aborts on the first timeout
+// fails here.
+func TestReachValidation963_TileTimeoutsDoNotAbort(t *testing.T) {
+	sc := reachFixtureScaleFromEnv()
+	path := prepareReachFixture(t, sc)
+	srv, c, db, src := reachValidationEnv(t, path, sc.resolutionM)
+	src.surface = func(e, n float64) float32 { return rollingElev(e, n) + syntheticCanopy963(e, n) }
+	c.budget = newUpstreamBudget(4000, c.now)
+	cs := surfaceCoverage963(c, reachValidationCoverageConfig(sc.resolutionM))
+	res := float64(sc.resolutionM)
+	e0, n0 := dhm.ToUTM32(reachFixtureOrigin.Lat, reachFixtureOrigin.Lon)
+	bad := dhm.CoverageTile{X: int(math.Floor(e0 / (dhm.CoverageTilePx * res))), Y: int(math.Floor(n0 / (dhm.CoverageTilePx * res)))}
+	var mu sync.Mutex
+	seen := map[dhm.CoverageTile]int{}
+	src.hook = func(ctx context.Context, r dhm.RasterRequest) error {
+		if r.Model != dhm.ModelSurface {
+			return nil
+		}
+		tile := tileOf963(r, res)
+		mu.Lock()
+		seen[tile]++
+		first := seen[tile] == 1
+		mu.Unlock()
+		if tile == bad || first {
+			<-ctx.Done() // a raster that never arrives: the attempt's own timeout
+			return dhm.ContextFailure(ctx.Err())
+		}
+		return nil
+	}
+	out := t.TempDir()
+	o := fixtureValidationOptions(t, src, sc.radiusM)
+	o.outDir = out
+	o.upstream = countReach963Upstream(c, cs)
+	var slept []time.Duration
+	var lines []string
+	g := defaultGather963(func(d time.Duration) { mu.Lock(); slept = append(slept, d); mu.Unlock() })
+	g.timeout, g.retries, g.backoff = 50*time.Millisecond, 2, time.Second
+	g.logf = func(f string, a ...interface{}) { mu.Lock(); lines = append(lines, fmt.Sprintf(f, a...)); mu.Unlock() }
+	g.every, g.upstream = 1, o.upstream
+	rep, err := runReachValidation963(context.Background(), srv, c, cs, db.conn, o, g)
+	if err != nil {
+		t.Fatalf("one slow DSM tile aborted the run: %v", err)
+	}
+	if seen[bad] != 3 || len(seen) < 2 {
+		t.Fatalf("DSM attempts per tile %v: want 3 at the bad tile %v and others", seen, bad)
+	}
+	others := len(seen) - 1
+	f := rep.Terrain.Fetch
+	wantDSM := reachFetch963Stats{Fetched: others, Retried: 2 + others, Failed: 1, Reasons: map[string]int{"timeout": 3 + others}}
+	if f.DSM.Fetched != wantDSM.Fetched || f.DSM.Retried != wantDSM.Retried || f.DSM.Failed != 1 || f.DSM.Reasons["timeout"] != wantDSM.Reasons["timeout"] || len(f.DSM.Reasons) != 1 {
+		t.Fatalf("DSM fetches %+v, want %+v", f.DSM, wantDSM)
+	}
+	if f.DTM.Failed != 0 || f.DTM.Retried != 0 || f.DTM.Fetched != src.model[dhm.ModelTerrain] || len(f.DTM.Reasons) != 0 {
+		t.Fatalf("DTM fetches %+v for %d DTM rasters", f.DTM, src.model[dhm.ModelTerrain])
+	}
+	if !rep.Terrain.Partial || rep.Terrain.FetchRetries != 2 || rep.Terrain.FetchTimeoutS != 0.05 {
+		t.Fatalf("terrain %+v", rep.Terrain)
+	}
+	// The pairs over the failed tile have no terrain; the rest are scored,
+	// and together they are every pair a clean run scores.
+	p := rep.Pairs
+	if p.NoTerrain == 0 || p.Scored == 0 || p.Positives == 0 || p.Scored+p.NoTerrain != p.Candidates {
+		t.Fatalf("pairs %+v", p)
+	}
+	// Backoff 1 s, then 2 s, for the bad tile; 1 s for each flaky one.
+	ones, twos := 0, 0
+	for _, d := range slept {
+		switch d {
+		case time.Second:
+			ones++
+		case 2 * time.Second:
+			twos++
+		default:
+			t.Fatalf("slept %v: %v", d, slept)
+		}
+	}
+	if ones != 1+others || twos != 1 {
+		t.Fatalf("backoffs %v", slept)
+	}
+	md, err := os.ReadFile(filepath.Join(out, "reach-validation-963.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "DSM " + f.DSM.text(); !strings.Contains(string(md), "DHM tile fetches (0.05 s timeout, up to 2 retries; a failed tile has no terrain): DTM ") ||
+		!strings.Contains(string(md), want) || !strings.Contains(string(md), "1 failed (timeout ×") {
+		t.Fatalf("header lacks the fetch counts %q:\n%.600s", want, md)
+	}
+	if _, err := os.Stat(filepath.Join(out, "reach-validation-963.json")); err != nil {
+		t.Fatal(err)
+	}
+	progress, gaveUp := 0, 0
+	for _, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "963: disk "):
+			progress++
+		case strings.Contains(l, fmt.Sprintf("DSM tile %d,%d given up after 3 attempts (timeout)", bad.X, bad.Y)):
+			gaveUp++
+		}
+	}
+	if gaveUp != 1 || progress == 0 || !strings.Contains(lines[len(lines)-1], "upstream calls") {
+		t.Fatalf("%d progress lines, %d given up:\n%s", progress, gaveUp, strings.Join(lines, "\n"))
+	}
+}
+
+// TestReachValidation963_FatalErrorSaysWhere: a failure no retry mends (a
+// refused token) ends the run at once, with the stage, the disk, the tile,
+// its bounding box and the upstream status in the error.
+func TestReachValidation963_FatalErrorSaysWhere(t *testing.T) {
+	sc := reachFixtureScaleFromEnv()
+	path := prepareReachFixture(t, sc)
+	srv, c, db, src := reachValidationEnv(t, path, sc.resolutionM)
+	c.budget = newUpstreamBudget(4000, c.now)
+	cs := surfaceCoverage963(c, reachValidationCoverageConfig(sc.resolutionM))
+	src.hook = func(ctx context.Context, r dhm.RasterRequest) error {
+		if r.Model == dhm.ModelSurface {
+			return dhm.FetchError{Reason: "status 403"}
+		}
+		return nil
+	}
+	o := fixtureValidationOptions(t, src, sc.radiusM)
+	g := defaultGather963(func(time.Duration) { t.Error("a refused token was retried") })
+	_, err := runReachValidation963(context.Background(), srv, c, cs, db.conn, o, g)
+	var te tileError963
+	if !errors.As(err, &te) || te.stage != stageDSM963 || te.attempts != 1 {
+		t.Fatalf("error %v", err)
+	}
+	for _, want := range []string{"disk 1/", "DSM fetch, disk of ", "DSM tile ", "(EPSG:25832 bbox ", "attempt 1: status 403"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q lacks %q", err, want)
+		}
+	}
+}
+
+// TestReachValidation963_Retryable: every upstream failure is retried and
+// then left without terrain, except a refused token and a request the
+// client refuses, which are the harness's or the operator's to fix.
+func TestReachValidation963_Retryable(t *testing.T) {
+	for err, want := range map[error]bool{
+		dhm.FetchError{Reason: "timeout"}: true, dhm.FetchError{Reason: "status 503"}: true, dhm.FetchError{Reason: "busy"}: true,
+		dhm.FetchError{Reason: "invalid raster"}: true, dhm.FetchError{Reason: "status 401"}: false, dhm.FetchError{Reason: "status 403"}: false,
+		dhm.ErrBadRequest: false, fmt.Errorf("wrapped: %w", dhm.FetchError{Reason: "transport"}): true,
+	} {
+		if got := retryable963(err); got != want {
+			t.Errorf("retryable963(%v) = %v, want %v", err, got, want)
+		}
+	}
+}
+
+// TestReachValidation963_Gather963FromEnv: the opt-in runs' fetch
+// settings, their defaults, and a bad value refused with its name.
+func TestReachValidation963_Gather963FromEnv(t *testing.T) {
+	g, err := gather963FromEnv(nil)
+	if err != nil || g.timeout != 60*time.Second || g.retries != 3 || g.backoff != 5*time.Second || g.every != 25 {
+		t.Fatalf("defaults %+v, %v", g, err)
+	}
+	t.Setenv("CORESCOPE_REACH_VALIDATION_963_FETCH_TIMEOUT", "90")
+	t.Setenv("CORESCOPE_REACH_VALIDATION_963_FETCH_RETRIES", "0")
+	t.Setenv("CORESCOPE_REACH_VALIDATION_963_PROGRESS_EVERY", "5")
+	if g, err = gather963FromEnv(nil); err != nil || g.timeout != 90*time.Second || g.retries != 0 || g.every != 5 {
+		t.Fatalf("seconds: %+v, %v", g, err)
+	}
+	t.Setenv("CORESCOPE_REACH_VALIDATION_963_FETCH_TIMEOUT", "2m")
+	if g, err = gather963FromEnv(nil); err != nil || g.timeout != 2*time.Minute {
+		t.Fatalf("duration: %+v, %v", g, err)
+	}
+	for name, v := range map[string]string{"CORESCOPE_REACH_VALIDATION_963_FETCH_TIMEOUT": "soon", "CORESCOPE_REACH_VALIDATION_963_FETCH_RETRIES": "-1"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, v)
+			if _, err := gather963FromEnv(nil); err == nil || !strings.Contains(err.Error(), name) {
+				t.Fatalf("%s=%s: %v", name, v, err)
+			}
+		})
 	}
 }
