@@ -6811,6 +6811,21 @@ body.embed .warmup-pills { display: none !important; }
 .reach-field-value { min-width: 4.5em; text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .reach-input { width: 100%; min-width: 0; min-height: 32px; box-sizing: border-box; }
 .reach-input.is-invalid { outline: 2px solid var(--danger); }
+/* #962 — the environment loss's hint and its reset to the operator's value. */
+.reach-field-hint { margin: 0 0 4px; color: var(--text-muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.reach-env-reset {
+  min-height: 32px;
+  padding: 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card-bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.reach-env-reset:hover:not(:disabled) { background: var(--row-hover); }
+.reach-env-reset:disabled { color: var(--text-muted); cursor: default; }
+.reach-env-reset:focus-visible { outline: 2px solid var(--accent, var(--link-color)); outline-offset: 2px; }
 .reach-credit { color: var(--text-muted); }
 .reach-credit-line { margin: 4px 0; overflow-wrap: anywhere; }
 /* #941 M2 — nodes in reach: the class chips open the list below them. */
@@ -6863,6 +6878,7 @@ body.embed .warmup-pills { display: none !important; }
   .reach-panel { left: 8px; right: 8px; bottom: 8px; width: auto; max-width: none; max-height: 46%; scroll-padding-top: 64px; }
   /* Touch: the chips and list rows are full-size targets. */
   .reach-nir-chip { min-height: 44px; }
+  .reach-env-reset { min-height: 44px; }
   .reach-nir-item { min-height: 44px; }
   /* The list scrolls on its own, shorter than the sheet's body below the
      head (the sheet is 46% of the map), so a thumb's height of the sheet
