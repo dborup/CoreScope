@@ -72,10 +72,55 @@
   var BEAT_MS = 60000;         // the heartbeat: remount deadline, sleep/wake
   var WAKE_GAP_MS = 2 * BEAT_MS; // a heartbeat later than this: the machine slept
   var CARRY_MS = 60000;        // a remount's step carry-over is used within this
-  // Kiosk config values for the customizer later (#883 M4, AGENTS.md
-  // rule 8): every, the idle seconds, the resume delay, the number poll,
-  // the theme, the scale and the safe inset (live.css --kiosk-*), which
-  // tiles show, and the remount interval.
+  var TILES = ['rate', 'active', 'records'];   // the HUD order
+  // #968 M1 — the operator preset (config.json "kiosk", served on
+  // /api/config/client, window.MC_KIOSK_CFG): one rule for the link parser,
+  // the tests and the server's bounds (cmd/server/kiosk_config.go). It fills
+  // what a kiosk=1 link does not say; it never turns kiosk on. The scale and
+  // the safe inset are #968 M2; the idle, resume, poll, Moments refresh and
+  // card cap stay fixed (owner decision on #968).
+  var SETTINGS = {
+    KEYS: ['tour', 'everySeconds', 'theme', 'tiles', 'remountHours'],
+    DEFAULTS: { tour: [], everySeconds: EVERY_DEFAULT, theme: THEME_DEFAULT, tiles: TILES.slice(), remountHours: REMOUNT_MS_DEFAULT / 3600000 },
+    LIMITS: { everySeconds: [EVERY_MIN, EVERY_MAX], remountHours: [REMOUNT_MS_MIN / 3600000, REMOUNT_MS_MAX / 3600000], tour: [0, MAX_STEPS] },
+    TILES: TILES,
+    THEMES: THEMES,
+    valid: function (key, val) {
+      var lim = SETTINGS.LIMITS[key];
+      switch (key) {
+        case 'everySeconds':
+          return typeof val === 'number' && isFinite(val) && Math.floor(val) === val && val >= lim[0] && val <= lim[1];
+        case 'remountHours':
+          return typeof val === 'number' && isFinite(val) && val >= lim[0] && val <= lim[1];
+        case 'theme':
+          return THEMES.indexOf(val) !== -1;
+        case 'tiles':
+          return Array.isArray(val) && val.length > 0 && val.every(function (t) { return TILES.indexOf(t) !== -1; });
+        case 'tour':
+          return Array.isArray(val) && val.length <= lim[1] && val.every(function (k) { return typeof k === 'string'; });
+        default:
+          return false;
+      }
+    },
+    // A section over the defaults. The lists are cleaned first (keys
+    // trimmed and capped, tiles deduped in HUD order); any other bad or
+    // missing value is the default, so a hand-edited config never breaks
+    // the page.
+    resolve: function (sec) {
+      var src = sec && typeof sec === 'object' && !Array.isArray(sec) ? sec : {};
+      var own = function (k) { return Object.prototype.hasOwnProperty.call(src, k); };
+      var tour = own('tour') && Array.isArray(src.tour) ? src.tour.filter(function (k) { return typeof k === 'string'; })
+        .map(function (k) { return k.trim(); }).filter(Boolean).slice(0, MAX_STEPS) : [];
+      var tiles = own('tiles') && Array.isArray(src.tiles) ? TILES.filter(function (t) { return src.tiles.indexOf(t) !== -1; }) : [];
+      return {
+        tour: tour,
+        everySeconds: own('everySeconds') && SETTINGS.valid('everySeconds', src.everySeconds) ? src.everySeconds : EVERY_DEFAULT,
+        theme: own('theme') && SETTINGS.valid('theme', src.theme) ? src.theme : THEME_DEFAULT,
+        tiles: tiles.length ? tiles : TILES.slice(),
+        remountHours: own('remountHours') && SETTINGS.valid('remountHours', src.remountHours) ? src.remountHours : REMOUNT_MS_DEFAULT / 3600000
+      };
+    }
+  };
 
   // Module state, so it survives an in-place remount (not a reload).
   var carry = null;            // { hash, step, at } from the mount that remounted
@@ -85,18 +130,26 @@
   // ── URL ─────────────────────────────────────────────────────────────────
   // params: URLSearchParams (or anything with get()). Only kiosk=1 turns
   // kiosk on; tour/every are parsed regardless and the caller decides.
-  function parseKioskParams(params) {
+  // #968 M1 — preset: the operator's (window.MC_KIOSK_CFG), or none. Per
+  // key the link wins, then the preset, then the built-in default. A link's
+  // tour= (even empty: a static view) replaces the preset tour; an every= or
+  // theme= the link cannot use falls back to the preset. The tiles and the
+  // remount interval come from the preset only.
+  function parseKioskParams(params, preset) {
     var get = function (k) { return params && typeof params.get === 'function' ? params.get(k) : null; };
-    var tour = String(get('tour') || '').split(',')
+    var p = SETTINGS.resolve(preset);
+    var rawTour = get('tour');
+    var tour = rawTour == null ? p.tour : String(rawTour).split(',')
       .map(function (s) { return s.trim(); })
       .filter(Boolean)
       .slice(0, MAX_STEPS);
     var every = parseInt(get('every'), 10);
-    if (isNaN(every)) every = EVERY_DEFAULT;
+    if (isNaN(every)) every = p.everySeconds;
     every = Math.min(EVERY_MAX, Math.max(EVERY_MIN, every));
     var theme = get('theme');
-    if (THEMES.indexOf(theme) === -1) theme = THEME_DEFAULT;
-    return { kiosk: get('kiosk') === '1', tour: tour, every: every, theme: theme };
+    if (THEMES.indexOf(theme) === -1) theme = p.theme;
+    return { kiosk: get('kiosk') === '1', tour: tour, every: every, theme: theme,
+      tiles: p.tiles, remountMs: p.remountHours * 3600000 };
   }
 
   // The hash to leave kiosk by: the same route without kiosk/tour/every.
@@ -371,7 +424,8 @@
    *   wakeLock            navigator.wakeLock, or null (plain http)
    *   setAutoReload(on)   version-notice's kiosk auto-reload (left on when
    *                       destroy() is the in-place remount: handingOver())
-   *   remountMs           the interval (M4 config), clamped to 1–24 h
+   *   remountMs           the interval, clamped to 1–24 h; default: the
+   *                       params' (#968 M1 preset remountHours)
    *   fetchStatus()       → Promise<{active,…}> (/api/nodes/network-status), optional
    *   fetchAreaStats()    → Promise<{density:[…]}> (/api/analytics/areas), optional
    *   momentsOn()         bool: Live has a Moments controller (records tile)
@@ -400,7 +454,8 @@
     // #883 M3
     var mountedAt = deps.now();
     var mountHash = deps.hash ? deps.hash() : null;
-    var remountMs = remountDelayMs(deps.remountMs);
+    // #968 M1: the preset's interval (params) unless the host gives one.
+    var remountMs = remountDelayMs(deps.remountMs != null ? deps.remountMs : params.remountMs);
     var remounting = false;
     var beating = !!(deps.remount || deps.wakeLock);
     var beatTimer = null, lastBeat = mountedAt, wakes = 0;
@@ -417,6 +472,11 @@
     var tiles = null;          // { el, records, slots: {name: el}, last: {name: text} }
     var rate = null, status = null, density = null, rec = { link: null, busiest: null };
     var pollTimer = null, lastPoll = 0, polls = 0, tileWrites = 0;
+    // #968 M1: the tiles the preset lists. Both bulk reads feed only the
+    // active tile (whole mesh and tour area), so without it nothing polls.
+    var shown = Array.isArray(params.tiles) && params.tiles.length ? TILES.filter(function (t) { return params.tiles.indexOf(t) !== -1; }) : TILES.slice();
+    if (!shown.length) shown = TILES.slice();
+    var polling = shown.indexOf('active') !== -1;
     liveCount++;
 
     function later(fn, ms) {
@@ -673,7 +733,7 @@
     function onWsOpen() {
       reseeds++;
       deps.reseed();
-      if (destroyed || doc.hidden || (polls && deps.now() - lastPoll < NUMBERS_FRESH_MS)) return;
+      if (destroyed || doc.hidden || !polling || (polls && deps.now() - lastPoll < NUMBERS_FRESH_MS)) return;
       pollTimer = cancel(pollTimer);
       poll();
     }
@@ -690,28 +750,36 @@
         return t;
       }
       function slot(parent, name, cls, text) { slots[name] = parent.appendChild(el('span', cls, text)); }
-      var r = tile('rate');
-      slot(r, 'rate', 'live-kiosk-tile-value');
-      r.appendChild(el('span', 'live-kiosk-tile-label', 'packets/min'));
-      var a = tile('active');
-      var line = a.appendChild(el('span', 'live-kiosk-tile-line'));
-      slot(line, 'active', 'live-kiosk-tile-value');
-      slot(line, 'area', 'live-kiosk-tile-area');
-      a.appendChild(el('span', 'live-kiosk-tile-label', 'active nodes'));
-      var recs = tile('records');
-      ['link', 'busiest'].forEach(function (k) {
-        var row = recs.appendChild(el('div', 'live-kiosk-record'));
-        row.setAttribute('data-record', k);
-        slot(row, k + 'Label', 'live-kiosk-record-label');
-        var v = row.appendChild(el('span', 'live-kiosk-record-line'));
-        slot(v, k + 'Value', 'live-kiosk-record-value');
-        slot(v, k + 'Detail', 'live-kiosk-record-detail');
-      });
+      var recs = null;
+      if (shown.indexOf('rate') !== -1) {
+        var r = tile('rate');
+        slot(r, 'rate', 'live-kiosk-tile-value');
+        r.appendChild(el('span', 'live-kiosk-tile-label', 'packets/min'));
+      }
+      if (shown.indexOf('active') !== -1) {
+        var a = tile('active');
+        var line = a.appendChild(el('span', 'live-kiosk-tile-line'));
+        slot(line, 'active', 'live-kiosk-tile-value');
+        slot(line, 'area', 'live-kiosk-tile-area');
+        a.appendChild(el('span', 'live-kiosk-tile-label', 'active nodes'));
+      }
+      if (shown.indexOf('records') !== -1) {
+        recs = tile('records');
+        ['link', 'busiest'].forEach(function (k) {
+          var row = recs.appendChild(el('div', 'live-kiosk-record'));
+          row.setAttribute('data-record', k);
+          slot(row, k + 'Label', 'live-kiosk-record-label');
+          var v = row.appendChild(el('span', 'live-kiosk-record-line'));
+          slot(v, k + 'Value', 'live-kiosk-record-value');
+          slot(v, k + 'Detail', 'live-kiosk-record-detail');
+        });
+      }
       tiles = { el: box, records: recs, slots: slots, last: {}, recordsHidden: null };
     }
-    // put writes a text only when it changed (the rate ticks every 2 s).
+    // put writes a text only when it changed (the rate ticks every 2 s),
+    // and only into a tile that was built (#968 M1).
     function put(name, text) {
-      if (tiles.last[name] === text) return;
+      if (!tiles.slots[name] || tiles.last[name] === text) return;
       tiles.last[name] = text;
       tiles.slots[name].textContent = text;
       tileWrites++;
@@ -724,6 +792,7 @@
       put('rate', m.rate);
       put('active', m.active);
       put('area', m.area);
+      if (!tiles.records) return;
       var hide = !m.records;
       if (tiles.recordsHidden !== hide) { tiles.recordsHidden = hide; tiles.records.hidden = hide; }
       if (hide) return;
@@ -763,7 +832,7 @@
     }
     function poll() {
       pollTimer = null;
-      if (destroyed || doc.hidden) return;
+      if (destroyed || doc.hidden || !polling) return;
       lastPoll = deps.now();
       polls++;
       read(deps.fetchStatus, function (b) { status = b; });
@@ -771,7 +840,7 @@
       pollTimer = later(poll, NUMBERS_POLL_MS);
     }
     function pollOnShow() {
-      if (pollTimer != null || destroyed) return;
+      if (pollTimer != null || destroyed || !polling) return;
       var since = deps.now() - lastPoll;
       if (!polls || since >= NUMBERS_POLL_MS) poll();
       else pollTimer = later(poll, NUMBERS_POLL_MS - since);
@@ -873,7 +942,7 @@
         return { timers: timers.size, listeners: listeners.length, step: t ? t.step : -1, steps: steps.length,
           paused: !!(t && t.paused), reasons: t ? t.reasons : [], reanchors: t ? t.reanchors : 0,
           skipped: skipped.slice(), idle: idle, overlay: !!overlay, fetches: fetches, every: params.every,
-          polls: polls, pollTimer: pollTimer != null, tileWrites: tileWrites, destroyed: destroyed,
+          polls: polls, pollTimer: pollTimer != null, tileWrites: tileWrites, destroyed: destroyed, tiles: shown.slice(),
           // #883 M3
           beat: beatTimer != null, wakes: wakes, wakeLock: !!lock, reseeds: reseeds,
           remountDue: remountDue(), remounting: remounting, remountInMs: Math.max(0, mountedAt + remountEvery() - deps.now()) };
@@ -896,6 +965,7 @@
     NUMBERS_FRESH_MS: NUMBERS_FRESH_MS,
     RECORD_WINDOW_MS: RECORD_WINDOW_MS,
     THEMES: THEMES,
+    SETTINGS: SETTINGS,
     parseKioskParams: parseKioskParams,
     stripKioskParams: stripKioskParams,
     resumeAfterMs: resumeAfterMs,

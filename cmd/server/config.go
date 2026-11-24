@@ -401,6 +401,10 @@ type Config struct {
 	// Absent/nil ⇒ off; see MomentsConfig.
 	Moments *MomentsConfig `json:"moments,omitempty"`
 
+	// Kiosk is the #968 operator kiosk preset (kiosk_config.go), read by
+	// canonical keys only in applyCanonicalKeys. nil ⇒ no preset.
+	Kiosk *KioskConfig `json:"-"`
+
 	// ClientRegions gates GET /api/nodes/{pubkey}/declared-regions (#126). The
 	// same config.json entry gates the ingestor's write path; absent ⇒ off.
 	ClientRegions *ClientRegionsConfig `json:"clientRegions,omitempty"`
@@ -1221,6 +1225,7 @@ func (c *Config) applyCanonicalKeys(keys *configkey.Doc) error {
 	if c.Moments != nil {
 		c.Moments.Enabled = keys.On("moments", "enabled")
 	}
+	c.Kiosk = readKioskConfig(keys, log.Printf)
 	if c.Compression != nil {
 		c.Compression.GZip = keys.On("compression", "gzip")
 		c.Compression.Websocket = keys.On("compression", "websocket")
