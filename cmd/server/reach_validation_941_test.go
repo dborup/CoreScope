@@ -334,12 +334,17 @@ func (in *reachValidationInput) candidatePairs(radiusM float64) (pairs []*valPai
 
 // ── Evaluation ─────────────────────────────────────────────────────────────
 
-// evaluatePairs computes every pair's loss under every model: one disk
-// grid per transmitting end (its farthest partner's distance), gathered
-// through the reach's tile cache and upstream budget, waiting when the
-// budget is spent. Ends are visited in tile order so neighbouring disks
-// reuse cached tiles.
-func evaluatePairs(ctx context.Context, c *terrainCoverage, pairs []*valPair, sleep func(time.Duration)) (tiles int, partial bool, err error) {
+// reachDisk is one transmitting end, its pairs and the disk around it
+// (its farthest partner's distance, with a little room).
+type reachDisk struct {
+	a       *valNode
+	pairs   []*valPair
+	radiusM float64
+}
+
+// reachDisks groups the pairs by their transmitting end, ordered by tile
+// so that neighbouring disks reuse cached tiles.
+func reachDisks(c *terrainCoverage, pairs []*valPair) []reachDisk {
 	byA := map[string][]*valPair{}
 	for _, p := range pairs {
 		byA[p.a.pk] = append(byA[p.a.pk], p)
@@ -364,34 +369,51 @@ func evaluatePairs(ctx context.Context, c *terrainCoverage, pairs []*valPair, sl
 		return order[i].pk < order[j].pk
 	})
 	res := float64(c.set.resolutionM)
-	freq, _ := c.link.frequency(nil)
-	k, _ := c.link.kFactor(nil)
+	out := make([]reachDisk, 0, len(order))
 	for _, o := range order {
 		ps := byA[o.pk]
-		a := ps[0].a
 		r := 0.0
 		for _, p := range ps {
 			r = math.Max(r, p.distanceM)
 		}
 		// The projection's scale: a little room past the farthest partner.
-		r = r*1.01 + 2*res
-		e, n := dhm.ToUTM32(a.pt.Lat, a.pt.Lon)
-		plan := dhm.PlanCoverageTiles(e, n, r, res)
-		grid := dhm.NewCoverageGrid(e, n, r, res)
-		for {
-			_, part, gerr := c.gather(ctx, plan, grid)
-			var budget errCoverageBudget
-			if errors.As(gerr, &budget) {
-				sleep(max(time.Second, budget.retry))
-				continue
-			}
-			if gerr != nil {
-				return tiles, partial, gerr
-			}
-			partial = partial || part
-			break
+		out = append(out, reachDisk{a: ps[0].a, pairs: ps, radiusM: r*1.01 + 2*res})
+	}
+	return out
+}
+
+// gatherReachDisk is the disk's elevation grid, gathered through c's tile
+// cache and upstream budget, waiting while the budget is spent.
+func gatherReachDisk(ctx context.Context, c *terrainCoverage, d reachDisk, sleep func(time.Duration)) (*dhm.CoverageGrid, int, bool, error) {
+	res := float64(c.set.resolutionM)
+	e, n := dhm.ToUTM32(d.a.pt.Lat, d.a.pt.Lon)
+	plan := dhm.PlanCoverageTiles(e, n, d.radiusM, res)
+	grid := dhm.NewCoverageGrid(e, n, d.radiusM, res)
+	for {
+		_, part, err := c.gather(ctx, plan, grid)
+		var budget errCoverageBudget
+		if errors.As(err, &budget) {
+			sleep(max(time.Second, budget.retry))
+			continue
 		}
-		tiles += len(plan)
+		return grid, len(plan), part, err
+	}
+}
+
+// evaluatePairs computes every pair's loss under every model: one disk
+// grid per transmitting end (reachDisks, gatherReachDisk).
+func evaluatePairs(ctx context.Context, c *terrainCoverage, pairs []*valPair, sleep func(time.Duration)) (tiles int, partial bool, err error) {
+	res := float64(c.set.resolutionM)
+	freq, _ := c.link.frequency(nil)
+	k, _ := c.link.kFactor(nil)
+	for _, d := range reachDisks(c, pairs) {
+		grid, n, part, gerr := gatherReachDisk(ctx, c, d, sleep)
+		if gerr != nil {
+			return tiles, partial, gerr
+		}
+		partial = partial || part
+		tiles += n
+		ps, a := d.pairs, d.a
 		targets := make([]dhm.ReachTarget, len(ps))
 		for i, p := range ps {
 			targets[i] = dhm.ReachTarget{Lat: p.b.pt.Lat, Lon: p.b.pt.Lon, HeightM: p.b.heightM}
@@ -400,7 +422,7 @@ func evaluatePairs(ctx context.Context, c *terrainCoverage, pairs []*valPair, sl
 			p.loss = map[dhm.PathModel]float64{}
 		}
 		for _, m := range reachValidationModels {
-			spec := dhm.CoverageSpec{Center: a.pt, RadiusM: r, ResolutionM: res, TxHeightM: a.heightM,
+			spec := dhm.CoverageSpec{Center: a.pt, RadiusM: d.radiusM, ResolutionM: res, TxHeightM: a.heightM,
 				FreqMHz: freq, K: k, Model: m}
 			losses, err := dhm.ReachLosses(ctx, grid, spec, targets)
 			if err != nil {
@@ -602,6 +624,17 @@ func rateOf(k, n int) *float64 {
 	return round4(float64(k) / float64(n))
 }
 
+// predictedSNR is a pair's predicted SNR under model m: the received power
+// minus the reporting observer's noise floor, or minus sensitivity + 10 dB
+// (SF8's limit) when it reports none.
+func predictedSNR(p *valPair, m dhm.PathModel, radio CoverageRadio) float64 {
+	noise := radio.SensitivityDbm + reachValidationNoiseOffsetDb
+	if p.noiseDbm != nil {
+		noise = *p.noiseDbm
+	}
+	return radio.TxPowerDbm + radio.AntennaGainDbi + radio.RxGainDbi - radio.LossDb - p.loss[m] - noise
+}
+
 // scoreMetrics scores the pairs under one model.
 func scoreMetrics(ps []*valPair, m dhm.PathModel, radio CoverageRadio) reachValidationMetrics {
 	budget := radio.budgetDb()
@@ -625,11 +658,7 @@ func scoreMetrics(ps []*valPair, m dhm.PathModel, radio CoverageRadio) reachVali
 			}
 		}
 		if p.snr != nil && p.positive {
-			noise := radio.SensitivityDbm + reachValidationNoiseOffsetDb
-			if p.noiseDbm != nil {
-				noise = *p.noiseDbm
-			}
-			pred := radio.TxPowerDbm + radio.AntennaGainDbi + radio.RxGainDbi - radio.LossDb - p.loss[m] - noise
+			pred := predictedSNR(p, m, radio)
 			snrObs = append(snrObs, *p.snr)
 			snrPred = append(snrPred, pred)
 			offs = append(offs, *p.snr-pred)
@@ -643,6 +672,45 @@ func scoreMetrics(ps []*valPair, m dhm.PathModel, radio CoverageRadio) reachVali
 		out.MedianSNROffsetDb = round4(*med)
 	}
 	return out
+}
+
+// scoredPairs are the pairs with a loss under every model; it counts them
+// into c (scored, positives by source, negatives, SNR) and the rest as
+// without terrain.
+func scoredPairs(all []*valPair, models []dhm.PathModel, c *reachValidationPairCounts) []*valPair {
+	var ps []*valPair
+	for _, p := range all {
+		ok := true
+		for _, m := range models {
+			if math.IsNaN(p.loss[m]) {
+				ok = false
+			}
+		}
+		if !ok {
+			c.NoTerrain++
+			continue
+		}
+		ps = append(ps, p)
+		if p.positive {
+			c.Positives++
+			if p.firmware {
+				c.FromFirmware++
+			}
+			if p.edge {
+				c.FromEdges++
+			}
+			if p.snr != nil {
+				c.WithSNR++
+				if p.noiseDbm != nil {
+					c.WithReportedNoise++
+				}
+			}
+		} else {
+			c.Negatives++
+		}
+	}
+	c.Scored = len(ps)
+	return ps
 }
 
 // buildReachValidationReport scores the evaluated pairs.
@@ -659,38 +727,7 @@ func buildReachValidationReport(in *reachValidationInput, c *terrainCoverage, al
 		Models: []reachValidationModel{}, References: []reachValidationReference{}}
 	rep.Pairs = reachValidationPairCounts{Nodes: len(in.nodes), HiddenNodes: in.hidden, Candidates: len(all),
 		AmbiguousEdges: in.ambiguous, WeakEdges: weak, PositivesBeyond: beyond}
-	var ps []*valPair
-	for _, p := range all {
-		ok := true
-		for _, m := range reachValidationModels {
-			if math.IsNaN(p.loss[m]) {
-				ok = false
-			}
-		}
-		if !ok {
-			rep.Pairs.NoTerrain++
-			continue
-		}
-		ps = append(ps, p)
-		if p.positive {
-			rep.Pairs.Positives++
-			if p.firmware {
-				rep.Pairs.FromFirmware++
-			}
-			if p.edge {
-				rep.Pairs.FromEdges++
-			}
-			if p.snr != nil {
-				rep.Pairs.WithSNR++
-				if p.noiseDbm != nil {
-					rep.Pairs.WithReportedNoise++
-				}
-			}
-		} else {
-			rep.Pairs.Negatives++
-		}
-	}
-	rep.Pairs.Scored = len(ps)
+	ps := scoredPairs(all, reachValidationModels, &rep.Pairs)
 	for _, m := range reachValidationModels {
 		mr := reachValidationModel{Model: string(m), ID: m.ID(), Overall: scoreMetrics(ps, m, c.radio)}
 		for _, b := range reachValidationBands {
@@ -936,6 +973,22 @@ func runReachValidation(ctx context.Context, srv *Server, c *terrainCoverage, co
 // database copy; see docs/predicted-reach-validation.md. It skips unless
 // CORESCOPE_REACH_VALIDATION_DB is set.
 func TestReachValidation941_RealDB(t *testing.T) {
+	srv, c, db, _, o := openRealReachValidation(t)
+	o.upstream = countReachUpstream(c)
+	rep, err := runReachValidation(context.Background(), srv, c, db.conn, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("report in %s: %d scored pairs (%d positives)", o.outDir, rep.Pairs.Scored, rep.Pairs.Positives)
+}
+
+// openRealReachValidation is a real-data run's setup from the
+// CORESCOPE_REACH_VALIDATION_* variables (docs/predicted-reach-validation.md):
+// the instance's config with the reach on, its database copy read-only,
+// the reach's terrain and the run's options. It skips without
+// CORESCOPE_REACH_VALIDATION_DB.
+func openRealReachValidation(t *testing.T) (*Server, *terrainCoverage, *DB, *Config, reachValidationOptions) {
+	t.Helper()
 	dbPath := os.Getenv("CORESCOPE_REACH_VALIDATION_DB")
 	if dbPath == "" {
 		t.Skip("CORESCOPE_REACH_VALIDATION_DB not set: the real-data run is manual (docs/predicted-reach-validation.md)")
@@ -958,7 +1011,7 @@ func TestReachValidation941_RealDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	t.Cleanup(func() { db.Close() })
 	proxy := newDHMProxyFromConfig(cfg)
 	terrain := newTerrainProfilerFromConfig(cfg, proxy, db)
 	c := newTerrainCoverageFromConfig(cfg, proxy, terrain, db)
@@ -979,12 +1032,7 @@ func TestReachValidation941_RealDB(t *testing.T) {
 	}
 	o.terrainSource = map[[2]bool]string{{true, false}: "dhm", {true, true}: "dhm+glo30", {false, true}: "glo30"}[[2]bool{c.dhm != nil, c.fill != nil}]
 	o.outDir = outDir
-	o.upstream = countReachUpstream(c)
-	rep, err := runReachValidation(context.Background(), srv, c, db.conn, o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("report in %s: %d scored pairs (%d positives)", outDir, rep.Pairs.Scored, rep.Pairs.Positives)
+	return srv, c, db, cfg, o
 }
 
 // ── Mechanics on the fixture ───────────────────────────────────────────────
@@ -1160,10 +1208,15 @@ func rollingElev(e, n float64) float32 {
 func reachValidationCoverage(t *testing.T, resolutionM int) (*terrainCoverage, *fakeElevation) {
 	t.Helper()
 	src := newFakeElevation(t, rollingElev)
-	c := newTerrainCoverage(CoverageConfig{Enabled: true, ElevationCacheMB: intp(512), ResolutionM: intp(resolutionM)}, nil,
+	c := newTerrainCoverage(reachValidationCoverageConfig(resolutionM), nil,
 		terrainCoverageDeps{src: src, logf: func(string, ...interface{}) {}, observers: func() ([]Observer, error) { return nil, nil }})
 	c.covers = func(e, n float64) bool { return true }
 	return c, src
+}
+
+// reachValidationCoverageConfig is the fixture harness's reach config.
+func reachValidationCoverageConfig(resolutionM int) CoverageConfig {
+	return CoverageConfig{Enabled: true, ElevationCacheMB: intp(512), ResolutionM: intp(resolutionM)}
 }
 
 // reachValidationEnv is the harness on a prepared fixture copy.

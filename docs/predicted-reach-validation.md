@@ -171,3 +171,71 @@ losing the short bands. The median SNR
 offset of the chosen model is the calibration constant for M2's follow-up.
 The fixture run in CI says nothing about this choice: its terrain is
 synthetic and its links are Californian.
+
+## Candidate models for buildings, vegetation and ground reflection (#963 M0)
+
+Research only: test code, not in any binary and not served. The candidates
+live in `cmd/server/reach_models_963_test.go`, the harness that scores
+them in `cmd/server/reach_validation_963_harness_test.go`. It reuses this
+harness's nodes, pairs and labels unchanged and scores every candidate:
+
+| Id | Model |
+|---|---|
+| `delta` | today: delta-Bullington over the DTM |
+| `delta+env25` | today as the panel serves it: delta + the 25 dB environment loss (#962) |
+| `tworay` | the larger of delta and the plane-earth loss 40·log10 d − 20·log10(h1·h2), with the smooth-earth effective heights |
+| `tworay+p2108`, `delta+p2108` | ITU-R P.2108 §3.1 terminal clutter by the book: a terminal below its clutter's height is raised to it, plus the correction |
+| `delta+p2108c` | the same at suburban and urban/forest ends only; open land is left to delta, whose smooth-earth term already holds the ground's height gain |
+| `tworay+dsm`, `dsm`, `dsm-raw` | delta over DHM's surface model, with and without a 150 m clearance at both ends |
+| `hata-open`, `hata-suburban` | Okumura–Hata, terrain-blind |
+| `mm-proxy` | map.meshcore.io's approach: 25 m forest obstacles, P.2108 at the antennas, 10 dB fade margin |
+
+The clutter class of an end and the forest of `mm-proxy` come from the
+canopy, DHM's surface minus terrain model, so the run fetches both models.
+The surface tiles go through the same 2-slot DHM sub-budget and the same
+`map.coverage.upstreamPerMin`, so a run makes twice the DHM requests of
+the #941 run. Without DHM (GLO-30 only) there is no canopy: every end is
+open, and the DSM candidates equal `delta`.
+
+Besides #941's metrics, the report gives:
+- a split by the **lower antenna height** of a pair (< 5 m, 5–10 m, ≥ 10 m);
+- the **observed SNR** of the positives (median, 95th percentile, max, and how many are at or above a cap);
+- a **capped SNR offset**, with both SNRs capped at the SNR a receiver reports at most. Strong links then do not count as optimistic.
+
+**Run it against an instance's database** with the same variables as above:
+
+```sh
+cd cmd/server
+CORESCOPE_REACH_VALIDATION_DB=/tmp/reach-validation.db \
+CORESCOPE_REACH_VALIDATION_CONFIG=/path/to/dir-with-config.json \
+CORESCOPE_REACH_VALIDATION_OUT=/tmp/reach-report \
+go test -run 'TestReachValidation963_RealDB$' -count=1 -timeout 3h -v .
+```
+
+It writes `reach-validation-963.{json,md}`, and the reach radius of one
+point to 40 km over 72 bearings, `reach-radius-963.{json,md}`. The point's
+transmitter is 10 m above the ground and its receiver 2 m. Optional settings:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CORESCOPE_REACH_VALIDATION_963_POINT` | `56.136,8.975` (open Jutland) | the reach-radius point |
+| `CORESCOPE_REACH_VALIDATION_963_SNR_CAP` | 10 | the SNR cap of the capped offset, in dB; set it from the report's observed SNR summary |
+
+The radius, window and minimum edge count of the #941 run apply too.
+
+**Without a token**, the fixture moved to Jutland and the reach radius can
+run over the public Copernicus GLO-30 tiles. This is opt-in, because it
+reads them over the network:
+
+```sh
+cd cmd/server
+CORESCOPE_REACH_VALIDATION_963_GLO30=1 CORESCOPE_REACH_VALIDATION_963_OUT=/tmp/out \
+CORESCOPE_REACH_VALIDATION_FULL_FIXTURE=1 \
+go test -run 'TestReachValidation963_GLO30$' -count=1 -timeout 1h -v .
+```
+
+CI runs only the mechanics: `TestReachValidation963_FixtureMechanics`
+(synthetic terrain with synthetic forest and villages) and the model pins
+`TestReachModels963_*`. Set `CORESCOPE_REACH_VALIDATION_963_OUT` to keep
+their reports; `TestReachModels963_ReachRadiusFlat` then writes the
+flat-ground reach radius too.
