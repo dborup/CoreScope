@@ -13,6 +13,7 @@
  */
 'use strict';
 const { chromium } = require('playwright');
+const { settleLive } = require('./tests/e2e-live-settle');
 const BASE = process.env.BASE_URL || 'http://localhost:3000';
 
 let passed = 0, failed = 0;
@@ -21,6 +22,17 @@ async function step(name, fn) {
   catch (e) { failed++; console.error('  \u2717 ' + name + ': ' + e.message); }
 }
 function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
+
+// ready: the panel is registered on this mount's DragManager (its header is
+// in the page before init() gets that far) and the layout is final, so the
+// header box read next is the one the press lands on (review PR#961 F5).
+async function ready(page, id) {
+  await page.waitForFunction((pid) => {
+    const m = window._liveDragMgr, el = document.getElementById(pid);
+    return !!(m && el && m._panels.indexOf(el) !== -1);
+  }, id, { timeout: 10000 });
+  await settleLive(page, '#' + id);
+}
 
 (async () => {
   const browser = await chromium.launch({
@@ -46,6 +58,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     });
     await page.reload({ waitUntil: 'load' });
     await page.waitForSelector('#liveFeed .panel-header', { timeout: 8000 });
+    await ready(page, 'liveFeed');
   });
 
   await step('DragManager is initialized', async () => {
@@ -65,7 +78,6 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     await page.mouse.down();
     await page.mouse.move(headerBox.x + 120, headerBox.y + 80, { steps: 8 });
     await page.mouse.up();
-    await page.waitForTimeout(200);
 
     const state = await page.$eval('#liveFeed', el => ({
       dragged: el.dataset.dragged,
@@ -94,7 +106,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
 
     await page.reload({ waitUntil: 'load' });
     await page.waitForSelector('#liveFeed .panel-header', { timeout: 8000 });
-    await page.waitForTimeout(500); // restorePositions runs after init
+    await ready(page, 'liveFeed'); // restorePositions runs right after register
 
     const restored = await page.$eval('#liveFeed', el => ({
       dragged: el.dataset.dragged,
@@ -115,6 +127,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     await page.evaluate(() => localStorage.removeItem('panel-drag-liveLegend'));
     await page.reload({ waitUntil: 'load' });
     await page.waitForSelector('#liveLegend .panel-header', { timeout: 8000 });
+    await ready(page, 'liveLegend');
 
     const headerBox = await page.$eval('#liveLegend .panel-header', el => {
       const r = el.getBoundingClientRect();
@@ -124,7 +137,6 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     await page.mouse.down();
     await page.mouse.move(headerBox.x + 2, headerBox.y + 2); // inside DEAD_ZONE (5px)
     await page.mouse.up();
-    await page.waitForTimeout(200);
 
     const raw = await page.evaluate(() => localStorage.getItem('panel-drag-liveLegend'));
     assert(raw === null, 'dead-zone click should NOT persist a position, got: ' + raw);

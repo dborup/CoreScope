@@ -250,6 +250,9 @@
    *                  card or the drawer shows (#883 kiosk: 30 s)
    *   onMoment(m)    optional: every valid moment, normalized, from the
    *                  socket and the seed (the #883 kiosk record tiles)
+   *   panelId        optional: makes the window a Live drag panel (#958):
+   *                  this id, .live-overlay, the bar as its .panel-header
+   *                  and a corner button. live.js registers it; not in kiosk.
    *
    * The per-viewer off switch lives in live.js: a viewer who turned Moments
    * off gets no controller at all (no fetch, no WS listener, no DOM).
@@ -331,6 +334,17 @@
     bar.appendChild(pill);
     bar.appendChild(pauseBtn);
     bar.appendChild(drawerBtn);
+    if (deps.panelId) {
+      wrap.id = deps.panelId;
+      wrap.classList.add('live-overlay');
+      bar.classList.add('panel-header');
+      var cornerBtn = el('button', 'panel-corner-btn'); // live.js sets its arrow
+      cornerBtn.type = 'button';
+      cornerBtn.setAttribute('data-panel', deps.panelId);
+      cornerBtn.title = 'Move panel to next corner';
+      cornerBtn.setAttribute('aria-label', 'Move panel to next corner');
+      bar.appendChild(cornerBtn);
+    }
     wrap.appendChild(stack);
     wrap.appendChild(bar);
     var announce = el('div', 'sr-only');

@@ -127,6 +127,7 @@ run test-883-kiosk-tour.js
 run test-883-kiosk-numbers.js
 run test-883-kiosk-moments.js
 run test-883-m3-kiosk.js
+run test-958-movable-moments.js
 run test-live-follow.js
 run test-map-last-heard-options.js
 run test-issue-124-rx-coverage-viewport.js
@@ -194,6 +195,7 @@ run test-issue-728-dhm-tile-retry.js
 run test-issue-728-ortho-followups.js
 run test-packets-window-pinned.js
 run test-tap-when-settled.js
+run test-live-settle.js
 run test-issue-733-dhm-credit.js
 run test-issue-734-dhm-overlays.js
 run test-issue-734-customizer-overlays.js
