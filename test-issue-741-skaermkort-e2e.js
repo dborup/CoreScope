@@ -319,8 +319,16 @@ function checkGetMap(url, layer, base = WMS_BASE) {
   // viewCovered: no zoom animation, and the whole map covered by
   // Dataforsyningen tiles of the current zoom level, requested, loaded or
   // not. span, when given: the width of those tiles' bbox, which halves with
-  // each zoom step.
-  function viewCovered(page, span) {
+  // each zoom step. A layer that leaves part of the view empty (or stops
+  // fetching during a drag) fails here, after 20 s, with what was missing.
+  async function viewCovered(page, span) {
+    try {
+      await waitCovered(page, span);
+    } catch (e) {
+      throw new Error('the map view was not covered by Dataforsyningen tiles' + (span ? ' with a bbox ' + Math.round(span) + ' m wide' : '') + ' within 20 s: ' + e.message.split('\n')[0]);
+    }
+  }
+  function waitCovered(page, span) {
     return page.waitForFunction((want) => {
       const c = document.querySelector('.leaflet-container');
       if (!c || document.querySelector('.leaflet-map-pane.leaflet-zoom-anim')) return false;
