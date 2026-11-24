@@ -123,6 +123,10 @@ const (
 	coverageResultMaxBytes = 1008*1008 + 64<<10 + coverageReachMaxNodes*coverageReachEntryBytes
 	// coverageRefusalLogEvery throttles the refusal and fill-failure logs.
 	coverageRefusalLogEvery = time.Minute
+	// coverageEnvLossDefaultDb is map.coverage.environmentLossDb's default
+	// (#962): the #941 validation saw observed SNR a median ~27 dB below
+	// the bare-terrain prediction, worst on short links.
+	coverageEnvLossDefaultDb = 20
 	// coverageMaxInFlightCap bounds map.coverage.maxInFlight: each
 	// computation uses half the CPUs (dhm.CoverageWorkers) and up to
 	// ~64 MB.
@@ -152,6 +156,10 @@ type CoverageConfig struct {
 	// (#941 M2); a request may name the other. Delta by default, as the
 	// validation report on real Danish links decided.
 	Model *string `json:"model"`
+	// EnvironmentLossDb (#962) is the browser's environment loss: the
+	// buildings, trees and other clutter the terrain model does not
+	// include, subtracted from the link budget (0–60 dB).
+	EnvironmentLossDb *float64 `json:"environmentLossDb"`
 }
 
 // coverageSettings are map.coverage, resolved and bounded.
@@ -165,6 +173,7 @@ type coverageSettings struct {
 	cacheTTL            time.Duration
 	elevationCacheBytes int
 	model               dhm.PathModel
+	envLossDb           float64
 }
 
 // resolveCoverageSettings applies the defaults and bounds; an
@@ -182,6 +191,7 @@ func resolveCoverageSettings(cc CoverageConfig, logf func(string, ...interface{}
 		// 64 MB holds 128 tiles: about three 40 km disks.
 		elevationCacheBytes: k.integer("elevationCacheMB", cc.ElevationCacheMB, 64, 8, 1024) << 20,
 		model:               coverageModelSetting(cc.Model, logf),
+		envLossDb:           k.num("environmentLossDb", cc.EnvironmentLossDb, coverageEnvLossDefaultDb, 0, 60, false),
 	}
 }
 
@@ -247,6 +257,9 @@ type CoverageClientConfig struct {
 	// request may name (#941 M2).
 	Model  string   `json:"model"`
 	Models []string `json:"models"`
+	// EnvironmentLossDb is the operator's environment loss (#962), the
+	// panel's starting value: the browser subtracts it from the budget.
+	EnvironmentLossDb float64 `json:"environmentLossDb"`
 }
 
 // ── Service ────────────────────────────────────────────────────────────────
@@ -383,8 +396,9 @@ func quietLogf(string, ...interface{}) {}
 
 // extractCoverageConfig lifts map.coverage out of the client-visible map;
 // only its canonical `enabled` switches it on (#884), and only its
-// canonical `model` picks the model (#886): a case variant is reported
-// once and ignored, whatever the order of the keys.
+// canonical `model` picks the model (#886) and its canonical
+// `environmentLossDb` sets the environment loss (#962): a case variant is
+// reported once and ignored, whatever the order of the keys.
 func (c *Config) extractCoverageConfig() {
 	if !liftMapBlock(c, "coverage", "predicted reach", &c.Coverage, func(cc *CoverageConfig) *bool { return &cc.Enabled }) || c.keys == nil {
 		return
@@ -394,6 +408,11 @@ func (c *Config) extractCoverageConfig() {
 		m = nil
 	}
 	c.Coverage.Model = m
+	var env *float64 // null or absent: the default
+	if json.Unmarshal(c.keys.Get("map", "coverage", "environmentLossDb"), &env) != nil {
+		env = nil
+	}
+	c.Coverage.EnvironmentLossDb = env
 }
 
 // ── Upstream budget ────────────────────────────────────────────────────────
@@ -1209,6 +1228,8 @@ func (s *Server) coverageClientConfig() *CoverageClientConfig {
 		DHM:          c.dhm != nil,
 		Model:        string(c.set.model),
 		Models:       []string{string(dhm.PathBullington), string(dhm.PathDelta)},
+
+		EnvironmentLossDb: c.set.envLossDb,
 	}
 	if c.fill != nil {
 		out.Fill = &DHMFillClientConfig{

@@ -441,6 +441,9 @@ type reachValidationParams struct {
 	TxPowerDbm       float64 `json:"txPowerDbm"`
 	GainsDbi         float64 `json:"gainsDbi"`
 	LossDb           float64 `json:"cableLossDb"`
+	// EnvironmentLossDb is the operator's environment loss (#962): the
+	// panel subtracts it, the harness does not.
+	EnvironmentLossDb float64 `json:"environmentLossDb"`
 }
 
 type reachValidationTerrain struct {
@@ -651,7 +654,8 @@ func buildReachValidationReport(in *reachValidationInput, c *terrainCoverage, al
 		Params: reachValidationParams{RadiusKm: radiusM / 1000, ResolutionM: c.set.resolutionM, FreqMHz: freq, K: k,
 			BudgetDb: c.radio.budgetDb(), ReachedMarginDb: coverageClasses[1].minDb, WindowDays: window.Hours() / 24,
 			MinEdgeCount: o.minEdgeCount, NoiseFallbackDbm: c.radio.SensitivityDbm + reachValidationNoiseOffsetDb,
-			TxPowerDbm: c.radio.TxPowerDbm, GainsDbi: c.radio.AntennaGainDbi + c.radio.RxGainDbi, LossDb: c.radio.LossDb},
+			TxPowerDbm: c.radio.TxPowerDbm, GainsDbi: c.radio.AntennaGainDbi + c.radio.RxGainDbi, LossDb: c.radio.LossDb,
+			EnvironmentLossDb: c.set.envLossDb},
 		Models: []reachValidationModel{}, References: []reachValidationReference{}}
 	rep.Pairs = reachValidationPairCounts{Nodes: len(in.nodes), HiddenNodes: in.hidden, Candidates: len(all),
 		AmbiguousEdges: in.ambiguous, WeakEdges: weak, PositivesBeyond: beyond}
@@ -738,6 +742,7 @@ func buildReachValidationReport(in *reachValidationInput, c *terrainCoverage, al
 	rep.Notes = []string{
 		"Negatives are pairs never observed while both nodes were active: weak evidence, so the false-reach rate is an upper bound.",
 		"Reached: a margin of at least reachedMarginDb at the operator's link budget (config radio).",
+		"Losses and the budget are raw: the environment loss the panel subtracts by default (map.coverage.environmentLossDb, environmentLossDb here) is not applied.",
 		"Predicted SNR: received power minus the reporting observer's noise floor, or minus noiseFallbackDbm when it reports none; the median offset (observed minus predicted) is the calibration constant to fit.",
 	}
 	return rep
@@ -757,8 +762,8 @@ func fmtPtr(v *float64, pct bool) string {
 func (r reachValidationReport) markdown() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Predicted reach validation (#%s)\n\n", r.Issue)
-	fmt.Fprintf(&b, "Data as of %s. Radius %.0f km, %d m grid, %.3f MHz, k %.2f, link budget %.0f dB (reached: margin ≥ %.0f dB), window %.0f days. Terrain: %s, %d tiles gathered, %s%s.\n\n",
-		r.DataAsOf, r.Params.RadiusKm, r.Params.ResolutionM, r.Params.FreqMHz, r.Params.K, r.Params.BudgetDb, r.Params.ReachedMarginDb,
+	fmt.Fprintf(&b, "Data as of %s. Radius %.0f km, %d m grid, %.3f MHz, k %.2f, link budget %.0f dB (reached: margin ≥ %.0f dB; the panel's environment loss %.0f dB, not applied here), window %.0f days. Terrain: %s, %d tiles gathered, %s%s.\n\n",
+		r.DataAsOf, r.Params.RadiusKm, r.Params.ResolutionM, r.Params.FreqMHz, r.Params.K, r.Params.BudgetDb, r.Params.ReachedMarginDb, r.Params.EnvironmentLossDb,
 		r.Params.WindowDays, r.Terrain.Source, r.Terrain.Tiles, upstreamText(r.Terrain.Upstream), map[bool]string{true: " (partial)", false: ""}[r.Terrain.Partial])
 	b.WriteString("## Pairs\n\n| Nodes | Hidden | Candidates | Scored | Positives | from observer_neighbors | from neighbor_edges | Negatives | Ambiguous edges | Weak edges | Positives beyond radius | No terrain | With SNR |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|\n")
 	p := r.Pairs

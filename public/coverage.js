@@ -8,11 +8,12 @@
  *
  * The server computes the path loss in dB (cmd/server/terrain_coverage.go)
  * and sends it as one byte per pixel. Everything that only shifts the
- * margin — transmit power, both antenna gains, cable loss, sensitivity —
- * is applied here, through a 256-entry lookup table built from CSS
- * variables, so moving those sliders recolours the same pixels without a
- * request. Heights, radius, frequency and the model (Bullington or
- * delta-Bullington, #941 M2) change the loss and ask again.
+ * margin — transmit power, both antenna gains, cable loss, sensitivity
+ * and the environment loss (#962) — is applied here, through a 256-entry
+ * lookup table built from CSS variables, so moving those sliders
+ * recolours the same pixels without a request. Heights, radius,
+ * frequency and the model (Bullington or delta-Bullington, #941 M2)
+ * change the loss and ask again.
  *
  * #941 M2 — nodes in reach: the response lists the repeaters and rooms
  * inside the radius with their predicted path loss. The panel counts them
@@ -34,7 +35,7 @@
   // profile's link already uses ha and freq on the same #/map hash.
   var KEYS = {
     tx: 'rtx', rx: 'rrx', radius: 'rkm', freq: 'rmhz',
-    power: 'rpwr', txGain: 'rgtx', rxGain: 'rgrx', loss: 'rloss', sens: 'rsens'
+    power: 'rpwr', txGain: 'rgtx', rxGain: 'rgrx', loss: 'rloss', sens: 'rsens', env: 'renv'
   };
   // The link's two words (#941 M2): the model, and which nodes in reach
   // the list shows.
@@ -45,12 +46,19 @@
   // budget bounds mirror resolveCoverageRadio.
   var BOUNDS = {
     tx: [0, 100, 1], rx: [0, 100, 1], radius: [1, 60, 1], freq: [150, 2500, 3],
-    power: [-10, 30, 1], txGain: [-10, 20, 1], rxGain: [-10, 20, 1], loss: [0, 30, 1], sens: [-150, -80, 1]
+    power: [-10, 30, 1], txGain: [-10, 20, 1], rxGain: [-10, 20, 1], loss: [0, 30, 1], sens: [-150, -80, 1],
+    env: [0, 60, 1]
   };
   var REQUEST_FIELDS = ['tx', 'rx', 'radius', 'freq'];
-  var BUDGET_FIELDS = ['power', 'txGain', 'rxGain', 'loss', 'sens'];
-  var RADIO_KEYS = { power: 'txPowerDbm', txGain: 'antennaGainDbi', rxGain: 'rxGainDbi', loss: 'lossDb', sens: 'sensitivityDbm' };
-  var DEFAULT_RADIO = { txPowerDbm: 22, antennaGainDbi: 3, rxGainDbi: 3, lossDb: 0, sensitivityDbm: -130 };
+  var BUDGET_FIELDS = ['power', 'txGain', 'rxGain', 'loss', 'sens', 'env'];
+  var RADIO_KEYS = { power: 'txPowerDbm', txGain: 'antennaGainDbi', rxGain: 'rxGainDbi', loss: 'lossDb', sens: 'sensitivityDbm',
+    env: 'environmentLossDb' };
+  // The environment loss (#962): the buildings, trees and other clutter the
+  // terrain model does not include. map.coverage.environmentLossDb sets it
+  // (cmd/server's coverageEnvLossDefaultDb is the same 20 dB).
+  var DEFAULT_ENV_LOSS_DB = 20;
+  var DEFAULT_RADIO = { txPowerDbm: 22, antennaGainDbi: 3, rxGainDbi: 3, lossDb: 0, sensitivityDbm: -130,
+    environmentLossDb: DEFAULT_ENV_LOSS_DB };
 
   // The margin classes of M0 §3.5 (owner decision 7), in dB, best first.
   // Their colours are the CSS variables; the customizer gets them in M4.
@@ -183,11 +191,21 @@
   // ── Link budget and colours ──────────────────────────────────────────────
 
   /* budgetOf is the maximum path loss the link tolerates, in dB: power +
-   * both gains − cable loss − sensitivity, each from the state, else the
-   * operator's radio block, else the shipped defaults. */
+   * both gains − cable loss − sensitivity − environment loss, each from the
+   * state, else the operator's values (operatorRadio), else the shipped
+   * defaults. */
   function budgetOf(st, radio) {
     var v = budgetValues(st, radio);
-    return v.power + v.txGain + v.rxGain - v.loss - v.sens;
+    return v.power + v.txGain + v.rxGain - v.loss - v.sens - v.env;
+  }
+
+  /* operatorRadio is the operator's budget: the client config's radio
+   * block and its coverage.environmentLossDb (#962). */
+  function operatorRadio(cfg) {
+    var out = Object.assign({}, cfg && cfg.radio);
+    out.environmentLossDb = cfg && typeof cfg.environmentLossDb === 'number' && isFinite(cfg.environmentLossDb)
+      ? cfg.environmentLossDb : DEFAULT_ENV_LOSS_DB;
+    return out;
   }
 
   function budgetValues(st, radio) {
@@ -454,6 +472,7 @@
    * host runs a link's fit without saving it as the viewer's view). */
   function create(opts) {
     var map = opts.map, L = global.L, cfg = opts.cfg || {};
+    var radio = operatorRadio(cfg);
     var fetchFn = opts.fetchFn || (global.fetch ? global.fetch.bind(global) : null);
     var state = null, armed = false, panel = null, ui = {}, btn = null, hint = null;
     var overlay = null, canvas = null, centreDot = null, raster = null, meta = null, data = null;
@@ -623,6 +642,16 @@
       field(bud, 'rxGain', 'RX antenna gain', 'dBi', 'range', 'reach-rxgain');
       field(bud, 'loss', 'Cable loss', 'dB', 'range', 'reach-loss');
       field(bud, 'sens', 'Sensitivity', 'dBm', 'range', 'reach-sens');
+      field(bud, 'env', 'Environment loss', 'dB', 'range', 'reach-env');
+      var envHint = el('p', 'reach-field-hint', 'Buildings, trees and other clutter the terrain model does not include. ');
+      envHint.setAttribute('data-testid', 'reach-env-hint');
+      ui.envReset = el('button', 'reach-env-reset', 'Reset');
+      ui.envReset.type = 'button';
+      ui.envReset.setAttribute('data-testid', 'reach-env-reset');
+      ui.envReset.setAttribute('aria-label', 'Reset the environment loss to the server default, ' + fmt(radio.environmentLossDb, 0) + ' dB');
+      ui.envReset.addEventListener('click', onEnvReset);
+      envHint.appendChild(ui.envReset);
+      bud.appendChild(envHint);
       BUDGET_FIELDS.forEach(function (f) { ui[f].addEventListener('input', onBudgetInput); });
       ui.budget = el('p', 'reach-budget');
       ui.budget.setAttribute('data-testid', 'reach-budget');
@@ -768,7 +797,7 @@
         ui.nodesList.hidden = true;
         return;
       }
-      var rows = reachRows(reach, budgetOf(state, cfg.radio));
+      var rows = reachRows(reach, budgetOf(state, radio));
       var counts = reachCounts(rows);
       var inReach = counts.good + counts.marginal + counts.weak;
       Object.keys(ui.chips).forEach(function (k) {
@@ -809,12 +838,13 @@
         var v = typeof state[f] === 'number' ? state[f] : resolved[f];
         if (global.document.activeElement !== ui[f]) ui[f].value = v === null || v === undefined ? '' : String(v);
       });
-      var bv = budgetValues(state, cfg.radio);
+      var bv = budgetValues(state, radio);
       BUDGET_FIELDS.forEach(function (f) {
         if (global.document.activeElement !== ui[f]) ui[f].value = String(bv[f]);
         ui[f + 'Out'].textContent = fmt(bv[f], 0) + ' ' + ui[f + 'Unit'];
       });
-      ui.budget.textContent = 'Maximum path loss ' + fmt(budgetOf(state, cfg.radio), 0) + ' dB';
+      ui.budget.textContent = 'Maximum path loss ' + fmt(budgetOf(state, radio), 0) + ' dB';
+      ui.envReset.disabled = typeof state.env !== 'number';
       if (ui.modelSelect && global.document.activeElement !== ui.modelSelect) ui.modelSelect.value = state.model || defaultModel();
     }
 
@@ -886,7 +916,7 @@
       if (!canvas || !raster || !meta) return;
       var ctx = canvas.getContext('2d');
       var img = ctx.createImageData(meta.width, meta.height);
-      var budget = budgetOf(state, cfg.radio);
+      var budget = budgetOf(state, radio);
       paint(img.data, raster, buildLut(budget, meta, themeColors()));
       ctx.putImageData(img, 0, 0);
       var share = classShares(raster, budget, meta);
@@ -1025,6 +1055,18 @@
       var v = boundedNumber(f, e.target.value);
       if (v === null) return;
       state[f] = v;
+      budgetChanged();
+    }
+
+    /* onEnvReset returns the environment loss to the operator's value:
+     * the link drops renv. */
+    function onEnvReset() {
+      if (!state) return;
+      delete state.env;
+      budgetChanged();
+    }
+
+    function budgetChanged() {
       syncInputs();
       writeHash();
       // One repaint per frame, however fast the slider moves.
@@ -1117,6 +1159,8 @@
     reachNote: reachNote,
     listShows: listShows,
     budgetOf: budgetOf,
+    operatorRadio: operatorRadio,
+    DEFAULT_ENV_LOSS_DB: DEFAULT_ENV_LOSS_DB,
     marginClass: marginClass,
     parseColor: parseColor,
     themeColors: themeColors,

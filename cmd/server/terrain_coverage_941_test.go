@@ -746,17 +746,17 @@ func TestCoverage941_SettingsDefaultsAndClamps(t *testing.T) {
 	logs := &dhmLogSink{}
 	s := resolveCoverageSettings(CoverageConfig{}, logs.logf)
 	want := coverageSettings{maxRadiusM: 40000, resolutionM: 30, maxInFlight: 1, rateLimitPerMin: 2, upstreamPerMin: 240,
-		cacheEntries: 32, cacheTTL: 24 * time.Hour, elevationCacheBytes: 64 << 20, model: dhm.PathDelta}
+		cacheEntries: 32, cacheTTL: 24 * time.Hour, elevationCacheBytes: 64 << 20, model: dhm.PathDelta, envLossDb: 20}
 	if s != want || logs.String() != "" {
 		t.Fatalf("defaults %+v (log %q)", s, logs.String())
 	}
 	s = resolveCoverageSettings(CoverageConfig{MaxRadiusKm: floatp(61), ResolutionM: intp(10), MaxInFlight: intp(5),
 		RateLimitPerMin: intp(-1), UpstreamPerMin: intp(-1), CacheEntries: intp(0), CacheTTLHours: floatp(math.NaN()),
-		ElevationCacheMB: intp(4)}, logs.logf)
+		ElevationCacheMB: intp(4), EnvironmentLossDb: floatp(61)}, logs.logf)
 	if s != want {
 		t.Fatalf("clamped %+v", s)
 	}
-	for _, k := range []string{"maxRadiusKm", "resolutionM", "maxInFlight", "rateLimitPerMin", "upstreamPerMin", "cacheEntries", "cacheTTLHours", "elevationCacheMB"} {
+	for _, k := range []string{"maxRadiusKm", "resolutionM", "maxInFlight", "rateLimitPerMin", "upstreamPerMin", "cacheEntries", "cacheTTLHours", "elevationCacheMB", "environmentLossDb"} {
 		if !strings.Contains(logs.String(), "map.coverage."+k) {
 			t.Fatalf("out-of-range %s not warned: %q", k, logs.String())
 		}
