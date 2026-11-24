@@ -193,7 +193,7 @@ function checkGetMap(url, layer, base = WMS_BASE) {
     const ctx = await browser.newContext(phone
       ? { viewport, hasTouch: true, isMobile: true, deviceScaleFactor: 2 }
       : { viewport });
-    const rec = { wms: [], osm: [], terrain: [], tokens: [], warnings: [], errors: [] };
+    const rec = { wms: [], wmsPending: 0, osm: [], terrain: [], tokens: [], warnings: [], errors: [] };
     await ctx.route(BASE + '/api/config/client', async (route) => {
       const response = await route.fetch();
       const config = await response.json();
@@ -212,9 +212,12 @@ function checkGetMap(url, layer, base = WMS_BASE) {
       if (/[?&]token=/i.test(url)) rec.tokens.push(url);
       if (url.indexOf('https://api.dataforsyningen.dk/') === 0) {
         rec.wms.push(url);
-        if (wmsDelayMs) await new Promise(r => setTimeout(r, wmsDelayMs));
-        const layer = new URL(url).searchParams.get('layers');
-        await route.fulfill({ status: 200, contentType: 'image/png', body: WMS_STUBS[layer] || OTHER_STUB });
+        rec.wmsPending++;
+        try {
+          if (wmsDelayMs) await new Promise(r => setTimeout(r, wmsDelayMs));
+          const layer = new URL(url).searchParams.get('layers');
+          await route.fulfill({ status: 200, contentType: 'image/png', body: WMS_STUBS[layer] || OTHER_STUB });
+        } finally { rec.wmsPending--; }
         return;
       }
       // Nothing else third-party leaves the browser: non-image requests are refused.
@@ -311,6 +314,83 @@ function checkGetMap(url, layer, base = WMS_BASE) {
     await page.waitForTimeout(700);
   }
   async function zoomIn(page) { await page.click('.leaflet-control-zoom-in'); await page.waitForTimeout(900); }
+  // #967: the churn script below must move the map the same way on every
+  // run, so it waits on what the map shows, not on the clock.
+  // viewCovered: no zoom animation, and the whole map covered by
+  // Dataforsyningen tiles of the current zoom level, requested, loaded or
+  // not. span, when given: the width of those tiles' bbox, which halves with
+  // each zoom step.
+  function viewCovered(page, span) {
+    return page.waitForFunction((want) => {
+      const c = document.querySelector('.leaflet-container');
+      if (!c || document.querySelector('.leaflet-map-pane.leaflet-zoom-anim')) return false;
+      const layer = Array.from(document.querySelectorAll('.leaflet-tile-pane .leaflet-layer'))
+        .find(l => l.querySelector('img.leaflet-tile[src^="https://api.dataforsyningen.dk/"]'));
+      if (!layer) return false;
+      const levels = Array.from(layer.querySelectorAll('.leaflet-tile-container'));
+      const level = levels.reduce((a, b) => (Number(b.style.zIndex) > Number(a.style.zIndex) ? b : a));
+      const imgs = Array.from(level.querySelectorAll('img.leaflet-tile'));
+      if (want && !imgs.every(i => Math.abs(tileSpanOf(i.src) - want) < want / 100)) return false;
+      const tiles = imgs.map(i => i.getBoundingClientRect());
+      const r = c.getBoundingClientRect();
+      for (let x = r.left + 1; x < r.right; x += 16) {
+        for (let y = r.top + 1; y < r.bottom; y += 16) {
+          if (!tiles.some(t => x >= t.left && x < t.right && y >= t.top && y < t.bottom)) return false;
+        }
+      }
+      return true;
+      function tileSpanOf(src) { const b = new URL(src).searchParams.get('bbox').split(',').map(Number); return b[2] - b[0]; }
+    }, span || 0, { timeout: 20000 });
+  }
+  // mapSettled: the view is covered and every GetMap the stub was asked for
+  // is answered.
+  async function mapSettled(page, rec, span) {
+    await viewCovered(page, span);
+    for (const deadline = Date.now() + 20000; rec.wmsPending > 0;) {
+      assert(Date.now() < deadline, rec.wmsPending + ' GetMaps still unanswered after 20 s');
+      await new Promise(r => setTimeout(r, 20));
+    }
+  }
+  // dragSettled drags the map as pan() does, in eight steps, but lets the map
+  // follow each step and ask for the tiles that view needs before the next
+  // (the answers may still be on their way), and holds the mouse still for
+  // 100 ms before the release. pan()'s quick drag
+  // left two things to timing (#967): how far Leaflet's inertia carried the
+  // map after the release (it measures the speed over the last 50 ms), and
+  // which in-between views its 200 ms throttled update fetched tiles for.
+  async function dragSettled(page, rec, dx, dy) {
+    const b = await page.$eval('.leaflet-container', el => { const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; });
+    const panePos = () => page.evaluate(() => {
+      const m = new DOMMatrixReadOnly(getComputedStyle(document.querySelector('.leaflet-map-pane')).transform);
+      return { x: m.m41, y: m.m42 };
+    });
+    const p0 = await panePos();
+    await page.mouse.move(b.x, b.y);
+    await page.mouse.down();
+    for (let k = 1; k <= 8; k++) {
+      const off = { x: Math.round(dx * k / 8), y: Math.round(dy * k / 8) };
+      await page.mouse.move(b.x + off.x, b.y + off.y);
+      await page.waitForFunction(([x, y]) => {
+        const m = new DOMMatrixReadOnly(getComputedStyle(document.querySelector('.leaflet-map-pane')).transform);
+        return Math.abs(m.m41 - x) < 0.5 && Math.abs(m.m42 - y) < 0.5;
+      }, [p0.x + off.x, p0.y + off.y], { timeout: 10000 });
+      await viewCovered(page);
+    }
+    await page.evaluate(() => { window.__e2eDragHeld = Date.now(); });
+    await page.waitForFunction(() => Date.now() - window.__e2eDragHeld >= 100);
+    await page.mouse.up();
+    await mapSettled(page, rec);
+  }
+  // zoomInSettled clicks + and waits for the next zoom level's view.
+  async function zoomInSettled(page, rec) {
+    const span = await page.evaluate(() => {
+      const img = document.querySelector('.leaflet-tile-pane img.leaflet-tile[src^="https://api.dataforsyningen.dk/"]');
+      const b = new URL(img.src).searchParams.get('bbox').split(',').map(Number);
+      return b[2] - b[0];
+    });
+    await page.click('.leaflet-control-zoom-in');
+    await mapSettled(page, rec, span / 2);
+  }
   async function shot(page, name) {
     if (!SHOT_DIR) return;
     await page.screenshot({ path: path.join(SHOT_DIR, name), type: 'jpeg', quality: 60 });
@@ -814,13 +894,10 @@ function checkGetMap(url, layer, base = WMS_BASE) {
       try {
         await gotoMap(page, '#/map');
         await selectBase(page, id);
-        await page.waitForTimeout(1500);
-        await pan(page, 260, 0);
-        await page.waitForTimeout(1500);
-        await zoomIn(page);
-        await page.waitForTimeout(1500);
-        await pan(page, -200, 140);
-        await page.waitForTimeout(2500);
+        await mapSettled(page, rec);
+        await dragSettled(page, rec, 260, 0);
+        await zoomInSettled(page, rec);
+        await dragSettled(page, rec, -200, 140);
         assert(rec.errors.length === 0, id + ': console errors: ' + rec.errors.join(' | '));
         return rec.wms.slice();
       } finally { await ctx.close(); }
