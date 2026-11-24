@@ -44,6 +44,7 @@
     this.enabled = true;
     this.zCounter = 1000;
     this._panels = [];
+    this._bound = []; // { panel, header, fns } per register(), for unregister()
     this._onKeyDown = this._handleKeyDown.bind(this);
   }
 
@@ -53,8 +54,9 @@
     if (!header) return;
     this._panels.push(panel);
     var self = this;
+    var fns = {};
 
-    header.addEventListener('pointerdown', function (e) {
+    fns.pointerdown = function (e) {
       if (!self.enabled) return;
       if (e.button !== 0) return;
       if (e.target.closest('button')) return;
@@ -71,9 +73,9 @@
       self.panelStartY = rect.top;
       self.preTransform = panel.style.transform || '';
       document.addEventListener('keydown', self._onKeyDown);
-    });
+    };
 
-    header.addEventListener('pointermove', function (e) {
+    fns.pointermove = function (e) {
       if (self.state === 'IDLE') return;
       if (self.activePanel !== panel) return;
       var dx = e.clientX - self.startX;
@@ -88,9 +90,9 @@
       }
 
       panel.style.transform = 'translate(' + dx + 'px, ' + dy + 'px)';
-    });
+    };
 
-    header.addEventListener('pointerup', function (e) {
+    fns.pointerup = function (e) {
       if (self.activePanel !== panel) return;
       header.releasePointerCapture(e.pointerId);
       if (self.state === 'DRAGGING') {
@@ -98,16 +100,35 @@
         self._finalizePosition(panel);
       }
       self._reset();
-    });
+    };
 
-    header.addEventListener('pointercancel', function () {
+    fns.pointercancel = function () {
       if (self.activePanel !== panel) return;
       panel.classList.remove('is-dragging');
       if (self.state === 'DRAGGING') {
         self._finalizePosition(panel);
       }
       self._reset();
-    });
+    };
+
+    for (var type in fns) header.addEventListener(type, fns[type]);
+    this._bound.push({ panel: panel, header: header, fns: fns });
+  };
+
+  // unregister releases what register() bound, for a panel that goes away
+  // before the page does (#958: the Moments window, re-made when the viewer
+  // turns Moments off and on).
+  DragManager.prototype.unregister = function (panel) {
+    for (var i = 0; i < this._bound.length; i++) {
+      var b = this._bound[i];
+      if (b.panel !== panel) continue;
+      for (var type in b.fns) b.header.removeEventListener(type, b.fns[type]);
+      this._bound.splice(i, 1);
+      break;
+    }
+    var at = this._panels.indexOf(panel);
+    if (at !== -1) this._panels.splice(at, 1);
+    if (this.activePanel === panel) this._reset();
   };
 
   DragManager.prototype._handleKeyDown = function (e) {
@@ -187,8 +208,9 @@
     }
   };
 
-  DragManager.prototype.restorePositions = function () {
-    var panels = this._panels;
+  // only: restore just these panels (#958: one registered later); all by default.
+  DragManager.prototype.restorePositions = function (only) {
+    var panels = only || this._panels;
     for (var i = 0; i < panels.length; i++) {
       var panel = panels[i];
       var raw = localStorage.getItem('panel-drag-' + panel.id);

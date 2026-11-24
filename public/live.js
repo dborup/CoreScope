@@ -415,11 +415,24 @@
   };
 
   /* ---- Panel Corner Positioning (#608 M0) ---- */
-  var PANEL_DEFAULTS = { liveFeed: 'bl', liveLegend: 'br', liveNodeDetail: 'tr' };
+  var PANEL_DEFAULTS = { liveFeed: 'bl', liveLegend: 'br', liveNodeDetail: 'tr', liveMoments: 'bc' };
   var CORNER_CYCLE = ['tl', 'tr', 'br', 'bl'];
-  var CORNER_ARROWS = { tl: '↘', tr: '↙', bl: '↗', br: '↖' };
-  var CORNER_LABELS = { tl: 'top-left', tr: 'top-right', bl: 'bottom-left', br: 'bottom-right' };
-  var PANEL_NAMES = { liveFeed: 'Feed', liveLegend: 'Legend', liveNodeDetail: 'Node detail' };
+  var CORNER_ARROWS = { tl: '↘', tr: '↙', bl: '↗', br: '↖', bc: '↑' };
+  var CORNER_LABELS = { tl: 'top-left', tr: 'top-right', bl: 'bottom-left', br: 'bottom-right', bc: 'bottom-center' };
+  var PANEL_NAMES = { liveFeed: 'Feed', liveLegend: 'Legend', liveNodeDetail: 'Node detail', liveMoments: 'Moments' };
+  // #958: the Moments window (live-moments.js) is a panel too. Its default
+  // is its own bottom-centre anchor, 'bc', and its button cycles that and
+  // the four corners. It never takes a corner from the panels: at its
+  // anchor it sits below them, and once moved it shares their level
+  // (live.css). It moves only where a panel can be dragged (DRAG_MQ) and
+  // never in kiosk; elsewhere it keeps its anchor.
+  var MOMENTS_PANEL = 'liveMoments';
+  var MOMENTS_CYCLE = ['bc', 'tl', 'tr', 'br', 'bl'];
+  var DRAG_MQ = '(pointer: fine) and (min-width: 768px)';
+
+  function dragAllowed() {
+    try { return !!(window.matchMedia && window.matchMedia(DRAG_MQ).matches); } catch (_) { return false; }
+  }
 
   function getPanelPositions() {
     var pos = {};
@@ -436,6 +449,7 @@
       var candidate = CORNER_CYCLE[(idx + i) % 4];
       var occupied = false;
       for (var otherId in allPositions) {
+        if (otherId === MOMENTS_PANEL) continue;
         if (otherId !== panelId && allPositions[otherId] === candidate) { occupied = true; break; }
       }
       if (!occupied) return candidate;
@@ -446,6 +460,7 @@
   function applyPanelPosition(id, corner) {
     var el = document.getElementById(id);
     if (!el) return;
+    if (id === MOMENTS_PANEL && !dragAllowed()) { el.removeAttribute('data-position'); return; }
     el.setAttribute('data-position', corner);
     var btn = el.querySelector('.panel-corner-btn');
     if (btn) {
@@ -460,22 +475,29 @@
     for (var id in positions) {
       applyPanelPosition(id, positions[id]);
     }
-    // Wire up click handlers on corner buttons
+    // Wire up click handlers on corner buttons. One shared handler, so the
+    // re-run from the drag media gate does not bind a second one.
     var btns = document.querySelectorAll('.panel-corner-btn[data-panel]');
     for (var i = 0; i < btns.length; i++) {
-      btns[i].addEventListener('click', function(e) {
-        e.stopPropagation();
-        var panelId = this.getAttribute('data-panel');
-        onCornerClick(panelId);
-      });
+      btns[i].addEventListener('click', onCornerBtnClick);
     }
+  }
+
+  function onCornerBtnClick(e) {
+    e.stopPropagation();
+    onCornerClick(this.getAttribute('data-panel'));
   }
 
   function onCornerClick(panelId) {
     var positions = getPanelPositions();
     var current = positions[panelId];
-    var nextIdx = (CORNER_CYCLE.indexOf(current) + 1) % 4;
-    var next = nextAvailableCorner(panelId, CORNER_CYCLE[nextIdx], positions);
+    var next;
+    if (panelId === MOMENTS_PANEL) {
+      next = MOMENTS_CYCLE[(MOMENTS_CYCLE.indexOf(current) + 1) % MOMENTS_CYCLE.length];
+    } else {
+      var nextIdx = (CORNER_CYCLE.indexOf(current) + 1) % 4;
+      next = nextAvailableCorner(panelId, CORNER_CYCLE[nextIdx], positions);
+    }
     try { localStorage.setItem('panel-corner-' + panelId, next); } catch (_) { /* quota */ }
     // #1567: corner button must clear any prior free-form drag state, or
     // the inline top/left from drag-manager.js wins the cascade over the
@@ -503,13 +525,28 @@
     }
   }
 
+  // #958: makes a new Moments window (its DOM from live-moments.js with
+  // panelId) a panel: its corner, its button, the DragManager and, where it
+  // can be dragged, its saved drag. Returns the release for stopMoments(),
+  // or null in kiosk, where the window stays exactly as it was.
+  function attachMomentsPanel(el, mgr, kiosk) {
+    if (!el || kiosk) return null;
+    applyPanelPosition(MOMENTS_PANEL, getPanelPositions()[MOMENTS_PANEL]);
+    var btn = el.querySelector('.panel-corner-btn');
+    if (btn) btn.addEventListener('click', onCornerBtnClick);
+    if (!mgr) return null;
+    mgr.register(el);
+    if (dragAllowed()) mgr.restorePositions([el]);
+    return function () { mgr.unregister(el); };
+  }
+
   // Export for testing
   if (typeof window !== 'undefined') {
     window._panelCorner = {
       PANEL_DEFAULTS: PANEL_DEFAULTS, CORNER_CYCLE: CORNER_CYCLE,
       getPanelPositions: getPanelPositions, nextAvailableCorner: nextAvailableCorner,
       applyPanelPosition: applyPanelPosition, onCornerClick: onCornerClick,
-      resetPanelPositions: resetPanelPositions
+      resetPanelPositions: resetPanelPositions, attachMomentsPanel: attachMomentsPanel
     };
   }
 
@@ -1772,6 +1809,7 @@
   // #881 M2 — the moments controller (live-moments.js), null while the
   // server has moments off or the viewer is on another page.
   let moments = null;
+  let momentsPanelRelease = null; // #958: its DragManager registration
   let momentsListening = false; // the customizer-change listener is on window
   let _momentHl = null; // { layers, timer } of the last fly-to highlight
   // #883 M1 — kiosk mode (#/live?kiosk=1, live-kiosk.js). kioskOn is read
@@ -2958,7 +2996,7 @@
       dragMgr.restorePositions();
 
       // Responsive gate: disable drag below medium breakpoint or on touch
-      var dragMql = window.matchMedia('(pointer: fine) and (min-width: 768px)');
+      var dragMql = window.matchMedia(DRAG_MQ);
       function onDragMediaChange(e) {
         if (!e.matches) {
           // Revert dragged panels to corner positions. Preserve the
@@ -2972,6 +3010,8 @@
           dragMgr.disable();
         } else {
           dragMgr.enable();
+          // #958: the gate took the Moments window's corner; give it back.
+          applyPanelPosition(MOMENTS_PANEL, getPanelPositions()[MOMENTS_PANEL]);
           dragMgr.restorePositions();
         }
       }
@@ -4163,7 +4203,7 @@
       toggle.addEventListener('change', () => {
         try { localStorage.setItem(M.STORAGE_KEY, toggle.checked ? 'true' : 'false'); } catch (_) { /* private mode */ }
         if (toggle.checked) startMoments();
-        else if (moments) { moments.destroy(); moments = null; }
+        else stopMoments();
         setLiveHashParam(M.HASH_PARAM, toggle.checked ? '' : '0');
       });
     }
@@ -4189,7 +4229,7 @@
     if (enabled !== toggle.checked) {
       toggle.checked = enabled;
       if (enabled) startMoments();
-      else if (moments) { moments.destroy(); moments = null; }
+      else stopMoments();
     }
     if (moments) moments.onSettingsChanged();
   }
@@ -4284,7 +4324,15 @@
       cardCap: kioskOn ? 2 : 0,
       timeRefreshMs: kioskOn ? 30000 : 0,
       onMoment: (m) => { if (kiosk) kiosk.onMoment(m); },
+      // #958: a drag panel like the Feed, except in kiosk.
+      panelId: kioskOn ? null : MOMENTS_PANEL,
     });
+    momentsPanelRelease = attachMomentsPanel(document.getElementById(MOMENTS_PANEL), window._liveDragMgr, kioskOn);
+  }
+
+  function stopMoments() {
+    if (momentsPanelRelease) { momentsPanelRelease(); momentsPanelRelease = null; }
+    if (moments) { moments.destroy(); moments = null; }
   }
 
   function clearMomentHighlight() {
@@ -6159,7 +6207,7 @@
       window.removeEventListener('moments-defaults-changed', onMomentsDefaultsChanged);
       momentsListening = false;
     }
-    if (moments) { moments.destroy(); moments = null; }
+    stopMoments();
     clearMomentHighlight();
     // #883 — before map.remove(): the controller holds map listeners.
     // M3: an in-place remount hands the kiosk theme and auto-reload over.

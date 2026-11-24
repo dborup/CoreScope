@@ -127,6 +127,8 @@ async function controlsCovered(page) {
     const bad = [];
     let checked = 0;
     for (const el of document.querySelectorAll(sel)) {
+      // #958: the Moments window's own corner button is no control it covers.
+      if (el.closest('.live-moments, .live-moments-drawer')) continue;
       const r = el.getBoundingClientRect();
       if (!r.width || !r.height || getComputedStyle(el).visibility === 'hidden') continue;
       const x = r.left + r.width / 2, y = r.top + r.height / 2;

@@ -2127,6 +2127,27 @@ select.live-heard-select {
 .live-moments-more:empty { display: none; }
 .live-moments-more { font-weight: 600; color: var(--accent); }
 .live-moments.is-paused .live-moments-count::after { content: ' · paused'; }
+/* #958: outside kiosk the window is a Live drag panel (.live-overlay, the
+ * bar its .panel-header, live.js gates it to DRAG_MQ). In a corner it
+ * drops the centring and, like the legend (#875), keeps clear of the
+ * Leaflet control rail on the right. Once the viewer moved it (a corner or
+ * a drag) it is on the panels' level, 1000, and later in the page, so its
+ * bar and corner button stay reachable over the Feed, the Legend or the
+ * header in the same corner; at its own anchor it stays at 900, below
+ * them. Its bar keeps its own fill on hover, and a drag shadows the bar
+ * and cards, not the transparent box. */
+.live-moments[data-position="tl"],
+.live-moments[data-position="tr"],
+.live-moments[data-position="bl"],
+.live-moments[data-position="br"] { transform: none; z-index: 1000; }
+.live-moments[data-dragged="true"] { z-index: 1000; }
+.live-moments[data-position="tr"],
+.live-moments[data-position="br"] { right: var(--live-ctrl-rail-legend, 68px); }
+.live-moments-bar.panel-header:hover { background: var(--card-bg); }
+.live-moments.is-dragging { box-shadow: none; }
+@media not all and (pointer: fine) and (min-width: 768px) {
+  .live-moments .panel-corner-btn { display: none; }
+}
 
 .live-moment-card,
 .live-moment-row {
