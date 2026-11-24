@@ -11,9 +11,9 @@
  * margin — transmit power, both antenna gains, cable loss, sensitivity
  * and the environment loss (#962) — is applied here, through a 256-entry
  * lookup table built from CSS variables, so moving those sliders
- * recolours the same pixels without a request. Heights, radius,
- * frequency and the model (Bullington or delta-Bullington, #941 M2)
- * change the loss and ask again.
+ * recolours the same pixels without a request. Heights, radius and the
+ * model (Bullington or delta-Bullington, #941 M2) change the loss and
+ * ask again.
  *
  * #941 M2 — nodes in reach: the response lists the repeaters and rooms
  * inside the radius with their predicted path loss. The panel counts them
@@ -34,22 +34,25 @@
   // The other keys of a reach link. They are namespaced (r…) because the
   // profile's link already uses ha and freq on the same #/map hash.
   var KEYS = {
-    tx: 'rtx', rx: 'rrx', radius: 'rkm', freq: 'rmhz',
+    tx: 'rtx', rx: 'rrx', radius: 'rkm',
     power: 'rpwr', txGain: 'rgtx', rxGain: 'rgrx', loss: 'rloss', sens: 'rsens', env: 'renv'
   };
   // The link's two words (#941 M2): the model, and which nodes in reach
   // the list shows.
+  // #960: the frequency is the server's (firmware, else the default), shown
+  // read-only. Old links may carry rmhz: it is ignored and dropped.
+  var LEGACY_KEYS = ['rmhz'];
   var MODEL_KEY = 'rmodel', LIST_KEY = 'rlist';
   var MODELS = { bullington: 'Bullington (P.526 §4.5.1)', delta: 'Delta-Bullington (P.526 §4.5.2)' };
   var LIST_FILTERS = ['good', 'marginal', 'weak', 'all'];
   // [min, max, decimals]. Request bounds mirror cmd/server's grammar;
   // budget bounds mirror resolveCoverageRadio.
   var BOUNDS = {
-    tx: [0, 100, 1], rx: [0, 100, 1], radius: [1, 60, 1], freq: [150, 2500, 3],
+    tx: [0, 100, 1], rx: [0, 100, 1], radius: [1, 60, 1],
     power: [-10, 30, 1], txGain: [-10, 20, 1], rxGain: [-10, 20, 1], loss: [0, 30, 1], sens: [-150, -80, 1],
     env: [0, 60, 1]
   };
-  var REQUEST_FIELDS = ['tx', 'rx', 'radius', 'freq'];
+  var REQUEST_FIELDS = ['tx', 'rx', 'radius'];
   var BUDGET_FIELDS = ['power', 'txGain', 'rxGain', 'loss', 'sens', 'env'];
   var RADIO_KEYS = { power: 'txPowerDbm', txGain: 'antennaGainDbi', rxGain: 'rxGainDbi', loss: 'lossDb', sens: 'sensitivityDbm',
     env: 'environmentLossDb' };
@@ -165,6 +168,7 @@
     params.delete(MODEL_KEY);
     params.delete(LIST_KEY);
     Object.keys(KEYS).forEach(function (f) { params.delete(KEYS[f]); });
+    LEGACY_KEYS.forEach(function (k) { params.delete(k); });
     Object.keys(ser || {}).forEach(function (k) { params.set(k, ser[k]); });
     var qs = params.toString();
     return qs ? (base || '#') + '?' + qs : base;
@@ -174,7 +178,7 @@
    * that change the loss. The budget never reaches the server. */
   function requestURL(st) {
     var q = 'at=' + encodeURIComponent(atString(st.at));
-    var server = { tx: 'ha', rx: 'hr', radius: 'r', freq: 'freq' };
+    var server = { tx: 'ha', rx: 'hr', radius: 'r' };
     REQUEST_FIELDS.forEach(function (f) {
       if (typeof st[f] === 'number') q += '&' + server[f] + '=' + encodeURIComponent(String(st[f]));
     });
@@ -558,7 +562,7 @@
       input.type = kind;
       input.min = String(f === 'radius' ? 1 : b[0]);
       input.max = String(f === 'radius' ? (cfg.maxRadiusKm || b[1]) : b[1]);
-      input.step = f === 'freq' ? '0.001' : (kind === 'range' ? '1' : '0.5');
+      input.step = kind === 'range' ? '1' : '0.5';
       input.setAttribute('data-testid', testid);
       input.setAttribute('aria-label', label + (unit ? ' (' + unit + ')' : ''));
       row.appendChild(input);
@@ -618,7 +622,6 @@
       field(geo, 'tx', 'Antenna height', 'm', 'number', 'reach-tx');
       field(geo, 'rx', 'Receiver height', 'm', 'number', 'reach-rx');
       field(geo, 'radius', 'Radius', 'km', 'number', 'reach-radius');
-      field(geo, 'freq', 'Frequency', 'MHz', 'number', 'reach-freq');
       REQUEST_FIELDS.forEach(function (f) { ui[f].addEventListener('input', onGeometryInput); });
       var mrow = el('label', 'reach-field');
       mrow.appendChild(el('span', 'reach-field-label', 'Model'));
@@ -633,6 +636,9 @@
       ui.modelSelect.addEventListener('change', onModelChange);
       mrow.appendChild(ui.modelSelect);
       geo.appendChild(mrow);
+      ui.freqUsed = el('p', 'reach-freq-used');
+      ui.freqUsed.setAttribute('data-testid', 'reach-freq-used');
+      geo.appendChild(ui.freqUsed);
       panel.appendChild(geo);
 
       var bud = el('fieldset', 'reach-group');
@@ -832,12 +838,15 @@
     function syncInputs() {
       if (!panel || !state) return;
       var p = data && data.params;
-      var resolved = { tx: p && p.txHeightM, rx: p && p.rxHeightM, radius: p && p.radiusKm, freq: p && p.freqMHz };
-      if (!p) resolved = { tx: null, rx: cfg.rxHeightM, radius: cfg.radiusKm, freq: null };
+      var resolved = { tx: p && p.txHeightM, rx: p && p.rxHeightM, radius: p && p.radiusKm };
+      if (!p) resolved = { tx: null, rx: cfg.rxHeightM, radius: cfg.radiusKm };
       REQUEST_FIELDS.forEach(function (f) {
         var v = typeof state[f] === 'number' ? state[f] : resolved[f];
         if (global.document.activeElement !== ui[f]) ui[f].value = v === null || v === undefined ? '' : String(v);
       });
+      ui.freqUsed.textContent = p && typeof p.freqMHz === 'number'
+        ? 'Frequency ' + fmt(p.freqMHz, 3) + ' MHz' + (p.freqSource ? ' (' + p.freqSource + ')' : '')
+        : '';
       var bv = budgetValues(state, radio);
       BUDGET_FIELDS.forEach(function (f) {
         if (global.document.activeElement !== ui[f]) ui[f].value = String(bv[f]);

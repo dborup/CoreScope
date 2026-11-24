@@ -340,6 +340,41 @@ function rasterFor(c, radiusKm) {
     } finally { await ctx.close(); }
   });
 
+  // ── 2b (#960): the frequency is shown, not edited ───────────────────────
+  await step('#960 the frequency is read-only with its source, rmhz is ignored and no freq is sent', async () => {
+    const { ctx, page, rec } = await newCtx({});
+    try {
+      await page.goto(`${BASE}/#/map?reach=${AARHUS.lat},${AARHUS.lon}&rkm=20&rmhz=915`, { waitUntil: 'domcontentloaded' });
+      await waitLayer(page);
+      assert(await page.locator('[data-testid="reach-freq"]').count() === 0, 'the frequency field is still rendered');
+      assert(await page.locator('.reach-panel input[type="number"]').count() === 3, 'geometry inputs: expected 3');
+      assert(!/freq/.test(rec.coverage[0]), 'freq was sent: ' + rec.coverage[0]);
+      const used = (await page.textContent('[data-testid="reach-freq-used"]')).trim();
+      assert(/869\.618 MHz/.test(used) && /firmware/.test(used) && !/915/.test(used), 'frequency used: ' + used);
+      assert(await page.locator('[data-testid="reach-freq-used"] input').count() === 0, 'the frequency used is editable');
+      await shot(page, '960-desktop.jpg', '[data-testid="reach-panel"]');
+      await page.waitForTimeout(400);
+      noNetwork(rec);
+    } finally { await ctx.close(); }
+  });
+
+  await step('#960 375×560 touch, cold #/map: taps open the panel, the frequency is text, not a field', async () => {
+    const { ctx, page, rec } = await newCtx({ viewport: { width: 375, height: 560 }, touch: true });
+    try {
+      await page.goto(`${BASE}/#/map?lat=${AARHUS.lat}&lon=${AARHUS.lon}&zoom=10`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
+      await page.locator('[data-testid="map-reach-toggle"]').tap();
+      const m = await page.locator('#leaflet-map').boundingBox();
+      await page.touchscreen.tap(m.x + m.width / 2, m.y + 60);
+      await waitLayer(page);
+      assert(await page.locator('[data-testid="reach-freq"]').count() === 0, 'the frequency field is rendered');
+      assert(/869\.618 MHz \(firmware\)/.test(await page.textContent('[data-testid="reach-freq-used"]')), 'frequency used');
+      assert(!/freq/.test(rec.coverage[0]), 'freq was sent: ' + rec.coverage[0]);
+      await page.evaluate(() => document.querySelector('[data-testid="reach-freq-used"]').scrollIntoView({ block: 'center' }));
+      await shot(page, '960-phone.jpg');
+    } finally { await ctx.close(); }
+  });
+
   // ── 3: a link restores the layer ────────────────────────────────────────
   await step('a #/map?reach= link restores the layer, sends r but never the power', async () => {
     const { ctx, page, rec } = await newCtx({});
