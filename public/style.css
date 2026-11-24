@@ -6868,6 +6868,21 @@ body.embed .warmup-pills { display: none !important; }
      head (the sheet is 46% of the map), so a thumb's height of the sheet
      always shows beside it to swipe the sheet by. */
   .reach-nir-list { max-height: clamp(96px, calc(46vh - 150px), 220px); }
+  /* Landscape phone (touch, wider than tall, under 480 px high): the map is
+     only about 250 px tall, so no sheet height clears the map controls
+     (zoom, layers, the toggles reach down to y=218 at 640x360) and a
+     full-width sheet always covers some. So the sheet stands between the
+     two control columns, as on desktop (68 px in from each side, 30 px up
+     from the bottom, clear of the attribution), and may use the map's
+     height less its top margin. The list is what is left of its body less
+     a strip (about 80 px) of sheet to swipe by: the sheet is the viewport
+     less 150 px, the head 55 px. One row is the least it shows: 44 px and
+     the list's 1 px top border. The bound is 479 px, so a 640x480 window is
+     not caught, and touch only: a mouse has no swipe to trap. */
+  @media (max-height: 479px) and (orientation: landscape) and (pointer: coarse) {
+    .reach-panel { left: 68px; right: 68px; bottom: 30px; max-height: calc(100% - 42px); }
+    .reach-nir-list { max-height: max(45px, calc(100vh - 285px)); }
+  }
   /* The head and its × stay at the top of the scrolled sheet; it covers
      the sheet's top padding so nothing scrolls past above it. */
   .reach-head {
