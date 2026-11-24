@@ -362,6 +362,7 @@
     map = L.map('leaflet-map', { zoomControl: true }).setView(initCenter, initZoom);
     // #959: the node popup's Terrain profile and Predicted reach, on open.
     map.on('popupopen', onNodePopupOpen);
+    map.on('popupopen popupclose', onPopupSheet);
 
     // If navigated with ?node=PUBKEY, highlight that node after markers load
     targetNodeKey = urlParams.get('node') || null;
@@ -2609,6 +2610,16 @@
       </div>`;
   }
 
+  /* findNodeByKey answers the Map page's node with that public key, any
+   * case, or null. One O(n) scan, only ever on a user's action. */
+  function findNodeByKey(key) {
+    var want = String(key || '').toLowerCase();
+    for (var i = 0; i < nodes.length; i++) {
+      if ((nodes[i].public_key || '').toLowerCase() === want) return nodes[i];
+    }
+    return null;
+  }
+
   /* #959: the node popup offers node detail's Terrain profile and
    * Predicted reach (roles.js nodeToolActions), built as DOM when a popup
    * opens: the popup string never carries a node field into an action, and
@@ -2617,10 +2628,7 @@
     var box = e.popup && e.popup.getElement() && e.popup.getElement().querySelector('.map-popup[data-node-popup]');
     var key = e.popup && e.popup._source && e.popup._source._nodeKey;
     if (!box || !key || typeof window.nodeToolActions !== 'function') return;
-    var want = String(key).toLowerCase(), node = null;
-    for (var i = 0; i < nodes.length && !node; i++) {
-      if ((nodes[i].public_key || '').toLowerCase() === want) node = nodes[i];
-    }
+    var node = findNodeByKey(key);
     if (!node) return;
     var popup = e.popup, row = document.createElement('div');
     row.className = 'map-popup-tools';
@@ -2634,6 +2642,16 @@
     })).then(function () {
       if (row.firstChild && popup.isOpen()) popupRefit(popup);
     });
+  }
+
+  /* onPopupSheet marks #map-wrap while a popup is open. On a phone the
+   * reach's bottom sheet (z-index above Leaflet's panes) covers the lower
+   * half of the map, and a node popup with its actions is taller than the
+   * map left above the sheet, so no pan can clear it: the sheet steps aside
+   * (style.css) until the popup closes, and the reach stays on the map. */
+  function onPopupSheet(e) {
+    var wrap = document.getElementById('map-wrap');
+    if (wrap) wrap.classList.toggle('has-map-popup', e.type === 'popupopen');
   }
 
   /* popupRefit is Leaflet 1.9.4's Popup.update() without its content step,
@@ -2858,13 +2876,8 @@
   function profileResolveNode(pubkey) {
     if (!pubkey) return null;
     var want = String(pubkey).toLowerCase();
-    var i, n;
-    for (i = 0; i < nodes.length; i++) {
-      n = nodes[i];
-      if ((n.public_key || '').toLowerCase() === want) {
-        return { name: n.name || n.adv_name || null, lat: n.lat, lon: n.lon, role: n.role || null };
-      }
-    }
+    var i, n = findNodeByKey(want);
+    if (n) return { name: n.name || n.adv_name || null, lat: n.lat, lon: n.lon, role: n.role || null };
     for (i = 0; i < observers.length; i++) {
       n = observers[i];
       if ((n.id || '').toLowerCase() === want) {
@@ -2896,11 +2909,7 @@
    * both honest and useful: the profile is measured from exactly where
    * the observer sits, it just is not labelled with its name. */
   function profileIsNode(pubkey) {
-    var want = String(pubkey || '').toLowerCase();
-    for (var i = 0; i < nodes.length; i++) {
-      if ((nodes[i].public_key || '').toLowerCase() === want) return true;
-    }
-    return false;
+    return !!findNodeByKey(pubkey);
   }
 
   function profileRefLatLng(ref) {

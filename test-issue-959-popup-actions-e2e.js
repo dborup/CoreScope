@@ -8,8 +8,8 @@
  * cmd/server sends, and /api/terrain/coverage and its raster are a stub in
  * the server's shape. Nothing reaches a real network.
  *
- * Asserts, on a 960×720 desktop and a 375×560 touch phone, from a cold
- * #/map with real clicks and taps:
+ * Asserts, on a 960×720 desktop and 375×560 and 360×640 touch phones, from
+ * a cold #/map with real clicks and taps:
  *   1. rendering the markers builds no action (no per-marker work); one
  *      popup open builds each action once and sends no request, and the
  *      handler costs well under 1 ms per open, a full lookup included;
@@ -20,10 +20,15 @@
  *   3. Predicted reach opens the reach for that node in place: one request
  *      for that key, the panel names the node, reach=<key> in the address
  *      bar, no hashchange, the same map (no reload) and the same view;
- *   4. Terrain profile from a reopened popup starts the tool with that node
- *      as A and the picker armed for B: no hashchange, the same map,
- *      profile=<key> in the address bar, no profile request yet, and the
- *      reach put away;
+ *   4. with the reach still open, another node's popup has both chips under
+ *      a finger (on a phone the reach sheet steps aside while the popup is
+ *      open and comes back when it closes), and its Terrain profile starts
+ *      the tool with that node as A and the picker armed for B: no
+ *      hashchange, the same map, profile=<key> in the address bar, no
+ *      profile request yet, and the reach put away;
+ *   4b. on the desktop, a click with Ctrl, Meta, Shift or Alt, or with a
+ *      button other than the primary one, is left to the link: the popup
+ *      is not taken over and no tool opens;
  *   5. with both features off the popup has no action; with only the reach
  *      on, only Predicted reach;
  *   6. no page error, and no request leaves localhost.
@@ -218,9 +223,11 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   }
 
   /* pickMarker marks a node marker a finger can hit, clear of the map's
-   * buttons and with room for its popup above it, and answers its key. */
-  async function pickMarker(page) {
-    const key = await page.evaluate(() => {
+   * buttons and with room for its popup above it, and answers its key.
+   * o.exclude: a key not to pick. o.anyHeight: anywhere a finger hits it
+   * (with the phone's reach sheet open, only the map above it is free). */
+  async function pickMarker(page, o) {
+    const key = await page.evaluate((o) => {
       const map = window.__maps[window.__maps.length - 1];
       const size = map.getSize();
       const box = map.getContainer().getBoundingClientRect();
@@ -232,7 +239,9 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         if (html.indexOf('href="#/nodes/') < 0) return;
         const r = l._icon.getBoundingClientRect();
         const x = r.left + r.width / 2, y = r.top + r.height / 2;
-        if (x < box.left + 60 || x > box.left + size.x - 60 || y < box.top + size.y * 0.45 || y > box.top + size.y - 40) return;
+        if (x < box.left + 60 || x > box.left + size.x - 60 || y > box.top + size.y - 40) return;
+        if (y < box.top + (o.anyHeight ? 40 : size.y * 0.45)) return;
+        if (o.exclude && String(l._nodeKey).toLowerCase() === o.exclude) return;
         const hit = document.elementFromPoint(x, y);
         if (!hit || !(hit === l._icon || l._icon.contains(hit))) return;
         found.push({ l, d: Math.abs(x - box.left - size.x / 2) });
@@ -242,7 +251,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       document.querySelectorAll('[data-test-marker]').forEach(e => e.removeAttribute('data-test-marker'));
       found[0].l._icon.setAttribute('data-test-marker', '1');
       return String(found[0].l._nodeKey).toLowerCase();
-    });
+    }, o || {});
     assert(key && byKey.has(key), 'no node marker to tap: ' + key);
     return byKey.get(key);
   }
@@ -272,7 +281,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   }
 
   async function shot(page, name) {
-    if (!SHOTS) return;
+    if (!SHOTS || /-\.jpg$/.test(name)) return;
     await page.screenshot({ path: path.join(SHOTS, name), type: 'jpeg', quality: 60 });
   }
 
@@ -287,6 +296,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   for (const o of [
     { label: 'desktop 960×720', viewport: { width: 960, height: 720 }, touch: false, shot: 'desktop' },
     { label: 'phone 375×560', viewport: { width: 375, height: 560 }, touch: true, shot: 'phone' },
+    { label: 'phone 360×640', viewport: { width: 360, height: 640 }, touch: true, shot: '' },
   ]) {
     const { ctx, page, rec } = await newCtx(o);
     try {
@@ -384,6 +394,59 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         await shot(page, `959-popup-${o.shot}.jpg`);
       });
 
+      if (!o.touch) {
+        await step(`${o.label}: a click with a modifier or another button follows the link, not the tool (#959 F2)`, async () => {
+          // A listener on window runs after the chip's own: it reads whether
+          // the chip took the click over, then cancels the navigation itself
+          // so no new tab or window leaves this page.
+          await page.evaluate(() => {
+            window.__chipClicks = [];
+            window.__chipSpy = (e) => {
+              const a = e.target.closest && e.target.closest('.map-popup-tools a');
+              if (!a) return;
+              window.__chipClicks.push({ testid: a.getAttribute('data-testid'), taken: e.defaultPrevented });
+              e.preventDefault();
+            };
+            window.addEventListener('click', window.__chipSpy);
+          });
+          const before = rec.api.length;
+          const kept = async (what) => {
+            await page.waitForTimeout(150);
+            const r = await page.evaluate(() => ({
+              last: window.__chipClicks[window.__chipClicks.length - 1] || null,
+              popup: !!document.querySelector('.leaflet-popup .map-popup-tools'),
+            }));
+            assert(r.last && !r.last.taken && r.popup, what + ' was taken over by the chip: ' + JSON.stringify(r));
+          };
+          for (const sel of [REACH, PROFILE]) {
+            for (const mod of ['Control', 'Meta', 'Shift', 'Alt']) {
+              const b = await settledBox(page, sel);
+              await page.keyboard.down(mod);
+              await page.mouse.click(b.x, b.y);
+              await page.keyboard.up(mod);
+              await kept(mod + '-click on ' + sel);
+            }
+            // Chromium sends no click for a middle or right press (auxclick
+            // instead), so a non-primary click is dispatched as a script would.
+            await page.$eval(sel, (a) => a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 1 })));
+            await kept('a middle-button click on ' + sel);
+          }
+          await page.waitForTimeout(300);
+          const s = await page.evaluate(() => ({
+            off: window.removeEventListener('click', window.__chipSpy),
+            clicks: window.__chipClicks,
+            popup: !!document.querySelector('.leaflet-popup .map-popup-tools'),
+            reach: !!document.querySelector('[data-testid="reach-panel"]:not([hidden])'),
+            profile: !!document.querySelector('[data-testid="tp-panel"].is-open'),
+          }));
+          assert(s.clicks.length === 10, 'chip clicks seen: ' + JSON.stringify(s.clicks));
+          const taken = s.clicks.filter(c => c.taken);
+          assert(taken.length === 0, 'the chip took over a click meant for the link: ' + JSON.stringify(taken));
+          assert(s.popup && !s.reach && !s.profile, 'a tool opened or the popup closed: ' + JSON.stringify(s));
+          assert(rec.coverage.length === 0 && rec.api.length === before, 'requests: ' + rec.api.slice(before).join(', '));
+        });
+      }
+
       await step(`${o.label}: Predicted reach opens that node's reach in place, keeping the map and its view`, async () => {
         await page.evaluate(() => document.getElementById('leaflet-map').setAttribute('data-test-keep', '1'));
         const v0 = await view(page);
@@ -407,13 +470,52 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         await shot(page, `959-reach-${o.shot}.jpg`);
       });
 
-      await step(`${o.label}: Terrain profile starts the tool with that node as A, in place`, async () => {
-        // The phone's reach panel covers the lower map; close it first, as
-        // a user would, so the marker is in reach of a finger again.
-        if (o.touch) await tap(page, '[data-testid="reach-close"]', true);
-        await page.waitForTimeout(300);
+      await step(`${o.label}: with the reach open, another node's popup has both chips under a finger (#959 F1)`, async () => {
+        // The issue's flow: the reach stays open, and the next node is one a
+        // finger can reach (on a phone, above the reach sheet).
+        node = await pickMarker(page, { exclude: node.pk, anyHeight: o.touch });
         await openPopup(page, o.touch);
         await page.waitForSelector(PROFILE, { timeout: 5000 });
+        await page.waitForSelector(REACH, { timeout: 5000 });
+        await page.waitForTimeout(500);
+        const hits = await page.evaluate((sels) => sels.map((sel) => {
+          const e = document.querySelector(sel);
+          const r = e.getBoundingClientRect();
+          const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+          const owner = hit && hit.closest('[data-testid]');
+          return { sel, ok: !!hit && (hit === e || e.contains(hit)), hit: owner ? owner.getAttribute('data-testid') : (hit && hit.className) || null };
+        }), [PROFILE, REACH]);
+        for (const h of hits) assert(h.ok, `${h.sel} is covered by ${h.hit}`);
+        const sheet = () => page.evaluate(() => {
+          const p = document.querySelector('[data-testid="reach-panel"]');
+          return { open: !!p && !p.hidden, shown: !!p && getComputedStyle(p).display !== 'none' };
+        });
+        const s0 = await sheet();
+        assert(s0.open, 'the reach closed when the popup opened');
+        if (o.touch) {
+          assert(!s0.shown, 'the phone\'s reach sheet stayed over the popup');
+          // It comes back when the popup closes, and steps aside again for
+          // the next one. (Leaflet panned the marker down to fit its popup,
+          // so it may now sit under the sheet: reopened by script.)
+          await page.evaluate(() => window.__maps[window.__maps.length - 1].closePopup());
+          const s1 = await sheet();
+          assert(s1.open && s1.shown, 'the reach sheet did not come back: ' + JSON.stringify(s1));
+          await page.evaluate(() => {
+            const m = window.__maps[window.__maps.length - 1];
+            const icon = document.querySelector('[data-test-marker]');
+            m.eachLayer((l) => { if (l._icon === icon) l.openPopup(); });
+          });
+          await page.waitForSelector(PROFILE, { timeout: 5000 });
+          await page.waitForTimeout(500);
+          const s2 = await sheet();
+          assert(s2.open && !s2.shown, 'the sheet did not step aside again: ' + JSON.stringify(s2));
+        } else {
+          assert(s0.shown, 'the desktop reach panel was hidden by a popup');
+        }
+        await shot(page, `959-popup-over-reach-${o.shot}.jpg`);
+      });
+
+      await step(`${o.label}: Terrain profile starts the tool with that node as A, in place`, async () => {
         const v0 = await view(page);
         await tap(page, PROFILE, o.touch);
         await page.waitForSelector('[data-testid="tp-panel"].is-open', { timeout: 10000 });

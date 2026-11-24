@@ -19,7 +19,9 @@
  *      id, and appends nothing to a row that left the page;
  *   5. the wiring: node detail and the Map popup both go through the shared
  *      builder (no third copy of the gates), the popup string itself never
- *      carries an action, and the popup mounts on Leaflet's popupopen.
+ *      carries an action, and the popup mounts on Leaflet's popupopen;
+ *   6. one lookup of a node by key in map.js (findNodeByKey), and on a
+ *      phone the reach sheet steps aside while a popup is open.
  *
  * Usage: node test-issue-959-popup-actions.js
  */
@@ -265,6 +267,42 @@ test('the popup chips use CSS variables only', () => {
   for (const r of rules) assert.ok(!/#[0-9a-f]{3,8}\b|rgb\(|hsl\(/i.test(r.replace(/var\([^)]*\)/g, '')), 'hard-coded colour: ' + r.trim());
   assert.ok(rules.some(r => /\.leaflet-container \.map-popup-tools \.node-action-chip[^{]*\{[^}]*color:\s*var\(--text-on-accent\)/.test(r)),
     'Leaflet\'s popup link colour must not win over the chip text');
+});
+
+test('one node lookup by key: findNodeByKey, not a scan in each caller (#959 F3)', () => {
+  const scans = mapJs.match(/\.public_key \|\| ''\)\.toLowerCase\(\) === want/g) || [];
+  assert.strictEqual(scans.length, 1, 'linear scans of nodes by public key: ' + scans.length);
+  const i = mapJs.indexOf('function findNodeByKey(');
+  assert.ok(i > 0 && mapJs.indexOf('=== want', i) < mapJs.indexOf('\n  }\n', i), 'the one scan lives in findNodeByKey');
+  for (const fn of ['onNodePopupOpen', 'profileResolveNode', 'profileIsNode']) {
+    const j = mapJs.indexOf('function ' + fn + '(');
+    assert.ok(j > 0, 'no ' + fn);
+    assert.ok(/findNodeByKey\(/.test(mapJs.slice(j, mapJs.indexOf('\n  }\n', j))), fn + ' must use findNodeByKey');
+  }
+});
+
+/* enclosingMedia answers the @media preludes a CSS rule sits in. */
+function enclosingMedia(css, at) {
+  const stack = [];
+  const re = /([^{}]*)\{|\}/g;
+  let m;
+  while ((m = re.exec(css)) && m.index < at) {
+    if (m[0] === '}') stack.pop();
+    else stack.push(/^@media/.test(m[1].trim()) ? m[1].trim() : null);
+  }
+  return stack.filter(Boolean);
+}
+
+test('on a phone the reach sheet steps aside while a map popup is open (#959 F1)', () => {
+  assert.ok(/map\.on\('popupopen popupclose', onPopupSheet\)/.test(mapJs), 'no popupopen/popupclose handler for the sheet');
+  const i = mapJs.indexOf('function onPopupSheet(');
+  const body = mapJs.slice(i, mapJs.indexOf('\n  }\n', i));
+  assert.ok(i > 0 && /classList\.toggle\('has-map-popup', e\.type === 'popupopen'\)/.test(body), 'onPopupSheet must mark #map-wrap while a popup is open');
+  const css = read('style.css').replace(/\/\*[\s\S]*?\*\//g, '');
+  const at = css.search(/\.has-map-popup \.reach-panel\s*\{\s*display:\s*none;\s*\}/);
+  assert.ok(at > 0, 'no .has-map-popup .reach-panel { display: none }');
+  const media = enclosingMedia(css, at);
+  assert.deepStrictEqual(media, ['@media (max-width: 640px)'], 'only the phone\'s bottom sheet steps aside: ' + JSON.stringify(media));
 });
 
 Promise.all(pending).then(() => {

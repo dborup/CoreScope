@@ -6883,6 +6883,11 @@ body.embed .warmup-pills { display: none !important; }
     .reach-panel { left: 68px; right: 68px; bottom: 30px; max-height: calc(100% - 42px); }
     .reach-nir-list { max-height: max(45px, calc(100vh - 285px)); }
   }
+  /* #959: a map popup is taller than the map above the sheet, and the
+     sheet sits above Leaflet's panes, so it would cover the popup's links.
+     It steps aside while a popup is open (map.js onPopupSheet); the reach
+     stays on the map and the sheet comes back when the popup closes. */
+  .has-map-popup .reach-panel { display: none; }
   /* The head and its × stay at the top of the scrolled sheet; it covers
      the sheet's top padding so nothing scrolls past above it. */
   .reach-head {
