@@ -207,8 +207,11 @@ func (s *Store) buildAndPersistNeighborEdges() (int, error) {
 //
 // Resolution of hop-prefix → full pubkey is done via a one-shot
 // SELECT of (lowered) pubkey prefixes from nodes. Prefixes with
-// multiple candidates are skipped (matches the conservative
-// resolution rule in cmd/server/extractEdgesFromObs).
+// multiple candidates are skipped. The server's live builder,
+// cmd/server/neighbor_graph.go buildFromStoreWithNodes, is less strict: it
+// keeps an ambiguous prefix as a prefix edge and resolves it later
+// (resolveAmbiguousEdges, disambiguate). The flood-only last-hop rule and
+// the self-edge guards are the same on both sides.
 func (s *Store) buildNeighborEdges() (neighborEdgesBuild, error) {
 	var b neighborEdgesBuild
 	prefixIdx, err := buildPrefixIndex(s.db)
@@ -454,9 +457,11 @@ func isRelayRole(role string) bool {
 }
 
 // resolvePrefix returns the single resolved pubkey if exactly one
-// candidate matches, otherwise (zero || multiple), it returns ok=false
-// (matches the conservative server-side resolver in
-// cmd/server/extractEdgesFromObs).
+// candidate matches, otherwise (zero || multiple), it returns ok=false.
+// This is stricter than the server's live builder,
+// cmd/server/neighbor_graph.go buildFromStoreWithNodes, which keeps an
+// ambiguous prefix as a prefix edge and resolves it later
+// (upsertEdgeWithCandidates, disambiguate).
 func resolvePrefix(idx prefixIndex, hop string) (string, bool) {
 	h := strings.ToLower(hop)
 	candidates := idx[h]
