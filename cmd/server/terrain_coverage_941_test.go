@@ -305,6 +305,11 @@ func TestCoverage941_UpstreamCallsWithinBudget(t *testing.T) {
 		return nil
 	}
 	env := newCoverageEnv(t, src, CoverageConfig{}, nil, nil)
+	// This test pins the upstream calls, not the wall clock: under -race a
+	// cold 40 km reach takes about as long as coverageDeadline, so a 504
+	// failed it at random (#967). TestCoverage941_Deadline and
+	// TestCoverage941_PerCallTimeout pin the bounds themselves.
+	env.c.deadline, env.c.perCall = time.Hour, time.Hour
 	e0, n0 := dhm.ToUTM32(56.1629, 10.2039)
 	planned := 0
 	for _, tl := range dhm.PlanCoverageTiles(e0, n0, 40000, 30) {
@@ -556,6 +561,29 @@ func TestCoverage941_Deadline(t *testing.T) {
 	wantError(t, env.get(reachQuery("56.1629,10.2039", "r=5")), 504, "terrain data timed out")
 	if el := time.Since(start); el > 2*time.Second {
 		t.Fatalf("took %v", el)
+	}
+}
+
+// One tile's fetch has its own bound, coveragePerCall by default, well
+// inside the computation's: a tile that never answers is 504 at it.
+func TestCoverage941_PerCallTimeout(t *testing.T) {
+	src := newFakeElevation(t, flatElev(3))
+	if c := newCoverageEnv(t, src, CoverageConfig{}, nil, nil).c; c.perCall != coveragePerCall || c.deadline != coverageDeadline {
+		t.Fatalf("defaults: per call %v, deadline %v", c.perCall, c.deadline)
+	}
+	var left atomic.Int64
+	src.hook = func(ctx context.Context, _ dhm.RasterRequest) error {
+		if dl, ok := ctx.Deadline(); ok {
+			left.Store(int64(time.Until(dl)))
+		}
+		<-ctx.Done()
+		return dhm.ContextFailure(ctx.Err())
+	}
+	env := newCoverageEnv(t, src, CoverageConfig{}, nil, nil)
+	env.c.deadline, env.c.perCall = time.Hour, 100*time.Millisecond
+	wantError(t, env.get(reachQuery("56.1629,10.2039", "r=5")), 504, "terrain data timed out")
+	if l := time.Duration(left.Load()); l > env.c.perCall {
+		t.Fatalf("a fetch had %v left, per-call bound %v", l, env.c.perCall)
 	}
 }
 
