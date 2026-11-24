@@ -131,10 +131,11 @@ test('the request carries the centre and the geometry, never the budget', () => 
 
 // ── 3. Budget and classes ────────────────────────────────────────────────
 
-test('the default budget is 22 + 3 + 3 + 130 = 158 dB (M0 §3.5)', () => {
-  assert.strictEqual(PR.budgetOf({}, null), 158);
-  assert.strictEqual(PR.budgetOf(null, { txPowerDbm: 20, antennaGainDbi: 5, rxGainDbi: 3, lossDb: 1, sensitivityDbm: -125 }), 152);
-  assert.strictEqual(PR.budgetOf({ power: 10, loss: 4 }, { txPowerDbm: 20, antennaGainDbi: 5, rxGainDbi: 3, lossDb: 1, sensitivityDbm: -125 }), 139);
+test('the default budget is 22 + 3 + 3 + 130 = 158 dB (M0 §3.5), less the environment loss (#962)', () => {
+  assert.strictEqual(PR.budgetOf({}, { environmentLossDb: 0 }), 158);
+  assert.strictEqual(PR.budgetOf({}, null), 133, '#962: 25 dB environment loss by default');
+  assert.strictEqual(PR.budgetOf(null, { txPowerDbm: 20, antennaGainDbi: 5, rxGainDbi: 3, lossDb: 1, sensitivityDbm: -125, environmentLossDb: 0 }), 152);
+  assert.strictEqual(PR.budgetOf({ power: 10, loss: 4 }, { txPowerDbm: 20, antennaGainDbi: 5, rxGainDbi: 3, lossDb: 1, sensitivityDbm: -125, environmentLossDb: 0 }), 139);
 });
 
 test('margin classes: a boundary belongs to the better class', () => {

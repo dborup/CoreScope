@@ -57,6 +57,8 @@ const RADIO = { txPowerDbm: 22, antennaGainDbi: 3, rxGainDbi: 3, lossDb: 0, sens
 const COVERAGE_BLOCK = {
   enabled: true, maxRadiusKm: 40, radiusKm: 40, resolutionM: 30, rxHeightM: 2,
   pointAntenna: { m: 2, source: 'point-default' }, radio: RADIO, dhm: true,
+  // #962: no environment loss, so these numbers stay the 158 dB budget's.
+  environmentLossDb: 0,
 };
 const AARHUS = { lat: 56.1629, lon: 10.2039 };
 

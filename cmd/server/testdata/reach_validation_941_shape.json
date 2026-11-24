@@ -52,6 +52,7 @@
   "params": {
     "budgetDb": "number",
     "cableLossDb": "number",
+    "environmentLossDb": "number",
     "freqMHz": "number",
     "gainsDbi": "number",
     "k": "number",

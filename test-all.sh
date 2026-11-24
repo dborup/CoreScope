@@ -201,6 +201,7 @@ run test-issue-792-elevation-overlay.js
 run test-issue-860-elevation-ramp.js
 run test-issue-738-foreign-fill-ui.js
 run test-issue-941-predicted-reach.js
+run test-issue-962-reach-env-loss.js
 run test-issue-730-buildings-ui.js
 run test-issue-752-inset-attribution.js
 run test-issue-741-base-layer-factory.js
