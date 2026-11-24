@@ -17,19 +17,33 @@
  *      click after a drag clears the drag.
  *   5. Escape mid-drag reverts; reset (resetPanelPositions) puts it back at
  *      bc and forgets the drag and the corner.
- *   6. Lifecycle: Live → Packets → Live three times, and Moments off/on
+ *   6. The drag gate off and on again (1440 → 700 → 1440): the window at
+ *      tr leaves its corner while narrow and gets it back when wide.
+ *   7. Lifecycle: Live → Packets → Live three times, and Moments off/on
  *      three times, leave the live DragManager with the three panels plus
  *      this one, all in the document.
- *   7. Kiosk at 1440x900: a saved drag and corner do not move the kiosk
+ *   8. Kiosk at 1440x900: a saved drag and corner do not move the kiosk
  *      stack; it has no drag hooks and is not registered.
- *   8. Phone 375x560 with touch, cold from Home and the bottom-nav Live tab:
- *      a saved drag and corner change nothing, there is no corner button,
- *      a touch drag on the bar does not move it and the drawer opens.
+ *   9. Touch tablet 1024x768 (gate off): the bar shows, its corner button
+ *      is in the DOM but not visible.
+ *  10. Order: with live.js served without initMoments' MeshConfigReady
+ *      await, Moments start before init() makes the DragManager; on a first
+ *      mount and on a remount the window still joins that mount's manager
+ *      (not none, not the last mount's) and drags.
+ *  11. Phone 375x560 with touch, cold from Home and the bottom-nav Live tab:
+ *      a saved drag and corner change nothing, the corner button is not
+ *      visible, a touch drag on the bar does not move it and the drawer
+ *      opens.
+ *
+ * Every rect a press or an assertion depends on is read after
+ * tests/e2e-live-settle.js says the layout is final: right after a mount
+ * the window drops 52px when live.js sets the page height (review PR#961).
  *
  * Usage: BASE_URL=http://localhost:13581 node test-958-movable-moments-e2e.js
  */
 'use strict';
 const { chromium } = require('playwright');
+const { settleLive } = require('./tests/e2e-live-settle');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 if (!['localhost', '127.0.0.1', '[::1]'].includes(new URL(BASE).hostname)) throw new Error('local server only');
@@ -77,7 +91,10 @@ async function open(browser, opts) {
   h.ready = async () => {
     await page.waitForFunction(() => window._liveGetMap && window._liveGetMap() && window._liveMoments && window._liveMoments(), null, { timeout: 20000 });
     await page.waitForSelector('.live-moments-bar', { state: 'visible', timeout: 10000 });
+    await h.settle();
   };
+  // the rect read next is the one a press lands on (tests/e2e-live-settle.js)
+  h.settle = () => settleLive(page, '.live-moments');
   h.goto = async (hash) => {
     await page.goto(BASE + '/?r=' + Date.now() + '#/live?' + (hash || VIEW), { waitUntil: 'domcontentloaded' });
     await h.ready();
@@ -96,6 +113,7 @@ function state(page) {
       left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width,
       vw: innerWidth, vh: innerHeight,
       header: !!w.querySelector('.live-moments-bar.panel-header'),
+      cornerBtn: !!btn,
       cornerShown: !!(btn && btn.getClientRects().length && getComputedStyle(btn).visibility !== 'hidden'),
       drag: localStorage.getItem('panel-drag-liveMoments'),
       corner: localStorage.getItem('panel-corner-liveMoments'),
@@ -194,6 +212,7 @@ function near(a, b, tol) { return Math.abs(a - b) <= (tol || 2); }
       assert(s.right <= 1100 && s.left >= 0, 'clamped: ' + JSON.stringify(s));
       await d.page.setViewportSize({ width: 1440, height: 900 });
       await d.page.evaluate(() => window._panelCorner.resetPanelPositions());
+      await d.settle();
     });
 
     await step('bar buttons: a press on Pause that moves is no drag; Pause and the drawer still click', async () => {
@@ -265,6 +284,29 @@ function near(a, b, tol) { return Math.abs(a - b) <= (tol || 2); }
       assert(near((s.left + s.right) / 2, a.pageCx, 3) && near(s.vh - s.bottom, a.bottomGap, 3), 'back at the anchor: ' + JSON.stringify(s));
     });
 
+    await step('drag gate off and on again (narrow, then wide): the window gets its corner back', async () => {
+      await d.page.click('#liveMoments .panel-corner-btn'); // bc → tl
+      await d.page.click('#liveMoments .panel-corner-btn'); // tl → tr
+      const s0 = await state(d.page);
+      assert(s0.pos === 'tr' && s0.corner === 'tr', 'at tr: ' + JSON.stringify(s0));
+      // onDragMediaChange disables / enables the DragManager in the same
+      // call that takes / gives back the corner
+      await d.page.setViewportSize({ width: 700, height: 900 });
+      await d.page.waitForFunction(() => window._liveDragMgr.enabled === false, null, { timeout: 5000 });
+      await d.settle();
+      let s = await state(d.page);
+      assert(!s.pos && s.corner === 'tr', 'gate off: its own anchor, the corner kept: ' + JSON.stringify(s));
+      await d.page.setViewportSize({ width: 1440, height: 900 });
+      await d.page.waitForFunction(() => window._liveDragMgr.enabled === true, null, { timeout: 5000 });
+      await d.settle();
+      s = await state(d.page);
+      const a = await anchors(d.page);
+      assert(s.pos === 'tr' && s.corner === 'tr' && !s.dragged, 'tr again: ' + JSON.stringify(s));
+      assert(near(s.top, a.pageTop + 64, 2) && near(s.left, s0.left, 2) && near(s.right, s0.right, 2),
+        'on the tr anchor as before: ' + JSON.stringify([s0, s, a]));
+      await d.page.evaluate(() => window._panelCorner.resetPanelPositions());
+    });
+
     await step('lifecycle: three remounts and three Moments off/on leave one registration', async () => {
       for (let i = 0; i < 3; i++) {
         await d.page.evaluate(() => { location.hash = '#/packets'; });
@@ -278,6 +320,7 @@ function near(a, b, tol) { return Math.abs(a - b) <= (tol || 2); }
         await d.page.evaluate(() => { const t = document.getElementById('liveMomentsToggle'); t.checked = true; t.dispatchEvent(new Event('change')); });
         await d.page.waitForSelector('.live-moments-bar', { state: 'visible' });
       }
+      await d.settle();
       const r = await d.page.evaluate(() => {
         const m = window._liveDragMgr;
         return { n: m._panels.length, ids: m._panels.map((p) => p.id).sort().join(','),
@@ -311,15 +354,68 @@ function near(a, b, tol) { return Math.abs(a - b) <= (tol || 2); }
       await k.ctx.close();
     });
 
+    await step('touch tablet 1024x768 (drag gate off): the bar shows, its corner button does not', async () => {
+      const t = await open(browser, { viewport: { width: 1024, height: 768 }, touch: true });
+      await t.goto();
+      const env = await t.page.evaluate(() => ({ vw: innerWidth, gate: matchMedia('(pointer: fine) and (min-width: 768px)').matches }));
+      assert(env.vw === 1024 && !env.gate, 'a 1024px window with the drag gate off: ' + JSON.stringify(env));
+      const s = await state(t.page);
+      assert(s.id === 'liveMoments' && s.cornerBtn, 'a panel with its corner button in the DOM: ' + JSON.stringify(s));
+      assert(!s.cornerShown, 'corner button not visible: ' + JSON.stringify(s));
+      assert(!s.pos && !s.dragged, 'on its own anchor: ' + JSON.stringify(s));
+      assert(await t.page.isVisible('.live-moments-bar .live-moments-pause'), 'the bar\'s Pause button shows (not the phone bar)');
+      assert(!t.errors.length, t.errors.join('; '));
+      await t.ctx.close();
+    });
+
+    await step('Moments started before the DragManager exists still join this mount\'s manager', async () => {
+      // live.js served without initMoments' MeshConfigReady await, so
+      // startMoments() runs inside init(), before its DragManager block. It
+      // records the manager it saw (none, or the last mount's).
+      const AWAIT = 'try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}';
+      const START = '  function startMoments() {\n';
+      const o = await open(browser);
+      let patched = 0;
+      await o.ctx.route(/\/live\.js(\?|$)/, async (route) => {
+        const res = await route.fetch();
+        const src = await res.text();
+        if (src.includes(AWAIT) && src.includes(START)) patched++;
+        await route.fulfill({ response: res, body: src.replace(AWAIT, '')
+          .replace(START, START + '    (window.__e2eSeenMgr = window.__e2eSeenMgr || []).push(window._liveDragMgr || null);\n') });
+      });
+      await o.page.goto(BASE + '/?r=' + Date.now() + '#/packets', { waitUntil: 'domcontentloaded' });
+      await o.page.waitForFunction(() => window.MC_MOMENTS_CFG, null, { timeout: 20000 });
+      assert(patched === 1, 'live.js patched: ' + patched);
+      for (let mount = 1; mount <= 2; mount++) {
+        await o.page.evaluate((v) => { location.hash = '#/live?' + v; }, VIEW);
+        await o.ready();
+        const r = await o.page.evaluate(() => {
+          const m = window._liveDragMgr, seen = window.__e2eSeenMgr;
+          return { starts: seen.length, before: seen[seen.length - 1] !== m,
+            ids: m._panels.map((p) => p.id).sort().join(','), connected: m._panels.every((p) => p.isConnected),
+            prev: seen.length > 1 && seen[seen.length - 1] ? seen[seen.length - 1]._panels.length : 0 };
+        });
+        assert(r.starts === mount && r.before, 'mount ' + mount + ': Moments started before this mount\'s manager: ' + JSON.stringify(r));
+        assert(r.ids === 'liveFeed,liveLegend,liveMoments,liveNodeDetail' && r.connected && r.prev <= 3, 'mount ' + mount + ': ' + JSON.stringify(r));
+        const s0 = await state(o.page);
+        const c = await centre(o.page, '.live-moments-bar .live-moments-count');
+        await mouseDrag(o.page, c.x, c.y, -200, -100);
+        const s = await state(o.page);
+        assert(s.dragged === 'true' && near(s.left, s0.left - 200, 3) && near(s.top, s0.top - 100, 3), 'mount ' + mount + ' drags: ' + JSON.stringify([s0, s]));
+        await o.page.evaluate(() => window._panelCorner.resetPanelPositions());
+        await o.page.evaluate(() => { location.hash = '#/packets'; });
+        await o.page.waitForFunction(() => !document.querySelector('.live-page'));
+      }
+      assert(!o.errors.length, o.errors.join('; '));
+      await o.ctx.close();
+    });
+
     await step('phone 375x560 touch, cold from Home: saved keys change nothing; no corner button; a touch drag does not move it', async () => {
       const coldLive = async (h) => {
         await h.page.goto(BASE + '/?r=' + Date.now() + '#/', { waitUntil: 'domcontentloaded' });
         await h.page.waitForSelector('[data-bottom-nav-tab="live"]', { state: 'visible', timeout: 20000 });
         await h.page.tap('[data-bottom-nav-tab="live"]');
-        await h.ready();
-        // let the VCR bar and the fonts settle before the rects are compared
-        await h.page.evaluate(() => document.fonts.ready);
-        await h.page.waitForTimeout(500);
+        await h.ready(); // settled: the VCR bar, the fonts and the page height
       };
       const vp = { width: 375, height: 560 };
       const plain = await open(browser, { viewport: vp, touch: true });
@@ -329,7 +425,8 @@ function near(a, b, tol) { return Math.abs(a - b) <= (tol || 2); }
       const p = await open(browser, { viewport: vp, touch: true, seed: SAVED });
       await coldLive(p);
       let s = await state(p.page);
-      assert(!s.pos && !s.dragged && s.inline === '' && !s.cornerShown, 'no corner, no position: ' + JSON.stringify(s));
+      assert(s.cornerBtn && !s.cornerShown, 'corner button in the DOM but not visible: ' + JSON.stringify(s));
+      assert(!s.pos && !s.dragged && s.inline === '', 'no corner, no position: ' + JSON.stringify(s));
       assert(s.drag && s.corner, 'the saved keys are there: ' + JSON.stringify(s));
       assert(near(s.left, base.left, 1) && near(s.top, base.top, 3) && near(s.right, base.right, 1) && near(s.left, 8, 1),
         'same place as without them: ' + JSON.stringify([base, s]));

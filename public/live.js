@@ -1810,6 +1810,9 @@
   // server has moments off or the viewer is on another page.
   let moments = null;
   let momentsPanelRelease = null; // #958: its DragManager registration
+  // #958: this mount's DragManager, null outside a mount. Not
+  // window._liveDragMgr, which keeps the last mount's manager after destroy().
+  let liveDragMgr = null;
   let momentsListening = false; // the customizer-change listener is on window
   let _momentHl = null; // { layers, timer } of the last fly-to highlight
   // #883 M1 — kiosk mode (#/live?kiosk=1, live-kiosk.js). kioskOn is read
@@ -2989,11 +2992,14 @@
       // #1619: expose so the feed-detail-card popup (constructed in a
       // different scope) can register itself as draggable.
       window._liveDragMgr = dragMgr;
+      liveDragMgr = dragMgr;
       var dragPanels = ['liveFeed', 'liveLegend', 'liveNodeDetail'];
       for (var di = 0; di < dragPanels.length; di++) {
         dragMgr.register(document.getElementById(dragPanels[di]));
       }
       dragMgr.restorePositions();
+      // #958: a Moments window that came up first joins it now.
+      joinMomentsPanel();
 
       // Responsive gate: disable drag below medium breakpoint or on touch
       var dragMql = window.matchMedia(DRAG_MQ);
@@ -4327,7 +4333,16 @@
       // #958: a drag panel like the Feed, except in kiosk.
       panelId: kioskOn ? null : MOMENTS_PANEL,
     });
-    momentsPanelRelease = attachMomentsPanel(document.getElementById(MOMENTS_PANEL), window._liveDragMgr, kioskOn);
+    joinMomentsPanel();
+  }
+
+  // #958: makes the Moments window a panel of this mount's DragManager.
+  // startMoments() (after MeshConfigReady) and init()'s DragManager block
+  // both call it, so the order does not matter: once both exist, the one
+  // that runs second registers the window, once.
+  function joinMomentsPanel() {
+    if (!moments || momentsPanelRelease) return;
+    momentsPanelRelease = attachMomentsPanel(document.getElementById(MOMENTS_PANEL), liveDragMgr, kioskOn);
   }
 
   function stopMoments() {
@@ -6242,6 +6257,7 @@
     if (_dragMediaHandlers) { _dragMediaHandlers.mql.removeEventListener('change', _dragMediaHandlers.fn); _dragMediaHandlers = null; }
     if (_feedCardDismiss) { document.removeEventListener('click', _feedCardDismiss); _feedCardDismiss = null; }
     if (_onDragManagerResize) { window.removeEventListener('resize', _onDragManagerResize); _onDragManagerResize = null; }
+    liveDragMgr = null;
     if (_feedResizeHandlers) {
       document.removeEventListener('mousemove', _feedResizeHandlers.mousemove);
       document.removeEventListener('mouseup', _feedResizeHandlers.mouseup);
