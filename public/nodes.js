@@ -317,22 +317,6 @@
     return table ? `<tr><td>Hash Prefix</td><td>${value}</td></tr>` : `<dt>Hash Prefix</dt><dd>${value}</dd>`;
   }
 
-  /* Node-detail actions owned by other modules: #681 M5 "Terrain profile"
-   * (terrain-profile.js), #941 "Predicted reach" (coverage.js) and #737 M2
-   * "Oblique photo" (skraafoto.js). They
-   * and the built-in actions share the node-action-chip class (#920).
-   * Each module owns its button and its gate (feature switched on, node
-   * has a fix), so this only waits for the client config and appends what
-   * it hands back, in this order. A re-render that replaced the row first
-   * gets nothing. */
-  function mountConfigAction(row, testid, build) {
-    Promise.resolve(window.MeshConfigReady).catch(function () {}).then(function () {
-      if (!row.isConnected || row.querySelector('[data-testid="' + testid + '"]')) return;
-      var action = build();
-      if (action) row.appendChild(action);
-    });
-  }
-
   // Copy URL (#811 M4): the link that previews as a node card when the
   // server shares node cards for this role, else the plain #/nodes/ link.
   // Built at click time, so a late /api/config/client or a customizer
@@ -348,16 +332,16 @@
     });
   }
 
+  /* Node-detail actions owned by other modules: #681 M5 "Terrain profile"
+   * and #941 "Predicted reach" (roles.js nodeToolActions, shared with the
+   * Map page popup, #959), then #737 M2 "Oblique photo" (skraafoto.js).
+   * They and the built-in actions share the node-action-chip class (#920).
+   * Each module owns its button and its gate, so this only mounts what it
+   * hands back once the client config is in (roles.js mountConfigAction). */
   function mountNodeActions(row, n) {
     if (!row) return;
-    var tp = window.TerrainProfile, sf = window.Skraafoto, pr = window.PredictedReach;
-    if (tp && typeof tp.nodeEntryAction === 'function') {
-      mountConfigAction(row, 'node-terrain-profile', function () { return tp.nodeEntryAction(n, window.MC_DHM_CFG); });
-    }
-    // #941: the node's predicted reach on the Map page.
-    if (pr && typeof pr.nodeEntryAction === 'function') {
-      mountConfigAction(row, 'node-predicted-reach', function () { return pr.nodeEntryAction(n, window.MC_COVERAGE_CFG); });
-    }
+    var sf = window.Skraafoto, mountConfigAction = window.mountConfigAction;
+    window.nodeToolActions(n).forEach(function (a) { mountConfigAction(row, a.testid, a.build); });
     if (sf && typeof sf.nodeAction === 'function') {
       mountConfigAction(row, 'node-skraafoto', function () { return sf.nodeAction(n, window.MC_SKRAAFOTO_CFG); });
     }

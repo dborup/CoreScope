@@ -284,8 +284,11 @@ test('the class colours are CSS variables in :root and both dark blocks, and the
 test('roles.js publishes the coverage block, and nodes.js mounts the chip', () => {
   const roles = fs.readFileSync(path.join(__dirname, 'public', 'roles.js'), 'utf8');
   assert.ok(/window\.MC_COVERAGE_CFG = cfg\.coverage \|\| null;/.test(roles));
+  // #959: the chip is listed once in roles.js nodeToolActions, which node
+  // detail and the Map popup both mount (test-issue-959-popup-actions.js).
+  assert.ok(/testid: 'node-predicted-reach', build: function \(\) \{ return pr\.nodeEntryAction\(node, w\.MC_COVERAGE_CFG\); \}/.test(roles));
   const nodes = fs.readFileSync(path.join(__dirname, 'public', 'nodes.js'), 'utf8');
-  assert.ok(/mountConfigAction\(row, 'node-predicted-reach'/.test(nodes));
+  assert.ok(/nodeToolActions\(n\)\.forEach\(function \(a\) \{ mountConfigAction\(row, a\.testid, a\.build\); \}\)/.test(nodes));
   const map = fs.readFileSync(path.join(__dirname, 'public', 'map.js'), 'utf8');
   assert.ok(/initReachTool\(\);/.test(map) && /destroyReachTool\(\);/.test(map));
 });

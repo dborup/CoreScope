@@ -7350,6 +7350,12 @@ body.embed .warmup-pills { display: none !important; }
 @media (max-width: 768px) {
   .node-action-chip { min-height: 44px; min-width: 44px; justify-content: center; }
 }
+/* #959: the same chips in the Map page's node popup, a row under View Node
+   and Show Neighbors. Leaflet colours every popup link, so the chip text
+   is set again here. */
+.map-popup-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: flex-start; }
+.map-popup-tools:empty { display: none; }
+.leaflet-container .map-popup-tools .node-action-chip { color: var(--text-on-accent); }
 
 /* #737 M2 — "Oblique photo": the node-detail button is a node action chip
    (#920) beside "Terrain profile"; in the Path profile a row of
