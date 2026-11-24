@@ -52,7 +52,7 @@ console.log('\n=== #941 Predicted reach: public/coverage.js ===\n');
 // ── 1. Deep link ─────────────────────────────────────────────────────────
 
 test('a point link round-trips with every field', () => {
-  const st = { at: { kind: 'point', lat: 56.1629, lon: 10.2039 }, tx: 12.5, rx: 1.5, radius: 25, freq: 868.1,
+  const st = { at: { kind: 'point', lat: 56.1629, lon: 10.2039 }, tx: 12.5, rx: 1.5, radius: 25,
     power: 14, txGain: 5, rxGain: 0, loss: 2, sens: -125 };
   const ser = PR.serializeState(st);
   assert.strictEqual(ser.reach, '56.1629,10.2039');
@@ -83,8 +83,18 @@ test('a centre that cannot be read is no link at all', () => {
 });
 
 test('an optional value that is junk or out of range is dropped, the rest kept', () => {
-  const st = PR.parseState('reach=56.1,10.2&rtx=1e2&rrx=-1&rkm=0&rmhz=100&rpwr=99&rgtx=Infinity&rgrx=4&rloss=0x1&rsens=-131');
+  const st = PR.parseState('reach=56.1,10.2&rtx=1e2&rrx=-1&rkm=0&rpwr=99&rgtx=Infinity&rgrx=4&rloss=0x1&rsens=-131');
   assert.deepStrictEqual(JSON.parse(JSON.stringify(st)), { at: { kind: 'point', lat: 56.1, lon: 10.2 }, rxGain: 4, sens: -131 });
+});
+
+test('#960: rmhz is ignored on read, never written, and dropped from a hash', () => {
+  const st = PR.parseState('reach=56.1,10.2&rmhz=868.1&rtx=3');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(st)), { at: { kind: 'point', lat: 56.1, lon: 10.2 }, tx: 3 });
+  assert.strictEqual(PR.serializeState({ at: { kind: 'point', lat: 56.1, lon: 10.2 }, freq: 868.1 }).rmhz, undefined);
+  assert.ok(!Object.keys(PR.KEYS).includes('freq'));
+  const out = PR.withReachParams('#/map?zoom=9&reach=55,9&rmhz=868.1', PR.serializeState({ at: { kind: 'node', pubkey: PK } }));
+  assert.strictEqual(new URLSearchParams(out.split('?')[1]).get('rmhz'), null);
+  assert.strictEqual(PR.withReachParams('#/map?reach=55,9&rmhz=868.1', {}), '#/map');
 });
 
 test('withReachParams replaces the reach keys and keeps the rest of the hash', () => {
@@ -112,7 +122,9 @@ test('the reach keys never collide with the Path profile\'s', () => {
 test('the request carries the centre and the geometry, never the budget', () => {
   const url = PR.requestURL({ at: { kind: 'point', lat: 56.1629, lon: 10.2039 }, tx: 10, rx: 2, radius: 30, freq: 869.618,
     power: 14, txGain: 5, rxGain: 1, loss: 2, sens: -120 });
-  assert.strictEqual(url, '/api/terrain/coverage?at=56.1629%2C10.2039&ha=10&hr=2&r=30&freq=869.618');
+  // #960: the frequency is the server's, never the panel's.
+  assert.strictEqual(url, '/api/terrain/coverage?at=56.1629%2C10.2039&ha=10&hr=2&r=30');
+  assert.ok(!url.includes('freq'));
   for (const leak of ['14', 'rpwr', '-120', 'sens', 'gain', 'p=', 'g=', 's=']) assert.ok(!url.includes(leak), leak);
   assert.strictEqual(PR.requestURL({ at: { kind: 'node', pubkey: PK } }), '/api/terrain/coverage?at=' + PK);
 });
