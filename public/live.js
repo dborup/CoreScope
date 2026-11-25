@@ -1037,17 +1037,23 @@
     </div>`;
   }
 
+  // Evict through the layer group the path was added to: poly.remove() only
+  // takes it off the map, and the group kept every route ever drawn, with its
+  // LatLng/Point arrays and click closure (~30 MB/h on real traffic, #972).
+  function dropClickablePath(entry) {
+    entry.layer.removeLayer(entry.poly);
+  }
+
   function pruneClickablePaths(now) {
     const cutoff = now - CLICKABLE_PATH_TTL_MS;
     for (let i = clickablePaths.length - 1; i >= 0; i--) {
       if (clickablePaths[i].addedAt < cutoff) {
-        try { clickablePaths[i].poly.remove(); } catch (_) {}
+        dropClickablePath(clickablePaths[i]);
         clickablePaths.splice(i, 1);
       }
     }
     while (clickablePaths.length > CLICKABLE_PATH_MAX) {
-      try { clickablePaths[0].poly.remove(); } catch (_) {}
-      clickablePaths.shift();
+      dropClickablePath(clickablePaths.shift());
     }
   }
 
@@ -1055,7 +1061,7 @@
     if (!clickablePathsLayer) return;
     const poly = L.polyline(latLngs, { weight: 12, opacity: 0, interactive: true }).addTo(clickablePathsLayer);
     // color/hash: what the route was drawn in (read by the #882 E2E).
-    const entry = { addedAt: Date.now(), poly, color, hash };
+    const entry = { addedAt: Date.now(), poly, layer: clickablePathsLayer, color, hash };
     clickablePaths.push(entry);
     pruneClickablePaths(Date.now());
     let dismissTimer = null;
