@@ -46,7 +46,9 @@ is remembered on this device.
 ## Your settings (Customize → Display → Live Moments)
 
 These are your own display choices, stored in your browser. They appear only
-where the operator has turned Moments on.
+where the operator has turned Moments on. The defaults below are the
+operator's when they set `moments.display` (see below), otherwise the
+built-in ones.
 
 | Setting | Default | Range | Notes |
 |---------|---------|-------|-------|
@@ -94,8 +96,38 @@ Moments are off by default: no detector runs, nothing is broadcast and
 | `historySize` | `50` | 1 to 500 | How many moments `/api/moments` keeps. In memory, lost on restart. |
 
 Out-of-range values are clamped, with a line in the log. `0` or a missing
-value takes the default. The browser is told only whether Moments are on and
-the history size (`moments` in `/api/config/client`).
+value takes the default. The browser is told only whether Moments are on, the
+history size and the display defaults below (`moments` in
+`/api/config/client`).
+
+### Display defaults for your viewers
+
+`moments.display` sets the defaults of the viewer settings above for every
+browser on this instance. It takes the same keys as the customizer's Live
+Moments section, so the `moments` section of a downloaded customizer file can
+be pasted here as it is. Set only what you want to change:
+
+```json
+"moments": {
+  "enabled": true,
+  "display": { "visibleCards": 1, "dwellSeconds": 12, "showBusiest": false }
+}
+```
+
+| Field | Built-in | Range |
+|-------|----------|-------|
+| `enabled` | `true` | `true` or `false`: whether the Live page starts with Moments |
+| `visibleCards` | `3` | 1 to 5 (desktop; a phone shows one) |
+| `dwellSeconds` | `8` | 3 to 30 |
+| `showNewNode`, `showBackOnline`, `showRecordLink`, `showBusiest` | `true` | `true` or `false` |
+
+A viewer's own value in **Customize → Display** wins over yours, and for
+`enabled` a `?moments=` link and the viewer's Live checkbox win too. Keys are
+case-sensitive (`dwellSeconds`, not `DwellSeconds`): a different spelling is
+ignored with a warning in the log. A number out of range is clamped and a
+value of the wrong kind is ignored, each with a log line. Without
+`moments.enabled` the block does nothing. `theme.json` has no `moments`
+section: the server ignores one there.
 
 ### Visibility
 

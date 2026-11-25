@@ -178,12 +178,35 @@ Step descriptions and checklist answers support Markdown (`**bold**`, `*italic*`
 
 User themes take priority over admin themes. Users can reset their personal theme to go back to the admin default.
 
+`theme.json` holds these sections only: `branding`, `theme`, `themeDark`, `nodeColors`, `typeColors`, `home` and `markerStroke`. A downloaded customizer file can hold more (the Display tab's settings), and the server ignores those sections in `theme.json`. They stay per-browser settings.
+
+### Operator display defaults (`config.json`)
+
+Two Display settings take a default for every browser from `config.json`, served on `/api/config/client`:
+
+- **Timestamps:** the `timestamps` block.
+
+  ```json
+  "timestamps": {
+    "defaultMode": "absolute",
+    "timezone": "utc",
+    "formatPreset": "iso-seconds",
+    "customFormat": "",
+    "allowCustomFormat": false
+  }
+  ```
+
+  `defaultMode` is `ago` or `absolute`, `timezone` is `local` or `utc`, and `formatPreset` is `iso`, `iso-seconds` or `locale`. An invalid value logs a warning and takes the built-in (`ago`, `local`, `iso`). `allowCustomFormat: true` offers the **Custom Format** field in the Display tab; `customFormat` is then its default, with the tokens `YYYY`, `MM`, `DD`, `HH`, `mm`, `ss`, `SSS` and `Z`.
+- **Live Moments:** `moments.display`, while `moments.enabled` is on. See [moments.md](moments.md#display-defaults-for-your-viewers).
+
+A viewer's own value in the customizer wins over the operator's, and the operator's wins over the built-in. For Moments on/off, a `?moments=` link and the viewer's Live checkbox win over both. Keys are case-sensitive: a different spelling (`AllowCustomFormat`) is ignored with a warning in the server log.
+
 ### Map layer settings
 
 Some of the customizer's Display settings belong to an optional map layer and only appear when the server offers that layer:
 
 - **Ancient Monuments**: the protected ancient monuments overlay and its Path profile warning. See [ancient-monuments.md](ancient-monuments.md).
-- **Live Moments**: the Live page's moment cards, only while the operator has `moments.enabled`. `moments.enabled` (default `true`) is whether the Live page starts with them (a `?moments=` link and your own last choice on the Live page still win until Reset All); `moments.visibleCards` (1 to 5, default 3, desktop only: a phone shows one); `moments.dwellSeconds` (3 to 30, default 8) is how long a card stays; `moments.showNewNode`, `showBackOnline`, `showRecordLink` and `showBusiest` (default `true`) switch a kind off. The card fill and the four kind accents are the theme keys `momentCardBg`, `momentNewNode`, `momentBackOnline`, `momentRecordLink` and `momentBusiest` (CSS `--moment-*`), and the accents follow the colourblind preset. The operator's thresholds and rate stay in `config.json`. See [moments.md](moments.md).
+- **Live Moments**: the Live page's moment cards, only while the operator has `moments.enabled`. `moments.enabled` (default `true`) is whether the Live page starts with them (a `?moments=` link and your own last choice on the Live page still win until Reset All); `moments.visibleCards` (1 to 5, default 3, desktop only: a phone shows one); `moments.dwellSeconds` (3 to 30, default 8) is how long a card stays; `moments.showNewNode`, `showBackOnline`, `showRecordLink` and `showBusiest` (default `true`) switch a kind off. The operator sets the defaults with `moments.display` in `config.json` (see above). The card fill and the four kind accents are the theme keys `momentCardBg`, `momentNewNode`, `momentBackOnline`, `momentRecordLink` and `momentBusiest` (CSS `--moment-*`), and the accents follow the colourblind preset. The operator's thresholds and rate stay in `config.json`. See [moments.md](moments.md).
 - **Oblique Photos**: how the oblique aerial photo (Skråfoto) viewer opens, only while the server offers the photos. `skraafoto.direction` is the first photo: `auto` (the default: across the line when opened from a Path profile, otherwise north), `north`, `east`, `south`, `west` or `nadir`; a shared link's direction still wins. `skraafoto.zoom` is `zoomed` (the default: each new photo opens on the crop around the point, where the point is in the photo, otherwise on the whole photo) or `overview` (the whole photo first). `skraafoto.lineOfSight` (default `true`) draws the line of sight from a Path profile; this row is shown only with the Path profile tool. These are viewer settings; the server's `map.skraafoto` config is not part of the customizer.
 
 ## Full Example

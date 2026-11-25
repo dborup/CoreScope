@@ -2502,35 +2502,42 @@ window.addEventListener('DOMContentLoaded', () => {
   requestNavStats();
 
   // --- Theme Customization ---
-  // Fetch theme config and apply via customizer v2 pipeline
-  fetch('/api/config/theme', { cache: 'no-store' }).then(r => r.json()).then(cfg => {
-    // Normalize timestamp defaults
-    cfg = cfg || {};
-    if (!cfg.timestamps) cfg.timestamps = {};
-    const tsCfg = cfg.timestamps;
-    if (tsCfg.defaultMode !== 'absolute' && tsCfg.defaultMode !== 'ago') tsCfg.defaultMode = 'ago';
-    if (tsCfg.timezone !== 'utc' && tsCfg.timezone !== 'local') tsCfg.timezone = 'local';
-    if (tsCfg.formatPreset !== 'iso' && tsCfg.formatPreset !== 'iso-seconds' && tsCfg.formatPreset !== 'locale') tsCfg.formatPreset = 'iso';
-    if (typeof tsCfg.customFormat !== 'string') tsCfg.customFormat = '';
-    tsCfg.allowCustomFormat = tsCfg.allowCustomFormat === true;
-
-    // Customizer v2: set server defaults and run full pipeline
-    // (reads localStorage overrides → merges → sets SITE_CONFIG → applies CSS → dispatches theme-changed)
-    if (window._customizerV2) {
-      window._customizerV2.init(cfg);
-    } else {
-      // Fallback if customize-v2.js didn't load
-      window.SITE_CONFIG = cfg;
-    }
-  }).catch(() => {
-    window.SITE_CONFIG = { timestamps: { defaultMode: 'ago', timezone: 'local', formatPreset: 'iso', customFormat: '', allowCustomFormat: false } };
-    if (window._customizerV2) window._customizerV2.init(window.SITE_CONFIG);
-  });
+  // Theme config plus the operator's display defaults (#969), then the
+  // customizer v2 pipeline.
+  bootSiteConfig(fetch('/api/config/theme', { cache: 'no-store' }), window.MeshConfigReady);
 
   // Navigate immediately — don't gate data-fetching pages on cosmetic theme fetch
   if (!location.hash || location.hash === '#/') location.hash = '#/home';
   else navigate();
 });
+
+/**
+ * #969 — starts the customizer once both config fetches have settled: the
+ * theme (/api/config/theme) and the client config (/api/config/client,
+ * window.MeshConfigReady), which carries the operator's `timestamps` and
+ * `moments.display` (roles.js keeps them as MC_OPERATOR_DISPLAY). One
+ * init with every server default, so the customizer's phantom-override
+ * cleanup never compares a viewer's value against a default that is about
+ * to change. Either fetch may fail: a missing theme is {}, missing
+ * operator values are the built-ins.
+ * @param {Promise<Response>} themeRequest - the /api/config/theme fetch
+ * @param {Promise} clientReady - window.MeshConfigReady
+ * @returns {Promise<Object>} the config handed to the customizer
+ */
+function bootSiteConfig(themeRequest, clientReady) {
+  return Promise.all([
+    Promise.resolve(themeRequest).then(r => r.json()).catch(() => null),
+    Promise.resolve(clientReady).catch(() => {}),
+  ]).then(([theme]) => {
+    // Customizer v2: set server defaults and run full pipeline
+    // (reads localStorage overrides → merges → sets SITE_CONFIG → applies CSS → dispatches theme-changed)
+    const cfg = withOperatorDisplayDefaults(theme, window.MC_OPERATOR_DISPLAY);
+    if (window._customizerV2) window._customizerV2.init(cfg);
+    else window.SITE_CONFIG = cfg; // fallback if customize-v2.js didn't load
+    return cfg;
+  });
+}
+window.bootSiteConfig = bootSiteConfig;
 
 /**
  * Reusable ARIA tab-bar initialiser.

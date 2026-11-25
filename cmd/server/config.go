@@ -1220,7 +1220,9 @@ func (c *Config) applyCanonicalKeys(keys *configkey.Doc) error {
 	}
 	if c.Moments != nil {
 		c.Moments.Enabled = keys.On("moments", "enabled")
+		c.Moments.Display = readMomentsDisplay(keys, log.Printf)
 	}
+	c.applyTimestampKeys(keys)
 	if c.Compression != nil {
 		c.Compression.GZip = keys.On("compression", "gzip")
 		c.Compression.Websocket = keys.On("compression", "websocket")
@@ -1565,6 +1567,27 @@ func (c *Config) NormalizeTimestampConfig() {
 		log.Printf("[config] warning: timestamps.formatPreset=%q is invalid, using %q", origPreset, defaults.FormatPreset)
 		c.Timestamps.FormatPreset = defaults.FormatPreset
 	}
+}
+
+// applyTimestampKeys (#969) re-reads the timestamps block by its exact keys
+// (#884): since #969 the browser uses it, and allowCustomFormat is the
+// operator's gate for a free-form format string, so a case variant must
+// neither open it nor override a canonical value. A variant logs one
+// warning; a block found only under a variant key is no block.
+func (c *Config) applyTimestampKeys(keys *configkey.Doc) {
+	if raw := keys.Get("timestamps"); raw == nil || string(raw) == "null" {
+		c.Timestamps = nil
+		return
+	}
+	ts := TimestampConfig{AllowCustomFormat: keys.On("timestamps", "allowCustomFormat")}
+	for _, f := range []struct {
+		key string
+		dst *string
+	}{{"defaultMode", &ts.DefaultMode}, {"timezone", &ts.Timezone}, {"formatPreset", &ts.FormatPreset}, {"customFormat", &ts.CustomFormat}} {
+		// The struct decode already rejected a non-string value.
+		_ = json.Unmarshal(keys.Get("timestamps", f.key), f.dst)
+	}
+	c.Timestamps = &ts
 }
 
 func (c *Config) GetTimestampConfig() TimestampConfig {

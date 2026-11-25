@@ -813,6 +813,51 @@
     disabledNoticeHTML: '<p class="text-muted estimated-positions-note" data-estimated-positions-disabled>Estimated positions are disabled by the instance operator.</p>'
   };
 
+  // ─── #969 Operator display defaults ───
+  // config.json `timestamps` and `moments.display` arrive on
+  // /api/config/client, their only source; /api/config/theme carries
+  // neither. app.js's bootSiteConfig hands them to the customizer as its
+  // server defaults, so the customizer's own merge gives the precedence
+  // viewer > operator > built-in (and a ?moments= link above all for
+  // Moments on/off, in live.js).
+  var TS_BUILTIN = { defaultMode: 'ago', timezone: 'local', formatPreset: 'iso', customFormat: '', allowCustomFormat: false };
+  function oneOf(v, list, dflt) { return list.indexOf(v) >= 0 ? v : dflt; }
+  // Cast at the boundary: an unknown value is the built-in.
+  function normalizeTimestampConfig(ts) {
+    var t = ts && typeof ts === 'object' ? ts : {};
+    return {
+      defaultMode: oneOf(t.defaultMode, ['ago', 'absolute'], TS_BUILTIN.defaultMode),
+      timezone: oneOf(t.timezone, ['local', 'utc'], TS_BUILTIN.timezone),
+      formatPreset: oneOf(t.formatPreset, ['iso', 'iso-seconds', 'locale'], TS_BUILTIN.formatPreset),
+      customFormat: typeof t.customFormat === 'string' ? t.customFormat : '',
+      allowCustomFormat: t.allowCustomFormat === true
+    };
+  }
+  // The operator's sections from a /api/config/client body. moments is
+  // null unless the server has Moments on and the operator set a default.
+  function operatorDisplayDefaults(cfg) {
+    var c = cfg && typeof cfg === 'object' ? cfg : {};
+    var m = c.moments;
+    var display = m && m.enabled === true && m.display && typeof m.display === 'object' && !Array.isArray(m.display)
+      ? Object.assign({}, m.display) : null;
+    return { timestamps: normalizeTimestampConfig(c.timestamps), moments: display };
+  }
+  // The theme body with the operator's sections in place of anything it
+  // carries under those names; without operator values (the client config
+  // failed), the timestamps built-ins. themeCfg is not changed.
+  function withOperatorDisplayDefaults(themeCfg, operator) {
+    var cfg = Object.assign({}, themeCfg && typeof themeCfg === 'object' ? themeCfg : {});
+    var op = operator && typeof operator === 'object' ? operator : {};
+    cfg.timestamps = normalizeTimestampConfig(op.timestamps);
+    if (op.moments && typeof op.moments === 'object') cfg.moments = Object.assign({}, op.moments);
+    else delete cfg.moments;
+    return cfg;
+  }
+  window.normalizeTimestampConfig = normalizeTimestampConfig;
+  window.operatorDisplayDefaults = operatorDisplayDefaults;
+  window.withOperatorDisplayDefaults = withOperatorDisplayDefaults;
+  window.MC_OPERATOR_DISPLAY = null;
+
   // ─── Fetch server overrides ───
   window.MeshConfigReady = fetch('/api/config/client').then(function (r) { return r.json(); }).then(function (cfg) {
     estimatedPositionsEnabled = !cfg.estimatedPositions || cfg.estimatedPositions.enabled !== false;
@@ -903,6 +948,7 @@
     window.MC_COVERAGE_CFG = cfg.coverage || null;
     // #881 — Live moments; absent unless the server's moments.enabled is on.
     window.MC_MOMENTS_CFG = (cfg.moments && cfg.moments.enabled === true) ? cfg.moments : null;
+    window.MC_OPERATOR_DISPLAY = operatorDisplayDefaults(cfg);
     if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);
     if (cfg.snrThresholds) Object.assign(SNR_THRESHOLDS, cfg.snrThresholds);
     if (cfg.distThresholds) Object.assign(DIST_THRESHOLDS, cfg.distThresholds);
