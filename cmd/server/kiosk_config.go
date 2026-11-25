@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/meshcore-analyzer/configkey"
@@ -82,6 +83,21 @@ func kioskDefaultConfig() KioskConfig {
 	}
 }
 
+// errKioskNull: a kiosk member (or the block) is JSON null.
+var errKioskNull = errors.New("null")
+
+// kioskDecode is json.Unmarshal that refuses null. Unmarshal takes null
+// into any type without an error and leaves the zero value, which is in
+// range for some members (safeInsetVmin 0, an empty tour or tiles list,
+// an empty block): null must warn and take the default like any other bad
+// value.
+func kioskDecode(raw json.RawMessage, v interface{}) error {
+	if string(raw) == "null" {
+		return errKioskNull
+	}
+	return json.Unmarshal(raw, v)
+}
+
 func kioskOneOf(v string, set []string) bool {
 	for _, s := range set {
 		if v == s {
@@ -99,7 +115,7 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 		return nil
 	}
 	var obj struct{}
-	if json.Unmarshal(raw, &obj) != nil {
+	if kioskDecode(raw, &obj) != nil {
 		logf("[config] kiosk.(block) is not an object; ignored, using the default (no preset)")
 		return nil
 	}
@@ -110,7 +126,7 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 
 	if v := keys.Get("kiosk", "tour"); v != nil {
 		var tour []string
-		if json.Unmarshal(v, &tour) != nil {
+		if kioskDecode(v, &tour) != nil {
 			warn("tour", "a list of area keys", "(no tour)")
 		} else {
 			for _, s := range tour {
@@ -126,7 +142,7 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 	}
 	if v := keys.Get("kiosk", "everySeconds"); v != nil {
 		var n int
-		if json.Unmarshal(v, &n) != nil || n < kioskEveryMin || n > kioskEveryMax {
+		if kioskDecode(v, &n) != nil || n < kioskEveryMin || n > kioskEveryMax {
 			warn("everySeconds", "a whole number of seconds in 15-3600", "60")
 		} else {
 			k.EverySeconds = n
@@ -134,7 +150,7 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 	}
 	if v := keys.Get("kiosk", "theme"); v != nil {
 		var s string
-		if json.Unmarshal(v, &s) != nil || !kioskOneOf(s, kioskThemes) {
+		if kioskDecode(v, &s) != nil || !kioskOneOf(s, kioskThemes) {
 			warn("theme", `"dark", "light" or "auto"`, kioskThemeDefault)
 		} else {
 			k.Theme = s
@@ -142,7 +158,7 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 	}
 	if v := keys.Get("kiosk", "tiles"); v != nil {
 		var list []string
-		if json.Unmarshal(v, &list) != nil {
+		if kioskDecode(v, &list) != nil {
 			warn("tiles", `a list of "rate", "active", "records"`, "(all tiles)")
 		} else {
 			want := map[string]bool{}
@@ -169,7 +185,7 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 	}
 	if v := keys.Get("kiosk", "remountHours"); v != nil {
 		var h float64
-		if json.Unmarshal(v, &h) != nil || h < kioskRemountMinH || h > kioskRemountMaxH {
+		if kioskDecode(v, &h) != nil || h < kioskRemountMinH || h > kioskRemountMaxH {
 			warn("remountHours", "a number of hours in 1-24", "6")
 		} else {
 			k.RemountHours = h
@@ -184,7 +200,7 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 	}
 	if v := keys.Get("kiosk", "safeInsetVmin"); v != nil {
 		var f float64
-		if json.Unmarshal(v, &f) != nil || f < kioskInsetMin || f > kioskInsetMax {
+		if kioskDecode(v, &f) != nil || f < kioskInsetMin || f > kioskInsetMax {
 			warn("safeInsetVmin", "a number in 0-10", "3")
 		} else {
 			k.SafeInsetVmin = f
@@ -196,11 +212,11 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 // parseKioskScale reads "auto" (exact) or a number that is a step.
 func parseKioskScale(raw json.RawMessage) (KioskScale, bool) {
 	var s string
-	if json.Unmarshal(raw, &s) == nil {
+	if kioskDecode(raw, &s) == nil {
 		return 0, s == "auto"
 	}
 	var f float64
-	if json.Unmarshal(raw, &f) != nil {
+	if kioskDecode(raw, &f) != nil {
 		return 0, false
 	}
 	for _, step := range kioskScales {

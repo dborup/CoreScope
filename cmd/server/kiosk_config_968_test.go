@@ -109,6 +109,10 @@ func TestKioskPresetClientBlock968(t *testing.T) {
 		{"remountHours 1.5", `{"kiosk": {"remountHours": 1.5}}`, kioskWith(map[string]interface{}{"remountHours": 1.5}), 0},
 		{"remountHours 0.5", `{"kiosk": {"remountHours": 0.5}}`, kioskDefaults(), 1},
 		{"remountHours 25", `{"kiosk": {"remountHours": 25}}`, kioskDefaults(), 1},
+		// null is a bad value for every member: one warning and the default,
+		// never the zero value json.Unmarshal leaves (#974 review).
+		{"every member null: one warning each", `{"kiosk": {"tour": null, "everySeconds": null, "theme": null, "tiles": null, "remountHours": null, "scale": null, "safeInsetVmin": null}}`,
+			kioskDefaults(), 7},
 		// theme: dark, light or auto, exact.
 		{"theme auto", `{"kiosk": {"theme": "auto"}}`, kioskWith(map[string]interface{}{"theme": "auto"}), 0},
 		{"theme unknown", `{"kiosk": {"theme": "blue"}}`, kioskDefaults(), 1},
@@ -119,17 +123,20 @@ func TestKioskPresetClientBlock968(t *testing.T) {
 		{"tiles: empty list is all", `{"kiosk": {"tiles": []}}`, kioskDefaults(), 0},
 		{"tiles: only unknown is all", `{"kiosk": {"tiles": ["x"]}}`, kioskDefaults(), 1},
 		{"tiles: not a list", `{"kiosk": {"tiles": "rate"}}`, kioskDefaults(), 1},
+		{"tiles null", `{"kiosk": {"tiles": null}}`, kioskDefaults(), 1},
 		// tour: area keys, trimmed, at most 12.
 		{"tour: trimmed, empty keys dropped", `{"kiosk": {"tour": [" a ", "", "b"]}}`, kioskWith(map[string]interface{}{"tour": []interface{}{"a", "b"}}), 0},
 		{"tour: 13 keys cut to 12", `{"kiosk": {"tour": ["1","2","3","4","5","6","7","8","9","10","11","12","13"]}}`,
 			kioskWith(map[string]interface{}{"tour": []interface{}{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"}}), 1},
 		{"tour: not a list of strings", `{"kiosk": {"tour": "a,b"}}`, kioskDefaults(), 1},
+		{"tour null", `{"kiosk": {"tour": null}}`, kioskDefaults(), 1},
 		// Canonical keys only (#884).
 		{"a case-variant block is not the kiosk block", `{"Kiosk": {"everySeconds": 30}}`, nil, 0},
 		{"a case-variant member is ignored", `{"kiosk": {"EverySeconds": 30, "THEME": "light"}}`, kioskDefaults(), 0},
 		{"the canonical member wins over a variant after it", `{"kiosk": {"everySeconds": 30, "EverySeconds": 90}}`,
 			kioskWith(map[string]interface{}{"everySeconds": float64(30)}), 0},
 		{"not an object", `{"kiosk": 5}`, nil, 1},
+		{"null block: not served", `{"kiosk": null}`, nil, 1},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -208,6 +215,8 @@ func TestKioskPresetDisplay968(t *testing.T) {
 		{"safeInsetVmin -0.5", `{"kiosk": {"safeInsetVmin": -0.5}}`, kioskDefaults(), 1},
 		{"safeInsetVmin 10.5", `{"kiosk": {"safeInsetVmin": 10.5}}`, kioskDefaults(), 1},
 		{"safeInsetVmin a string", `{"kiosk": {"safeInsetVmin": "6"}}`, kioskDefaults(), 1},
+		{"safeInsetVmin null", `{"kiosk": {"safeInsetVmin": null}}`, kioskDefaults(), 1},
+		{"scale null", `{"kiosk": {"scale": null}}`, kioskDefaults(), 1},
 		{"both, valid", `{"kiosk": {"scale": 1.5, "safeInsetVmin": 6}}`,
 			kioskWith(map[string]interface{}{"scale": 1.5, "safeInsetVmin": float64(6)}), 0},
 		{"both, bad: one warning each", `{"kiosk": {"scale": 9, "safeInsetVmin": 99}}`, kioskDefaults(), 2},

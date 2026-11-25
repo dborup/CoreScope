@@ -19,7 +19,10 @@
  *   6. The operator preset (scale 1.25, inset 5): kiosk takes it with no
  *      viewer value; the Display tab shows it; a viewer value wins; setting
  *      the operator's value back stores nothing.
- *   7. 375x560 touch phone, cold from Home: More → Customize → Display,
+ *   7. A cold kiosk link whose /api/config/client answers 2.5 s late with
+ *      the preset 1.25 / 5: kiosk mounts on auto / 3vmin, then ends on
+ *      1.25 / 5vmin once the preset arrives (initKiosk applies it again).
+ *   8. 375x560 touch phone, cold from Home: More → Customize → Display,
  *      both controls changed by real taps, both >= 44 px, no horizontal
  *      scroll.
  *
@@ -54,6 +57,7 @@ async function open(browser, o) {
       const res = await route.fetch();
       const body = await res.json();
       body.kiosk = o.preset;
+      if (o.delayMs) await new Promise((r) => setTimeout(r, o.delayMs));
       await route.fulfill({ response: res, json: body });
     });
   }
@@ -209,6 +213,27 @@ async function open(browser, o) {
       l = await o.look();
       assert(l.scale === '2' && l.inset === '5vmin', 'viewer over preset: ' + JSON.stringify(l));
       await o.leave();
+      assert(!o.errors.length, o.errors.join('; '));
+      await o.ctx.close();
+    });
+
+    await step('a late /api/config/client (2.5 s): kiosk mounts on auto / 3vmin, then ends on the preset 1.25 / 5vmin', async () => {
+      const o = await open(browser, { preset: PRESET, delayMs: 2500, viewport: { width: 1920, height: 1080 } });
+      const q = o.page;
+      await q.goto(BASE + '/?r=' + Date.now() + '#/live?kiosk=1&tour=AAA', { waitUntil: 'domcontentloaded' });
+      await q.waitForFunction(() => document.body.classList.contains('kiosk'), null, { timeout: 20000 });
+      const early = await q.evaluate(() => ({ cfg: window.MC_KIOSK_CFG === undefined,
+        scale: getComputedStyle(document.body).getPropertyValue('--kiosk-scale').trim(),
+        inset: getComputedStyle(document.body).getPropertyValue('--kiosk-safe-inset').trim() }));
+      // The preset must not be there yet, or this step tests nothing.
+      assert(early.cfg, 'the client config arrived before kiosk mounted');
+      assert(early.scale === '1.5' && early.inset === '3vmin', 'before the preset: ' + JSON.stringify(early));
+      await q.waitForFunction(() => window._liveKiosk && window._liveKiosk(), null, { timeout: 20000 });
+      await q.waitForSelector('.live-kiosk-step', { state: 'attached', timeout: 10000 });
+      const l = await o.look();
+      assert(l.scale === '1.25' && l.inset === '5vmin', 'after the late preset: ' + JSON.stringify(l));
+      const want = Math.round(0.05 * l.short); // 54
+      assert(Math.abs(l.stepLeft - want) <= 1 && Math.abs(l.stepTop - want) <= 1, 'step label at ' + l.stepLeft + ',' + l.stepTop + ', want ' + want);
       assert(!o.errors.length, o.errors.join('; '));
       await o.ctx.close();
     });
