@@ -601,6 +601,39 @@ test('validateShape rejects non-array myNodes', () => {
   assert.ok(!result.valid, 'non-array myNodes should be invalid');
 });
 
+// ── #968 M2: the Live kiosk section ──
+console.log('\n#968 M2 kiosk section:');
+function loadCustomizerWithKiosk() {
+  const ctx = makeSandbox();
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync('public/payload-labels.js', 'utf8'), ctx, { filename: 'payload-labels.js' });
+  vm.runInContext(fs.readFileSync('public/customize-v2.js', 'utf8'), ctx, { filename: 'customize-v2.js' });
+  // index.html order: live-kiosk.js after the customizer (the lazy lookup).
+  vm.runInContext(fs.readFileSync('public/live-kiosk.js', 'utf8'), ctx, { filename: 'live-kiosk.js' });
+  return { ctx, api: ctx.window._customizerV2, ls: ctx.localStorage };
+}
+
+test('kiosk is a valid object section', () => {
+  const { api } = loadCustomizerWithKiosk();
+  assert.ok(api.VALID_SECTIONS.indexOf('kiosk') >= 0);
+  assert.ok(api.validateShape({ kiosk: { scale: 1.5, safeInsetVmin: 4 } }).valid);
+  assert.ok(!api.validateShape({ kiosk: [] }).valid, 'an array is not the section');
+});
+
+test('kiosk is merged over the server defaults like any object section', () => {
+  const { api } = loadCustomizerWithKiosk();
+  const eff = api.computeEffective({ kiosk: { scale: 1.5 } }, { kiosk: { safeInsetVmin: 6 } });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(eff.kiosk)), { scale: 1.5, safeInsetVmin: 6 });
+});
+
+test('kiosk overrides are stored and counted', () => {
+  const { api, ls } = loadCustomizerWithKiosk();
+  api.init({});
+  api.writeOverrides({ kiosk: { scale: 2, safeInsetVmin: 6 } });
+  assert.deepStrictEqual(JSON.parse(ls.getItem('cs-theme-overrides')), { kiosk: { scale: 2, safeInsetVmin: 6 } });
+  assert.strictEqual(api.countOverrides('kiosk'), 2);
+});
+
 // ── Summary ──
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`);
 process.exit(failed > 0 ? 1 : 0);

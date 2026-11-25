@@ -55,9 +55,10 @@ section('=== #968 M1 LiveKiosk.SETTINGS ===');
 
 test('KEYS, DEFAULTS and LIMITS are the plan\'s, and the URL clamps read the same bounds', () => {
   const S = K.SETTINGS;
-  eq(S.KEYS, ['tour', 'everySeconds', 'theme', 'tiles', 'remountHours']);
-  eq(S.DEFAULTS, { tour: [], everySeconds: 60, theme: 'dark', tiles: ['rate', 'active', 'records'], remountHours: 6 });
-  eq(S.LIMITS, { everySeconds: [15, 3600], remountHours: [1, 24], tour: [0, 12] });
+  // #968 M2 adds scale and safeInsetVmin (test-968-customizer-kiosk.js).
+  eq(S.KEYS, ['tour', 'everySeconds', 'theme', 'tiles', 'remountHours', 'scale', 'safeInsetVmin']);
+  eq(S.DEFAULTS, { tour: [], everySeconds: 60, theme: 'dark', tiles: ['rate', 'active', 'records'], remountHours: 6, scale: 'auto', safeInsetVmin: 3 });
+  eq(S.LIMITS, { everySeconds: [15, 3600], remountHours: [1, 24], tour: [0, 12], safeInsetVmin: [0, 10] });
   eq(S.TILES, ['rate', 'active', 'records']);
   eq(S.THEMES, ['dark', 'light', 'auto']);
   assert.strictEqual(S.LIMITS.everySeconds[0], K.EVERY_MIN);
@@ -74,14 +75,14 @@ test('valid(): each key\'s type and bounds; unknown keys are never valid', () =>
   assert(v('theme', 'dark') && v('theme', 'light') && v('theme', 'auto') && !v('theme', 'Dark') && !v('theme', ''));
   assert(v('tiles', ['rate']) && v('tiles', ['records', 'active']) && !v('tiles', ['x']) && !v('tiles', 'rate') && !v('tiles', []));
   assert(v('tour', []) && v('tour', ['a']) && !v('tour', 'a') && !v('tour', [1]) && !v('tour', new Array(13).fill('a')));
-  for (const k of ['kiosk', 'enabled', 'scale', 'safeInsetVmin', 'toString']) assert(!v(k, 1) && !v(k, true), k);
+  for (const k of ['kiosk', 'enabled', 'toString']) assert(!v(k, 1) && !v(k, true), k);
 });
 
 test('resolve(): a bad or missing value is the default, so a hand-edited config never breaks the page', () => {
   const r = K.SETTINGS.resolve;
   const D = JSON.parse(JSON.stringify(K.SETTINGS.DEFAULTS));
   eq(r(null), D);
-  eq(r({ everySeconds: 90, theme: 'auto', remountHours: 3 }), { tour: [], everySeconds: 90, theme: 'auto', tiles: ['rate', 'active', 'records'], remountHours: 3 });
+  eq(r({ everySeconds: 90, theme: 'auto', remountHours: 3 }), { tour: [], everySeconds: 90, theme: 'auto', tiles: ['rate', 'active', 'records'], remountHours: 3, scale: 'auto', safeInsetVmin: 3 });
   eq(r({ everySeconds: 1, theme: 'x', remountHours: 99, tiles: ['bogus'], tour: 'a' }), D);
   // A resolved preset never carries a key outside KEYS (kiosk stays URL-only).
   eq(Object.keys(r({ kiosk: true, enabled: true, scale: 2 })), JSON.parse(JSON.stringify(K.SETTINGS.KEYS)));

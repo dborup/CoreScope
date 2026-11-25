@@ -69,6 +69,9 @@ func kioskDefaults() map[string]interface{} {
 		"theme":        "dark",
 		"tiles":        []interface{}{"rate", "active", "records"},
 		"remountHours": float64(6),
+		// #968 M2: the screen's text size and edge margin.
+		"scale":         "auto",
+		"safeInsetVmin": float64(3),
 	}
 }
 
@@ -172,6 +175,82 @@ func TestKioskPresetResponseShape968(t *testing.T) {
 	for i := 0; i < f.Type.Elem().NumField(); i++ {
 		if ft := f.Type.Elem().Field(i).Type; ft.Kind() == reflect.Map || ft.Kind() == reflect.Interface {
 			t.Fatalf("%s.%s is %v", f.Type.Elem().Name(), f.Type.Elem().Field(i).Name, ft)
+		}
+	}
+}
+
+// #968 M2 — kiosk.scale and kiosk.safeInsetVmin, the operator side of the
+// customizer's Display → Live kiosk (K1, K2). scale is "auto" (the
+// viewport media queries) or one of 1, 1.25, 1.5, 2; safeInsetVmin is
+// 0-10 (% of the short side). Out of range: one warning and the default.
+func TestKioskPresetDisplay968(t *testing.T) {
+	cases := []struct {
+		name  string
+		json  string
+		want  map[string]interface{}
+		warns int
+	}{
+		{"unset: auto and 3", `{"kiosk": {}}`, kioskDefaults(), 0},
+		{"scale auto", `{"kiosk": {"scale": "auto"}}`, kioskDefaults(), 0},
+		{"scale 1", `{"kiosk": {"scale": 1}}`, kioskWith(map[string]interface{}{"scale": float64(1)}), 0},
+		{"scale 1.25", `{"kiosk": {"scale": 1.25}}`, kioskWith(map[string]interface{}{"scale": 1.25}), 0},
+		{"scale 1.5", `{"kiosk": {"scale": 1.5}}`, kioskWith(map[string]interface{}{"scale": 1.5}), 0},
+		{"scale 2", `{"kiosk": {"scale": 2}}`, kioskWith(map[string]interface{}{"scale": float64(2)}), 0},
+		{"scale 2.0 is 2", `{"kiosk": {"scale": 2.0}}`, kioskWith(map[string]interface{}{"scale": float64(2)}), 0},
+		{"scale not a step", `{"kiosk": {"scale": 1.75}}`, kioskDefaults(), 1},
+		{"scale 0", `{"kiosk": {"scale": 0}}`, kioskDefaults(), 1},
+		{"scale 3", `{"kiosk": {"scale": 3}}`, kioskDefaults(), 1},
+		{"scale a numeric string", `{"kiosk": {"scale": "1.5"}}`, kioskDefaults(), 1},
+		{"scale Auto in another case", `{"kiosk": {"scale": "Auto"}}`, kioskDefaults(), 1},
+		{"safeInsetVmin 0 (lower edge)", `{"kiosk": {"safeInsetVmin": 0}}`, kioskWith(map[string]interface{}{"safeInsetVmin": float64(0)}), 0},
+		{"safeInsetVmin 10 (upper edge)", `{"kiosk": {"safeInsetVmin": 10}}`, kioskWith(map[string]interface{}{"safeInsetVmin": float64(10)}), 0},
+		{"safeInsetVmin 4.5", `{"kiosk": {"safeInsetVmin": 4.5}}`, kioskWith(map[string]interface{}{"safeInsetVmin": 4.5}), 0},
+		{"safeInsetVmin -0.5", `{"kiosk": {"safeInsetVmin": -0.5}}`, kioskDefaults(), 1},
+		{"safeInsetVmin 10.5", `{"kiosk": {"safeInsetVmin": 10.5}}`, kioskDefaults(), 1},
+		{"safeInsetVmin a string", `{"kiosk": {"safeInsetVmin": "6"}}`, kioskDefaults(), 1},
+		{"both, valid", `{"kiosk": {"scale": 1.5, "safeInsetVmin": 6}}`,
+			kioskWith(map[string]interface{}{"scale": 1.5, "safeInsetVmin": float64(6)}), 0},
+		{"both, bad: one warning each", `{"kiosk": {"scale": 9, "safeInsetVmin": 99}}`, kioskDefaults(), 2},
+		{"a case-variant member is ignored", `{"kiosk": {"Scale": 2, "SafeInsetVmin": 6}}`, kioskDefaults(), 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, present, logs := kioskClientFor(t, c.json)
+			if !present {
+				t.Fatal("kiosk not served")
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Fatalf("kiosk = %v, want %v", got, c.want)
+			}
+			if n := kioskWarnings(logs); n != c.warns {
+				t.Fatalf("want %d kiosk warning(s), got %d:\n%s", c.warns, n, logs)
+			}
+		})
+	}
+}
+
+// The example config documents both keys with their defaults.
+func TestKioskPresetDisplayExample968(t *testing.T) {
+	raw, err := os.ReadFile("../../config.example.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Kiosk struct {
+			Scale         *string  `json:"scale"`
+			SafeInsetVmin *float64 `json:"safeInsetVmin"`
+		} `json:"kiosk"`
+		Comment string `json:"_comment_kiosk"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Kiosk.Scale == nil || *doc.Kiosk.Scale != "auto" || doc.Kiosk.SafeInsetVmin == nil || *doc.Kiosk.SafeInsetVmin != 3 {
+		t.Fatalf("config.example.json kiosk.scale/safeInsetVmin = %v/%v, want auto/3", doc.Kiosk.Scale, doc.Kiosk.SafeInsetVmin)
+	}
+	for _, w := range []string{"scale", "safeInsetVmin", "1.25", "0-10"} {
+		if !strings.Contains(doc.Comment, w) {
+			t.Fatalf("_comment_kiosk misses %q", w)
 		}
 	}
 }
