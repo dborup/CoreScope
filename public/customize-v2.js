@@ -696,6 +696,20 @@
     return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
   }
 
+  /** The value typed in the Predicted reach field: null when empty (the
+   *  operator's value), the number when the module rule takes it, undefined
+   *  otherwise. Only the decimal grammar is checked here; the bounds are
+   *  the rule's alone (BOUNDS.env), so the field never caps a value the rule
+   *  allows. */
+  function reachInputValue(key, raw) {
+    var P = window.PredictedReach;
+    raw = String(raw).trim();
+    if (raw === '') return null;
+    if (!P || typeof P.isDecimal !== 'function' || !P.isDecimal(raw)) return undefined;
+    var v = Number(raw);
+    return isValidReachSetting(key, v) ? v : undefined;
+  }
+
   /** The effective reach settings (this section over the defaults), or
    *  null without the rule. */
   function reachSettings(effectiveConfig) {
@@ -2657,7 +2671,7 @@
       '<div class="cust-terrain-row">' +
         '<div><label for="' + id + '">Environment loss (dB)' + _overrideDot('reach', 'environmentLossDb') + '</label>' +
           '<div class="cust-hint">Buildings, trees and other clutter the terrain model does not include. Empty: the server\u2019s ' +
-            escAttr(String(server)) + ' dB. A link with its own value (renv) still wins; the panel\u2019s Reset returns here.</div></div>' +
+            escAttr(String(server)) + ' dB. A shared link\u2019s own value still wins; the panel\u2019s Reset returns here.</div></div>' +
         '<input type="number" id="' + id + '" min="' + b[0] + '" max="' + b[1] + '" step="1" ' +
           'inputmode="decimal" data-cv2-reach="environmentLossDb" value="' + (v === null ? '' : escAttr(String(v))) + '" ' +
           'placeholder="' + escAttr(String(server)) + '">' +
@@ -3598,10 +3612,9 @@
       var key = inp.dataset.cv2Reach;
       inp.addEventListener('change', function () {
         if (!_reachRule()) return;
-        var raw = String(inp.value).trim();
-        if (raw === '') { clearOverride('reach', key); return; }
-        var v = /^[0-9]{1,2}(\.[0-9])?$/.test(raw) ? Number(raw) : undefined;
-        if (v === undefined || !isValidReachSetting(key, v)) {
+        var v = reachInputValue(key, inp.value);
+        if (v === null) { clearOverride('reach', key); return; }
+        if (v === undefined) {
           var now = reachSettings(_getEffective())[key];
           inp.value = now === null ? '' : String(now);
           return;
@@ -4383,6 +4396,7 @@
     renderMomentsSettings: _renderMomentsSettings,
     // #968 M3 — exposed for tests; see test-968-m3-customizer-reach.js.
     isValidReachSetting: isValidReachSetting,
+    reachInputValue: reachInputValue,
     reachSettings: reachSettings,
     renderReachSettings: _renderReachSettings,
     countOverrides: _countOverrides,

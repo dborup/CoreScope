@@ -445,7 +445,7 @@ function rasterFor(c, radiusKm) {
         await page.locator(REACH_INPUT).scrollIntoViewIfNeeded();
         let c = await customizerReach(page);
         assert(c.title && c.input && c.value === '' && c.placeholder === '25' && c.min === '0' && c.max === '60' && c.stored === null, 'section ' + JSON.stringify(c));
-        assert(/Empty: the server\u2019s 25 dB/.test(c.hint) && /renv/.test(c.hint), 'hint ' + c.hint);
+        assert(/Empty: the server\u2019s 25 dB/.test(c.hint) && /A shared link\u2019s own value still wins/.test(c.hint) && !/renv/.test(c.hint), 'hint ' + c.hint);
         await shot(page, `968-customizer-display-${theme}.jpg`, '.cust-overlay');
 
         // 40 dB moves the open panel at once, with no request and no renv.
@@ -460,6 +460,16 @@ function rasterFor(c, radiusKm) {
         await setReachField(page, 70);
         c = await customizerReach(page);
         assert(c.value === '40' && JSON.stringify(c.stored) === '{"environmentLossDb":40}', 'a bad value stuck ' + JSON.stringify(c));
+        // N1 on #976: the field leaves the range to BOUNDS.env, so a wider
+        // bound takes 100 (the field once capped input at two digits).
+        await page.evaluate(() => { window.PredictedReach.BOUNDS.env = [0, 120, 1]; });
+        await setReachField(page, 100);
+        c = await customizerReach(page);
+        assert(JSON.stringify(c.stored) === '{"environmentLossDb":100}', 'the field capped 100 ' + JSON.stringify(c));
+        await page.evaluate(() => { window.PredictedReach.BOUNDS.env = [0, 60, 1]; });
+        await setReachField(page, 40);
+        c = await customizerReach(page);
+        assert(JSON.stringify(c.stored) === '{"environmentLossDb":40}', 'back to 40 ' + JSON.stringify(c));
         assert(rec.coverage.length === cov, 'the viewer default asked the server again');
 
         // A cold link: 40 dB; renv=10 wins; Reset lands on 40.

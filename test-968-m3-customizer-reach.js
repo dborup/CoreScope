@@ -11,7 +11,8 @@
  *      predicted reach, its bounds read from PredictedReach.BOUNDS.env (not
  *      a copy), empty meaning the operator's value, the override dot;
  *   3. the docs name the key.
- * The change handler is exercised in test-issue-962-reach-env-loss-e2e.js.
+ * The field's value is reachInputValue (the change handler's parse); the
+ * handler itself is exercised in test-issue-962-reach-env-loss-e2e.js.
  * Usage: node test-968-m3-customizer-reach.js
  */
 'use strict';
@@ -135,8 +136,27 @@ test('control: empty means the operator\'s value, which the placeholder and the 
   const i = input(html);
   assert.ok(/value=""/.test(i) && /placeholder="35"/.test(i), i);
   assert.ok(/server’s 35 dB|server's 35 dB/.test(html), 'the hint does not name the server value');
-  assert.ok(/renv|link/i.test(html), 'the hint does not say a link still wins');
+  assert.ok(/shared link’s own value still wins/.test(html), 'the hint does not say a link still wins');
+  assert.ok(!/renv/.test(html), 'the hint names the renv parameter');
   assert.ok(/placeholder="25"/.test(input(load({ cfg: { enabled: true } }).api.renderReachSettings())), 'no operator value: 25');
+});
+
+// N1 on #976: the field checks only the decimal grammar (the module's
+// isDecimal); BOUNDS.env alone decides the range, so the field never caps a
+// value the rule allows (it once capped at two digits, 99.9).
+test('control: the typed value — BOUNDS.env decides alone, no digit cap in the field', () => {
+  const c = load();
+  const val = (raw) => c.api.reachInputValue('environmentLossDb', raw);
+  eq([val(''), val('  '), val('40'), val(' 40 '), val('0'), val('12.5'), val('60')], [null, null, 40, 40, 0, 12.5, 60]);
+  for (const bad of ['61', '100', '-1', '12.55', '1e1', '4O', 'abc', '.5']) {
+    assert.strictEqual(val(bad), undefined, bad);
+  }
+  PR(c).BOUNDS.env = [0, 120, 1];
+  eq([val('100'), val('120'), val('99.5'), val('100.5')], [100, 120, 99.5, 100.5], 'the field caps what BOUNDS.env allows');
+  assert.strictEqual(val('120.5'), undefined, 'over the stubbed bound');
+  PR(c).BOUNDS.env = [5, 50, 1];
+  assert.deepStrictEqual([val('4'), val('5'), val('51')], [undefined, 5, undefined], 'the lower bound is the rule\'s too');
+  assert.strictEqual(load({ noRule: true }).api.reachInputValue('environmentLossDb', '40'), undefined, 'accepted without the module');
 });
 
 test('control: a stored value shows with the override dot', () => {

@@ -109,6 +109,11 @@
 
   function round(v, places) { var f = Math.pow(10, places); return Math.round(v * f) / f; }
 
+  /* isDecimal: a string in the plain decimal grammar of a link value.
+   * Exported: the customizer's field checks the grammar with it and leaves
+   * the bounds to SETTINGS.valid (#968 M3). */
+  function isDecimal(s) { return typeof s === 'string' && DECIMAL_RE.test(s); }
+
   function el(tag, cls, text) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -139,7 +144,7 @@
   function boundedNumber(field, v) {
     var b = BOUNDS[field];
     if (!b || v === null || v === undefined || v === '' || typeof v === 'object' || typeof v === 'boolean') return null;
-    if (typeof v === 'string' && !DECIMAL_RE.test(v)) return null;
+    if (typeof v === 'string' && !isDecimal(v)) return null;
     var n = Number(v);
     if (!isFinite(n) || n < b[0] || n > b[1]) return null;
     return round(n, b[2]);
@@ -1202,6 +1207,7 @@
     KEYS: KEYS,
     BOUNDS: BOUNDS,
     SETTINGS: SETTINGS,
+    isDecimal: isDecimal,
     CLASSES: CLASSES,
     parseState: parseState,
     invalidLink: invalidLink,
