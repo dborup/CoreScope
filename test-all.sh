@@ -127,6 +127,7 @@ run test-883-kiosk-tour.js
 run test-883-kiosk-numbers.js
 run test-883-kiosk-moments.js
 run test-883-m3-kiosk.js
+run test-968-kiosk-preset.js
 run test-958-movable-moments.js
 run test-969-operator-display-defaults.js
 run test-live-follow.js

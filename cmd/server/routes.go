@@ -693,6 +693,7 @@ func (s *Server) handleConfigClient(w http.ResponseWriter, r *http.Request) {
 		Customizer:          CustomizerClientConfig{DisabledTabs: disabledTabs},
 		ClientRxCoverage:    s.cfg.ClientRxCoverageEnabled(),
 		Moments:             s.cfg.momentsClientConfig(),
+		Kiosk:               s.cfg.kioskClientConfig(),
 		GeoFilter:           s.getGeoFilter(),
 		Privacy:             privacy,
 		EstimatedPositions:  EstimatedPositionsClientConfig{Enabled: s.estimatedPositionsEnabled()},

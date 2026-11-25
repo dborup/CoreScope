@@ -76,7 +76,8 @@ function page(opts) {
     p.root = root; p.map = map;
     p.c = K.create({
       doc, win, root, map,
-      params: K.parseKioskParams(new URLSearchParams(p.hash.split('?')[1] || '')),
+      // #968 M1: the operator preset (/api/config/client `kiosk`), if any.
+      params: opts.params || K.parseKioskParams(new URLSearchParams(p.hash.split('?')[1] || ''), opts.preset),
       fetchAreas: () => Promise.resolve(AREAS),
       fly: (bounds) => p.flights.push({ mount: p.mounts, bounds: JSON.parse(JSON.stringify(bounds)), at: clock.now() }),
       reducedMotion: () => true,
@@ -285,6 +286,36 @@ test('the test-only override shortens the interval (soak test), and the clamp ho
   q.clock.advance(55 * 60000);
   assert.strictEqual(q.remountCalls, 0, 'config below 1 h is clamped to 1 h');
   q.destroy();
+});
+
+test('#968 M1: the operator preset\'s remountHours sets the interval (a bare kiosk=1 link)', async () => {
+  const p = page({ preset: { remountHours: 2 } });
+  await flush();
+  assert.strictEqual(p.c.stats().remountInMs, 2 * H, 'due 2 h after the mount');
+  p.clock.advance(2 * H - 60000);
+  await flush();
+  assert.strictEqual(p.remountCalls, 0, 'not before 2 h');
+  p.clock.advance(2 * 60000);
+  await flush();
+  assert.strictEqual(p.remountCalls, 1, 'at the first boundary after 2 h');
+  const next = p.c.stats().remountInMs;
+  assert(next <= 2 * H && next > 2 * H - 3 * 60000, 'the next mount keeps the preset interval: ' + next);
+  p.destroy();
+  // A preset outside 1-24 h is the built-in 6 h.
+  const q = page({ preset: { remountHours: 48 } });
+  await flush();
+  assert.strictEqual(q.c.stats().remountInMs, 6 * H);
+  q.destroy();
+});
+
+test('#968 M1: the remount interval in the params goes through the 1-24 h clamp', async () => {
+  const mk = (ms) => Object.assign(K.parseKioskParams(new URLSearchParams(TOUR)), { remountMs: ms });
+  for (const [ms, want] of [[0.5 * H, 1 * H], [30 * H, 24 * H], [3 * H, 3 * H], [0, 6 * H]]) {
+    const p = page({ params: mk(ms) });
+    await flush();
+    assert.strictEqual(p.c.stats().remountInMs, want, String(ms));
+    p.destroy();
+  }
 });
 
 test('an in-place remount offers no start overlay and no skipped note again', async () => {
