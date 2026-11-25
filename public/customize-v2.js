@@ -36,8 +36,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments'];
+  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'kiosk'];
+  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'kiosk'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -676,6 +676,41 @@
     return R.resolve(sec && typeof sec === 'object' ? sec : {});
   }
 
+  // ── #968 M2 — Live kiosk: the screen's text size and edge margin ──
+  // kiosk.scale and kiosk.safeInsetVmin, per browser. The keys, steps and
+  // bounds are the kiosk's own rule (public/live-kiosk.js,
+  // LiveKiosk.SETTINGS: VIEWER_KEYS, valid, display), which live.js applies
+  // on a kiosk mount and on theme-changed. The operator's preset
+  // (config.json "kiosk", window.MC_KIOSK_CFG) is this section's default:
+  // the viewer's value wins over it, and a value equal to it is not stored.
+  // That file loads after this one, hence the lazy lookup.
+  function _kioskRule() {
+    var R = window.LiveKiosk && window.LiveKiosk.SETTINGS;
+    return R && R.VIEWER_KEYS && typeof R.valid === 'function' && typeof R.display === 'function' ? R : null;
+  }
+
+  function isValidKioskSetting(key, val) {
+    var R = _kioskRule();
+    return !!R && R.VIEWER_KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The effective scale and inset (this section over the operator
+   *  preset over auto / 3), or null without the rule. */
+  function kioskSettings(effectiveConfig) {
+    var R = _kioskRule();
+    if (!R) return null;
+    return R.display(effectiveConfig && effectiveConfig.kiosk, window.MC_KIOSK_CFG);
+  }
+
+  /** Store one value; the operator's own value clears the override. false
+   *  for a key or value the rule refuses. */
+  function setKioskSetting(key, val) {
+    if (!isValidKioskSetting(key, val)) return false;
+    if (val === _kioskRule().display(null, window.MC_KIOSK_CFG)[key]) clearOverride('kiosk', key);
+    else setOverride('kiosk', key, val);
+    return true;
+  }
+
   // ── #737 — the oblique photo (Skråfoto) viewer's defaults ──
   // The first direction, the first zoom and whether the line of sight is
   // drawn. The keys, values and defaults are the viewer's own rule
@@ -972,6 +1007,17 @@
           else console.warn('[customizer-v2] Invalid Moments setting rejected:', 'moments.' + mok, moIn[mok]);
         }
         if (Object.keys(moOut).length) clean[key] = moOut;
+      } else if (key === 'kiosk' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #968 M2 — the kiosk scale and inset, by the kiosk's rule; the
+        // operator-only keys (tour, tiles, …) are never the viewer's.
+        var kIn = delta[key], kOut = {}, kRule = _kioskRule(), kKeys = kRule ? kRule.VIEWER_KEYS : [];
+        for (var kki = 0; kki < kKeys.length; kki++) {
+          var kk2 = kKeys[kki];
+          if (!_own(kIn, kk2) || kIn[kk2] == null) continue;
+          if (isValidKioskSetting(kk2, kIn[kk2])) kOut[kk2] = kIn[kk2];
+          else console.warn('[customizer-v2] Invalid Live kiosk setting rejected:', 'kiosk.' + kk2, kIn[kk2]);
+        }
+        if (Object.keys(kOut).length) clean[key] = kOut;
       } else if (key === 'skraafoto' && typeof delta[key] === 'object' && delta[key] !== null) {
         // #737 — the oblique photo viewer's defaults, by the viewer's rule.
         var sIn = delta[key], sOut = {}, sRule = _skraafotoRule(), sKeys = sRule ? sRule.KEYS : [];
@@ -1602,6 +1648,20 @@
           }
         }
       }
+      // #968 M2 — kiosk: a scale step and a bounded inset.
+      if (key === 'kiosk' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var krule = _kioskRule();
+        for (var ksk in obj[key]) {
+          if (!_own(obj[key], ksk)) continue;
+          if (krule && krule.VIEWER_KEYS.indexOf(ksk) === -1) {
+            console.warn('[customizer-v2] Unknown kiosk key in import:', ksk);
+          } else if (!isValidKioskSetting(ksk, obj[key][ksk])) {
+            errors.push('Invalid Live kiosk setting: kiosk.' + ksk + ' = "' + obj[key][ksk] + '" \u2014 must be ' +
+              (!krule ? 'unavailable without the Live kiosk' : ksk === 'scale' ? 'auto, 1, 1.25, 1.5 or 2'
+                : 'a number ' + krule.LIMITS[ksk][0] + '-' + krule.LIMITS[ksk][1]));
+          }
+        }
+      }
       // #737 — skraafoto: two lists of values and a boolean.
       if (key === 'skraafoto' && typeof obj[key] === 'object' && obj[key] !== null) {
         var srule = _skraafotoRule();
@@ -1833,7 +1893,7 @@
       { id: 'theme', glyph: 'ph:palette', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', glyph: 'ph:target', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'home', glyph: 'ph:house', title: 'Home', badge: _tabBadge('home') },
-      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + _countOverrides('moments') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
+      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + _countOverrides('moments') + _countOverrides('kiosk') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', glyph: 'ph:map-trifold', title: 'GeoFilter' },
       { id: 'export', glyph: 'ph:download-simple', title: 'Export' }
     ];
@@ -2347,6 +2407,7 @@
       _renderHeritageSettings() +
       _renderSkraafotoSettings() +
       _renderMomentsSettings() +
+      _renderKioskSettings() +
     '</div>';
   }
 
@@ -2620,6 +2681,33 @@
       check('showBackOnline', 'Back online', '') +
       check('showRecordLink', 'Record link', '') +
       check('showBusiest', 'Busiest repeater', '');
+  }
+
+  // ── #968 M2 Live kiosk ──
+  // Always offered: any server can run a kiosk link. Each field names the
+  // server's value, which is what an unset field means.
+  var KIOSK_SCALE_LABELS = { auto: 'Automatic (by screen size)', 1: '1\u00d7', 1.25: '1.25\u00d7', 1.5: '1.5\u00d7', 2: '2\u00d7' };
+  function _renderKioskSettings() {
+    var R = _kioskRule();
+    if (!R) return '';
+    var k = kioskSettings(_getEffective());
+    var op = R.display(null, window.MC_KIOSK_CFG);
+    var fmt = function (key, v) { return key === 'scale' ? KIOSK_SCALE_LABELS[v] : v + ' %'; };
+    var opts = R.SCALES.map(function (v) {
+      return '<option value="' + escAttr(String(v)) + '"' + (v === k.scale ? ' selected' : '') + '>' + KIOSK_SCALE_LABELS[v] + '</option>';
+    }).join('');
+    var lim = R.LIMITS.safeInsetVmin;
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Live kiosk</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">For a TV or wall screen running a <code>#/live?kiosk=1</code> link. Set these once in the screen\u2019s own browser, outside kiosk, before opening the kiosk link. They apply to this browser only and win over the server\u2019s kiosk preset.</p>' +
+      '<div class="cust-field"><label for="cv2-kiosk-scale">Text and tile size' + _overrideDot('kiosk', 'scale') + '</label>' +
+        '<select id="cv2-kiosk-scale" data-cv2-kiosk="scale" style="width:100%;min-height:48px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);touch-action:manipulation">' + opts + '</select>' +
+        '<div class="cust-hint">Server default: ' + fmt('scale', op.scale) + '. Automatic grows it with the screen, from 1\u00d7 up to 2\u00d7.</div></div>' +
+      '<div class="cust-terrain-row">' +
+        '<div><label for="cv2-kiosk-safeInsetVmin">Screen-edge margin (% of short side)' + _overrideDot('kiosk', 'safeInsetVmin') + '</label>' +
+          '<div class="cust-hint">Keeps text clear of a TV\u2019s cut-off edges. Server default: ' + fmt('safeInsetVmin', op.safeInsetVmin) + '.</div></div>' +
+        '<input type="number" id="cv2-kiosk-safeInsetVmin" min="' + lim[0] + '" max="' + lim[1] + '" step="0.5" ' +
+          'inputmode="decimal" data-cv2-kiosk="safeInsetVmin" value="' + escAttr(String(k.safeInsetVmin)) + '">' +
+      '</div>';
   }
 
   // ── #737 Oblique photo viewer defaults ──
@@ -3515,6 +3603,21 @@
       });
     });
 
+    // #968 M2 — Live kiosk scale and inset. The operator's own value is a
+    // cleared override (setKioskSetting); a bad one is put back.
+    container.querySelectorAll('[data-cv2-kiosk]').forEach(function (inp) {
+      var key = inp.dataset.cv2Kiosk;
+      inp.addEventListener('change', function () {
+        var raw = inp.value;
+        var v = key === 'scale' ? (raw === 'auto' ? 'auto' : Number(raw))
+          : (/^[0-9]{1,2}(\.[0-9]+)?$/.test(raw) ? Number(raw) : undefined);
+        if (!setKioskSetting(key, v)) {
+          var now = kioskSettings(_getEffective());
+          if (now) inp.value = String(now[key]);
+        }
+      });
+    });
+
     // #737 — oblique photo viewer defaults. A value back at its default is
     // a cleared override; a bad one is put back. The next viewer reads it.
     container.querySelectorAll('[data-cv2-skraafoto]').forEach(function (inp) {
@@ -4286,6 +4389,13 @@
     isValidMomentsSetting: isValidMomentsSetting,
     momentsSettings: momentsSettings,
     renderMomentsSettings: _renderMomentsSettings,
+    // #968 M2 — exposed for tests; see test-968-customizer-kiosk.js. A
+    // getter: public/live-kiosk.js loads after this file (index.html).
+    get KIOSK_SETTING_KEYS() { var R = _kioskRule(); return R ? R.VIEWER_KEYS.slice() : []; },
+    isValidKioskSetting: isValidKioskSetting,
+    kioskSettings: kioskSettings,
+    setKioskSetting: setKioskSetting,
+    renderKioskSettings: _renderKioskSettings,
     countOverrides: _countOverrides,
     // #741 — exposed for tests; see test-issue-741-customizer-base-maps.js.
     renderTileProviderSelector: _renderTileProviderSelector,

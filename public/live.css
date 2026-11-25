@@ -682,7 +682,7 @@ body.kiosk.kiosk-idle * { cursor: none !important; }
   top: max(var(--kiosk-safe-inset), env(safe-area-inset-top, 0px));
   left: max(var(--kiosk-safe-inset), env(safe-area-inset-left, 0px));
   z-index: 950;
-  max-width: calc(100% - 6vmin - 140px);
+  max-width: calc(100% - 2 * var(--kiosk-safe-inset) - 140px);
   padding: 10px 16px 12px;
   border-radius: 10px;
   background: color-mix(in srgb, var(--card-bg) 88%, transparent);
@@ -947,7 +947,7 @@ body.kiosk .live-node-detail:not(.hidden) ~ .live-kiosk-exit { display: none; }
   .live-kiosk-record-label { font-size: 10px; }
   .live-kiosk-record-value { font-size: 13px; }
   .live-kiosk-record-detail { display: none; }
-  .live-kiosk-step { padding: 6px 10px 8px; max-width: calc(100% - 6vmin - 120px); }
+  .live-kiosk-step { padding: 6px 10px 8px; max-width: calc(100% - 2 * var(--kiosk-safe-inset) - 120px); }
   .live-kiosk-step-label { font-size: 20px; }
   .live-kiosk-step-count { font-size: 13px; }
   .live-kiosk-start { padding: 16px 20px; }
