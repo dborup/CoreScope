@@ -36,8 +36,8 @@
     'meshcore-live-heatmap-opacity'
   ];
 
-  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'kiosk'];
-  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'kiosk'];
+  var VALID_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'heatmapOpacity', 'liveHeatmapOpacity', 'distanceUnit', 'favorites', 'myNodes', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'reach', 'kiosk'];
+  var OBJECT_SECTIONS = ['branding', 'theme', 'themeDark', 'nodeColors', 'typeColors', 'home', 'timestamps', 'markerStroke', 'terrain', 'masts', 'dhmOverlays', 'heritage', 'skraafoto', 'moments', 'reach', 'kiosk'];
   var SCALAR_SECTIONS = ['heatmapOpacity', 'liveHeatmapOpacity'];
   var DISTANCE_UNIT_VALUES = ['km', 'mi', 'auto'];
 
@@ -711,6 +711,49 @@
     return true;
   }
 
+  // ── #968 M3 — Predicted reach: the viewer's default environment loss ──
+  // The key, its default (null: the operator's value) and its validation
+  // are the rule in public/coverage.js (PredictedReach.SETTINGS), and its
+  // bounds are PredictedReach.BOUNDS.env, which a Go test pins to the
+  // server's. The panel reads the effective section back, so the customizer
+  // stores exactly what it uses. coverage.js loads after this file, hence
+  // the lazy lookup; without it no value is accepted.
+  function _reachRule() {
+    var P = window.PredictedReach;
+    var R = P && P.SETTINGS;
+    return R && P.BOUNDS && typeof R.resolve === 'function' && typeof R.valid === 'function' ? R : null;
+  }
+
+  function _reachBounds() { return _reachRule() ? window.PredictedReach.BOUNDS.env : null; }
+
+  function isValidReachSetting(key, val) {
+    var R = _reachRule();
+    return !!R && R.KEYS.indexOf(key) >= 0 && R.valid(key, val);
+  }
+
+  /** The value typed in the Predicted reach field: null when empty (the
+   *  operator's value), the number when the module rule takes it, undefined
+   *  otherwise. Only the decimal grammar is checked here; the bounds are
+   *  the rule's alone (BOUNDS.env), so the field never caps a value the rule
+   *  allows. */
+  function reachInputValue(key, raw) {
+    var P = window.PredictedReach;
+    raw = String(raw).trim();
+    if (raw === '') return null;
+    if (!P || typeof P.isDecimal !== 'function' || !P.isDecimal(raw)) return undefined;
+    var v = Number(raw);
+    return isValidReachSetting(key, v) ? v : undefined;
+  }
+
+  /** The effective reach settings (this section over the defaults), or
+   *  null without the rule. */
+  function reachSettings(effectiveConfig) {
+    var R = _reachRule();
+    if (!R) return null;
+    var sec = effectiveConfig && effectiveConfig.reach;
+    return R.resolve(sec && typeof sec === 'object' ? sec : {});
+  }
+
   // ── #737 — the oblique photo (Skråfoto) viewer's defaults ──
   // The first direction, the first zoom and whether the line of sight is
   // drawn. The keys, values and defaults are the viewer's own rule
@@ -1018,6 +1061,16 @@
           else console.warn('[customizer-v2] Invalid Live kiosk setting rejected:', 'kiosk.' + kk2, kIn[kk2]);
         }
         if (Object.keys(kOut).length) clean[key] = kOut;
+      } else if (key === 'reach' && typeof delta[key] === 'object' && delta[key] !== null) {
+        // #968 M3 — the Predicted reach default, by the module's rule.
+        var rIn = delta[key], rOut = {}, rRule = _reachRule(), rKeys = rRule ? rRule.KEYS : [];
+        for (var rki = 0; rki < rKeys.length; rki++) {
+          var rk = rKeys[rki];
+          if (!_own(rIn, rk) || rIn[rk] == null) continue;
+          if (isValidReachSetting(rk, rIn[rk])) rOut[rk] = rIn[rk];
+          else console.warn('[customizer-v2] Invalid Predicted reach setting rejected:', 'reach.' + rk, rIn[rk]);
+        }
+        if (Object.keys(rOut).length) clean[key] = rOut;
       } else if (key === 'skraafoto' && typeof delta[key] === 'object' && delta[key] !== null) {
         // #737 — the oblique photo viewer's defaults, by the viewer's rule.
         var sIn = delta[key], sOut = {}, sRule = _skraafotoRule(), sKeys = sRule ? sRule.KEYS : [];
@@ -1662,6 +1715,22 @@
           }
         }
       }
+      // #968 M3 — reach: one bounded number; null is the default (the
+      // operator's value), the same as leaving the key out.
+      if (key === 'reach' && typeof obj[key] === 'object' && obj[key] !== null) {
+        var rrule = _reachRule(), rb = _reachBounds();
+        for (var rsk in obj[key]) {
+          if (!_own(obj[key], rsk)) continue;
+          if (rrule && rrule.KEYS.indexOf(rsk) === -1) {
+            console.warn('[customizer-v2] Unknown reach key in import:', rsk);
+          } else if (obj[key][rsk] === null && rrule && rrule.DEFAULTS[rsk] === null) {
+            // The documented default written out; writeOverrides skips it.
+          } else if (!isValidReachSetting(rsk, obj[key][rsk])) {
+            errors.push('Invalid Predicted reach setting: reach.' + rsk + ' = "' + obj[key][rsk] + '" \u2014 must be ' +
+              (rb ? 'a number ' + rb[0] + '-' + rb[1] + ' dB' : 'unavailable without the Predicted reach'));
+          }
+        }
+      }
       // #737 — skraafoto: two lists of values and a boolean.
       if (key === 'skraafoto' && typeof obj[key] === 'object' && obj[key] !== null) {
         var srule = _skraafotoRule();
@@ -1893,7 +1962,7 @@
       { id: 'theme', glyph: 'ph:palette', title: 'Theme', badge: _tabBadge(isDarkMode() ? 'themeDark' : 'theme') },
       { id: 'nodes', glyph: 'ph:target', title: 'Colors', badge: (function () { var n = _countOverrides('nodeColors') + _countOverrides('typeColors'); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'home', glyph: 'ph:house', title: 'Home', badge: _tabBadge('home') },
-      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + _countOverrides('moments') + _countOverrides('kiosk') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
+      { id: 'display', glyph: 'ph:monitor', title: 'Display', badge: (function () { var n = _countOverrides('timestamps') + _countOverrides('terrain') + _countOverrides('masts') + _countOverrides('dhmOverlays') + _countOverrides('heritage') + _countOverrides('skraafoto') + _countOverrides('reach') + _countOverrides('moments') + _countOverrides('kiosk') + (_isOverridden(null, 'distanceUnit') ? 1 : 0); return n ? ' <span class="cv2-tab-badge">' + n + '</span>' : ''; })() },
       { id: 'geofilter', glyph: 'ph:map-trifold', title: 'GeoFilter' },
       { id: 'export', glyph: 'ph:download-simple', title: 'Export' }
     ];
@@ -2406,6 +2475,7 @@
       _renderDHMOverlaySettings() +
       _renderHeritageSettings() +
       _renderSkraafotoSettings() +
+      _renderReachSettings() +
       _renderMomentsSettings() +
       _renderKioskSettings() +
     '</div>';
@@ -2646,6 +2716,27 @@
           num('warnDistanceM', 'Warn within (m) of a zone', 'Empty: every zone the server reports (its own radius). An end inside a zone is always shown.', 10,
             h.warnDistanceM === null ? '' : String(h.warnDistanceM), 'server radius')
         : '');
+  }
+
+  // ── #968 M3 Predicted reach ──
+  // Shown only while the server offers the predicted reach (its coverage
+  // block). Empty is the operator's value; a link's renv still wins, and
+  // the panel's Reset returns here.
+  function _renderReachSettings() {
+    var R = _reachRule(), P = window.PredictedReach;
+    if (!R || !P.offered(window.MC_COVERAGE_CFG)) return '';
+    var v = reachSettings(_getEffective()).environmentLossDb, b = _reachBounds();
+    var server = P.operatorRadio(window.MC_COVERAGE_CFG).environmentLossDb;
+    var id = 'cv2-reach-environmentLossDb';
+    return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Predicted reach</p>' +
+      '<div class="cust-terrain-row">' +
+        '<div><label for="' + id + '">Environment loss (dB)' + _overrideDot('reach', 'environmentLossDb') + '</label>' +
+          '<div class="cust-hint">Buildings, trees and other clutter the terrain model does not include. Empty: the server\u2019s ' +
+            escAttr(String(server)) + ' dB. A shared link\u2019s own value still wins; the panel\u2019s Reset returns here.</div></div>' +
+        '<input type="number" id="' + id + '" min="' + b[0] + '" max="' + b[1] + '" step="1" ' +
+          'inputmode="decimal" data-cv2-reach="environmentLossDb" value="' + (v === null ? '' : escAttr(String(v))) + '" ' +
+          'placeholder="' + escAttr(String(server)) + '">' +
+      '</div>';
   }
 
   // ── #881 M3 Live Moments ──
@@ -3618,6 +3709,23 @@
       });
     });
 
+    // #968 M3 — the Predicted reach default. Empty is a cleared override
+    // (the operator's value); a bad value is put back.
+    container.querySelectorAll('[data-cv2-reach]').forEach(function (inp) {
+      var key = inp.dataset.cv2Reach;
+      inp.addEventListener('change', function () {
+        if (!_reachRule()) return;
+        var v = reachInputValue(key, inp.value);
+        if (v === null) { clearOverride('reach', key); return; }
+        if (v === undefined) {
+          var now = reachSettings(_getEffective())[key];
+          inp.value = now === null ? '' : String(now);
+          return;
+        }
+        setOverride('reach', key, v);
+      });
+    });
+
     // #737 — oblique photo viewer defaults. A value back at its default is
     // a cleared override; a bad one is put back. The next viewer reads it.
     container.querySelectorAll('[data-cv2-skraafoto]').forEach(function (inp) {
@@ -4396,6 +4504,11 @@
     kioskSettings: kioskSettings,
     setKioskSetting: setKioskSetting,
     renderKioskSettings: _renderKioskSettings,
+    // #968 M3 — exposed for tests; see test-968-m3-customizer-reach.js.
+    isValidReachSetting: isValidReachSetting,
+    reachInputValue: reachInputValue,
+    reachSettings: reachSettings,
+    renderReachSettings: _renderReachSettings,
     countOverrides: _countOverrides,
     // #741 — exposed for tests; see test-issue-741-customizer-base-maps.js.
     renderTileProviderSelector: _renderTileProviderSelector,
