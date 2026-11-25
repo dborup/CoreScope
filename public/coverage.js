@@ -46,7 +46,9 @@
   var MODELS = { bullington: 'Bullington (P.526 §4.5.1)', delta: 'Delta-Bullington (P.526 §4.5.2)' };
   var LIST_FILTERS = ['good', 'marginal', 'weak', 'all'];
   // [min, max, decimals]. Request bounds mirror cmd/server's grammar;
-  // budget bounds mirror resolveCoverageRadio.
+  // budget bounds mirror resolveCoverageRadio. Exported: the customizer
+  // reads env from here (#968 M3), and Go's
+  // TestCoverage968_EnvBoundsMatchTheClient pins it to the server.
   var BOUNDS = {
     tx: [0, 100, 1], rx: [0, 100, 1], radius: [1, 60, 1],
     power: [-10, 30, 1], txGain: [-10, 20, 1], rxGain: [-10, 20, 1], loss: [0, 30, 1], sens: [-150, -80, 1],
@@ -62,6 +64,30 @@
   var DEFAULT_ENV_LOSS_DB = 25;
   var DEFAULT_RADIO = { txPowerDbm: 22, antennaGainDbi: 3, rxGainDbi: 3, lossDb: 0, sensitivityDbm: -130,
     environmentLossDb: DEFAULT_ENV_LOSS_DB };
+
+  // #968 M3 — the viewer's default environment loss: the customizer's
+  // `reach` section (Customize → Display → Predicted reach), stored per
+  // browser. A link's renv wins over it, it wins over the operator's value.
+  // Like renv it stays in the browser: never a request field. null (empty)
+  // is the operator's value. The customizer validates with this rule, so it
+  // stores exactly what the panel uses.
+  var SETTINGS = {
+    SECTION: 'reach',
+    KEYS: ['environmentLossDb'],
+    DEFAULTS: { environmentLossDb: null },
+    // A number in BOUNDS.env, in the renv grammar (its decimals).
+    valid: function (key, v) {
+      return key === 'environmentLossDb' && typeof v === 'number' && boundedNumber('env', v) === v;
+    },
+    resolve: function (sec) {
+      var out = {};
+      SETTINGS.KEYS.forEach(function (k) {
+        out[k] = sec && typeof sec === 'object' && Object.prototype.hasOwnProperty.call(sec, k) && SETTINGS.valid(k, sec[k])
+          ? sec[k] : SETTINGS.DEFAULTS[k];
+      });
+      return out;
+    }
+  };
 
   // The margin classes of M0 §3.5 (owner decision 7), in dB, best first.
   // Their colours are the CSS variables; the customizer gets them in M4.
@@ -196,8 +222,8 @@
 
   /* budgetOf is the maximum path loss the link tolerates, in dB: power +
    * both gains − cable loss − sensitivity − environment loss, each from the
-   * state, else the operator's values (operatorRadio), else the shipped
-   * defaults. */
+   * state, else the radio's (defaultRadio: the viewer's environment loss,
+   * else the operator's values), else the shipped defaults. */
   function budgetOf(st, radio) {
     var v = budgetValues(st, radio);
     return v.power + v.txGain + v.rxGain - v.loss - v.sens - v.env;
@@ -209,6 +235,16 @@
     var out = Object.assign({}, cfg && cfg.radio);
     out.environmentLossDb = cfg && typeof cfg.environmentLossDb === 'number' && isFinite(cfg.environmentLossDb)
       ? cfg.environmentLossDb : DEFAULT_ENV_LOSS_DB;
+    return out;
+  }
+
+  /* defaultRadio is the budget a link without renv starts from (#968 M3):
+   * the operator's, with the viewer's environment loss (their `reach`
+   * section) over the operator's when it is valid. */
+  function defaultRadio(cfg, viewer) {
+    var out = operatorRadio(cfg);
+    var v = SETTINGS.resolve(viewer).environmentLossDb;
+    if (v !== null) out.environmentLossDb = v;
     return out;
   }
 
@@ -473,10 +509,13 @@
    * client config's coverage block), dhm (its dhm block, for the credit),
    * resolveNode(pubkey) → {name, lat, lon}, fetchFn (tests), onArm and
    * onOpen (the host puts its other map tools away), linkMove(move) (the
-   * host runs a link's fit without saving it as the viewer's view). */
+   * host runs a link's fit without saving it as the viewer's view),
+   * viewerSettings() → the viewer's `reach` section (#968 M3), read each
+   * time the budget is used so a customizer change applies. */
   function create(opts) {
     var map = opts.map, L = global.L, cfg = opts.cfg || {};
-    var radio = operatorRadio(cfg);
+    function viewer() { return opts.viewerSettings ? opts.viewerSettings() : null; }
+    function radio() { return defaultRadio(cfg, viewer()); }
     var fetchFn = opts.fetchFn || (global.fetch ? global.fetch.bind(global) : null);
     var state = null, armed = false, panel = null, ui = {}, btn = null, hint = null;
     var overlay = null, canvas = null, centreDot = null, raster = null, meta = null, data = null;
@@ -654,7 +693,6 @@
       ui.envReset = el('button', 'reach-env-reset', 'Reset');
       ui.envReset.type = 'button';
       ui.envReset.setAttribute('data-testid', 'reach-env-reset');
-      ui.envReset.setAttribute('aria-label', 'Reset the environment loss to the server default, ' + fmt(radio.environmentLossDb, 0) + ' dB');
       ui.envReset.addEventListener('click', onEnvReset);
       envHint.appendChild(ui.envReset);
       bud.appendChild(envHint);
@@ -803,7 +841,7 @@
         ui.nodesList.hidden = true;
         return;
       }
-      var rows = reachRows(reach, budgetOf(state, radio));
+      var rows = reachRows(reach, budgetOf(state, radio()));
       var counts = reachCounts(rows);
       var inReach = counts.good + counts.marginal + counts.weak;
       Object.keys(ui.chips).forEach(function (k) {
@@ -847,13 +885,19 @@
       ui.freqUsed.textContent = p && typeof p.freqMHz === 'number'
         ? 'Frequency ' + fmt(p.freqMHz, 3) + ' MHz' + (p.freqSource ? ' (' + p.freqSource + ')' : '')
         : '';
-      var bv = budgetValues(state, radio);
+      var r = radio();
+      var bv = budgetValues(state, r);
       BUDGET_FIELDS.forEach(function (f) {
         if (global.document.activeElement !== ui[f]) ui[f].value = String(bv[f]);
         ui[f + 'Out'].textContent = fmt(bv[f], 0) + ' ' + ui[f + 'Unit'];
       });
-      ui.budget.textContent = 'Maximum path loss ' + fmt(budgetOf(state, radio), 0) + ' dB';
+      ui.budget.textContent = 'Maximum path loss ' + fmt(budgetOf(state, r), 0) + ' dB';
       ui.envReset.disabled = typeof state.env !== 'number';
+      // Whose value the reset returns to: the viewer's default, else the
+      // server's.
+      ui.envReset.setAttribute('aria-label', 'Reset the environment loss to '
+        + (SETTINGS.resolve(viewer()).environmentLossDb !== null ? 'your default, ' : 'the server default, ')
+        + fmt(r.environmentLossDb, 0) + ' dB');
       if (ui.modelSelect && global.document.activeElement !== ui.modelSelect) ui.modelSelect.value = state.model || defaultModel();
     }
 
@@ -925,7 +969,7 @@
       if (!canvas || !raster || !meta) return;
       var ctx = canvas.getContext('2d');
       var img = ctx.createImageData(meta.width, meta.height);
-      var budget = budgetOf(state, radio);
+      var budget = budgetOf(state, radio());
       paint(img.data, raster, buildLut(budget, meta, themeColors()));
       ctx.putImageData(img, 0, 0);
       var share = classShares(raster, budget, meta);
@@ -1117,7 +1161,10 @@
       writeHash();
     }
 
-    function onThemeChange() { recolor(); }
+    // A customizer change (theme-changed → theme-refresh) may move the
+    // viewer's default environment loss: the inputs follow it, and a link's
+    // renv still wins.
+    function onThemeChange() { syncInputs(); recolor(); }
 
     buildToggle();
     global.document.addEventListener('keydown', onKey);
@@ -1153,6 +1200,8 @@
     ENDPOINT: ENDPOINT,
     HASH_PARAM: HASH_PARAM,
     KEYS: KEYS,
+    BOUNDS: BOUNDS,
+    SETTINGS: SETTINGS,
     CLASSES: CLASSES,
     parseState: parseState,
     invalidLink: invalidLink,
@@ -1169,6 +1218,7 @@
     listShows: listShows,
     budgetOf: budgetOf,
     operatorRadio: operatorRadio,
+    defaultRadio: defaultRadio,
     DEFAULT_ENV_LOSS_DB: DEFAULT_ENV_LOSS_DB,
     marginClass: marginClass,
     parseColor: parseColor,

@@ -22,10 +22,21 @@
  *      marker, its popup's "View Node", the node's "Predicted reach" chip,
  *      then the environment loss slider (to 0) and the reset; each budget
  *      change recounts with no request, and nothing scrolls sideways;
- *   4. no console error, and no request leaves localhost.
+ *   4. no console error, and no request leaves localhost;
+ *   5. #968 M3, the viewer's default (Customize → Display → Predicted
+ *      reach): on desktop, light and dark, the section shows with an empty
+ *      field and the operator's value as placeholder; 40 moves the open
+ *      panel (no renv written, no request), a bad value is put back; a cold
+ *      link starts at 40, renv=10 wins and the panel's Reset lands on 40;
+ *      emptying the field returns to the operator's value. Without the
+ *      server's coverage block the section is not there. On a 375×560
+ *      phone from a cold #/map, by real taps: More → Customize → Display,
+ *      type 40, close, then the node's reach starts at 40 and its Reset
+ *      after a slider tap returns to 40.
  *
  * SHOTS_DIR, when set, receives small JPEG screenshots (default 25 dB vs
- * 0 dB, desktop and phone).
+ * 0 dB, desktop and phone; #968: the customizer section and the panel at
+ * the viewer's default).
  *
  * Usage:
  *   BASE_URL=http://localhost:13581 node test-issue-962-reach-env-loss-e2e.js
@@ -123,7 +134,8 @@ function rasterFor(c, radiusKm) {
     await ctx.route(BASE + '/api/config/client', async (route) => {
       const response = await route.fetch();
       const config = await response.json();
-      config.coverage = o.coverage || coverageBlock(25);
+      if (o.coverage === false) delete config.coverage;
+      else config.coverage = o.coverage || coverageBlock(25);
       await route.fulfill({ response, json: config });
     });
     const rasters = new Map();
@@ -228,6 +240,53 @@ function rasterFor(c, radiusKm) {
     assert(errs.length === 0, 'console errors: ' + errs.join(' | '));
   }
 
+  /* openNodeReachByTaps: from a cold #/map at the node, real taps on its
+   * marker, its popup's "View Node" and the node's "Predicted reach" chip;
+   * resolves when the panel is ready. */
+  async function openNodeReachByTaps(page, rec, opened) {
+    if (!opened) {
+      await page.goto(`${BASE}/#/map?lat=${node.lat}&lon=${node.lon}&zoom=16`, { waitUntil: 'domcontentloaded' });
+    }
+    await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
+    await page.waitForTimeout(600);
+    // The node's marker: the one nearest the map's centre, which is the node.
+    const mk = await page.evaluate(() => {
+      const m = document.querySelector('#leaflet-map').getBoundingClientRect();
+      const cx = m.left + m.width / 2, cy = m.top + m.height / 2;
+      let best = null;
+      document.querySelectorAll('#leaflet-map .leaflet-marker-icon').forEach(e => {
+        const r = e.getBoundingClientRect();
+        const x = r.left + r.width / 2, y = r.top + r.height / 2, d = Math.hypot(x - cx, y - cy);
+        if (r.width > 0 && (!best || d < best.d)) best = { x, y, d };
+      });
+      return best;
+    });
+    assert(mk && mk.d < 30, 'no marker at the node: ' + JSON.stringify(mk));
+    await page.touchscreen.tap(mk.x, mk.y);
+    const view = page.locator('.leaflet-popup-content a[href="#/nodes/' + node.pk + '"]');
+    await view.waitFor({ state: 'visible', timeout: 10000 });
+    await view.tap();
+    await page.waitForSelector('[data-testid="node-predicted-reach"]', { timeout: 30000 });
+    await tapWhenSettled(page, '[data-testid="node-predicted-reach"]', { minHeight: 32 });
+    await waitPanel(page);
+    assert(new URLSearchParams(rec.coverage[rec.coverage.length - 1]).get('at') === node.pk.toLowerCase(), 'not the node\'s reach: ' + rec.coverage.join(' '));
+  }
+
+  /* tapEnvSliderStart taps the environment loss slider's left end (0 dB). */
+  async function tapEnvSliderStart(page) {
+    await page.evaluate(() => document.querySelector('[data-testid="reach-env"]').scrollIntoView({ block: 'center' }));
+    await page.waitForTimeout(300);
+    const sl = await page.evaluate(() => {
+      const e = document.querySelector('[data-testid="reach-env"]');
+      const r = e.getBoundingClientRect();
+      const x = r.left + 2, y = r.top + r.height / 2, top = document.elementFromPoint(x, y);
+      return { x, y, onTop: top === e, h: r.height };
+    });
+    assert(sl.onTop && sl.h >= 32, 'the slider is covered or small: ' + JSON.stringify(sl));
+    await page.touchscreen.tap(sl.x, sl.y);
+    await page.waitForTimeout(800);
+  }
+
   async function shot(page, name, el) {
     if (!SHOTS) return;
     const target = el ? await page.$(el) : page;
@@ -308,31 +367,7 @@ function rasterFor(c, radiusKm) {
     await step(`375×560 ${theme}, cold #/map: taps open a node's reach; the slider to 0 dB and the reset recount with no request`, async () => {
       const { ctx, page, rec } = await newCtx({ theme, viewport: { width: 375, height: 560 }, touch: true });
       try {
-        const pk = node.pk.toLowerCase();
-        await page.goto(`${BASE}/#/map?lat=${node.lat}&lon=${node.lon}&zoom=16`, { waitUntil: 'domcontentloaded' });
-        await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
-        await page.waitForTimeout(600);
-        // The node's marker: the one nearest the map's centre, which is the node.
-        const mk = await page.evaluate(() => {
-          const m = document.querySelector('#leaflet-map').getBoundingClientRect();
-          const cx = m.left + m.width / 2, cy = m.top + m.height / 2;
-          let best = null;
-          document.querySelectorAll('#leaflet-map .leaflet-marker-icon').forEach(e => {
-            const r = e.getBoundingClientRect();
-            const x = r.left + r.width / 2, y = r.top + r.height / 2, d = Math.hypot(x - cx, y - cy);
-            if (r.width > 0 && (!best || d < best.d)) best = { x, y, d };
-          });
-          return best;
-        });
-        assert(mk && mk.d < 30, 'no marker at the node: ' + JSON.stringify(mk));
-        await page.touchscreen.tap(mk.x, mk.y);
-        const view = page.locator('.leaflet-popup-content a[href="#/nodes/' + node.pk + '"]');
-        await view.waitFor({ state: 'visible', timeout: 10000 });
-        await view.tap();
-        await page.waitForSelector('[data-testid="node-predicted-reach"]', { timeout: 30000 });
-        await tapWhenSettled(page, '[data-testid="node-predicted-reach"]', { minHeight: 32 });
-        await waitPanel(page);
-        assert(new URLSearchParams(rec.coverage[0]).get('at') === pk, 'not the node\'s reach: ' + rec.coverage[0]);
+        await openNodeReachByTaps(page, rec);
         let s = await panelState(page);
         assert(s.budget === 'Maximum path loss 133 dB' && JSON.stringify(s.chips) === JSON.stringify(AT_133), 'phone default ' + JSON.stringify(s));
         await page.evaluate(() => document.querySelector('[data-testid="reach-env"]').scrollIntoView({ block: 'center' }));
@@ -341,15 +376,7 @@ function rasterFor(c, radiusKm) {
 
         // A tap at the slider's left end puts it at 0 dB.
         const api = rec.api.length, cov = rec.coverage.length;
-        const sl = await page.evaluate(() => {
-          const e = document.querySelector('[data-testid="reach-env"]');
-          const r = e.getBoundingClientRect();
-          const x = r.left + 2, y = r.top + r.height / 2, top = document.elementFromPoint(x, y);
-          return { x, y, onTop: top === e, h: r.height };
-        });
-        assert(sl.onTop && sl.h >= 32, 'the slider is covered or small: ' + JSON.stringify(sl));
-        await page.touchscreen.tap(sl.x, sl.y);
-        await page.waitForTimeout(800);
+        await tapEnvSliderStart(page);
         s = await panelState(page);
         assert(s.env === '0' && s.budget === 'Maximum path loss 158 dB' && JSON.stringify(s.chips) === JSON.stringify(AT_158), 'phone at 0 ' + JSON.stringify(s));
         assert(/[?&]renv=0(&|$)/.test(s.hash), 'renv=0 not in the link: ' + s.hash);
@@ -367,6 +394,167 @@ function rasterFor(c, radiusKm) {
       } finally { await ctx.close(); }
     });
   }
+
+  // ── 5: #968 M3, the viewer's default ──────────────────────────────────
+  const REACH_INPUT = '[data-cv2-reach="environmentLossDb"]';
+
+  /* openDisplayTab: the palette button (desktop), or More → Customize on a
+   * phone, then the Display tab, scrolled to the Predicted reach field. */
+  async function openDisplayTab(page, phone) {
+    await page.waitForFunction(() => window._customizerV2 && window._customizerV2.initDone, null, { timeout: 15000 });
+    if (phone) {
+      await tapWhenSettled(page, '[data-bottom-nav-tab="more"]');
+      await page.waitForSelector('[data-mpa-mirror="customizeToggle"]', { state: 'visible', timeout: 5000 });
+      await tapWhenSettled(page, '[data-mpa-mirror="customizeToggle"]');
+    } else await page.click('#customizeToggle');
+    await page.waitForSelector('.cust-overlay:not(.hidden)', { timeout: 5000 });
+    if (phone) await tapWhenSettled(page, '.cust-tab[data-tab="display"]', { minHeight: 32 });
+    else await page.click('.cust-tab[data-tab="display"]');
+    await page.waitForSelector('.cust-panel[data-panel="display"].active', { timeout: 4000 });
+  }
+
+  function customizerReach(page) {
+    return page.evaluate((sel) => {
+      const i = document.querySelector(sel);
+      const title = [...document.querySelectorAll('.cust-panel[data-panel="display"] .cust-section-title')].some(p => p.textContent === 'Predicted reach');
+      if (!i) return { title, input: false };
+      const row = i.closest('.cust-terrain-row');
+      return { title, input: true, value: i.value, placeholder: i.placeholder, min: i.min, max: i.max, hint: row ? row.textContent : '',
+        h: i.getBoundingClientRect().height,
+        stored: (() => { try { return (JSON.parse(localStorage.getItem('cs-theme-overrides') || '{}').reach) || null; } catch (_) { return 'bad'; } })() };
+    }, REACH_INPUT);
+  }
+
+  async function setReachField(page, v) {
+    await page.fill(REACH_INPUT, String(v));
+    await page.dispatchEvent(REACH_INPUT, 'change');
+    await page.waitForTimeout(700); // the customizer's debounced write, then theme-refresh
+  }
+
+  function resetLabel(page) {
+    return page.evaluate(() => document.querySelector('[data-testid="reach-env-reset"]').getAttribute('aria-label'));
+  }
+
+  for (const theme of ['light', 'dark']) {
+    await step(`#968 ${theme}: the Display tab sets the viewer's default; renv wins; the panel's Reset lands on it`, async () => {
+      const { ctx, page, rec } = await newCtx({ theme });
+      try {
+        await page.goto(`${BASE}/#/map?reach=${AARHUS.lat},${AARHUS.lon}&rkm=25`, { waitUntil: 'domcontentloaded' });
+        await waitPanel(page);
+        await openDisplayTab(page);
+        await page.locator(REACH_INPUT).scrollIntoViewIfNeeded();
+        let c = await customizerReach(page);
+        assert(c.title && c.input && c.value === '' && c.placeholder === '25' && c.min === '0' && c.max === '60' && c.stored === null, 'section ' + JSON.stringify(c));
+        assert(/Empty: the server\u2019s 25 dB/.test(c.hint) && /renv/.test(c.hint), 'hint ' + c.hint);
+        await shot(page, `968-customizer-display-${theme}.jpg`, '.cust-overlay');
+
+        // 40 dB moves the open panel at once, with no request and no renv.
+        const cov = rec.coverage.length;
+        await setReachField(page, 40);
+        c = await customizerReach(page);
+        assert(JSON.stringify(c.stored) === '{"environmentLossDb":40}', 'stored ' + JSON.stringify(c.stored));
+        let s = await panelState(page);
+        assert(s.env === '40' && s.budget === 'Maximum path loss 118 dB' && s.resetDisabled && !/renv=/.test(s.hash), 'live ' + JSON.stringify(s));
+        assert(/your default, 40 dB/.test(await resetLabel(page)), 'reset label ' + await resetLabel(page));
+        // A bad value is put back, never stored.
+        await setReachField(page, 70);
+        c = await customizerReach(page);
+        assert(c.value === '40' && JSON.stringify(c.stored) === '{"environmentLossDb":40}', 'a bad value stuck ' + JSON.stringify(c));
+        assert(rec.coverage.length === cov, 'the viewer default asked the server again');
+
+        // A cold link: 40 dB; renv=10 wins; Reset lands on 40.
+        await page.goto(`${BASE}/?r=1#/map?reach=${AARHUS.lat},${AARHUS.lon}&rkm=25`, { waitUntil: 'domcontentloaded' });
+        await waitPanel(page);
+        s = await panelState(page);
+        assert(s.env === '40' && s.budget === 'Maximum path loss 118 dB' && !/renv=/.test(s.hash), 'cold ' + JSON.stringify(s));
+        await page.goto(`${BASE}/?r=2#/map?reach=${AARHUS.lat},${AARHUS.lon}&rkm=25&renv=10`, { waitUntil: 'domcontentloaded' });
+        await waitPanel(page);
+        s = await panelState(page);
+        assert(s.env === '10' && s.budget === 'Maximum path loss 148 dB' && !s.resetDisabled, 'renv ' + JSON.stringify(s));
+        await page.click('[data-testid="reach-env-reset"]');
+        await page.waitForTimeout(800);
+        s = await panelState(page);
+        assert(s.env === '40' && s.budget === 'Maximum path loss 118 dB' && s.resetDisabled && !/renv=/.test(s.hash), 'reset ' + JSON.stringify(s));
+        await page.click('[data-testid="reach-nir-all"]');
+        await page.waitForTimeout(200);
+        await shot(page, `968-desktop-${theme}-viewer-40db.jpg`);
+        await shot(page, `968-panel-${theme}-viewer-40db.jpg`, '[data-testid="reach-panel"]');
+
+        // Emptying the field: the operator's value again, nothing stored.
+        await openDisplayTab(page);
+        await setReachField(page, '');
+        c = await customizerReach(page);
+        s = await panelState(page);
+        assert(c.stored === null && s.env === '25' && s.budget === 'Maximum path loss 133 dB', 'cleared ' + JSON.stringify([c, s]));
+        assert(/server default, 25 dB/.test(await resetLabel(page)), 'reset label ' + await resetLabel(page));
+        assert(!/renv|env/.test(rec.coverage.join(' ')), 'the environment loss reached the server: ' + rec.coverage.join(' '));
+        noNetwork(rec);
+      } finally { await ctx.close(); }
+    });
+  }
+
+  await step('#968: without the server\'s coverage block the Display tab has no Predicted reach section', async () => {
+    const { ctx, page, rec } = await newCtx({ coverage: false });
+    try {
+      await page.goto(`${BASE}/#/map`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
+      await openDisplayTab(page);
+      const c = await customizerReach(page);
+      assert(!c.title && !c.input, 'shown without coverage ' + JSON.stringify(c));
+      assert(!(await page.$('[data-testid="map-reach-toggle"]')), 'the map offers the reach without coverage');
+      await shot(page, '968-customizer-display-no-coverage.jpg', '.cust-overlay');
+      noNetwork(rec);
+    } finally { await ctx.close(); }
+  });
+
+  await step('#968 375×560, cold #/map, real taps: More → Customize → Display, 40 dB; the node\'s reach starts there and Reset returns to it', async () => {
+    const { ctx, page, rec } = await newCtx({ theme: 'dark', viewport: { width: 375, height: 560 }, touch: true });
+    try {
+      await page.goto(`${BASE}/#/map?lat=${node.lat}&lon=${node.lon}&zoom=16`, { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('#leaflet-map[data-loaded="true"]', { timeout: 30000 });
+      await openDisplayTab(page, true);
+      await page.locator(REACH_INPUT).scrollIntoViewIfNeeded();
+      await page.waitForTimeout(300);
+      let c = await customizerReach(page);
+      assert(c.title && c.input && c.value === '' && c.h >= 32, 'phone section ' + JSON.stringify(c));
+      await tapWhenSettled(page, REACH_INPUT, { minHeight: 32 });
+      await page.keyboard.type('40');
+      await page.keyboard.press('Enter');
+      // Leaving the field commits it, as on a phone keyboard's "done".
+      await page.evaluate((sel) => document.querySelector(sel).blur(), REACH_INPUT);
+      await page.waitForTimeout(700);
+      c = await customizerReach(page);
+      assert(JSON.stringify(c.stored) === '{"environmentLossDb":40}' && c.value === '40', 'phone stored ' + JSON.stringify(c));
+      // The customizer re-renders its panel on every write (scrolling it to
+      // the top); bring the field back for the picture.
+      await page.locator(REACH_INPUT).scrollIntoViewIfNeeded();
+      await page.waitForTimeout(200);
+      await shot(page, '968-phone-dark-375x560-customizer.jpg');
+      const sideways1 = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      assert(sideways1 <= 0, 'horizontal scroll in the customizer ' + sideways1 + ' px');
+      await tapWhenSettled(page, '.cust-close', { minHeight: 24 });
+      await page.waitForSelector('.cust-overlay.hidden', { state: 'attached', timeout: 5000 });
+
+      await openNodeReachByTaps(page, rec, true);
+      let s = await panelState(page);
+      assert(s.env === '40' && s.budget === 'Maximum path loss 118 dB' && s.resetDisabled && !/renv=/.test(s.hash), 'phone default ' + JSON.stringify(s));
+      await page.evaluate(() => document.querySelector('[data-testid="reach-env"]').scrollIntoView({ block: 'center' }));
+      await page.waitForTimeout(300);
+      await shot(page, '968-phone-dark-375x560-viewer-40db.jpg');
+      const cov = rec.coverage.length;
+      await tapEnvSliderStart(page);
+      s = await panelState(page);
+      assert(s.env === '0' && /[?&]renv=0(&|$)/.test(s.hash), 'phone at 0 ' + JSON.stringify(s));
+      await tapWhenSettled(page, '[data-testid="reach-env-reset"]');
+      await page.waitForTimeout(800);
+      s = await panelState(page);
+      assert(s.env === '40' && s.budget === 'Maximum path loss 118 dB' && !/renv=/.test(s.hash), 'phone reset ' + JSON.stringify(s));
+      assert(rec.coverage.length === cov, 'a budget change asked the server');
+      const sideways = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      assert(sideways <= 0, 'horizontal scroll ' + sideways + ' px');
+      noNetwork(rec);
+    } finally { await ctx.close(); }
+  });
 
   await browser.close();
   console.log(`\n${passed} passed, ${failed} failed\n`);
