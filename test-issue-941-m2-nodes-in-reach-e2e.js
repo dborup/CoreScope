@@ -400,6 +400,9 @@ function rasterFor(c, radiusKm) {
         return s.bottom - head.bottom - document.querySelector(sel).getBoundingClientRect().height;
       }, selector);
       const dy = Math.max(1, Math.min(80 - TOUCH_SLOP_PX, Math.floor(room - 8)));
+      // One swipe a turn (no opts.maxSwipes): touchSwipe makes up a
+      // shortfall inside the touch, and a further swipe must land on a grip
+      // found again, which the next turn does.
       await touchSwipe(page, cdp, at, below ? dy : -dy, { scrollers: ['[data-testid="reach-panel"]', '[data-testid="reach-nir-list"]'] });
       if (await tops() === was) throw new Error(`a swipe at ${JSON.stringify(at)} scrolled nothing on the way to ${selector}`);
     }

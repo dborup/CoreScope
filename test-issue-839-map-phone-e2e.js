@@ -230,12 +230,15 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
    * view. Nothing scrolls the box for it: a box a finger cannot scroll
    * (#841 F2: `touch-action: none` on the list) fails here. Stepped
    * dispatched touches scroll on the Linux runner, where
-   * Input.synthesizeScrollGesture did not (#841). The finger travels the
-   * third plus Chromium's touch slop and holds still before it lifts
-   * (tests/e2e-touch-swipe.js): a 30 px swipe that lifted while moving
-   * scrolled 15 to 41 px, and in the 63 px landscape list the 22 swipes the
-   * budget allows fell short now and then (#967). Returns the number of
-   * swipes it took. */
+   * Input.synthesizeScrollGesture did not (#841). Each swipe is
+   * tests/e2e-touch-swipe.js's: the finger travels the third plus Chromium's
+   * touch slop, moves on while the box has scrolled less, and holds still
+   * before it lifts. A 30 px swipe that lifted while moving scrolled 15 to
+   * 41 px; with the slop added and held, it still scrolled only 16 to 18 px
+   * now and then on a loaded host. In the 63 px landscape list the 22 swipes
+   * the budget allows then fell short (#967, #973). A swipe
+   * still short after the lift is finished by further swipes, counted
+   * against the same budget. Returns the number of swipes it took. */
   async function bringIntoBox(page, box, target) {
     let p = await placement(page, box, target);
     if (p.inside) return 0;
@@ -254,8 +257,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         const up = p.below > 0, travel = dist + TOUCH_SLOP_PX;
         const y0 = Math.round(b.y + b.height / 2 + (up ? travel : -travel) / 2);
         const before = await page.evaluate((s) => document.querySelector(s).scrollTop, box);
-        await touchSwipe(page, cdp, { x, y: y0 }, up ? dist : -dist, { steps: 10, scrollers: [box] });
-        swipes++;
+        swipes += await touchSwipe(page, cdp, { x, y: y0 }, up ? dist : -dist, { steps: 10, scrollers: [box], maxSwipes: n - swipes });
         const after = await page.evaluate((s) => document.querySelector(s).scrollTop, box);
         p = await placement(page, box, target);
         stuck = after === before ? stuck + 1 : 0;

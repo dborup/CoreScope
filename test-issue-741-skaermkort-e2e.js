@@ -895,7 +895,10 @@ function checkGetMap(url, layer, base = WMS_BASE) {
     }
   }
 
-  // 14 — no extra tile churn against Skærmkort, with 1.0 s responses
+  // 14 — no extra tile churn against Skærmkort, with 1.0 s responses.
+  // The settled drags (dragSettled) no longer exercise tile fetching during
+  // a fast drag, so a Natur option that only changes that (updateInterval,
+  // updateWhenIdle) passes here (#973 review).
   await step('M2 churn: with 1.0 s GetMaps, the same pick/pan/zoom script requests the same tiles for Natur as for Skærmkort, none twice', async () => {
     const run = async (id) => {
       const { ctx, page, rec } = await newCtx({ tiles: naturOn(), wmsDelayMs: NATUR_COLD_MS });
