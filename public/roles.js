@@ -903,6 +903,10 @@
     window.MC_COVERAGE_CFG = cfg.coverage || null;
     // #881 — Live moments; absent unless the server's moments.enabled is on.
     window.MC_MOMENTS_CFG = (cfg.moments && cfg.moments.enabled === true) ? cfg.moments : null;
+    // #968 M1 — the operator kiosk preset (config.json "kiosk", resolved by
+    // the server); it fills what a #/live?kiosk=1 link does not say. null
+    // when the server has none (undefined until this fetch resolves).
+    window.MC_KIOSK_CFG = cfg.kiosk || null;
     if (typeof window.MC_initTileRegistry === 'function') window.MC_initTileRegistry(true);
     if (cfg.snrThresholds) Object.assign(SNR_THRESHOLDS, cfg.snrThresholds);
     if (cfg.distThresholds) Object.assign(DIST_THRESHOLDS, cfg.distThresholds);
