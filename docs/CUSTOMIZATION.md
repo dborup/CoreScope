@@ -207,7 +207,9 @@ Some of the customizer's Display settings belong to an optional map layer and on
 
 - **Ancient Monuments**: the protected ancient monuments overlay and its Path profile warning. See [ancient-monuments.md](ancient-monuments.md).
 - **Live Moments**: the Live page's moment cards, only while the operator has `moments.enabled`. `moments.enabled` (default `true`) is whether the Live page starts with them (a `?moments=` link and your own last choice on the Live page still win until Reset All); `moments.visibleCards` (1 to 5, default 3, desktop only: a phone shows one); `moments.dwellSeconds` (3 to 30, default 8) is how long a card stays; `moments.showNewNode`, `showBackOnline`, `showRecordLink` and `showBusiest` (default `true`) switch a kind off. The operator sets the defaults with `moments.display` in `config.json` (see above). The card fill and the four kind accents are the theme keys `momentCardBg`, `momentNewNode`, `momentBackOnline`, `momentRecordLink` and `momentBusiest` (CSS `--moment-*`), and the accents follow the colourblind preset. The operator's thresholds and rate stay in `config.json`. See [moments.md](moments.md).
+- **Live kiosk**: how a TV or wall screen running `#/live?kiosk=1` looks in this browser. `kiosk.scale` is the text and tile size: `auto` (the default: picked by the screen's size, 1 up to 2) or a fixed `1`, `1.25`, `1.5` or `2`. `kiosk.safeInsetVmin` is the margin kept clear at the screen edges for TV overscan, in % of the screen's short side, 0 to 10 (default 3). Set them once in the screen's own browser, outside kiosk, before opening the kiosk link (a kiosk screen hides the customizer). Your browser's value wins over the operator's `kiosk` preset in `config.json` (below), which wins over the defaults; a value equal to the operator's is not stored. A running kiosk takes a change at once. In an exported file this section is per browser: placed on a server as `theme.json` it is ignored there, so put the operator's values in `config.json`.
 - **Oblique Photos**: how the oblique aerial photo (Skråfoto) viewer opens, only while the server offers the photos. `skraafoto.direction` is the first photo: `auto` (the default: across the line when opened from a Path profile, otherwise north), `north`, `east`, `south`, `west` or `nadir`; a shared link's direction still wins. `skraafoto.zoom` is `zoomed` (the default: each new photo opens on the crop around the point, where the point is in the photo, otherwise on the whole photo) or `overview` (the whole photo first). `skraafoto.lineOfSight` (default `true`) draws the line of sight from a Path profile; this row is shown only with the Path profile tool. These are viewer settings; the server's `map.skraafoto` config is not part of the customizer.
+- **Predicted reach**: the default environment loss of the Map's Predicted reach panel (#968), only while the server offers the predicted reach. `reach.environmentLossDb` (0 to 60 dB, empty by default) is the buildings, trees and other clutter the terrain model does not include. Empty means the operator's `map.coverage.environmentLossDb` in `config.json` (default 25 dB). A link's own value (`renv`) still wins, and the panel's Reset returns to your default. It stays in the browser: it is never sent to the server and changes no request. Like the other sections here it is a per-browser value: a `theme.json` on the server ignores it, so operators set theirs in `config.json`.
 
 ### Live kiosk preset (operator, `config.json`)
 
@@ -219,7 +221,9 @@ A TV or wall screen runs Live in kiosk mode from a link such as `#/live?kiosk=1&
   "everySeconds": 60,
   "theme": "dark",
   "tiles": ["rate", "active", "records"],
-  "remountHours": 6
+  "remountHours": 6,
+  "scale": "auto",
+  "safeInsetVmin": 3
 }
 ```
 
@@ -230,12 +234,14 @@ A TV or wall screen runs Live in kiosk mode from a link such as `#/live?kiosk=1&
 | `theme` | `dark` | `dark`, `light`, `auto` | The kiosk theme for a link without `theme=`. `auto` keeps the screen's own theme. |
 | `tiles` | all three | `rate`, `active`, `records` | The big-number tiles shown. A tile that is not listed is not built, and without `active` the screen makes no `network-status` and `analytics/areas` requests. An empty list or only unknown names means all three. |
 | `remountHours` | `6` | 1 to 24 | How often a long-running kiosk remounts Live in place. |
+| `scale` | `auto` | `auto`, `1`, `1.25`, `1.5`, `2` | The kiosk text and tile size. `auto` picks it by the screen's size. |
+| `safeInsetVmin` | `3` | 0 to 10 | The margin kept clear at the screen edges (TV overscan), in % of the short side. |
 
 - **Precedence:** the link's own `tour=`, `every=` and `theme=` win, then the preset, then the built-in default. A link with an empty `tour=` is a static view even when the preset has a tour. The tiles and the remount interval have no link parameter.
 - **The preset never turns kiosk on.** Only a link with `kiosk=1` does; normal Live is unchanged.
 - **Keys are case-sensitive** (as everywhere in `config.json`): `EverySeconds` is ignored with a warning in the log.
-- **A value outside its bounds** logs one warning at startup and takes its default. A tour longer than 12 keeps the first 12.
-- The text size and the screen-edge margin for TV overscan follow in a later release (#968 M2, per browser in the customizer).
+- **A value outside its bounds**, or `null`, logs one warning at startup and takes its default. A tour longer than 12 keeps the first 12. `"kiosk": null` is no preset, with a warning.
+- **`scale` and `safeInsetVmin` per screen:** a viewer can set both in Customize → Display → **Live kiosk** in the screen's own browser (see Display above). That browser's value wins over this preset; there is no link parameter for them.
 
 ## Full Example
 

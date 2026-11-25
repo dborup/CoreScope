@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 
 	"github.com/meshcore-analyzer/configkey"
@@ -15,6 +16,10 @@ import (
 //
 // Bounds are public/live-kiosk.js's (LiveKiosk.SETTINGS); a value outside
 // them logs one warning and takes the default.
+//
+// #968 M2 adds the screen's text size (scale) and edge margin
+// (safeInsetVmin). A viewer's own value from Customize → Display → Live
+// kiosk wins over these in that browser.
 const (
 	kioskMaxSteps        = 12 // LiveKiosk.MAX_STEPS, the regionGroups cap
 	kioskEveryMin        = 15
@@ -24,12 +29,30 @@ const (
 	kioskRemountMaxH     = 24
 	kioskRemountDefaultH = 6
 	kioskThemeDefault    = "dark"
+	kioskInsetMin        = 0 // % of the short side (vmin)
+	kioskInsetMax        = 10
+	kioskInsetDefault    = 3 // live.css --kiosk-safe-inset, #883 decision 8
 )
 
 var (
 	kioskThemes = []string{"dark", "light", "auto"}
 	kioskTiles  = []string{"rate", "active", "records"} // the HUD order
+	// kioskScales: the --kiosk-scale steps of live.css; "auto" is 0.
+	kioskScales = []KioskScale{1, 1.25, 1.5, 2}
 )
+
+// KioskScale is kiosk.scale: 0 is "auto" (live.css picks the step by the
+// viewport), otherwise one of kioskScales. It is served as "auto" or the
+// number, as config.json writes it.
+type KioskScale float64
+
+// MarshalJSON writes 0 as "auto".
+func (s KioskScale) MarshalJSON() ([]byte, error) {
+	if s == 0 {
+		return []byte(`"auto"`), nil
+	}
+	return json.Marshal(float64(s))
+}
 
 // KioskConfig is the resolved kiosk preset, as served to the browser.
 type KioskConfig struct {
@@ -43,16 +66,36 @@ type KioskConfig struct {
 	Tiles []string `json:"tiles"`
 	// RemountHours: the in-place remount interval.
 	RemountHours float64 `json:"remountHours"`
+	// Scale: the kiosk text and tile size, "auto" or a step (#968 M2).
+	Scale KioskScale `json:"scale"`
+	// SafeInsetVmin: the screen-edge margin in % of the short side, 0-10.
+	SafeInsetVmin float64 `json:"safeInsetVmin"`
 }
 
 func kioskDefaultConfig() KioskConfig {
 	return KioskConfig{
-		Tour:         []string{},
-		EverySeconds: kioskEveryDefault,
-		Theme:        kioskThemeDefault,
-		Tiles:        append([]string(nil), kioskTiles...),
-		RemountHours: kioskRemountDefaultH,
+		Tour:          []string{},
+		EverySeconds:  kioskEveryDefault,
+		Theme:         kioskThemeDefault,
+		Tiles:         append([]string(nil), kioskTiles...),
+		RemountHours:  kioskRemountDefaultH,
+		SafeInsetVmin: kioskInsetDefault,
 	}
+}
+
+// errKioskNull: a kiosk member (or the block) is JSON null.
+var errKioskNull = errors.New("null")
+
+// kioskDecode is json.Unmarshal that refuses null. Unmarshal takes null
+// into any type without an error and leaves the zero value, which is in
+// range for some members (safeInsetVmin 0, an empty tour or tiles list,
+// an empty block): null must warn and take the default like any other bad
+// value.
+func kioskDecode(raw json.RawMessage, v interface{}) error {
+	if string(raw) == "null" {
+		return errKioskNull
+	}
+	return json.Unmarshal(raw, v)
 }
 
 func kioskOneOf(v string, set []string) bool {
@@ -72,7 +115,7 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 		return nil
 	}
 	var obj struct{}
-	if json.Unmarshal(raw, &obj) != nil {
+	if kioskDecode(raw, &obj) != nil {
 		logf("[config] kiosk.(block) is not an object; ignored, using the default (no preset)")
 		return nil
 	}
@@ -83,7 +126,7 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 
 	if v := keys.Get("kiosk", "tour"); v != nil {
 		var tour []string
-		if json.Unmarshal(v, &tour) != nil {
+		if kioskDecode(v, &tour) != nil {
 			warn("tour", "a list of area keys", "(no tour)")
 		} else {
 			for _, s := range tour {
@@ -99,7 +142,7 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 	}
 	if v := keys.Get("kiosk", "everySeconds"); v != nil {
 		var n int
-		if json.Unmarshal(v, &n) != nil || n < kioskEveryMin || n > kioskEveryMax {
+		if kioskDecode(v, &n) != nil || n < kioskEveryMin || n > kioskEveryMax {
 			warn("everySeconds", "a whole number of seconds in 15-3600", "60")
 		} else {
 			k.EverySeconds = n
@@ -107,7 +150,7 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 	}
 	if v := keys.Get("kiosk", "theme"); v != nil {
 		var s string
-		if json.Unmarshal(v, &s) != nil || !kioskOneOf(s, kioskThemes) {
+		if kioskDecode(v, &s) != nil || !kioskOneOf(s, kioskThemes) {
 			warn("theme", `"dark", "light" or "auto"`, kioskThemeDefault)
 		} else {
 			k.Theme = s
@@ -115,7 +158,7 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 	}
 	if v := keys.Get("kiosk", "tiles"); v != nil {
 		var list []string
-		if json.Unmarshal(v, &list) != nil {
+		if kioskDecode(v, &list) != nil {
 			warn("tiles", `a list of "rate", "active", "records"`, "(all tiles)")
 		} else {
 			want := map[string]bool{}
@@ -142,13 +185,46 @@ func readKioskConfig(keys *configkey.Doc, logf func(string, ...interface{})) *Ki
 	}
 	if v := keys.Get("kiosk", "remountHours"); v != nil {
 		var h float64
-		if json.Unmarshal(v, &h) != nil || h < kioskRemountMinH || h > kioskRemountMaxH {
+		if kioskDecode(v, &h) != nil || h < kioskRemountMinH || h > kioskRemountMaxH {
 			warn("remountHours", "a number of hours in 1-24", "6")
 		} else {
 			k.RemountHours = h
 		}
 	}
+	if v := keys.Get("kiosk", "scale"); v != nil {
+		if sc, ok := parseKioskScale(v); ok {
+			k.Scale = sc
+		} else {
+			warn("scale", `"auto" or one of 1, 1.25, 1.5, 2`, "auto")
+		}
+	}
+	if v := keys.Get("kiosk", "safeInsetVmin"); v != nil {
+		var f float64
+		if kioskDecode(v, &f) != nil || f < kioskInsetMin || f > kioskInsetMax {
+			warn("safeInsetVmin", "a number in 0-10", "3")
+		} else {
+			k.SafeInsetVmin = f
+		}
+	}
 	return &k
+}
+
+// parseKioskScale reads "auto" (exact) or a number that is a step.
+func parseKioskScale(raw json.RawMessage) (KioskScale, bool) {
+	var s string
+	if kioskDecode(raw, &s) == nil {
+		return 0, s == "auto"
+	}
+	var f float64
+	if kioskDecode(raw, &f) != nil {
+		return 0, false
+	}
+	for _, step := range kioskScales {
+		if KioskScale(f) == step {
+			return step, true
+		}
+	}
+	return 0, false
 }
 
 // kioskClientConfig is the /api/config/client block, nil when unset.

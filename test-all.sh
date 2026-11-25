@@ -128,6 +128,7 @@ run test-883-kiosk-numbers.js
 run test-883-kiosk-moments.js
 run test-883-m3-kiosk.js
 run test-968-kiosk-preset.js
+run test-968-customizer-kiosk.js
 run test-958-movable-moments.js
 run test-969-operator-display-defaults.js
 run test-live-follow.js
@@ -207,6 +208,7 @@ run test-issue-738-foreign-fill-ui.js
 run test-issue-941-predicted-reach.js
 run test-issue-959-popup-actions.js
 run test-issue-962-reach-env-loss.js
+run test-968-m3-customizer-reach.js
 run test-issue-730-buildings-ui.js
 run test-issue-752-inset-attribution.js
 run test-issue-741-base-layer-factory.js

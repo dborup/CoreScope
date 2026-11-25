@@ -1844,6 +1844,20 @@
     kioskThemeRestore = window.LiveKiosk.applyKioskTheme(theme, kioskThemeIO);
     kioskThemeShown = theme;
   }
+  // #968 M2: the screen's text size and edge margin, inline on body: the
+  // viewer's (Customize → Display → Live kiosk) over the operator preset
+  // over live.css's own auto / 3vmin. Applied on mount, again once the
+  // preset has arrived (initKiosk) and on theme-changed (any customizer
+  // change); destroy() takes them off. Two properties, no re-layout loop.
+  let kioskDisplayListening = false;
+  function kioskDisplay() {
+    return window.LiveKiosk.SETTINGS.display(window.SITE_CONFIG && window.SITE_CONFIG.kiosk, window.MC_KIOSK_CFG);
+  }
+  function applyKioskDisplay() {
+    if (!kioskOn || !window.LiveKiosk || !document.body) return;
+    window.LiveKiosk.applyDisplay(document.body.style, kioskDisplay());
+    if (!kioskDisplayListening) { window.addEventListener('theme-changed', applyKioskDisplay); kioskDisplayListening = true; }
+  }
 
   async function init(app) {
     const generation = ++liveGeneration;
@@ -1851,6 +1865,7 @@
     kioskOn = !!(window.LiveKiosk && getHashParams && window.LiveKiosk.parseKioskParams(getHashParams(), window.MC_KIOSK_CFG).kiosk);
     if (kioskOn) {
       document.body.classList.add('kiosk');
+      applyKioskDisplay();
       // #883 M2: the kiosk theme (dark unless &theme=), before the first
       // paint, through app.js's non-persisting apply. After an in-place
       // remount it is still showing, with the old mount's restore. #968:
@@ -4264,6 +4279,7 @@
     if (!page) return;
     const params = K.parseKioskParams(getHashParams(), window.MC_KIOSK_CFG);
     setKioskTheme(params.theme);
+    applyKioskDisplay();
     kiosk = K.create({
       doc: document,
       win: window,
@@ -4274,9 +4290,9 @@
       fetchAreas: () => api('/config/areas/polygons', { ttl: 3600 }),
       fly: (bounds, o) => {
         if (!map) return;
-        // The safe-area inset (3 % of the short side) keeps the area clear
-        // of TV overscan.
-        const pad = Math.round(0.03 * Math.min(window.innerWidth, window.innerHeight));
+        // The safe-area inset (3 % of the short side unless set, #968 M2)
+        // keeps the area clear of TV overscan.
+        const pad = K.insetPx(kioskDisplay().safeInsetVmin, window.innerWidth, window.innerHeight);
         const opts = { padding: [pad, pad], maxZoom: 12 };
         if (o.animate) map.flyToBounds(bounds, Object.assign(opts, { duration: 2.5 }));
         else map.fitBounds(bounds, Object.assign(opts, { animate: false }));
@@ -6249,6 +6265,8 @@
     kioskHandover = handover;
     if (kioskThemeRestore && !handover) { kioskThemeRestore(); kioskThemeRestore = null; }
     if (!handover) kioskThemeShown = null;
+    if (kioskDisplayListening) { window.removeEventListener('theme-changed', applyKioskDisplay); kioskDisplayListening = false; }
+    if (window.LiveKiosk && document.body) window.LiveKiosk.clearDisplay(document.body.style);
     kioskOn = false;
     if (document.body) document.body.classList.remove('kiosk');
     if (regionFilterChangeHandler && window.RegionFilter && typeof RegionFilter.offChange === 'function') {

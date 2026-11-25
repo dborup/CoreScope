@@ -3482,6 +3482,8 @@
       map: map,
       mount: document.getElementById('map-wrap'),
       cfg: window.MC_COVERAGE_CFG,
+      // #968 M3: the viewer's default environment loss (Customize → Display).
+      viewerSettings: function () { return window.SITE_CONFIG && window.SITE_CONFIG.reach; },
       dhm: window.MC_DHM_CFG,
       resolveNode: profileResolveNode,
       onArm: reachPutProfileAway,
