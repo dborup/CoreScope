@@ -73,18 +73,29 @@
   var WAKE_GAP_MS = 2 * BEAT_MS; // a heartbeat later than this: the machine slept
   var CARRY_MS = 60000;        // a remount's step carry-over is used within this
   var TILES = ['rate', 'active', 'records'];   // the HUD order
+  // #968 M2 — the screen's text and tile size and its edge margin. 'auto'
+  // is live.css's own steps by viewport; the inset is % of the short side.
+  var SCALES = ['auto', 1, 1.25, 1.5, 2];
+  var INSET_MIN = 0, INSET_MAX = 10, INSET_DEFAULT = 3; // live.css --kiosk-safe-inset
   // #968 M1 — the operator preset (config.json "kiosk", served on
   // /api/config/client, window.MC_KIOSK_CFG): one rule for the link parser,
   // the tests and the server's bounds (cmd/server/kiosk_config.go). It fills
-  // what a kiosk=1 link does not say; it never turns kiosk on. The scale and
-  // the safe inset are #968 M2; the idle, resume, poll, Moments refresh and
-  // card cap stay fixed (owner decision on #968).
+  // what a kiosk=1 link does not say; it never turns kiosk on. The idle,
+  // resume, poll, Moments refresh and card cap stay fixed (owner decision
+  // on #968).
+  // #968 M2: scale and safeInsetVmin are also the viewer's (VIEWER_KEYS,
+  // Customize → Display → Live kiosk, SITE_CONFIG.kiosk); display() puts the
+  // viewer over the preset.
   var SETTINGS = {
-    KEYS: ['tour', 'everySeconds', 'theme', 'tiles', 'remountHours'],
-    DEFAULTS: { tour: [], everySeconds: EVERY_DEFAULT, theme: THEME_DEFAULT, tiles: TILES.slice(), remountHours: REMOUNT_MS_DEFAULT / 3600000 },
-    LIMITS: { everySeconds: [EVERY_MIN, EVERY_MAX], remountHours: [REMOUNT_MS_MIN / 3600000, REMOUNT_MS_MAX / 3600000], tour: [0, MAX_STEPS] },
+    KEYS: ['tour', 'everySeconds', 'theme', 'tiles', 'remountHours', 'scale', 'safeInsetVmin'],
+    VIEWER_KEYS: ['scale', 'safeInsetVmin'],
+    DEFAULTS: { tour: [], everySeconds: EVERY_DEFAULT, theme: THEME_DEFAULT, tiles: TILES.slice(), remountHours: REMOUNT_MS_DEFAULT / 3600000,
+      scale: 'auto', safeInsetVmin: INSET_DEFAULT },
+    LIMITS: { everySeconds: [EVERY_MIN, EVERY_MAX], remountHours: [REMOUNT_MS_MIN / 3600000, REMOUNT_MS_MAX / 3600000], tour: [0, MAX_STEPS],
+      safeInsetVmin: [INSET_MIN, INSET_MAX] },
     TILES: TILES,
     THEMES: THEMES,
+    SCALES: SCALES,
     valid: function (key, val) {
       var lim = SETTINGS.LIMITS[key];
       switch (key) {
@@ -98,6 +109,10 @@
           return Array.isArray(val) && val.length > 0 && val.every(function (t) { return TILES.indexOf(t) !== -1; });
         case 'tour':
           return Array.isArray(val) && val.length <= lim[1] && val.every(function (k) { return typeof k === 'string'; });
+        case 'scale':
+          return SCALES.indexOf(val) !== -1;
+        case 'safeInsetVmin':
+          return typeof val === 'number' && isFinite(val) && val >= lim[0] && val <= lim[1];
         default:
           return false;
       }
@@ -117,8 +132,21 @@
         everySeconds: own('everySeconds') && SETTINGS.valid('everySeconds', src.everySeconds) ? src.everySeconds : EVERY_DEFAULT,
         theme: own('theme') && SETTINGS.valid('theme', src.theme) ? src.theme : THEME_DEFAULT,
         tiles: tiles.length ? tiles : TILES.slice(),
-        remountHours: own('remountHours') && SETTINGS.valid('remountHours', src.remountHours) ? src.remountHours : REMOUNT_MS_DEFAULT / 3600000
+        remountHours: own('remountHours') && SETTINGS.valid('remountHours', src.remountHours) ? src.remountHours : REMOUNT_MS_DEFAULT / 3600000,
+        scale: own('scale') && SETTINGS.valid('scale', src.scale) ? src.scale : 'auto',
+        safeInsetVmin: own('safeInsetVmin') && SETTINGS.valid('safeInsetVmin', src.safeInsetVmin) ? src.safeInsetVmin : INSET_DEFAULT
       };
+    },
+    // #968 M2 — the screen's scale and inset: per key the viewer's value
+    // (SITE_CONFIG.kiosk), then the operator preset, then auto / 3. No link
+    // parameter sets them.
+    display: function (viewer, preset) {
+      var p = SETTINGS.resolve(preset);
+      var v = viewer && typeof viewer === 'object' && !Array.isArray(viewer) ? viewer : {};
+      var pick = function (k) {
+        return Object.prototype.hasOwnProperty.call(v, k) && SETTINGS.valid(k, v[k]) ? v[k] : p[k];
+      };
+      return { scale: pick('scale'), safeInsetVmin: pick('safeInsetVmin') };
     }
   };
 
@@ -150,6 +178,29 @@
     if (THEMES.indexOf(theme) === -1) theme = p.theme;
     return { kiosk: get('kiosk') === '1', tour: tour, every: every, theme: theme,
       tiles: p.tiles, remountMs: p.remountHours * 3600000 };
+  }
+
+  // ── #968 M2: scale and inset on body.kiosk ──────────────────────────────
+  // d: display()'s result. Only a value that differs from live.css's own
+  // (auto, 3vmin) is set inline, so a screen with none set is unchanged;
+  // clearDisplay() takes both off when kiosk ends.
+  function applyDisplay(style, d) {
+    if (!style || !d) return;
+    if (d.scale === 'auto') style.removeProperty('--kiosk-scale');
+    else style.setProperty('--kiosk-scale', String(d.scale));
+    if (d.safeInsetVmin === INSET_DEFAULT) style.removeProperty('--kiosk-safe-inset');
+    else style.setProperty('--kiosk-safe-inset', d.safeInsetVmin + 'vmin');
+  }
+
+  function clearDisplay(style) {
+    if (!style) return;
+    style.removeProperty('--kiosk-scale');
+    style.removeProperty('--kiosk-safe-inset');
+  }
+
+  // The inset in px for a w x h viewport (the tour's map padding).
+  function insetPx(vmin, w, h) {
+    return Math.round(vmin / 100 * Math.min(w, h));
   }
 
   // The hash to leave kiosk by: the same route without kiosk/tour/every.
@@ -967,6 +1018,9 @@
     THEMES: THEMES,
     SETTINGS: SETTINGS,
     parseKioskParams: parseKioskParams,
+    applyDisplay: applyDisplay,
+    clearDisplay: clearDisplay,
+    insetPx: insetPx,
     stripKioskParams: stripKioskParams,
     resumeAfterMs: resumeAfterMs,
     areaBounds: areaBounds,
