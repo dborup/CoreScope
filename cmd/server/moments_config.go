@@ -31,6 +31,10 @@ type MomentsConfig struct {
 	// HistorySize: moments kept for GET /api/moments. Default 50, range
 	// 1-500.
 	HistorySize int `json:"historySize,omitempty"`
+	// Display is moments.display (#969): the operator's defaults for the
+	// Live page's Moments viewer settings. Read only by its exact keys
+	// (#884) in readMomentsDisplay, never by the struct decode.
+	Display *MomentsDisplayConfig `json:"-"`
 }
 
 // momentsSettings is MomentsConfig resolved: defaults applied, ranges
@@ -117,8 +121,9 @@ func (c *Config) momentsSettings() momentsSettings {
 // /api/config/client: whether the server emits moments and how many it
 // keeps. Omitted when moments are off.
 type MomentsClientConfig struct {
-	Enabled     bool `json:"enabled"`
-	HistorySize int  `json:"historySize"`
+	Enabled     bool                  `json:"enabled"`
+	HistorySize int                   `json:"historySize"`
+	Display     *MomentsDisplayConfig `json:"display,omitempty"`
 }
 
 // momentsClientConfig is the /api/config/client block, nil when off.
@@ -126,5 +131,5 @@ func (c *Config) momentsClientConfig() *MomentsClientConfig {
 	if !c.MomentsEnabled() {
 		return nil
 	}
-	return &MomentsClientConfig{Enabled: true, HistorySize: c.momentsSettings().historySize}
+	return &MomentsClientConfig{Enabled: true, HistorySize: c.momentsSettings().historySize, Display: c.Moments.Display}
 }
