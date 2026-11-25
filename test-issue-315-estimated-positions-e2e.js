@@ -132,6 +132,14 @@ async function browserChecks(browser, base, enabled, mode, assets, shots) {
   page.setDefaultTimeout(10000);
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
+  // A same-origin request the browser gave up on (#967: one local run lost
+  // packet-path-map.js and 11 other scripts to net::ERR_NETWORK_CHANGED)
+  // leaves the app without that script or answer; a later wait then times
+  // out without saying why.
+  const failedRequests = [];
+  page.on('requestfailed', request => {
+    if (new URL(request.url()).origin === base) failedRequests.push(request.url().slice(base.length) + ' ' + request.failure().errorText);
+  });
   async function go(hash) {
     await page.goto(base + '/' + hash, { waitUntil: 'load' });
     await page.waitForFunction(() => window.L && window.L.version === '1.9.4');
@@ -228,6 +236,8 @@ async function browserChecks(browser, base, enabled, mode, assets, shots) {
     }
     assert.deepEqual(errors, [], 'browser runtime errors');
   } catch (error) {
+    if (failedRequests.length) console.error('#315 ' + mode + ': failed same-origin requests: ' + failedRequests.join(', '));
+    if (errors.length) console.error('#315 ' + mode + ': browser runtime errors: ' + errors.join(' | '));
     await screenshot('failure');
     throw error;
   } finally { await context.close(); }
