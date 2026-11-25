@@ -2531,7 +2531,7 @@ function bootSiteConfig(themeRequest, clientReady) {
   ]).then(([theme]) => {
     // Customizer v2: set server defaults and run full pipeline
     // (reads localStorage overrides → merges → sets SITE_CONFIG → applies CSS → dispatches theme-changed)
-    const cfg = withOperatorDisplayDefaults(theme, window.MC_OPERATOR_DISPLAY);
+    const cfg = window.withOperatorDisplayDefaults(theme, window.MC_OPERATOR_DISPLAY);
     if (window._customizerV2) window._customizerV2.init(cfg);
     else window.SITE_CONFIG = cfg; // fallback if customize-v2.js didn't load
     return cfg;
