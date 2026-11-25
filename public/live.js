@@ -1833,18 +1833,44 @@
     get: () => document.documentElement.getAttribute('data-theme'),
     apply: (t) => window.applyThemeTransient(t),
   };
+  // #968 M1: the kiosk theme now showing (dark, light or auto), kept across
+  // an in-place remount like its restore. The operator preset can arrive
+  // after the first paint (a cold kiosk link): setKioskTheme() then swaps
+  // to it once, putting the viewer's theme back first.
+  let kioskThemeShown = null;
+  function setKioskTheme(theme) {
+    if (typeof window.applyThemeTransient !== 'function' || theme === kioskThemeShown) return;
+    if (kioskThemeRestore) { kioskThemeRestore(); kioskThemeRestore = null; }
+    kioskThemeRestore = window.LiveKiosk.applyKioskTheme(theme, kioskThemeIO);
+    kioskThemeShown = theme;
+  }
+  // #968 M2: the screen's text size and edge margin, inline on body: the
+  // viewer's (Customize → Display → Live kiosk) over the operator preset
+  // over live.css's own auto / 3vmin. Applied on mount, again once the
+  // preset has arrived (initKiosk) and on theme-changed (any customizer
+  // change); destroy() takes them off. Two properties, no re-layout loop.
+  let kioskDisplayListening = false;
+  function kioskDisplay() {
+    return window.LiveKiosk.SETTINGS.display(window.SITE_CONFIG && window.SITE_CONFIG.kiosk, window.MC_KIOSK_CFG);
+  }
+  function applyKioskDisplay() {
+    if (!kioskOn || !window.LiveKiosk || !document.body) return;
+    window.LiveKiosk.applyDisplay(document.body.style, kioskDisplay());
+    if (!kioskDisplayListening) { window.addEventListener('theme-changed', applyKioskDisplay); kioskDisplayListening = true; }
+  }
 
   async function init(app) {
     const generation = ++liveGeneration;
-    kioskOn = !!(window.LiveKiosk && getHashParams && window.LiveKiosk.parseKioskParams(getHashParams()).kiosk);
+    // Only the link's kiosk=1 turns kiosk on; the preset (#968) never does.
+    kioskOn = !!(window.LiveKiosk && getHashParams && window.LiveKiosk.parseKioskParams(getHashParams(), window.MC_KIOSK_CFG).kiosk);
     if (kioskOn) {
       document.body.classList.add('kiosk');
+      applyKioskDisplay();
       // #883 M2: the kiosk theme (dark unless &theme=), before the first
       // paint, through app.js's non-persisting apply. After an in-place
-      // remount it is still showing, with the old mount's restore.
-      if (!kioskHandover && typeof window.applyThemeTransient === 'function') {
-        kioskThemeRestore = window.LiveKiosk.applyKioskTheme(window.LiveKiosk.parseKioskParams(getHashParams()).theme, kioskThemeIO);
-      }
+      // remount it is still showing, with the old mount's restore. #968:
+      // the preset's theme when /api/config/client has already answered.
+      if (!kioskHandover) setKioskTheme(window.LiveKiosk.parseKioskParams(getHashParams(), window.MC_KIOSK_CFG).theme);
     }
     app.innerHTML = `
       <div class="live-page">
@@ -4242,24 +4268,31 @@
 
   // #883 M1 — the kiosk controller. Its tour fits the map to one area per
   // step: animated (flyToBounds) unless the viewer prefers reduced motion.
-  function initKiosk(generation) {
+  // #968 M1: it waits for /api/config/client, which carries the operator
+  // preset (window.MC_KIOSK_CFG); the link's own values still win.
+  async function initKiosk(generation) {
     const K = window.LiveKiosk;
     if (!kioskOn || !K || kiosk || generation !== liveGeneration || !map) return;
+    try { if (window.MeshConfigReady) await window.MeshConfigReady; } catch (_) {}
+    if (!kioskOn || kiosk || generation !== liveGeneration || !map) return;
     const page = document.querySelector('.live-page');
     if (!page) return;
+    const params = K.parseKioskParams(getHashParams(), window.MC_KIOSK_CFG);
+    setKioskTheme(params.theme);
+    applyKioskDisplay();
     kiosk = K.create({
       doc: document,
       win: window,
       root: page,
       map: { on: (t, fn) => { if (map) map.on(t, fn); }, off: (t, fn) => { if (map) map.off(t, fn); } },
-      params: K.parseKioskParams(getHashParams()),
+      params: params,
       // Shared with the selected-area outline: one request per hour at most.
       fetchAreas: () => api('/config/areas/polygons', { ttl: 3600 }),
       fly: (bounds, o) => {
         if (!map) return;
-        // The safe-area inset (3 % of the short side) keeps the area clear
-        // of TV overscan.
-        const pad = Math.round(0.03 * Math.min(window.innerWidth, window.innerHeight));
+        // The safe-area inset (3 % of the short side unless set, #968 M2)
+        // keeps the area clear of TV overscan.
+        const pad = K.insetPx(kioskDisplay().safeInsetVmin, window.innerWidth, window.innerHeight);
         const opts = { padding: [pad, pad], maxZoom: 12 };
         if (o.animate) map.flyToBounds(bounds, Object.assign(opts, { duration: 2.5 }));
         else map.fitBounds(bounds, Object.assign(opts, { animate: false }));
@@ -6231,6 +6264,9 @@
     else if (kioskHandover) setKioskAutoReload(false); // left before its controller came up
     kioskHandover = handover;
     if (kioskThemeRestore && !handover) { kioskThemeRestore(); kioskThemeRestore = null; }
+    if (!handover) kioskThemeShown = null;
+    if (kioskDisplayListening) { window.removeEventListener('theme-changed', applyKioskDisplay); kioskDisplayListening = false; }
+    if (window.LiveKiosk && document.body) window.LiveKiosk.clearDisplay(document.body.style);
     kioskOn = false;
     if (document.body) document.body.classList.remove('kiosk');
     if (regionFilterChangeHandler && window.RegionFilter && typeof RegionFilter.offChange === 'function') {

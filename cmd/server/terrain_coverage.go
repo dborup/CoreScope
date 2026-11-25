@@ -284,6 +284,7 @@ type terrainCoverage struct {
 	fillSlots  chan struct{}
 	covers     func(e, n float64) bool
 	deadline   time.Duration
+	perCall    time.Duration
 	workers    int
 
 	refused    atomic.Int64
@@ -348,6 +349,7 @@ func newTerrainCoverage(cc CoverageConfig, rc *RadioConfig, d terrainCoverageDep
 		fillSlots:  make(chan struct{}, coverageFillSlots),
 		covers:     dhm.Covers,
 		deadline:   coverageDeadline,
+		perCall:    coveragePerCall,
 		workers:    dhm.CoverageWorkers(),
 		now:        time.Now,
 		logf:       d.logf,
@@ -955,7 +957,7 @@ func (c *terrainCoverage) dhmTile(ctx context.Context, j *coverageTileJob, res f
 	if j.needDHM {
 		k := coverageTileKey{Res: int(res), X: j.t.X, Y: j.t.Y}
 		var err error
-		data, _, err = c.tileFlight.Do(ctx, fmt.Sprint(k), coveragePerCall, func(work context.Context) ([]byte, error) {
+		data, _, err = c.tileFlight.Do(ctx, fmt.Sprint(k), c.perCall, func(work context.Context) ([]byte, error) {
 			r, _ := j.t.Raster(res)
 			g, err := c.dhm.FetchRaster(work, r)
 			if err != nil {
