@@ -1661,6 +1661,9 @@ type ClientConfigResponse struct {
 	// Moments says whether the server emits #881 moments ({"type":"moment"}
 	// WebSocket frames, GET /api/moments). Omitted when moments are off.
 	Moments *MomentsClientConfig `json:"moments,omitempty"`
+	// Kiosk is the #968 operator kiosk preset for #/live?kiosk=1 links
+	// (resolved, every member present). Omitted when config.json has none.
+	Kiosk *KioskConfig `json:"kiosk,omitempty"`
 	// GeoFilter is the configured geo_filter box/polygon (#730), exposed
 	// for client-side domestic/foreign classification — see
 	// nodePassesGeoFilter (public/app.js) and geo_filter.go. Omitted when

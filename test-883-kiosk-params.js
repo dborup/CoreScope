@@ -31,6 +31,8 @@ const K = load();
 const P = (s) => K.parseKioskParams(new URLSearchParams(s));
 // Arrays and objects come from the sandbox realm; compare as plain JSON.
 const eq = (a, b, m) => assert.deepStrictEqual(JSON.parse(JSON.stringify(a)), b, m);
+const H = 3600000;
+const ALL_TILES = ['rate', 'active', 'records'];
 
 console.log('\n=== #883 live-kiosk: parseKioskParams ===');
 
@@ -44,8 +46,9 @@ test('kiosk: only the exact value 1 turns it on', () => {
 });
 
 test('defaults: no tour, every 60 s, the dark theme (#883 M2)', () => {
-  eq(P('kiosk=1'), { kiosk: true, tour: [], every: 60, theme: 'dark' });
-  eq(K.parseKioskParams(null), { kiosk: false, tour: [], every: 60, theme: 'dark' });
+  // #968 M1: and every tile, and the 6 h remount (no operator preset).
+  eq(P('kiosk=1'), { kiosk: true, tour: [], every: 60, theme: 'dark', tiles: ALL_TILES, remountMs: 6 * H });
+  eq(K.parseKioskParams(null), { kiosk: false, tour: [], every: 60, theme: 'dark', tiles: ALL_TILES, remountMs: 6 * H });
 });
 
 test('every: parseInt, NaN or empty is 60, clamped to [15, 3600], fractions floored', () => {
@@ -74,7 +77,7 @@ test('tour: at most 12 steps', () => {
 });
 
 test('tour and every are parsed even without kiosk (the caller decides)', () => {
-  eq(P('tour=a,b&every=30'), { kiosk: false, tour: ['a', 'b'], every: 30, theme: 'dark' });
+  eq(P('tour=a,b&every=30'), { kiosk: false, tour: ['a', 'b'], every: 30, theme: 'dark', tiles: ALL_TILES, remountMs: 6 * H });
 });
 
 console.log('\n=== #883 live-kiosk: areaBounds ===');
@@ -178,6 +181,82 @@ test('stripKioskParams drops kiosk, tour and every and keeps the rest', () => {
   assert.strictEqual(K.stripKioskParams('#/live?kiosk=1'), '#/live');
   assert.strictEqual(K.stripKioskParams('#/live'), '#/live');
   assert.strictEqual(K.stripKioskParams(''), '#/live');
+});
+
+
+console.log('\n=== #968 M1 live-kiosk: the operator preset (URL > preset > built-in) ===');
+
+// What /api/config/client serves for an operator's config.json "kiosk".
+const PRESET = { tour: ['AAA', 'bbb'], everySeconds: 45, theme: 'light', tiles: ['rate', 'records'], remountHours: 12 };
+const PP = (s, preset) => K.parseKioskParams(new URLSearchParams(s), preset);
+
+test('a bare kiosk=1 link takes the preset: tour, every, theme, tiles and the remount interval', () => {
+  eq(PP('kiosk=1', PRESET), { kiosk: true, tour: ['AAA', 'bbb'], every: 45, theme: 'light', tiles: ['rate', 'records'], remountMs: 12 * H });
+});
+
+test('the link wins per key: its own tour=, every= and theme= beat the preset', () => {
+  const r = PP('kiosk=1&tour=x,y&every=90&theme=dark', PRESET);
+  eq(r.tour, ['x', 'y'], 'tour');
+  assert.strictEqual(r.every, 90, 'every');
+  assert.strictEqual(r.theme, 'dark', 'theme');
+  // The keys the link does not give still come from the preset.
+  eq(PP('kiosk=1&every=20', PRESET).tour, ['AAA', 'bbb']);
+  assert.strictEqual(PP('kiosk=1&tour=x', PRESET).every, 45);
+  assert.strictEqual(PP('kiosk=1&theme=auto', PRESET).theme, 'auto');
+  assert.strictEqual(PP('kiosk=1&theme=auto', PRESET).every, 45);
+  // The link's every is still clamped as before, not replaced by the preset.
+  assert.strictEqual(PP('kiosk=1&every=5', PRESET).every, 15);
+});
+
+test('an explicit empty tour= in the link is a static view, not the preset tour', () => {
+  eq(PP('kiosk=1&tour=', PRESET).tour, []);
+  eq(PP('kiosk=1&tour=,,', PRESET).tour, []);
+});
+
+test('a link value it cannot use falls back to the preset, not the built-in', () => {
+  assert.strictEqual(PP('kiosk=1&every=abc', PRESET).every, 45);
+  assert.strictEqual(PP('kiosk=1&theme=blue', PRESET).theme, 'light');
+});
+
+test('the preset never turns kiosk on: kiosk=1 is URL-only', () => {
+  for (const s of ['', 'kiosk=0', 'tour=a', 'kiosk=true']) {
+    assert.strictEqual(PP(s, Object.assign({ kiosk: true, enabled: true }, PRESET)).kiosk, false, s);
+  }
+  assert.strictEqual(K.parseKioskParams(null, PRESET).kiosk, false, 'no params');
+});
+
+test('out-of-range or malformed preset values fall back to the built-in default', () => {
+  const bad = { tour: 'AAA,bbb', everySeconds: 14, theme: 'Light', tiles: ['x'], remountHours: 25 };
+  eq(PP('kiosk=1', bad), { kiosk: true, tour: [], every: 60, theme: 'dark', tiles: ALL_TILES, remountMs: 6 * H });
+  const bad2 = { tour: [7, ' ', null], everySeconds: 3601, theme: 5, tiles: 'rate', remountHours: 0.5 };
+  eq(PP('kiosk=1', bad2), { kiosk: true, tour: [], every: 60, theme: 'dark', tiles: ALL_TILES, remountMs: 6 * H });
+  assert.strictEqual(PP('kiosk=1', { everySeconds: 30.5 }).every, 60, 'a fraction');
+  assert.strictEqual(PP('kiosk=1', { everySeconds: '30' }).every, 60, 'a string');
+  for (const p of [null, undefined, 5, 'x', []]) {
+    eq(PP('kiosk=1', p), { kiosk: true, tour: [], every: 60, theme: 'dark', tiles: ALL_TILES, remountMs: 6 * H }, JSON.stringify(p));
+  }
+});
+
+test('preset edges are kept: every 15 and 3600, remount 1 h and 24 h', () => {
+  assert.strictEqual(PP('kiosk=1', { everySeconds: 15 }).every, 15);
+  assert.strictEqual(PP('kiosk=1', { everySeconds: 3600 }).every, 3600);
+  assert.strictEqual(PP('kiosk=1', { remountHours: 1 }).remountMs, 1 * H);
+  assert.strictEqual(PP('kiosk=1', { remountHours: 24 }).remountMs, 24 * H);
+  assert.strictEqual(PP('kiosk=1', { remountHours: 1.5 }).remountMs, 1.5 * H);
+});
+
+test('the preset tour: trimmed, empty keys dropped, at most MAX_STEPS (12)', () => {
+  eq(PP('kiosk=1', { tour: [' a ', '', 'b', 7] }).tour, ['a', 'b']);
+  const many = Array.from({ length: 15 }, (_, i) => 'k' + i);
+  eq(PP('kiosk=1', { tour: many }).tour, many.slice(0, 12));
+});
+
+test('preset tiles: unknown and duplicate names dropped, HUD order kept; none left is every tile', () => {
+  eq(PP('kiosk=1', { tiles: ['records', 'bogus', 'rate', 'rate'] }).tiles, ['rate', 'records']);
+  eq(PP('kiosk=1', { tiles: ['active'] }).tiles, ['active']);
+  eq(PP('kiosk=1', { tiles: [] }).tiles, ALL_TILES);
+  // A link has no tiles= of its own: the param is not read.
+  eq(PP('kiosk=1&tiles=rate', {}).tiles, ALL_TILES);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
