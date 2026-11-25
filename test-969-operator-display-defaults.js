@@ -145,6 +145,28 @@ test('bootSiteConfig: a failed client config fetch falls back to the built-ins',
   eq(b.inits, [{ timestamps: BUILTIN_TS }]);
 });
 
+// The real customizer behind bootSiteConfig (review #975, finding 5): a
+// saved viewer value is in SITE_CONFIG once boot settles, so nothing may
+// put the operator's sections back over the customizer's merge.
+test('bootSiteConfig with the real customizer: a saved viewer timestamp value wins over the operator', async () => {
+  const c = loadCustomizer({
+    scripts: ['payload-labels.js', 'roles.js', 'app.js', 'live-moments.js'],
+    setup: (ctx) => {
+      ctx.localStorage.setItem('cs-theme-overrides', JSON.stringify({ timestamps: { defaultMode: 'ago' }, moments: { visibleCards: 3 } }));
+      ctx.location = { hash: '' };
+      ctx.Promise = Promise;
+      ctx.fetch = (url) => Promise.resolve({ json: () => Promise.resolve(String(url).indexOf('/api/config/client') === 0 ? CLIENT : {}) });
+    },
+  });
+  const w = c.ctx.window;
+  await w.bootSiteConfig(c.ctx.fetch('/api/config/theme'), w.MeshConfigReady);
+  assert.ok(c.api.initDone, 'the customizer started');
+  const ts = w.SITE_CONFIG.timestamps;
+  eq([ts.defaultMode, ts.timezone, ts.formatPreset], ['ago', 'utc', 'iso-seconds']);
+  const m = c.api.momentsSettings(w.SITE_CONFIG);
+  eq([m.visibleCards, m.dwellSeconds, m.enabled], [3, 20, false]);
+});
+
 // ── 4. Precedence: viewer > operator > built-in (customizer merge) ──────────
 
 function customizer(server, overrides) {
@@ -182,6 +204,38 @@ test('viewer over operator: a customizer value wins per key', () => {
 test('a viewer value equal to the operator default is not kept as an override', () => {
   const page = loadPage(() => undefined);
   const c = customizer(page.w.withOperatorDisplayDefaults({}, OPERATOR), { timestamps: { timezone: 'utc' }, moments: { dwellSeconds: 20 } });
+  eq(c.api.readOverrides(), {});
+});
+
+// Review #975, finding 1: a viewer picking the built-in value under a
+// different operator default keeps it; the store compares against the
+// effective server default, not the built-in.
+test('Display tab: a viewer value at the built-in, unlike the operator default, is kept across a reload', () => {
+  const page = loadPage(() => undefined);
+  const server = page.w.withOperatorDisplayDefaults({}, { timestamps: OP_TS, moments: { visibleCards: 1, showBusiest: false } });
+  const c = customizer(server);
+  c.api.saveMomentsSetting('visibleCards', 3);
+  c.api.saveMomentsSetting('showBusiest', true);
+  eq(c.api.readOverrides(), { moments: { visibleCards: 3, showBusiest: true } });
+  const now = c.api.momentsSettings(c.ctx.window.SITE_CONFIG);
+  eq([now.visibleCards, now.showBusiest], [3, true]);
+  const reloaded = customizer(server, c.api.readOverrides());
+  const m = reloaded.api.momentsSettings(reloaded.ctx.window.SITE_CONFIG);
+  eq([m.visibleCards, m.showBusiest], [3, true], 'after a reload');
+});
+
+test('Display tab: a viewer value back at the operator default is a cleared override', () => {
+  const page = loadPage(() => undefined);
+  const c = customizer(page.w.withOperatorDisplayDefaults({}, OPERATOR), { moments: { visibleCards: 4, dwellSeconds: 12 } });
+  c.api.saveMomentsSetting('visibleCards', 1);
+  eq(c.api.readOverrides(), { moments: { dwellSeconds: 12 } });
+  eq(c.api.momentsSettings(c.ctx.window.SITE_CONFIG).visibleCards, 1);
+});
+
+test('Display tab: without an operator default, the built-in value is a cleared override', () => {
+  const page = loadPage(() => undefined);
+  const c = customizer(page.w.withOperatorDisplayDefaults({}, null), { moments: { visibleCards: 4 } });
+  c.api.saveMomentsSetting('visibleCards', 3);
   eq(c.api.readOverrides(), {});
 });
 

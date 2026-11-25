@@ -148,6 +148,23 @@ func TestOperatorDisplay969_MomentsDisplayBounds(t *testing.T) {
 	}
 }
 
+// Rule: a moments.display that is not an object is ignored with one log
+// line, as every other key of the wrong kind (review #975, finding 4).
+func TestOperatorDisplay969_MomentsDisplayNotAnObject(t *testing.T) {
+	for _, display := range []string{`5`, `"three"`, `[3]`, `true`} {
+		cfg, out := loadConfig969(t, `{"moments":{"enabled":true,"display":`+display+`}}`)
+		if cfg.Moments.Display != nil {
+			t.Fatalf("display=%s was read: %+v", display, cfg.Moments.Display)
+		}
+		if n := strings.Count(out, "moments.display"); n != 1 {
+			t.Fatalf("display=%s: want one log line for moments.display, got %d in %q", display, n, out)
+		}
+		if !strings.Contains(out, "moments.display is not an object") {
+			t.Fatalf("display=%s: no warning in %q", display, out)
+		}
+	}
+}
+
 // Rule: canonical keys (#884) for moments.display: a case variant of the
 // block or of a key is ignored with a warning.
 func TestOperatorDisplay969_MomentsDisplayKeysAreCanonical(t *testing.T) {

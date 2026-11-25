@@ -18,8 +18,13 @@
  *      value beats them.
  *   4. Live: the operator's Moments-off default starts Live without them;
  *      a ?moments=1 link wins.
+ *   3b. Live at 1440x900: under the operator's visibleCards 1 and
+ *      showBusiest off, a viewer who types 3 and ticks Busiest repeater in
+ *      the Display tab keeps both across a reload (review #975).
  *   5. 375x560 touch phone from a cold start: the same timestamp format on
- *      Packets and the operator's single card on Live.
+ *      Packets; Live shows one card without sideways overflow. A phone
+ *      always shows one (VISIBLE_PHONE), so the operator's visibleCards is
+ *      proven by step 3 on desktop, not here.
  *   6. Without the operator blocks: the built-ins, as before.
  *
  * Usage: BASE_URL=http://localhost:13581 node test-969-operator-defaults-e2e.js
@@ -182,6 +187,43 @@ async function open(browser, opts) {
       await v.ctx.close();
     });
 
+    // Review #975, finding 1: a viewer who picks the built-in value under a
+    // different operator default keeps it across a reload.
+    await step('Live, 1440x900: under the operator visibleCards 1 and showBusiest off, the viewer types 3 and ticks Busiest repeater; both survive a reload', async () => {
+      const h = await open(browser, { display: { visibleCards: 1, showBusiest: false } });
+      await h.live('', true);
+      await h.openDisplay();
+      const cards = h.page.locator('[data-cv2-moments="visibleCards"]');
+      await cards.fill('3');
+      await cards.press('Tab');
+      await h.page.click('[data-cv2-moments="showBusiest"]');
+      const saved = () => h.page.evaluate(() => (JSON.parse(localStorage.getItem('cs-theme-overrides') || '{}').moments || null));
+      await h.page.waitForFunction(() => {
+        const m = JSON.parse(localStorage.getItem('cs-theme-overrides') || '{}').moments || {};
+        return m.visibleCards === 3 && m.showBusiest === true;
+      }, null, { timeout: 5000 }).catch(async () => { throw new Error('viewer values not saved: ' + JSON.stringify(await saved())); });
+      await h.page.reload({ waitUntil: 'domcontentloaded' });
+      await h.page.waitForFunction(() => window._liveMoments && window._liveMoments(), null, { timeout: 20000 });
+      await h.inited();
+      const eff = await h.page.evaluate(() => window._customizerV2.momentsSettings(window.SITE_CONFIG));
+      assert(eff.visibleCards === 3 && eff.showBusiest === true, 'after reload ' + JSON.stringify(eff));
+      await h.send([
+        { id: 'b0', kind: 'busiest_repeater', at: at(2), relays: 42, windowMinutes: 10, node: { publicKey: PK('b'), name: 'E2E-969 busy', role: 'repeater', lat: 55.25, lon: 9.45 } },
+        nodeMoment('r1', 1), nodeMoment('r2', 2),
+      ]);
+      await h.page.waitForFunction(() => document.querySelectorAll('.live-moment-card:not(.is-leaving)').length === 3, null, { timeout: 5000 })
+        .catch(async () => { throw new Error('cards ' + await h.cards()); });
+      assert(await h.page.evaluate(() => !!document.querySelector('.live-moment-card[data-kind="busiest_repeater"]')), 'no busiest card');
+      await h.openDisplay();
+      const d = await h.page.evaluate(() => ({
+        cards: document.querySelector('[data-cv2-moments="visibleCards"]').value,
+        busiest: document.querySelector('[data-cv2-moments="showBusiest"]').checked,
+      }));
+      assert(d.cards === '3' && d.busiest === true, 'Display tab after reload ' + JSON.stringify(d));
+      assert(!h.errors.length, h.errors.join('; '));
+      await h.ctx.close();
+    });
+
     await step('Live: the operator Moments-off default; a ?moments=1 link wins', async () => {
       const h = await open(browser, { display: { enabled: false } });
       await h.live('', false);
@@ -193,7 +235,7 @@ async function open(browser, opts) {
       await h.ctx.close();
     });
 
-    await step('375x560 phone, cold start: the operator timestamp format and the single card', async () => {
+    await step('375x560 phone, cold start: the operator timestamp format; Live shows one card, as a phone always does, without sideways overflow', async () => {
       const h = await open(browser, { viewport: { width: 375, height: 560 }, touch: true, display: { visibleCards: 1 } });
       const text = await h.packets(ISO_MS);
       assert(ISO_MS.test(text), 'Time cell ' + JSON.stringify(text));

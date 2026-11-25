@@ -47,10 +47,16 @@ func momentsDisplayFields() []momentsDisplayField {
 }
 
 // readMomentsDisplay reads moments.display by its exact keys (#884). A
-// number out of range is clamped, a value of the wrong kind is dropped,
-// each with one log line. Nil when no key is usable.
+// block that is not an object, a number out of range (clamped) and a value
+// of the wrong kind (dropped) each log one line. Nil when no key is usable.
 func readMomentsDisplay(keys *configkey.Doc, logf func(string, ...interface{})) *MomentsDisplayConfig {
-	if keys.Get("moments", "display") == nil {
+	raw := keys.Get("moments", "display")
+	if raw == nil {
+		return nil
+	}
+	var obj struct{}
+	if json.Unmarshal(raw, &obj) != nil {
+		logf("[config] moments.display is not an object; ignored, using the built-in viewer defaults")
 		return nil
 	}
 	d := &MomentsDisplayConfig{}
