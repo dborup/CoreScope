@@ -177,8 +177,11 @@ var dagiDefault = sync.OnceValues(func() (*dagiIndex, error) {
 })
 
 // loadDagiIndex reads dagi-<layer>.json for every layer from dir in fsys.
+// The four files must come from one build of one download: the same credit
+// (it names the fetch month), DAGI generation and download date.
 func loadDagiIndex(fsys fs.FS, dir string) (*dagiIndex, error) {
 	idx := &dagiIndex{}
+	var first dagiAssetSource
 	for l := DagiLayer(0); l < dagiLayerCount; l++ {
 		name := dir + "/dagi-" + l.String() + ".json"
 		raw, err := fs.ReadFile(fsys, name)
@@ -196,8 +199,16 @@ func loadDagiIndex(fsys fs.FS, dir string) (*dagiIndex, error) {
 			return nil, fmt.Errorf("%s: quantum %v", name, file.Quantum)
 		}
 		idx.quantum = file.Quantum
-		if idx.credit == "" {
-			idx.credit = file.Credit
+		if file.Credit == "" {
+			return nil, fmt.Errorf("%s: no credit", name)
+		}
+		if l == 0 {
+			idx.credit, first = file.Credit, file.Source
+		} else if file.Credit != idx.credit || file.Source.Generation != first.Generation ||
+			file.Source.Downloaded != first.Downloaded {
+			return nil, fmt.Errorf("%s: credit %q, generation %d, downloaded %q; %s has %q, %d, %q", name,
+				file.Credit, file.Source.Generation, file.Source.Downloaded,
+				DagiLayer(0), idx.credit, first.Generation, first.Downloaded)
 		}
 		li, err := buildDagiLayer(file)
 		if err != nil {

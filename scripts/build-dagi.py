@@ -540,6 +540,23 @@ def farthest(pts, i0, i1):
     return max(range(i0 + 1, i1), key=lambda i: (seg_dist2(pts[i], pts[i0], pts[i1]), -i))
 
 
+def quantise_arc(arc, kept, proj):
+    """The quantised polyline of an arc's kept source vertices (indices into
+    arc, ascending), consecutive repeats merged, and per segment k of it the
+    source index range (i0, i1) it stands for."""
+    pts, sp = [], []
+    for i in kept:
+        u = proj(arc[i])
+        if pts and pts[-1] == u:
+            if sp:
+                sp[-1] = (sp[-1][0], i)
+            continue  # before the first segment: it starts at kept[0] anyway
+        if pts:
+            sp.append((sp[-1][1] if sp else kept[0], i))
+        pts.append(u)
+    return pts, sp
+
+
 def simplify_group(layers, tol_m, log):
     """Simplifies the rings of every feature of the layers in one topology.
     Returns per layer per feature its rings in quantised units (closed), and
@@ -598,17 +615,7 @@ def simplify_group(layers, tol_m, log):
     out, span = [None] * len(arcs), [None] * len(arcs)
 
     def quantise(a):
-        pts, sp = [], []
-        for i in keep[a]:
-            u = proj(arcs[a][i])
-            if pts and pts[-1] == u:
-                if sp:
-                    sp[-1] = (sp[-1][0], i)
-                continue  # before the first segment: it starts at keep[a][0] anyway
-            if pts:
-                sp.append((sp[-1][1] if sp else keep[a][0], i))
-            pts.append(u)
-        out[a], span[a] = pts, sp
+        out[a], span[a] = quantise_arc(arcs[a], keep[a], proj)
 
     for a in range(len(arcs)):
         if keep[a] is not None:
@@ -887,11 +894,123 @@ def self_test():
     # With an XY envelope (flags bits 1-3 = 1: 4 doubles) before the WKB.
     gp = b"GP\x00\x03" + struct.pack("<i", 25832) + struct.pack("<4d", 0, 1, 0, 1) + wkb
     assert parse_gpkg_geometry(gp) == polys
+    # The same triangle big-endian, and a big-endian MultiPolygon holding it
+    # and the little-endian one (every WKB geometry has its own byte order).
+    wkb_be = struct.pack(">BII", 0, 3, 1) + struct.pack(">I", 4) + struct.pack(">8d", 0, 0, 1, 0, 0, 1, 0, 0)
+    assert parse_wkb(wkb_be, 0) == (polys, len(wkb_be))
+    multi = struct.pack(">BII", 0, 6, 2) + wkb_be + wkb
+    assert parse_wkb(multi, 0) == (polys + polys, len(multi))
     assert source_area_m2([[[(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)],
                             [(2, 2), (4, 2), (4, 4), (2, 4), (2, 2)]]]) == 96.0
     assert credit("2026-11-26") == ("Indeholder data fra Klimadatastyrelsen, DAGI, november 2026, "
                                     "CC BY 4.0 — data bearbejdet")
+    # A code keeps its leading zero (kommunekode 0101).
+    kommune = next(s for s in LAYERS if s["layer"] == "kommune")
+    rec = feature_record(kommune, {"kommunekode": "0101", "navn": "København", "udenforkommuneinddeling": 0,
+                                   "regionlokalid": "x"}, {"x": "1084"})
+    assert rec == {"code": "0101", "name": "København", "region": "1084"}, rec
+    self_test_rings()
+    self_test_simplify_group()
     print("self-test ok")
+
+
+def self_test_rings():
+    # clean_ring: centimetres, no consecutive repeat, no closing vertex.
+    assert clean_ring([(0, 0), (1, 0), (1, 0), (1, 1), (0, 0), (0, 0)]) == [(0, 0), (100, 0), (100, 100)]
+    # delta_ring: the first vertex absolute, then deltas, the closing one left out.
+    assert delta_ring([(1, 2), (4, 6), (3, 3), (1, 2)]) == [1, 2, 3, 4, -1, -3]
+    # quantise_arc: vertices that land on one output point merge, and each
+    # segment spans the source indices from its first to its last vertex.
+    def proj(p):
+        return p[0] // 10, p[1] // 10
+    arc = [(0, 0), (12, 0), (15, 0), (25, 0), (31, 0), (35, 0)]
+    assert quantise_arc(arc, range(6), proj) == ([(0, 0), (1, 0), (2, 0), (3, 0)], [(0, 2), (2, 3), (3, 5)])
+    assert quantise_arc(arc, [0, 3, 5], proj) == ([(0, 0), (2, 0), (3, 0)], [(0, 3), (3, 5)])
+    # Merged before the first segment: that segment still starts at the first kept vertex.
+    assert quantise_arc([(0, 0), (5, 0), (15, 0)], [0, 1, 2], proj) == ([(0, 0), (1, 0)], [(0, 2)])
+    # crossing_segments: two segments of one arc that cross are a conflict;
+    # consecutive ones, and the closing pair of a closed arc, are not.
+    assert crossing_segments([[(0, 0), (10, 0), (10, 10), (5, -5)]], 4) == {(0, 0), (0, 2)}
+    assert crossing_segments([[(0, 0), (10, 0), (10, 10), (0, 10), (0, 0)]], 4) == set()
+    assert crossing_segments([[(0, 0), (10, 10)], [(0, 10), (10, 0)]], 4) == {(0, 0), (1, 0)}
+    # swallowed_segments: a vertex strictly inside a neighbour flags the
+    # neighbour's segments within reach of it; a vertex on its border does not.
+    big = [(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)]
+    inside = [(40, 5), (60, 5), (50, 10), (40, 5)]
+    touching = [(100, 50), (120, 40), (120, 60), (100, 50)]
+    feats = [[big], [inside], [touching]]
+    assert swallowed_segments(feats, [big, inside, touching], [{0}, {1}, {2}], 12) == {(0, 0)}
+    assert swallowed_segments([[big], [touching]], [big, touching], [{0}, {1}], 12) == set()
+
+
+def self_test_simplify_group():
+    """simplify_group on synthetic features (metres in EPSG:25832, near 56 N
+    9 E) at a 60 m tolerance."""
+    x0, y0 = 500000, 6200000
+
+    def poly(*rings):
+        return [[(x0 + x, y0 + y) for x, y in r] for r in rings]
+
+    def sq(xa, ya, xb, yb):
+        return [(xa, ya), (xb, ya), (xb, yb), (xa, yb)]
+
+    def unit(x, y):
+        return to_units(cm((x0 + x, y0 + y)))
+
+    notch = (1000, 1941)
+    feats = [
+        # A: a square whose top edge has a notch 59 m deep and a bump 55 m
+        # high, which Douglas-Peucker alone cuts off at 60 m ...
+        [poly([(0, 0), (2000, 0), (2000, 2000), (1900, 2055), (1800, 2000), (1100, 2000), notch,
+               (900, 2000), (0, 2000)])],
+        # B: ... swallowing this 1,440 m2 islet in the notch. Restoring the
+        # notch frees it, and leaves the bump 60.8 m from the new chord, so
+        # that half must be simplified again.
+        [poly(sq(960, 1980, 1040, 1998))],
+        # C: a body and a 400 m2 islet, under MIN_ISLET_M2.
+        [poly(sq(3000, 0, 4000, 1000)), poly(sq(5000, 5000, 5020, 5020))],
+        # E: a hole that is F's 400 m2 enclave; F: the enclave and a body.
+        [poly(sq(0, 3000, 1000, 4000), sq(400, 3400, 420, 3420))],
+        [poly(sq(400, 3400, 420, 3420)), poly(sq(2000, 3000, 3000, 4000))],
+        # G, H: neighbours whose shared border wiggles 30 m.
+        [poly([(0, 6000), (1000, 6000), (1000, 6200), (1030, 6500), (1000, 6800), (1000, 7000), (0, 7000)])],
+        [poly([(1000, 6000), (2000, 6000), (2000, 7000), (1000, 7000), (1000, 6800), (1030, 6500), (1000, 6200)])],
+        # K, L: a lens on K's edge, 50 m high: its coast and the border it
+        # shares with K both simplify to the same chord, two vertices.
+        [poly([(0, 9000), (1000, 9000), (1000, 10000), (700, 10000), (300, 10000), (0, 10000)])],
+        [poly([(300, 10000), (700, 10000), (650, 10040), (500, 10050), (350, 10040)])],
+    ]
+    layer = ({"layer": "test"}, [({}, p) for p in feats])
+    (out,), stats = simplify_group([layer], 60.0, lambda m: None)
+    a, g, h = out[0], out[5], out[6]
+    # The islet rule: both small islets go, the enclave from E and F alike,
+    # each counted once; B's islet is above the limit and stays.
+    assert stats["droppedIslets"] == 2 and stats["droppedIsletAreaM2"] == 800, stats
+    assert [len(x) for x in out] == [1] * len(feats), [len(x) for x in out]
+    # The conflict pass: B's islet is not inside A, because A got the notch
+    # back; the bump came back with it (the deviation below); L's ring has
+    # three vertices again (the check below).
+    assert stats["conflictVerticesAdded"] > 0 and stats["rounds"] > 1, stats
+    assert unit(*notch) in a[0] and unit(1900, 2055) in a[0], a
+    index = [FeatureIndex(rings) for rings in out]
+    for i, rings in enumerate(out):
+        for r in rings:
+            assert r[0] == r[-1] and len(set(r)) >= 3, (i, r)
+            for p in r:
+                for j, fx in enumerate(index):
+                    assert j == i or fx.locate(p) != 1, ("vertex of", i, "inside", j, p)
+    assert 0 < stats["maxDeviationM"] <= 60.0, stats
+    # G and H keep one shared border, simplified once to a straight edge.
+    edge = {unit(1000, 6000), unit(1000, 7000)}
+    for r in (g[0], h[0]):
+        assert any({p, q} == edge for p, q in zip(r, r[1:])), r
+    # A feature with nothing but a small islet would vanish: refused.
+    try:
+        simplify_group([({"layer": "test"}, [({}, [poly(sq(0, 0, 20, 20))])])], 60.0, lambda m: None)
+    except ValueError as err:
+        assert "lost every ring" in str(err), err
+    else:
+        raise AssertionError("a feature that lost every ring was accepted")
 
 
 def main():

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"math"
 	"sort"
+	"strings"
 	"testing"
 	"testing/fstest"
 )
@@ -389,6 +390,17 @@ func TestLoadDagiIndexRejects(t *testing.T) {
 		"quantum differs":              func(f map[DagiLayer]*dagiAssetFile) { f[DagiPostnummer].Quantum = 1e-4 },
 		"no quantum":                   func(f map[DagiLayer]*dagiAssetFile) { f[DagiKommune].Quantum = 0 },
 		"empty layer":                  func(f map[DagiLayer]*dagiAssetFile) { f[DagiRegion].Features = nil },
+		"credit differs": func(f map[DagiLayer]*dagiAssetFile) {
+			f[DagiPostnummer].Credit = strings.Replace(f[DagiPostnummer].Credit, "november", "oktober", 1)
+		},
+		"generation differs": func(f map[DagiLayer]*dagiAssetFile) { f[DagiLandsdel].Source.Generation++ },
+		"downloaded differs": func(f map[DagiLayer]*dagiAssetFile) { f[DagiRegion].Source.Downloaded = "2026-11-25" },
+		"first file differs": func(f map[DagiLayer]*dagiAssetFile) { f[DagiKommune].Source.Generation-- },
+		"no credit in any file": func(f map[DagiLayer]*dagiAssetFile) {
+			for _, file := range f {
+				file.Credit = ""
+			}
+		},
 	}
 	for name, mut := range cases {
 		if _, err := loadDagiIndex(write(mut), "d"); err == nil {
