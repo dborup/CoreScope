@@ -363,6 +363,9 @@
     // #959: the node popup's Terrain profile and Predicted reach, on open.
     map.on('popupopen', onNodePopupOpen);
     map.on('popupopen popupclose', onPopupSheet);
+    // #982: a finger beside a marker closes the open popup (onMapNearMiss).
+    map.getContainer().addEventListener('pointerdown', onMapPointerDown, true);
+    map.getContainer().addEventListener('click', onMapNearMiss, true);
 
     // If navigated with ?node=PUBKEY, highlight that node after markers load
     targetNodeKey = urlParams.get('node') || null;
@@ -2376,17 +2379,19 @@
       // once for any number of calls. An add whose group has left the map
       // (clustering off, the page gone) never ends: it is dropped.
       if (clusterGroup && map && map.hasLayer(clusterGroup)) { _renderQueued = true; return; }
-      if (_clusterAdd.keep) _clusterAdd.keep.on('remove', _clusterAdd.keep.closePopup);
-      _clusterAdd = null;
+      dropClusterAdd();
       _renderQueued = false;
     }
     _renderingMarkers = true;
     var keep = openPopupMarker();
+    // #982: clearLayers() folds a spider back into its cluster; the popup's
+    // marker goes back in there too, and the spider is opened again for it.
+    var spider = !!(keep && keep._preSpiderfyLatlng);
     if (keep) keep.off('remove', keep.closePopup);
     try { _renderMarkersInner(keep); } finally {
       _renderingMarkers = false;
-      if (_clusterAdd) _clusterAdd.keep = keep;
-      else settleKeptPopup(keep);
+      if (_clusterAdd) { _clusterAdd.keep = keep; _clusterAdd.spider = spider; }
+      else settleKeptPopup(keep, spider);
     }
     // #681 M4: markers are rebuilt on every filter change; re-attach the
     // profile pickers to the new ones. A no-op unless the tool is armed.
@@ -2395,10 +2400,15 @@
 
   /* #979: Leaflet's close goes back on the kept marker, and the popup
    * closes after all if its marker is not on the map (its node gone,
-   * filtered out or clustered). */
-  function settleKeptPopup(keep) {
+   * filtered out or clustered). #982: a marker that was a spiderfied
+   * cluster child gets its spider back first. */
+  function settleKeptPopup(keep, spider) {
     if (!keep) return;
     keep.on('remove', keep.closePopup);
+    if (spider && map && !map.hasLayer(keep) && clusterGroup && map.hasLayer(clusterGroup)) {
+      var cluster = clusterGroup.getVisibleParent(keep);
+      if (cluster && cluster !== keep && cluster.spiderfy) cluster.spiderfy();
+    }
     if (!map || !map.hasLayer(keep)) keep.closePopup();
   }
 
@@ -2409,9 +2419,11 @@
    * callback when the add starts, so each add gets its own, and _clusterAdd
    * is that add's until it ends. */
   function addClusterMarkers(markers) {
-    var add = { keep: null, done: false };
+    var add = { keep: null, spider: false, done: false, chunks: 0 };
     clusterGroup.options.chunkProgress = function (processed, total) {
-      if (processed !== total || add.done) return;
+      add.chunks++;
+      if (processed !== total) { watchClusterChunk(add); return; }
+      if (add.done) return;
       add.done = true;
       Promise.resolve().then(function () { endClusterAdd(add); });
     };
@@ -2423,8 +2435,35 @@
   function endClusterAdd(add) {
     if (_clusterAdd !== add) return;
     _clusterAdd = null;
-    settleKeptPopup(add.keep);
+    settleKeptPopup(add.keep, add.spider);
     if (_renderQueued) { _renderQueued = false; renderMarkers(); }
+  }
+
+  /* #982: markercluster runs an add's next chunk from a timeout it sets
+   * just after this chunk's chunkProgress. A check set after that one, from
+   * a microtask, with the same delay, runs after that chunk; if the chunk
+   * threw (a bug in marker or icon code), it never reported, and the add
+   * would stay in flight for good, every later rebuild queued behind it.
+   * The dead add is let go: the rebuild asked for meanwhile runs, or else
+   * the popup is settled. One timeout per chunk; none for a one-chunk add. */
+  function watchClusterChunk(add) {
+    var seen = add.chunks, delay = clusterGroup.options.chunkDelay;
+    Promise.resolve().then(function () {
+      setTimeout(function () {
+        if (add.chunks !== seen || add.done || _clusterAdd !== add) return;
+        dropClusterAdd();
+        if (_renderQueued) { _renderQueued = false; renderMarkers(); }
+        else settleKeptPopup(add.keep, add.spider);
+      }, delay);
+    });
+  }
+
+  /* dropClusterAdd lets go of the add in flight, which will never end: its
+   * kept marker gets Leaflet's close back. */
+  function dropClusterAdd() {
+    var keep = _clusterAdd.keep;
+    _clusterAdd = null;
+    if (keep) keep.on('remove', keep.closePopup);
   }
 
   /* #979: the marker whose popup is open, if it is a node's or an
@@ -2696,7 +2735,7 @@
           <dt style="color:var(--text-muted);float:left;clear:left;width:80px;padding:2px 0;">Adverts</dt>
           <dd style="margin-left:88px;padding:2px 0;">${node.advert_count || 0}</dd>
         </dl>
-        <div style="margin-top:8px;clear:both;">
+        <div class="map-popup-links" style="margin-top:8px;clear:both;">
           <a href="#/nodes/${node.public_key}" style="color:var(--link-color);font-size:12px;">View Node →</a>
           ${node.public_key ? ` · <a href="javascript:void(0)" role="button" data-show-neighbors data-pubkey="${escapeHtml(node.public_key)}" data-name="${escapeHtml(node.name || 'Unknown')}" style="color:var(--link-color);font-size:12px;cursor:pointer;">Show Neighbors</a>` : ''}
         </div>
@@ -2757,6 +2796,29 @@
   function onPopupSheet(e) {
     var wrap = document.getElementById('map-wrap');
     if (wrap) wrap.classList.toggle('has-map-popup', e.type === 'popupopen');
+  }
+
+  /* #982: a phone's browser moves a tap that lands beside a tappable
+   * element onto it (touch adjustment), so a finger on bare map next to a
+   * marker opens that marker. With a popup open, on a map dense enough to
+   * leave little bare map, that tap is the user closing it: it closes the
+   * popup instead. The finger's own point comes with the pointerdown; a
+   * tap on the marker's icon, and any tap with no popup open, is left as
+   * it was. */
+  var _touchDown = null;
+  function onMapPointerDown(e) {
+    _touchDown = e.pointerType === 'touch' ? { x: e.clientX, y: e.clientY } : null;
+  }
+  function onMapNearMiss(e) {
+    var down = _touchDown;
+    _touchDown = null;
+    if (!down || !e.isTrusted || !map || !(map._popup && map._popup.isOpen())) return;
+    var icon = e.target.closest && e.target.closest('.leaflet-marker-icon');
+    if (!icon) return;
+    var r = icon.getBoundingClientRect();
+    if (down.x >= r.left && down.x <= r.right && down.y >= r.top && down.y <= r.bottom) return;
+    e.stopPropagation();
+    map.closePopup();
   }
 
   /* popupRefit is Leaflet 1.9.4's Popup.update() without its content step,

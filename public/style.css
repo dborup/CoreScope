@@ -6907,6 +6907,13 @@ body.embed .warmup-pills { display: none !important; }
      It steps aside while a popup is open (map.js onPopupSheet); the reach
      stays on the map and the sheet comes back when the popup closes. */
   .has-map-popup .reach-panel { display: none; }
+  /* #982: so do the map buttons (zoom, layers, the settings, ruler and
+     reach toggles). A popup fills most of a phone's map, and one under them
+     had its × or its text covered; they come back when it closes. */
+  .has-map-popup .leaflet-top .leaflet-control,
+  .has-map-popup .map-controls-toggle,
+  .has-map-popup .map-profile-toggle,
+  .has-map-popup .map-reach-toggle { visibility: hidden; }
   /* The head and its × stay at the top of the scrolled sheet; it covers
      the sheet's top padding so nothing scrolls past above it. */
   .reach-head {
@@ -7380,6 +7387,14 @@ body.embed .warmup-pills { display: none !important; }
 .map-popup-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: flex-start; }
 .map-popup-tools:empty { display: none; }
 .leaflet-container .map-popup-tools .node-action-chip { color: var(--text-on-accent); }
+/* #982: on a phone View Node and Show Neighbors are finger-sized, like the
+   chips under them, and so is the popup's × (on a dense map it is how a
+   popup is closed); the title keeps clear of the larger ×. */
+@media (max-width: 768px) {
+  .map-popup-links a { display: inline-flex; align-items: center; min-height: 44px; }
+  #map-wrap .leaflet-popup a.leaflet-popup-close-button { width: 44px; height: 44px; line-height: 44px; font-size: 24px; }
+  #map-wrap .map-popup h3 { padding-right: 24px; }
+}
 
 /* #737 M2 — "Oblique photo": the node-detail button is a node action chip
    (#920) beside "Terrain profile"; in the Path profile a row of
