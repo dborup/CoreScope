@@ -208,7 +208,8 @@ test('hasPosition mirrors the server: finite, in range, not 0,0', () => {
   }
   for (const n of [null, {}, { lat: null, lon: null }, { lat: 55.6 }, { lon: 12.5 }, { lat: 0, lon: 0 }, { lat: '0', lon: '0' },
     { lat: 90.1, lon: 12 }, { lat: -91, lon: 12 }, { lat: 55, lon: 180.5 }, { lat: 55, lon: -181 },
-    { lat: NaN, lon: 12 }, { lat: 55, lon: Infinity }, { lat: '', lon: '' }, { lat: 'x', lon: 12 }]) {
+    { lat: NaN, lon: 12 }, { lat: 55, lon: Infinity }, { lat: '', lon: '' }, { lat: '', lon: 12.5 }, { lat: 55.1, lon: '' },
+    { lat: 'x', lon: 12 }]) {
     assert.strictEqual(AC.hasPosition(n), false, JSON.stringify(n));
   }
 });

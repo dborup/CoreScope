@@ -27,7 +27,11 @@
  *      failed /api/ response (a node with clock-skew data is used, because
  *      /clock-skew's own 404 for a node without one is out of scope);
  *   5. a positioned repeater's page still asks both, and /station answers
- *      200 (the server contract is unchanged).
+ *      200 (the server contract is unchanged);
+ *   6. the same repeater with an out-of-range position (its
+ *      /api/nodes/{pk} answer rewritten to lat 95) asks neither and shows
+ *      the "no position" text: the owner section gates on hasPosition, not
+ *      on a non-null, non-0,0 check.
  *
  * Usage:
  *   BASE_URL=http://localhost:13581 node test-issue-979-node-page-e2e.js
@@ -77,8 +81,14 @@ function positioned(n) {
     if (r.ok()) { noPos = n; break; }
   }
   // A node without a position of its own may still get a map from an
-  // estimated position; the overlap needs one with no map at all.
-  const noMap = noPosAll.find((n) => n.estimated_lat == null || n.estimated_lon == null);
+  // estimated position; the overlap needs one with no map at all. Only
+  // /api/nodes/{pk} carries estimated_lat and estimated_lon, not the list.
+  let noMap = null;
+  for (const n of noPosAll) {
+    const r = await probe.request.get(BASE + '/api/nodes/' + encodeURIComponent(n.public_key));
+    const d = r.ok() ? ((await r.json()).node || {}) : null;
+    if (d && (d.estimated_lat == null || d.estimated_lon == null)) { noMap = n; break; }
+  }
   await probe.close();
   assert(withPos, 'the fixture has no positioned repeater');
   assert(noMap, 'the fixture has no repeater without a position or an estimated one');
@@ -187,10 +197,20 @@ function positioned(n) {
   }
 
   // ── Item 3: no request the client can tell is pointless ──
-  async function watch(pk) {
+  // patchNode, when given, rewrites the node in the page's /api/nodes/{pk}
+  // answer (the rest of the answer is the real server's).
+  async function watch(pk, patchNode) {
     const ctx = await newCtx({ width: 375, height: 560 }, 'light', true);
     await ctx.route((u) => new URL(u).pathname === '/api/antenna-claims/config',
       (r) => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(CLAIMS_CONFIG) }));
+    if (patchNode) {
+      await ctx.route((u) => new URL(u).pathname === '/api/nodes/' + pk, async (r) => {
+        const res = await r.fetch();
+        const body = await res.json();
+        Object.assign(body.node, patchNode);
+        await r.fulfill({ response: res, body: JSON.stringify(body) });
+      });
+    }
     const page = await ctx.newPage();
     const log = { errors: [], failed: [], asked: {}, status: {} };
     page.on('console', (m) => { if (m.type() === 'error') log.errors.push(m.text()); });
@@ -225,6 +245,12 @@ function positioned(n) {
     assert(log.asked.antenna && log.asked.station, 'asked: ' + JSON.stringify(log.asked));
     assert(log.status.station === 200, '/station answered ' + log.status.station);
     assert(!log.text.includes(NO_POSITION), 'a positioned node shows the "no position" text');
+  });
+
+  await step('out-of-range position (lat 95): no /antenna or /station request, the "no position" text', async () => {
+    const log = await watch(withPos.public_key, { lat: 95 });
+    assert(log.text.includes(NO_POSITION), 'owner section text: ' + log.text.slice(0, 200));
+    assert(!log.asked.antenna && !log.asked.station, 'asked: ' + JSON.stringify(log.asked) + ' answered: ' + JSON.stringify(log.status));
   });
 
   await browser.close();
