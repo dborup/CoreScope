@@ -74,12 +74,16 @@ test('no setInterval remains in animation hot path', () => {
   // The only acceptable setIntervals are the UI ones (timeline, clock, prune, rate counter)
   // Count total setInterval occurrences
   const matches = src.match(/setInterval\(/g) || [];
-  // Count known OK ones: _timelineRefreshInterval, _lcdClockInterval, _pruneInterval, _rateCounterInterval, _affinityInterval
-  const okPatterns = ['_timelineRefreshInterval', '_lcdClockInterval', '_pruneInterval', '_rateCounterInterval', '_affinityInterval'];
+  // Count known OK ones: _timelineRefreshInterval, _lcdClockInterval, _pruneInterval, _rateCounterInterval
+  const okPatterns = ['_timelineRefreshInterval', '_lcdClockInterval', '_pruneInterval', '_rateCounterInterval'];
   let okCount = 0;
   for (const p of okPatterns) {
     if (src.includes(p + ' = setInterval') || src.includes(p + '= setInterval')) okCount++;
   }
+  // #984: the affinity poller's one interval is written twice: its injectable
+  // default and the call site.
+  if (src.includes('intervalId = env.setInterval(') &&
+      src.includes('setInterval: (fn, ms) => setInterval(fn, ms)')) okCount += 2;
   // Allow some non-animation setIntervals (the 4 UI ones above)
   assert.ok(matches.length <= okCount + 1,
     `Found ${matches.length} setInterval calls, expected at most ${okCount + 1} (non-animation). Some animation setIntervals may remain.`);

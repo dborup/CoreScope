@@ -3638,27 +3638,112 @@
       applyHeardFilter();
       // Initialize shared HopResolver with loaded nodes
       if (window.HopResolver) HopResolver.init(list);
-      // Fetch affinity data for hop disambiguation
-      fetchAffinityData();
+      // Fetch affinity data for hop disambiguation, then every 60 s
       startAffinityRefresh();
     } catch (e) { console.error('Failed to load nodes:', e); }
   }
 
-  let _affinityInterval = null;
+  // #984 — the neighbor-graph (hop affinity) poller. A stalled connection
+  // once collected one request per tick for 20 minutes, then released them
+  // all at once. So: at most one request at a time, aborted after timeoutMs
+  // (the next tick tries again); no poll while the tab is hidden, and one
+  // refresh on return if the data is older than the interval. A failed,
+  // non-OK or truncated response keeps the last good data and warns once per
+  // failure streak. Globals are read at call time; tests inject fakes.
+  function createAffinityPoller(deps) {
+    const env = Object.assign({
+      url: '/api/analytics/neighbor-graph',
+      intervalMs: 60000,
+      timeoutMs: 15000,
+      onData: () => {},
+      fetch: (url, init) => fetch(url, init),
+      document: document,
+      now: () => Date.now(),
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (id) => clearTimeout(id),
+      setInterval: (fn, ms) => setInterval(fn, ms),
+      clearInterval: (id) => clearInterval(id),
+      createController: () => (typeof AbortController === 'function' ? new AbortController() : null),
+      warn: (msg, e) => console.warn(msg, e),
+    }, deps);
+    let intervalId = null;
+    let current = null;     // the open request: { controller, timer }
+    let lastOkAt = null;
+    let failing = false;
 
-  async function fetchAffinityData() {
-    try {
-      const resp = await fetch('/api/analytics/neighbor-graph');
-      const graph = await resp.json();
-      if (window.HopResolver && HopResolver.setAffinity) {
-        HopResolver.setAffinity(graph);
+    // Frees the slot if req still holds it; false for a superseded request.
+    function release(req) {
+      if (current !== req) return false;
+      env.clearTimeout(req.timer);
+      current = null;
+      return true;
+    }
+    function fail(e) {
+      if (failing) return;
+      failing = true;
+      env.warn('Failed to fetch affinity data:', e);
+    }
+    async function tick() {
+      if (current || env.document.hidden) return;
+      const req = { controller: env.createController(), timer: null };
+      current = req;
+      req.timer = env.setTimeout(() => {
+        if (!release(req)) return;
+        if (req.controller) req.controller.abort();
+        fail(new Error('timed out after ' + env.timeoutMs + ' ms'));
+      }, env.timeoutMs);
+      let graph;
+      try {
+        const resp = await env.fetch(env.url, { signal: req.controller ? req.controller.signal : undefined });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        graph = await resp.json();
+      } catch (e) {
+        if (release(req)) fail(e);
+        return;
       }
-    } catch (e) { console.warn('Failed to fetch affinity data:', e); }
+      if (!release(req)) return;
+      lastOkAt = env.now();
+      failing = false;
+      env.onData(graph);
+    }
+    function onVisibility() {
+      if (env.document.hidden) return;
+      if (lastOkAt === null || env.now() - lastOkAt >= env.intervalMs) tick();
+    }
+    return {
+      timeoutMs: env.timeoutMs,
+      tick: tick,
+      inFlight: () => current !== null,
+      // Polls now and every intervalMs; calling it again restarts the
+      // interval (the DOM adds the same listener only once).
+      start() {
+        if (intervalId !== null) env.clearInterval(intervalId);
+        intervalId = env.setInterval(tick, env.intervalMs);
+        env.document.addEventListener('visibilitychange', onVisibility);
+        return tick();
+      },
+      stop() {
+        if (intervalId !== null) { env.clearInterval(intervalId); intervalId = null; }
+        env.document.removeEventListener('visibilitychange', onVisibility);
+        const req = current;
+        if (req && release(req) && req.controller) req.controller.abort();
+      },
+    };
   }
 
+  let affinityPoller = null;
+
   function startAffinityRefresh() {
-    if (_affinityInterval) clearInterval(_affinityInterval);
-    _affinityInterval = setInterval(fetchAffinityData, 60000);
+    if (!affinityPoller) {
+      affinityPoller = createAffinityPoller({
+        onData: (graph) => { if (window.HopResolver && HopResolver.setAffinity) HopResolver.setAffinity(graph); },
+      });
+    }
+    return affinityPoller.start();
+  }
+
+  function stopAffinityRefresh() {
+    if (affinityPoller) { affinityPoller.stop(); affinityPoller = null; }
   }
 
   function clearNodeMarkers() {
@@ -4126,6 +4211,10 @@
     return addFeedItem(icon, typeName, payload, hops, color, pkt);
   };
   window._liveRebuildFeedList = function() { return rebuildFeedList(); };
+  // #984 test seams: the poller factory and this mount's poller.
+  window._liveCreateAffinityPoller = createAffinityPoller;
+  window._liveStartAffinityRefresh = startAffinityRefresh;
+  window._liveAffinityPoller = function() { return affinityPoller; };
 
   // PR #1490 test seams: Expose internal state for Playwright assertions
   window._liveDrawAnimatedLine = drawAnimatedLine;
@@ -6253,7 +6342,7 @@
     _scopeLegendSig = '';
     if (_scopeThemeListening) { window.removeEventListener('theme-changed', invalidateScopePalette); _scopeThemeListening = false; }
     if (_feedTimestampInterval) { clearInterval(_feedTimestampInterval); _feedTimestampInterval = null; }
-    if (_affinityInterval) { clearInterval(_affinityInterval); _affinityInterval = null; }
+    stopAffinityRefresh();
     // Unsubscribe rather than close: the socket belongs to app.js and the rest
     // of the app still needs it.
     if (wsHandler) { offWS(wsHandler); wsHandler = null; }
