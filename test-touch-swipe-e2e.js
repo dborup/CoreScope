@@ -18,7 +18,8 @@
  *
  * Asserts, at 375x560 with touch, on a static page (no server needed):
  *   1. swipes of 1, 21, 36 and 65 px, up and down, from 10 or 8 moves,
- *      each scroll the box by that ± BAND_PX, in one swipe;
+ *      each scroll the box by that ± BAND_PX, in one swipe although three
+ *      are allowed (so a further swipe cannot hide a missing correction);
  *   2. the same holds while the main thread is busy for 30 ms in every
  *      frame (a loaded runner);
  *   3. the same holds on a page that cancels the first three touchmoves of
@@ -91,7 +92,9 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       for (const px of [1, 21, 36, 65]) {
         for (const sign of [1, -1]) {
           await setTop(page, 1000);
-          const swipes = await touchSwipe(page, cdp, AT, sign * px, { steps, scrollers: ['#box'] });
+          // Three swipes allowed, one expected: the shortfall is made up
+          // inside the touch, not by the fallback's further swipes.
+          const swipes = await touchSwipe(page, cdp, AT, sign * px, { steps, scrollers: ['#box'], maxSwipes: 3 });
           const moved = (await top(page)) - 1000;
           if (!inBand(moved, sign * px) || swipes !== 1) got.push(`${steps} moves, ${sign * px} px: moved ${moved} in ${swipes} swipe(s)`);
         }

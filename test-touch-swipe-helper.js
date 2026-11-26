@@ -18,7 +18,8 @@
  *     (a lift while moving starts a fling of varying length);
  *   - a swipe whose first moves scroll nothing (a loaded host) is made up
  *     inside the same touch, as is one measured while the box still catches
- *     up, without overshooting;
+ *     up, without overshooting; so is a shortfall of 1 to 5 px, and one
+ *     that takes more than one correction because a correction loses a move;
  *   - a swipe still short after the lift is finished by further swipes only
  *     within opts.maxSwipes, which touchSwipe returns the count of; it stops
  *     at the content's end and never swipes back over an overshoot.
@@ -37,13 +38,15 @@ async function test(name, fn) { await fn(); passed++; console.log('  ✓ ' + nam
 
 /* model is a page with one scroll box '#box' and a fake CDP session.
  *   eat: the first `eat` moves of each touch scroll nothing (a loaded host);
+ *   drop: further moves of each touch (1-based) that scroll nothing, such
+ *        as a correction's first move;
  *   lag: px the box moves per frame towards where the finger has put it
  *        (Infinity: at once);
  *   liftLoss: px each successive touch's scroll loses (> 0) or gains (< 0)
  *        when it lifts;
  *   top, max: the box's scrollTop and its largest. */
 function model(o) {
-  o = Object.assign({ eat: 0, lag: Infinity, liftLoss: [], top: 1000, max: 5000 }, o);
+  o = Object.assign({ eat: 0, drop: [], lag: Infinity, liftLoss: [], top: 1000, max: 5000 }, o);
   const log = [];
   let frame = 0, top = o.top, aim = o.top, touch = null, touches = 0;
   const box = { get scrollTop() { return Math.round(top); }, get scrollLeft() { return 0; } };
@@ -78,7 +81,7 @@ function model(o) {
       const p = params.touchPoints[0];
       if (params.type === 'touchStart') touch = { y0: p.y, y: p.y, top0: aim, moves: 0, lost: 0, at: frame, n: touches++ };
       else if (params.type === 'touchMove') {
-        if (++touch.moves <= o.eat) touch.lost += Math.abs(p.y - touch.y);
+        if (++touch.moves <= o.eat || o.drop.includes(touch.moves)) touch.lost += Math.abs(p.y - touch.y);
         touch.y = p.y; touch.at = frame;
         aimAt(p.y);
       } else if (params.type === 'touchEnd') {
@@ -153,6 +156,30 @@ function model(o) {
       const kinds = m.log.map(e => e[0]);
       const held = m.log.slice(kinds.lastIndexOf('touchMove') + 1, kinds.indexOf('touchEnd'));
       assert.ok(held.some(e => e[0] === 'wait' && e[1] >= HOLD_MS), 'no hold before the lift after the correction');
+    }
+  });
+
+  await test('a shortfall of a few px is made up too, both ways', async () => {
+    // One eaten move of a 10-move path loses 4 or 5 px.
+    for (const px of [21, -21, 30, -30, 36, -36]) {
+      const m = model({ eat: 1 });
+      const first = swipePath({ x: 10, y: 300 }, px, 10)[0];
+      const lost = Math.abs(first.y - 300);
+      assert.ok(lost >= 1 && lost <= 5, 'the model lost ' + lost + ' px, not 1 to 5');
+      assert.equal(await touchSwipe(m.page, m.cdp, { x: 10, y: 300 }, px, { scrollers: ['#box'], steps: 10 }), 1);
+      assert.equal(m.top() - 1000, px, lost + ' px short left for ' + px);
+    }
+  });
+
+  await test('a correction that itself loses a move is followed by another', async () => {
+    // The first path's first three moves and the first correction's first
+    // move scroll nothing: the first correction leaves a few px.
+    for (const px of [30, -30]) {
+      const m = model({ eat: 3, drop: [11] });
+      assert.equal(await touchSwipe(m.page, m.cdp, { x: 10, y: 300 }, px, { scrollers: ['#box'], steps: 10 }), 1);
+      assert.equal(m.top() - 1000, px, 'scrolled for ' + px);
+      const holds = m.log.filter(e => e[0] === 'wait' && e[1] === HOLD_MS).length;
+      assert.ok(holds >= 3, 'took ' + (holds - 1) + ' correction(s), not 2 or more');
     }
   });
 

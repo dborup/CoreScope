@@ -390,10 +390,12 @@ function rasterFor(c, radiusKm) {
       const tops = () => page.evaluate(() => ['reach-panel', 'reach-nir-list'].map(id => document.querySelector(`[data-testid="${id}"]`).scrollTop).join());
       const was = await tops();
       // How far the sheet moves: short enough that a body barely taller
-      // than the element is not overshot back and forth, and at most a
-      // thumb's 80 px of finger travel. The finger travels that plus
-      // Chromium's touch slop (#967: a 36 px swipe moved the sheet 21 px,
-      // and on a slightly taller layout the list ran out of swipes).
+      // than the element is not overshot back and forth, and small enough
+      // that the first path is at most a thumb's 80 px of finger travel:
+      // that distance plus Chromium's touch slop (#967: a 36 px swipe moved
+      // the sheet 21 px, and on a slightly taller layout the list ran out of
+      // swipes). A correction inside the touch moves the same finger further,
+      // by the shortfall, so the whole touch can travel more than 80 px.
       const room = await page.evaluate((sel) => {
         const head = document.querySelector('[data-testid="reach-panel"] .reach-head').getBoundingClientRect();
         const s = document.querySelector('[data-testid="reach-panel"]').getBoundingClientRect();
