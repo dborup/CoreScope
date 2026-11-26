@@ -242,3 +242,5 @@ The organisations in charge of the Copernicus programme by law or by delegation 
 ### Map Data
 
 The terrain profile's coverage gate (Danish land and sea) and the Denmark outline in the link-preview image are derived from Topografisk Landpolygon: "Indeholder data fra Klimadatastyrelsen, Topografisk Landpolygon, november 2026" ([Vilkår for brug af frie geografiske data](https://www.sdfe.dk/Media/638052180760639799/)).
+
+The kommune, landsdel, region and postnummer boundaries in `cmd/server/dagi/` are simplified from DAGI (Danmarks Administrative Geografiske Inddeling), generation 271, downloaded 2026-11-26: "Indeholder data fra Klimadatastyrelsen, DAGI, november 2026, CC BY 4.0 — data bearbejdet" ([DAGI](https://dataforsyningen.dk/data/3901), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/), [Vilkår for brug af data](https://dataforsyningen.dk/Vilkaar)). `scripts/build-dagi.py` makes them from the GeoPackage download.
