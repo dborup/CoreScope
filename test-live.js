@@ -1626,6 +1626,45 @@ console.log('\n=== live.js: #984 neighbor-graph poller ===');
     t.poller.stop();
   });
 
+  test('#984: a stopped or superseded request that fails later does not warn', async () => {
+    // stop() aborts the request; the abort rejects it, and that is not a failure.
+    const a = makePoller();
+    a.poller.start();
+    a.poller.stop();
+    await flush();
+    assert.strictEqual(a.net.reqs[0].signal.aborted, true, 'precondition: the abort reached the fetch');
+    assert.strictEqual(a.warnings.length, 0, 'a stopped request does not warn');
+    // A timed-out request (warned already) is superseded; once a success ends
+    // the streak, its late error must not open a new one.
+    const b = makePoller({ honourAbort: false });
+    b.poller.start();
+    await b.clock.advance(60000);
+    assert.strictEqual(b.warnings.length, 1, 'precondition: the timeout warned');
+    assert.strictEqual(b.net.reqs.length, 2);
+    b.net.reqs[1].ok(G1);
+    await flush();
+    b.net.reqs[0].reject(new TypeError('Failed to fetch'));
+    await flush();
+    assert.strictEqual(b.warnings.length, 1, 'a superseded request does not warn');
+    b.poller.stop();
+  });
+
+  test('#984: the late answer of a timed-out request does not mark the data fresh', async () => {
+    const t = makePoller({ honourAbort: false });
+    t.poller.start();
+    await t.clock.advance(t.poller.timeoutMs); // req 0 times out, slot freed
+    t.doc.hidden = true; t.doc.fire('visibilitychange');
+    await t.clock.advance(35000);
+    t.net.reqs[0].ok(G2); // 50 s: its answer arrives late
+    await flush();
+    assert.deepStrictEqual(t.data, [], 'precondition: the late answer is dropped');
+    await t.clock.advance(20000); // 70 s; the 60 s tick fell while hidden
+    assert.strictEqual(t.net.reqs.length, 1, 'precondition: nothing polled while hidden');
+    t.doc.hidden = false; t.doc.fire('visibilitychange');
+    assert.strictEqual(t.net.reqs.length, 2, 'no good data yet: the visibility refresh still happens');
+    t.poller.stop();
+  });
+
   test('#984: a hidden document skips the tick', async () => {
     const t = makePoller();
     t.doc.hidden = true;

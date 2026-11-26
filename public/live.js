@@ -3649,7 +3649,10 @@
   // (the next tick tries again); no poll while the tab is hidden, and one
   // refresh on return if the data is older than the interval. A failed,
   // non-OK or truncated response keeps the last good data and warns once per
-  // failure streak. Globals are read at call time; tests inject fakes.
+  // failure streak. The timeout also covers the body download: a ~95 KB graph
+  // needs about 55 kbps sustained to finish in 15 s, which any link that can
+  // run the live page clears; a slower one retries on the next tick and keeps
+  // the last good data. Globals are read at call time; tests inject fakes.
   function createAffinityPoller(deps) {
     const env = Object.assign({
       url: '/api/analytics/neighbor-graph',
