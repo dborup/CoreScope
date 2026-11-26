@@ -396,9 +396,26 @@ const json = (body, status) => ({ status: status || 200, contentType: 'applicati
     { id: '9999999999999999', pubkey: PK, name: 'Clear only', role: 'repeater', status: 'approved', createdAt: now - 5e6, expiresAt: now - 4e6,
       provenAt: now - 4.5e6, reviewedAt: now - 4.5e6, approvedBy: 'owner', heightM: null, heightOp: 'clear', heightInForce: true, detailsOp: 'clear', detailsInForce: true },
   ];
+  // routeFocusMoved waits until the app has moved focus after a route change.
+  // app.js focuses the new page's heading in the next animation frame
+  // (#630-7), and the key field is drawn before that frame. A key sent
+  // before it can land on the heading: on a loaded CI runner the frame came
+  // between press()'s focus on the field and its Enter, so the form was
+  // never sent and the list never loaded (#967). Frame callbacks run in the
+  // order they were asked for, so once two frames asked for now have run,
+  // the app's has too.
+  async function routeFocusMoved(page) {
+    await page.evaluate(() => {
+      window.__e2eFrames = 0;
+      const tick = () => { if (++window.__e2eFrames < 2) requestAnimationFrame(tick); };
+      requestAnimationFrame(tick);
+    });
+    await page.waitForFunction(() => window.__e2eFrames >= 2, null, { timeout: 10000 });
+  }
   async function unlock(page, filter) {
     await page.goto(BASE + '/#/tools/antenna-claims' + (filter ? '?filter=' + filter : ''), { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('[data-testid="ac-admin-key"]', { timeout: 15000 });
+    await routeFocusMoved(page);
     await page.fill('[data-testid="ac-admin-key"]', ADMIN_KEY);
     await page.press('[data-testid="ac-admin-key"]', 'Enter');
     await page.waitForSelector('#acAdminList[aria-busy="false"]', { timeout: 10000 });
@@ -535,6 +552,7 @@ const json = (body, status) => ({ status: status || 200, contentType: 'applicati
     const tap = (sel, minH) => tapWhenSettled(page, sel, { minHeight: minH });
     await page.goto(BASE + '/#/tools/antenna-claims', { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('[data-testid="ac-admin-key"]', { timeout: 15000 });
+    await routeFocusMoved(page);
     await tap('[data-testid="ac-admin-key"]');
     await page.keyboard.type(ADMIN_KEY);
     await page.keyboard.press('Enter');

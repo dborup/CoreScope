@@ -49,6 +49,7 @@ const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { touchSwipe, TOUCH_SLOP_PX } = require('./tests/e2e-touch-swipe');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13839';
 const PNG_1X1 = Buffer.from(
@@ -225,12 +226,19 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   }
   /* Brings `target` fully into view inside its scroll container `box`, as a
    * viewer would: real touch swipes only (touchStart, ten touchMoves,
-   * touchEnd through CDP), each moving a third of the box, until it is in
+   * touchEnd through CDP), each scrolling a third of the box, until it is in
    * view. Nothing scrolls the box for it: a box a finger cannot scroll
    * (#841 F2: `touch-action: none` on the list) fails here. Stepped
    * dispatched touches scroll on the Linux runner, where
-   * Input.synthesizeScrollGesture did not (#841). Returns the number of
-   * swipes it took. */
+   * Input.synthesizeScrollGesture did not (#841). Each swipe is
+   * tests/e2e-touch-swipe.js's: the finger travels the third plus Chromium's
+   * touch slop, moves on while the box has scrolled less, and holds still
+   * before it lifts. A 30 px swipe that lifted while moving scrolled 15 to
+   * 41 px; with the slop added and held, it still scrolled only 16 to 18 px
+   * now and then on a loaded host. In the 63 px landscape list the 22 swipes
+   * the budget allows then fell short (#967, #973). A swipe
+   * still short after the lift is finished by further swipes, counted
+   * against the same budget. Returns the number of swipes it took. */
   async function bringIntoBox(page, box, target) {
     let p = await placement(page, box, target);
     if (p.inside) return 0;
@@ -244,15 +252,12 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         const b = await page.locator(box).boundingBox();
         const x = Math.round(b.x + b.width / 2), dist = Math.max(30, Math.round(b.height / 3));
         n = Math.min(60, Math.ceil(sh / dist) + 2);
-        const y0 = Math.round(b.y + b.height / 2 + dist / 2), dir = p.below > 0 ? -1 : 1;
+        // Up the box to scroll down, down it to scroll up; the finger's path
+        // is centred on the box.
+        const up = p.below > 0, travel = dist + TOUCH_SLOP_PX;
+        const y0 = Math.round(b.y + b.height / 2 + (up ? travel : -travel) / 2);
         const before = await page.evaluate((s) => document.querySelector(s).scrollTop, box);
-        await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y: y0 }] });
-        for (let k = 1; k <= 10; k++) {
-          await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: y0 + Math.round(dir * dist * k / 10) }] });
-        }
-        await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-        swipes++;
-        await page.waitForTimeout(150);
+        swipes += await touchSwipe(page, cdp, { x, y: y0 }, up ? dist : -dist, { steps: 10, scrollers: [box], maxSwipes: n - swipes });
         const after = await page.evaluate((s) => document.querySelector(s).scrollTop, box);
         p = await placement(page, box, target);
         stuck = after === before ? stuck + 1 : 0;

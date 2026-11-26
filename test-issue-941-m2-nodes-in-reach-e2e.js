@@ -47,6 +47,7 @@
 'use strict';
 const path = require('path');
 const { chromium } = require('playwright');
+const { touchSwipe, TOUCH_SLOP_PX } = require('./tests/e2e-touch-swipe');
 
 const BASE = process.env.BASE_URL || 'http://localhost:13581';
 const SHOTS = process.env.SHOTS_DIR || '';
@@ -323,20 +324,6 @@ function rasterFor(c, radiusKm) {
   });
 
   // ── 4: phone, touch, from a cold #/map ──────────────────────────────────
-  /* swipe moves a finger up (dy > 0) or down the screen from `at`, slowly
-   * and held still at the end, so there is no fling. */
-  async function swipe(page, cdp, at, dy) {
-    const steps = 8;
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] });
-    for (let k = 1; k <= steps; k++) {
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: at.x, y: at.y - dy * k / steps }] });
-      await page.waitForTimeout(16);
-    }
-    await page.waitForTimeout(150);
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await page.waitForTimeout(150);
-  }
-
   /* sheetGrip is where a thumb would push the sheet: the lowest spot of
    * its visible body, below the sticky head, off the node list (a swipe
    * there scrolls the list) and a thumb's width (±16 px) clear of every
@@ -402,15 +389,23 @@ function rasterFor(c, radiusKm) {
       if (at.onList) throw new Error(`no spot on the sheet off the node list and the sliders to swipe from on the way to ${selector} (the list covers its body) ${await geometry(page, selector)}`);
       const tops = () => page.evaluate(() => ['reach-panel', 'reach-nir-list'].map(id => document.querySelector(`[data-testid="${id}"]`).scrollTop).join());
       const was = await tops();
-      // Short enough that a body barely taller than the element is not
-      // overshot back and forth.
+      // How far the sheet moves: short enough that a body barely taller
+      // than the element is not overshot back and forth, and small enough
+      // that the first path is at most a thumb's 80 px of finger travel:
+      // that distance plus Chromium's touch slop (#967: a 36 px swipe moved
+      // the sheet 21 px, and on a slightly taller layout the list ran out of
+      // swipes). A correction inside the touch moves the same finger further,
+      // by the shortfall, so the whole touch can travel more than 80 px.
       const room = await page.evaluate((sel) => {
         const head = document.querySelector('[data-testid="reach-panel"] .reach-head').getBoundingClientRect();
         const s = document.querySelector('[data-testid="reach-panel"]').getBoundingClientRect();
         return s.bottom - head.bottom - document.querySelector(sel).getBoundingClientRect().height;
       }, selector);
-      const dy = Math.max(16, Math.min(80, Math.floor(room - 8)));
-      await swipe(page, cdp, at, below ? dy : -dy);
+      const dy = Math.max(1, Math.min(80 - TOUCH_SLOP_PX, Math.floor(room - 8)));
+      // One swipe a turn (no opts.maxSwipes): touchSwipe makes up a
+      // shortfall inside the touch, and a further swipe must land on a grip
+      // found again, which the next turn does.
+      await touchSwipe(page, cdp, at, below ? dy : -dy, { scrollers: ['[data-testid="reach-panel"]', '[data-testid="reach-nir-list"]'] });
       if (await tops() === was) throw new Error(`a swipe at ${JSON.stringify(at)} scrolled nothing on the way to ${selector}`);
     }
     const geo = await geometry(page, selector);
