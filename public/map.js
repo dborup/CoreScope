@@ -2244,6 +2244,8 @@
   }
 
   var _renderingMarkers = false;
+  var _clusterAdd = null;      // #979: the cluster group's chunked add in flight
+  var _renderQueued = false;   // #979: renderMarkers was called during it
   var _lastDeconflictZoom = null;
   var _currentMarkerData = []; // stored marker data for zoom-only repositioning
   var _observerByPubkey = new Map(); // observer id (pubkey) → observer object, rebuilt on each render
@@ -2359,25 +2361,70 @@
 
   function renderMarkers() {
     if (_renderingMarkers) return;
-    _renderingMarkers = true;
     // #979: a reload (an ADVERT batch → loadNodes) or a filter change must
     // not close the popup the user has open. Leaflet closes a popup when its
     // marker leaves the map (bindPopup's remove handler), and the rebuild
     // below takes every marker off; for the open one that handler is off
     // meanwhile, and the marker is put back in its node's place. The popup
     // closes after all if its node is gone, filtered out or clustered.
+    // With clustering on, the markers go on the map at the end of the
+    // cluster group's chunked add, which may be a few chunks later: the
+    // popup is settled then (endClusterAdd).
+    if (_clusterAdd) {
+      // A rebuild now would clear the group under that add, and the add
+      // would go on putting the old markers in. It runs when the add ends,
+      // once for any number of calls. An add whose group has left the map
+      // (clustering off, the page gone) never ends: it is dropped.
+      if (clusterGroup && map && map.hasLayer(clusterGroup)) { _renderQueued = true; return; }
+      if (_clusterAdd.keep) _clusterAdd.keep.on('remove', _clusterAdd.keep.closePopup);
+      _clusterAdd = null;
+      _renderQueued = false;
+    }
+    _renderingMarkers = true;
     var keep = openPopupMarker();
     if (keep) keep.off('remove', keep.closePopup);
     try { _renderMarkersInner(keep); } finally {
       _renderingMarkers = false;
-      if (keep) {
-        keep.on('remove', keep.closePopup);
-        if (!map || !map.hasLayer(keep)) keep.closePopup();
-      }
+      if (_clusterAdd) _clusterAdd.keep = keep;
+      else settleKeptPopup(keep);
     }
     // #681 M4: markers are rebuilt on every filter change; re-attach the
     // profile pickers to the new ones. A no-op unless the tool is armed.
     profileSyncPickers();
+  }
+
+  /* #979: Leaflet's close goes back on the kept marker, and the popup
+   * closes after all if its marker is not on the map (its node gone,
+   * filtered out or clustered). */
+  function settleKeptPopup(keep) {
+    if (!keep) return;
+    keep.on('remove', keep.closePopup);
+    if (!map || !map.hasLayer(keep)) keep.closePopup();
+  }
+
+  /* #979: adds a rebuild's markers to the cluster group. Its chunked add
+   * puts in up to chunkInterval ms of markers, then the rest from a timeout
+   * (2,000 nodes on a slow phone take several), and the markers go on the
+   * map after its chunkProgress(total, total) call. markercluster reads that
+   * callback when the add starts, so each add gets its own, and _clusterAdd
+   * is that add's until it ends. */
+  function addClusterMarkers(markers) {
+    var add = { keep: null, done: false };
+    clusterGroup.options.chunkProgress = function (processed, total) {
+      if (processed !== total || add.done) return;
+      add.done = true;
+      Promise.resolve().then(function () { endClusterAdd(add); });
+    };
+    clusterGroup.addLayers(markers);
+    // All in the first chunk: on the map already, renderMarkers settles it.
+    if (!add.done) _clusterAdd = add;
+  }
+
+  function endClusterAdd(add) {
+    if (_clusterAdd !== add) return;
+    _clusterAdd = null;
+    settleKeptPopup(add.keep);
+    if (_renderQueued) { _renderQueued = false; renderMarkers(); }
   }
 
   /* #979: the marker whose popup is open, if it is a node's or an
@@ -2517,7 +2564,7 @@
       }
     }
     if (useCluster && clusterMarkers.length > 0) {
-      clusterGroup.addLayers(clusterMarkers);
+      addClusterMarkers(clusterMarkers);
     }
   }
 
@@ -2599,6 +2646,9 @@
     var link = e.target.closest('[data-show-neighbors]');
     if (link) {
       e.preventDefault();
+      // #979: the popup has done its job; on a phone it would cover half
+      // of the neighbours shown (a refresh no longer closes it).
+      if (map) map.closePopup();
       selectReferenceNode(link.dataset.pubkey, link.dataset.name);
     }
   });
@@ -3619,6 +3669,8 @@
     }
     markerLayer = null;
     clusterGroup = null;
+    _clusterAdd = null;
+    _renderQueued = false;
     _currentMarkerData = [];
     routeLayer = null;
     if (heatLayer) { heatLayer = null; }

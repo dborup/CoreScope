@@ -20,12 +20,22 @@
  *      reach for that node; then (the issue's phone flow) the next node's
  *      popup makes the phone's reach sheet step aside through two more
  *      refreshes, and a tap on the map closes it and the sheet comes back;
+ *   1b. with clustering on and 2,000 nodes (the fixture's and clones of
+ *      them), at 1440×900 and 375×560 touch, CPU 4× and the cluster group's
+ *      chunkInterval lowered to 20 ms so markercluster adds them in chunks
+ *      on any machine: the popup stays open through two refreshes, with one
+ *      remove handler on its marker; a filter change during a chunked add
+ *      (two renderMarkers calls) is run once after it, and no node has two
+ *      markers in the group;
  *   2. a popup whose node is filtered out (its role unchecked) closes, one
  *      whose node is gone from the next /api/nodes answer closes, and with
  *      clustering on, one kept through a refresh still closes when a zoom
  *      out puts its marker in a cluster (Leaflet's own close is back on);
- *   3. a refresh that changes the popup's node leaves the open popup as it
- *      is, and the popup opened next shows the new data;
+ *   3. a refresh that renames, moves and ages the popup's node leaves the
+ *      open popup as it is, its marker takes the node's new place and stale
+ *      icon (where a marker built afresh is), and the popup opened next
+ *      shows the new data; Show Neighbors in a popup closes it (1440×900
+ *      click, 375×560 tap);
  *   4. a #/map?node= link centres on its node and opens its popup once: a
  *      later reload neither moves the view nor takes over the popup the
  *      user opened since;
@@ -82,7 +92,35 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   });
   console.log(`\n=== #979 Map popup through ADVERT refreshes against ${BASE} ===\n`);
 
-  /* newCtx: o.nodes(list) may rewrite each /api/nodes answer's node list. */
+  /* clonedPage answers one page of /api/nodes (fetchAllNodes asks 500 at a
+   * time) from the fixture's nodes and clones of them up to o.clones nodes
+   * in all. A clone sits 0.02°–0.08° from its node, so a node keeps its own
+   * marker at zoom 15. o.nodes(list) may rewrite the list as below. */
+  async function clonedPage(route, o) {
+    const u = new URL(route.request().url());
+    const limit = Number(u.searchParams.get('limit')) || 500;
+    const offset = Number(u.searchParams.get('offset')) || 0;
+    if (!o.cloneList) {
+      const all = new URL(u); all.searchParams.set('limit', '5000'); all.searchParams.set('offset', '0');
+      const base = ((await (await route.fetch({ url: all.toString() })).json()).nodes) || [];
+      const placed = base.filter(n => n.lat && n.lon);
+      const list = base.slice();
+      for (let i = 0; list.length < o.clones; i++) {
+        const n = placed[i % placed.length];
+        const a = i * 2.399963, d = 0.02 + 0.06 * ((i * 7919) % 1000) / 1000;
+        list.push(Object.assign({}, n, {
+          public_key: String(n.public_key).slice(0, 56) + (0x97900000 + i).toString(16),
+          name: (n.name || 'Node') + ' ~' + i, lat: n.lat + d * Math.sin(a), lon: n.lon + d * Math.cos(a),
+        }));
+      }
+      o.cloneList = list;
+    }
+    const list = o.nodes ? o.nodes(o.cloneList) : o.cloneList;
+    return { nodes: list.slice(offset, offset + limit), total: list.length, counts: {} };
+  }
+
+  /* newCtx: o.nodes(list) may rewrite each /api/nodes answer's node list;
+   * o.clones serves that many nodes (clonedPage). */
   async function newCtx(o) {
     const ctx = await browser.newContext({
       viewport: o.viewport, hasTouch: !!o.touch, isMobile: !!o.touch,
@@ -98,6 +136,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     });
     await ctx.route(url => new URL(url).pathname === '/api/nodes', async (route) => {
       rec.nodes++;
+      if (o.clones) return route.fulfill({ json: await clonedPage(route, o) });
       const response = await route.fetch();
       if (!o.nodes) return route.fulfill({ response });
       const body = await response.json();
@@ -403,6 +442,133 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     } finally { await ctx.close(); }
   }
 
+  // ── 1b: clustering on, a rebuild that markercluster adds in chunks ───────
+  /* watchClusterAdds wraps the cluster group's addLayers: each add is noted
+   * with its marker count, how many it held when the call returned (fewer
+   * than all: chunked) and when its last chunk ran. chunkInterval, when
+   * given, is lowered so the add is chunked on a fast machine too.
+   * o.midChunk: once, a role filter is turned off and on again from a
+   * timeout between the first two chunks (two renderMarkers calls). */
+  async function watchClusterAdds(page, o) {
+    await page.evaluate((o) => {
+      const map = window.__maps[window.__maps.length - 1];
+      let g = null;
+      map.eachLayer((l) => { if (l instanceof L.MarkerClusterGroup) g = l; });
+      if (!g) throw new Error('no cluster group on the map');
+      window.__group = g;
+      if (o.chunkInterval) g.options.chunkInterval = o.chunkInterval;
+      window.__adds = [];
+      window.__midChunk = !!o.midChunk;
+      if (g.__watched) return;
+      g.__watched = true;
+      const addLayers = g.addLayers;
+      g.addLayers = function (arr, skip) {
+        const a = { total: arr.length, first: -1, chunks: 0, done: false };
+        window.__adds.push(a);
+        const progress = this.options.chunkProgress;
+        this.options.chunkProgress = function (p, t) {
+          a.chunks++;
+          if (p === t) a.done = true;
+          if (progress) return progress.apply(this, arguments);
+        };
+        const r = addLayers.call(this, arr, skip);
+        a.first = this.getLayers().length;
+        if (!a.done && window.__midChunk) {
+          window.__midChunk = false;
+          setTimeout(() => { const cb = document.getElementById('mcRole_companion'); cb.click(); cb.click(); }, 0);
+        }
+        return r;
+      };
+    }, o || {});
+  }
+
+  /* clusterState: the adds noted, every node's marker count in the group,
+   * and the open popup's marker and its remove handlers. */
+  function clusterState(page) {
+    return page.evaluate(() => {
+      const map = window.__maps[window.__maps.length - 1];
+      const keys = new Map();
+      for (const l of window.__group.getLayers()) if (l._nodeKey) keys.set(l._nodeKey, (keys.get(l._nodeKey) || 0) + 1);
+      const src = map._popup && map._popup.isOpen() && map._popup._source;
+      return {
+        adds: window.__adds.map(a => ({ total: a.total, first: a.first, chunks: a.chunks, done: a.done })),
+        markers: keys.size, doubled: Array.from(keys.values()).filter(n => n > 1).length,
+        removeHandlers: src ? ((src._events && src._events.remove) || []).filter(l => l.fn === src.closePopup).length : null,
+      };
+    });
+  }
+
+  /* chunkedRefresh: advertRefresh's ADVERT batch, with the CPU slowed
+   * rate×, until the rebuild's add (watchClusterAdds) and any add after it
+   * have had their last chunk. o.fetch as advertRefresh. */
+  async function chunkedRefresh(page, rec, cdp, rate, o) {
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate });
+    try {
+      const a0 = await page.evaluate(() => window.__adds.length);
+      if (o.fetch) await page.evaluate(() => invalidateApiCache('/nodes'));
+      const n0 = rec.nodes;
+      rec.sockets[rec.sockets.length - 1].send(ADVERT);
+      await page.waitForFunction((a0) => window.__adds.length > a0 && window.__adds.every(a => a.done), a0, { timeout: 30000 });
+      if (o.fetch) assert(rec.nodes > n0, 'the refresh did not ask /api/nodes again');
+      await page.waitForTimeout(300);
+    } finally { await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 }); }
+  }
+
+  /* zoomToRepeater centres on a fixture repeater at zoom 15, where its
+   * clones (clonedPage) are clear of it. */
+  async function zoomToRepeater(page) {
+    await page.evaluate(() => {
+      const map = window.__maps[window.__maps.length - 1];
+      let pick = null;
+      map.eachLayer((l) => { if (!pick && l._nodeKey && l._role === 'repeater' && !/9790[0-9a-f]{4}$/.test(l._nodeKey)) pick = l; });
+      if (!pick) window.__group.eachLayer((l) => { if (!pick && l._role === 'repeater' && !/9790[0-9a-f]{4}$/.test(l._nodeKey)) pick = l; });
+      map.setView(pick.getLatLng(), 15, { animate: false });
+    });
+    await page.waitForTimeout(600);
+  }
+
+  for (const o of [
+    { label: 'desktop 1440×900, clustering on, 2,000 nodes', viewport: { width: 1440, height: 900 }, theme: 'dark' },
+    { label: 'phone 375×560, clustering on, 2,000 nodes', viewport: { width: 375, height: 560 }, touch: true, theme: 'light' },
+  ]) {
+    const { ctx, page, rec } = await newCtx(Object.assign({ clustering: true, clones: 2000 }, o));
+    const cdp = await ctx.newCDPSession(page);
+    try {
+      await coldMap(page, rec);
+      await watchClusterAdds(page, {});
+      await zoomToRepeater(page);
+
+      await step(`${o.label}: a popup stays open through refreshes markercluster adds in chunks (CPU 4×)`, async () => {
+        const node = await pickMarker(page, { anyHeight: !!o.touch });
+        await openPopup(page, o.touch);
+        await watchClusterAdds(page, { chunkInterval: 20 });
+        await chunkedRefresh(page, rec, cdp, 4, {});
+        await chunkedRefresh(page, rec, cdp, 4, { fetch: true });
+        const c = await clusterState(page);
+        assert(c.adds.length === 2 && c.adds.every(a => a.total > 1900 && a.first < a.total && a.chunks > 1),
+          'the refreshes were not added in chunks: ' + JSON.stringify(c.adds));
+        assertKept(await popupState(page), node, 'after chunked refreshes');
+        assert(c.removeHandlers === 1, 'the kept marker has ' + c.removeHandlers + ' remove handlers');
+        await shot(page, `979-popup-chunked-${o.touch ? 'phone' : 'desktop'}.jpg`);
+      });
+
+      await step(`${o.label}: a rebuild asked for during a chunked add waits for it: no marker twice, one remove handler`, async () => {
+        const node = await popupState(page);
+        await watchClusterAdds(page, { chunkInterval: 20, midChunk: true });
+        await chunkedRefresh(page, rec, cdp, 4, { fetch: true });
+        // The filter's two rebuilds ran as one, after the add.
+        await page.waitForFunction(() => window.__adds.length >= 2 && window.__adds.every(a => a.done), null, { timeout: 30000 });
+        await page.waitForTimeout(300);
+        const c = await clusterState(page);
+        assert(c.adds.length === 2, 'the rebuilds during the add were not run as one after it: ' + JSON.stringify(c.adds));
+        assert(c.doubled === 0 && c.markers === c.adds[1].total, 'markers twice or missing: ' + JSON.stringify(c));
+        assertKept(await popupState(page), { pk: node.key }, 'after a rebuild during a chunked add');
+        assert(c.removeHandlers === 1, 'the kept marker has ' + c.removeHandlers + ' remove handlers');
+        clean(rec);
+      });
+    } finally { await ctx.close(); }
+  }
+
   // ── 2: a popup whose node is filtered out or gone closes ─────────────────
   await step('desktop: a popup whose node is filtered out closes, and the flag goes', async () => {
     const { ctx, page, rec } = await newCtx({ viewport: { width: 1440, height: 900 } });
@@ -468,23 +634,51 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
   });
 
   // ── 3: the refreshed data shows on the next open ─────────────────────────
-  await step('desktop: a refresh leaves the open popup as it is, and the next open shows the new data', async () => {
-    let renamed = null;
+  /* keptMarker: where the marker of node pk is and how it looks, and
+   * whether it is the open popup's. */
+  const keptMarker = (page, pk) => page.evaluate((pk) => {
+    const map = window.__maps[window.__maps.length - 1];
+    let mk = null;
+    map.eachLayer((l) => { if (!mk && l._icon && l._nodeKey && String(l._nodeKey).toLowerCase() === pk) mk = l; });
+    if (!mk) return null;
+    const ll = mk.getLatLng();
+    return { lat: ll.lat, lon: ll.lng, stale: mk._icon.classList.contains('marker-stale'),
+      iconStale: / marker-stale/.test(mk.options.icon.options.className || ''),
+      open: !!(map._popup && map._popup.isOpen() && map._popup._source === mk) };
+  }, pk);
+
+  await step('desktop: a refresh that renames, moves and ages the open popup\'s node leaves the popup as it is, moves and restyles its marker, and the next open shows the new data', async () => {
+    let changed = null;
+    const STALE = new Date(Date.now() - 40 * 86400000).toISOString();
     const o = { viewport: { width: 1440, height: 900 },
-      nodes: list => list.map(n => (String(n.public_key).toLowerCase() === renamed ? Object.assign({}, n, { name: 'Renamed 979' }) : n)) };
+      nodes: list => list.map(n => (String(n.public_key).toLowerCase() === changed
+        ? Object.assign({}, n, { name: 'Renamed 979', lat: n.lat + 0.004, lon: n.lon - 0.006, last_seen: STALE, last_heard: STALE }) : n)) };
     const { ctx, page, rec } = await newCtx(o);
     try {
       await coldMap(page, rec);
       const node = await pickMarker(page);
       await openPopup(page, false);
       const s0 = await popupState(page);
-      renamed = node.pk;
+      const m0 = await keptMarker(page, node.pk);
+      assert(m0 && m0.open && !m0.stale, 'before: ' + JSON.stringify(m0));
+      changed = node.pk;
       await advertRefresh(page, rec, { pk: node.pk, fetch: true });
       const s1 = await popupState(page);
-      assertKept(s1, node, 'renamed');
+      assertKept(s1, node, 'changed');
       assert(s1.name === s0.name, 'the open popup was re-rendered: ' + s0.name + ' → ' + s1.name);
+      const m1 = await keptMarker(page, node.pk);
+      // The kept marker took the node's new place and its stale look.
+      assert(m1 && m1.open, 'the open popup\'s marker: ' + JSON.stringify(m1));
+      assert(Math.abs(m1.lat - m0.lat) > 0.002 || Math.abs(m1.lon - m0.lon) > 0.002, 'the kept marker did not move: ' + JSON.stringify([m0, m1]));
+      assert(m1.stale && m1.iconStale, 'the kept marker kept its old icon: ' + JSON.stringify(m1));
       await page.evaluate(() => window.__maps[window.__maps.length - 1].closePopup());
       await page.waitForTimeout(100);
+      // A rebuild with no popup open makes a new marker: the kept one was
+      // where and as that one is.
+      await advertRefresh(page, rec, { pk: node.pk });
+      const m2 = await keptMarker(page, node.pk);
+      assert(m2 && Math.abs(m2.lat - m1.lat) < 1e-9 && Math.abs(m2.lon - m1.lon) < 1e-9 && m2.stale,
+        'the kept marker was not where a new one is: ' + JSON.stringify([m1, m2]));
       await page.evaluate((pk) => window.__maps[window.__maps.length - 1].eachLayer((l) => {
         if (l._icon && l._nodeKey && String(l._nodeKey).toLowerCase() === pk) l._icon.setAttribute('data-test-marker', '1');
       }), node.pk);
@@ -496,6 +690,31 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       clean(rec);
     } finally { await ctx.close(); }
   });
+
+  // ── 3b: Show Neighbors from a popup closes it ────────────────────────────
+  for (const o of [
+    { label: 'desktop 1440×900', viewport: { width: 1440, height: 900 } },
+    { label: 'phone 375×560', viewport: { width: 375, height: 560 }, touch: true },
+  ]) {
+    await step(`${o.label}: Show Neighbors in a popup closes it and shows that node's neighbours`, async () => {
+      const { ctx, page, rec } = await newCtx(o);
+      try {
+        await coldMap(page, rec);
+        await pickMarker(page);
+        await openPopup(page, o.touch);
+        await tap(page, '.leaflet-popup [data-show-neighbors]', o.touch);
+        await page.waitForFunction(() => !document.querySelector('.leaflet-popup'), null, { timeout: 5000 });
+        const s = await popupState(page);
+        assert(s.closes === 1 && !s.wrapFlag, 'Show Neighbors: ' + JSON.stringify(s));
+        const r = await page.evaluate(() => ({ on: document.getElementById('mcNeighbors').checked }));
+        assert(r.on, 'the neighbours filter is not on');
+        await page.waitForTimeout(500);
+        assert(!(await popupState(page)).open, 'the popup came back');
+        await shot(page, `979-show-neighbors-${o.touch ? 'phone' : 'desktop'}.jpg`);
+        clean(rec);
+      } finally { await ctx.close(); }
+    });
+  }
 
   // ── 4: a #/map?node= link opens its node's popup once, not per reload ──
   await step('desktop: a #/map?node= link centres and opens once; a reload leaves the view and the user\'s popup alone', async () => {
