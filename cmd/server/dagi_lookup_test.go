@@ -393,6 +393,12 @@ func TestLoadDagiIndexRejects(t *testing.T) {
 		"credit differs": func(f map[DagiLayer]*dagiAssetFile) {
 			f[DagiPostnummer].Credit = strings.Replace(f[DagiPostnummer].Credit, "november", "oktober", 1)
 		},
+		"credit differs in landsdel": func(f map[DagiLayer]*dagiAssetFile) {
+			f[DagiLandsdel].Credit += " "
+		},
+		"credit differs in region": func(f map[DagiLayer]*dagiAssetFile) {
+			f[DagiRegion].Credit += " "
+		},
 		"generation differs": func(f map[DagiLayer]*dagiAssetFile) { f[DagiLandsdel].Source.Generation++ },
 		"downloaded differs": func(f map[DagiLayer]*dagiAssetFile) { f[DagiRegion].Source.Downloaded = "2026-11-25" },
 		"first file differs": func(f map[DagiLayer]*dagiAssetFile) { f[DagiKommune].Source.Generation-- },

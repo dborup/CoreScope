@@ -349,7 +349,11 @@ func TestDagiAssetAreaSums(t *testing.T) {
 	for l := DagiLayer(0); l < dagiLayerCount; l++ {
 		lo, hi := 42000.0, 44000.0 // km²
 		if l == DagiPostnummer {
-			lo, hi = 100000, 155000
+			// Postnummer areas cover the land and the postcode zones that
+			// reach into coastal water, so the total exceeds the ~43,000 km²
+			// land area; the asset sums to 147,662 km². The band is tight
+			// enough to catch a lost or doubled zone group.
+			lo, hi = 140000, 155000
 		}
 		if km2 := recorded[l] / 1e6; !(km2 >= lo && km2 <= hi) {
 			t.Errorf("%s: areaM2 total %.0f km², want %g–%g km² for Denmark", l, km2, lo, hi)

@@ -999,7 +999,9 @@ def self_test_simplify_group():
             for p in r:
                 for j, fx in enumerate(index):
                     assert j == i or fx.locate(p) != 1, ("vertex of", i, "inside", j, p)
-    assert 0 < stats["maxDeviationM"] <= 60.0, stats
+    # The exact worst dropped vertex (pins the per-span vertex range and the
+    # 1/100 m unit conversion; a bound alone would pass if either drifted).
+    assert stats["maxDeviationM"] == 53.01, stats
     # G and H keep one shared border, simplified once to a straight edge.
     edge = {unit(1000, 6000), unit(1000, 7000)}
     for r in (g[0], h[0]):
