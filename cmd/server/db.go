@@ -782,6 +782,11 @@ type PacketQuery struct {
 	// filter, exactly like the in-memory path's nil set for an unknown or
 	// empty area (#569).
 	AreaNodes map[string]bool
+
+	// dagiSnap is the #740 DAGI membership the handler read when Area
+	// carries a DAGI selection (nodeScopeKey), so the store filters with
+	// the state the response's hidden count came from.
+	dagiSnap *dagiMembershipSnapshot
 }
 
 // PacketResult wraps paginated packet list.
@@ -790,6 +795,8 @@ type PacketResult struct {
 	Total   int                      `json:"total"`
 	Limit   int                      `json:"limit"`
 	Offset  int                      `json:"offset"`
+	// Dagi is set when a DAGI filter applied (#740).
+	Dagi *DagiFilterInfo `json:"dagi,omitempty"`
 }
 
 // QueryPackets returns paginated, filtered packets as transmissions (matching Node.js shape).
@@ -1115,7 +1122,9 @@ func (db *DB) buildTransmissionWhere(q PacketQuery) ([]string, []interface{}) {
 		}
 		args = append(args, q.Region)
 	}
-	if len(q.AreaNodes) > 0 {
+	if q.AreaNodes != nil {
+		// An empty set (a DAGI code nobody is in, #740) matches nothing;
+		// area itself resolves to nil or a non-empty set (areaMemberSet).
 		// #569: same originator contract as filterPacketsPrepared — the
 		// decoded ADVERT pubkey, which the ingestor copies into the indexed
 		// from_pubkey column (#1143). One bound JSON array regardless of the

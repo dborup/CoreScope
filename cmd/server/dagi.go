@@ -18,9 +18,18 @@ package main
 // is all they need.
 //
 // The index is read-only and in memory; nothing here touches the database
-// (#1283). M1 adds no API: M2 wires the per-node cache (dagi_membership.go)
-// into the filters. Config for later (AGENTS.md rule 8): a dagi.enabled
-// switch, and an asset override path (loadDagiIndex takes any fs.FS).
+// (#1283). M2 (dagi_api.go) wires the per-node cache (dagi_membership.go)
+// into the filters and serves the code lists and the polygons. Config for
+// later (AGENTS.md rule 8): an asset override path (loadDagiIndex takes any
+// fs.FS).
+//
+// Street postcodes (ergadepostnummer) are block-sized (median about
+// 9,800 m², below the postnummer layer's 225 m simplification), and every
+// one of them is named København K, København V or Frederiksberg C. So the
+// filter does not tell them apart: every postnummer that shares its name
+// with a street postcode is grouped by that name, and the group's filter
+// key is its lowest code (1050 København K, 1550 København V, 1800
+// Frederiksberg C). Any member code selects the whole group.
 
 import (
 	"embed"
@@ -137,9 +146,16 @@ type dagiSeg struct{ x0, y0, x1, y1 float64 }
 // all its rings (even-odd), bucketed in horizontal bands so a test reads
 // only the edges whose latitude range meets the point's band.
 type dagiFeature struct {
-	area                   DagiArea
-	region                 string
+	area   DagiArea
+	region string
+	// key is the code the filters use for the feature: its own code, or
+	// for a grouped postnummer the group's (see the file comment).
+	key                    string
+	grouped                bool // a postnummer in a group (key may be its own code)
+	street                 bool
+	outsideKommune         bool
 	areaM2                 float64
+	rings                  [][]int64 // as in the asset, for the polygon endpoint
 	minX, minY, maxX, maxY float64
 	bandH                  float64
 	bands                  [][]int32
@@ -169,6 +185,21 @@ type dagiIndex struct {
 	layers  [dagiLayerCount]dagiLayerIndex
 	quantum float64
 	credit  string
+	source  DagiSource
+}
+
+// DagiSource is where the asset came from and its terms, from the kommune
+// file's header (loadDagiIndex checks the others agree on the credit, the
+// generation and the download date).
+type DagiSource struct {
+	Owner      string `json:"owner"`
+	Dataset    string `json:"dataset"`
+	DatasetURL string `json:"datasetUrl"`
+	License    string `json:"license"`
+	LicenseURL string `json:"licenseUrl"`
+	TermsURL   string `json:"termsUrl"`
+	Generation int    `json:"generation"`
+	Downloaded string `json:"downloaded"`
 }
 
 // dagiDefault is the embedded asset, parsed on first use.
@@ -204,6 +235,9 @@ func loadDagiIndex(fsys fs.FS, dir string) (*dagiIndex, error) {
 		}
 		if l == 0 {
 			idx.credit, first = file.Credit, file.Source
+			idx.source = DagiSource{Owner: file.Owner, Dataset: file.Dataset, DatasetURL: file.DatasetURL,
+				License: file.License, LicenseURL: file.LicenseURL, TermsURL: file.TermsURL,
+				Generation: file.Source.Generation, Downloaded: file.Source.Downloaded}
 		} else if file.Credit != idx.credit || file.Source.Generation != first.Generation ||
 			file.Source.Downloaded != first.Downloaded {
 			return nil, fmt.Errorf("%s: credit %q, generation %d, downloaded %q; %s has %q, %d, %q", name,
@@ -213,6 +247,9 @@ func loadDagiIndex(fsys fs.FS, dir string) (*dagiIndex, error) {
 		li, err := buildDagiLayer(file)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
+		}
+		if l == DagiPostnummer {
+			dagiGroupStreetPostcodes(&li)
 		}
 		idx.layers[l] = li
 	}
@@ -275,13 +312,50 @@ func dagiPrecedes(a, b *dagiFeature) bool {
 	return a.area.Code < b.area.Code
 }
 
+// dagiGroupStreetPostcodes keys every postnummer that shares its name with
+// a street postcode by the lowest code of that name (see the file comment).
+func dagiGroupStreetPostcodes(li *dagiLayerIndex) {
+	lowest := map[string]string{} // name of a street postcode → lowest code of the name
+	for i := range li.features {
+		if f := &li.features[i]; f.street {
+			lowest[f.area.Name] = ""
+		}
+	}
+	for i := range li.features {
+		f := &li.features[i]
+		if low, ok := lowest[f.area.Name]; ok && (low == "" || f.area.Code < low) {
+			lowest[f.area.Name] = f.area.Code
+		}
+	}
+	for i := range li.features {
+		f := &li.features[i]
+		if low, ok := lowest[f.area.Name]; ok {
+			f.key, f.grouped = low, true
+		}
+	}
+}
+
+// filterKey is the filter key of code in the layer, and whether the code is
+// known.
+func (li *dagiLayerIndex) filterKey(code string) (string, bool) {
+	i, ok := li.byCode[code]
+	if !ok {
+		return "", false
+	}
+	return li.features[i].key, true
+}
+
 func dagiCell(v float64) int { return int(math.Floor(v / dagiCellUnits)) }
 
 func buildDagiFeature(af dagiAssetFeature) (dagiFeature, error) {
 	f := dagiFeature{
-		area:   DagiArea{Code: af.Code, Name: af.Name},
-		region: af.Region,
-		areaM2: af.AreaM2,
+		area:           DagiArea{Code: af.Code, Name: af.Name},
+		region:         af.Region,
+		key:            af.Code,
+		street:         af.Street,
+		outsideKommune: af.OutsideKommune,
+		areaM2:         af.AreaM2,
+		rings:          af.Rings,
 	}
 	if af.Code == "" || len(af.Rings) == 0 {
 		return f, fmt.Errorf("no code or no rings")

@@ -377,6 +377,8 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/config/geo-filter", s.handleConfigGeoFilter).Methods("GET")
 	r.HandleFunc("/api/config/areas", s.handleConfigAreas).Methods("GET")
 	r.HandleFunc("/api/config/areas/polygons", s.handleConfigAreasPolygons).Methods("GET")
+	r.HandleFunc("/api/config/dagi", s.handleConfigDagi).Methods("GET")
+	r.HandleFunc("/api/config/dagi/polygons", s.handleConfigDagiPolygons).Methods("GET")
 	r.HandleFunc("/api/ping-scores", s.handlePingScores).Methods("GET")
 	r.HandleFunc("/api/ping-scores/{hash}/path", s.handlePingScorePath).Methods("GET")
 	r.HandleFunc("/api/analytics/areas", s.handleAreaAnalytics).Methods("GET")
@@ -1501,6 +1503,24 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 			q.AreaNodes = areaMemberSet(s.db, entry)
 		}
 	}
+	// #740 M2: the DAGI params ride on the area key, filtered from the
+	// membership snapshot read here. Unknown codes are dropped, as an
+	// unknown area is; without a store there is no membership, and the
+	// params are dropped too.
+	var dagiInfo *DagiFilterInfo
+	if s.store != nil {
+		var snap *dagiMembershipSnapshot
+		d := s.dagiRequest(r.URL.Query())
+		if d.sel.active() {
+			snap = s.store.dagiSnapshot()
+		}
+		if snap != nil {
+			q.Area, q.dagiSnap = nodeScopeKey(q.Area, d.sel), snap
+			dagiInfo = &DagiFilterInfo{UnpositionedHidden: snap.unpositionedVisible(s.cfg)}
+		} else {
+			q.Area = nodeScopeKey(q.Area, dagiSelection{})
+		}
+	}
 
 	if r.URL.Query().Get("groupByHash") == "true" {
 		var result *PacketResult
@@ -1514,9 +1534,9 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, err.Error())
 			return
 		}
-		result.Limit = q.Limit
-		result.Offset = q.Offset
-		writeJSON(w, result)
+		out := *result // the store may hand out a cached result
+		out.Limit, out.Offset, out.Dagi = q.Limit, q.Offset, dagiInfo
+		writeJSON(w, &out)
 		return
 	}
 
@@ -1534,6 +1554,7 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 
 	result.Limit = q.Limit
 	result.Offset = q.Offset
+	result.Dagi = dagiInfo
 	writeJSON(w, result)
 }
 
@@ -1795,6 +1816,10 @@ type nodeListPostFilters struct {
 	applyGeo      bool
 	areaNodes     map[string]bool // nil = no area filter active
 	areaRequested bool            // true if ?area= was given but resolved to nothing
+	// dagiNodes/dagiRequested are the #740 DAGI filter: requested when a
+	// DAGI param was given; nil nodes (an unknown code) match nothing.
+	dagiNodes     map[string]bool
+	dagiRequested bool
 
 	// relayMap backs hasScope/hashRegions below — the bulk pubkey ->
 	// RepeaterRelayInfo map (see GetRepeaterRelayInfoMap), keyed by
@@ -1855,6 +1880,12 @@ func (f nodeListPostFilters) apply(nodes []map[string]interface{}) []map[string]
 				continue
 			}
 		}
+		if f.dagiRequested {
+			pk, _ := node["public_key"].(string)
+			if !f.dagiNodes[pk] { // nil (an unknown code) matches nothing, like an unknown area
+				continue
+			}
+		}
 		if f.hasScope != nil || len(f.hashRegions) > 0 {
 			pk, _ := node["public_key"].(string)
 			info := f.relayInfoFor(pk)
@@ -1883,7 +1914,7 @@ func (f nodeListPostFilters) apply(nodes []map[string]interface{}) []map[string]
 // to skip the compensation loop entirely on the (common) unfiltered path.
 func (f nodeListPostFilters) active() bool {
 	return (f.geoFilter != nil && f.applyGeo) || len(f.cfg.NodeBlacklist) > 0 ||
-		len(f.cfg.HiddenNamePrefixes) > 0 || f.areaRequested ||
+		len(f.cfg.HiddenNamePrefixes) > 0 || f.areaRequested || f.dagiRequested ||
 		f.hasScope != nil || len(f.hashRegions) > 0
 }
 
@@ -1945,7 +1976,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	if area := q.Get("area"); area != "" {
 		filters.areaRequested = true
 		if s.store != nil {
-			filters.areaNodes = s.store.resolveAreaNodes(area)
+			filters.areaNodes = s.store.resolveAreaNodes(nodeScopeKey(area, dagiSelection{}))
 		} else if s.cfg != nil && s.cfg.Areas != nil {
 			if entry, ok := s.cfg.Areas[area]; ok {
 				if pks, err := s.db.GetNodePubkeysInArea(entry); err == nil {
@@ -1955,6 +1986,25 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+		}
+	}
+
+	// #740 M2: ?kommune= / ?landsdel= / ?dkregion= / ?postnr=, from one
+	// membership snapshot. Without a store there is no membership: the
+	// filter matches nothing, as an unresolvable area does.
+	var dagiInfo *DagiFilterInfo
+	if d := s.dagiRequest(q); d.asked {
+		filters.dagiRequested = true
+		dagiInfo = &DagiFilterInfo{}
+		var snap *dagiMembershipSnapshot
+		if s.store != nil {
+			snap = s.store.dagiSnapshot()
+		}
+		if snap != nil {
+			if d.unknown == "" {
+				filters.dagiNodes = snap.matching(d.sel)
+			}
+			dagiInfo.UnpositionedHidden = snap.unpositionedVisible(s.cfg)
 		}
 	}
 
@@ -2115,7 +2165,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	writeJSON(w, NodeListResponse{Nodes: nodes, Total: total, Counts: counts})
+	writeJSON(w, NodeListResponse{Nodes: nodes, Total: total, Counts: counts, Dagi: dagiInfo})
 }
 
 func (s *Server) handleNodeSearch(w http.ResponseWriter, r *http.Request) {
@@ -2385,7 +2435,7 @@ func (s *Server) handleBulkHealth(w http.ResponseWriter, r *http.Request) {
 
 	if s.store != nil {
 		region := r.URL.Query().Get("region")
-		area := r.URL.Query().Get("area")
+		area := s.lenientScope(r.URL.Query()) // #740 M2: unknown codes dropped, like an unknown area
 		results := s.store.GetBulkHealth(lim, region, area)
 		// Filter blacklisted nodes + hidden-prefix nodes (#1181).
 		needsBlacklist := len(s.cfg.NodeBlacklist) > 0
@@ -3022,7 +3072,7 @@ func (s *Server) handleFleetClockSkew(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, []*NodeClockSkew{})
 		return
 	}
-	area := r.URL.Query().Get("area")
+	area := s.lenientScope(r.URL.Query()) // #740 M2: unknown codes dropped, like an unknown area
 	if area == "" {
 		setAnalyticsSnapshotHeaders(w, s.store.recomputer(&s.store.recompNodesClockSkew)) // #492
 	}
@@ -3033,8 +3083,9 @@ func (s *Server) handleFleetClockSkew(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAnalyticsRF(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
-	area := r.URL.Query().Get("area")
-	if s.rejectAnalyticsFilters(w, region, area) {
+	// #740 M2: area plus the DAGI params, as one node scope key.
+	area, scopeOK := s.analyticsScope(w, r.URL.Query(), region, r.URL.Query().Get("area"))
+	if !scopeOK {
 		return
 	}
 	window := ParseTimeWindow(r)
@@ -3087,8 +3138,9 @@ func (s *Server) handleAnalyticsRelayAirtimeShare(w http.ResponseWriter, r *http
 
 func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
-	area := r.URL.Query().Get("area")
-	if s.rejectAnalyticsFilters(w, region, area) {
+	// #740 M2: area plus the DAGI params, as one node scope key.
+	area, scopeOK := s.analyticsScope(w, r.URL.Query(), region, r.URL.Query().Get("area"))
+	if !scopeOK {
 		return
 	}
 	window := ParseTimeWindow(r)
@@ -3128,8 +3180,9 @@ func (s *Server) handleAnalyticsTopology(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleAnalyticsChannels(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		region := r.URL.Query().Get("region")
-		area := r.URL.Query().Get("area")
-		if s.rejectAnalyticsFilters(w, region, area) {
+		// #740 M2: area plus the DAGI params, as one node scope key.
+		area, scopeOK := s.analyticsScope(w, r.URL.Query(), region, r.URL.Query().Get("area"))
+		if !scopeOK {
 			return
 		}
 		window := ParseTimeWindow(r)
@@ -3163,8 +3216,9 @@ func (s *Server) handleAnalyticsChannels(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleAnalyticsDistance(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
-	area := r.URL.Query().Get("area")
-	if s.rejectAnalyticsFilters(w, region, area) {
+	// #740 M2: area plus the DAGI params, as one node scope key.
+	area, scopeOK := s.analyticsScope(w, r.URL.Query(), region, r.URL.Query().Get("area"))
+	if !scopeOK {
 		return
 	}
 	if s.store != nil {
@@ -3200,8 +3254,9 @@ func (s *Server) handleAnalyticsDistance(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleAnalyticsHashSizes(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		region := r.URL.Query().Get("region")
-		area := r.URL.Query().Get("area")
-		if s.rejectAnalyticsFilters(w, region, area) {
+		// #740 M2: area plus the DAGI params, as one node scope key.
+		area, scopeOK := s.analyticsScope(w, r.URL.Query(), region, r.URL.Query().Get("area"))
+		if !scopeOK {
 			return
 		}
 		if region == "" && area == "" {
@@ -3223,8 +3278,9 @@ func (s *Server) handleAnalyticsHashSizes(w http.ResponseWriter, r *http.Request
 func (s *Server) handleAnalyticsHashCollisions(w http.ResponseWriter, r *http.Request) {
 	if s.store != nil {
 		region := r.URL.Query().Get("region")
-		area := r.URL.Query().Get("area")
-		if s.rejectAnalyticsFilters(w, region, area) {
+		// #740 M2: area plus the DAGI params, as one node scope key.
+		area, scopeOK := s.analyticsScope(w, r.URL.Query(), region, r.URL.Query().Get("area"))
+		if !scopeOK {
 			return
 		}
 		if region == "" && area == "" {

@@ -242,6 +242,10 @@ func main() {
 	// In-memory packet store
 	store := NewPacketStore(database, cfg.PacketStore, cfg.CacheTTL)
 	store.config = cfg
+	// #740 M2: build the DAGI membership once at startup; node snapshot
+	// rebuilds keep it current. In the background: it reads the nodes
+	// table, not the packets the startup load below is reading.
+	go store.warmDagi()
 
 	// Load the persisted neighbor graph BEFORE the packet load so the
 	// chunked loader can resolve relay-hop pubkeys from path_json. Since
