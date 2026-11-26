@@ -191,6 +191,28 @@ test('currentHeight: a viewer note for owner, estimate and default heights only'
   for (const s of ['operator-node', 'operator-role']) assert.strictEqual(at(s), '', s);
 });
 
+// #979: the owner section asks /antenna and /station only for a node the
+// server can place; for the rest the server's answer is its #743 404, so
+// the request would only log a console error. hasPosition is the server's
+// HasGPS && isValidNodePosition (cmd/server/db.go) on the node page's node.
+test('hasPosition mirrors the server: finite, in range, not 0,0', () => {
+  // The table go test (TestNodePosition979_ClientGateMatchesServer) runs
+  // against the real /antenna and /station handlers.
+  const cases = JSON.parse(fs.readFileSync(path.join(__dirname, 'cmd', 'server', 'testdata', 'node-position-cases.json'), 'utf8')).cases;
+  assert.ok(cases.length >= 10, 'node-position-cases.json has ' + cases.length + ' cases');
+  for (const c of cases) assert.strictEqual(AC.hasPosition({ lat: c.lat, lon: c.lon }), c.positioned, c.name);
+  // What only the client sees: no node, missing fields, strings and
+  // non-finite values from a bad answer.
+  for (const [lat, lon] of [[55.6, 12.5], [-33.9, 151.2], [90, 180], [-90, -180], [0, 12.5], [55.6, 0], ['55.6', '12.5']]) {
+    assert.strictEqual(AC.hasPosition({ lat, lon }), true, lat + ',' + lon);
+  }
+  for (const n of [null, {}, { lat: null, lon: null }, { lat: 55.6 }, { lon: 12.5 }, { lat: 0, lon: 0 }, { lat: '0', lon: '0' },
+    { lat: 90.1, lon: 12 }, { lat: -91, lon: 12 }, { lat: 55, lon: 180.5 }, { lat: 55, lon: -181 },
+    { lat: NaN, lon: 12 }, { lat: 55, lon: Infinity }, { lat: '', lon: '' }, { lat: 'x', lon: 12 }]) {
+    assert.strictEqual(AC.hasPosition(n), false, JSON.stringify(n));
+  }
+});
+
 function fakeTimers() {
   const q = [];
   return {
