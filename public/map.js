@@ -1954,6 +1954,10 @@
       if (targetNodeKey) {
         const targetNode = nodes.find(n => n.public_key === targetNodeKey);
         if (targetNode && targetNode.lat && targetNode.lon) {
+          // #979: once. A later reload (every ADVERT batch) would move the
+          // view back and take over the popup the user has opened since.
+          const targetKey = targetNodeKey;
+          targetNodeKey = null;
           map.setView([targetNode.lat, targetNode.lon], 14);
           // Delay popup open slightly — Leaflet needs the map to settle after setView
           mapTimeout(() => {
@@ -1962,7 +1966,7 @@
               if (found || !layer || !layer.eachLayer) return;
               layer.eachLayer(m => {
                 if (found) return;
-                if (m._nodeKey === targetNodeKey && m.openPopup) {
+                if (m._nodeKey === targetKey && m.openPopup) {
                   m.openPopup();
                   found = true;
                 }
@@ -1970,7 +1974,7 @@
             };
             findIn(markerLayer);
             if (!found) findIn(clusterGroup);
-            if (!found) console.warn('[map] Target node marker not found:', targetNodeKey);
+            if (!found) console.warn('[map] Target node marker not found:', targetKey);
           }, 500);
         }
       }
@@ -2240,6 +2244,8 @@
   }
 
   var _renderingMarkers = false;
+  var _clusterAdd = null;      // #979: the cluster group's chunked add in flight
+  var _renderQueued = false;   // #979: renderMarkers was called during it
   var _lastDeconflictZoom = null;
   var _currentMarkerData = []; // stored marker data for zoom-only repositioning
   var _observerByPubkey = new Map(); // observer id (pubkey) → observer object, rebuilt on each render
@@ -2355,14 +2361,82 @@
 
   function renderMarkers() {
     if (_renderingMarkers) return;
+    // #979: a reload (an ADVERT batch → loadNodes) or a filter change must
+    // not close the popup the user has open. Leaflet closes a popup when its
+    // marker leaves the map (bindPopup's remove handler), and the rebuild
+    // below takes every marker off; for the open one that handler is off
+    // meanwhile, and the marker is put back in its node's place. The popup
+    // closes after all if its node is gone, filtered out or clustered.
+    // With clustering on, the markers go on the map at the end of the
+    // cluster group's chunked add, which may be a few chunks later: the
+    // popup is settled then (endClusterAdd).
+    if (_clusterAdd) {
+      // A rebuild now would clear the group under that add, and the add
+      // would go on putting the old markers in. It runs when the add ends,
+      // once for any number of calls. An add whose group has left the map
+      // (clustering off, the page gone) never ends: it is dropped.
+      if (clusterGroup && map && map.hasLayer(clusterGroup)) { _renderQueued = true; return; }
+      if (_clusterAdd.keep) _clusterAdd.keep.on('remove', _clusterAdd.keep.closePopup);
+      _clusterAdd = null;
+      _renderQueued = false;
+    }
     _renderingMarkers = true;
-    try { _renderMarkersInner(); } finally { _renderingMarkers = false; }
+    var keep = openPopupMarker();
+    if (keep) keep.off('remove', keep.closePopup);
+    try { _renderMarkersInner(keep); } finally {
+      _renderingMarkers = false;
+      if (_clusterAdd) _clusterAdd.keep = keep;
+      else settleKeptPopup(keep);
+    }
     // #681 M4: markers are rebuilt on every filter change; re-attach the
     // profile pickers to the new ones. A no-op unless the tool is armed.
     profileSyncPickers();
   }
 
-  function _renderMarkersInner() {
+  /* #979: Leaflet's close goes back on the kept marker, and the popup
+   * closes after all if its marker is not on the map (its node gone,
+   * filtered out or clustered). */
+  function settleKeptPopup(keep) {
+    if (!keep) return;
+    keep.on('remove', keep.closePopup);
+    if (!map || !map.hasLayer(keep)) keep.closePopup();
+  }
+
+  /* #979: adds a rebuild's markers to the cluster group. Its chunked add
+   * puts in up to chunkInterval ms of markers, then the rest from a timeout
+   * (2,000 nodes on a slow phone take several), and the markers go on the
+   * map after its chunkProgress(total, total) call. markercluster reads that
+   * callback when the add starts, so each add gets its own, and _clusterAdd
+   * is that add's until it ends. */
+  function addClusterMarkers(markers) {
+    var add = { keep: null, done: false };
+    clusterGroup.options.chunkProgress = function (processed, total) {
+      if (processed !== total || add.done) return;
+      add.done = true;
+      Promise.resolve().then(function () { endClusterAdd(add); });
+    };
+    clusterGroup.addLayers(markers);
+    // All in the first chunk: on the map already, renderMarkers settles it.
+    if (!add.done) _clusterAdd = add;
+  }
+
+  function endClusterAdd(add) {
+    if (_clusterAdd !== add) return;
+    _clusterAdd = null;
+    settleKeptPopup(add.keep);
+    if (_renderQueued) { _renderQueued = false; renderMarkers(); }
+  }
+
+  /* #979: the marker whose popup is open, if it is a node's or an
+   * observer's, else null. */
+  function openPopupMarker() {
+    var p = map && map._popup;
+    var src = p && p.isOpen() && p._source;
+    return src && src._nodeKey ? src : null;
+  }
+
+  /* keep: the open popup's marker (renderMarkers), reused for its node. */
+  function _renderMarkersInner(keep) {
     // Don't clear what doesn't exist (map first loading will throw null error)
     if (markerLayer) {
       markerLayer.clearLayers();
@@ -2456,12 +2530,28 @@
 
     var useCluster = filters.clustering && clusterGroup;
     var clusterMarkers = [];
+    var kept = null;
     for (const m of allMarkers) {
       const pos = (useCluster ? m.latLng : (m.adjustedLatLng || m.latLng));
-      const marker = L.marker(pos, { icon: m.icon, alt: m.alt });
-      marker._nodeKey = m.node.public_key || m.node.id || null;
-      marker._role = (m.node && m.node.role) || 'companion';
-      marker.bindPopup(m.popupFn(), { maxWidth: 280 });
+      const key = m.node.public_key || m.node.id || null;
+      let marker;
+      if (keep && !kept && key === keep._nodeKey) {
+        // #979: the open popup's marker takes this node's place and look
+        // (it is off the map, so the icon is only noted until it is added).
+        // Its popup is left as it is, actions and all; the new content goes
+        // in on its next open (onNodePopupOpen).
+        marker = kept = keep;
+        if (!marker.getLatLng().equals(pos)) marker.setLatLng(pos);
+        marker.options.alt = m.alt;
+        marker.setIcon(m.icon);
+        marker._role = (m.node && m.node.role) || 'companion';
+        marker._stalePopupFn = m.popupFn;
+      } else {
+        marker = L.marker(pos, { icon: m.icon, alt: m.alt });
+        marker._nodeKey = key;
+        marker._role = (m.node && m.node.role) || 'companion';
+        marker.bindPopup(m.popupFn(), { maxWidth: 280 });
+      }
       m._leafletMarker = marker;
       m._leafletLine = null;
       m._leafletDot = null;
@@ -2474,7 +2564,7 @@
       }
     }
     if (useCluster && clusterMarkers.length > 0) {
-      clusterGroup.addLayers(clusterMarkers);
+      addClusterMarkers(clusterMarkers);
     }
   }
 
@@ -2556,6 +2646,9 @@
     var link = e.target.closest('[data-show-neighbors]');
     if (link) {
       e.preventDefault();
+      // #979: the popup has done its job; on a phone it would cover half
+      // of the neighbours shown (a refresh no longer closes it).
+      if (map) map.closePopup();
       selectReferenceNode(link.dataset.pubkey, link.dataset.name);
     }
   });
@@ -2625,6 +2718,7 @@
    * opens: the popup string never carries a node field into an action, and
    * a marker that is never opened costs nothing. One lookup per open. */
   function onNodePopupOpen(e) {
+    refreshStalePopup(e.popup);
     var box = e.popup && e.popup.getElement() && e.popup.getElement().querySelector('.map-popup[data-node-popup]');
     var key = e.popup && e.popup._source && e.popup._source._nodeKey;
     if (!box || !key || typeof window.nodeToolActions !== 'function') return;
@@ -2642,6 +2736,17 @@
     })).then(function () {
       if (row.firstChild && popup.isOpen()) popupRefit(popup);
     });
+  }
+
+  /* #979: a popup kept open through a reload went on showing the data it
+   * opened with; the reload left the newer content on its marker, and it
+   * goes in now, before the actions are added. */
+  function refreshStalePopup(popup) {
+    var src = popup && popup._source;
+    if (!src || typeof src._stalePopupFn !== 'function') return;
+    var fn = src._stalePopupFn;
+    src._stalePopupFn = null;
+    popup.setContent(fn());
   }
 
   /* onPopupSheet marks #map-wrap while a popup is open. On a phone the
@@ -3564,6 +3669,8 @@
     }
     markerLayer = null;
     clusterGroup = null;
+    _clusterAdd = null;
+    _renderQueued = false;
     _currentMarkerData = [];
     routeLayer = null;
     if (heatLayer) { heatLayer = null; }
