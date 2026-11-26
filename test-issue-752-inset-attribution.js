@@ -381,9 +381,9 @@ test('I5 the compact cap includes the vertical padding (#756 — no 2px scroll)'
 test('I5 the node-detail QR overlays clear the credit in the same corner', () => {
   const css = read('style.css');
   // Every rule that pins one of the two QR overlays over the map (the side
-  // pane's at any width, the full page's at <=640px) must lift it above the
-  // credit, which paints in the same corner.
-  for (const sel of ['.node-map-qr-overlay', '.node-top-row .node-qr-wrap']) {
+  // pane's at any width, the full page's at <=640px when it has a map, #979)
+  // must lift it above the credit, which paints in the same corner.
+  for (const sel of ['.node-map-qr-overlay', '.node-top-row .node-qr-wrap:not(.node-qr-wrap--full)']) {
     const re = new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{([^}]*)\\}', 'g');
     const pinned = [...css.matchAll(re)].map((m) => m[1]).filter((b) => /position:\s*absolute/.test(b));
     assert.strictEqual(pinned.length, 1, 'expected one rule pinning ' + sel + ' over the map');

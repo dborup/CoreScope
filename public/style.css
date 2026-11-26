@@ -4056,10 +4056,13 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
   /* #1243 — On mobile, mirror the desktop split-pane behavior used by the
      compact node detail (.node-map-qr-wrap): overlay the QR on the map
      instead of stacking a 250px-tall QR panel below it. Desktop (≥768px)
-     keeps the side-by-side flex layout untouched. */
+     keeps the side-by-side flex layout untouched.
+     #979 — only a QR beside a map is pinned: a node without one gets
+     node-qr-wrap--full, which has nothing to sit on, so pinned it floated
+     up over the action chips. It stays in the flow, as up to 768px. */
   .node-top-row { position: relative; }
   .node-top-row .node-map-wrap { flex: 1 1 100%; }
-  .node-top-row .node-qr-wrap {
+  .node-top-row .node-qr-wrap:not(.node-qr-wrap--full) {
     position: absolute;
     /* #752 — above the map credit, as .node-map-qr-overlay is. */
     bottom: var(--mc-credit-compact-clearance);
@@ -4075,11 +4078,11 @@ tr[data-hops]:hover { background: rgba(59,130,246,0.1); }
     line-height: 0;
     margin: 0;
   }
-  .node-top-row .node-qr-wrap .node-qr svg { max-width: 72px; height: auto; }
+  .node-top-row .node-qr-wrap:not(.node-qr-wrap--full) .node-qr svg { max-width: 72px; height: auto; }
   /* Hide the redundant pubkey caption inside the overlay QR — it's already
      shown in the card above and would push the overlay too large. */
-  .node-top-row .node-qr-wrap .mono { display: none; }
-  [data-theme="dark"] .node-top-row .node-qr-wrap {
+  .node-top-row .node-qr-wrap:not(.node-qr-wrap--full) .mono { display: none; }
+  [data-theme="dark"] .node-top-row .node-qr-wrap:not(.node-qr-wrap--full) {
     background: var(--card-bg-translucent-dark, rgba(255, 255, 255, 0.4));
   }
 }
