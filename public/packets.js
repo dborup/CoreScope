@@ -990,7 +990,9 @@
       } else {
         keep = curParams.filter(function (p) { return /^obs=./.test(p); });
       }
-      var pathModal = document.getElementById('packetPathModal');
+      // The modal, or its "could not be opened" notice (#978): the link
+      // stays shareable and a reload tries again.
+      var pathModal = document.getElementById('packetPathModal') || document.getElementById('packetPathLoadError');
       if (pathModal && subpath === '/' + pathModal.dataset.hash) keep.push('viewPath=1');
     }
     if (keep.length) query += (query ? '&' : '?') + keep.join('&');
@@ -1461,11 +1463,13 @@
     // rendering below (the modal fetches its own data), so it's safe to
     // fire immediately. restore() skips a history entry whose modal was
     // closed on another page (#180); the cold-load updatePacketsUrl() below
-    // then drops ?viewPath=1, as the modal is not open.
+    // then drops ?viewPath=1, as the modal is not open. When
+    // packet-path-map.js did not load, a notice says so and offers a retry
+    // (#978) instead of dropping the link silently.
     var _urlViewPath = _initUrlParams.get('viewPath');
     if (_urlViewPath === '1') {
       var _viewPathHash = directPacketHash || filters.hash;
-      if (_viewPathHash && window.PacketPathMap) window.PacketPathMap.restore(_viewPathHash);
+      if (_viewPathHash) openViewPath(_viewPathHash, true);
     }
     var _urlNode = _initUrlParams.get('node');
     if (_urlNode) { filters.node = _urlNode; filters.nodeName = _urlNode.slice(0, 8); }
@@ -1721,7 +1725,100 @@
     });
   }
 
+  // Opens the View Path modal (packet-path-map.js) on hash: restore() for a
+  // ?viewPath=1 URL, open() for the detail's button. Without the module --
+  // its script failed to load -- shows the load-error notice instead (#978).
+  function openViewPath(hash, fromUrl) {
+    if (!window.PacketPathMap) { showViewPathLoadError(hash); return; }
+    if (fromUrl) window.PacketPathMap.restore(hash);
+    else window.PacketPathMap.open(hash);
+  }
+
+  function removeViewPathLoadError() {
+    var el = document.getElementById('packetPathLoadError');
+    if (el) el.remove();
+  }
+
+  // Loads packet-path-map.js once more, from the src index.html gave it.
+  // done(true) once window.PacketPathMap exists.
+  function loadPathMapScript(done) {
+    var first = document.querySelector('script[src*="packet-path-map.js"]');
+    var script = document.createElement('script');
+    script.src = first ? first.getAttribute('src') : 'packet-path-map.js';
+    script.onload = function () { done(!!window.PacketPathMap); };
+    script.onerror = function () { script.remove(); done(false); };
+    document.head.appendChild(script);
+  }
+
+  // #978: the View Path modal could not open because packet-path-map.js did
+  // not load (a dropped connection on a cold load). Tells the user, keeps
+  // ?viewPath=1 while shown (updatePacketsUrl), and "Try again" loads the
+  // script once more and opens the modal. Built with createElement and
+  // textContent only.
+  function showViewPathLoadError(hash) {
+    removeViewPathLoadError();
+    var overlay = document.createElement('div');
+    overlay.id = 'packetPathLoadError';
+    overlay.className = 'modal-overlay';
+    overlay.dataset.hash = hash;
+    var box = document.createElement('div');
+    box.className = 'modal packet-path-load-error';
+    box.setAttribute('role', 'alertdialog');
+    box.setAttribute('aria-labelledby', 'packetPathLoadErrorTitle');
+    box.setAttribute('aria-describedby', 'packetPathLoadErrorText');
+    var title = document.createElement('h3');
+    title.id = 'packetPathLoadErrorTitle';
+    title.textContent = 'Relay Path';
+    var text = document.createElement('p');
+    text.id = 'packetPathLoadErrorText';
+    text.textContent = 'The path view could not be opened, because part of the page did not load.';
+    var actions = document.createElement('div');
+    actions.className = 'packet-path-load-error-actions';
+    var retry = document.createElement('button');
+    retry.type = 'button';
+    retry.id = 'packetPathLoadRetry';
+    retry.className = 'btn btn-primary';
+    retry.textContent = 'Try again';
+    var dismiss = document.createElement('button');
+    dismiss.type = 'button';
+    dismiss.className = 'btn btn-secondary';
+    dismiss.textContent = 'Close';
+    function closeNotice() {
+      if (!overlay.isConnected) return;
+      overlay.remove();
+      updatePacketsUrl();
+    }
+    retry.addEventListener('click', function () {
+      retry.disabled = true;
+      text.textContent = 'Loading…';
+      loadPathMapScript(function (ok) {
+        if (!overlay.isConnected) return;
+        if (ok) {
+          overlay.remove();
+          window.PacketPathMap.open(hash);
+          updatePacketsUrl();
+          return;
+        }
+        retry.disabled = false;
+        text.textContent = 'The path view still could not be opened. Check your connection and try again.';
+        retry.focus();
+      });
+    });
+    dismiss.addEventListener('click', closeNotice);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) closeNotice(); });
+    overlay.addEventListener('keydown', function (e) { if (e.key === 'Escape') { e.stopPropagation(); closeNotice(); } });
+    actions.appendChild(retry);
+    actions.appendChild(dismiss);
+    box.appendChild(title);
+    box.appendChild(text);
+    box.appendChild(actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    retry.focus();
+  }
+
   function destroy() {
+    removeViewPathLoadError();
     ++packetLoadGeneration;
     ++initGeneration; // invalidates an init() still awaiting its first fetch
     clearTimeout(_renderTimer);
@@ -4170,8 +4267,8 @@
     const viewPathBtn = panel.querySelector('[data-view-path]');
     if (viewPathBtn) {
       viewPathBtn.addEventListener('click', () => {
-        if (window.PacketPathMap) window.PacketPathMap.open(viewPathBtn.dataset.viewPath);
-        // The modal is in the DOM now: add ?viewPath=1 like a shared link
+        openViewPath(viewPathBtn.dataset.viewPath, false);
+        // The modal (or its load-error notice, #978) is in the DOM now: add ?viewPath=1 like a shared link
         // has it, so a reload reopens it (#167). Closing drops it again.
         updatePacketsUrl();
       });
