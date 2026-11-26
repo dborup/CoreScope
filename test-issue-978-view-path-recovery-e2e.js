@@ -161,6 +161,32 @@ async function tapTarget(page, sel) {
         await page.waitForFunction(() => !document.getElementById('packetPathLoadError') && !/viewPath=1/.test(location.hash), null, { timeout: 5000 });
         assert(new RegExp('^#/packets/' + hash).test(await page.evaluate(() => location.hash)), 'Close left the packet');
       });
+
+      await step(`375x560 ${theme}: Escape closes the notice, a second open replaces it, and leaving the page removes it`, async () => {
+        await page.goto(`${BASE}/#/packets/${hash}?viewPath=1`, { waitUntil: 'load' });
+        await page.reload({ waitUntil: 'load' });
+        await tapTarget(page, '#packetPathLoadError #packetPathLoadRetry');
+        // Escape with focus in the notice closes it and drops ?viewPath=1.
+        // Focus is set here: on a cold load the opening detail sheet can
+        // take it back from the notice's own focus() call.
+        await page.focus('#packetPathLoadRetry');
+        await page.keyboard.press('Escape');
+        await page.waitForFunction(() => !document.getElementById('packetPathLoadError') && !/viewPath=1/.test(location.hash), null, { timeout: 5000 });
+
+        // A second View Path while the script is still missing replaces the
+        // notice instead of stacking a second one.
+        await page.evaluate(() => {
+          const b = document.querySelector('[data-view-path]');
+          b.click();
+          b.click();
+        });
+        await page.waitForSelector('#packetPathLoadError', { timeout: 5000 });
+        assert((await page.$$('#packetPathLoadError')).length === 1, 'a second open stacked a second notice');
+
+        // Leaving the packets page (destroy()) removes the notice.
+        await page.evaluate(() => { location.hash = '#/nodes'; });
+        await page.waitForFunction(() => !document.getElementById('packetPathLoadError'), null, { timeout: 5000 });
+      });
       await context.close();
     }
   }

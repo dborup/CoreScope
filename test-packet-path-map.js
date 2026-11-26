@@ -265,6 +265,8 @@ function makeSandbox(apiImpl) {
       assert.strictEqual(ctx.document.getElementById('packetPathMapContainer').style.display, 'none', reason);
       assert.strictEqual(ctx.document.getElementById('packetPathLegend').style.display, 'none', reason);
       assert.strictEqual(counts.maps, 0, reason);
+      // #978: an unavailable record is final, so it gets no "Try again".
+      assert.strictEqual(ctx.document.getElementById('packetPathRetry'), null, reason + ' offers Try again');
       ctx.window.PacketPathMap.close();
     }
   });
