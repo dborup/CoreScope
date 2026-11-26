@@ -1142,24 +1142,30 @@ console.log('\n=== live.js: clickable paths ===');
   function loadPaths(entries) {
     clickablePaths.splice(0, clickablePaths.length, ...entries);
   }
+  // The L.layerGroup a path was added to (#972): eviction must take the
+  // polyline out of the group, not just off the map.
+  function mockGroup() {
+    const g = { held: new Set(), removeLayer(p) { g.held.delete(p); return g; } };
+    return g;
+  }
+  function pathEntry(group, addedAt) {
+    const poly = { remove() {} };
+    group.held.add(poly);
+    return { addedAt, poly, layer: group };
+  }
 
   test('pruneClickablePaths removes entries older than TTL', () => {
     const now = Date.now();
-    loadPaths([
-      { addedAt: now - 35000, poly: { remove() {} } },
-      { addedAt: now - 5000,  poly: { remove() {} } },
-      { addedAt: now - 1000,  poly: { remove() {} } },
-    ]);
+    const g = mockGroup();
+    loadPaths([pathEntry(g, now - 35000), pathEntry(g, now - 5000), pathEntry(g, now - 1000)]);
     pruneClickablePaths(now);
     assert.strictEqual(clickablePaths.length, 2, 'should remove paths older than 30s');
   });
 
   test('pruneClickablePaths keeps all entries within TTL', () => {
     const now = Date.now();
-    loadPaths([
-      { addedAt: now - 5000,  poly: { remove() {} } },
-      { addedAt: now - 1000,  poly: { remove() {} } },
-    ]);
+    const g = mockGroup();
+    loadPaths([pathEntry(g, now - 5000), pathEntry(g, now - 1000)]);
     pruneClickablePaths(now);
     assert.strictEqual(clickablePaths.length, 2);
   });
@@ -1168,13 +1174,38 @@ console.log('\n=== live.js: clickable paths ===');
     const now = Date.now();
     // Match production insertion order: oldest at front (index 0), newest at back
     // entries[0].addedAt = now-5100 (oldest), entries[51].addedAt = now (newest)
+    const g = mockGroup();
     const entries = [];
-    for (let i = 51; i >= 0; i--) entries.push({ addedAt: now - i * 100, poly: { remove() {} } });
+    for (let i = 51; i >= 0; i--) entries.push(pathEntry(g, now - i * 100));
     loadPaths(entries);
     pruneClickablePaths(now);
     assert.strictEqual(clickablePaths.length, 50, 'should evict oldest beyond 50');
     // FIFO: the 2 oldest (addedAt now-5100 and now-5000) were shifted off; now-4900 is oldest remaining
     assert.strictEqual(clickablePaths[0].addedAt, now - 49 * 100, 'oldest remaining should have addedAt = now-4900');
+  });
+
+  // #972: poly.remove() only takes a polyline off the map; the layer group
+  // kept it (and its LatLng/Point arrays) forever. Both eviction branches
+  // must leave the group holding exactly the paths that are left.
+  test('pruneClickablePaths removes TTL-expired paths from their layer group (#972)', () => {
+    const now = Date.now();
+    const g = mockGroup();
+    loadPaths([pathEntry(g, now - 35000), pathEntry(g, now - 31000), pathEntry(g, now - 1000)]);
+    pruneClickablePaths(now);
+    assert.strictEqual(clickablePaths.length, 1);
+    assert.strictEqual(g.held.size, 1, 'group still holds ' + g.held.size + ' polylines, 1 path is left');
+    assert.ok(g.held.has(clickablePaths[0].poly), 'the group holds the path that is left');
+  });
+
+  test('pruneClickablePaths removes cap-evicted paths from their layer group (#972)', () => {
+    const now = Date.now();
+    const g = mockGroup();
+    const entries = [];
+    for (let i = 199; i >= 0; i--) entries.push(pathEntry(g, now - i * 10));
+    loadPaths(entries);
+    pruneClickablePaths(now);
+    assert.strictEqual(clickablePaths.length, 50);
+    assert.strictEqual(g.held.size, 50, 'group still holds ' + g.held.size + ' polylines, the cap is 50');
   });
 }
 

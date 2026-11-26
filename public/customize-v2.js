@@ -676,6 +676,15 @@
     return R.resolve(sec && typeof sec === 'object' ? sec : {});
   }
 
+  /** Stores a viewer's valid Moments value: one equal to the server default
+   *  (the operator's moments.display over the built-ins, #969) is a cleared
+   *  override. Compared against the built-in instead, a viewer picking it
+   *  under another operator default would fall back to the operator's. */
+  function _saveMomentsSetting(key, v) {
+    if (v === momentsSettings(_getServer())[key]) clearOverride('moments', key);
+    else setOverride('moments', key, v);
+  }
+
   // ── #968 M2 — Live kiosk: the screen's text size and edge margin ──
   // kiosk.scale and kiosk.safeInsetVmin, per browser. The keys, steps and
   // bounds are the kiosk's own rule (public/live-kiosk.js,
@@ -3671,9 +3680,9 @@
       });
     });
 
-    // #881 M3 — Live Moments settings. A value back at its default is a
-    // cleared override; a bad one is put back. A new on/off default makes the
-    // viewer's saved Live choice forgotten, so it applies.
+    // #881 M3 — Live Moments settings. A value back at the server default
+    // is a cleared override; a bad one is put back. A new on/off default
+    // makes the viewer's saved Live choice forgotten, so it applies.
     container.querySelectorAll('[data-cv2-moments]').forEach(function (inp) {
       var key = inp.dataset.cv2Moments;
       inp.addEventListener('change', function () {
@@ -3689,8 +3698,7 @@
         if (key === 'enabled') {
           try { localStorage.removeItem(window.LiveMoments.STORAGE_KEY); } catch (_e) { /* private mode */ }
         }
-        if (v === R.DEFAULTS[key]) clearOverride('moments', key);
-        else setOverride('moments', key, v);
+        _saveMomentsSetting(key, v);
       });
     });
 
@@ -4496,6 +4504,7 @@
     KIOSK_COLOR_KEYS: KIOSK_COLOR_KEYS,
     isValidMomentsSetting: isValidMomentsSetting,
     momentsSettings: momentsSettings,
+    saveMomentsSetting: _saveMomentsSetting,
     renderMomentsSettings: _renderMomentsSettings,
     // #968 M2 — exposed for tests; see test-968-customizer-kiosk.js. A
     // getter: public/live-kiosk.js loads after this file (index.html).
