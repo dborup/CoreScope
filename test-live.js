@@ -1459,6 +1459,392 @@ console.log('\n=== live.js: groupIsMultibyte (#608 per-observation route) ===');
   });
 }
 
+// #984: the neighbor-graph (hop affinity) poller. A stalled connection used to
+// collect one request per 60 s tick. Driven on a fake clock, a fake fetch and a
+// fake document; the factory is live.js's own (window._liveCreateAffinityPoller).
+console.log('\n=== live.js: #984 neighbor-graph poller ===');
+{
+  const flush = () => new Promise((r) => setImmediate(r));
+  function makeClock() {
+    let now = 0, nextId = 1;
+    const timers = new Map(); // id -> { fn, at, every }
+    return {
+      now: () => now,
+      setTimeout: (fn, ms) => { const id = nextId++; timers.set(id, { fn, at: now + ms, every: 0 }); return id; },
+      clearTimeout: (id) => { timers.delete(id); },
+      setInterval: (fn, ms) => { const id = nextId++; timers.set(id, { fn, at: now + ms, every: ms }); return id; },
+      clearInterval: (id) => { timers.delete(id); },
+      pending: () => timers.size,
+      intervals: () => [...timers.values()].filter((t) => t.every).map((t) => t.every),
+      // Fires every timer due by now + ms, in time order, flushing promises in between.
+      async advance(ms) {
+        const end = now + ms;
+        for (;;) {
+          let id = null, due = null;
+          for (const [k, t] of timers) if (t.at <= end && (!due || t.at < due.at)) { id = k; due = t; }
+          if (!due) break;
+          now = due.at;
+          if (due.every) due.at += due.every; else timers.delete(id);
+          due.fn();
+          await flush();
+        }
+        now = end;
+        await flush();
+      },
+    };
+  }
+  // A fetch whose requests settle only when the test says so. honourAbort:false
+  // is a connection that ignores the abort too (the slot must still free up).
+  function makeFetch({ honourAbort = true } = {}) {
+    const reqs = [];
+    let open = 0, maxOpen = 0;
+    const fn = (url, init) => new Promise((resolve, reject) => {
+      const req = { url, signal: init && init.signal, settled: false };
+      open++; maxOpen = Math.max(maxOpen, open);
+      const done = (f) => (v) => { if (req.settled) return; req.settled = true; open--; f(v); };
+      req.resolve = done(resolve); req.reject = done(reject);
+      req.ok = (graph) => req.resolve({ ok: true, status: 200, json: () => Promise.resolve(graph) });
+      req.status = (status, body) => req.resolve({ ok: false, status, json: () => Promise.resolve(body) });
+      req.truncated = () => req.resolve({ ok: true, status: 200,
+        json: () => Promise.reject(new SyntaxError('Unterminated string in JSON')) });
+      if (honourAbort && req.signal) {
+        req.signal.addEventListener('abort', () => {
+          const e = new Error('The operation was aborted.'); e.name = 'AbortError'; req.reject(e);
+        });
+      }
+      reqs.push(req);
+    });
+    return { fn, reqs, open: () => open, maxOpen: () => maxOpen };
+  }
+  function makeDoc() {
+    const listeners = new Map();
+    return {
+      hidden: false,
+      addEventListener(type, fn) { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(fn); },
+      removeEventListener(type, fn) { if (listeners.has(type)) listeners.get(type).delete(fn); },
+      count(type) { return listeners.has(type) ? listeners.get(type).size : 0; },
+      fire(type) { [...(listeners.get(type) || [])].forEach((fn) => fn({ type })); },
+    };
+  }
+  let liveCtx = null;
+  function createPoller() {
+    if (!liveCtx) liveCtx = makeLiveSandbox();
+    return liveCtx.window._liveCreateAffinityPoller;
+  }
+  function makePoller(opts) {
+    const clock = makeClock();
+    const net = makeFetch(opts);
+    const doc = makeDoc();
+    const data = [];
+    const warnings = [];
+    const create = createPoller();
+    assert.strictEqual(typeof create, 'function', 'live.js must expose window._liveCreateAffinityPoller');
+    const poller = create({
+      onData: (g) => data.push(g),
+      fetch: net.fn, document: doc, now: clock.now,
+      setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+      setInterval: clock.setInterval, clearInterval: clock.clearInterval,
+      createController: () => new AbortController(),
+      warn: (...a) => warnings.push(a),
+    });
+    return { poller, clock, net, doc, data, warnings };
+  }
+  const G1 = { edges: [{ source: 'aa', target: 'bb', score: 3 }] };
+  const G2 = { edges: [{ source: 'aa', target: 'cc', score: 5 }] };
+
+  test('#984: interval, endpoint and timeout: 60 s, /api/analytics/neighbor-graph, a timeout well under the interval', async () => {
+    const t = makePoller();
+    t.poller.start();
+    assert.deepStrictEqual(t.clock.intervals(), [60000], 'one 60 s interval');
+    assert.strictEqual(t.net.reqs.length, 1, 'start() polls at once');
+    assert.strictEqual(t.net.reqs[0].url, '/api/analytics/neighbor-graph');
+    assert.ok(t.net.reqs[0].signal, 'the request carries an abort signal');
+    const timeout = t.poller.timeoutMs;
+    assert.ok(timeout > 0 && timeout <= 30000, `timeout ${timeout} ms must be well under 60 s`);
+    t.net.reqs[0].ok(G1);
+    await flush();
+    assert.deepStrictEqual(t.data, [G1], 'the graph reaches onData unchanged');
+    t.poller.stop();
+  });
+
+  test('#984: a request that never resolves blocks further ticks (one in flight per tab)', async () => {
+    const t = makePoller();
+    t.poller.start();
+    assert.strictEqual(t.net.reqs.length, 1);
+    t.poller.tick(); t.poller.tick();
+    t.poller.start(); // loadNodes() runs again (area/region change, VCR scrub)
+    t.doc.fire('visibilitychange');
+    await t.clock.advance(1000);
+    assert.strictEqual(t.net.reqs.length, 1, 'no second request while the first is open');
+    assert.strictEqual(t.poller.inFlight(), true);
+    assert.deepStrictEqual(t.clock.intervals(), [60000], 'start() again keeps one interval');
+    assert.strictEqual(t.doc.count('visibilitychange'), 1, 'start() again keeps one visibility listener');
+    t.poller.stop();
+  });
+
+  test('#984: the timeout aborts the stalled request and the next tick starts a fresh one', async () => {
+    const t = makePoller();
+    t.poller.start();
+    const first = t.net.reqs[0];
+    await t.clock.advance(t.poller.timeoutMs - 1);
+    assert.strictEqual(first.signal.aborted, false, 'not aborted before the timeout');
+    await t.clock.advance(1);
+    assert.strictEqual(first.signal.aborted, true, 'aborted at the timeout');
+    assert.strictEqual(t.poller.inFlight(), false, 'the slot is free after the abort');
+    assert.strictEqual(t.warnings.length, 1, 'the timeout is a failure and warns');
+    await t.clock.advance(60000 - t.poller.timeoutMs);
+    assert.strictEqual(t.net.reqs.length, 2, 'the next tick starts a fresh request');
+    assert.strictEqual(t.net.reqs[1].signal.aborted, false, 'with its own, live signal');
+    t.net.reqs[1].ok(G1);
+    await flush();
+    assert.deepStrictEqual(t.data, [G1]);
+    t.poller.stop();
+  });
+
+  test('#984: a 20-minute stall makes at most one request at a time, not 20 that land at once', async () => {
+    const t = makePoller();
+    t.poller.start();
+    await t.clock.advance(20 * 60000);
+    assert.strictEqual(t.net.maxOpen(), 1, 'never more than one open request');
+    assert.strictEqual(t.net.reqs.length, 21, 'one fresh request per tick');
+    assert.ok(t.net.reqs.slice(0, -1).every((r) => r.signal.aborted), 'each earlier one aborted');
+    assert.strictEqual(t.warnings.length, 1, 'one warning for the whole failure streak');
+    t.poller.stop();
+  });
+
+  test('#984: a connection that ignores the abort still frees the slot, and its late answer is dropped', async () => {
+    const t = makePoller({ honourAbort: false });
+    t.poller.start();
+    await t.clock.advance(60000);
+    assert.strictEqual(t.net.reqs.length, 2, 'the next tick starts a fresh request');
+    t.net.reqs[0].ok(G2); // the stalled answer arrives late
+    await flush();
+    assert.deepStrictEqual(t.data, [], 'a timed-out request never reaches onData');
+    t.net.reqs[1].ok(G1);
+    await flush();
+    assert.deepStrictEqual(t.data, [G1]);
+    t.poller.stop();
+  });
+
+  test('#984: a hidden document skips the tick', async () => {
+    const t = makePoller();
+    t.doc.hidden = true;
+    t.poller.start();
+    await t.clock.advance(5 * 60000);
+    assert.strictEqual(t.net.reqs.length, 0, 'no request while hidden');
+    t.poller.stop();
+  });
+
+  test('#984: becoming visible refreshes once, and only when the data is older than the interval', async () => {
+    const t = makePoller();
+    t.poller.start();
+    t.net.reqs[0].ok(G1);
+    await flush();
+    t.doc.hidden = true; t.doc.fire('visibilitychange');
+    await t.clock.advance(30000);
+    t.doc.hidden = false; t.doc.fire('visibilitychange');
+    assert.strictEqual(t.net.reqs.length, 1, 'fresh data (30 s old): no refresh');
+    t.doc.hidden = true; t.doc.fire('visibilitychange');
+    await t.clock.advance(60000); // the 60 s tick falls while hidden
+    assert.strictEqual(t.net.reqs.length, 1, 'the hidden tick is skipped');
+    t.doc.hidden = false; t.doc.fire('visibilitychange');
+    t.doc.fire('visibilitychange');
+    assert.strictEqual(t.net.reqs.length, 2, 'stale data (90 s old): exactly one refresh');
+    t.net.reqs[1].ok(G2);
+    await flush();
+    assert.deepStrictEqual(t.data, [G1, G2]);
+    t.doc.fire('visibilitychange');
+    assert.strictEqual(t.net.reqs.length, 2, 'fresh again: no refresh');
+    t.poller.stop();
+  });
+
+  test('#984: visible with no good data yet (hidden from the start) refreshes once', async () => {
+    const t = makePoller();
+    t.doc.hidden = true;
+    t.poller.start();
+    t.doc.hidden = false; t.doc.fire('visibilitychange');
+    assert.strictEqual(t.net.reqs.length, 1);
+    t.poller.stop();
+  });
+
+  test('#984: a failed or truncated response keeps the last good data and warns once per streak', async () => {
+    const t = makePoller();
+    t.poller.start();
+    t.net.reqs[0].ok(G1);
+    await flush();
+    await t.clock.advance(60000);
+    t.net.reqs[1].truncated();
+    await flush();
+    await t.clock.advance(60000);
+    t.net.reqs[2].status(503, { error: 'warming up' });
+    await flush();
+    await t.clock.advance(60000);
+    t.net.reqs[3].reject(new TypeError('Failed to fetch'));
+    await flush();
+    assert.deepStrictEqual(t.data, [G1], 'no failure replaces the last good graph');
+    assert.strictEqual(t.warnings.length, 1, 'one warning for the three failures in a row');
+    assert.ok(String(t.warnings[0][0]).includes('affinity'), 'the warning names the affinity data');
+    await t.clock.advance(60000);
+    t.net.reqs[4].ok(G2);
+    await flush();
+    assert.deepStrictEqual(t.data, [G1, G2], 'a success ends the streak');
+    await t.clock.advance(60000);
+    t.net.reqs[5].truncated();
+    await flush();
+    assert.strictEqual(t.warnings.length, 2, 'a new streak warns again');
+    t.poller.stop();
+  });
+
+  test('#984: stop() clears the interval, the timeout and the listener, aborts the request and drops its answer', async () => {
+    const t = makePoller({ honourAbort: false });
+    t.poller.start();
+    const req = t.net.reqs[0];
+    assert.strictEqual(t.clock.pending(), 2, 'precondition: the interval and the timeout');
+    assert.strictEqual(t.doc.count('visibilitychange'), 1);
+    t.poller.stop();
+    assert.strictEqual(t.clock.pending(), 0, 'no timer left');
+    assert.strictEqual(t.doc.count('visibilitychange'), 0, 'no listener left');
+    assert.strictEqual(req.signal.aborted, true, 'the open request is aborted');
+    req.ok(G1);
+    await t.clock.advance(10 * 60000);
+    t.doc.fire('visibilitychange');
+    assert.deepStrictEqual(t.data, [], 'its late answer is dropped');
+    assert.strictEqual(t.net.reqs.length, 1, 'no request after stop()');
+    assert.strictEqual(t.warnings.length, 0, 'teardown is not a failure');
+  });
+
+  // Through the path master already has: loadNodes() via the VCR "resume live"
+  // seam, which re-arms the poller each time it runs.
+  function makeLoadNodesSandbox() {
+    const ctx = makeSandbox();
+    addLiveGlobals(ctx);
+    const pages = {};
+    ctx.registerPage = (name, mod) => { pages[name] = mod; };
+    ctx.document.body.classList = { add() {}, remove() {}, contains() { return false; } };
+    ctx.fetchAllNodes = () => Promise.resolve({ nodes: [] });
+    const warnings = [];
+    ctx.console = Object.assign({}, console, { warn: (...args) => warnings.push(args) });
+    loadInCtx(ctx, 'public/payload-labels.js');
+    loadInCtx(ctx, 'public/roles.js');
+    loadInCtx(ctx, 'public/live-heard-filter.js');
+    loadInCtx(ctx, 'public/packet-helpers.js');
+    loadInCtx(ctx, 'public/live.js');
+    const clock = makeClock();
+    const net = makeFetch();
+    const doc = makeDoc();
+    ctx.setTimeout = clock.setTimeout; ctx.clearTimeout = clock.clearTimeout;
+    ctx.setInterval = clock.setInterval; ctx.clearInterval = clock.clearInterval;
+    ctx.fetch = net.fn;
+    ctx.AbortController = AbortController;
+    ctx.document.addEventListener = doc.addEventListener;
+    ctx.document.removeEventListener = doc.removeEventListener;
+    const graphReqs = () => net.reqs.filter((r) => r.url === '/api/analytics/neighbor-graph');
+    return { ctx, pages, clock, net, doc, graphReqs, warnings, reload: () => ctx.window._liveVcrResumeLive() };
+  }
+
+  test('#984: loadNodes() run again while the graph request stalls adds no request, and the hidden tab polls nothing', async () => {
+    const t = makeLoadNodesSandbox();
+    t.reload();
+    await flush();
+    t.reload();
+    await flush();
+    assert.strictEqual(t.graphReqs().length, 1, 'a second loadNodes() must not start a second graph request');
+    await t.clock.advance(20 * 60000);
+    assert.ok(t.graphReqs().every((r, i, a) => i === a.length - 1 || r.signal && r.signal.aborted),
+      'every stalled request before the last is aborted');
+    assert.deepStrictEqual(t.clock.intervals(), [60000], 'one 60 s interval');
+    assert.strictEqual(t.warnings.filter((w) => String(w[0]).includes('affinity')).length, 1,
+      'one affinity warning for the 20-minute failure streak');
+    const before = t.graphReqs().length;
+    t.ctx.document.hidden = true;
+    await t.clock.advance(5 * 60000);
+    t.reload();
+    await flush();
+    assert.strictEqual(t.graphReqs().length, before, 'no graph request while the tab is hidden');
+    t.pages.live.destroy();
+    assert.deepStrictEqual(t.clock.intervals(), [], 'destroy() clears the interval');
+    assert.strictEqual(t.doc.count('visibilitychange'), 0, 'destroy() leaves no visibility listener');
+  });
+
+  test('#984: through loadNodes(), a failed graph response keeps the last good affinity data', async () => {
+    const t = makeLoadNodesSandbox();
+    const affinity = [];
+    t.ctx.HopResolver.setAffinity = (g) => affinity.push(g);
+    t.ctx.window.HopResolver = t.ctx.HopResolver;
+    t.reload();
+    await flush();
+    t.graphReqs()[0].ok(G1);
+    await flush();
+    t.reload();
+    await flush();
+    t.graphReqs()[1].status(503, { error: 'warming up' });
+    await flush();
+    t.reload();
+    await flush();
+    t.graphReqs()[2].truncated();
+    await flush();
+    assert.strictEqual(t.graphReqs().length, 3);
+    assert.deepStrictEqual(affinity, [G1], 'neither the 503 body nor a truncated one replaces the graph');
+    t.pages.live.destroy();
+  });
+
+  test('#984: Live destroy() stops the poller; a remount starts one fresh poller', async () => {
+    const ctx = makeSandbox();
+    addLiveGlobals(ctx);
+    const pages = {};
+    ctx.registerPage = (name, mod) => { pages[name] = mod; };
+    ctx.document.body.classList = { add() {}, remove() {}, contains() { return false; } };
+    loadInCtx(ctx, 'public/payload-labels.js');
+    loadInCtx(ctx, 'public/roles.js');
+    loadInCtx(ctx, 'public/live-heard-filter.js');
+    loadInCtx(ctx, 'public/packet-helpers.js');
+    loadInCtx(ctx, 'public/live.js');
+    // Swap in the fakes after load: live.js reads these globals when it polls.
+    const clock = makeClock();
+    const net = makeFetch();
+    const doc = makeDoc();
+    const affinity = [];
+    ctx.setTimeout = clock.setTimeout; ctx.clearTimeout = clock.clearTimeout;
+    ctx.setInterval = clock.setInterval; ctx.clearInterval = clock.clearInterval;
+    ctx.fetch = net.fn;
+    ctx.AbortController = AbortController;
+    ctx.document.addEventListener = doc.addEventListener;
+    ctx.document.removeEventListener = doc.removeEventListener;
+    ctx.HopResolver.setAffinity = (g) => affinity.push(g);
+    ctx.window.HopResolver = ctx.HopResolver;
+    const start = ctx.window._liveStartAffinityRefresh;
+    assert.strictEqual(typeof start, 'function', 'live.js must expose window._liveStartAffinityRefresh');
+    start();
+    assert.deepStrictEqual(clock.intervals(), [60000]);
+    assert.strictEqual(net.reqs.length, 1);
+    assert.strictEqual(net.reqs[0].url, '/api/analytics/neighbor-graph');
+    assert.strictEqual(doc.count('visibilitychange'), 1);
+    net.reqs[0].ok(G1);
+    await flush();
+    assert.deepStrictEqual(affinity, [G1], 'the graph reaches HopResolver.setAffinity');
+    await clock.advance(60000);
+    assert.strictEqual(net.reqs.length, 2, 'the interval polls');
+    const open = net.reqs[1];
+    pages.live.destroy();
+    assert.strictEqual(open.signal.aborted, true, 'destroy() aborts the open request');
+    assert.deepStrictEqual(clock.intervals(), [], 'destroy() clears the interval');
+    assert.strictEqual(clock.pending(), 0, 'and the timeout');
+    assert.strictEqual(doc.count('visibilitychange'), 0, 'destroy() removes the visibility listener');
+    assert.strictEqual(ctx.window._liveAffinityPoller(), null, 'and drops the poller');
+    await clock.advance(5 * 60000);
+    doc.fire('visibilitychange');
+    assert.strictEqual(net.reqs.length, 2, 'nothing polls after destroy()');
+    start(); // the next mount (#950 in-place remount, or a return visit)
+    start();
+    assert.deepStrictEqual(clock.intervals(), [60000], 'one interval after the remount');
+    assert.strictEqual(doc.count('visibilitychange'), 1, 'one listener after the remount');
+    assert.strictEqual(net.reqs.length, 3, 'one request after the remount');
+    pages.live.destroy();
+    assert.strictEqual(clock.pending(), 0);
+    assert.strictEqual(doc.count('visibilitychange'), 0);
+  });
+}
+
 // ===== SUMMARY =====
 Promise.allSettled(pendingTests).then(() => {
   console.log(`\n${'═'.repeat(40)}`);
