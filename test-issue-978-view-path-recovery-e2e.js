@@ -10,9 +10,9 @@
  * - Item 2: with packet-path-map.js blocked, open a shared
  *   #/packets/<hash>?viewPath=1 link. A notice says the path view could not
  *   be opened, ?viewPath=1 stays in the URL, and its "Try again" (44x44 or
- *   more) reports a second failure while the script is still blocked, then
- *   loads the script and opens the modal once it is reachable. Close on the
- *   notice drops ?viewPath=1.
+ *   more) reloads the page: while the script is still blocked the notice
+ *   comes back, and once it is reachable the reload opens the modal. Close
+ *   on the notice drops ?viewPath=1.
  *
  * Usage: BASE_URL=http://localhost:13581 node test-issue-978-view-path-recovery-e2e.js
  * Optional: SCREENSHOT_DIR writes the phone screenshots there.
@@ -130,14 +130,16 @@ async function tapTarget(page, sel) {
         assert(!(await page.$('#packetPathModal')), 'no modal without its script');
         await shot(page, `978-script-blocked-375x560-${theme}.png`);
 
-        // Still blocked: the notice stays and says so.
-        await retry.tap();
-        await page.waitForFunction(() => /still could not/.test(document.getElementById('packetPathLoadErrorText').textContent), null, { timeout: 10000 });
-        retry = await tapTarget(page, '#packetPathLoadRetry');
-        assert(await retry.isEnabled(), 'Try again stays disabled after a second failure');
+        // Still blocked: Try again reloads the page, and the new document
+        // shows the notice again, on the same link.
+        await page.evaluate(() => { window.__before978Retry = true; });
+        await Promise.all([page.waitForEvent('load'), retry.tap()]);
+        assert(await page.evaluate(() => !window.__before978Retry), 'Try again did not reload the page');
+        retry = await tapTarget(page, '#packetPathLoadError #packetPathLoadRetry');
+        assert(/[?&]viewPath=1(&|$)/.test(await page.evaluate(() => location.hash)), 'the reload dropped ?viewPath=1');
 
         await page.unroute('**/packet-path-map.js*', blocked);
-        await retry.tap();
+        await Promise.all([page.waitForEvent('load'), retry.tap()]);
         await page.waitForSelector('#packetPathModal', { timeout: 10000 });
         assert(!(await page.$('#packetPathLoadError')), 'the notice is still shown over the modal');
         assert(/[?&]viewPath=1(&|$)/.test(await page.evaluate(() => location.hash)), 'the URL lost ?viewPath=1 after Try again');

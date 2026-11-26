@@ -1739,22 +1739,12 @@
     if (el) el.remove();
   }
 
-  // Loads packet-path-map.js once more, from the src index.html gave it.
-  // done(true) once window.PacketPathMap exists.
-  function loadPathMapScript(done) {
-    var first = document.querySelector('script[src*="packet-path-map.js"]');
-    var script = document.createElement('script');
-    script.src = first ? first.getAttribute('src') : 'packet-path-map.js';
-    script.onload = function () { done(!!window.PacketPathMap); };
-    script.onerror = function () { script.remove(); done(false); };
-    document.head.appendChild(script);
-  }
-
   // #978: the View Path modal could not open because packet-path-map.js did
-  // not load (a dropped connection on a cold load). Tells the user, keeps
-  // ?viewPath=1 while shown (updatePacketsUrl), and "Try again" loads the
-  // script once more and opens the modal. Built with createElement and
-  // textContent only.
+  // not load (a dropped connection on a cold load). Tells the user and keeps
+  // ?viewPath=1 while shown (updatePacketsUrl), so "Try again" reloads the
+  // page and the reload reopens the modal. A reload, not a script injected
+  // from code: index.html's static tags are the only script loaders
+  // (docs/browser-dependencies.md). Built with createElement/textContent.
   function showViewPathLoadError(hash) {
     removeViewPathLoadError();
     var overlay = document.createElement('div');
@@ -1771,7 +1761,7 @@
     title.textContent = 'Relay Path';
     var text = document.createElement('p');
     text.id = 'packetPathLoadErrorText';
-    text.textContent = 'The path view could not be opened, because part of the page did not load.';
+    text.textContent = 'The path view could not be opened, because part of the page did not load. Try again reloads the page.';
     var actions = document.createElement('div');
     actions.className = 'packet-path-load-error-actions';
     var retry = document.createElement('button');
@@ -1788,22 +1778,7 @@
       overlay.remove();
       updatePacketsUrl();
     }
-    retry.addEventListener('click', function () {
-      retry.disabled = true;
-      text.textContent = 'Loading…';
-      loadPathMapScript(function (ok) {
-        if (!overlay.isConnected) return;
-        if (ok) {
-          overlay.remove();
-          window.PacketPathMap.open(hash);
-          updatePacketsUrl();
-          return;
-        }
-        retry.disabled = false;
-        text.textContent = 'The path view still could not be opened. Check your connection and try again.';
-        retry.focus();
-      });
-    });
+    retry.addEventListener('click', function () { location.reload(); });
     dismiss.addEventListener('click', closeNotice);
     overlay.addEventListener('click', function (e) { if (e.target === overlay) closeNotice(); });
     overlay.addEventListener('keydown', function (e) { if (e.key === 'Escape') { e.stopPropagation(); closeNotice(); } });
@@ -1818,7 +1793,6 @@
   }
 
   function destroy() {
-    removeViewPathLoadError();
     ++packetLoadGeneration;
     ++initGeneration; // invalidates an init() still awaiting its first fetch
     clearTimeout(_renderTimer);
@@ -1831,6 +1805,7 @@
     clearTimeout(_wsRenderTimer);
     if (_wsRafId) { cancelAnimationFrame(_wsRafId); _wsRafId = null; }
     _wsRenderDirty = false;
+    removeViewPathLoadError(); // #978
     _displayPackets = [];
     _rowCounts = [];
     _rowCountsDirty = false;
