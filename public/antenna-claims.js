@@ -754,18 +754,29 @@
 
   var NO_POSITION = 'This node sends no position in its adverts, so nothing can be claimed for it.';
 
+  // hasPosition: the server can place the node (HasGPS and
+  // isValidNodePosition in cmd/server/db.go). Without that /antenna,
+  // /station and a claim all answer the #743 404, so none is asked (#979).
+  function hasPosition(n) {
+    if (!n || n.lat == null || n.lon == null || n.lat === '' || n.lon === '') return false;
+    var lat = Number(n.lat), lon = Number(n.lon);
+    if (!isFinite(lat) || !isFinite(lon) || (lat === 0 && lon === 0)) return false;
+    return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
+  }
+
   function renderOwnerSection(section, n, view) {
     section.textContent = '';
     markSection(section);
     var title = el('h4', null, view.detailsEnabled ? 'Antenna and station (owner)' : 'Antenna height (owner)');
     title.id = 'antennaClaimTitle';
     section.appendChild(title);
+    var hasPos = hasPosition(n);
     var current = el('p', 'ac-current');
     current.setAttribute('data-testid', 'ac-current');
     current.hidden = true;
     section.appendChild(current);
-    renderCurrent(current, n, view);
-    if (view.detailsEnabled) {
+    if (hasPos) renderCurrent(current, n, view);
+    if (hasPos && view.detailsEnabled) {
       var station = el('div', 'ac-station');
       station.setAttribute('data-testid', 'ac-station');
       station.hidden = true;
@@ -774,7 +785,6 @@
     }
     var body = el('div', 'ac-body');
     section.appendChild(body);
-    var hasPos = n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
     var id = claimParam(location.hash);
     if (id) { renderClaim(body, n, view, id, recall(id)); return; }
     if (!hasPos) {
@@ -1086,8 +1096,7 @@
     fresh.addEventListener('click', function () {
       view.poller.cancel();
       history.replaceState(null, '', claimHash(n.public_key, null));
-      var hasPos = n.lat != null && n.lon != null && !(n.lat === 0 && n.lon === 0);
-      if (hasPos) {
+      if (hasPosition(n)) {
         renderForm(body, n, view);
         focusQuietly(body.querySelector('#acHeight:not(:disabled)') || body.querySelector('input[name="acMode"]:checked'));
       } else { body.textContent = ''; body.appendChild(el('p', 'text-muted', NO_POSITION)); }
@@ -1458,6 +1467,7 @@
     adminParts: adminParts,
     reviewReasons: reviewReasons,
     currentHeight: currentHeight,
+    hasPosition: hasPosition,
     FILTERS: FILTERS,
     parseHeight: parseHeight,
     utf8Length: utf8Length,

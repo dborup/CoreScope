@@ -1,0 +1,17 @@
+{
+  "_comment": "#979: when the server can place a node: HasGPS and isValidNodePosition (cmd/server/db.go), which resolveTerrainEnd applies for GET /api/nodes/{pk}/antenna, /station and the claim POST. public/antenna-claims.js hasPosition asks those routes only for a positioned node, so the node page logs no 404 for the rest. go test (TestNodePosition979_ClientGateMatchesServer) and node test-antenna-claims.js read this same file, so a change to one side that is not matched in the other fails CI. lat/lon null is a NULL column.",
+  "cases": [
+    { "name": "a normal position", "lat": 55.676, "lon": 12.568, "positioned": true },
+    { "name": "southern and western", "lat": -33.87, "lon": -70.65, "positioned": true },
+    { "name": "on the equator", "lat": 0, "lon": 12.5, "positioned": true },
+    { "name": "on the prime meridian", "lat": 51.48, "lon": 0, "positioned": true },
+    { "name": "the north-east corner", "lat": 90, "lon": 180, "positioned": true },
+    { "name": "the south-west corner", "lat": -90, "lon": -180, "positioned": true },
+    { "name": "0,0 is no position", "lat": 0, "lon": 0, "positioned": false },
+    { "name": "no position at all", "lat": null, "lon": null, "positioned": false },
+    { "name": "latitude above 90", "lat": 90.0001, "lon": 12.5, "positioned": false },
+    { "name": "latitude below -90", "lat": -90.5, "lon": 12.5, "positioned": false },
+    { "name": "longitude above 180", "lat": 55, "lon": 180.0001, "positioned": false },
+    { "name": "longitude below -180", "lat": 55, "lon": -181, "positioned": false }
+  ]
+}
