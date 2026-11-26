@@ -33,7 +33,7 @@ const src = fs.readFileSync(__dirname + '/public/live.js', 'utf8');
   // Execute the real loader with a deferred response. A departed mount must
   // not populate a new mount's shared node state or start background timers.
   const start = src.indexOf('  async function loadNodes(');
-  const end = src.indexOf('  let _affinityInterval', start);
+  const end = src.indexOf('  // #984 — the neighbor-graph (hop affinity) poller', start);
   let release;
   let updates = 0;
   const ctx = {
@@ -41,8 +41,7 @@ const src = fs.readFileSync(__dirname + '/public/live.js', 'utf8');
     nodesLayer: { clearLayers() {} }, nodeMarkers: {}, nodeData: {},
     fetchAllNodes: () => new Promise(resolve => { release = resolve; }),
     document: { getElementById() { updates++; return null; } },
-    addNodeMarker() { updates++; }, fetchAffinityData() { updates++; },
-    startAffinityRefresh() { updates++; }, console, Date,
+    addNodeMarker() { updates++; }, startAffinityRefresh() { updates++; }, console, Date,
   };
   vm.createContext(ctx);
   vm.runInContext(src.slice(start, end), ctx);
