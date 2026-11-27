@@ -2860,22 +2860,25 @@
 
   // ── #1633 / #674 1-byte path hops: Show / Mark / Hide ──
   // Reads and writes through hop-filter.js (MC_get1ByteHopsMode /
-  // MC_set1ByteHopsMode), which owns the storage key, the default (mark) and
-  // the migration of the #1633 boolean key. Every change fires
+  // MC_set1ByteHopsMode), which owns the storage key, the default (the
+  // operator's customizer.oneByteHopsDefault, else mark, #912 M2) and the
+  // migration of the #1633 boolean key. Every change fires
   // `mc-hide-1byte-hops-changed`; map.js (which redraws the route view) and
   // packets.js subscribe and re-render in place (PR #1689 r1 adv #4, #673).
   // Analytics rebuilds on its next tab activation.
   function _renderHide1ByteHopsToggle() {
     var mode = typeof window.MC_get1ByteHopsMode === 'function' ? window.MC_get1ByteHopsMode() : 'mark';
+    var dflt = typeof window.MC_get1ByteHopsDefault === 'function' ? window.MC_get1ByteHopsDefault() : 'mark';
     var opt = function (value, label) {
-      return '<option value="' + value + '"' + (mode === value ? ' selected' : '') + '>' + label + '</option>';
+      return '<option value="' + value + '"' + (mode === value ? ' selected' : '') + '>' + label +
+        (dflt === value ? ' (server default)' : '') + '</option>';
     };
     return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Path Display</p>' +
       '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">1-byte path-hash prefixes (firmware default) collide often: several nodes share each one, so a 1-byte hop on a route is a best guess. Mark flags the uncertain hops on the map route; Hide leaves 1-byte hops out everywhere without changing what\'s stored.</p>' +
       '<div class="cust-field">' +
         '<label for="cv2-hide-1byte-hops" style="display:block;margin-bottom:4px">Short (1-byte) path-hash hops</label>' +
         '<select id="cv2-hide-1byte-hops" data-cv2-hide-1byte-hops style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">' +
-          opt('show', 'Show') + opt('mark', 'Mark uncertain hops (default)') + opt('hide', 'Hide') +
+          opt('show', 'Show') + opt('mark', 'Mark uncertain hops') + opt('hide', 'Hide') +
         '</select>' +
       '</div>';
   }

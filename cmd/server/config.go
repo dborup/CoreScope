@@ -449,12 +449,18 @@ type Config struct {
 }
 
 // CustomizerConfig holds operator-side knobs for the in-app customizer modal.
-// Today only DisabledTabs is exposed: a list of tab ids the operator wants to
-// hide from end users (e.g. ["branding","geofilter","export"]). The frontend
+// DisabledTabs is a list of tab ids the operator wants to hide from end users
+// (e.g. ["branding","geofilter","export"]). The frontend
 // (public/customize-v2.js _renderTabs) reads this from /api/config/client and
 // filters those tabs out before rendering. Issue #1508.
 type CustomizerConfig struct {
 	DisabledTabs []string `json:"disabledTabs"`
+	// OneByteHopsDefault (#912 M2) is the 1-byte hop mode (show, mark or
+	// hide) of a visitor who has not picked one; "" means mark. Only
+	// applyOneByteHopsDefault sets it, from the canonical key: the struct
+	// decode skips it, so a value of the wrong type warns instead of
+	// rejecting the whole file.
+	OneByteHopsDefault string `json:"-"`
 }
 
 // PrivacyConfig is the entire privacy feature's configuration: one opt-in
@@ -1214,6 +1220,7 @@ func (c *Config) applyCanonicalKeys(keys *configkey.Doc) error {
 		}
 	}
 	c.applyMaxHopDist(keys, log.Printf)
+	c.applyOneByteHopsDefault(keys, log.Printf)
 	c.Share.Nodes.Enabled = keys.On("share", "nodes", "enabled")
 	c.Share.Packets.Enabled = keys.On("share", "packets", "enabled")
 	c.AntennaClaims.ApplyGates(keys.On)
@@ -1279,6 +1286,37 @@ func (c *Config) applyMaxHopDist(keys *configkey.Doc, logf func(string, ...inter
 		return
 	}
 	c.MaxHopDist = &v
+}
+
+// oneByteHopsModes are the 1-byte hop modes of public/hop-filter.js (#674).
+var oneByteHopsModes = map[string]bool{"show": true, "mark": true, "hide": true}
+
+// applyOneByteHopsDefault (#912 M2) takes customizer.oneByteHopsDefault from
+// the exact-case key only (#884). An absent key leaves it unset (mark); any
+// other value than show, mark or hide logs one warning and gives mark.
+func (c *Config) applyOneByteHopsDefault(keys *configkey.Doc, logf func(string, ...interface{})) {
+	raw := keys.Get("customizer", "oneByteHopsDefault")
+	if raw == nil {
+		return
+	}
+	if c.Customizer == nil {
+		c.Customizer = &CustomizerConfig{}
+	}
+	var v string
+	if json.Unmarshal(raw, &v) != nil || !oneByteHopsModes[v] {
+		logf("[config] customizer.oneByteHopsDefault is not \"show\", \"mark\" or \"hide\"; using \"mark\"")
+		v = "mark"
+	}
+	c.Customizer.OneByteHopsDefault = v
+}
+
+// OneByteHopsDefault is the effective operator default for the 1-byte hop
+// mode, as /api/config/client serves it: mark unless configured.
+func (c *Config) OneByteHopsDefault() string {
+	if c.Customizer == nil || c.Customizer.OneByteHopsDefault == "" {
+		return "mark"
+	}
+	return c.Customizer.OneByteHopsDefault
 }
 
 // jsonObject is a JSON object as encoding/json decodes it into

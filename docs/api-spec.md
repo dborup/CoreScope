@@ -3063,7 +3063,11 @@ Client-side configuration values.
   "cacheInvalidateMs":  number | null,
   "externalUrls":       object | null,
   "propagationBufferMs": number,         // default: 5000
-  "estimatedPositions": { "enabled": boolean } // default: true; operator policy
+  "estimatedPositions": { "enabled": boolean }, // default: true; operator policy
+  "customizer": {
+    "disabledTabs":       string[],      // default: []
+    "oneByteHopsDefault": "show" | "mark" | "hide" // default: "mark"; #912 M2
+  }
 }
 ```
 

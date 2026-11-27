@@ -19,8 +19,12 @@
   //   show — as before #674, no markings;
   //   mark — (default) visible, uncertain hops marked in the map route view;
   //   hide — the #1633 behaviour: 1-byte hops left out everywhere.
-  // The default is stored as "no key". The #1633 boolean key migrates once:
-  // "true" becomes mode "hide"; anything else is dropped.
+  // #912 M2 — the mode is the visitor's stored choice, else the operator's
+  // default (customizer.oneByteHopsDefault on /api/config/client), else mark.
+  // Every explicit choice is stored, so a pick equal to today's default still
+  // wins when the operator changes it; a visitor who never chose has no key
+  // and follows the operator. The #1633 boolean key migrates once: "true"
+  // becomes mode "hide"; anything else is dropped.
   var MODE_KEY = 'meshcore-1byte-hops-mode';
   var LEGACY_KEY = 'meshcore-hide-1byte-hops';
   var MODES = ['show', 'mark', 'hide'];
@@ -29,6 +33,15 @@
   // An array lookup, not an object one: "constructor" or "__proto__" must not
   // pass as a mode (#677 review).
   function isMode(m) { return MODES.indexOf(m) !== -1; }
+
+  // The operator default, or null. roles.js hands it over once the client
+  // config arrives; a config that arrived before this file ran is read here.
+  var operatorDefault = null;
+  if (typeof window !== 'undefined' && window.MC_CUSTOMIZER_CFG && isMode(window.MC_CUSTOMIZER_CFG.oneByteHopsDefault)) {
+    operatorDefault = window.MC_CUSTOMIZER_CFG.oneByteHopsDefault;
+  }
+
+  function get1ByteHopsDefault() { return operatorDefault || DEFAULT_MODE; }
 
   function get1ByteHopsMode() {
     try {
@@ -46,21 +59,33 @@
         }
       }
     } catch (_e) { /* storage unavailable */ }
-    return DEFAULT_MODE;
+    return get1ByteHopsDefault();
   }
 
-  function set1ByteHopsMode(mode) {
-    if (!isMode(mode)) return;
-    try {
-      if (mode === DEFAULT_MODE) localStorage.removeItem(MODE_KEY);
-      else localStorage.setItem(MODE_KEY, mode);
-      localStorage.removeItem(LEGACY_KEY);
-    } catch (_e) { /* private mode */ }
+  function fireChanged(mode) {
     if (typeof window !== 'undefined' && typeof window.CustomEvent === 'function') {
       window.dispatchEvent(new window.CustomEvent('mc-hide-1byte-hops-changed', {
         detail: { mode: mode, value: mode === 'hide' }
       }));
     }
+  }
+
+  function set1ByteHopsMode(mode) {
+    if (!isMode(mode)) return;
+    try {
+      localStorage.setItem(MODE_KEY, mode);
+      localStorage.removeItem(LEGACY_KEY);
+    } catch (_e) { /* private mode */ }
+    fireChanged(mode);
+  }
+
+  // #912 M2 — set the operator default (anything but a mode clears it). A
+  // visitor who follows the default is told when their mode changes.
+  function set1ByteHopsDefault(mode) {
+    var before = get1ByteHopsMode();
+    operatorDefault = isMode(mode) ? mode : null;
+    var after = get1ByteHopsMode();
+    if (after !== before) fireChanged(after);
   }
 
   // #1633 API, kept for its callers: "hide" is mode hide; turning it off
@@ -139,6 +164,8 @@
     window.MC_setHide1ByteHops = setHide1ByteHops;
     window.MC_get1ByteHopsMode = get1ByteHopsMode;
     window.MC_set1ByteHopsMode = set1ByteHopsMode;
+    window.MC_get1ByteHopsDefault = get1ByteHopsDefault;
+    window.MC_set1ByteHopsDefault = set1ByteHopsDefault;
     window.MC_isVisibleHop = isVisibleHop;
     window.MC_filterPathHops = filterPathHops;
     window.MC_hopByteLen = hopByteLen;
@@ -151,6 +178,8 @@
       setHide1ByteHops: setHide1ByteHops,
       get1ByteHopsMode: get1ByteHopsMode,
       set1ByteHopsMode: set1ByteHopsMode,
+      get1ByteHopsDefault: get1ByteHopsDefault,
+      set1ByteHopsDefault: set1ByteHopsDefault,
       isVisibleHop: isVisibleHop,
       filterPathHops: filterPathHops,
       hopByteLen: hopByteLen,
