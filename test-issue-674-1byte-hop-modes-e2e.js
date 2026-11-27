@@ -140,7 +140,7 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
       s = await state(page);
       assert(s.mode === 'mark' && s.chips === mark.chips, 'back to mark: ' + JSON.stringify(s));
       const stored = await page.evaluate(() => localStorage.getItem('meshcore-1byte-hops-mode'));
-      assert(stored === null, 'the default is stored as no key, got ' + stored);
+      assert(stored === 'mark', 'an explicit mark is stored (#912 M2), got ' + stored);
       assert(errors.length === 0, 'page errors: ' + errors.join(' | '));
     } finally { await ctx.close(); }
   });
