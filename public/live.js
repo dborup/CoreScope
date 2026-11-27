@@ -92,8 +92,14 @@
   // One registry per page load, so a scope keeps its colour while the
   // viewer stays (session-sticky). Bounded by LiveScopeColor.CAP.
   let _scopeRegistry = null;
+  // #882 M2 — the legend window (minutes, rows) is the customizer's
+  // per-browser liveScope section, validated by LiveScopeColor.SETTINGS.
+  function scopeLegendSettings() {
+    const cfg = window.SITE_CONFIG && window.SITE_CONFIG.liveScope;
+    return window.LiveScopeColor.SETTINGS.resolve(cfg);
+  }
   function scopeRegistry() {
-    if (!_scopeRegistry) _scopeRegistry = window.LiveScopeColor.createRegistry();
+    if (!_scopeRegistry) _scopeRegistry = window.LiveScopeColor.createRegistry(scopeLegendSettings());
     return _scopeRegistry;
   }
   // The canvas needs concrete colour strings: the --scope-* variables are
@@ -111,6 +117,14 @@
     return _scopePalette;
   }
   function invalidateScopePalette() { _scopePalette = null; }
+  // A customizer change ('theme-changed'): new colours for the next lines
+  // (drawn lines keep theirs), the legend redrawn with the window re-read
+  // (its swatches are var(--scope-*), so they follow at once).
+  function onScopeThemeChanged() {
+    invalidateScopePalette();
+    _scopeLegendSig = '';
+    renderScopeLegend();
+  }
   let _scopeThemeListening = false;
   // Scope colour of one transmission, or null when "Color by scope" is off.
   // touch: register the scope in the legend (live packets only; a VCR
@@ -139,7 +153,7 @@
     return null;
   }
 
-  // Legend section "SCOPES (last 15 min)": re-rendered at most once a second
+  // Legend section "SCOPES (last N min)": re-rendered at most once a second
   // while packets arrive, on the shared 60 s tick (expiry) and on a toggle,
   // and only touches the DOM when its rows changed. Names are untrusted
   // (node/config strings), so rows are built with textContent.
@@ -172,13 +186,22 @@
     const menu = document.getElementById('scopeLegendMenu');
     const menuList = document.getElementById('scopeLegendMenuList');
     if (!S || !sec || !list) return;
+    // The window follows the customizer even when its 'theme-changed' came
+    // before this page listened (boot order): re-read on every render
+    // (<= 1/s, two keys). The registry's touch() uses it from then on.
+    scopeRegistry().configure(scopeLegendSettings());
     sec.hidden = !colorByScope;
     if (menu) menu.hidden = !colorByScope;
     if (!colorByScope) { _scopeLegendSig = ''; return; }
     const L = scopeRegistry().legend(Date.now());
-    const sig = L.sig + '|' + scopedOnly;
+    const sig = L.sig + '|' + scopedOnly + '|' + L.windowMinutes;
     if (sig === _scopeLegendSig) return;
     _scopeLegendSig = sig;
+    const title = 'SCOPES (last ' + L.windowMinutes + ' min)';
+    [sec, menu].forEach(function(box) {
+      const h = box && box.querySelector('.legend-title');
+      if (h) h.textContent = title;
+    });
     const frag = document.createDocumentFragment();
     if (!L.rows.length) frag.appendChild(scopeLegendRow(null, 'No named scopes yet', 'live-scope-empty'));
     for (const r of L.rows) frag.appendChild(scopeLegendRow(S.paletteVar({ kind: 'named' }, r.slot), r.name));
@@ -3327,7 +3350,7 @@
     // One shared 60 s tick: nodes also age out of the "Last heard" filter
     // here (#660), with no timer of its own.
     _pruneInterval = setInterval(() => { pruneStaleNodes(); applyHeardFilter(); renderScopeLegend(); }, 60000);
-    if (!_scopeThemeListening) { window.addEventListener('theme-changed', invalidateScopePalette); _scopeThemeListening = true; }
+    if (!_scopeThemeListening) { window.addEventListener('theme-changed', onScopeThemeChanged); _scopeThemeListening = true; }
 
     // Refresh relative timestamps in feed every 10 seconds (#701)
     _feedTimestampInterval = setInterval(function() {
@@ -6343,7 +6366,7 @@
     if (_heardReapplyTimer) { clearTimeout(_heardReapplyTimer); _heardReapplyTimer = null; }
     if (_scopeLegendTimer) { clearTimeout(_scopeLegendTimer); _scopeLegendTimer = null; }
     _scopeLegendSig = '';
-    if (_scopeThemeListening) { window.removeEventListener('theme-changed', invalidateScopePalette); _scopeThemeListening = false; }
+    if (_scopeThemeListening) { window.removeEventListener('theme-changed', onScopeThemeChanged); _scopeThemeListening = false; }
     if (_feedTimestampInterval) { clearInterval(_feedTimestampInterval); _feedTimestampInterval = null; }
     stopAffinityRefresh();
     // Unsubscribe rather than close: the socket belongs to app.js and the rest

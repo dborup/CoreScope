@@ -22,6 +22,8 @@
   var DATA_ATTR   = 'data-cb-preset';
   var MOMENT_KINDS = ['newNode', 'backOnline', 'recordLink', 'busiest'];
   // newNode -> --mc-moment-new-node
+  // #882 M2 — Live scope colours: --mc-scope-{light|dark}-{1..12|none|unknown|other}.
+  var SCOPE_SUFFIXES = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', 'none', 'unknown', 'other'];
   function _momentVar(k) { return '--mc-moment-' + k.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
 
   // ── Palettes ────────────────────────────────────────────────────────────
@@ -56,7 +58,16 @@
       routeRamp: ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'],
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
-      momentAccents: { newNode: '#009E73', backOnline: '#2E86C1', recordLink: '#B8578A', busiest: '#D55E00' }
+      momentAccents: { newNode: '#009E73', backOnline: '#2E86C1', recordLink: '#B8578A', busiest: '#D55E00' },
+      // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
+      // one list per base-map mode: the stylesheet palette (Okabe-Ito based), so this preset changes nothing.
+      // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
+      scopePalette: {
+        light: ['#0072b2', '#009e73', '#b35c00', '#7e3fa0', '#a8780b', '#00838f', '#b0306f', '#4b5eaa', '#5e8b2f', '#8b4513', '#c026d3', '#6d6d00',
+          '#a1a1aa', '#57534e', '#111827'],
+        dark:  ['#3d8bfd', '#3fd7a5', '#f0a03c', '#c49be0', '#e6c34a', '#4dd0e1', '#f06292', '#8c9eff', '#a5d66b', '#d7a07a', '#e879f9', '#dce775',
+          '#6b7280', '#c4b5a5', '#f8fafc']
+      }
     },
     {
       id: 'deut',
@@ -85,7 +96,16 @@
       routeRamp: ['#0d0887', '#7e03a8', '#cc4778', '#f89540', '#f0f921'],
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
-      momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' }
+      momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' },
+      // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
+      // one list per base-map mode: blue / orange / purple / amber axes, lightness-separated (red-green safe).
+      // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
+      scopePalette: {
+        light: ['#2F5FD0', '#C25000', '#6A3FC8', '#8F6400', '#B0175E', '#1D3D8F', '#6E4300', '#4B2A8A', '#C2338A', '#00607A', '#7D4F94', '#A33500',
+          '#a1a1aa', '#57534e', '#111827'],
+        dark:  ['#648FFF', '#FE6100', '#A08CFF', '#FFB000', '#DC267F', '#9DB8FF', '#FFD27A', '#C9B8FF', '#FF8CC6', '#5CC8E6', '#E0A3FF', '#FF9E7A',
+          '#6b7280', '#c4b5a5', '#f8fafc']
+      }
     },
     {
       id: 'prot',
@@ -112,7 +132,16 @@
       routeRamp: ['#0d0887', '#7e03a8', '#cc4778', '#f89540', '#f0f921'],
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
-      momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' }
+      momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' },
+      // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
+      // one list per base-map mode: the deut palette: the same blue / orange / purple / amber axes.
+      // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
+      scopePalette: {
+        light: ['#2F5FD0', '#C25000', '#6A3FC8', '#8F6400', '#B0175E', '#1D3D8F', '#6E4300', '#4B2A8A', '#C2338A', '#00607A', '#7D4F94', '#A33500',
+          '#a1a1aa', '#57534e', '#111827'],
+        dark:  ['#648FFF', '#FE6100', '#A08CFF', '#FFB000', '#DC267F', '#9DB8FF', '#FFD27A', '#C9B8FF', '#FF8CC6', '#5CC8E6', '#E0A3FF', '#FF9E7A',
+          '#6b7280', '#c4b5a5', '#f8fafc']
+      }
     },
     {
       id: 'trit',
@@ -147,7 +176,16 @@
       routeRamp: ['#440154', '#3b528b', '#21918c', '#5ec962', '#fde725'],
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
-      momentAccents: { newNode: '#2A8F4C', backOnline: '#C04F7F', recordLink: '#B45AA6', busiest: '#CC6677' }
+      momentAccents: { newNode: '#2A8F4C', backOnline: '#C04F7F', recordLink: '#B45AA6', busiest: '#CC6677' },
+      // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
+      // one list per base-map mode: Tol muted extended: rose / green / wine / teal (blue-yellow safe).
+      // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
+      scopePalette: {
+        light: ['#AA3344', '#117733', '#882255', '#7A6A00', '#AA4499', '#44706A', '#5E6B00', '#332288', '#006E8A', '#994455', '#666633', '#B8572A',
+          '#a1a1aa', '#57534e', '#111827'],
+        dark:  ['#EE8899', '#44BB99', '#CC6699', '#DDCC77', '#DD88CC', '#88CCCC', '#BBCC33', '#9988EE', '#66CCEE', '#EEAA88', '#CCCC88', '#E0B0FF',
+          '#6b7280', '#c4b5a5', '#f8fafc']
+      }
     },
     {
       id: 'achromat',
@@ -195,7 +233,16 @@
       routeRamp: ['#222222', '#555555', '#888888', '#bbbbbb', '#eeeeee'],
       // #881 M3 — the Live Moments kind accents (icon + stripe), each >= 3:1
       // against the light and the dark card (test-881-m3-theme-tokens.js).
-      momentAccents: { newNode: '#777777', backOnline: '#858585', recordLink: '#6f6f6f', busiest: '#8f8f8f' }
+      momentAccents: { newNode: '#777777', backOnline: '#858585', recordLink: '#6f6f6f', busiest: '#8f8f8f' },
+      // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
+      // one list per base-map mode: a luminance ramp, darkest first on light tiles, lightest first on dark.
+      // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
+      scopePalette: {
+        light: ['#000000', '#1a1a1a', '#2b2b2b', '#3a3a3a', '#474747', '#525252', '#5c5c5c', '#666666', '#6e6e6e', '#767676', '#7e7e7e', '#858585',
+          '#a1a1aa', '#57534e', '#111827'],
+        dark:  ['#ffffff', '#f0f0f0', '#e0e0e0', '#d1d1d1', '#c2c2c2', '#b3b3b3', '#a6a6a6', '#999999', '#8c8c8c', '#808080', '#757575', '#6b6b6b',
+          '#6b7280', '#c4b5a5', '#f8fafc']
+      }
     }
   ];
 
@@ -303,6 +350,15 @@
         if (ma[k]) style.setProperty(_momentVar(k), ma[k]);
         else style.removeProperty(_momentVar(k));
       });
+      // #882 M2 — Live scope colours per mode; style.css reads them through
+      // --scope-* so a customizer colour still wins.
+      var sp = p.scopePalette;
+      ['light', 'dark'].forEach(function (mode) {
+        SCOPE_SUFFIXES.forEach(function (sx, i) {
+          if (sp && sp[mode] && sp[mode][i]) style.setProperty('--mc-scope-' + mode + '-' + sx, sp[mode][i]);
+          else style.removeProperty('--mc-scope-' + mode + '-' + sx);
+        });
+      });
       // #1407 — ROLE_COLORS / ROLE_STYLE are now live getters in roles.js
       // that read --mc-role-* directly, so no explicit sync is needed. The
       // pre-#1407 code path kept them in sync as a workaround for the static
@@ -354,6 +410,9 @@
         for (var hj = 1; hj <= 5; hj++) style.removeProperty('--mc-heat-' + mode + '-' + hj);
       });
       MOMENT_KINDS.forEach(function (k) { style.removeProperty(_momentVar(k)); });
+      ['light', 'dark'].forEach(function (mode) {
+        SCOPE_SUFFIXES.forEach(function (sx) { style.removeProperty('--mc-scope-' + mode + '-' + sx); });
+      });
     }
     if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof window.CustomEvent === 'function') {
       try { window.dispatchEvent(new window.CustomEvent('cb-preset-changed', { detail: { id: null } })); } catch (e) {}
@@ -397,7 +456,8 @@
       TILE_LIGHT: TILE_LIGHT,
       TILE_DARK: TILE_DARK
     },
-    STORAGE_KEY: STORAGE_KEY
+    STORAGE_KEY: STORAGE_KEY,
+    SCOPE_SUFFIXES: SCOPE_SUFFIXES
   };
   if (typeof window !== 'undefined') window.MeshCorePresets = api;
   if (typeof module !== 'undefined') module.exports = api;
