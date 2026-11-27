@@ -604,6 +604,10 @@
     "enabled": true,
     "_comment": "Operator policy for neighbor-derived position estimates. Omit this section or enabled to preserve the default (true). Set false to disable estimates in node details, packet/Ping Scores paths, maps, and estimate-dependent analytics. Reported GPS, ordinary neighbor graphs, and independent IATA/name-based fallbacks are unchanged. Requires a Go server restart and browser refresh; not reloaded by SIGHUP."
   },
+  "dagi": {
+    "enabled": true,
+    "_comment": "#740: the DAGI filters ?kommune=, ?landsdel=, ?dkregion= and ?postnr= (Klimadatastyrelsen's administrative boundaries, embedded in the server) on /api/nodes, /api/packets and every endpoint that takes area, plus GET /api/config/dagi and /api/config/dagi/polygons. Omit this section or enabled to keep the default (true); only the exact key dagi.enabled is read. false turns the filters and both endpoints off and skips the in-memory index (about 7 MB). Requires a server restart."
+  },
   "observersCache": {
     "ttlSeconds": 30,
     "_comment": "TTL for the default-shape /api/observers response cache (#1481 P0-3). Default 30s. Lower = fresher data, more SQL pressure on the 1.9M-row observations table. TTL-boundary refills are collapsed via singleflight so concurrent requests cause exactly one SQL fill. Issue #1483."

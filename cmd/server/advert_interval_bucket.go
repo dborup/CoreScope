@@ -267,9 +267,12 @@ func (s *Server) handleAnalyticsAdvertIntervalBucket(w http.ResponseWriter, r *h
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	if s.rejectAnalyticsFilters(w, q.region, q.area) {
+	// #740 M2: area plus the DAGI params, as one node scope key.
+	area, scopeOK := s.analyticsScope(w, r.URL.Query(), q.region, q.area)
+	if !scopeOK {
 		return
 	}
+	q.area = area
 	var snap *advertIntervalSnapshot
 	if s.store != nil {
 		rc := s.store.recomputer(&s.store.recompAdvertIntervals)

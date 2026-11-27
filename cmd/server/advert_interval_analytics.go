@@ -779,8 +779,9 @@ func (s *PacketStore) GetAdvertIntervalAnalytics(region, area string) AdvertInte
 // visibility filter (#896); a failed lookup fails closed.
 func (s *Server) handleAnalyticsAdvertIntervals(w http.ResponseWriter, r *http.Request) {
 	region := r.URL.Query().Get("region")
-	area := r.URL.Query().Get("area")
-	if s.rejectAnalyticsFilters(w, region, area) {
+	// #740 M2: area plus the DAGI params, as one node scope key.
+	area, scopeOK := s.analyticsScope(w, r.URL.Query(), region, r.URL.Query().Get("area"))
+	if !scopeOK {
 		return
 	}
 	if s.store == nil {

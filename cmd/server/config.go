@@ -160,6 +160,11 @@ type Config struct {
 	// enabled for compatibility; changes require a server restart.
 	EstimatedPositions *EstimatedPositionsConfig `json:"estimatedPositions,omitempty"`
 
+	// Dagi switches the #740 DAGI filters (kommune, landsdel, region,
+	// postnummer) and their endpoints. Missing means on: the asset is
+	// embedded. Read from the canonical key dagi.enabled only.
+	Dagi *DagiConfig `json:"dagi,omitempty"`
+
 	// ChannelProposals configures publicly suggested hashtag channels
 	// (internal/channelregistry). Submissions open only when enabled AND a
 	// strong apiKey is set; the same block is read by the ingestor.
@@ -1225,6 +1230,10 @@ func (c *Config) applyCanonicalKeys(keys *configkey.Doc) error {
 	if c.Moments != nil {
 		c.Moments.Enabled = keys.On("moments", "enabled")
 		c.Moments.Display = readMomentsDisplay(keys, log.Printf)
+	}
+	if c.Dagi != nil {
+		// On by default: only a canonical boolean switches DAGI off (#740).
+		c.Dagi.Enabled = keys.Bool("dagi", "enabled")
 	}
 	c.applyTimestampKeys(keys)
 	c.Kiosk = readKioskConfig(keys, log.Printf)

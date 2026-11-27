@@ -351,6 +351,12 @@ type PacketStore struct {
 	areaNodeMu         sync.RWMutex
 	areaNodeCache      map[string]map[string]bool
 	areaNodeCacheTimes map[string]time.Time
+	// #740 M2: the DAGI membership cache, created on first use unless
+	// dagi.enabled is false (dagiMembership), then refreshed by every node
+	// snapshot the store publishes.
+	dagiOnce sync.Once
+	dagiPtr  atomic.Pointer[dagiMembership]
+
 	// Full server config — needed for Areas map in resolveAreaNodes.
 	config *Config
 	// Cached node list + prefix map (rebuilt on demand, shared across analytics)
@@ -2516,7 +2522,7 @@ func (s *PacketStore) QueryPackets(q PacketQuery) *PacketResult {
 			// #569: carry the same cached area membership the in-memory
 			// filter uses, so SQL history applies it before COUNT/LIMIT.
 			if q.Area != "" {
-				q.AreaNodes = s.resolveAreaNodes(q.Area)
+				q.AreaNodes = s.packetAreaNodes(q)
 			}
 			if result, err := s.db.QueryPackets(q); err == nil {
 				return result
@@ -2597,7 +2603,7 @@ func (s *PacketStore) QueryGroupedPackets(q PacketQuery) *PacketResult {
 			// #569: carry the same cached area membership the in-memory
 			// filter uses, so SQL history applies it before COUNT/LIMIT.
 			if q.Area != "" {
-				q.AreaNodes = s.resolveAreaNodes(q.Area)
+				q.AreaNodes = s.packetAreaNodes(q)
 			}
 			if result, err := s.db.QueryGroupedPackets(q); err == nil {
 				return result
@@ -4255,7 +4261,7 @@ func (s *PacketStore) preparePacketFilters(q PacketQuery) packetFilters {
 		f.regionObservers = s.resolveRegionObservers(q.Region)
 	}
 	if q.Area != "" {
-		f.areaNodes = s.resolveAreaNodes(q.Area)
+		f.areaNodes = s.packetAreaNodes(q)
 	}
 	if q.Node != "" {
 		f.nodePK = s.db.resolveNodePubkey(q.Node)
@@ -4596,6 +4602,11 @@ func (s *PacketStore) resolveEntryPointAreaWithPM(prefixes []string, pm *prefixM
 // Results are cached per-key for 30 seconds. Uses its own RWMutex so callers
 // holding s.mu won't deadlock.
 func (s *PacketStore) resolveAreaNodes(areaKey string) map[string]bool {
+	// #740 M2: a key with a DAGI selection (nodeScopeKey) is the area's
+	// set ANDed with the selection's.
+	if area, sel, ok := splitNodeScopeKey(areaKey); ok {
+		return s.scopeNodes(area, sel, s.dagiSnapshot())
+	}
 	if s.config == nil || s.config.Areas == nil {
 		return nil
 	}
@@ -8009,12 +8020,17 @@ func (s *PacketStore) getCachedNodesAndPMOK() ([]nodeInfo, *prefixMap, bool) {
 		}
 
 		s.cacheMu.Lock()
-		if s.nodeCacheGen == gen {
+		published := s.nodeCacheGen == gen
+		if published {
 			s.nodeCache = nodes
 			s.nodePM = pm
 			s.nodeCacheTime = time.Now()
 		}
 		s.cacheMu.Unlock()
+		if published {
+			// #740 M2: outside cacheMu; a no-op unless a node moved.
+			s.refreshDagiOnPublish(nodes)
+		}
 		return nodeSnapshot{nodes, pm, true}, nil
 	})
 	out := v.(nodeSnapshot)

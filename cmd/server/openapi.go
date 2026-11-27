@@ -44,6 +44,17 @@ type paramMeta struct {
 	Enum        []string `json:"enum,omitempty"` // the only accepted values, if fixed
 }
 
+// dagiParamMetas documents the #740 DAGI params of an endpoint; what says
+// what a code does there.
+func dagiParamMetas(what string) []paramMeta {
+	return []paramMeta{
+		{Name: "kommune", Description: "DAGI kommunekode (e.g. 0751, GET /api/config/dagi). " + what, Type: "string"},
+		{Name: "landsdel", Description: "DAGI landsdel id_lokalid (e.g. 218546), as kommune.", Type: "string"},
+		{Name: "dkregion", Description: "DAGI regionskode (e.g. 1082), as kommune. Not region, the observer IATA filter.", Type: "string"},
+		{Name: "postnr", Description: "Postnummer (e.g. 8000), as kommune; a node at sea matches none, and a street postcode selects its group.", Type: "string"},
+	}
+}
+
 // routeDescriptions returns metadata for all known API routes.
 // Key format: "METHOD /path/pattern"
 func routeDescriptions() map[string]routeMeta {
@@ -53,6 +64,19 @@ func routeDescriptions() map[string]routeMeta {
 		"GET /api/config/client":         {Summary: "Client-visible operator configuration", Description: "Includes estimatedPositions: {enabled: boolean}, the effective server-startup policy for neighbor-derived position estimates. Missing server configuration defaults to enabled; explicit false suppresses these estimates in node detail, live and archived paths, and estimate-dependent analytics. Reported GPS and independent IATA/name-match observer positioning are unchanged. Restart the server to change the policy.", Tag: "config"},
 		"GET /api/config/regions":        {Summary: "Get configured regions", Tag: "config"},
 		"GET /api/config/regions/groups": {Summary: "Get configured region quick-pick groups", Tag: "config"},
+
+		// DAGI (#740 M2)
+		"GET /api/config/dagi": {Summary: "DAGI filter values (kommune, landsdel, region, postnummer)", Description: "#740 M2: what the DAGI filters accept, from Klimadatastyrelsen's administrative boundaries (DAGI, embedded). {enabled, credit, source: {owner, dataset, datasetUrl, license, licenseUrl, termsUrl, generation, downloaded}, layers: [{layer, param, areas: [{code, name, outsideKommune?, codes?}]}]}. Layers in order kommune (param kommune, kommunekode), landsdel (param landsdel, the DAGI id_lokalid: the asset has no NUTS code), region (param dkregion, regionskode; region is the observer IATA filter) and postnummer (param postnr). Entries are sorted by code; names are for the client to sort. Street postcodes are not listed one by one: every postnummer named like a street postcode (København K, København V, Frederiksberg C) is one entry, coded by the group's lowest code, with every member in codes; each member code selects the group. The credit must be shown with anything drawn from the data. With dagi.enabled false: {enabled: false, layers: []}. The params filter GET /api/nodes, GET /api/packets (by the ADVERT sender) and every endpoint that takes area, by the node's own position, ANDed with area, region and each other; nodes without a usable position match none.", Tag: "config"},
+		"GET /api/config/dagi/polygons": {Summary: "DAGI boundaries to draw", Description: "#740 M2: the simplified DAGI polygons of one layer, or of one code: {layer, param, credit, quantum, encoding, features: [{code, name, group?, rings}]}. rings are the asset's own encoding: [lon0, lat0, dlon, dlat, ...] in quantum degrees, the closing vertex implicit, even-odd. group is set on the members of a postnummer group, and a member code returns the whole group. Cache-Control public, max-age=86400, and an ETag (If-None-Match, compared weakly and as a list, gives 304). About 310 KB (137 KB gzipped) for the whole kommune layer.", Tag: "config",
+			QueryParams: []paramMeta{
+				{Name: "layer", Description: "The layer.", Type: "string", Required: true, Enum: []string{"kommune", "landsdel", "region", "postnummer"}},
+				{Name: "code", Description: "Only this code's feature (a postnummer group: every member). Omitted: the whole layer.", Type: "string"},
+			},
+			Errors: []routeError{
+				{Status: "400", Description: "No or an unknown layer, or an empty code."},
+				{Status: "404", Description: "An unknown code, or DAGI is off (dagi.enabled false)."},
+			}},
+
 		"GET /api/regions/observed": {Summary: "Observed scoped relay positions", Description: "Bulk Regions map snapshot with selectable 1h, 24h or 7d window. Includes unpositioned scoped relays, current identity visibility filters, conservative retained-history coverage and explicit node/scope truncation flags. Reported positions are self-reported coordinates; neighbor estimates are excluded. Window bounds end at generatedAt, the shared relay snapshot time (normally refreshed every five minutes).", Tag: "analytics", Response: schemaRef("RegionsObservedResponse"),
 			QueryParams: []paramMeta{{Name: "window", Description: "1h, 24h (default), or 7d", Type: "string"}},
 			Errors:      []routeError{{Status: "400", Description: "Invalid window."}, {Status: "500", Description: "Current identity or node metadata could not be read."}, {Status: "503", Description: "Relay snapshot is unavailable or warming up."}}},
@@ -201,7 +225,7 @@ func routeDescriptions() map[string]routeMeta {
 
 		// Packets
 		"GET /api/packets": {Summary: "List packets", Description: "Returns decoded packets with filtering, sorting, and pagination.", Tag: "packets",
-			QueryParams: []paramMeta{
+			QueryParams: append([]paramMeta{
 				{Name: "limit", Description: "Max packets to return", Type: "integer"},
 				{Name: "offset", Description: "Pagination offset", Type: "integer"},
 				{Name: "sort", Description: "Sort field", Type: "string"},
@@ -213,7 +237,7 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "search", Description: "Full-text search", Type: "string"},
 				{Name: "groupByHash", Description: "Group duplicate packets by hash", Type: "boolean"},
 				{Name: "nodes", Description: "Comma-separated public keys or node names (multi-node filter; exact, case-sensitive match). Entries are trimmed, empty entries are dropped and duplicates collapse. At most 50 distinct entries, 100 comma-separated entries and 4096 characters (#335); over any bound is 400 before any lookup. An all-empty list returns no packets.", Type: "string"},
-			},
+			}, dagiParamMetas("Only ADVERT packets whose sender is in it; an unknown code is ignored, as an unknown area is. With a DAGI filter the response carries dagi.unpositionedHidden.")...),
 			Errors: []routeError{
 				{Status: "400", Description: "Invalid filter: malformed or repeated excludeTypes, excludeTypes combined with nodes, or a nodes list over its bounds (50 distinct entries, 100 comma-separated entries, 4096 characters; #335)."},
 			}},
@@ -233,13 +257,13 @@ func routeDescriptions() map[string]routeMeta {
 		// Nodes
 		"GET /api/nodes": {Summary: "List nodes", Description: "Returns all known mesh nodes with status and metadata. Repeater/room rows carry the issue #672 usefulness metrics (traffic_share_score, bridge_score, coverage_score, redundancy_score), the composite usefulness_score + usefulness_grade, and relay-activity counters. See the Node schema.", Tag: "nodes",
 			Response: schemaRef("NodeListResponse"),
-			QueryParams: []paramMeta{
+			QueryParams: append([]paramMeta{
 				{Name: "role", Description: "Filter by node role", Type: "string"},
 				{Name: "status", Description: "Filter by status (active/stale/offline)", Type: "string"},
 				{Name: "geoFilter", Description: "Overrides the deployment's geo_filter node-list default for this one request: \"1\"/\"true\" excludes nodes outside the configured geo_filter (unless foreign_advert-tagged), \"0\"/\"false\" returns every node regardless. Any other value (including omitting it) uses the deployment default — geo_filter applies to the node list unless config.json sets geoFilterExemptNodeList=true.", Type: "string"},
 				{Name: "hasScope", Description: "Issue #1862. \"true\" keeps only nodes that have ever transported at least one region-scoped (TRANSPORT_FLOOD/DIRECT) packet; \"false\" keeps only nodes that never have. Backed by the same relay-activity signal as the Scopes tab's \"Repeaters Never Relaying Any Scope\" section — pair with role=repeater to match its exact semantics.", Type: "string"},
 				{Name: "hashRegion", Description: "Issue #1862. Comma-separated region scope name(s) (e.g. \"eu,be\"; leading \"#\" optional, case-insensitive) — keeps only nodes that have transported at least one of them. Combines with hasScope as AND, not OR.", Type: "string"},
-			}},
+			}, dagiParamMetas("Only nodes whose position is in it; an unknown code matches nothing, as an unknown area does. With a DAGI param the response carries dagi.unpositionedHidden: the visible nodes without a usable position, which no DAGI filter matches (the whole list, not narrowed by the other filters).")...)},
 		"GET /api/nodes/search":         {Summary: "Search nodes", Description: "Search nodes by name or public key prefix.", Tag: "nodes", QueryParams: []paramMeta{{Name: "q", Description: "Search query", Type: "string", Required: true}}},
 		"GET /api/nodes/bulk-health":    {Summary: "Bulk node health", Description: "Returns health status for up to limit nodes in one call, each with its Heard By lists (directObservers / relayObservers, see HeardDirectObserver) and stats.avgSnr over direct receptions only.", Tag: "nodes", Response: schemaRef("BulkHealthResponse")},
 		"GET /api/nodes/network-status": {Summary: "Network status summary", Description: "Returns counts of active, stale, and offline nodes.", Tag: "nodes"},
@@ -289,10 +313,10 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "to", Description: "RFC3339 end; if from or to is given, window is ignored (an unparseable value leaves that bound open)", Type: "string"},
 			}},
 		"GET /api/analytics/advert-intervals": {Summary: "Mesh-wide estimated advert intervals", Description: "#245 M2: the flood and zero-hop advert intervals the nodes run with, estimated per node exactly as node detail's advertIntervals (include=advertRoutes) - the newest 20 flood and 20 zero-hop adverts, the same classifier and estimator, snapped to the firmware's settable values (flood.advert.interval whole hours 3-168, advert.interval even minutes 60-240 or the 2-minute new-install default). Counts only nodes in the node list with at least one ADVERT; hidden identities are left out. Distributions (buckets) hold medium and high confidence estimates; low confidence, irregular, too few and not observed are counted beside them. No zero-hop adverts means the zero-hop interval is 0 (off) or no observer hears the node directly, so it is reported as not observed. Computed once per analytics cycle by a background pass over the database (config analytics.recomputeIntervalSeconds.advertIntervals, #492 pauseWhenIdle applies to it); every request, filtered or not, is answered from that snapshot.", Tag: "analytics", Response: schemaRef("AdvertIntervalAnalyticsResponse"),
-			QueryParams: []paramMeta{
+			QueryParams: append([]paramMeta{
 				{Name: "region", Description: "Comma-separated region (IATA) codes: only nodes whose sampled adverts an observer in one of them heard.", Type: "string"},
 				{Name: "area", Description: "Configured area key: only nodes whose position lies in the area (unknown key: 400).", Type: "string"},
-			}},
+			}, dagiParamMetas("Only nodes whose position is in it (unknown code: 400).")...)},
 		"GET /api/analytics/advert-intervals/bucket": {Summary: "Nodes of one advert interval bucket", Description: "#896: the nodes one Flood or Zero-hop bucket of GET /api/analytics/advert-intervals counts, by the same rule (medium/high confidence estimates, keyed by interval_s and snapped) over the same snapshot rows and region/area filter. Served from the published analytics snapshot only: 503 before the first one, never a database scan. Identities the instance hides (node or observer blacklist, hidden-name prefix on the node, inactive-node or observer name, checked at serve time) are withheld: counted in withheld, never listed; nodes stays the histogram's count. Sorted by name case-insensitively, then name, then key. These are observed estimates, not confirmed firmware settings.", Tag: "analytics", Response: schemaRef("AdvertIntervalBucketResponse"),
 			QueryParams: []paramMeta{
 				{Name: "class", Description: "Route class of the distribution.", Type: "string", Required: true, Enum: []string{advertClassFlood, advertClassZeroHop}},
@@ -300,6 +324,7 @@ func routeDescriptions() map[string]routeMeta {
 				{Name: "snapped", Description: "The bucket's snapped.", Type: "boolean", Required: true},
 				{Name: "region", Description: "As GET /api/analytics/advert-intervals.", Type: "string"},
 				{Name: "area", Description: "As GET /api/analytics/advert-intervals (unknown key: 400).", Type: "string"},
+				{Name: "kommune", Description: "As GET /api/analytics/advert-intervals (unknown code: 400); likewise landsdel, dkregion and postnr.", Type: "string"},
 				{Name: "offset", Description: "Visible members to skip (default 0).", Type: "integer"},
 				{Name: "limit", Description: "Members per page: default 50, at most 200 (larger values are capped).", Type: "integer"},
 				{Name: "snapshot", Description: "generated_at of the snapshot the client paged from; 409 when the published snapshot differs.", Type: "string"},

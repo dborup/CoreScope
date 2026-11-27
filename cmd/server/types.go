@@ -876,6 +876,8 @@ type NodeListResponse struct {
 	Nodes  []map[string]interface{} `json:"nodes"`
 	Total  int                      `json:"total"`
 	Counts map[string]int           `json:"counts"`
+	// Dagi is set when a DAGI param was given (#740).
+	Dagi *DagiFilterInfo `json:"dagi,omitempty"`
 }
 
 type NodeSearchResponse struct {
