@@ -59,6 +59,65 @@ When `areas` is configured, a pill bar appears below the main navigation on:
 
 Click a pill to select that area. Click again (or click the active pill) to deselect. Only one area can be active at a time. The selection is saved in `localStorage` and persists across page reloads.
 
+## Danish areas (DAGI)
+
+A second, separate filter scopes the **Nodes** page to one Danish administrative area: a kommune, a landsdel, a region or a postnummer. The boundaries come from DAGI (Danmarks Administrative Geografiske Inddeling) and ship with the server, so there is nothing to configure. An operator can switch them off with `"dagi": { "enabled": false }` in `config.json`. Without DAGI the control does not appear.
+
+Like the area filter, it works on the **node's own GPS position**, not on where an observer is. The region filter (observer IATA) and the area filter still apply, and all of them are combined: a node must pass every active filter.
+
+### Picking an area
+
+The control sits under the region filter and reads **Denmark: All** until you pick something. It then reads, for example, **Kommune: Aarhus** or **Postnr: 8000 Aarhus C**, and a ✕ beside it clears the filter.
+
+- **On a desktop** it opens a popover under the control.
+- **On a phone** (600 px wide or less) it opens a sheet from the bottom of the screen. The search box does not take focus by itself, so the keyboard only opens when you tap the box.
+- **Search** matches the start of any word in a name, and the start of a code, in every layer at once:
+  - "aar" finds Aarhus, Aars and Årslev;
+  - "800" finds 8000 Aarhus C;
+  - æ, ø and å match ae, oe and aa, and case does not matter.
+  - Each layer shows up to 30 hits; type more to narrow the list.
+- **The tabs** (Region, Landsdel, Kommune, Postnr) browse a whole layer while the search box is empty.
+  - Kommuner are sorted the Danish way, so Aabenraa, Aalborg and Aarhus come last, as if they started with Å.
+  - Postcodes are sorted by number, under a header for each thousand.
+- **Keyboard:** the arrow keys move through the list, Enter in the search box picks the first hit, and Escape closes the picker.
+
+One area is selected at a time. A new pick replaces the previous one, even in another layer.
+
+**Copenhagen street postcodes.** Central Copenhagen has hundreds of single-street postcodes. The picker shows them as three rows: "1050–1473 København K", "1550–1799 København V" and "1800–1974 Frederiksberg C". Searching for one of them, such as 1051, finds its row, marked "includes 1051".
+
+**Christiansø** is listed under Kommune as "Christiansø (outside the kommune division)": it belongs to no kommune.
+
+### Links and saved choice
+
+A pick puts the selection in the page's URL, so a link can be shared. A choice restored from `localStorage` (see below) stays out of the URL until you pick again, or until the Nodes page rewrites its URL for a search, a tab or a sort change:
+
+| Layer | Link |
+|--|--|
+| Kommune | `#/nodes?kommune=0751` (kommunekode) |
+| Landsdel | `#/nodes?landsdel=218546` |
+| Region | `#/nodes?dkregion=1082` (regionskode; `region` is already the observer filter) |
+| Postnummer | `#/nodes?postnr=8000` (a street postcode such as `1051` selects its group) |
+
+- **A link wins over the saved choice.** The last pick is kept in `localStorage` (`meshcore-dagi-filter`) and applies when a link has no DAGI parameter.
+- **A link with several DAGI parameters** keeps the most specific one (postnr, then kommune, then landsdel, then region) and drops the others from the URL.
+- **An unknown code** is dropped without a message, and the page shows all of Denmark. This can happen with an old link, or with a landsdel id after a yearly boundary update. The code is checked against `/api/config/dagi` before any request uses it, so it is never sent to the server.
+
+### Nodes without a position
+
+A node with no GPS position (none, or 0,0) is in no area, so an active Danish-area filter always hides it. The Nodes page then says how many, for example "18 nodes have no position, so no Danish-area filter can include them". **The count covers all nodes, before the other filters** (role tab, search, region, area), so it can be higher than the number the current view would otherwise show.
+
+A node at sea, off the coast, matches no kommune either.
+
+### Packets and the other pages
+
+So far the control is on the **Nodes** page only. The API also accepts the same parameters on `/api/packets` and on the analytics endpoints that take `area`.
+
+On packets, the filter works like `area`: it keeps only **ADVERT** packets, because only an ADVERT names its sender's public key. The Packets page will say so when it gets the control.
+
+### Credit
+
+The boundaries and names are DAGI data: "Indeholder data fra Klimadatastyrelsen, DAGI, november 2026, CC BY 4.0 — data bearbejdet". The picker's footer shows this credit with links to the [licence](https://creativecommons.org/licenses/by/4.0/) and the [terms](https://dataforsyningen.dk/Vilkaar).
+
 ## Area Map tool
 
 The Area Map is a visual debug and builder tool served at `/area-map.html` on your CoreScope instance.
@@ -104,3 +163,9 @@ GET /api/config/areas/polygons
 Returns full area definitions including polygon coordinates. Used by the Area Map tool.
 
 Both endpoints require no authentication.
+
+```
+GET /api/config/dagi
+```
+
+Returns the Danish areas per layer (`layer`, its filter `param` and the `areas` with `code` and `name`), the credit and the source and licence links. Used by the Danish-area picker. With DAGI off it returns `{"enabled": false, "layers": []}`.

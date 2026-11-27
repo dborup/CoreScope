@@ -18,6 +18,7 @@
     "ChannelQR": "readonly",
     "Chart": "readonly",
     "DIST_THRESHOLDS": "readonly",
+    "DagiFilter": "readonly",
     "DragManager": "readonly",
     "EXTERNAL_URLS": "readonly",
     "FAV_KEY": "readonly",
