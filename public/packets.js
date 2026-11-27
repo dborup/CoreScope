@@ -822,6 +822,9 @@
   let showFullNames = savedFullNames;
   let packetLoadGeneration = 0;
   let wsHandler = null;
+  // #990: the Area selection's member set, so live packets follow the server's
+  // ?area= rule (scope-member-filter.js). Created on the first selected area.
+  let areaMembers = null;
   let packetsPaused = false;
   let pauseBuffer = [];
   let observers = [];
@@ -1306,6 +1309,28 @@
     await ensureHopResolver();
   }
 
+  // #990: fetches the selected area's member set once per change of area (a
+  // reload with the same area fetches nothing). geoFilter=0, because the
+  // server's ?area= rule for packets (areaMemberSet) ignores geo_filter, which
+  // /api/nodes applies by default.
+  function syncAreaMembers() {
+    const key = AreaFilter.getAreaParam();
+    if (!areaMembers) {
+      if (!key) return;
+      areaMembers = ScopeMemberFilter.create({
+        fetchMembers: k => fetchAllNodes('&area=' + encodeURIComponent(k) + '&geoFilter=0')
+          .then(r => r.nodes.map(n => n.public_key)),
+        keyOf: p => ScopeMemberFilter.advertSender(getParsedDecoded(p)),
+        emptyMatchesAll: true,
+      });
+    }
+    areaMembers.setScope(key);
+  }
+
+  function passesAreaFilter(p) {
+    return !areaMembers || areaMembers.accepts(p);
+  }
+
   // Incremental path (WS/poll): resolve only remaining heuristic hops.
   // #165 — "already resolved" means resolved for THIS packet's observer. A
   // bare-key check let a second observer reuse the first one's pick.
@@ -1645,6 +1670,7 @@
           const obs = observerMap.get(p.observer_id);
           if (!obs || !selectedRegions.includes(obs.iata)) return false;
         }
+        if (!passesAreaFilter(p)) return false;
         if (filters.node && !(p.decoded_json || '').includes(filters.node)) return false;
         return true;
       });
@@ -1652,9 +1678,10 @@
 
       // Resolve any new hops, then update and re-render
       resolveIncomingHops(filtered).then(() => {
-        // The channel may change while hop initialization is in flight. Do
-        // not let stale-channel updates occupy the new bounded matching page.
-        const accepted = filters.hash ? filtered : filterChannelPackets(filtered, filters.channel);
+        // The channel or area may change while hop initialization is in
+        // flight. Do not let stale updates occupy the new bounded matching page.
+        const accepted = filters.hash ? filtered
+          : filterChannelPackets(filtered, filters.channel).filter(passesAreaFilter);
         if (!accepted.length) return;
         if (groupByHash) {
           // Update existing groups or create new ones
@@ -1821,6 +1848,7 @@
     document.removeEventListener('keydown', _pktEsc);
     if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; }
     if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; }
+    areaMembers = null;
     removeAllByopOverlays();
     packets = [];
     hashIndex = new Map();    selectedId = null;
@@ -1901,6 +1929,7 @@
   async function loadPackets() {
     const generation = ++packetLoadGeneration;
     const requestGrouped = groupByHash;
+    syncAreaMembers();
     const container = document.getElementById('pktLeft');
     if (container) container.setAttribute('data-loaded', 'false');
     try {
@@ -4905,6 +4934,7 @@
       renderTableRows,
       _setPackets: function(p) { packets = p; },
       _packetHashes: function() { return packets.map(p => p.hash); },
+      _areaMembersReady: function() { return !areaMembers || areaMembers.ready(); },
       _setFilter: function(k, v) { filters[k] = v; },
       _setFullNames: function(on, saved) { showFullNames = !!on; savedFullNames = saved === undefined ? !!on : !!saved; },
       _setObservers: function(list) { observers = list; observerMap = new Map(list.map(o => [o.id, o])); },

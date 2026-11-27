@@ -64,7 +64,21 @@ func dagiSeedConfig() *Config {
 // GRP_TXT without a sender). Packet i has hash %016x of i+1.
 func seedDagi(t *testing.T, db *DB) {
 	t.Helper()
-	now := time.Now().UTC()
+	seedDagiRows(t, db, time.Now().UTC())
+}
+
+// seedDagiAt is seedDagi at a given now, so servers seeded with the same now
+// hold the same rows whenever each is built.
+func seedDagiAt(now time.Time) func(*testing.T, *DB) {
+	return func(t *testing.T, db *DB) {
+		t.Helper()
+		seedDagiRows(t, db, now)
+	}
+}
+
+// seedDagiRows writes the seed with every timestamp relative to now.
+func seedDagiRows(t *testing.T, db *DB, now time.Time) {
+	t.Helper()
 	if _, err := db.conn.Exec(`INSERT INTO observers (id, name, iata, last_seen, first_seen) VALUES ('obsA', 'A', 'AAR', ?, '2026-01-01T00:00:00Z'), ('obsB', 'B', 'CPH', ?, '2026-01-01T00:00:00Z')`,
 		now.Format(time.RFC3339), now.Format(time.RFC3339)); err != nil {
 		t.Fatal(err)
@@ -976,8 +990,13 @@ func TestDagiPacketsFilter(t *testing.T) {
 // Without DAGI params, area behaves exactly as before: the same rows for
 // every area key, DAGI on or off.
 func TestDagiAreaUnchangedWithoutDagiParams(t *testing.T) {
-	_, on := newDagiServer(t, dagiSeedConfig(), "memory")
-	_, off := newDagiServer(t, dagiOff(), "memory")
+	// Both servers hold the same rows: the seed times are one instant.
+	seed := seedDagiAt(time.Now().UTC())
+	_, on := newDagiServerSeeded(t, dagiSeedConfig(), "memory", seed)
+	// The two servers are built in different seconds, as they may be on a
+	// loaded runner: their answers may not depend on when.
+	dagiNextSecond()
+	_, off := newDagiServerSeeded(t, dagiOff(), "memory", seed)
 	for _, area := range []string{"", "AARC", "NOPE"} {
 		for _, path := range []string{"/api/packets?limit=100", "/api/packets?limit=100&groupByHash=true", "/api/nodes?limit=100", "/api/analytics/rf", "/api/analytics/hash-sizes"} {
 			q := path
@@ -1090,6 +1109,12 @@ func TestDagiPacketQueryUsesPinnedSnapshot(t *testing.T) {
 	if got := store.packetAreaNodes(q); got["mover"] || got == nil {
 		t.Errorf("live snapshot: %v, want an empty set", got)
 	}
+}
+
+// dagiNextSecond sleeps into the next wall-clock second.
+func dagiNextSecond() {
+	now := time.Now()
+	time.Sleep(now.Truncate(time.Second).Add(time.Second).Sub(now))
 }
 
 // dagiStripVolatile drops what differs between two servers by time alone.
