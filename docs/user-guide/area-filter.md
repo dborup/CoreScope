@@ -89,7 +89,7 @@ One area is selected at a time. A new pick replaces the previous one, even in an
 
 ### Links and saved choice
 
-The selection is in the page's URL, so a link can be shared:
+A pick puts the selection in the page's URL, so a link can be shared. A choice restored from `localStorage` (see below) stays out of the URL until you pick again, or until the Nodes page rewrites its URL for a search, a tab or a sort change:
 
 | Layer | Link |
 |--|--|

@@ -28,6 +28,11 @@
  *     throttling, within the budget.
  *  7. Reload: the pick survives a reload with no param (localStorage), and a
  *     link param overrides it.
+ *  8. Warm tab: a loaded #/nodes, then #/map, then #/nodes?kommune=0860 (and
+ *     the same for ?region=) sends one request with the param and filters the
+ *     list; the router applies a link after destroy(), so the cached list
+ *     must not be reused. Back on #/nodes with nothing changed, the cached
+ *     list is kept (no refetch).
  *
  * Screenshots for the PR's browser validation go to DAGI_SHOTS_DIR when set.
  * Defaults to localhost:13581 — NEVER point at prod (AGENTS.md). CI sets BASE_URL.
@@ -284,6 +289,58 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     await page.goto(BASE + '/#/nodes?postnr=1051', { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => document.querySelector('.dagi-trigger-label') && document.querySelector('.dagi-trigger-label').textContent.indexOf('Postnr') === 0);
     assert((await trigger(page)) === 'Postnr: 1050–1473 København K', 'street postcode: ' + await trigger(page));
+    await ctx.close();
+  });
+
+  // A same-tab link: the router applies it after Nodes' destroy(), so only
+  // the list's own cache key can notice it.
+  async function warmThenLink(page, nodeReqs, link) {
+    await page.goto(BASE + '/#/nodes', { waitUntil: 'domcontentloaded' });
+    await listLoaded(page);
+    const before = (await rowNames(page)).length;
+    await page.evaluate(() => { location.hash = '#/map'; });
+    await page.waitForSelector('.leaflet-container');
+    nodeReqs.length = 0;
+    await page.evaluate((h) => { location.hash = h; }, link);
+    await listLoaded(page);
+    return before;
+  }
+
+  await step('warm tab: loaded #/nodes, #/map, then #/nodes?kommune=0860 refetches once and filters; an unchanged return keeps the list', async () => {
+    const { ctx, page, nodeReqs } = await cold({ width: 1440, height: 900 }, false);
+    const want = (await (await page.request.get(BASE + '/api/nodes?limit=1&kommune=0860')).json()).dagi.unpositionedHidden;
+    // Unchanged selection: #/nodes -> #/map -> #/nodes reuses the cached list.
+    await page.goto(BASE + '/#/nodes', { waitUntil: 'domcontentloaded' });
+    await listLoaded(page);
+    await page.evaluate(() => { window._nodesGetAllNodes().e2eWarm = true; });
+    await page.evaluate(() => { location.hash = '#/map'; });
+    await page.waitForSelector('.leaflet-container');
+    await page.evaluate(() => { location.hash = '#/nodes'; });
+    await listLoaded(page);
+    assert(await page.evaluate(() => window._nodesGetAllNodes().e2eWarm === true), 'an unchanged return refetched the list');
+
+    const before = await warmThenLink(page, nodeReqs, '#/nodes?kommune=0860');
+    assert(before > 1, 'unfiltered list has ' + before + ' rows');
+    const sent = nodeReqs.filter((u) => dagiParams(u).join() === 'kommune=0860');
+    assert(sent.length === 1, sent.length + ' kommune=0860 requests, want 1: ' + nodeReqs.join(' '));
+    await page.waitForFunction(() => !document.getElementById('nodesDagiNotice').hidden, null, { timeout: 5000 })
+      .catch(() => { throw new Error('no notice'); });
+    const notice = await page.evaluate(() => document.getElementById('nodesDagiNotice').textContent);
+    assert(notice.indexOf(want + ' nodes have no position') === 0, `notice "${notice}", want the server's ${want}`);
+    assert((await rowNames(page)).length === 0, (await rowNames(page)).length + ' rows listed for an empty kommune');
+    assert((await trigger(page)) === 'Kommune: Hjørring', 'trigger: ' + await trigger(page));
+    await ctx.close();
+  });
+
+  await step('warm tab: loaded #/nodes, #/map, then #/nodes?region=SJC refetches once and filters', async () => {
+    const { ctx, page, nodeReqs } = await cold({ width: 1440, height: 900 }, false);
+    const want = (await (await page.request.get(BASE + '/api/nodes?limit=500&region=SJC')).json()).nodes.length;
+    const before = await warmThenLink(page, nodeReqs, '#/nodes?region=SJC');
+    assert(want > 0 && want < before, `region SJC has ${want} of ${before} nodes`);
+    const sent = nodeReqs.filter((u) => new URL(u).searchParams.get('region') === 'SJC');
+    assert(sent.length === 1, sent.length + ' region=SJC requests, want 1: ' + nodeReqs.join(' '));
+    const rows = (await rowNames(page)).length;
+    assert(rows === want, `${rows} rows, want the server's ${want} for region SJC`);
     await ctx.close();
   });
 

@@ -1512,6 +1512,11 @@
   let _themeRefreshHandler = null;
 
   let _allNodes = null; // cached full node list
+  // #740 M3a: the query _allNodes was fetched under (nodesQueryKey). The
+  // router applies a link's ?region= or DAGI param after destroy() has
+  // removed this page's onChange handlers, so no handler drops the cache;
+  // loadNodes compares this key instead.
+  let _allNodesKey = null;
   // #740 M3a: the server's count of unpositioned nodes a DAGI filter hid
   // from _allNodes (whole list, before the other filters), or 0.
   let _dagiHidden = 0;
@@ -1667,9 +1672,28 @@
     el.hidden = !text;
   }
 
+  // The selection a node list answers: region, area and DAGI choice. `dagi`
+  // is DagiFilter.hashParam() for the wanted choice, or the sent part of
+  // DagiFilter.queryString() for a fetched list, so a choice still waiting
+  // for its check does not match a list fetched without it.
+  function nodesQueryKey(rp, ap, dagi) {
+    return (rp || '') + '|' + (ap || '') + '|' + (dagi || '');
+  }
+
+  function wantedNodesQueryKey() {
+    return nodesQueryKey(RegionFilter.getRegionParam(), AreaFilter.getAreaParam(),
+      window.DagiFilter ? DagiFilter.hashParam() : '');
+  }
+
   // opts.bust: fetch fresh pages even if the same request is in flight (#279).
   async function loadNodes(refreshOnly, opts) {
     try {
+      // A list cached under another selection (a link opened in this tab) is
+      // stale; one still current is kept.
+      if (_allNodes && _allNodesKey !== wantedNodesQueryKey()) {
+        _allNodes = null;
+        _fleetSkew = null;
+      }
       // Fetch all nodes via pagination loop — server clamps /api/nodes ?limit
       // to 500 (PR #1540 / v3.8.3 DoS guard), so a single fetch silently
       // truncates large deployments. Loop exit uses data.nodes.length < PAGE_SIZE
@@ -1723,6 +1747,7 @@
           seen.set(accumulated[i].public_key, accumulated[i]);
         }
         _allNodes = Array.from(seen.values());
+        _allNodesKey = nodesQueryKey(rp, ap, dq.slice(1));
         _dagiHidden = dagiHidden;
         // m3: counts from first response only (subsequent pages may differ)
         await skewPromise;
@@ -2389,7 +2414,7 @@
   window._nodesIsAdvertMessage = isAdvertMessage;
   window._nodesMissingNodeView = missingNodeView;
   window._nodesGetAllNodes = function() { return _allNodes; };
-  window._nodesSetAllNodes = function(n) { _allNodes = n; };
+  window._nodesSetAllNodes = function(n) { _allNodes = n; _allNodesKey = wantedNodesQueryKey(); };
   window._nodesGetFiltered = function() { return nodes; };
   window._nodesSetFiltered = function(arr) { nodes = arr; };
   window._nodesRenderRows = renderRows;

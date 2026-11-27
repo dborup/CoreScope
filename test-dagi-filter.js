@@ -236,6 +236,19 @@ test('an empty DAGI param in the link keeps the saved choice', async () => {
   same(s.DF.getSelected(), { param: 'kommune', code: '0751' });
 });
 
+test('a link value is trimmed, and a blank one keeps the saved choice', async () => {
+  const s = load({ hash: '#/nodes?kommune=%200751%20&tab=repeater' });
+  assert.strictEqual(s.DF.syncFromUrl(s.location.hash), true);
+  same(s.DF.getSelected(), { param: 'kommune', code: '0751' });
+  same(JSON.parse(s.storage['meshcore-dagi-filter']), { param: 'kommune', code: '0751' });
+  assert.strictEqual(s.location.hash, '#/nodes?kommune=0751&tab=repeater');
+  await s.DF.ready();
+  assert.strictEqual(s.DF.queryString(), '&kommune=0751', 'the trimmed code is the known one');
+  const t = load({ stored: { param: 'kommune', code: '0751' } });
+  assert.strictEqual(t.DF.syncFromUrl('#/nodes?kommune=%20%20'), false);
+  same(t.DF.getSelected(), { param: 'kommune', code: '0751' });
+});
+
 test('a saved value that is not a {param, code} pair is ignored', async () => {
   for (const stored of ['not json', { param: 'area', code: 'X' }, { param: 'kommune', code: '' }, { param: 'kommune', code: 751 }]) {
     const s = load({ stored });

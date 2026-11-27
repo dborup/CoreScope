@@ -4402,6 +4402,8 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
   .dagi-panel {
     position: fixed; top: auto; left: 0; right: 0; bottom: 0; z-index: var(--z-modal);
     width: auto; max-height: 85vh; border-radius: 12px 12px 0 0; border-bottom: 0;
+    /* iOS Safari's vh is the large viewport, under the browser bar. */
+    max-height: 85dvh;
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
   .dagi-head { min-height: 44px; }
