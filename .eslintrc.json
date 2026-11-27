@@ -64,6 +64,7 @@
     "SKEW_SEVERITY_LABELS": "readonly",
     "SKEW_SEVERITY_ORDER": "readonly",
     "SNR_THRESHOLDS": "readonly",
+    "ScopeMemberFilter": "readonly",
     "SlideOver": "readonly",
     "TILE_DARK": "readonly",
     "TILE_LIGHT": "readonly",

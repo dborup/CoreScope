@@ -47,6 +47,7 @@ const PINS = [/\bpinPacketsTimeWindow\(/, /meshcore-time-window/, /timeWindow=/]
 // age cannot empty their table.
 const STUBBED = {
   'test-issue-406-packets-live-channel-e2e.js': '/api/packets is fulfilled by page.route from an in-test packet list',
+  'test-issue-990-packets-live-area-e2e.js': '/api/packets is fulfilled by page.route from an in-test packet list',
 };
 
 const checks = [];
