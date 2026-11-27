@@ -265,6 +265,8 @@ function makeSandbox(apiImpl) {
       assert.strictEqual(ctx.document.getElementById('packetPathMapContainer').style.display, 'none', reason);
       assert.strictEqual(ctx.document.getElementById('packetPathLegend').style.display, 'none', reason);
       assert.strictEqual(counts.maps, 0, reason);
+      // #978: an unavailable record is final, so it gets no "Try again".
+      assert.strictEqual(ctx.document.getElementById('packetPathRetry'), null, reason + ' offers Try again');
       ctx.window.PacketPathMap.close();
     }
   });
@@ -372,7 +374,7 @@ function makeSandbox(apiImpl) {
     const options = pingOptions(async () => ++calls === 1 ? { status: 'initializing' } : { status: 'live', path: archivedPath });
     await ctx.window.PacketPathMap.open('historic', options);
     const retry = ctx.document.getElementById('packetPathRetry');
-    assert.strictEqual(retry.style.display, 'inline-block');
+    assert.ok(retry, 'a "Try again" button is shown');
     await retry._listeners.click[0]();
     assert.strictEqual(calls, 2);
     assert.strictEqual(counts.maps, 1);
@@ -403,6 +405,30 @@ function makeSandbox(apiImpl) {
       console.log('  ✅ a failed fetch shows an error status without throwing');
     } catch (e) { failed++; console.log('  ❌ a failed fetch shows an error status without throwing: ' + e.message); }
   })();
+
+  // #978 item 3: a live packet's failed path request offers "Try again",
+  // built with createElement/textContent, which refetches the path.
+  await historyCase('#978: a failed live path request shows a "Try again" that refetches the path', async () => {
+    let calls = 0;
+    const ctx = makeSandbox(() => ++calls === 1 ? Promise.reject(new Error('network down')) : Promise.resolve({ hash: 'deadbeef', branches: [] }));
+    await ctx.window.PacketPathMap.open('deadbeef');
+    assert.strictEqual(ctx.document.getElementById('packetPathStatus').textContent, 'Failed to load path: network down');
+    const retry = ctx.document.getElementById('packetPathRetry');
+    assert.ok(retry, 'expected a packetPathRetry button after a failed live request');
+    assert.strictEqual(retry.tagName, 'button', 'built with createElement');
+    assert.strictEqual(retry.type, 'button');
+    assert.strictEqual(retry.textContent, 'Try again');
+    assert.ok(/\bbtn\b/.test(retry.className), 'the .btn class gives it a 48 px touch target');
+    await retry._listeners.click[0]();
+    assert.strictEqual(calls, 2, 'Try again refetches /api/packets/<hash>/path');
+    assert.ok(ctx.document.getElementById('packetPathStatus').textContent.includes('no observations'), 'the refetched result is shown');
+    assert.strictEqual(ctx.document.getElementById('packetPathRetry'), null, 'no stale Try again after a successful refetch');
+    ctx.window.PacketPathMap.close();
+  });
+
+  await historyCase('#978: "Try again" is not built from an HTML string', async () => {
+    assert.ok(!/id="packetPathRetry"/.test(src), 'packetPathRetry must not be part of the innerHTML template');
+  });
 
   await (async () => {
     try {

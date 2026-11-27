@@ -1534,9 +1534,9 @@ func (s *Server) handlePackets(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, err.Error())
 			return
 		}
-		out := *result // the store may hand out a cached result
-		out.Limit, out.Offset, out.Dagi = q.Limit, q.Offset, dagiInfo
-		writeJSON(w, &out)
+		// Every call builds a fresh result (TestQueryGroupedPacketsResultNotShared).
+		result.Limit, result.Offset, result.Dagi = q.Limit, q.Offset, dagiInfo
+		writeJSON(w, result)
 		return
 	}
 

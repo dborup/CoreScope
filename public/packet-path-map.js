@@ -299,7 +299,7 @@
         '<div id="packetPathControls"></div>' +
         '<div id="packetPathMapContainer" style="height:360px;border-radius:8px;overflow:hidden;background:var(--surface-1)"></div>' +
         '<div id="packetPathStatus" style="margin-top:8px;font-size:12px;color:var(--text-muted)">Loading…</div>' +
-        '<button type="button" id="packetPathRetry" style="display:none;margin-top:12px">Try again</button>' +
+        '<div id="packetPathActions"></div>' +
       '</div>';
     document.body.appendChild(overlay);
     overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
@@ -342,13 +342,20 @@
     function withoutMap(message, canRetry) {
       var mapEl = document.getElementById('packetPathMapContainer');
       var legendEl = document.getElementById('packetPathLegend');
-      var retryBtn = document.getElementById('packetPathRetry');
+      var actionsEl = document.getElementById('packetPathActions');
       if (mapEl) mapEl.style.display = 'none';
       if (legendEl) legendEl.style.display = 'none';
       if (statusEl) statusEl.textContent = message;
-      if (retryBtn && canRetry) {
-        retryBtn.style.display = 'inline-block';
+      // "Try again" (#978) reopens the modal, which refetches the path. A
+      // replaced modal is not a close, so ?viewPath=1 stays in the URL.
+      if (actionsEl && canRetry) {
+        var retryBtn = document.createElement('button');
+        retryBtn.type = 'button';
+        retryBtn.id = 'packetPathRetry';
+        retryBtn.className = 'btn btn-secondary packet-path-retry';
+        retryBtn.textContent = 'Try again';
         retryBtn.addEventListener('click', function () { return open(hash, options); });
+        actionsEl.appendChild(retryBtn);
       }
     }
 
@@ -358,8 +365,8 @@
       if (window.MeshConfigReady) await window.MeshConfigReady;
     } catch (e) {
       if (!isCurrent()) return;
-      if (historical) withoutMap('Failed to load path: ' + e.message, true);
-      else if (statusEl) statusEl.textContent = 'Failed to load path: ' + e.message;
+      // Both a live packet's path and a historical record can be retried (#978).
+      withoutMap('Failed to load path: ' + e.message, true);
       return;
     }
     if (!isCurrent()) return;
