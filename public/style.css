@@ -501,10 +501,13 @@
   --scope-unknown: #57534e;
   --scope-other: #111827;
   /* #880 — Live "Follow a packet". Built on theme tokens, so both dark
-   * blocks follow without their own copies. Customizer mapping: #880 M3. */
+   * blocks follow without their own copies. #880 M3: the customizer's
+   * Theme tab sets any of them (light and dark); a colourblind preset sets
+   * the relay / observer pair (--mc-follow-*, cb-presets.js followAccents),
+   * since yellow next to green is the pair a red-green deficiency loses. */
   --follow-ring: var(--accent);
-  --follow-relay: var(--status-yellow);
-  --follow-observer: var(--status-green);
+  --follow-relay: var(--mc-follow-relay, var(--status-yellow));
+  --follow-observer: var(--mc-follow-observer, var(--status-green));
   --follow-flag: var(--warning);
 
   /* #620: minimum viewport margin of the region/area dropdown menus. Read by
