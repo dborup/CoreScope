@@ -19,14 +19,17 @@
  *      repeaters on one mast) survives two refreshes: the spider is restored
  *      around it and the popup stays on its marker, at 1440×900 (click) and
  *      375×560 (tap); a kept popup whose marker a refresh puts in a new
- *      cluster still closes;
+ *      cluster still closes; with 1,000 nodes and a slowed CPU, so the
+ *      rebuild's add goes on in several chunks, the spider is restored at
+ *      the add's end (_clusterAdd.spider) and the popup stays on its leg;
  *   4. closing a popup on a dense phone map, at 360×640 and 375×560 touch,
  *      light and dark, with real taps: the map buttons step aside while a
  *      popup is open, so neither the × nor the popup is under one, and they
  *      come back when it closes; a finger tap on empty map beside a marker,
  *      which Chromium's touch adjustment moves onto that marker, closes the
  *      open popup instead of opening the neighbour's, while a tap on a
- *      marker still opens it, with or without a popup open; View Node and
+ *      marker still opens it, with or without a popup open (with none, the
+ *      touch-adjusted tap opens that marker, as before); View Node and
  *      Show Neighbors are at least 44 px tall (compact at 1440×900);
  *   5. no page error but the injected one, and no request leaves localhost.
  *
@@ -596,6 +599,60 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
     });
   }
 
+  /* The spider's restore also runs from the chunked add's end
+   * (_clusterAdd.spider, settled by endClusterAdd or the watchdog), not
+   * only from rebuildMarkers: 1,000 clones and a 4× slowed CPU make the
+   * rebuild's add go on in several chunks, as in #981's suite. */
+  await step('desktop 1440×900 dark, clustering on, 1,000 nodes: a popup on a spiderfied child stays on its leg through refreshes whose add goes on in several chunks', async () => {
+    const mast = {};
+    const { ctx, page, rec } = await newCtx({ viewport: { width: 1440, height: 900 }, theme: 'dark', clustering: true,
+      clones: 1000, nodes: mastNodes(mast) });
+    const cdp = await ctx.newCDPSession(page);
+    try {
+      await coldMap(page, rec);
+      await watchClusterAdds(page, {});
+      await page.evaluate((pk) => {
+        const map = window.__maps[window.__maps.length - 1];
+        let mk = null;
+        window.__group.eachLayer((l) => { if (String(l._nodeKey).toLowerCase() === pk) mk = l; });
+        map.setView(mk.getLatLng(), 15, { animate: false });
+      }, mast.keys[0]);
+      await page.waitForTimeout(600);
+      await page.evaluate((pk) => {
+        let mk = null;
+        window.__group.eachLayer((l) => { if (String(l._nodeKey).toLowerCase() === pk) mk = l; });
+        window.__group.getVisibleParent(mk)._icon.setAttribute('data-test-cluster', '1');
+      }, mast.keys[0]);
+      await tap(page, '[data-test-cluster]', false);
+      await page.waitForFunction((keys) => {
+        const map = window.__maps[window.__maps.length - 1];
+        let n = 0;
+        map.eachLayer((l) => { if (l._nodeKey && keys.indexOf(String(l._nodeKey).toLowerCase()) >= 0 && l._spiderLeg) n++; });
+        return n === keys.length;
+      }, mast.keys, { timeout: 5000 });
+      await page.waitForTimeout(500);
+      const node = await pickMarker(page, { keys: mast.keys });
+      await openPopup(page, false);
+      let s = await popupState(page);
+      assert(s.spider && s.atMarker, 'the popup is not on a spiderfied child: ' + JSON.stringify(s));
+      await watchClusterAdds(page, { chunkInterval: 0 });
+      for (const fetch of [false, true]) {
+        const what = fetch ? 'a chunked refetch' : 'a chunked cached refresh';
+        const ok = await chunkedRefresh(page, rec, cdp, { fetch });
+        assert(ok, what + ' did not end');
+        await page.waitForTimeout(300);
+        const c = await clusterState(page);
+        const last = c.adds.filter(a => a.total > 0).slice(-1)[0];
+        assert(last && last.done && last.chunks > 1, what + ': the add did not go on in several chunks: ' + JSON.stringify(c.adds));
+        s = await popupState(page);
+        assertKept(s, node.pk, 'after ' + what);
+        assert(s.spider, what + ': the spider was not restored around the popup: ' + JSON.stringify(s));
+        assert(c.doubled === 0, what + ': markers twice: ' + JSON.stringify(c));
+      }
+      clean(rec);
+    } finally { await ctx.close(); }
+  });
+
   await step('desktop 1440×900, clustering on: a kept popup whose marker a refresh puts in a new cluster still closes', async () => {
     const st = { pk: null, extra: null };
     const o = { viewport: { width: 1440, height: 900 }, clustering: true,
@@ -810,6 +867,32 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
           if (o.k) return !!s && String(s._nodeKey).toLowerCase() === o.k;
           return map.getZoom() > o.z || Object.values(map._layers).some(l => l._spiderLeg);
         }, other, { timeout: 5000 }).catch(() => { throw new Error('a tap on another marker was not that marker\'s: ' + JSON.stringify(other)); });
+        clean(rec);
+      });
+
+      await step(`${o.label}: a finger beside a marker with no popup open is unchanged: touch adjustment opens that marker`, async () => {
+        let res = null;
+        // The step before may have left a zoom or a spider settling.
+        await page.evaluate(() => window.__maps[window.__maps.length - 1].closePopup());
+        await page.waitForTimeout(1500);
+        for (let i = 0; i < 12 && !res; i++) {
+          await placeMarker(page, 0.5, 0.15);
+          assert(!(await popupState(page)).open, 'a popup is open before the tap');
+          const cands = (await nearMissPoints(page)).filter(p => p.node);
+          if (i >= cands.length) break;
+          const p = cands[i];
+          const z0 = await page.evaluate(() => window.__maps[window.__maps.length - 1].getZoom());
+          await fingerTap(page, cdp, p.x, p.y, 12);
+          await page.waitForTimeout(500);
+          const downs = await page.evaluate(() => window.__downs);
+          // Only a touch the browser moved onto the marker is the case.
+          if (!(downs.length && downs[0].onIcon)) continue;
+          res = { p, after: await popupState(page),
+            zoomed: (await page.evaluate(() => window.__maps[window.__maps.length - 1].getZoom())) !== z0 };
+        }
+        assert(res, 'no tap was moved onto a marker by touch adjustment');
+        assert(res.after.open && res.after.key && !res.zoomed,
+          'a tap beside a marker with no popup open did not open that marker: ' + JSON.stringify(res));
         clean(rec);
       });
     } finally { await ctx.close(); }
