@@ -207,6 +207,10 @@
         if (token) parts.push('sort=' + encodeURIComponent(token));
       }
     }
+    // #740 M3a: this rebuilds the query from scratch, so it carries the
+    // DAGI param itself; a tab, search or sort change would erase it.
+    var dagi = window.DagiFilter ? DagiFilter.hashParam() : '';
+    if (dagi) parts.push(dagi);
     return parts.length ? '?' + parts.join('&') : '';
   }
   window.buildNodesQuery = buildNodesQuery;
@@ -757,6 +761,7 @@
 
   let regionChangeHandler = null;
   let areaChangeHandler = null;
+  let dagiChangeHandler = null;
   let packetCountHelpCleanup = null;
 
   function init(app, routeParam) {
@@ -819,6 +824,8 @@
       </div>
       <div id="nodesRegionFilter" class="region-filter-container"></div>
       <div id="nodesAreaFilter" style="display:none"></div>
+      <div id="nodesDagiFilter" class="dagi-filter-container" style="display:none"></div>
+      <div id="nodesDagiNotice" class="dagi-notice" role="status" hidden></div>
       <div class="split-layout">
         <div class="panel-left" id="nodesLeft" aria-live="polite" aria-relevant="additions removals"></div>
         <div class="panel-right empty" id="nodesRight"><span>Select a node to view details</span></div>
@@ -829,6 +836,10 @@
     AreaFilter.init(document.getElementById('nodesAreaFilter'));
     regionChangeHandler = RegionFilter.onChange(function () { _allNodes = null; _fleetSkew = null; loadNodes(); });
     areaChangeHandler = AreaFilter.onChange(function () { _allNodes = null; _fleetSkew = null; loadNodes(); });
+    if (window.DagiFilter) {
+      DagiFilter.init(document.getElementById('nodesDagiFilter'));
+      dagiChangeHandler = DagiFilter.onChange(function () { _allNodes = null; _fleetSkew = null; loadNodes(); });
+    }
 
     if (search) {
       var _si = document.getElementById('nodeSearch');
@@ -1491,6 +1502,9 @@
     regionChangeHandler = null;
     if (areaChangeHandler) AreaFilter.offChange(areaChangeHandler);
     areaChangeHandler = null;
+    if (dagiChangeHandler) DagiFilter.offChange(dagiChangeHandler);
+    dagiChangeHandler = null;
+    if (window.DagiFilter) DagiFilter.release(document.getElementById('nodesDagiFilter'));
     nodes = [];
     selectedKey = null;
   }
@@ -1498,6 +1512,9 @@
   let _themeRefreshHandler = null;
 
   let _allNodes = null; // cached full node list
+  // #740 M3a: the server's count of unpositioned nodes a DAGI filter hid
+  // from _allNodes (whole list, before the other filters), or 0.
+  let _dagiHidden = 0;
   let _fleetSkew = null; // cached clock skew map: pubkey → {severity, recentMedianSkewSec, medianSkewSec, ...}
 
   /**
@@ -1641,6 +1658,15 @@
     return ' <span class="dup-name-badge" title="' + escapeHtml(title) + '">(' + keys.length + ')</span>';
   }
 
+  // #740 M3a: "N nodes have no position…" under an active DAGI filter.
+  function renderDagiNotice() {
+    const el = document.getElementById('nodesDagiNotice');
+    if (!el) return;
+    const text = window.DagiFilter && DagiFilter.queryString() ? DagiFilter.hiddenNotice(_dagiHidden) : '';
+    el.textContent = text;
+    el.hidden = !text;
+  }
+
   // opts.bust: fetch fresh pages even if the same request is in flight (#279).
   async function loadNodes(refreshOnly, opts) {
     try {
@@ -1657,6 +1683,11 @@
         if (rp) baseParams.set('region', rp);
         const ap = AreaFilter.getAreaParam();
         if (ap) baseParams.set('area', ap);
+        // #740 M3a: a DAGI code is sent only once /api/config/dagi has
+        // checked it (an unknown one is dropped, never sent).
+        if (window.DagiFilter) await DagiFilter.ready();
+        const dq = window.DagiFilter ? DagiFilter.queryString() : '';
+        let dagiHidden = 0;
 
         // B1 fix: use local accumulator; only assign _allNodes on full success.
         const accumulated = [];
@@ -1667,7 +1698,10 @@
         const nodesBody = document.getElementById('nodesBody');
         while (offset < SAFETY_CAP) {
           baseParams.set('offset', String(offset));
-          const data = await api('/nodes?' + baseParams, { ttl: CLIENT_TTL.nodeList, bust: !!(opts && opts.bust) });
+          const data = await api('/nodes?' + baseParams + dq, { ttl: CLIENT_TTL.nodeList, bust: !!(opts && opts.bust) });
+          // Read before the null check: a filter nobody matches answers
+          // `nodes: null` with the count.
+          if (offset === 0 && dq && data && data.dagi) dagiHidden = Number(data.dagi.unpositionedHidden) || 0;
           if (!data || !Array.isArray(data.nodes)) break;
           accumulated.push.apply(accumulated, data.nodes);
           counts = data.counts || counts || {};
@@ -1689,6 +1723,7 @@
           seen.set(accumulated[i].public_key, accumulated[i]);
         }
         _allNodes = Array.from(seen.values());
+        _dagiHidden = dagiHidden;
         // m3: counts from first response only (subsequent pages may differ)
         await skewPromise;
       }
@@ -1758,6 +1793,7 @@
       syncClaimedToFavorites();
 
       renderCounts();
+      renderDagiNotice();
       updateExportBtn();
       if (refreshOnly) {
         renderRows();

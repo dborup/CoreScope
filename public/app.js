@@ -1607,6 +1607,8 @@ function navigate() {
   // #531: a link's ?region= is the selection before the new page fetches
   // anything. After destroy(), so the old page's listeners are gone.
   if (window.RegionFilter) RegionFilter.syncFromUrl(location.hash);
+  // #740 M3a: the same for a link's DAGI param (?kommune=, ?postnr=, …).
+  if (window.DagiFilter) DagiFilter.syncFromUrl(location.hash);
 
   // #1572 — defensive: ensure body.live-fullscreen is cleared whenever
   // we navigate to a non-live route. Live page's destroy() also clears
