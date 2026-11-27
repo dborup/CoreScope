@@ -1999,7 +1999,13 @@ console.log('\n=== packets.js: View Path button ===');
   });
 
   test('View Path button opens window.PacketPathMap.open with its own hash, not a full navigation', () => {
-    assert.ok(src.includes("if (window.PacketPathMap) window.PacketPathMap.open(viewPathBtn.dataset.viewPath);"),
+    assert.ok(src.includes("openViewPath(viewPathBtn.dataset.viewPath, false);"),
+      'clicking View Path must go through openViewPath(hash, false)');
+    // #978: openViewPath opens the modal in place (restore() only for a
+    // ?viewPath=1 URL), or shows the load-error notice without the module.
+    const fn = src.slice(src.indexOf('function openViewPath('), src.indexOf('function removeViewPathLoadError('));
+    assert.ok(fn.includes('if (!window.PacketPathMap) { showViewPathLoadError(hash); return; }'), 'without the module, openViewPath must show the notice');
+    assert.ok(fn.includes('else window.PacketPathMap.open(hash);'),
       'clicking View Path must call PacketPathMap.open in place, matching the ?viewPath=1 deep-link behavior');
   });
 

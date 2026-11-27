@@ -1937,8 +1937,15 @@ body.scroll-locked { overflow: hidden; }
  * detail is a side pane and the nav and the search stay above the modal
  * (#180), so the rule stops there. */
 @media (max-width: 1023px) {
-  #packetPathModal.modal-overlay { z-index: var(--z-modal); }
+  #packetPathModal.modal-overlay,
+  #packetPathLoadError.modal-overlay { z-index: var(--z-modal); }
 }
+/* #978: "Try again" in the View Path modal and in its load-error notice;
+ * .btn keeps them at least 48 px tall for a finger. */
+.packet-path-retry { margin-top: 12px; }
+.packet-path-load-error h3 { margin: 0 0 8px; }
+.packet-path-load-error p { margin: 0 0 16px; color: var(--text-muted); }
+.packet-path-load-error-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .modal {
   /* #1059: fluid via min(); cap height at 90vh; internal scroll.
      MINOR-6: dropped redundant `width: ...` — `max-width: min(90vw, 500px)`
