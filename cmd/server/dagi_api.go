@@ -467,10 +467,42 @@ func (s *Server) handleConfigDagiPolygons(w http.ResponseWriter, r *http.Request
 	h := w.Header()
 	h.Set("Cache-Control", "public, max-age="+dagiPolygonsMaxAge)
 	h.Set("ETag", tag)
-	if r.Header.Get("If-None-Match") == tag {
+	if etagNoneMatchHits(r.Header.Values("If-None-Match"), tag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 	h.Set("Content-Type", "application/json")
 	w.Write(append(body, '\n'))
+}
+
+// etagNoneMatchHits reports whether If-None-Match header values name tag,
+// by RFC 9110's weak comparison (13.1.2): "*", or any entity tag in the
+// list whose opaque part equals tag's, with or without W/. A tag's
+// characters may include commas, so the list is scanned tag by tag.
+func etagNoneMatchHits(values []string, tag string) bool {
+	tag = strings.TrimPrefix(tag, "W/")
+	for _, v := range values {
+		for {
+			v = strings.TrimLeft(v, " \t,")
+			if v == "" {
+				break
+			}
+			if v[0] == '*' {
+				return true
+			}
+			v = strings.TrimPrefix(v, "W/")
+			if v == "" || v[0] != '"' {
+				break // malformed: no further tag can be read
+			}
+			end := strings.IndexByte(v[1:], '"')
+			if end < 0 {
+				break
+			}
+			if v[:end+2] == tag {
+				return true
+			}
+			v = v[end+2:]
+		}
+	}
+	return false
 }

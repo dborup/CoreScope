@@ -82,13 +82,19 @@ func seedDagi(t *testing.T, db *DB) {
 
 func dagiSeedPacket(t *testing.T, db *DB, i int, decoded string, typ int, from string, obs int, ts time.Time) {
 	t.Helper()
-	res, err := db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, from_pubkey) VALUES ('AA', ?, ?, 1, ?, ?, ?)`,
-		fmt.Sprintf("%016x", i+1), ts.Format(time.RFC3339), typ, decoded, from)
+	dagiSeedFrame(t, db, i, "AA", "[]", decoded, typ, from, obs, ts)
+}
+
+// dagiSeedFrame is dagiSeedPacket with the frame's raw hex and path.
+func dagiSeedFrame(t *testing.T, db *DB, i int, raw, path, decoded string, typ int, from string, obs int, ts time.Time) {
+	t.Helper()
+	res, err := db.conn.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, route_type, payload_type, decoded_json, from_pubkey) VALUES (?, ?, ?, 1, ?, ?, ?)`,
+		raw, fmt.Sprintf("%016x", i+1), ts.Format(time.RFC3339), typ, decoded, from)
 	if err != nil {
 		t.Fatal(err)
 	}
 	id, _ := res.LastInsertId()
-	if _, err := db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp) VALUES (?, ?, 5, -90, '[]', ?)`, id, obs, ts.Unix()); err != nil {
+	if _, err := db.conn.Exec(`INSERT INTO observations (transmission_id, observer_idx, snr, rssi, path_json, timestamp) VALUES (?, ?, 5, -90, ?, ?)`, id, obs, path, ts.Unix()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -100,9 +106,15 @@ func dagiHash(i int) string { return fmt.Sprintf("%016x", i+1) }
 // from the store, "fallback" through the store's SQL history fallback.
 func newDagiServer(t *testing.T, cfg *Config, mode string) (*Server, *mux.Router) {
 	t.Helper()
+	return newDagiServerSeeded(t, cfg, mode, seedDagi)
+}
+
+// newDagiServerSeeded is newDagiServer over the rows seed writes.
+func newDagiServerSeeded(t *testing.T, cfg *Config, mode string, seed func(*testing.T, *DB)) (*Server, *mux.Router) {
+	t.Helper()
 	db := setupTestDB(t)
 	t.Cleanup(func() { db.Close() })
-	seedDagi(t, db)
+	seed(t, db)
 	srv := NewServer(db, cfg, NewHub())
 	srv.store = NewPacketStore(db, nil)
 	srv.store.config = cfg
@@ -309,7 +321,13 @@ func TestNodeScopeKey(t *testing.T) {
 		seen[k] = sel
 	}
 	// An area param that holds the separator cannot smuggle a selection in:
-	// it stays one (unknown) area.
+	// it stays one (unknown) area, and never becomes the configured area
+	// the separator was put into.
+	for raw, configured := range map[string]string{"AA\x00R": "AAR", "\x00BEL": "BEL", "BEL\x00": "BEL"} {
+		if got := nodeScopeKey(raw, dagiSelection{}); got == configured || !strings.Contains(got, "\uFFFD") {
+			t.Errorf("area %q has key %q", raw, got)
+		}
+	}
 	for _, raw := range []string{"\x00kommune=0751", "BEL\x00", "\x00"} {
 		key := nodeScopeKey(raw, dagiSelection{})
 		if _, _, ok := splitNodeScopeKey(key); ok {
@@ -685,8 +703,18 @@ func TestDagiPolygonsEndpoint(t *testing.T) {
 	if cc != "public, max-age=86400" || !strings.HasPrefix(tag, `"`) || len(tag) < 10 {
 		t.Errorf("Cache-Control %q ETag %q", cc, tag)
 	}
-	if w2 := dagiGet(t, router, "/api/config/dagi/polygons?layer=kommune&code=0751", "If-None-Match", tag); w2.Code != 304 || w2.Body.Len() != 0 {
-		t.Errorf("revalidation: %d, %d bytes", w2.Code, w2.Body.Len())
+	// Revalidation compares weakly (RFC 9110 13.1.2): a proxy that weakens
+	// the tag, or a cache that sends several, still gets its 304.
+	for _, inm := range []string{tag, "W/" + tag, `"stale", ` + tag, `W/"stale",W/` + tag, "*"} {
+		if w2 := dagiGet(t, router, "/api/config/dagi/polygons?layer=kommune&code=0751", "If-None-Match", inm); w2.Code != 304 || w2.Body.Len() != 0 {
+			t.Errorf("If-None-Match %s: %d, %d bytes", inm, w2.Code, w2.Body.Len())
+		}
+	}
+	// A stale tag gets the boundary again.
+	for _, inm := range []string{`"` + strings.Repeat("0", 24) + `"`, `"stale", W/"older"`, strings.Trim(tag, `"`)} {
+		if w2 := dagiGet(t, router, "/api/config/dagi/polygons?layer=kommune&code=0751", "If-None-Match", inm); w2.Code != 200 || w2.Body.String() != w.Body.String() {
+			t.Errorf("If-None-Match %s: %d, %d bytes", inm, w2.Code, w2.Body.Len())
+		}
 	}
 	if w2 := dagiGet(t, router, "/api/config/dagi/polygons?layer=kommune&code=0101"); w2.Header().Get("ETag") == tag {
 		t.Error("two boundaries share an ETag")
@@ -701,6 +729,49 @@ func TestDagiPolygonsEndpoint(t *testing.T) {
 	for _, f := range grp.Features {
 		if f.Group != "1050" || f.Name != "København K" {
 			t.Errorf("member %+v", f.Code)
+		}
+	}
+	// A regular postnummer that shares its name with street postcodes
+	// (1799 København V) is a member like them.
+	pn := &idx.layers[DagiPostnummer]
+	if f := pn.features[pn.byCode["1799"]]; f.street || f.area.Name != "København V" {
+		t.Fatalf("1799 is no regular København V postcode: %+v", f.area)
+	}
+	var v DagiPolygonsResponse
+	dagiGetJSON(t, router, "/api/config/dagi/polygons?layer=postnummer&code=1799", &v)
+	has1799 := false
+	for _, f := range v.Features {
+		has1799 = has1799 || f.Code == "1799"
+		if f.Group != "1550" {
+			t.Errorf("group 1550 member %s: group %q", f.Code, f.Group)
+		}
+	}
+	if !has1799 || len(v.Features) != 150 {
+		t.Errorf("group 1550: %d features, 1799 among them %v", len(v.Features), has1799)
+	}
+	// Across the layer, group is set exactly on the codes a config entry
+	// groups.
+	var cfgResp DagiConfigResponse
+	dagiGetJSON(t, router, "/api/config/dagi", &cfgResp)
+	groupOf := map[string]string{}
+	for _, l := range cfgResp.Layers {
+		if l.Param != "postnr" {
+			continue
+		}
+		for _, a := range l.Areas {
+			for _, c := range a.Codes {
+				groupOf[c] = a.Code
+			}
+		}
+	}
+	var layer DagiPolygonsResponse
+	dagiGetJSON(t, router, "/api/config/dagi/polygons?layer=postnummer", &layer)
+	if len(layer.Features) != len(pn.features) || len(groupOf) != 232+150+105 {
+		t.Fatalf("postnummer layer %d features, %d grouped codes", len(layer.Features), len(groupOf))
+	}
+	for _, f := range layer.Features {
+		if f.Group != groupOf[f.Code] {
+			t.Errorf("postnummer %s: group %q, want %q", f.Code, f.Group, groupOf[f.Code])
 		}
 	}
 	var whole DagiPolygonsResponse
@@ -735,6 +806,32 @@ func TestDagiPolygonsEndpoint(t *testing.T) {
 		t.Errorf("kommune layer: %v, %d features", err, len(all.Features))
 	}
 	t.Logf("kommune layer: %d bytes, %d gzipped", len(body), wz.Body.Len())
+}
+
+func TestEtagNoneMatchHits(t *testing.T) {
+	const tag = `"abc"`
+	for _, c := range []struct {
+		values []string
+		want   bool
+	}{
+		{nil, false},
+		{[]string{""}, false},
+		{[]string{`"abc"`}, true},
+		{[]string{`W/"abc"`}, true},
+		{[]string{` "x" , W/"abc" `}, true},
+		{[]string{`"x"`, `"abc"`}, true}, // two header lines
+		{[]string{"*"}, true},
+		{[]string{`"abcd"`, `"ab"`, `abc`, `"abc`}, false},
+		{[]string{`"a,b", "abc"`}, true}, // a comma inside a tag
+		{[]string{`"a,"abc"`}, false},    // the tag "a," then garbage
+	} {
+		if got := etagNoneMatchHits(c.values, tag); got != c.want {
+			t.Errorf("%q: %v, want %v", c.values, got, c.want)
+		}
+	}
+	if !etagNoneMatchHits([]string{`"abc"`}, `W/"abc"`) {
+		t.Error("a weak own tag does not match")
+	}
 }
 
 func TestDagiNodesFilter(t *testing.T) {
@@ -916,6 +1013,62 @@ func TestDagiAreaUnchangedWithoutDagiParams(t *testing.T) {
 	}
 }
 
+// An area param with the separator in it is an unknown area on every
+// endpoint, never the configured area it would spell without the
+// separator.
+func TestDagiAreaWithSeparatorStaysUnknown(t *testing.T) {
+	cfg := dagiSeedConfig()
+	cfg.Areas["AAR"] = AreaEntry{Label: "Aarhus C and N", Polygon: [][2]float64{{56.14, 10.19}, {56.19, 10.19}, {56.19, 10.23}, {56.14, 10.23}}}
+	_, router := newDagiServer(t, cfg, "memory")
+	var bad, unknown, aar dagiNodesPage
+	dagiGetJSON(t, router, "/api/nodes?limit=100&area=AA%00R", &bad)
+	dagiGetJSON(t, router, "/api/nodes?limit=100&area=NOPE", &unknown)
+	dagiGetJSON(t, router, "/api/nodes?limit=100&area=AAR", &aar)
+	if len(aar.keys()) != 2 || !reflect.DeepEqual(bad.keys(), unknown.keys()) {
+		t.Errorf("nodes: AA\\0R %v, NOPE %v, AAR %v", bad.keys(), unknown.keys(), aar.keys())
+	}
+	// The endpoints that drop an unknown area answer unfiltered.
+	for _, p := range []string{"/api/nodes/bulk-health?limit=100", "/api/packets?limit=100", "/api/nodes/clock-skew"} {
+		got := dagiStripVolatile(dagiGet(t, router, p+"&area=AA%00R").Body.String())
+		if want := dagiStripVolatile(dagiGet(t, router, p+"&area=NOPE").Body.String()); got != want {
+			t.Errorf("%s: AA\\0R answers\n%s\nwant what NOPE answers\n%s", p, got, want)
+		}
+	}
+	// The analytics endpoints answer 400, as before.
+	if w := dagiGet(t, router, "/api/analytics/rf?area=AA%00R"); w.Code != 400 {
+		t.Errorf("rf: %d", w.Code)
+	}
+}
+
+// The store builds a fresh grouped result on every call, cache hit or
+// not, so the handler may write its page fields and the DAGI block into it.
+func TestQueryGroupedPacketsResultNotShared(t *testing.T) {
+	for _, mode := range []string{"memory", "fallback"} {
+		srv, router := newDagiServer(t, dagiSeedConfig(), mode)
+		q := PacketQuery{Limit: 5}
+		if mode == "fallback" {
+			q.Since = "2026-01-01T00:00:00Z"
+		}
+		first := srv.store.QueryGroupedPackets(q)
+		if len(first.Packets) == 0 {
+			t.Fatalf("%s: no packets", mode)
+		}
+		first.Limit, first.Offset, first.Dagi = 99, 7, &DagiFilterInfo{UnpositionedHidden: 3}
+		first.Packets[0]["dagi_probe"] = true
+		second := srv.store.QueryGroupedPackets(q) // within the 3 s cache
+		if second == first || second.Dagi != nil || second.Limit == 99 || second.Packets[0]["dagi_probe"] != nil {
+			t.Errorf("%s: the second call shares the first's result: %+v", mode, second)
+		}
+		// End to end: a DAGI page leaves no DAGI block on the next one.
+		if !strings.Contains(dagiGet(t, router, "/api/packets?groupByHash=true&kommune=0751").Body.String(), `"dagi"`) {
+			t.Errorf("%s: the DAGI page has no dagi block", mode)
+		}
+		if body := dagiGet(t, router, "/api/packets?groupByHash=true").Body.String(); strings.Contains(body, `"dagi"`) {
+			t.Errorf("%s: a plain page after a DAGI page: %s", mode, body)
+		}
+	}
+}
+
 // A packet query filters with the snapshot the handler pinned, not a
 // newer one: the list and its hidden count come from one state.
 func TestDagiPacketQueryUsesPinnedSnapshot(t *testing.T) {
@@ -1025,6 +1178,201 @@ func TestDagiAnalyticsEndpoints(t *testing.T) {
 	sort.Strings(got)
 	if !reflect.DeepEqual(got, dagiKeys(0, 1)) {
 		t.Errorf("bulk-health 0751: %v", got)
+	}
+}
+
+// seedDagiRelayed is seedDagi plus relayed adverts with real frames and
+// advert timestamps, so topology, distance, hash sizes and the clock skew
+// have something an area can take away.
+func seedDagiRelayed(t *testing.T, db *DB) {
+	t.Helper()
+	seedDagi(t, db)
+	now := time.Now().UTC().Add(-30 * time.Second)
+	for i, r := range []struct {
+		node     int    // the sender (dagiSeedNodes)
+		pathByte string // hash size and hop count
+		hop      string // the relay, a seed node's key prefix
+		skew     int    // advert clock minus observation clock, seconds
+	}{
+		{0, "41", "2222", -600}, // Aarhus C via Aarhus N, 2-byte hashes
+		{1, "01", "11", 0},      // Aarhus N via Aarhus C
+		{2, "01", "44", 300},    // Kbh K via Frederiksberg C
+		{3, "01", "33", 0},      // Frederiksberg C via Kbh K
+		{4, "01", "11", 120},    // Odense via Aarhus C
+	} {
+		n := dagiSeedNodes[r.node]
+		decoded := fmt.Sprintf(`{"type":"ADVERT","pubKey":%q,"name":%q,"timestamp":%d}`, n.pk, n.name, now.Unix()+int64(r.skew))
+		dagiSeedFrame(t, db, 100+i, "11"+r.pathByte+r.hop+"00", fmt.Sprintf(`[%q]`, r.hop), decoded, 4, n.pk, n.obs, now)
+	}
+}
+
+// dagiSortedList is a top-level JSON list with its elements sorted: the
+// fleet clock skew lists nodes in map order.
+func dagiSortedList(s string) string {
+	var items []json.RawMessage
+	if !strings.HasPrefix(s, "[") || json.Unmarshal([]byte(s), &items) != nil {
+		return s
+	}
+	out := make([]string, len(items))
+	for i, it := range items {
+		out[i] = string(it)
+	}
+	sort.Strings(out)
+	return "[" + strings.Join(out, ",") + "]"
+}
+
+// dagiScopedEndpoints is every endpoint that takes area and so the DAGI
+// params; a new one goes here.
+var dagiScopedEndpoints = []string{
+	"/api/analytics/rf",
+	"/api/analytics/topology",
+	"/api/analytics/channels",
+	"/api/analytics/distance",
+	"/api/analytics/hash-sizes",
+	"/api/analytics/hash-collisions",
+	"/api/analytics/advert-intervals",
+	"/api/analytics/advert-intervals/bucket?class=flood&interval_s=3600&snapped=true",
+	"/api/nodes/clock-skew",
+	"/api/nodes/bulk-health?limit=100",
+}
+
+// dagiScopedEndpoints is complete: it lists exactly the routes whose
+// handler reads its scope through analyticsScope or lenientScope.
+func TestDagiScopedEndpointsComplete(t *testing.T) {
+	scoped := map[string]bool{} // handler method → it reads a DAGI scope
+	routes := map[string]string{}
+	fset := token.NewFileSet()
+	entries, _ := os.ReadDir(".")
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				switch sel.Sel.Name {
+				case "analyticsScope", "lenientScope":
+					scoped[fn.Name.Name] = true
+				case "HandleFunc":
+					if len(call.Args) == 2 {
+						lit, ok1 := call.Args[0].(*ast.BasicLit)
+						h, ok2 := call.Args[1].(*ast.SelectorExpr)
+						if ok1 && ok2 && lit.Kind == token.STRING {
+							path, _ := strconv.Unquote(lit.Value)
+							routes[path] = h.Sel.Name
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	want := []string{}
+	for path, h := range routes {
+		if scoped[h] {
+			want = append(want, path)
+		}
+	}
+	listed := []string{}
+	for _, ep := range dagiScopedEndpoints {
+		listed = append(listed, strings.SplitN(ep, "?", 2)[0])
+	}
+	sort.Strings(want)
+	sort.Strings(listed)
+	if len(want) < 10 || !reflect.DeepEqual(want, listed) {
+		t.Errorf("routes with a DAGI scope %v, dagiScopedEndpoints %v", want, listed)
+	}
+}
+
+// A DAGI selection filters every endpoint that takes area the way area
+// does: it answers what a configured area with the same members answers,
+// which is not the unfiltered answer, and a known code nobody is in
+// answers what another empty selection answers.
+func TestDagiSelectionFiltersLikeArea(t *testing.T) {
+	cfg := dagiSeedConfig()
+	cfg.Areas["AAR"] = AreaEntry{Label: "Aarhus C and N", Polygon: [][2]float64{{56.14, 10.19}, {56.19, 10.19}, {56.19, 10.23}, {56.14, 10.23}}}
+	cfg.Areas["KBH"] = AreaEntry{Label: "Kbh K and Frederiksberg C", Polygon: [][2]float64{{55.67, 12.53}, {55.69, 12.53}, {55.69, 12.60}, {55.67, 12.60}}}
+	srv, router := newDagiServerSeeded(t, cfg, "memory", seedDagiRelayed)
+	cases := []struct{ sel, like string }{
+		{"kommune=0751", "area=AAR"},
+		{"dkregion=1084", "area=KBH"},
+		{"kommune=0751&area=AARC", "area=AARC"},
+	}
+	// The premise: each area holds exactly its selection's nodes.
+	for _, c := range cases {
+		var bySel, byArea dagiNodesPage
+		dagiGetJSON(t, router, "/api/nodes?limit=100&"+c.sel, &bySel)
+		dagiGetJSON(t, router, "/api/nodes?limit=100&"+c.like, &byArea)
+		if len(byArea.keys()) == 0 || !reflect.DeepEqual(bySel.keys(), byArea.keys()) {
+			t.Fatalf("%s holds %v, %s %v", c.like, byArea.keys(), c.sel, bySel.keys())
+		}
+	}
+	srv.store.TriggerDistanceIndexBuild()
+	for deadline := time.Now().Add(5 * time.Second); !srv.store.DistanceIndexBuilt(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("distance index not built")
+		}
+	}
+	rows := []advertIntervalNodeRow{}
+	for _, n := range dagiSeedNodes {
+		r := aaRow(n.pk, "repeater", nil, aaEst(3600, advertConfidenceHigh, true), aaNone(advertIntervalNoneObserved))
+		r.name = n.name
+		rows = append(rows, r)
+	}
+	aabPublish(t, srv, aabSnapshot(rows, aabAt), false)
+
+	for _, ep := range dagiScopedEndpoints {
+		t.Run(ep, func(t *testing.T) {
+			sep := "?"
+			if strings.Contains(ep, "?") {
+				sep = "&"
+			}
+			body := func(q string) string {
+				t.Helper()
+				path := ep
+				if q != "" {
+					path += sep + q
+				}
+				w := dagiGet(t, router, path)
+				if w.Code != 200 {
+					t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+				}
+				return dagiSortedList(dagiStripVolatile(w.Body.String()))
+			}
+			all := body("")
+			for _, c := range cases {
+				like := body(c.like)
+				if like == all {
+					t.Fatalf("the seed is too thin: %s does not change the answer", c.like)
+				}
+				if got := body(c.sel); got != like {
+					t.Errorf("%s answers\n%s\nwant what %s answers\n%s", c.sel, got, c.like, like)
+				}
+			}
+			empty := body("kommune=0860")
+			if empty == all {
+				t.Errorf("kommune=0860 (nobody in it) answers the unfiltered answer")
+			}
+			if other := body("dkregion=1081"); other != empty {
+				t.Errorf("two empty selections differ:\n%s\n%s", empty, other)
+			}
+		})
 	}
 }
 
