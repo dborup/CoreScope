@@ -61,7 +61,7 @@ Click a pill to select that area. Click again (or click the active pill) to dese
 
 ## Danish areas (DAGI)
 
-A second, separate filter scopes the **Nodes** page to one Danish administrative area: a kommune, a landsdel, a region or a postnummer. The boundaries come from DAGI (Danmarks Administrative Geografiske Inddeling) and ship with the server, so there is nothing to configure. An operator can switch them off with `"dagi": { "enabled": false }` in `config.json`. Without DAGI the control does not appear.
+A second, separate filter scopes the **Nodes**, **Packets** and **Map** pages to one Danish administrative area: a kommune, a landsdel, a region or a postnummer. The boundaries come from DAGI (Danmarks Administrative Geografiske Inddeling) and ship with the server, so there is nothing to configure. An operator can switch them off with `"dagi": { "enabled": false }` in `config.json`. Without DAGI the control does not appear.
 
 Like the area filter, it works on the **node's own GPS position**, not on where an observer is. The region filter (observer IATA) and the area filter still apply, and all of them are combined: a node must pass every active filter.
 
@@ -108,15 +108,27 @@ A node with no GPS position (none, or 0,0) is in no area, so an active Danish-ar
 
 A node at sea, off the coast, matches no kommune either.
 
-### Packets and the other pages
+### Packets
 
-So far the control is on the **Nodes** page only. The API also accepts the same parameters on `/api/packets` and on the analytics endpoints that take `area`.
+The control sits beside the area filter (under **Filters** on a phone). On packets, the filter works like `area`: it keeps only **ADVERT** packets whose sender is in the area, because only an ADVERT names its sender's public key. Other packets (channel messages, direct messages, traces and so on) are not shown while a Danish-area filter is active, and the page says so under the filter bar, with the count of nodes that have no position.
 
-On packets, the filter works like `area`: it keeps only **ADVERT** packets, because only an ADVERT names its sender's public key. The Packets page will say so when it gets the control.
+Live packets follow the same rule. When you pick an area, the page fetches that area's nodes once and checks each live ADVERT's sender against them, so no request is made per packet. A node that gets a position in the area while the page is open is only included after the next pick or visit.
+
+### Map
+
+The control sits in the map controls panel. It filters the node markers, and draws the selected area's outline (in the geo-filter colour) with the DAGI credit in the map's attribution.
+
+- **A pick** in the control zooms the map to the area.
+- **A link** (or a return to the Map with a saved choice) draws the outline where the map already is, and does not move it: a link may carry its own view.
+- The outline is fetched once per area and cached by the browser for a day; panning and zooming fetch nothing. ✕ removes it.
+
+### Other pages
+
+The API also accepts the same parameters on the analytics endpoints that take `area`; the analytics pages do not have the control yet.
 
 ### Credit
 
-The boundaries and names are DAGI data: "Indeholder data fra Klimadatastyrelsen, DAGI, november 2026, CC BY 4.0 — data bearbejdet". The picker's footer shows this credit with links to the [licence](https://creativecommons.org/licenses/by/4.0/) and the [terms](https://dataforsyningen.dk/Vilkaar).
+The boundaries and names are DAGI data: "Indeholder data fra Klimadatastyrelsen, DAGI, november 2026, CC BY 4.0 — data bearbejdet". The picker's footer shows this credit with links to the [licence](https://creativecommons.org/licenses/by/4.0/) and the [terms](https://dataforsyningen.dk/Vilkaar), and the Map's attribution shows it while an outline is drawn.
 
 ## Area Map tool
 
@@ -169,3 +181,9 @@ GET /api/config/dagi
 ```
 
 Returns the Danish areas per layer (`layer`, its filter `param` and the `areas` with `code` and `name`), the credit and the source and licence links. Used by the Danish-area picker. With DAGI off it returns `{"enabled": false, "layers": []}`.
+
+```
+GET /api/config/dagi/polygons?layer=<kommune|landsdel|region|postnummer>&code=<code>
+```
+
+Returns one area's boundary rings (delta-encoded in `quantum` degrees) and the credit, cacheable for a day with an ETag. Used by the Map to draw the selected area's outline. A street postcode returns its whole group.

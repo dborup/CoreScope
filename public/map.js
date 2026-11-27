@@ -41,6 +41,8 @@
   const mapTimers = new Set(); // pending mapTimeout() ids, cleared by destroy()
   let areaNodesHandler = null;   // AreaFilter listeners, removed by destroy()
   let areaOutlineHandler = null;
+  let dagiChangeHandler = null;  // #740 M3b: DagiFilter listener and the
+  let dagiOutline = null;        // selected area's outline, both of this mount
   let mapThemeObs = null;        // theme observer and tile-provider listener
   let tileProviderHandler = null; // of this mount, removed by destroy()
   let creditObs = null;          // #839 credit-height observer, removed by destroy()
@@ -261,6 +263,7 @@
             <label id="mcSelectedAreaLabel" for="mcSelectedArea" style="display:none"><input type="checkbox" id="mcSelectedArea"> Selected area outline</label>
           </fieldset>
           <div id="mapAreaFilter"></div>
+          <div id="mapDagiFilter" class="dagi-filter-container" style="display:none"></div>
           <fieldset class="mc-section">
             <legend class="mc-label">Status</legend>
             <div class="filter-group" id="mcStatusFilter">
@@ -699,6 +702,26 @@
 
     AreaFilter.init(document.getElementById('mapAreaFilter'));
     areaNodesHandler = AreaFilter.onChange(function () { loadNodes(); });
+
+    // #740 M3b: the Danish areas filter and its selected area's outline. A
+    // pick reloads the nodes and fits the map to the area; a cold link (or a
+    // return to the page) draws it where the map already looks, as the link
+    // may carry its own view (#740 owner decision 7).
+    if (window.DagiFilter && window.DagiOutline) {
+      DagiFilter.init(document.getElementById('mapDagiFilter'), { beside: document.getElementById('mapControls') });
+      dagiOutline = DagiOutline.create({
+        L, map,
+        fetchJson: function (q) {
+          return fetch('/api/config/dagi/polygons?' + q)
+            .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)); });
+        },
+        decode: DagiFilter.decodeRings,
+        color: function () { return getComputedStyle(document.documentElement).getPropertyValue('--geo-filter-color').trim(); },
+        escape: safeEsc,
+      });
+      dagiChangeHandler = DagiFilter.onChange(function () { loadNodes(); refreshDagiOutline(true); });
+      DagiFilter.ready().then(function () { if (alive()) refreshDagiOutline(false); });
+    }
 
     // Status filter buttons
     document.querySelectorAll('#mcStatusFilter .btn').forEach(btn => {
@@ -1907,6 +1930,15 @@
     return p;
   }
 
+  // The DAGI outline follows the checked selection (polygonQuery() is '' for
+  // none or an unchecked code). fit: only on a user's pick.
+  function refreshDagiOutline(fit) {
+    if (!dagiOutline) return;
+    const q = window.DagiFilter ? DagiFilter.polygonQuery() : '';
+    if (q) dagiOutline.show(q, { fit: fit });
+    else dagiOutline.clear();
+  }
+
   async function loadNodesRequest(req, alive) {
     const current = () => alive() && req === nodesLoadGeneration && !!map;
     const stale = () => (alive() ? nodesLoadPromise : undefined);
@@ -1919,10 +1951,16 @@
       REGION_NAMES = regions;
 
       const aqs = AreaFilter.areaQueryString();
+      // #740 M3b: a DAGI code is sent only once /api/config/dagi has checked it.
+      if (window.DagiFilter) {
+        await DagiFilter.ready();
+        if (!current()) return stale();
+      }
+      const dqs = window.DagiFilter ? DagiFilter.queryString() : '';
       // Paginate past the server's per-request node cap (listLimits.nodesMax)
       // so actively-relaying repeaters that last advertised hours ago still
       // appear instead of being truncated by the top-N window. See fetchAllNodes.
-      const data = await fetchAllNodes(`&lastHeard=${filters.lastHeard}${aqs}`, { ttl: CLIENT_TTL.nodeList });
+      const data = await fetchAllNodes(`&lastHeard=${filters.lastHeard}${aqs}${dqs}`, { ttl: CLIENT_TTL.nodeList });
       if (!current()) return stale();
 
       // Load observers for jump buttons + map markers
@@ -3704,6 +3742,11 @@
     if (areaNodesHandler) AreaFilter.offChange(areaNodesHandler);
     if (areaOutlineHandler) AreaFilter.offChange(areaOutlineHandler);
     areaNodesHandler = areaOutlineHandler = null;
+    if (dagiChangeHandler) DagiFilter.offChange(dagiChangeHandler);
+    dagiChangeHandler = null;
+    if (window.DagiFilter) DagiFilter.release(document.getElementById('mapDagiFilter'));
+    if (dagiOutline) dagiOutline.clear();
+    dagiOutline = null;
     // #123: one theme observer and tile-provider listener per mount; before
     // this every mount added both for good, and each kept setting URLs on
     // its removed map's tile layer.

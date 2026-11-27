@@ -31,6 +31,7 @@
   var SEARCH_CAP = 30;           // rows shown per layer while searching
   var SEARCH_DEBOUNCE_MS = 100;
   var SHEET_QUERY = '(max-width: 600px)'; // keep in step with style.css
+  var BESIDE_GAP = 8;            // px between a `beside` popover and its anchor
 
   var _sel = null;       // {param, code}, or null for all of Denmark
   var _valid = false;    // _sel has been checked against the config
@@ -168,6 +169,37 @@
     return (n === 1 ? '1 node has' : n + ' nodes have') +
       ' no position, so no Danish-area filter can include ' + (n === 1 ? 'it' : 'them') +
       '. The count covers all nodes, before the other filters.';
+  }
+
+  /** GET /api/config/dagi/polygons as Leaflet rings: every feature's
+   *  rings, each [lon0, lat0, dlon, dlat, …] in quantum degrees with the
+   *  closing vertex implicit, summed and swapped to [lat, lon]. The rings
+   *  are one even-odd shape (holes and islands alike), so they are drawn as
+   *  one polygon. bounds is [[south, west], [north, east]], null for none. */
+  function decodeRings(resp) {
+    var out = { rings: [], bounds: null, vertices: 0 };
+    var q = resp && Number(resp.quantum);
+    if (!q || !isFinite(q) || q <= 0 || !Array.isArray(resp.features)) return out;
+    var s = Infinity, w = Infinity, n = -Infinity, e = -Infinity;
+    resp.features.forEach(function (f) {
+      if (!f || !Array.isArray(f.rings)) return;
+      f.rings.forEach(function (r) {
+        if (!Array.isArray(r) || r.length < 6) return;
+        var ring = new Array(r.length >> 1);
+        var x = 0, y = 0;
+        for (var i = 0, k = 0; i + 1 < r.length; i += 2, k++) {
+          x += r[i]; y += r[i + 1];
+          var lat = y * q, lon = x * q;
+          ring[k] = [lat, lon];
+          if (lat < s) s = lat; if (lat > n) n = lat;
+          if (lon < w) w = lon; if (lon > e) e = lon;
+        }
+        out.rings.push(ring);
+        out.vertices += ring.length;
+      });
+    });
+    if (out.vertices) out.bounds = [[s, w], [n, e]];
+    return out;
   }
 
   /* ---------- state ---------- */
@@ -318,6 +350,14 @@
     return _sel && _valid ? '&' + hashParam() : '';
   }
 
+  /** "layer=kommune&code=0751" for the polygon endpoint, only once the
+   *  code is known; '' for none. A street-postcode member asks for its
+   *  group, so the group is fetched (and cached) once. */
+  function polygonQuery() {
+    var e = _valid ? findEntry(_sel) : null;
+    return e ? 'layer=' + encodeURIComponent(e.layer) + '&code=' + encodeURIComponent(e.code) : '';
+  }
+
   function triggerLabel() {
     var e = findEntry(_sel);
     if (!e) return 'Denmark: All';
@@ -387,8 +427,8 @@
   }
 
   /** The trigger (and a clear button when something is selected). The picker itself is
-   *  built on first open. */
-  function render(container) {
+   *  built on first open. opts.beside: see init(). */
+  function render(container, opts) {
     if (_ui && _ui.container === container) teardown();
     container.textContent = '';
     if (!_config || !_config.layers.length) {
@@ -415,7 +455,8 @@
     wrap.appendChild(clear);
     container.appendChild(wrap);
 
-    _ui = { container: container, wrap: wrap, trigger: trigger, label: label, clear: clear, panel: null, rows: null, timer: null, offs: [] };
+    _ui = { container: container, wrap: wrap, trigger: trigger, label: label, clear: clear, panel: null, rows: null, timer: null, offs: [],
+      beside: (opts && opts.beside) || null };
     trigger.addEventListener('click', function (e) {
       if (e && e.stopPropagation) e.stopPropagation();
       if (_ui && _ui.panel && !_ui.panel.hidden) close(false); else open();
@@ -465,7 +506,7 @@
     var ui = _ui;
     var backdrop = el('div', 'dagi-backdrop');
     backdrop.hidden = true;
-    var panel = el('div', 'dagi-panel');
+    var panel = el('div', ui.beside ? 'dagi-panel dagi-panel-beside' : 'dagi-panel');
     panel.hidden = true;
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-label', 'Filter by Danish area');
@@ -687,8 +728,23 @@
   function place() {
     var ui = _ui;
     if (!ui || !ui.panel || ui.panel.hidden) return;
-    if (isSheet() || !window.RegionFilter || !window.RegionFilter.placeMenu) ui.panel.style.left = '';
+    ui.panel.style.top = '';
+    if (isSheet()) ui.panel.style.left = '';
+    else if (ui.beside) placeBeside(ui.panel, ui.beside, ui.trigger);
+    else if (!window.RegionFilter || !window.RegionFilter.placeMenu) ui.panel.style.left = '';
     else window.RegionFilter.placeMenu(ui.panel);
+  }
+
+  /** A popover inside a scrolling panel (the Map's controls) would be
+   *  clipped by it, so it is fixed (style.css) to the panel's left, level
+   *  with the trigger and kept inside the viewport. */
+  function placeBeside(panel, anchor, trigger) {
+    var a = anchor.getBoundingClientRect();
+    var m = panel.getBoundingClientRect();
+    var vh = window.innerHeight || document.documentElement.clientHeight;
+    var top = Math.min(trigger.getBoundingClientRect().top, vh - BESIDE_GAP - m.height);
+    panel.style.left = Math.max(BESIDE_GAP, a.left - m.width - BESIDE_GAP) + 'px';
+    panel.style.top = Math.max(BESIDE_GAP, top) + 'px';
   }
 
   function listen(target, type, fn, capture) {
@@ -754,12 +810,16 @@
     if (container && container === _container) _container = null;
   }
 
-  function initFilter(container) {
+  /** Renders the control into container once the config has loaded.
+   *  opts.beside (optional): an element the control sits in that scrolls
+   *  (the Map's controls panel); on desktop the picker then opens beside
+   *  it instead of under the trigger, where the panel would clip it. */
+  function initFilter(container, opts) {
     if (_container && _container !== container) release(_container);
     _container = container;
     container.style.display = 'none';
     return load().then(function () {
-      if (_container === container) render(container);
+      if (_container === container) render(container, opts);
     });
   }
 
@@ -771,6 +831,8 @@
     getSelected: getSelected,
     hashParam: hashParam,
     queryString: queryString,
+    polygonQuery: polygonQuery,
+    decodeRings: decodeRings,
     triggerLabel: triggerLabel,
     hiddenNotice: hiddenNotice,
     search: search,
