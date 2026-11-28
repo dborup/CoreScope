@@ -127,7 +127,7 @@ The details are:
 
 At least one field must be filled in when you set the details. **Setting the details replaces all of them.** Nothing is merged, so if you change the gain, type your contacts again. The public values are pre-filled for you; the administrator contact never is, because no page can read it.
 
-Station details are for repeaters and room servers, like heights. A claim that sets details is never approved automatically: an administrator always reads it, because the public contact is free text that would otherwise go public unchecked. A claim that only removes things takes effect at once after its advert.
+Station details are for repeaters and room servers, like heights. By default a claim that sets details is never approved automatically: an administrator reads it, because the public contact is free text that would otherwise go public unchecked. A site can choose to approve such claims by itself once the advert proves them (the operator setting `autoApproveDetails`); then your details, including the public contact, are shown as soon as the claim is proven, unless the claim is flagged for a closer look. An administrator can still revoke them later. A claim that only removes things takes effect at once after its advert.
 
 ### The two contacts
 
