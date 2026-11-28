@@ -70,6 +70,16 @@ func inactiveNodeLastSeenSQL(alias string) string {
 // being pruned" case is a distinct, meaningful signal of its own -- it
 // belongs in the planned node-change audit tool, not this feed.
 func (s *Server) computeNewNodes(limit int) ([]NewNodeEntry, error) {
+	entries, _, _, err := s.fetchNewNodes(limit)
+	return entries, err
+}
+
+// fetchNewNodes is computeNewNodes plus what SQL returned before identity
+// filtering: scanned is the number of rows read (up to the point the loop
+// stopped at limit) and oldestScanned the first_seen of the last row read.
+// The Network Digest needs both to tell whether the SQL LIMIT cut off rows
+// -- the filtered list alone undercounts when hidden rows were dropped.
+func (s *Server) fetchNewNodes(limit int) (entries []NewNodeEntry, scanned int, oldestScanned string, err error) {
 	if limit <= 0 || limit > newNodesSQLFetchCap {
 		limit = newNodesSQLFetchCap
 	}
@@ -81,7 +91,7 @@ func (s *Server) computeNewNodes(limit int) ([]NewNodeEntry, error) {
 		ORDER BY n.first_seen DESC
 		LIMIT ?`, newNodesSQLFetchCap)
 	if err != nil {
-		return nil, err
+		return nil, 0, "", err
 	}
 	defer rows.Close()
 
@@ -97,8 +107,10 @@ func (s *Server) computeNewNodes(limit int) ([]NewNodeEntry, error) {
 		// scanned so far as if they were the complete, successful result
 		// would misrepresent a partial fetch as a full one.
 		if err := rows.Scan(&e.PublicKey, &name, &role, &lat, &lon, &e.FirstSeen, &foreignAdvert); err != nil {
-			return nil, fmt.Errorf("computeNewNodes: scan row: %w", err)
+			return nil, 0, "", fmt.Errorf("computeNewNodes: scan row: %w", err)
 		}
+		scanned++
+		oldestScanned = e.FirstSeen
 		e.Foreign = foreignAdvert.Valid && foreignAdvert.Int64 != 0
 		// The node list's identity rule (#1006): blacklisted keys, observer-
 		// blacklisted keys and hidden name prefixes are left out before the
@@ -132,9 +144,9 @@ func (s *Server) computeNewNodes(limit int) ([]NewNodeEntry, error) {
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("computeNewNodes: row iteration: %w", err)
+		return nil, 0, "", fmt.Errorf("computeNewNodes: row iteration: %w", err)
 	}
-	return out, nil
+	return out, scanned, oldestScanned, nil
 }
 
 // handleNewNodes serves Tools > New Nodes: the most recently first-seen

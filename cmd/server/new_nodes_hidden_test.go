@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -204,5 +205,58 @@ func TestComputeNetworkDigest_BlacklistedNotCounted(t *testing.T) {
 	}
 	if digest.NewNodes != 1 {
 		t.Errorf("NewNodes = %d, want 1 (the blacklisted node is not counted)", digest.NewNodes)
+	}
+}
+
+// TestComputeNewNodes_HiddenPrefixIsCaseSensitive pins IsNameHidden's
+// case-sensitive prefix rule on this path (#1009 review N1): "Private" hides
+// "Private x" but not "private y".
+func TestComputeNewNodes_HiddenPrefixIsCaseSensitive(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	ensureInactiveNodesTable(t, srv)
+	srv.cfg.SetHiddenNamePrefixes([]string{"Private"})
+
+	now := time.Now().UTC()
+	insertNewNodeRow(t, srv, "casehidden0000001", "Private x", "repeater", nil, nil, now.Add(-1*time.Minute).Format(time.RFC3339))
+	insertNewNodeRow(t, srv, "casevisible000001", "private y", "repeater", nil, nil, now.Add(-2*time.Minute).Format(time.RFC3339))
+
+	entries, err := srv.computeNewNodes(50)
+	if err != nil {
+		t.Fatalf("computeNewNodes: %v", err)
+	}
+	keys := newNodeKeys(entries)
+	if keys["casehidden0000001"] {
+		t.Errorf(`"Private x" must be hidden by prefix "Private", got %+v`, entries)
+	}
+	if !keys["casevisible000001"] {
+		t.Errorf(`"private y" must stay visible (the prefix match is case-sensitive), got %+v`, entries)
+	}
+}
+
+// TestComputeNetworkDigest_CappedFlagWithHiddenRow (#1009 review F1): the
+// capped flag asks whether the SQL LIMIT cut off rows, so it must be based on
+// the rows SQL returned, not on the list left after hidden rows are dropped.
+// One hidden row among a full fetch still leaves a visible row cut off.
+func TestComputeNetworkDigest_CappedFlagWithHiddenRow(t *testing.T) {
+	srv, _ := setupTestServer(t)
+	ensureInactiveNodesTable(t, srv)
+	ensureNodeChangesTable(t, srv)
+	srv.cfg.SetHiddenNamePrefixes([]string{"~"})
+
+	now := time.Now().UTC()
+	insertNewNodeRow(t, srv, "probehidden000001", "~Hidden", "repeater", nil, nil, now.Format(time.RFC3339))
+	for i := 0; i < newNodesSQLFetchCap; i++ {
+		insertNewNodeRow(t, srv, fmt.Sprintf("probecap%010d01", i), "Cap", "repeater", nil, nil, now.Add(-time.Duration(i+1)*time.Minute).Format(time.RFC3339))
+	}
+
+	d, err := srv.computeNetworkDigest(now.Add(-7*24*time.Hour), "all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.NewNodesCapped {
+		t.Errorf("NewNodesCapped=false although the SQL LIMIT cut off a visible row (NewNodes=%d)", d.NewNodes)
+	}
+	if d.NewNodes != newNodesSQLFetchCap-1 {
+		t.Errorf("NewNodes = %d, want %d (the visible rows of the full fetch)", d.NewNodes, newNodesSQLFetchCap-1)
 	}
 }
