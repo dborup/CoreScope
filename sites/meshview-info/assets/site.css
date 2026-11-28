@@ -28,3 +28,7 @@ body .dash-card { min-width: 0; }
   body .set-row { gap: 12px; }
   body .set-row .v { overflow-wrap: anywhere; }
 }
+@media (max-width: 440px) {
+  body .nav-links { gap: 0 14px; }
+  body .nav-links a { letter-spacing: .03em; }
+}

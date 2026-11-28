@@ -8,11 +8,13 @@ Lokale kilder til de fire selvstændige sider. Ikke CoreScopes `public/` og ikke
 | observer.html | /observer |
 | hardware.html | /hardware |
 | radio.html | /radio |
+| guider.html | /guider |
 
 ## Assets og deployment
 
 HTML bruger `/meshview-info-assets/site.css`, og observer bruger desuden
-`/meshview-info-assets/copy-commands.js`. Fonts hentes relativt til CSS-filen.
+`/meshview-info-assets/copy-commands.js`, og guider bruger
+`/meshview-info-assets/guider.js` og miniaturerne i `assets/guider/`. Fonts hentes relativt til CSS-filen.
 
 Siderne serveres som statiske filer på de offentlige ruter ovenfor
 (skrivebeskyttet, uden om CoreScopes `public/`). De deployes ikke automatisk:
@@ -32,12 +34,25 @@ Fra repoet, med Playwright tilgængelig:
 node sites/meshview-info/test-copy-commands.js
 node sites/meshview-info/test-xss.cjs
 node sites/meshview-info/test-mobile.cjs
+node sites/meshview-info/test-guider.cjs
 ```
 
 Mobiltesten starter/lukker selv en lokal server på en ledig loopback-port,
 bruger syntetiske API-data og blokerer eksterne browserrequests. Den tester
 Chromium ved 320/375/390/768/1280 px. `SCREENSHOT_DIR` kan sættes for billeder.
 Det er ikke en test på fysisk iPhone/Safari eller af produktionens API-data.
+
+## Videoguider (/guider)
+
+Hver guide er et kort i `guider.html` med `data-youtube=""`. Når videoen er lagt
+på YouTube, sættes dens 11-tegns id (fx `data-youtube="dQw4w9WgXcQ"`). Et kort
+uden gyldigt id vises som "Video på vej" og kan ikke afspilles.
+
+Afspilning sker først ved klik: `assets/guider.js` skifter miniaturen ud med en
+`youtube-nocookie.com`-afspiller. Før klikket hentes intet fra YouTube;
+miniaturerne ligger lokalt i `assets/guider/` (640×360 jpg, taget fra videoen).
+Ny guide: læg miniaturen i `assets/guider/`, kopiér et kort, og link til den
+matchende side i `docs/user-guide/`.
 
 ## Fonts
 
