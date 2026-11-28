@@ -23,6 +23,8 @@
   var MOMENT_KINDS = ['newNode', 'backOnline', 'recordLink', 'busiest'];
   var FOLLOW_KINDS = ['relay', 'observer'];
   // newNode -> --mc-moment-new-node
+  // #882 M2 — Live scope colours: --mc-scope-{light|dark}-{1..12|none|unknown|other}.
+  var SCOPE_SUFFIXES = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', 'none', 'unknown', 'other'];
   function _momentVar(k) { return '--mc-moment-' + k.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }
 
   // ── Palettes ────────────────────────────────────────────────────────────
@@ -61,6 +63,8 @@
       // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
       // on the light and the dark card (test-880-m3-follow-customizer.js).
       followAccents: { relay: '#D55E00', observer: '#2E86C1' }
+      // #882 M2 — no scopePalette: the Live scope colours are the stylesheet's
+      // (style.css --scope-*, Okabe-Ito based), so this preset changes nothing.
     },
     {
       id: 'deut',
@@ -92,7 +96,16 @@
       momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' },
       // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
       // on the light and the dark card (test-880-m3-follow-customizer.js).
-      followAccents: { relay: '#FE6100', observer: '#648FFF' }
+      followAccents: { relay: '#FE6100', observer: '#648FFF' },
+      // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
+      // one list per base-map mode: blue / orange / purple / amber axes, lightness-separated (red-green safe).
+      // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
+      scopePalette: {
+        light: ['#2F5FD0', '#C25000', '#6A3FC8', '#8F6400', '#B0175E', '#1D3D8F', '#6E4300', '#4B2A8A', '#C2338A', '#00607A', '#7D4F94', '#A33500',
+          '#a1a1aa', '#57534e', '#111827'],
+        dark:  ['#648FFF', '#FE6100', '#A08CFF', '#FFB000', '#DC267F', '#9DB8FF', '#FFD27A', '#C9B8FF', '#FF8CC6', '#5CC8E6', '#E0A3FF', '#FF9E7A',
+          '#6b7280', '#c4b5a5', '#f8fafc']
+      }
     },
     {
       id: 'prot',
@@ -122,7 +135,16 @@
       momentAccents: { newNode: '#785EF0', backOnline: '#648FFF', recordLink: '#DC267F', busiest: '#FE6100' },
       // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
       // on the light and the dark card (test-880-m3-follow-customizer.js).
-      followAccents: { relay: '#FE6100', observer: '#648FFF' }
+      followAccents: { relay: '#FE6100', observer: '#648FFF' },
+      // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
+      // one list per base-map mode: the deut palette: the same blue / orange / purple / amber axes.
+      // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
+      scopePalette: {
+        light: ['#2F5FD0', '#C25000', '#6A3FC8', '#8F6400', '#B0175E', '#1D3D8F', '#6E4300', '#4B2A8A', '#C2338A', '#00607A', '#7D4F94', '#A33500',
+          '#a1a1aa', '#57534e', '#111827'],
+        dark:  ['#648FFF', '#FE6100', '#A08CFF', '#FFB000', '#DC267F', '#9DB8FF', '#FFD27A', '#C9B8FF', '#FF8CC6', '#5CC8E6', '#E0A3FF', '#FF9E7A',
+          '#6b7280', '#c4b5a5', '#f8fafc']
+      }
     },
     {
       id: 'trit',
@@ -160,7 +182,16 @@
       momentAccents: { newNode: '#2A8F4C', backOnline: '#C04F7F', recordLink: '#B45AA6', busiest: '#CC6677' },
       // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
       // on the light and the dark card (test-880-m3-follow-customizer.js).
-      followAccents: { relay: '#CC6677', observer: '#2A8F4C' }
+      followAccents: { relay: '#CC6677', observer: '#2A8F4C' },
+      // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
+      // one list per base-map mode: Tol muted extended: rose / green / wine / teal (blue-yellow safe).
+      // Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
+      scopePalette: {
+        light: ['#AA3344', '#117733', '#882255', '#7A6A00', '#AA4499', '#44706A', '#5E6B00', '#332288', '#006E8A', '#994455', '#666633', '#B8572A',
+          '#a1a1aa', '#57534e', '#111827'],
+        dark:  ['#EE8899', '#44BB99', '#CC6699', '#DDCC77', '#DD88CC', '#88CCCC', '#BBCC33', '#9988EE', '#66CCEE', '#EEAA88', '#CCCC88', '#E0B0FF',
+          '#6b7280', '#c4b5a5', '#f8fafc']
+      }
     },
     {
       id: 'achromat',
@@ -211,7 +242,19 @@
       momentAccents: { newNode: '#777777', backOnline: '#858585', recordLink: '#6f6f6f', busiest: '#8f8f8f' },
       // #880 M3 — Live "Follow a packet" relay / observer dots, each >= 3:1
       // on the light and the dark card (test-880-m3-follow-customizer.js).
-      followAccents: { relay: '#8f8f8f', observer: '#6f6f6f' }
+      followAccents: { relay: '#8f8f8f', observer: '#6f6f6f' },
+      // #882 M2 — Live scope colours, slots 1-12 then none / unknown / other,
+      // one list per base-map mode: a luminance ramp, darkest first on light tiles, lightest first on dark.
+      // Luminance is the only cue, so the ramp is 14 even steps from black (white) to just above
+      // 3:1 on the tile: slots 1-12, then unknown and other, each step >= 1.13:1 from the next.
+      // "No scope" (most traffic) sits below 3:1, as in the stylesheet's light palette, and
+      // >= 1.79:1 from every slot. Each slot >= 3:1 on the map tile (test-882-m2-scope-customizer.js).
+      scopePalette: {
+        light: ['#000000', '#151515', '#222222', '#2c2c2c', '#363636', '#3f3f3f', '#484848', '#505050', '#595959', '#626262', '#6b6b6b', '#757575',
+          '#a2a2a2', '#7f7f7f', '#898989'],
+        dark:  ['#ffffff', '#f0f0f0', '#e1e1e1', '#d3d3d3', '#c6c6c6', '#b9b9b9', '#adadad', '#a2a2a2', '#979797', '#8d8d8d', '#828282', '#797979',
+          '#525252', '#6f6f6f', '#666666']
+      }
     }
   ];
 
@@ -326,6 +369,15 @@
         if (fa[k]) style.setProperty('--mc-follow-' + k, fa[k]);
         else style.removeProperty('--mc-follow-' + k);
       });
+      // #882 M2 — Live scope colours per mode; style.css reads them through
+      // --scope-* so a customizer colour still wins.
+      var sp = p.scopePalette;
+      ['light', 'dark'].forEach(function (mode) {
+        SCOPE_SUFFIXES.forEach(function (sx, i) {
+          if (sp && sp[mode] && sp[mode][i]) style.setProperty('--mc-scope-' + mode + '-' + sx, sp[mode][i]);
+          else style.removeProperty('--mc-scope-' + mode + '-' + sx);
+        });
+      });
       // #1407 — ROLE_COLORS / ROLE_STYLE are now live getters in roles.js
       // that read --mc-role-* directly, so no explicit sync is needed. The
       // pre-#1407 code path kept them in sync as a workaround for the static
@@ -378,6 +430,9 @@
       });
       MOMENT_KINDS.forEach(function (k) { style.removeProperty(_momentVar(k)); });
       FOLLOW_KINDS.forEach(function (k) { style.removeProperty('--mc-follow-' + k); });
+      ['light', 'dark'].forEach(function (mode) {
+        SCOPE_SUFFIXES.forEach(function (sx) { style.removeProperty('--mc-scope-' + mode + '-' + sx); });
+      });
     }
     if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof window.CustomEvent === 'function') {
       try { window.dispatchEvent(new window.CustomEvent('cb-preset-changed', { detail: { id: null } })); } catch (e) {}
@@ -421,7 +476,8 @@
       TILE_LIGHT: TILE_LIGHT,
       TILE_DARK: TILE_DARK
     },
-    STORAGE_KEY: STORAGE_KEY
+    STORAGE_KEY: STORAGE_KEY,
+    SCOPE_SUFFIXES: SCOPE_SUFFIXES
   };
   if (typeof window !== 'undefined') window.MeshCorePresets = api;
   if (typeof module !== 'undefined') module.exports = api;

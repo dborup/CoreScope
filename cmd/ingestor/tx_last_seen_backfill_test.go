@@ -15,7 +15,29 @@ import (
 // observations. hash must be unique.
 func seedTxNoObs(t *testing.T, s *Store, hash string) int64 {
 	t.Helper()
-	res, err := s.db.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, payload_type, last_seen) VALUES ('aabb', ?, '2026-01-01T00:00:00Z', 1, 0)`, hash)
+	return seedTxWithObs(t, s, hash)
+}
+
+// seedTxWithObs inserts a transmission row with last_seen=0 plus one or
+// more observations at the given unix timestamps.
+//
+// Race this guards against: OpenStore schedules tx_last_seen_backfill_v1
+// in a goroutine. If that goroutine runs between two of the seed INSERTs
+// below, it sees only the first observation, stamps last_seen from it
+// (e.g. 100 instead of 300), and the test's own backfillTxLastSeen call
+// then skips the row because it only selects last_seen = 0. newTestStore
+// and WaitForAsyncMigrations already drain the goroutine before seeding;
+// seeding in one transaction also makes the row and all of its
+// observations appear at once, so a backfill running at any point sees
+// either none of them or all of them.
+func seedTxWithObs(t *testing.T, s *Store, hash string, obsTimestamps ...int64) int64 {
+	t.Helper()
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatalf("begin seed tx for %s: %v", hash, err)
+	}
+	defer tx.Rollback() // no-op after Commit
+	res, err := tx.Exec(`INSERT INTO transmissions (raw_hex, hash, first_seen, payload_type, last_seen) VALUES ('aabb', ?, '2026-01-01T00:00:00Z', 1, 0)`, hash)
 	if err != nil {
 		t.Fatalf("seed transmission %s: %v", hash, err)
 	}
@@ -23,18 +45,13 @@ func seedTxNoObs(t *testing.T, s *Store, hash string) int64 {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return id
-}
-
-// seedTxWithObs inserts a transmission row with last_seen=0 plus one or
-// more observations at the given unix timestamps.
-func seedTxWithObs(t *testing.T, s *Store, hash string, obsTimestamps ...int64) int64 {
-	t.Helper()
-	id := seedTxNoObs(t, s, hash)
 	for _, ts := range obsTimestamps {
-		if _, err := s.db.Exec(`INSERT INTO observations (transmission_id, timestamp) VALUES (?, ?)`, id, ts); err != nil {
+		if _, err := tx.Exec(`INSERT INTO observations (transmission_id, timestamp) VALUES (?, ?)`, id, ts); err != nil {
 			t.Fatalf("seed observation for %s: %v", hash, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit seed tx for %s: %v", hash, err)
 	}
 	return id
 }
