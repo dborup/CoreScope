@@ -75,10 +75,10 @@ const bindFavStars = (el, cb) => { lastBindCb = cb; };
 const window = { ROLE_COLORS: { repeater: '#3b82f6', room: '#a855f7' }, aaBadgeStyle: null };
 
 const M = new Function(
-  'esc', 'getFavorites', 'RegionFilter', 'AreaFilter', 'fetchAllNodes', 'api', 'CLIENT_TTL',
+  'esc', 'getFavorites', 'RegionFilter', 'AreaFilter', '_nodeScopeQs', 'fetchAllNodes', 'api', 'CLIENT_TTL',
   'getHealthStatus', 'getHealthLastHeard', 'getNodeHealth', 'MyMeshObservers', 'renderSkewBadge', 'currentSkewValue', 'favStar', 'timeAgo', 'bindFavStars', 'window',
   block + '\nreturn { renderMyRepeatersTab, _mrStatusCell, _mrSummaryCard };')(
-  esc, getFavorites, RegionFilter, AreaFilter, fetchAllNodes, api, CLIENT_TTL,
+  esc, getFavorites, RegionFilter, AreaFilter, () => AreaFilter.areaQueryString(), fetchAllNodes, api, CLIENT_TTL,
   getHealthStatus, getHealthLastHeard, getNodeHealth, MyMeshObservers, renderSkewBadge, currentSkewValue, favStar, timeAgo, bindFavStars, window);
 
 function makeEl() { return { _h: '', set innerHTML(v) { this._h = v; }, get innerHTML() { return this._h; } }; }

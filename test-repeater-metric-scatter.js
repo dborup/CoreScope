@@ -115,10 +115,10 @@ const setViewParam = (spec, v) => { viewParams[spec.param] = v; };
 CLIENT_TTL.observers = 0;
 
 const M = new Function(
-  'esc', 'window', 'RegionFilter', 'AreaFilter', 'fetchAllNodes', 'getFavorites', 'CLIENT_TTL', 'localStorage',
+  'esc', 'window', 'RegionFilter', 'AreaFilter', '_nodeScopeQs', 'fetchAllNodes', 'getFavorites', 'CLIENT_TTL', 'localStorage',
   'api', 'restoreViewParams', 'setViewParam', 'BUSIEST_SORT', 'BUSIEST_OBSERVERS', 'BUSIEST_LIMIT',
   block + '\nreturn { REPEATER_METRIC_AXES, REPEATER_METRIC_POINT_CAP, _niceCeil, _axisFmt, _axisFromMax, _resolveAxis, _toScatterPoints, _sampleExact, _sampleForPlot, renderMetricScatter, renderRepeaterMetricsTab, _busiestRepeaterRows, renderBusiestRepeatersTable, BUSIEST_DEFAULT_ROWS };')(
-  esc, windowStub, RegionFilter, AreaFilter, fetchAllNodes, getFavorites, CLIENT_TTL, fakeLocalStorage,
+  esc, windowStub, RegionFilter, AreaFilter, () => AreaFilter.areaQueryString(), fetchAllNodes, getFavorites, CLIENT_TTL, fakeLocalStorage,
   api, restoreViewParams, setViewParam, SPECS.BUSIEST_SORT, SPECS.BUSIEST_OBSERVERS, SPECS.BUSIEST_LIMIT);
 
 console.log('\n=== [1] axis registry: all 8 axes exist and read the right point fields ===');

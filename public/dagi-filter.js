@@ -377,6 +377,37 @@
     return true;
   }
 
+  /** #740 M3c: for a page part (an Analytics tab) that does not filter by
+   *  the selection, the line that says so; '' without a checked one. */
+  function notAppliedNotice() {
+    if (!queryString()) return '';
+    return 'The Danish area filter (' + triggerLabel() + ') does not apply to this tab: it shows data from all areas.';
+  }
+
+  // GET /api/analytics/dagi-unpositioned, shared for HIDDEN_TTL_MS.
+  var HIDDEN_URL = '/api/analytics/dagi-unpositioned';
+  var HIDDEN_TTL_MS = 60000;
+  var _hidden = null; // {at, p}
+
+  /** #740 M3c: how many nodes have no position, for hiddenNotice() where the
+   *  page's own answers do not carry dagi.unpositionedHidden (Analytics).
+   *  The count does not depend on the selection, so one request serves
+   *  every tab and selection for a minute. A failed request answers 0 (no
+   *  notice) and is asked again on the next call. */
+  function hiddenCount() {
+    var now = Date.now();
+    if (_hidden && now - _hidden.at < HIDDEN_TTL_MS) return _hidden.p;
+    var entry = { at: now, p: null };
+    entry.p = fetch(HIDDEN_URL)
+      .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)); })
+      .then(function (d) { return Math.max(0, Number(d && d.unpositionedHidden) || 0); }, function () {
+        if (_hidden === entry) _hidden = null;
+        return 0;
+      });
+    _hidden = entry;
+    return entry.p;
+  }
+
   function onChange(fn) { _listeners.push(fn); return fn; }
   function offChange(fn) { _listeners = _listeners.filter(function (f) { return f !== fn; }); }
 
@@ -839,6 +870,8 @@
     decodeRings: decodeRings,
     triggerLabel: triggerLabel,
     hiddenNotice: hiddenNotice,
+    hiddenCount: hiddenCount,
+    notAppliedNotice: notAppliedNotice,
     search: search,
     normalize: normalize,
     onChange: onChange,

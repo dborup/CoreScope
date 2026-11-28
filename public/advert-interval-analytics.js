@@ -146,7 +146,8 @@
   function scopeText(scope) {
     scope = scope || {};
     var region = String(scope.region || '').split(',').filter(Boolean).join(', ');
-    return (region ? 'Region ' + region : 'All regions') + ' · ' + (scope.area ? 'Area ' + scope.area : 'All areas');
+    return (region ? 'Region ' + region : 'All regions') + ' · ' + (scope.area ? 'Area ' + scope.area : 'All areas') +
+      (scope.dagi ? ' · ' + scope.dagi : ''); // DAGI selection label (issue 740, M3c)
   }
 
   /** One <li> per member, linked to its node's adverts of class cls. */
@@ -184,7 +185,7 @@
    * The panel's content. view: { bucket, status: 'loading' | 'error' |
    * 'ready', resp (the bucket response), shown (members loaded so far),
    * chart: { generated_at, nodes } (the histogram the bucket was opened
-   * from), scope: { region, area } (labels of the active filters),
+   * from), scope: { region, area, dagi } (labels of the active filters),
    * error: { status } }.
    */
   function renderBucketPanel(view) {

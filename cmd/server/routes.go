@@ -499,6 +499,7 @@ func (s *Server) RegisterRoutes(r *mux.Router) {
 	r.HandleFunc("/api/analytics/subpath-detail", s.handleAnalyticsSubpathDetail).Methods("GET")
 	r.HandleFunc("/api/analytics/neighbor-graph", s.handleNeighborGraph).Methods("GET")
 	r.HandleFunc("/api/analytics/relay-airtime-share", s.handleAnalyticsRelayAirtimeShare).Methods("GET")
+	r.HandleFunc("/api/analytics/dagi-unpositioned", s.handleAnalyticsDagiUnpositioned).Methods("GET") // #740 M3c
 
 	// Other endpoints
 	r.HandleFunc("/api/resolve-hops", s.handleResolveHops).Methods("GET")
