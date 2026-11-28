@@ -32,3 +32,7 @@ body .dash-card { min-width: 0; }
   body .nav-links { gap: 0 14px; }
   body .nav-links a { letter-spacing: .03em; }
 }
+@media (max-width: 480px) {
+  body .hero .btn-row { gap: 10px; }
+  body .hero .btn-row .btn { padding: 11px 14px; letter-spacing: .03em; min-height: 44px; }
+}
