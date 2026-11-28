@@ -335,6 +335,12 @@
     // so a selection can always be seen and cleared; the notice says where
     // it does not apply. A pick or a clear reloads like the other filters.
     if (window.DagiFilter) {
+      // Until ready() settles, no tab may fetch or render: a theme-refresh
+      // (app.js fires one ~300 ms after /api/config/theme), a tab click or a
+      // Region/Area/window change would otherwise send its requests without
+      // the linked selection, and on a tab without a generation guard that
+      // unfiltered answer could land last. Set before any handler below.
+      _dagiPending = true;
       DagiFilter.init(document.getElementById('analyticsDagiFilter'));
       _dagiChangeHandler = DagiFilter.onChange(function () { _updateDagiNotice(); reloadForFilters(); });
     }
@@ -396,6 +402,7 @@
       const mount = ++_mountGen;
       await DagiFilter.ready();
       if (mount !== _mountGen) return;
+      _dagiPending = false;
     }
     _updateDagiNotice();
 
@@ -415,6 +422,10 @@
   var _areaChangeHandler = null;
   var _dagiChangeHandler = null;
   var _mountGen = 0;      // init() and destroy() bump it (#740 M3c)
+  // True while init() waits for DagiFilter.ready(): renderTab() and
+  // loadAnalytics() are no-ops then, and init() renders the open tab itself
+  // once the selection is checked (#740 M3c review F1).
+  var _dagiPending = false;
   var _dagiNoticeGen = 0;
   let _currentTab = 'overview';
 
@@ -588,6 +599,7 @@
   }
 
   async function loadAnalytics(startedAt) {
+    if (_dagiPending) return;
     _cancelLoadRetry();
     const gen = _loadGen;
     if (startedAt === undefined) { startedAt = Date.now(); _loadStatusHtml = LOADING_HTML; }
@@ -655,6 +667,7 @@
   async function renderTab(tab) {
     const el = document.getElementById('analyticsContent');
     const d = _analyticsData;
+    if (_dagiPending) { el.innerHTML = LOADING_HTML; return; }
     if (LOAD_TABS.has(tab) && !d.rfData) { el.innerHTML = _loadStatusHtml; return; }
     switch (tab) {
       case 'overview': renderOverview(el, d); break;
@@ -3370,7 +3383,10 @@
     return html;
   }
 
+  // Bumped per render; a superseded render drops its answer (#740 M3c F1).
+  let _repeaterMetricsGen = 0;
   async function renderRepeaterMetricsTab(el) {
+    const myGen = ++_repeaterMetricsGen;
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading repeater metrics…</div>';
     try {
       const rq = RegionFilter.regionQueryString() + _nodeScopeQs();
@@ -3380,6 +3396,8 @@
         fetchAllNodes('&sortBy=lastSeen' + rq, { ttl: CLIENT_TTL.nodeList }),
         api('/observers', { ttl: CLIENT_TTL.observers }).catch(() => null),
       ]);
+      // A newer render (filter change, tab switch) owns the panel now.
+      if (myGen !== _repeaterMetricsGen || _currentTab !== 'repeater-metrics') return;
       const nodes = resp.nodes || resp;
       const favs = new Set(typeof getFavorites === 'function' ? getFavorites() : []);
       const points = _toScatterPoints(nodes, favs);
@@ -3622,7 +3640,7 @@
     }
   }
 
-function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; } if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; } _mountGen++; if (_dagiChangeHandler) { DagiFilter.offChange(_dagiChangeHandler); _dagiChangeHandler = null; } if (window.DagiFilter) DagiFilter.release(document.getElementById('analyticsDagiFilter')); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
+function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _stopScopeAudit(); _stopForeignTrafficRefresh(); _stopWardrivingRefresh(); _stopAreasRefresh(); _leaveDistanceTab(); _cancelLoadRetry(); _dagiPending = false; if (_regionChangeHandler) { RegionFilter.offChange(_regionChangeHandler); _regionChangeHandler = null; } if (_areaChangeHandler) { AreaFilter.offChange(_areaChangeHandler); _areaChangeHandler = null; } _mountGen++; if (_dagiChangeHandler) { DagiFilter.offChange(_dagiChangeHandler); _dagiChangeHandler = null; } if (window.DagiFilter) DagiFilter.release(document.getElementById('analyticsDagiFilter')); _analyticsData = {}; _channelData = null; if (_ngState && _ngState.animId) { cancelAnimationFrame(_ngState.animId); } _ngState = null; if (_themeRefreshHandler) { window.removeEventListener('theme-refresh', _themeRefreshHandler); _themeRefreshHandler = null; } }
 
   // Expose for testing
   if (typeof window !== 'undefined') {
@@ -4185,7 +4203,9 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
   }
 
   // --- Prefix Tool ---
+  let _prefixToolGen = 0; // as _repeaterMetricsGen
   async function renderPrefixTool(el) {
+    const myGen = ++_prefixToolGen;
     el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">Loading prefix data…</div>';
 
     const rq = RegionFilter.regionQueryString() + _nodeScopeQs();
@@ -4201,9 +4221,12 @@ function destroy() { _aiLeave(); _stopRolesRefresh(); _stopScopesRefresh(); _sto
         api(withQuery('/analytics/hash-sizes', rq), { ttl: CLIENT_TTL.analyticsRF }).catch(() => null),
       ]);
     } catch (e) {
+      if (myGen !== _prefixToolGen || _currentTab !== 'prefix-tool') return;
       el.innerHTML = `<div class="text-muted" role="alert" style="padding:40px">Failed to load: ${esc(e.message)}</div>`;
       return;
     }
+    // A newer render (filter change, tab switch) owns the panel now.
+    if (myGen !== _prefixToolGen || _currentTab !== 'prefix-tool') return;
 
     // Deduplicate by public_key, require at least 6 hex chars to build all 3 tiers
     const nodeMap = new Map();

@@ -23,6 +23,9 @@
  *     the window request carries both.
  *  6. Caches: a second selection is a new request, never the old answer;
  *     the hidden count is asked for once.
+ *  7. A late /api/config/dagi (review F1): with a theme-refresh and tab
+ *     clicks while it loads, no honouring tab sends an unfiltered request,
+ *     and Repeater Metrics / Prefix Tool settle on the filtered answer.
  *
  * Screenshots for the PR's browser validation go to DAGI_SHOTS_DIR when set.
  * Defaults to localhost:13581 — NEVER point at prod (AGENTS.md). CI sets BASE_URL.
@@ -190,6 +193,43 @@ function assert(c, m) { if (!c) throw new Error(m || 'assertion failed'); }
         assert(got.length && got.every((u) => kommuneOf(u) === '0751'), p + ': ' + got.join(' '));
       }
       assert((await notice(page)) === countText(hidden), 'notice: ' + await notice(page));
+      assert(!bad.length, 'error answers: ' + bad.join(' '));
+      await ctx.close();
+    });
+  }
+
+  // Review F1: /api/config/dagi answered late. app.js fires theme-refresh
+  // ~300 ms after /api/config/theme, and the test clicks another honouring
+  // tab and back meanwhile; neither may send a request without the
+  // selection. An unfiltered /api/nodes answer is held back 2 s, so on the
+  // tabs that page nodes it would be the last to land and draw the whole
+  // network under "Kommune: Aarhus" (the fixture has no node there).
+  const SETTLED_EMPTY = { 'repeater-metrics': 'No repeater or room nodes in this view.', 'prefix-tool': 'No repeaters in the network yet.' };
+  for (const [tab, paths] of Object.entries(HONOURING)) {
+    await step(`1440x900 tab=${tab}, /api/config/dagi 1.5 s late, theme-refresh and tab clicks meanwhile: nothing unfiltered`, async () => {
+      const { ctx, page, reqs, bad } = await cold({ width: 1440, height: 900 }, false);
+      await page.route('**/api/config/dagi', async (route) => { await new Promise((r) => setTimeout(r, 1500)); await route.continue(); });
+      await page.route('**/api/nodes?**', async (route) => {
+        if (!new URL(route.request().url()).searchParams.get('kommune')) await new Promise((r) => setTimeout(r, 2000));
+        await route.continue();
+      });
+      await page.goto(BASE + '/#/analytics?tab=' + tab + '&kommune=0751', { waitUntil: 'domcontentloaded' });
+      await page.waitForSelector('.tab-btn[data-tab="topology"]');
+      const other = tab === 'rf' ? 'topology' : 'rf';
+      await page.click('.tab-btn[data-tab="' + other + '"]');
+      await page.click('.tab-btn[data-tab="' + tab + '"]');
+      await page.waitForFunction(() => { const n = document.getElementById('analyticsDagiNotice'); return n && !n.hidden; });
+      await page.waitForFunction((ps) => ps.every((p) => performance.getEntriesByType('resource').some((e) => new URL(e.name).pathname === p)), paths);
+      // Past the held-back unfiltered answer, had one been asked for.
+      await page.waitForTimeout(2500);
+      const scoped = new Set(paths.concat(HONOURING.overview));
+      const unf = reqs.filter((u) => scoped.has(pathOf(u)) && kommuneOf(u) !== '0751');
+      assert(!unf.length, 'unfiltered: ' + unf.join(' '));
+      assert((await trigger(page)) === 'Kommune: Aarhus', 'trigger: ' + await trigger(page));
+      if (SETTLED_EMPTY[tab]) {
+        const txt = await page.evaluate(() => document.getElementById('analyticsContent').textContent);
+        assert(txt.includes(SETTLED_EMPTY[tab]), 'settled panel is not the filtered (empty) answer: ' + txt.slice(0, 160));
+      }
       assert(!bad.length, 'error answers: ' + bad.join(' '));
       await ctx.close();
     });

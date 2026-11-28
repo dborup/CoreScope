@@ -18,7 +18,10 @@
  *   5. the param stays in the hash across a tab and a window change;
  *   6. the client caches tell selections apart (a new selection is a new
  *      request, never the old answer), and the Advert Intervals bucket
- *      panel names the selection.
+ *      panel names the selection;
+ *   7. nothing is fetched or rendered unfiltered while /api/config/dagi is
+ *      still checking a linked code (review F1), and a superseded render
+ *      drops its late answer.
  */
 'use strict';
 
@@ -126,7 +129,12 @@ function pageEnv(opts) {
       if (opts.configFail) return respond({ error: 'boom' }, 500);
       return opts.dagiOff ? respond({ enabled: false, layers: [] }) : respond(DAGI_CONFIG);
     }
-    if (url === '/api/analytics/dagi-unpositioned') return respond({ unpositionedHidden: HIDDEN });
+    if (url === '/api/analytics/dagi-unpositioned') {
+      if (opts.countGate) await opts.countGate;
+      if (opts.countFail && opts.countFail()) return respond({ error: 'boom' }, 500);
+      return respond({ unpositionedHidden: HIDDEN });
+    }
+    if (opts.nodesHook && /\/api\/nodes\?/.test(url)) return respond(await opts.nodesHook(url));
     const m = /\/api\/analytics\/(rf|topology|channels|hash-sizes|hash-collisions)(\?|$)/.exec(url);
     const key = m && { rf: 'rfData', topology: 'topoData', channels: 'chanData', 'hash-sizes': 'hashData', 'hash-collisions': 'collisionData' }[m[1]];
     if (key) return respond(REAL[key]);
@@ -179,6 +187,8 @@ function pageEnv(opts) {
   };
 
   const store = Object.assign({}, opts.storage || {});
+  const winListeners = {};
+  const areaListeners = [];
   const pages = {};
   const ctx = {
     console: { log() {}, warn() {}, error() {} }, Date, Infinity, Math, Array, Object, String, Number, Boolean,
@@ -197,9 +207,11 @@ function pageEnv(opts) {
     matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
     timeAgo: () => 'x ago', initTabBar() {}, makeColumnsResizable() {},
     onWS() {}, offWS() {}, connectWS() {}, IATA_COORDS_GEO: {},
-    addEventListener() {}, removeEventListener() {}, dispatchEvent() {},
+    addEventListener: (type, fn) => { (winListeners[type] = winListeners[type] || []).push(fn); },
+    removeEventListener: (type, fn) => { winListeners[type] = (winListeners[type] || []).filter((f) => f !== fn); },
+    dispatchEvent() {},
     RegionFilter: { init() {}, onChange: (f) => f, offChange() {}, regionQueryString: () => '', getRegionParam: () => '' },
-    AreaFilter: { init() {}, onChange: (f) => f, offChange() {}, areaQueryString: () => opts.area || '', getSelectedLabel: () => '' },
+    AreaFilter: { init() {}, onChange: (f) => { areaListeners.push(f); return f; }, offChange() {}, areaQueryString: () => opts.area || '', getSelectedLabel: () => '' },
   };
   ctx.history = {
     state: null,
@@ -248,7 +260,11 @@ function pageEnv(opts) {
       tw.dispatch('change', {});
       await flush();
     },
+    // What app.js does ~300 ms after /api/config/theme resolves.
+    themeRefresh: async () => { for (const fn of winListeners['theme-refresh'] || []) fn({}); await flush(); },
+    areaChange: async () => { for (const fn of areaListeners) fn(); await flush(); },
     el,
+    content: () => el('analyticsContent').innerHTML,
     notice: () => el('analyticsDagiNotice'),
     hash: () => ctx.location.hash,
   };
@@ -496,6 +512,105 @@ const reqs = (env, path) => env.fetchLog.filter((u) => pathOf(u) === path);
     assert.ok(/function _nodeScopeQs\(\)/.test(uses[0]), uses[0]);
   });
 
+  console.log('\n=== 7. nothing unfiltered while the selection is being checked (review F1) ===');
+
+  // The whole network for an unfiltered /api/nodes, nothing for a selection
+  // (as on the fixture: no node lies in Aarhus Kommune).
+  const MANY = { nodes: [1, 2, 3].map((i) => ({ public_key: 'aabbccddee0' + i, name: 'R' + i, role: 'repeater' })), total: 3 };
+  const NONE = { nodes: [], total: 0 };
+  const EMPTY_TEXT = { 'repeater-metrics': 'No repeater or room nodes in this view.', 'prefix-tool': 'No repeaters in the network yet.' };
+  const scoped = (u) => /\/api\/(analytics\/(?!dagi-unpositioned)|nodes)/.test(u);
+
+  for (const tab of Object.keys(HONOURING)) {
+    await test('tab=' + tab + ': a theme-refresh, tab clicks, an Area and a window change while /api/config/dagi loads send no request; the first ones carry the selection', async () => {
+      let open;
+      const env = pageEnv({ configGate: new Promise((r) => { open = r; }), storage: { 'meshcore-favorites': '["aabbccddeeff"]' } });
+      await env.mount('#/analytics?tab=' + tab + '&kommune=0751');
+      await env.themeRefresh();
+      await env.clickTab(tab === 'rf' ? 'topology' : 'rf');
+      await env.clickTab(tab);
+      await env.areaChange();
+      await env.setWindow('');
+      await env.themeRefresh();
+      assert.deepStrictEqual(env.fetchLog.filter(scoped), [], 'requests before the check');
+      open();
+      await flush();
+      // The tab's own scoped paths and the shared load (My Repeaters' per-
+      // favourite lookups stay network-wide, as they are with Area).
+      const paths = new Set(HONOURING[tab].concat(HONOURING.overview));
+      const sent = env.fetchLog.filter((u) => paths.has(pathOf(u)));
+      assert.ok(sent.length, 'nothing loaded after the check');
+      assert.deepStrictEqual(sent.filter((u) => qOf(u).get('kommune') !== '0751'), [], 'unfiltered requests: ' + sent.join(', '));
+      for (const p of HONOURING[tab]) assert.ok(reqs(env, p).length, 'no request to ' + p);
+    });
+  }
+
+  for (const tab of ['repeater-metrics', 'prefix-tool']) {
+    await test(tab + ': the settled panel is the filtered answer, even when the unfiltered one would land last', async () => {
+      let open;
+      let releaseAll;
+      const allGate = new Promise((r) => { releaseAll = r; });
+      const env = pageEnv({
+        configGate: new Promise((r) => { open = r; }),
+        nodesHook: async (u) => (qOf(u).get('kommune') ? NONE : (await allGate, MANY)),
+      });
+      await env.mount('#/analytics?tab=' + tab + '&kommune=0751');
+      await env.themeRefresh();
+      open();
+      await flush();
+      releaseAll();
+      await flush();
+      assert.ok(env.content().includes(EMPTY_TEXT[tab]), 'not the filtered render: ' + env.content().slice(0, 200));
+    });
+
+    await test(tab + ': a superseded render drops its late answer (generation guard)', async () => {
+      // Two selections in a row; the first answer lands after the second.
+      let releaseFirst;
+      const firstGate = new Promise((r) => { releaseFirst = r; });
+      const env = pageEnv({
+        nodesHook: async (u) => (qOf(u).get('kommune') === '0751' ? (await firstGate, MANY) : NONE),
+      });
+      await env.mount('#/analytics?tab=' + tab + '&kommune=0751');
+      env.dagi().syncFromUrl('#/analytics?tab=' + tab + '&kommune=0860');
+      await flush();
+      assert.ok(env.content().includes(EMPTY_TEXT[tab]), 'second render missing: ' + env.content().slice(0, 200));
+      releaseFirst();
+      await flush();
+      assert.ok(env.content().includes(EMPTY_TEXT[tab]), 'the stale 0751 answer replaced the 0860 one: ' + env.content().slice(0, 200));
+    });
+
+    await test(tab + ': an answer that lands after a switch to another tab leaves that tab alone', async () => {
+      let release;
+      const gate = new Promise((r) => { release = r; });
+      const env = pageEnv({ nodesHook: async () => (await gate, NONE) });
+      await env.mount('#/analytics?tab=' + tab + '&kommune=0751');
+      await env.clickTab('channels');
+      const channels = env.content();
+      release();
+      await flush();
+      assert.ok(!env.content().includes(EMPTY_TEXT[tab]), tab + ' drew over Channels');
+      assert.strictEqual(env.content(), channels);
+    });
+  }
+
+  await test('the Prefix Tool honours the selection, so its notice is the count, not "does not apply" (R4)', async () => {
+    const env = pageEnv();
+    await env.mount('#/analytics?tab=prefix-tool&kommune=0751');
+    assert.strictEqual(env.notice().textContent, env.dagi().hiddenNotice(HIDDEN));
+    assert.strictEqual(env.el('analyticsAreaFilter').style.display, 'none', 'the Area control is still hidden there');
+  });
+
+  await test('a count that lands after a switch to a tab that does not honour it keeps "does not apply" (R2)', async () => {
+    let open;
+    const env = pageEnv({ countGate: new Promise((r) => { open = r; }) });
+    await env.mount('#/analytics?tab=rf&kommune=0751');
+    await env.clickTab('channels');
+    assert.strictEqual(env.notice().textContent, env.dagi().notAppliedNotice());
+    open();
+    await flush();
+    assert.strictEqual(env.notice().textContent, env.dagi().notAppliedNotice(), 'the late count replaced the notice');
+  });
+
   console.log('\n=== dagi-filter.js shared helpers ===');
 
   await test('notAppliedNotice() names the checked selection; empty without one', async () => {
@@ -515,6 +630,18 @@ const reqs = (env, path) => env.fetchLog.filter((u) => pathOf(u) === path);
     assert.strictEqual(a, HIDDEN);
     assert.strictEqual(b, HIDDEN);
     assert.strictEqual(reqs(env, '/api/analytics/dagi-unpositioned').length, 1);
+  });
+
+  await test('a failed hiddenCount() answers 0 and is asked again, not kept for the minute (R1)', async () => {
+    let fail = true;
+    const env = pageEnv({ countFail: () => fail });
+    await env.mount('#/analytics');
+    assert.strictEqual(await env.dagi().hiddenCount(), 0);
+    fail = false;
+    assert.strictEqual(await env.dagi().hiddenCount(), HIDDEN);
+    assert.strictEqual(reqs(env, '/api/analytics/dagi-unpositioned').length, 2);
+    assert.strictEqual(await env.dagi().hiddenCount(), HIDDEN);
+    assert.strictEqual(reqs(env, '/api/analytics/dagi-unpositioned').length, 2, 'the good answer was not kept');
   });
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');
