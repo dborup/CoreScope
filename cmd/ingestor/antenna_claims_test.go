@@ -538,17 +538,17 @@ func TestAntennaClaim789_ProveGuardsInTheTable(t *testing.T) {
 	r.claim(claimB, 20, "BBBBBB")
 	ctx := context.Background()
 	now := r.clock.UnixMilli()
-	if st, err := r.store.proveAntennaClaim(ctx, claimA, "h1", &claimLat, &claimLon, false, now); err != nil || st != antennaclaim.StatusProven {
+	if st, err := r.store.proveAntennaClaim(ctx, claimA, "h1", &claimLat, &claimLon, autoApproval{}, now); err != nil || st != antennaclaim.StatusProven {
 		t.Fatalf("first proof: %q %v", st, err)
 	}
-	if st, err := r.store.proveAntennaClaim(ctx, claimA, "h2", &claimLat, &claimLon, false, now+1); err != nil || st != "" {
+	if st, err := r.store.proveAntennaClaim(ctx, claimA, "h2", &claimLat, &claimLon, autoApproval{}, now+1); err != nil || st != "" {
 		t.Fatalf("second proof of a used code: %q %v", st, err)
 	}
 	if row := r.row(claimA); row.proofHash != "h1" || row.provenAt.Int64 != now {
 		t.Fatalf("a used code proved again: %+v", row)
 	}
 	late := r.clock.Add(24*time.Hour + time.Second).UnixMilli()
-	if st, err := r.store.proveAntennaClaim(ctx, claimB, "h3", &claimLat, &claimLon, false, late); err != nil || st != "" {
+	if st, err := r.store.proveAntennaClaim(ctx, claimB, "h3", &claimLat, &claimLon, autoApproval{}, late); err != nil || st != "" {
 		t.Fatalf("expired proof: %q %v", st, err)
 	}
 	if row := r.row(claimB); row.status != antennaclaim.StatusPending {
