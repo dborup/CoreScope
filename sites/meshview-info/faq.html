@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FAQ — MeshView.dk</title>
-  <meta name="description" content="Ofte stillede spørgsmål om MeshView og det danske MeshCore-netværk: kom i gang, kortet, data og privatliv." />
+  <meta name="description" content="Ofte stillede spørgsmål om MeshView og det danske MeshCore-netværk: kom i gang, observer og MQTT, kortet, dækning, privatliv og netværket." />
   <link rel="stylesheet" href="/meshview-info-assets/site.css" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -183,8 +183,11 @@
     </p>
     <div class="faq-toc">
       <a href="#kom-i-gang">Kom i gang</a>
+      <a href="#observer-og-mqtt">Observer og MQTT</a>
       <a href="#kortet">Kortet og data</a>
+      <a href="#daekning-og-placering">Dækning og placering</a>
       <a href="#privatliv">Privatliv</a>
+      <a href="#om-netvaerket">Om netværket</a>
     </div>
   </div>
 </section>
@@ -211,8 +214,49 @@
       <details class="faq-item" id="hvilken-hardware">
         <summary>Hvilken hardware skal jeg købe?</summary>
         <div class="faq-a">
-          <p>Det afhænger af, hvad noden skal bruges til. På <a href="/hardware">hardware-siden</a> er enhederne delt op efter brug, med links til producenterne. Køb altid 868 MHz-varianten.</p>
-          <p>Til at komme i gang er en lille companion-node, som du parrer med MeshCore-appen på telefonen, det nemmeste.</p>
+          <ul>
+            <li><strong>Til at komme i gang (companion):</strong> Seeed SenseCAP T1000-E. Den er færdig, har GPS og batteri og fås hos almindelige forhandlere i EU. Du parrer den med MeshCore-appen på telefonen.</li>
+            <li><strong>Repeater:</strong> Seeed SenseCAP Solar Node P1 Pro. Den har solpanel, batteri og et vandtæt kabinet, så den kræver hverken strøm eller kabler.</li>
+            <li><strong>Observer:</strong> en radio med WiFi, fx Heltec V3. P1 Pro har ikke WiFi og kan derfor ikke selv være observer.</li>
+          </ul>
+          <p>Køb altid 868 MHz-udgaven. Flere enheder, delt op efter brug, står på <a href="/hardware">hardware-siden</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="meshcore-eller-meshtastic">
+        <summary>Skal jeg vælge MeshCore eller Meshtastic?</summary>
+        <div class="faq-a">
+          <p>Det danske netværk, som MeshView viser, er MeshCore. De to systemer kan ikke tale sammen, så vil du være med her, skal du bruge MeshCore.</p>
+          <p>Mange enheder kan køre begge dele. Flash din radio med MeshCore via den officielle flasher: <a href="https://meshcore.io/flasher" target="_blank" rel="noopener">meshcore.io/flasher</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="radio-indstillinger">
+        <summary>Hvilke radio-indstillinger skal jeg bruge?</summary>
+        <div class="faq-a">
+          <p>Preset <strong>EU/UK (Narrow)</strong>: 869,618 MHz, båndbredde 62,5 kHz, SF8. Alle detaljer, også til repeatere, står på <a href="/radio">radio-indstillingerne</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="kun-sent">
+        <summary>Jeg kan sende, men der står kun "sent", og jeg dukker ikke op på kortet. Hvad er galt?</summary>
+        <div class="faq-a">
+          <p>"sent" betyder, at din radio har sendt beskeden, ikke at nogen har hørt den. Tjek:</p>
+          <ul>
+            <li>at du bruger de danske <a href="/radio">radio-indstillinger</a>;</li>
+            <li>at der er en repeater inden for rækkevidde (kig på <a href="https://meshview.dk/#/map">kortet</a>);</li>
+            <li>at antennen sidder ordentligt på. Send aldrig uden antenne.</li>
+          </ul>
+          <p>Prøv også udendørs eller højere oppe, og send et advert manuelt.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="hjaelp-paa-dansk">
+        <summary>Hvor kan jeg få hjælp på dansk?</summary>
+        <div class="faq-a">
+          <ul>
+            <li><a href="https://meshguide.dk" target="_blank" rel="noopener">meshguide.dk</a>: trin-for-trin-vejledning på dansk.</li>
+            <li>Vores <a href="/guider">videoguider</a>.</li>
+            <li>Det danske <a href="https://discord.gg/YJWpszjT23" target="_blank" rel="noopener">MeshCore-Discord</a>.</li>
+            <li>Lokale Facebook-grupper, fx MeshCore Østjylland, MeshCore Nordsjælland og MeshCore Fyn.</li>
+          </ul>
+          <p>I de lokale grupper er der altid nogen, der gerne hjælper.</p>
         </div>
       </details>
       <details class="faq-item" id="roller">
@@ -243,7 +287,91 @@
         <summary>Hvad er en observer, og hvordan bliver jeg en?</summary>
         <div class="faq-a">
           <p>En observer er en node, der lytter med og sender det, den hører, til MeshView over internettet. Uden observere er der intet at vise, så hver ny observer gør kortet bedre, især hvor der er få i forvejen.</p>
-          <p>Det kræver en repeater eller room server med WiFi og firmware, der kan sende til MQTT. Guiden <a href="/observer">Bliv observer</a> tager dig igennem det trin for trin.</p>
+          <p>Det kræver en repeater eller room server med WiFi og firmware, der kan sende til MQTT. Guiden <a href="/observer">Bliv observer</a> tager dig igennem det trin for trin, og <a href="#observer-og-mqtt">Observer og MQTT</a> herunder svarer på de typiske problemer.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="faq-group" id="observer-og-mqtt">
+      <h2>Observer og <em>MQTT</em></h2>
+      <details class="faq-item" id="observer-adgangskode">
+        <summary>Skal jeg have et brugernavn og en adgangskode til min observer?</summary>
+        <div class="faq-a">
+          <p>Nej, ikke til nye observere. De logger ind med <strong>device auth</strong>: radioen beviser, hvem den er, med sin egen MeshCore-nøgle. Du skal ikke oprette dig nogen steder og ikke vente på os. Følg guiden <a href="/observer">Bliv observer</a>.</p>
+          <p>Den gamle løsning med brugernavn og adgangskode på port 8883 kører stadig for de observere, der allerede bruger den. Har du en forbindelse, der virker, så lad den være.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="companion-adgangskode">
+        <summary>Skal min companion have et brugernavn og en adgangskode?</summary>
+        <div class="faq-a">
+          <p>Nej. En companion taler kun med din telefon over Bluetooth og har intet med MQTT at gøre. Det er kun en observer, der sender data til MeshView.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="observer-registrering">
+        <summary>Skal min observers nøgle registreres hos jer først?</summary>
+        <div class="faq-a">
+          <p>Nej. Enhver MeshCore-radio med device auth kan forbinde. Når den er online, dukker den op under <a href="https://meshview.dk/#/observers">Observers</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="observer-indstillinger">
+        <summary>Hvilke indstillinger skal jeg bruge?</summary>
+        <div class="faq-a">
+          <ul>
+            <li><strong>Server:</strong> <code>wss://mqtt.meshview.dk:443/mqtt</code> (WebSocket med TLS)</li>
+            <li><strong>Audience:</strong> <code>mqtt.meshview.dk</code></li>
+            <li><strong>Topic:</strong> <code>meshcore/{iata}/{device}/{type}</code></li>
+            <li><strong>Login:</strong> device auth (Ed25519 JWT)</li>
+          </ul>
+          <p>Bruger du en PC eller en Raspberry Pi (fx meshcore-packet-capture), skal klienten bruge WebSocket på port 443 med stien <code>/mqtt</code>. Port 8883 er den gamle adgang med brugernavn og adgangskode og tager ikke imod device auth. Kommandoerne til radioen står i <a href="/observer">guiden</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="not-authorized">
+        <summary>Min observer får "Not authorized" eller "connection refused (5)". Hvad er der galt?</summary>
+        <div class="faq-a">
+          <p>Det skyldes næsten altid én af disse ting:</p>
+          <ul>
+            <li><strong>Forkert port eller transport.</strong> Device auth virker kun på <code>wss://…:443/mqtt</code>, ikke på port 8883.</li>
+            <li><strong>Stien <code>/mqtt</code> mangler.</strong> Mange PC-klienter bruger <code>/</code> som standard.</li>
+            <li><strong>Forkert audience.</strong> Den skal være præcis <code>mqtt.meshview.dk</code>, uden <code>https://</code> og uden mellemrum.</li>
+            <li><strong>Et usynligt tegn fra terminalen.</strong> Har du skrevet kommandoerne i en seriel terminal, så sæt linjeafslutningen til "LF/Newline", og indtast audience igen.</li>
+          </ul>
+          <p>Virker det stadig ikke, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a> med nodens navn og cirka klokkeslæt, så kan vi se, hvorfor brokeren afviser den.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="disc-stale">
+        <summary>Hvad betyder "disc" ved mqtt1, og hvorfor står min observer som "stale"?</summary>
+        <div class="faq-a">
+          <p>"disc" betyder, at den MQTT-plads ikke har forbindelse lige nu; "ok" betyder, at den er forbundet. En observer bliver "stale" hos os, når vi ikke har modtaget data fra den i et stykke tid. Genstart observeren, og tjek <a href="#observer-indstillinger">indstillingerne</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="meshmapper-virker">
+        <summary>Den virker mod MeshMapper eller LetsMesh, men ikke mod meshview.dk. Hvorfor?</summary>
+        <div class="faq-a">
+          <p>Hver plads (mqtt1, mqtt2 …) har sin egen server og audience. At den ene virker, siger ikke noget om den anden. MeshView skal ligge i mqtt1 med <code>preset custom</code> og <a href="#observer-indstillinger">indstillingerne ovenfor</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="observer-firmware">
+        <summary>Hvor finder jeg observer-firmwaren?</summary>
+        <div class="faq-a">
+          <p>På <a href="https://observer.gessaman.com" target="_blank" rel="noopener">observer.gessaman.com</a>. Vælg din radio og den nyeste stabile version. Brug Chrome eller Edge på en computer og et USB-datakabel. Vi anbefaler en Heltec V3, men V4, Xiao S3 WIO, Station G2 og flere T-Beam-modeller virker også.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="efter-opdatering">
+        <summary>Jeg har opdateret firmwaren, og nu forbinder den ikke. Hvad skal jeg gøre?</summary>
+        <div class="faq-a">
+          <p>En opdatering kan nulstille MQTT-opsætningen. Indtast kommandoerne fra <a href="/observer">guiden</a> igen, og genstart. Har du valgt "Erase device", har radioen fået en ny identitet. Så kommer den frem som en ny node, og den gamle forsvinder af sig selv efter 7 dage.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="iata">
+        <summary>Hvilken IATA-kode skal jeg vælge?</summary>
+        <div class="faq-a">
+          <p>Koden for din region. I Danmark bruger vi AAL, AAR, BLL, ODE, CPH og RNN. Er du i tvivl, så se <a href="https://dk.meshmapper.net" target="_blank" rel="noopener">dk.meshmapper.net</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="observer-udland">
+        <summary>Vil I også have observere uden for Danmark?</summary>
+        <div class="faq-a">
+          <p>Ja, gerne tæt på grænsen, fx i Skåne og Nordtyskland. De hører trafik, der også går ind over Danmark.</p>
         </div>
       </details>
     </div>
@@ -288,6 +416,76 @@
           <p>Du får en kode, som du midlertidigt sætter i nodens navn og sender et advert med. Så ved MeshView, at det er dig, der ejer noden. Hele fremgangsmåden står i <a href="https://github.com/dborup/CoreScope/blob/master/docs/user-guide/antenna-height-claims.md" target="_blank" rel="noopener">vejledningen om antennehøjde</a>.</p>
         </div>
       </details>
+      <details class="faq-item" id="spoegelse">
+        <summary>Hvordan får jeg fjernet en gammel eller dobbelt node (et "spøgelse")?</summary>
+        <div class="faq-a">
+          <p>Den forsvinder af sig selv: en node, der ikke er hørt i 7 dage, flyttes til listen over inaktive noder. Det sker typisk efter en genflashing, hvor radioen har fået en ny nøgle. Vil du have den væk med det samme, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a> med nodens public key.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="repeater-forsvinder">
+        <summary>Min repeater forsvinder fra kortet en gang imellem. Hvorfor?</summary>
+        <div class="faq-a">
+          <p>MeshView kan kun vise det, en observer hører. Står din repeater langt fra den nærmeste observer, bliver den kun hørt, når forholdene er gode. En observer tæt på løser det.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="scope">
+        <summary>Hvad er scope (region)?</summary>
+        <div class="faq-a">
+          <p>Scope bestemmer, hvilke pakker en repeater sender videre. En repeater med <code>#dk</code> sender pakker videre, som er mærket <code>#dk</code>. Scope bestemmer ikke, hvad der kan høres: alle i nærheden kan stadig høre pakken. Se anbefalingerne på <a href="https://meshguide.dk" target="_blank" rel="noopener">meshguide.dk</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="hash-kollisioner">
+        <summary>Kan jeg se hash-kollisioner?</summary>
+        <div class="faq-a">
+          <p>Ja, under Analytics → <a href="https://meshview.dk/#/analytics?tab=collisions">Hash Issues</a>. Under Analytics → <a href="https://meshview.dk/#/analytics?tab=neighbor-graph">Neighbor Graph</a> kan du se, hvilke repeatere der hører hinanden.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="faq-group" id="daekning-og-placering">
+      <h2>Dækning og <em>placering</em></h2>
+      <details class="faq-item" id="daekning">
+        <summary>Er der dækning, hvor jeg bor?</summary>
+        <div class="faq-a">
+          <p>Kig på <a href="https://meshview.dk/#/map">kortet</a>. Står der aktive repeatere inden for 10–20 km, har du en god chance. Med terrænprofilen på kortet kan du se, om bakker eller bygninger står i vejen mellem dig og en repeater (se <a href="/guider">videoguiden</a>). Er du i tvivl, så skriv til os med din by, så kigger vi på det.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="ingen-noder">
+        <summary>Hvorfor er der ingen noder i mit område?</summary>
+        <div class="faq-a">
+          <p>Fordi ingen har sat en repeater op endnu. Netværket bygges af frivillige, én station ad gangen. En repeater højt oppe hos dig er netop det, der fylder hullet.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="antennens-hoejde">
+        <summary>Har antennens højde betydning?</summary>
+        <div class="faq-a">
+          <p>Ja, det er det vigtigste af det hele. Signalet på 868 MHz skal helst kunne "se" hen over landskabet. Et par meter ekstra højde gør mere end en større antenne. Tag, stald, mast og silo er gode steder.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="flere-repeatere">
+        <summary>Er der brug for flere repeatere, hvor jeg bor?</summary>
+        <div class="faq-a">
+          <p>Næsten altid. Også i byer med dækning gør flere repeatere nettet mere robust, især hvis du har en høj og fri placering.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="helium-antenne">
+        <summary>Kan jeg bruge min gamle Helium-antenne?</summary>
+        <div class="faq-a">
+          <p>Ja, sandsynligvis. Helium i Europa bruger det samme 868 MHz-bånd, så en antenne til Helium passer også til MeshCore. Du skal bare have en MeshCore-radio i den anden ende af kablet.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="forening-master">
+        <summary>Vi er en forening eller et firma med master. Hvordan kan vi hjælpe?</summary>
+        <div class="faq-a">
+          <p>Rigtig gerne! Høje placeringer er det, netværket mangler mest. En SenseCAP Solar Node P1 Pro kan sidde på en mast uden strøm. Har I også internet på stedet, kan I sætte en observer op ved siden af. Skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a>, så hjælper vi med at finde de bedste steder.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="tyskland-sverige">
+        <summary>Kan vi forbinde os med de tyske og svenske netværk?</summary>
+        <div class="faq-a">
+          <p>Ja, hvis de bruger de samme radio-indstillinger. Kan din repeater høre en tysk eller svensk repeater med samme indstillinger, sender den bare videre.</p>
+        </div>
+      </details>
     </div>
 
     <div class="faq-group" id="privatliv">
@@ -315,6 +513,41 @@
         <div class="faq-a">
           <p>Omdøb noden, så navnet starter med <code>🚫</code>, og send et advert. Så vises den ikke længere på MeshViews kort og lister. Noden virker stadig i netværket som normalt; den er kun skjult her.</p>
           <p>Vil du have den fjernet på en anden måde, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a>.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="faq-group" id="om-netvaerket">
+      <h2>Om <em>netværket</em></h2>
+      <details class="faq-item" id="hvad-bruges-det-til">
+        <summary>Hvad bruges netværket egentlig til?</summary>
+        <div class="faq-a">
+          <p>Lige nu er det mest et hobbynetværk, der bliver bygget ud. Derfor er mange beskeder "ping" og "test", fordi folk tjekker, om deres station når ud. Målet er et netværk, der virker, når internet og mobilnet ikke gør, fx ved strømsvigt eller en krise. Det kræver mange stationer først, og hver ny repeater bringer os tættere på.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="krise">
+        <summary>Kan netværket bruges i en krise?</summary>
+        <div class="faq-a">
+          <p>Ja, det er en af grundene til, at det findes. MeshCore virker uden internet og mobilnet, og repeatere med solpanel kører videre ved strømsvigt. Det er dog et frivilligt netværk uden garanti, så det er et supplement til nødopkald og beredskab, ikke en erstatning.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="sabotage">
+        <summary>Hvor svært er det at sabotere netværket?</summary>
+        <div class="faq-a">
+          <p>Som al radio kan det forstyrres lokalt med en kraftig sender, men det er ulovligt. Nettet har ingen central server, der kan lukkes, så en forstyrrelse rammer kun det område, hvor den sker.</p>
+          <p>Nodernes adverts er signeret med deres nøgle, og direkte beskeder er krypteret, så de kan ikke forfalskes. På offentlige kanaler kan alle med kanalnøglen derimod skrive, og afsendernavnet er bare tekst. Stol derfor ikke blindt på et navn i en offentlig kanal.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="hvem-staar-bag">
+        <summary>Hvem står bag meshview.dk, og er I det eneste fællesskab?</summary>
+        <div class="faq-a">
+          <p>MeshView.dk drives af frivillige. Det er et kort og et værktøj over det danske MeshCore-netværk, ikke en forening, man melder sig ind i. Netværket er alles: alle, der sætter en radio op, er med. Der er flere danske fællesskaber, fx meshguide.dk, Discord og de lokale Facebook-grupper.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="hele-danmark">
+        <summary>Dækker det hele Danmark, også København?</summary>
+        <div class="faq-a">
+          <p>Ja. Der er noder i hele landet, også i hovedstadsområdet. Tætheden varierer, så kig på <a href="https://meshview.dk/#/map">kortet</a> for dit område.</p>
         </div>
       </details>
     </div>

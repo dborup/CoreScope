@@ -34,8 +34,11 @@ const timeout = setTimeout(() => { console.error('TIMEOUT'); process.exit(1); },
 
   await page.goto(origin + '/faq');
   const items = page.locator('details.faq-item');
-  assert.equal(await items.count(), 14);
+  assert.equal(await items.count(), 45);
   assert.equal(await page.locator('details[open]').count(), 0, 'all answers closed without a hash');
+  assert.equal(await page.locator('details.faq-item details, details.faq-item .faq-group').count(), 0, 'no answer nested inside another');
+  const groups = await page.evaluate(() => [...document.querySelectorAll('.faq-group')].map(g => [g.id, g.querySelectorAll(':scope > details.faq-item').length]));
+  assert.deepEqual(groups, [['kom-i-gang', 10], ['observer-og-mqtt', 11], ['kortet', 9], ['daekning-og-placering', 7], ['privatliv', 3], ['om-netvaerket', 5]]);
   const ids = await page.evaluate(() => [...document.querySelectorAll('[id]')].map(e => e.id));
   assert.equal(new Set(ids).size, ids.length, 'ids are unique');
   const broken = await page.evaluate(() => [...document.querySelectorAll('a[href^="#"]')].map(a => a.getAttribute('href').slice(1)).filter(id => id && !document.getElementById(id)));
@@ -53,10 +56,10 @@ const timeout = setTimeout(() => { console.error('TIMEOUT'); process.exit(1); },
   await page.evaluate(() => document.fonts.ready);
   await page.waitForTimeout(300);
   assert.equal(await page.locator('#hash-storrelse').evaluate(d => d.open), true, 'deep link opens the answer');
-  await page.locator('#hash-storrelse').evaluate(d => d.scrollIntoView({ behavior: 'instant', block: 'start' }));
-  const navBottom = await page.locator('nav').evaluate(n => n.getBoundingClientRect().bottom);
-  const top = await page.locator('#hash-storrelse summary').evaluate(s => s.getBoundingClientRect().top);
-assert(top >= navBottom - 1, `deep-linked question not hidden under the nav (${top} vs ${navBottom})`);
+  // A deep link must land below the sticky nav: every question's scroll margin covers the nav height.
+  const nav = await page.locator('nav').evaluate(n => n.getBoundingClientRect().height);
+  const margins = await page.evaluate(() => [...document.querySelectorAll('details.faq-item, .faq-group')].map(e => parseFloat(getComputedStyle(e).scrollMarginTop)));
+  assert(margins.every(m => m >= nav), `scroll margin ${Math.min(...margins)} px covers the ${nav} px nav`);
   await page.goto(origin + '/faq');
   await page.locator('#roller a[href="#observer"]').evaluate(a => a.closest('details').open = true);
   await page.locator('#roller a[href="#observer"]').tap();
@@ -70,7 +73,7 @@ assert(top >= navBottom - 1, `deep-linked question not hidden under the nav (${t
   }
   assert.deepEqual(external, [], 'no external request');
   assert.deepEqual(errors, []);
-  console.log('PASS: /faq 14 answers, deep links open answers below the nav, links resolve, footer link on every page');
+  console.log('PASS: /faq 45 answers, deep links open answers below the nav, links resolve, footer link on every page');
 })().catch(e => { console.error(e); process.exitCode = 1; }).finally(async () => {
   if (browser) await browser.close();
   await new Promise(resolve => server.close(resolve));
