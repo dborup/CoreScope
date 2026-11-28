@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FAQ — MeshView.dk</title>
+  <meta name="description" content="Ofte stillede spørgsmål om MeshView og det danske MeshCore-netværk: kom i gang, observer og MQTT, kortet, dækning, privatliv og netværket." />
+  <link rel="stylesheet" href="/meshview-info-assets/site.css" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:      #080c10;
+      --bg2:     #0d1520;
+      --bg3:     #111d2c;
+      --accent:  #00e5a0;
+      --accent2: #00aaff;
+      --warn:    #ffb400;
+      --danger:  #ff4d6d;
+      --text:    #cdd9e5;
+      --muted:   #4a6070;
+      --border:  rgba(0,229,160,.15);
+      --glow:    0 0 18px rgba(0,229,160,.35);
+      --mono:    'Share Tech Mono', monospace;
+      --main:    'Syne', sans-serif;
+    }
+    html { scroll-behavior: smooth; }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    body { background:var(--bg); color:var(--text); font-family:var(--main); min-height:100vh; overflow-x:hidden; }
+    body::before {
+      content:''; position:fixed; inset:0; z-index:0;
+      background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+      background-size:200px; pointer-events:none;
+    }
+    body::after {
+      content:''; position:fixed; inset:0; z-index:0;
+      background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,.07) 2px,rgba(0,0,0,.07) 4px);
+      pointer-events:none;
+    }
+    .wrap { position:relative; z-index:1; max-width:980px; margin:0 auto; padding:0 24px; }
+
+    /* NAV */
+    nav { position:sticky; top:0; z-index:100; border-bottom:1px solid var(--border); background:rgba(8,12,16,.92); backdrop-filter:blur(12px); }
+    .nav-inner { display:flex; align-items:center; justify-content:space-between; height:60px; max-width:1200px; margin:0 auto; padding:0 24px; }
+    .logo { font-family:var(--mono); font-size:1.1rem; color:var(--accent); letter-spacing:.08em; text-decoration:none; }
+    .logo span { color:var(--text); }
+    .nav-links { display:flex; gap:32px; list-style:none; }
+    .nav-links a { font-family:var(--mono); font-size:.8rem; color:var(--muted); text-decoration:none; letter-spacing:.1em; text-transform:uppercase; transition:color .2s; }
+    .nav-links a:hover { color:var(--accent); }
+    .back-link { font-family:var(--mono); font-size:.78rem; color:var(--accent); text-decoration:none; display:inline-flex; align-items:center; gap:7px; }
+    .back-link:hover { text-decoration:underline; }
+
+    /* HERO */
+    .doc-hero { padding:70px 0 36px; }
+    .doc-tag { font-family:var(--mono); font-size:.72rem; color:var(--accent); letter-spacing:.2em; text-transform:uppercase; margin-bottom:16px; display:flex; align-items:center; gap:10px; }
+    .doc-tag::before { content:''; width:24px; height:1px; background:var(--accent); }
+    h1 { font-size:clamp(2.2rem,4.5vw,3.4rem); font-weight:800; line-height:1.08; letter-spacing:-.02em; margin-bottom:20px; }
+    h1 em { font-style:normal; color:var(--accent); }
+    .lead { font-size:1.05rem; color:var(--muted); line-height:1.75; max-width:700px; }
+    .lead a.inline { color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(0,229,160,.3); }
+    .lead a.inline:hover { border-color:var(--accent); }
+
+    .divider { height:1px; background:linear-gradient(90deg,transparent,var(--border),transparent); margin:8px 0; }
+
+    /* QUICK START CALLOUT */
+    .quickstart {
+      display:flex; gap:20px; align-items:center; flex-wrap:wrap;
+      background:linear-gradient(135deg, rgba(0,229,160,.08), rgba(0,170,255,.05));
+      border:1px solid var(--border); border-radius:10px; padding:24px 26px; margin:36px 0;
+    }
+    .qs-body { flex:1; min-width:240px; }
+    .qs-tag { font-family:var(--mono); font-size:.66rem; color:var(--accent); letter-spacing:.18em; text-transform:uppercase; margin-bottom:8px; }
+    .qs-title { font-size:1.2rem; font-weight:800; margin-bottom:8px; }
+    .qs-desc { font-size:.92rem; color:var(--muted); line-height:1.65; }
+    .btn { display:inline-flex; align-items:center; gap:8px; padding:12px 26px; font-family:var(--mono); font-size:.84rem; letter-spacing:.06em; text-decoration:none; border-radius:4px; transition:all .2s; white-space:nowrap; }
+    .btn-primary { background:var(--accent); color:#030608; box-shadow:var(--glow); }
+    .btn-primary:hover { background:#00ffb2; box-shadow:0 0 28px rgba(0,229,160,.6); }
+
+    /* SECTION */
+    .doc-section { padding:20px 0 60px; }
+    h2 { font-size:1.6rem; font-weight:800; letter-spacing:-.01em; margin-bottom:8px; }
+    h2 em { font-style:normal; color:var(--accent); }
+    .sec-sub { font-size:.95rem; color:var(--muted); line-height:1.7; margin-bottom:28px; max-width:620px; }
+
+    /* DEVICE GRID */
+    .dev-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:18px; }
+    .dev-card {
+      background:var(--bg2); border:1px solid var(--border); border-radius:10px;
+      padding:24px; display:flex; flex-direction:column; gap:12px;
+      transition:border-color .2s, transform .2s; position:relative; overflow:hidden;
+      text-decoration:none;
+    }
+    .dev-card::before {
+      content:''; position:absolute; top:0; left:0; right:0; height:2px;
+      background:linear-gradient(90deg,var(--accent),var(--accent2));
+      transform:scaleX(0); transform-origin:left; transition:transform .3s;
+    }
+    .dev-card:hover::before { transform:scaleX(1); }
+    .dev-card:hover { border-color:rgba(0,229,160,.4); transform:translateY(-3px); }
+    .dev-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+    .dev-name { font-size:1.15rem; font-weight:800; color:var(--text); line-height:1.2; }
+    .dev-chip { font-family:var(--mono); font-size:.7rem; color:var(--accent2); margin-top:4px; }
+    .dev-arrow { font-family:var(--mono); color:var(--accent); font-size:1.1rem; flex-shrink:0; opacity:.5; transition:opacity .2s, transform .2s; }
+    .dev-card:hover .dev-arrow { opacity:1; transform:translateX(3px); }
+    .dev-desc { font-size:.9rem; color:var(--muted); line-height:1.6; flex:1; }
+    .dev-tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+    .dev-tag { font-family:var(--mono); font-size:.6rem; letter-spacing:.06em; text-transform:uppercase; padding:3px 8px; border-radius:20px; background:var(--bg3); color:var(--muted); border:1px solid var(--border); }
+    .dev-tag.hot { color:var(--accent); border-color:rgba(0,229,160,.3); }
+
+    /* EQUIPMENT */
+    .eq-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:18px; }
+    .eq-card { background:var(--bg2); border:1px solid var(--border); border-radius:10px; padding:22px 24px; }
+    .eq-head { display:flex; align-items:center; gap:11px; margin-bottom:12px; }
+    .eq-ico { font-size:1.3rem; }
+    .eq-name { font-size:1.1rem; font-weight:800; color:var(--text); }
+    .eq-desc { font-size:.9rem; color:var(--muted); line-height:1.65; margin-bottom:14px; }
+    .eq-pick { display:flex; align-items:baseline; gap:8px; padding-top:12px; border-top:1px solid rgba(0,229,160,.08); }
+    .eq-pick .lbl { font-family:var(--mono); font-size:.62rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); white-space:nowrap; }
+    .eq-pick a { font-family:var(--mono); font-size:.8rem; color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(0,229,160,.3); }
+    .eq-pick a:hover { border-color:var(--accent); }
+    .eq-pick .placeholder { font-family:var(--mono); font-size:.78rem; color:var(--muted); font-style:italic; }
+
+    /* FOOTER */
+    footer { border-top:1px solid var(--border); padding:36px 0; margin-top:40px; }
+    .footer-inner { max-width:1200px; margin:0 auto; padding:0 24px; display:flex; justify-content:space-between; align-items:center; gap:20px; flex-wrap:wrap; }
+    .footer-logo { font-family:var(--mono); color:var(--accent); font-size:.9rem; }
+    .footer-links { display:flex; gap:24px; list-style:none; }
+    .footer-links a { font-family:var(--mono); font-size:.7rem; color:var(--muted); text-decoration:none; letter-spacing:.1em; }
+    .footer-links a:hover { color:var(--accent); }
+    .footer-copy { font-family:var(--mono); font-size:.68rem; color:var(--muted); }
+
+    @media(max-width:700px) {
+      .dev-grid,.eq-grid { grid-template-columns:1fr; }
+      .nav-links { display:none; }
+    }
+
+    /* FAQ */
+    .faq-toc { display:flex; flex-wrap:wrap; gap:10px 22px; margin-top:26px; }
+    .faq-toc a { font-family:var(--mono); font-size:.78rem; color:var(--accent); text-decoration:none; letter-spacing:.06em; min-height:44px; display:inline-flex; align-items:center; }
+    .faq-toc a:hover { text-decoration:underline; }
+    .faq-group { margin-top:44px; scroll-margin-top:130px; }
+    .faq-group h2 { font-size:1.35rem; font-weight:700; margin-bottom:14px; }
+    .faq-group h2 em { font-style:normal; color:var(--accent); }
+    .faq-item { border:1px solid var(--border); border-radius:6px; background:var(--bg2); margin-bottom:10px; scroll-margin-top:130px; }
+    .faq-item summary { cursor:pointer; list-style:none; padding:14px 46px 14px 18px; min-height:48px; position:relative; font-weight:700; font-size:1rem; line-height:1.45; }
+    .faq-item summary::-webkit-details-marker { display:none; }
+    .faq-item summary::after { content:'+'; position:absolute; right:18px; top:12px; font-family:var(--mono); color:var(--accent); font-size:1.2rem; }
+    .faq-item[open] summary::after { content:'−'; }
+    .faq-item summary:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; border-radius:6px; }
+    .faq-item summary:hover { color:var(--accent); }
+    .faq-a { padding:0 18px 16px; color:var(--text); line-height:1.7; font-size:.96rem; }
+    .faq-a p + p, .faq-a p + ul, .faq-a ul + p { margin-top:10px; }
+    .faq-a ul { padding-left:20px; }
+    .faq-a li { margin:4px 0; }
+    .faq-a a { color:var(--accent); text-decoration:none; border-bottom:1px solid rgba(0,229,160,.3); }
+    .faq-a a:hover { border-color:var(--accent); }
+    .faq-a code { font-family:var(--mono); font-size:.9em; color:var(--accent2); }
+    .faq-more { margin-top:44px; font-family:var(--mono); font-size:.8rem; color:var(--muted); line-height:1.7; border-left:2px solid var(--border); padding-left:14px; }
+    .faq-more a { color:var(--accent); }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a href="/velkommen" class="logo">mesh<span>view</span>.dk</a>
+    <ul class="nav-links">
+      <li><a href="https://meshview.dk/#/live" target="_blank" rel="noopener">Live</a></li>
+      <li><a href="/velkommen#noder">Noder</a></li>
+      <li><a href="/velkommen#guide">Kom i gang</a></li>
+      <li><a href="/guider">Guider</a></li>
+      <li><a href="https://tools.meshview.dk">Værktøjer</a></li>
+    </ul>
+  </div>
+</nav>
+
+<section class="doc-hero">
+  <div class="wrap">
+    <a href="/velkommen#" class="back-link">← Tilbage til forsiden</a>
+    <div class="doc-tag" style="margin-top:18px">// ofte stillede spørgsmål</div>
+    <h1>Spørgsmål og <em>svar</em></h1>
+    <p class="lead">
+      Korte svar på det, vi oftest bliver spurgt om. Vil du se det vist, så prøv
+      <a class="inline" href="/guider">videoguiderne</a>.
+    </p>
+    <div class="faq-toc">
+      <a href="#kom-i-gang">Kom i gang</a>
+      <a href="#observer-og-mqtt">Observer og MQTT</a>
+      <a href="#kortet">Kortet og data</a>
+      <a href="#daekning-og-placering">Dækning og placering</a>
+      <a href="#privatliv">Privatliv</a>
+      <a href="#om-netvaerket">Om netværket</a>
+    </div>
+  </div>
+</section>
+
+<section class="doc-section">
+  <div class="wrap">
+
+    <div class="faq-group" id="kom-i-gang">
+      <h2>Kom <em>i gang</em></h2>
+      <details class="faq-item" id="hvad-er-meshcore">
+        <summary>Hvad er MeshCore og MeshView?</summary>
+        <div class="faq-a">
+          <p>MeshCore er et off-grid mesh-netværk over LoRa-radio. Små, billige radioer sender beskeder videre for hinanden, uden internet og uden mobilnet. Repeatere på tage og master giver rækkevidde på mange kilometer.</p>
+          <p>MeshView er et kort og et værktøj over det danske MeshCore-netværk. Det viser noderne, pakkerne og ruterne, som observere rundt om i landet hører dem.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="koster-det">
+        <summary>Koster det noget, og skal jeg have licens?</summary>
+        <div class="faq-a">
+          <p>Netværket og MeshView er gratis og drives af frivillige. Du betaler kun for din egen hardware, typisk et par hundrede kroner for en lille node.</p>
+          <p>MeshCore bruger et licensfrit radiobånd ved 868 MHz, så du skal ikke have licens. Brug de danske <a href="/radio">radio-indstillinger</a>, så du holder dig inden for reglerne og kan tale med resten af netværket.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="hvilken-hardware">
+        <summary>Hvilken hardware skal jeg købe?</summary>
+        <div class="faq-a">
+          <ul>
+            <li><strong>Til at komme i gang (companion):</strong> Seeed SenseCAP T1000-E. Den er færdig, har GPS og batteri og fås hos almindelige forhandlere i EU. Du parrer den med MeshCore-appen på telefonen.</li>
+            <li><strong>Repeater:</strong> Seeed SenseCAP Solar Node P1 Pro. Den har solpanel, batteri og et vandtæt kabinet, så den kræver hverken strøm eller kabler.</li>
+            <li><strong>Observer:</strong> en radio med WiFi, fx Heltec V3. P1 Pro har ikke WiFi og kan derfor ikke selv være observer.</li>
+          </ul>
+          <p>Køb altid 868 MHz-udgaven. Flere enheder, delt op efter brug, står på <a href="/hardware">hardware-siden</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="meshcore-eller-meshtastic">
+        <summary>Skal jeg vælge MeshCore eller Meshtastic?</summary>
+        <div class="faq-a">
+          <p>Det danske netværk, som MeshView viser, er MeshCore. De to systemer kan ikke tale sammen, så vil du være med her, skal du bruge MeshCore.</p>
+          <p>Mange enheder kan køre begge dele. Flash din radio med MeshCore via den officielle flasher: <a href="https://meshcore.io/flasher" target="_blank" rel="noopener">meshcore.io/flasher</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="radio-indstillinger">
+        <summary>Hvilke radio-indstillinger skal jeg bruge?</summary>
+        <div class="faq-a">
+          <p>869,618 MHz, båndbredde 62,5 kHz, SF8 og coding rate 8. Tjek værdierne, ikke kun preset-navnet (<strong>EU/UK (Narrow)</strong>). Alle detaljer, også til repeatere, står på <a href="/radio">radio-indstillingerne</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="kun-sent">
+        <summary>Jeg kan sende, men der står kun "sent", og jeg dukker ikke op på kortet. Hvad er galt?</summary>
+        <div class="faq-a">
+          <p>"sent" betyder, at din radio har sendt beskeden, ikke at nogen har hørt den. Tjek:</p>
+          <ul>
+            <li>at du bruger de danske <a href="/radio">radio-indstillinger</a>;</li>
+            <li>at der er en repeater inden for rækkevidde (kig på <a href="https://meshview.dk/#/map">kortet</a>);</li>
+            <li>at antennen sidder ordentligt på. Send aldrig uden antenne.</li>
+          </ul>
+          <p>Prøv også udendørs eller højere oppe, og send et advert manuelt.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="hjaelp-paa-dansk">
+        <summary>Hvor kan jeg få hjælp på dansk?</summary>
+        <div class="faq-a">
+          <ul>
+            <li><a href="https://meshguide.dk" target="_blank" rel="noopener">meshguide.dk</a>: trin-for-trin-vejledning på dansk.</li>
+            <li>Vores <a href="/guider">videoguider</a>.</li>
+            <li>Det danske <a href="https://discord.gg/YJWpszjT23" target="_blank" rel="noopener">MeshCore-Discord</a>.</li>
+            <li>Lokale Facebook-grupper, fx MeshCore Østjylland, MeshCore Nordsjælland og MeshCore Fyn.</li>
+          </ul>
+          <p>I de lokale grupper er der altid nogen, der gerne hjælper.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="roller">
+        <summary>Hvad er forskellen på companion, repeater og room server?</summary>
+        <div class="faq-a">
+          <ul>
+            <li><strong>Companion:</strong> din personlige node. Du parrer den med telefonen og skriver beskeder i MeshCore-appen.</li>
+            <li><strong>Repeater:</strong> står fast, gerne højt, og sender andres pakker videre. Det er repeaterne, der giver netværket rækkevidde.</li>
+            <li><strong>Room server:</strong> et fælles chatrum, der gemmer beskeder, så man kan læse dem senere.</li>
+          </ul>
+          <p>En observer er en repeater eller room server, der også sender det, den hører, til MeshView. Se <a href="#observer">hvordan du bliver observer</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="kan-ikke-se-node">
+        <summary>Hvorfor kan jeg ikke se min node på kortet?</summary>
+        <div class="faq-a">
+          <p>De mest almindelige grunde:</p>
+          <ul>
+            <li><strong>Ingen position.</strong> Noden skal have en position i sine adverts, enten fra GPS eller sat i appen eller CLI'en.</li>
+            <li><strong>Ingen observer hører den.</strong> MeshView ser kun det, som en observer har hørt, direkte eller via repeatere. Står du langt fra andre, kan du selv <a href="/observer">blive observer</a>.</li>
+            <li><strong>Den har ikke sendt et advert endnu.</strong> Repeatere sender adverts med lange mellemrum. Send et advert manuelt fra appen, så ses noden med det samme.</li>
+            <li><strong>Den står uden for Danmark.</strong> Kortet viser kun noder i og omkring Danmark.</li>
+            <li><strong>Navnet starter med 🚫.</strong> Så er noden bevidst skjult (se <a href="#skjul-node">skjul din node</a>).</li>
+          </ul>
+        </div>
+      </details>
+      <details class="faq-item" id="observer">
+        <summary>Hvad er en observer, og hvordan bliver jeg en?</summary>
+        <div class="faq-a">
+          <p>En observer er en node, der lytter med og sender det, den hører, til MeshView over internettet. Uden observere er der intet at vise, så hver ny observer gør kortet bedre, især hvor der er få i forvejen.</p>
+          <p>Det kræver en repeater eller room server med WiFi og firmware, der kan sende til MQTT. Guiden <a href="/observer">Bliv observer</a> tager dig igennem det trin for trin, og <a href="#observer-og-mqtt">Observer og MQTT</a> herunder svarer på de typiske problemer.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="faq-group" id="observer-og-mqtt">
+      <h2>Observer og <em>MQTT</em></h2>
+      <details class="faq-item" id="observer-adgangskode">
+        <summary>Skal jeg have et brugernavn og en adgangskode til min observer?</summary>
+        <div class="faq-a">
+          <p>Nej, ikke til nye observere. De logger ind med <strong>device auth</strong>: radioen beviser, hvem den er, med sin egen MeshCore-nøgle. Du skal ikke oprette dig nogen steder og ikke vente på os. Følg guiden <a href="/observer">Bliv observer</a>.</p>
+          <p>Den gamle løsning med brugernavn og adgangskode på port 8883 kører stadig for de observere, der allerede bruger den. Har du en forbindelse, der virker, så lad den være.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="companion-adgangskode">
+        <summary>Skal min companion have et brugernavn og en adgangskode?</summary>
+        <div class="faq-a">
+          <p>Nej. En companion taler med din telefon eller computer over Bluetooth, USB eller WiFi og har intet med MQTT at gøre. Det er kun en observer, der sender data til MeshView.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="observer-registrering">
+        <summary>Skal min observers nøgle registreres hos jer først?</summary>
+        <div class="faq-a">
+          <p>Nej. Enhver MeshCore-radio med device auth kan forbinde. Når den er online, dukker den op under <a href="https://meshview.dk/#/observers">Observers</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="observer-indstillinger">
+        <summary>Hvilke indstillinger skal jeg bruge?</summary>
+        <div class="faq-a">
+          <ul>
+            <li><strong>Server:</strong> <code>wss://mqtt.meshview.dk:443/mqtt</code> (WebSocket med TLS)</li>
+            <li><strong>Audience:</strong> <code>mqtt.meshview.dk</code></li>
+            <li><strong>Topic:</strong> <code>meshcore/{iata}/{device}/{type}</code></li>
+            <li><strong>Login:</strong> device auth (Ed25519 JWT)</li>
+          </ul>
+          <p>Bruger du en PC eller en Raspberry Pi (fx meshcore-packet-capture), skal klienten bruge WebSocket på port 443 med stien <code>/mqtt</code>. Port 8883 er den gamle adgang med brugernavn og adgangskode og tager ikke imod device auth. Kommandoerne til radioen står i <a href="/observer">guiden</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="not-authorized">
+        <summary>Min observer får "Not authorized" eller "connection refused (5)". Hvad er der galt?</summary>
+        <div class="faq-a">
+          <p>Det skyldes næsten altid én af disse ting:</p>
+          <ul>
+            <li><strong>Forkert port eller transport.</strong> Device auth virker kun på <code>wss://…:443/mqtt</code>, ikke på port 8883.</li>
+            <li><strong>Stien <code>/mqtt</code> mangler.</strong> Mange PC-klienter bruger <code>/</code> som standard.</li>
+            <li><strong>Forkert audience.</strong> Den skal være præcis <code>mqtt.meshview.dk</code>, uden <code>https://</code> og uden mellemrum.</li>
+            <li><strong>Et usynligt tegn fra terminalen.</strong> Har du skrevet kommandoerne i en seriel terminal, så sæt linjeafslutningen til "LF/Newline", og indtast audience igen.</li>
+          </ul>
+          <p>Virker det stadig ikke, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a> med nodens navn og cirka klokkeslæt, så kan vi se, hvorfor brokeren afviser den.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="disc-stale">
+        <summary>Hvad betyder "disc" ved mqtt1, og hvorfor står min observer som "stale"?</summary>
+        <div class="faq-a">
+          <p>"disc" betyder, at den MQTT-plads ikke har forbindelse lige nu; "ok" betyder, at den er forbundet. En observer bliver "stale" hos os, når vi ikke har modtaget data fra den i et stykke tid. Genstart observeren, og tjek <a href="#observer-indstillinger">indstillingerne</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="meshmapper-virker">
+        <summary>Den virker mod MeshMapper eller LetsMesh, men ikke mod meshview.dk. Hvorfor?</summary>
+        <div class="faq-a">
+          <p>Hver plads (mqtt1, mqtt2 …) har sin egen server og audience. At den ene virker, siger ikke noget om den anden. MeshView skal ligge i mqtt1 med <code>preset custom</code> og <a href="#observer-indstillinger">indstillingerne ovenfor</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="observer-firmware">
+        <summary>Hvor finder jeg observer-firmwaren?</summary>
+        <div class="faq-a">
+          <p>På <a href="https://observer.gessaman.com" target="_blank" rel="noopener">observer.gessaman.com</a>. Vælg din radio og den nyeste stabile version. Brug Chrome eller Edge på en computer og et USB-datakabel. Vi anbefaler en Heltec V3, men V4, Xiao S3 WIO, Station G2 og flere T-Beam-modeller virker også.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="efter-opdatering">
+        <summary>Jeg har opdateret firmwaren, og nu forbinder den ikke. Hvad skal jeg gøre?</summary>
+        <div class="faq-a">
+          <p>En opdatering kan nulstille MQTT-opsætningen. Indtast kommandoerne fra <a href="/observer">guiden</a> igen, og genstart. Har du valgt "Erase device", har radioen fået en ny identitet. Så kommer den frem som en ny node, og den gamle forsvinder fra kort og lister, når den ikke har sendt et advert i 7 dage.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="iata">
+        <summary>Hvilken IATA-kode skal jeg vælge?</summary>
+        <div class="faq-a">
+          <p>Koden for din region. I Danmark bruger vi AAL, AAR, BLL, ODE, CPH og RNN. Er du i tvivl, så se <a href="https://dk.meshmapper.net" target="_blank" rel="noopener">dk.meshmapper.net</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="observer-udland">
+        <summary>Vil I også have observere uden for Danmark?</summary>
+        <div class="faq-a">
+          <p>Ja, gerne tæt på grænsen, fx i Skåne og Nordtyskland. De hører trafik, der også går ind over Danmark.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="faq-group" id="kortet">
+      <h2>Kortet og <em>data</em></h2>
+      <details class="faq-item" id="hash-storrelse">
+        <summary>Hvad betyder 1-, 2- og 3-byte hash?</summary>
+        <div class="faq-a">
+          <p>Når en pakke sendes videre, skriver hver repeater et kort id i pakkens rute: de første 1, 2 eller 3 bytes af sin offentlige nøgle. Det kaldes path hash mode.</p>
+          <p>Med 1 byte er der kun 256 mulige id'er, så mange repeatere deler samme id, og MeshView kan ikke altid vide, hvilken repeater en pakke gik igennem. Derfor anbefaler vi 2-byte på både repeatere og companions. Se <a href="/radio">radio-indstillingerne</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="graa-noder">
+        <summary>Hvorfor er nogle noder grå eller blege på kortet?</summary>
+        <div class="faq-a">
+          <p>En node bliver grå på kortet, når den ikke er hørt i et stykke tid. Grænsen afhænger af rollen. På meshview.dk er den ca. 4 døgn for companions, som ofte er slukket eller uden for rækkevidde, og ca. 10 døgn for repeatere og room servers, som normalt står tændt hele tiden.</p>
+          <p>En node, der hverken har sendt et advert eller er genkendt i en pakkes rute i 7 dage, forsvinder helt fra kortet. En repeater, der er helt væk, forsvinder derfor typisk, før den når at blive grå.</p>
+          <p>Hvis den stadig er aktiv, kommer den tilbage, så snart en observer hører den igen.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="set-hoert">
+        <summary>Hvad er forskellen på "set" og "hørt"?</summary>
+        <div class="faq-a">
+          <ul>
+            <li><strong>Set</strong> (last seen) er sidste gang, noden sendte et advert, altså sit navn og sin position.</li>
+            <li><strong>Hørt</strong> (last heard) er sidste gang, noden blev hørt overhovedet, også når den bare sendte en besked eller videresendte en pakke.</li>
+          </ul>
+          <p>En repeater kan derfor være hørt for få minutter siden, selvom dens sidste advert er mange timer gammelt.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="skraafoto-virker-ikke">
+        <summary>Hvorfor virker skråfoto, luftfoto eller terrænprofil ikke?</summary>
+        <div class="faq-a">
+          <p>Skråfoto, luftfoto, Skærmkort og højdedata kommer fra Klimadatastyrelsens Dataforsyningen. Når deres tjenester er nede eller under vedligehold, kan MeshView ikke vise dem. Prøv igen senere; resten af MeshView virker som normalt.</p>
+          <p>Se også videoguiderne til <a href="/guider">skråfoto og terrænprofil</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="antennehoejde">
+        <summary>Hvordan angiver jeg min antennehøjde?</summary>
+        <div class="faq-a">
+          <p>Ejeren af en repeater kan angive antennens højde over jorden. Det bruges i terrænprofilen og rækkeviddeberegningen, så resultaterne passer bedre til virkeligheden.</p>
+          <p>Du får en kode, som du midlertidigt sætter i nodens navn og sender et advert med. Så ved MeshView, at det er dig, der ejer noden. Hele fremgangsmåden står i <a href="https://github.com/dborup/CoreScope/blob/master/docs/user-guide/antenna-height-claims.md" target="_blank" rel="noopener">vejledningen om antennehøjde</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="spoegelse">
+        <summary>Hvordan får jeg fjernet en gammel eller dobbelt node (et "spøgelse")?</summary>
+        <div class="faq-a">
+          <p>Den forsvinder af sig selv fra kort og lister: en node, der hverken har sendt et advert eller er genkendt i en pakkes rute i 7 dage, flyttes til listen over inaktive noder. Det sker typisk efter en genflashing, hvor radioen har fået en ny nøgle. Vil du have den væk med det samme, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a> med nodens public key.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="repeater-forsvinder">
+        <summary>Min repeater forsvinder fra kortet en gang imellem. Hvorfor?</summary>
+        <div class="faq-a">
+          <p>MeshView kan kun vise det, en observer hører. Står din repeater langt fra den nærmeste observer, bliver den kun hørt, når forholdene er gode. Så bliver den grå på kortet, og har ingen observer hørt den i 7 dage, forsvinder den. En observer tæt på løser det.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="scope">
+        <summary>Hvad er scope (region)?</summary>
+        <div class="faq-a">
+          <p>Scope bestemmer, hvilke pakker en repeater sender videre. En repeater med <code>#dk</code> sender pakker videre, som er mærket <code>#dk</code>. Scope gælder kun pakker, der sendes ud til alle (flood), ikke direkte rutede pakker. Pakker uden scope sender en repeater også videre, medmindre den er sat til at afvise dem. Scope bestemmer ikke, hvad der kan høres: alle i nærheden kan stadig høre pakken. Se anbefalingerne på <a href="https://meshguide.dk" target="_blank" rel="noopener">meshguide.dk</a>.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="hash-kollisioner">
+        <summary>Kan jeg se hash-kollisioner?</summary>
+        <div class="faq-a">
+          <p>Ja, under Analytics → <a href="https://meshview.dk/#/analytics?tab=collisions">Hash Issues</a>. Under Analytics → <a href="https://meshview.dk/#/analytics?tab=neighbor-graph">Neighbor Graph</a> kan du se, hvilke repeatere der hører hinanden.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="faq-group" id="daekning-og-placering">
+      <h2>Dækning og <em>placering</em></h2>
+      <details class="faq-item" id="daekning">
+        <summary>Er der dækning, hvor jeg bor?</summary>
+        <div class="faq-a">
+          <p>Kig på <a href="https://meshview.dk/#/map">kortet</a>. Står der aktive repeatere inden for 10–20 km, har du en god chance. Med terrænprofilen på kortet kan du se, om bakker eller bygninger står i vejen mellem dig og en repeater (se <a href="/guider">videoguiden</a>). Er du i tvivl, så skriv til os med din by, så kigger vi på det.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="ingen-noder">
+        <summary>Hvorfor er der ingen noder i mit område?</summary>
+        <div class="faq-a">
+          <p>Enten har ingen sat en repeater op endnu, eller også er der ingen observer, der hører området. Netværket bygges af frivillige, én station ad gangen. En repeater højt oppe hos dig, eller en observer, er netop det, der fylder hullet.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="antennens-hoejde">
+        <summary>Har antennens højde betydning?</summary>
+        <div class="faq-a">
+          <p>Ja, det er det vigtigste af det hele. Signalet på 868 MHz skal helst kunne "se" hen over landskabet. Et par meter ekstra højde gør mere end en større antenne. Tag, stald, mast og silo er gode steder.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="flere-repeatere">
+        <summary>Er der brug for flere repeatere, hvor jeg bor?</summary>
+        <div class="faq-a">
+          <p>Næsten altid. Også i byer med dækning gør flere repeatere nettet mere robust, især hvis du har en høj og fri placering.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="helium-antenne">
+        <summary>Kan jeg bruge min gamle Helium-antenne?</summary>
+        <div class="faq-a">
+          <p>Ja, sandsynligvis. Helium i Europa bruger det samme 868 MHz-bånd, så en antenne til Helium passer også til MeshCore. Du skal bare have en MeshCore-radio i den anden ende af kablet.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="forening-master">
+        <summary>Vi er en forening eller et firma med master. Hvordan kan vi hjælpe?</summary>
+        <div class="faq-a">
+          <p>Rigtig gerne! Høje placeringer er det, netværket mangler mest. En SenseCAP Solar Node P1 Pro kan sidde på en mast uden strøm. Har I også internet på stedet, kan I sætte en observer op ved siden af. Skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a>, så hjælper vi med at finde de bedste steder.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="tyskland-sverige">
+        <summary>Kan vi forbinde os med de tyske og svenske netværk?</summary>
+        <div class="faq-a">
+          <p>Ja, hvis de bruger de samme radio-indstillinger. Kan din repeater høre en tysk eller svensk repeater med samme indstillinger, sender den deres pakker videre, medmindre en pakke er mærket med et scope, din repeater ikke kender, eller din repeater er sat til kun at sende sit eget scope videre (se <a href="#scope">scope</a>).</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="faq-group" id="privatliv">
+      <h2><em>Privatliv</em></h2>
+      <details class="faq-item" id="hvilke-data">
+        <summary>Hvilke data gemmer MeshView, og hvor længe?</summary>
+        <div class="faq-a">
+          <p>MeshView gemmer det, observerne hører i luften: pakker med deres rute og signalstyrke, og nodernes adverts med navn, rolle, offentlig nøgle og position. Det er data, som alle med en MeshCore-radio i nærheden kan modtage.</p>
+          <p>Teksten i beskeder på offentlige kanaler og på de hashtag-kanaler, MeshView kender, gemmes og vises også.</p>
+          <ul>
+            <li>Pakker, også kanalbeskeder, gemmes i 30 dage.</li>
+            <li>En node, der hverken har sendt et advert eller er genkendt i en pakkes rute i 7 dage, forsvinder fra kort og lister. Dens navn, nøgle og sidste position gemmes stadig i listen over inaktive noder, og dens nodeside kan stadig åbnes.</li>
+            <li>En observer, der ikke har sendt data i 7 dage, vises ikke længere, men den gemmes stadig.</li>
+            <li>Ping Scores gemmer navnet på den, der satte en ping i gang, så rekorderne kan bevares.</li>
+          </ul>
+          <p>Vil du have data om din node slettet, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a> med nodens public key.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="beskeder">
+        <summary>Kan andre læse mine beskeder?</summary>
+        <div class="faq-a">
+          <p>Nej, ikke dine private beskeder. Direkte beskeder mellem to noder er krypteret, og MeshView kan ikke læse dem.</p>
+          <p>Beskeder på <strong>offentlige kanaler</strong> kan alle læse, også i MeshView: Public-kanalen og Meshview.dk-kanalen.</p>
+          <p><strong>Hashtag-kanaler</strong> (kanaler med <code>#</code> i navnet) har en nøgle, der kommer af navnet. Alle, der kender navnet, kan derfor læse med. MeshView viser de hashtag-kanaler, den kender navnet på: en liste med almindelige navne og de kanaler, brugere har foreslået, og som er godkendt. Kender MeshView ikke navnet, vises kanalen ikke, men den er stadig ikke hemmelig for andre, der kender det.</p>
+          <p>Skal en kanal være privat, så brug en privat kanal med din egen nøgle. Den kan MeshView ikke læse.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="skjul-node">
+        <summary>Hvordan skjuler jeg min node?</summary>
+        <div class="faq-a">
+          <p>Omdøb noden, så navnet starter med <code>🚫</code>, og send et advert. Så forsvinder den fra MeshViews kort, nodeliste og søgning. Noden virker stadig i netværket som normalt.</p>
+          <p>At skjule er ikke det samme som at slette. Pakker, som noden har sendt, også dens adverts med navn og position, kan stadig ses på pakkesiden, til de udløber efter 30 dage. Det gælder også adverts, den sender efter omdøbningen. Vil du ikke vise din position, så fjern den fra noden, før du sender et nyt advert.</p>
+          <p>Vil du have dine data slettet, så skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a>.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="faq-group" id="om-netvaerket">
+      <h2>Om <em>netværket</em></h2>
+      <details class="faq-item" id="hvad-bruges-det-til">
+        <summary>Hvad bruges netværket egentlig til?</summary>
+        <div class="faq-a">
+          <p>Lige nu er det mest et hobbynetværk, der bliver bygget ud. Derfor er mange beskeder "ping" og "test", fordi folk tjekker, om deres station når ud. Målet er et netværk, der virker, når internet og mobilnet ikke gør, fx ved strømsvigt eller en krise. Det kræver mange stationer først, og hver ny repeater bringer os tættere på.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="krise">
+        <summary>Kan netværket bruges i en krise?</summary>
+        <div class="faq-a">
+          <p>Ja, det er en af grundene til, at det findes. MeshCore virker uden internet og mobilnet, og repeatere med solpanel kører videre ved strømsvigt. Det er dog et frivilligt netværk uden garanti, så det er et supplement til nødopkald og beredskab, ikke en erstatning.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="sabotage">
+        <summary>Hvor svært er det at sabotere netværket?</summary>
+        <div class="faq-a">
+          <p>Som al radio kan det forstyrres lokalt med en kraftig sender, men det er ulovligt. Nettet har ingen central server, der kan lukkes. Støjer nogen på frekvensen, rammer det kun området omkring senderen. Spam med pakker sendes derimod videre af repeaterne og kan belaste hele nettet.</p>
+          <p>Nodernes adverts er signeret med deres nøgle, så ingen kan udgive sig for at være en eksisterende node. Men alle kan lave en ny node med et hvilket som helst navn og en hvilken som helst position. Direkte beskeder er krypteret. På offentlige kanaler kan alle med kanalnøglen derimod skrive, og afsendernavnet er bare tekst. Stol derfor ikke blindt på et navn i en offentlig kanal.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="hvem-staar-bag">
+        <summary>Hvem står bag meshview.dk, og er I det eneste fællesskab?</summary>
+        <div class="faq-a">
+          <p>MeshView.dk drives af frivillige. Det er et kort og et værktøj over det danske MeshCore-netværk, ikke en forening, man melder sig ind i. Netværket er alles: alle, der sætter en radio op, er med. Der er flere danske fællesskaber, fx meshguide.dk, Discord og de lokale Facebook-grupper.</p>
+        </div>
+      </details>
+      <details class="faq-item" id="hele-danmark">
+        <summary>Dækker det hele Danmark, også København?</summary>
+        <div class="faq-a">
+          <p>Ja. Der er noder i hele landet, også i hovedstadsområdet. Tætheden varierer, så kig på <a href="https://meshview.dk/#/map">kortet</a> for dit område.</p>
+        </div>
+      </details>
+    </div>
+
+    <p class="faq-more">
+      Fandt du ikke svaret? Skriv til <a href="mailto:kontakt@meshview.dk">kontakt@meshview.dk</a>,
+      eller læs den fulde <a href="https://github.com/dborup/CoreScope/blob/master/docs/user-guide/" target="_blank" rel="noopener">brugervejledning</a>.
+    </p>
+
+  </div>
+</section>
+
+<footer>
+  <div class="footer-inner">
+    <div class="footer-logo">meshview.dk</div>
+    <ul class="footer-links">
+      <li><a href="https://meshcore.io" target="_blank" rel="noopener">MeshCore</a></li>
+      <li><a href="/guider">Guider</a></li>
+      <li><a href="/faq">FAQ</a></li>
+      <li><a href="/observer">Bliv observer</a></li>
+      <li><a href="mailto:kontakt@meshview.dk">Kontakt</a></li>
+    </ul>
+    <div class="footer-copy">© 2026 MeshView.dk — Frivilligt drevet</div>
+  </div>
+</footer>
+
+<script>
+  // Open the answer a link points to (#skjul-node etc.).
+  (function () {
+    function openHash() {
+      var id = decodeURIComponent(location.hash.slice(1));
+      if (!id) return;
+      var el = document.getElementById(id);
+      if (el && el.tagName === 'DETAILS') el.open = true;
+    }
+    window.addEventListener('hashchange', openHash);
+    // Same link tapped again after closing the answer: the hash does not
+    // change, so hashchange never fires. Open it on the click as well.
+    document.addEventListener('click', function (e) {
+      var a = e.target.closest && e.target.closest('a[href^="#"]');
+      if (!a) return;
+      var el = document.getElementById(decodeURIComponent(a.getAttribute('href').slice(1)));
+      if (el && el.tagName === 'DETAILS') el.open = true;
+    });
+    openHash();
+  })();
+</script>
+</body>
+</html>

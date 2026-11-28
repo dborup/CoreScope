@@ -3,7 +3,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const { chromium } = require('playwright');
-const routes = { '/velkommen': 'index.html', '/observer': 'observer.html', '/hardware': 'hardware.html', '/radio': 'radio.html', '/guider': 'guider.html' };
+const routes = { '/velkommen': 'index.html', '/observer': 'observer.html', '/hardware': 'hardware.html', '/radio': 'radio.html', '/guider': 'guider.html', '/faq': 'faq.html' };
 const expected = 'set wifi.ssid NAVN_PÅ_WIFI\nset wifi.pwd KODE_TIL_WIFI\nset mqtt.iata DIT_IATA\nset mqtt1.preset custom\nset mqtt1.server wss://mqtt.meshview.dk:443/mqtt\nset mqtt1.audience mqtt.meshview.dk\nset mqtt1.topic meshcore/{iata}/{device}/{type}\nset mqtt.owner DIT_PUB_KEY\nreboot';
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');

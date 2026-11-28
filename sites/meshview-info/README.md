@@ -9,6 +9,7 @@ Lokale kilder til de fire selvstændige sider. Ikke CoreScopes `public/` og ikke
 | hardware.html | /hardware |
 | radio.html | /radio |
 | guider.html | /guider |
+| faq.html | /faq |
 
 ## Assets og deployment
 
@@ -35,6 +36,7 @@ node sites/meshview-info/test-copy-commands.js
 node sites/meshview-info/test-xss.cjs
 node sites/meshview-info/test-mobile.cjs
 node sites/meshview-info/test-guider.cjs
+node sites/meshview-info/test-faq.cjs
 ```
 
 Mobiltesten starter/lukker selv en lokal server på en ledig loopback-port,
@@ -53,6 +55,14 @@ Afspilning sker først ved klik: `assets/guider.js` skifter miniaturen ud med en
 miniaturerne ligger lokalt i `assets/guider/` (640×360 jpg, taget fra videoen).
 Ny guide: læg miniaturen i `assets/guider/`, kopiér et kort, og link til den
 matchende side i `docs/user-guide/`.
+
+## FAQ (/faq)
+
+Hvert spørgsmål er et `<details class="faq-item" id="…">` i en gruppe. `id` er
+det dybe link (fx `/faq#skjul-node`), som åbner svaret; ændr ikke et id, der
+allerede er linket til. Svarene om data og privatliv skal passe med serverens
+indstillinger (`retention`, `hiddenNamePrefixes`, kanalnøgler); ret dem, når
+indstillingerne ændres.
 
 ## Fonts
 
