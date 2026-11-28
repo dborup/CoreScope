@@ -36,10 +36,10 @@ type NewNodeEntry struct {
 }
 
 // newNodesSQLFetchCap bounds how many rows we ever pull from SQL before
-// blacklist-filtering and truncating to the caller's requested limit in
-// Go -- filtering blacklisted pubkeys AFTER a tight SQL LIMIT would silently
-// undercount (e.g. requesting 50 but getting 48 back because 2 of the top
-// 50 were blacklisted). This deployment's node count doesn't call for
+// identity-filtering (identityHidden) and truncating to the caller's
+// requested limit in Go -- filtering hidden pubkeys AFTER a tight SQL LIMIT
+// would silently undercount (e.g. requesting 50 but getting 48 back because
+// 2 of the top 50 were hidden). This deployment's node count doesn't call for
 // anything cleverer.
 const newNodesSQLFetchCap = 500
 
@@ -100,7 +100,12 @@ func (s *Server) computeNewNodes(limit int) ([]NewNodeEntry, error) {
 			return nil, fmt.Errorf("computeNewNodes: scan row: %w", err)
 		}
 		e.Foreign = foreignAdvert.Valid && foreignAdvert.Int64 != 0
-		if s.cfg.IsBlacklisted(e.PublicKey) {
+		// The node list's identity rule (#1006): blacklisted keys, observer-
+		// blacklisted keys and hidden name prefixes are left out before the
+		// limit is applied. Read from live config on every call -- this feed
+		// has no response cache -- so a blacklist or prefix change applies to
+		// the next request.
+		if identityHidden(s.cfg, e.PublicKey, name.String) {
 			continue
 		}
 		e.Name = name.String
