@@ -122,6 +122,7 @@ run test-live-heard-filter.js
 run test-live-scope-color.js
 run test-881-live-moments.js
 run test-881-m3-customizer-moments.js
+run test-882-m2-scope-customizer.js
 run test-883-kiosk-params.js
 run test-883-kiosk-tour.js
 run test-883-kiosk-numbers.js
@@ -313,6 +314,7 @@ run test-issue-1509-detect-preset.js
 run test-issue-353-path-hash-warn.js
 run test-issue-480-no-scope.js
 run test-live.js
+run test-issue-912-live-1byte-hops.js
 run test-issue-220-live-filter-readiness.js
 run test-coverage-gate.js
 run test-node-reach-coverage.js

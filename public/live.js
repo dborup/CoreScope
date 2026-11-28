@@ -42,6 +42,9 @@
   let packetCount = 0;
   let activeAnims = 0;
   const MAX_CONCURRENT_ANIMS = 20;
+  // #912 M1: an uncertain segment is lighter than a certain one (0.8), as the
+  // route view's redacted edges are (route-render.js: 0.6 against 0.92).
+  const UNCERTAIN_SEGMENT_OPACITY = 0.5;
   // Perf caps for the animation overlay (see updateAnimCanvas / renderAnimations).
   const ANIM_MAX_DPR = 1.5;       // cap backing-store pixels on hi-DPI displays
   const ANIM_MIN_FRAME_MS = 15;   // don't redraw faster than ~60fps (high-refresh guard)
@@ -92,8 +95,14 @@
   // One registry per page load, so a scope keeps its colour while the
   // viewer stays (session-sticky). Bounded by LiveScopeColor.CAP.
   let _scopeRegistry = null;
+  // #882 M2 — the legend window (minutes, rows) is the customizer's
+  // per-browser liveScope section, validated by LiveScopeColor.SETTINGS.
+  function scopeLegendSettings() {
+    const cfg = window.SITE_CONFIG && window.SITE_CONFIG.liveScope;
+    return window.LiveScopeColor.SETTINGS.resolve(cfg);
+  }
   function scopeRegistry() {
-    if (!_scopeRegistry) _scopeRegistry = window.LiveScopeColor.createRegistry();
+    if (!_scopeRegistry) _scopeRegistry = window.LiveScopeColor.createRegistry(scopeLegendSettings());
     return _scopeRegistry;
   }
   // The canvas needs concrete colour strings: the --scope-* variables are
@@ -111,6 +120,14 @@
     return _scopePalette;
   }
   function invalidateScopePalette() { _scopePalette = null; }
+  // A customizer change ('theme-changed'): new colours for the next lines
+  // (drawn lines keep theirs), the legend redrawn with the window re-read
+  // (its swatches are var(--scope-*), so they follow at once).
+  function onScopeThemeChanged() {
+    invalidateScopePalette();
+    _scopeLegendSig = '';
+    renderScopeLegend();
+  }
   let _scopeThemeListening = false;
   // Scope colour of one transmission, or null when "Color by scope" is off.
   // touch: register the scope in the legend (live packets only; a VCR
@@ -139,7 +156,7 @@
     return null;
   }
 
-  // Legend section "SCOPES (last 15 min)": re-rendered at most once a second
+  // Legend section "SCOPES (last N min)": re-rendered at most once a second
   // while packets arrive, on the shared 60 s tick (expiry) and on a toggle,
   // and only touches the DOM when its rows changed. Names are untrusted
   // (node/config strings), so rows are built with textContent.
@@ -172,13 +189,22 @@
     const menu = document.getElementById('scopeLegendMenu');
     const menuList = document.getElementById('scopeLegendMenuList');
     if (!S || !sec || !list) return;
+    // The window follows the customizer even when its 'theme-changed' came
+    // before this page listened (boot order): re-read on every render
+    // (<= 1/s, two keys). The registry's touch() uses it from then on.
+    scopeRegistry().configure(scopeLegendSettings());
     sec.hidden = !colorByScope;
     if (menu) menu.hidden = !colorByScope;
     if (!colorByScope) { _scopeLegendSig = ''; return; }
     const L = scopeRegistry().legend(Date.now());
-    const sig = L.sig + '|' + scopedOnly;
+    const sig = L.sig + '|' + scopedOnly + '|' + L.windowMinutes;
     if (sig === _scopeLegendSig) return;
     _scopeLegendSig = sig;
+    const title = 'SCOPES (last ' + L.windowMinutes + ' min)';
+    [sec, menu].forEach(function(box) {
+      const h = box && box.querySelector('.legend-title');
+      if (h) h.textContent = title;
+    });
     const frag = document.createDocumentFragment();
     if (!L.rows.length) frag.appendChild(scopeLegendRow(null, 'No named scopes yet', 'live-scope-empty'));
     for (const r of L.rows) frag.appendChild(scopeLegendRow(S.paletteVar({ kind: 'named' }, r.slot), r.name));
@@ -3327,7 +3353,7 @@
     // One shared 60 s tick: nodes also age out of the "Last heard" filter
     // here (#660), with no timer of its own.
     _pruneInterval = setInterval(() => { pruneStaleNodes(); applyHeardFilter(); renderScopeLegend(); }, 60000);
-    if (!_scopeThemeListening) { window.addEventListener('theme-changed', invalidateScopePalette); _scopeThemeListening = true; }
+    if (!_scopeThemeListening) { window.addEventListener('theme-changed', onScopeThemeChanged); _scopeThemeListening = true; }
 
     // Refresh relative timestamps in feed every 10 seconds (#701)
     _feedTimestampInterval = setInterval(function() {
@@ -4196,6 +4222,9 @@
   window._liveFormatLiveTimestampHtml = formatLiveTimestampHtml;
   window._liveResolveHopPositions = resolveHopPositions;
   window._liveResolveHopEntries = resolveHopEntries;
+  window._liveOneByteHopsMode = oneByteHopsMode;
+  window._liveIsUncertainSegment = isUncertainSegment;
+  window._liveApplyOneByteHopsMode = applyOneByteHopsMode;
   window._liveStartFollow = function(hash, opts) { return startFollow(hash, opts); };
   window._liveStopFollow = function() { stopFollow(); };
   window._liveFollowState = function() { return followState; };
@@ -4665,6 +4694,7 @@
     // Prefer path_json (per-observer unique path) over decoded.path.hops (same for all)
     var allPaths = [];
     var seenPathKeys = new Set();
+    var hopMode = oneByteHopsMode(); // #912 M1: once per packet group
     for (var qi = 0; qi < packets.length; qi++) {
       var qpkt = packets[qi];
       var qd = qpkt.decoded || {};
@@ -4678,7 +4708,7 @@
       var pathKey = hops.join(',');
       if (seenPathKeys.has(pathKey)) continue;
       seenPathKeys.add(pathKey);
-      var hopPositions = resolveHopPositions(hops, qp, window.getResolvedPath ? getResolvedPath(qpkt) : null);
+      var hopPositions = resolveHopPositions(hops, qp, window.getResolvedPath ? getResolvedPath(qpkt) : null, hopMode);
       if (hopPositions.length >= 2) {
         allPaths.push({ hopPositions: hopPositions, raw: qpkt.raw || first.raw });
       } else if (hopPositions.length === 1) {
@@ -4689,7 +4719,7 @@
     // If no multi-hop paths found, try the decoded path as fallback
     if (allPaths.length === 0) {
       var fallbackHops = decoded.path?.hops || [];
-      var fallbackPositions = resolveHopPositions(fallbackHops, payload);
+      var fallbackPositions = resolveHopPositions(fallbackHops, payload, null, hopMode);
       if (fallbackPositions.length >= 2) {
         allPaths.push({ hopPositions: fallbackPositions, raw: first.raw });
       } else if (fallbackPositions.length === 1) {
@@ -4831,13 +4861,73 @@
     });
   }
 
-  function resolveHopPositions(hops, payload, resolvedPath) {
+  // #912 M1 — the 1-byte hop setting of hop-filter.js (#674), read per
+  // packet so a change (MC_set1ByteHopsMode fires mc-hide-1byte-hops-changed)
+  // reaches the next packet at once; animations in flight just finish.
+  // A visitor who never chose (or no hop-filter.js) gets Show on Live: owner
+  // decision on #912 (2026-11-27) until M2's operator default replaces this
+  // fallback. Other pages keep hop-filter.js's own default.
+  const LIVE_1BYTE_HOPS_FALLBACK = 'show';
+  function oneByteHopsMode() {
+    const stored = typeof window.MC_getStored1ByteHopsMode === 'function'
+      ? window.MC_getStored1ByteHopsMode() : null;
+    return stored || LIVE_1BYTE_HOPS_FALLBACK;
+  }
+
+  // #912 M1 — applies the mode to a path before it is resolved. Hide leaves
+  // the 1-byte hops out, with resolved_path filtered in step so each server
+  // answer stays with its own hop; Mark keeps them and flags their positions.
+  // Returns the input arrays untouched for Show, or when nothing changes.
+  // O(hops), no lookups: same order as the resolve that follows.
+  function applyOneByteHopsMode(hops, resolvedPath, mode) {
+    const out = { hops: hops, resolvedPath: resolvedPath, oneByte: null, hidden: 0 };
+    const isVisibleHop = window.MC_isVisibleHop;
+    if ((mode !== 'hide' && mode !== 'mark') || !hops || !hops.length ||
+      typeof isVisibleHop !== 'function') return out;
+    const opts = { hide1ByteHops: true };
+    const paired = !!resolvedPath && resolvedPath.length === hops.length;
+    let kept = null, keptRp = null;
+    for (let i = 0; i < hops.length; i++) {
+      if (isVisibleHop(hops[i], opts)) {
+        if (kept) { kept.push(hops[i]); if (keptRp) keptRp.push(resolvedPath[i]); }
+        continue;
+      }
+      if (mode === 'mark') {
+        if (!out.oneByte) out.oneByte = new Array(hops.length).fill(false);
+        out.oneByte[i] = true;
+        continue;
+      }
+      if (!kept) { kept = hops.slice(0, i); keptRp = paired ? resolvedPath.slice(0, i) : null; }
+      out.hidden++;
+    }
+    if (kept) {
+      out.hops = kept;
+      // A resolved_path that did not match the hops is ignored downstream; it
+      // must not start to match the shorter path by accident.
+      out.resolvedPath = keptRp;
+    }
+    return out;
+  }
+
+  // #912 M1 — a segment is drawn dashed and lighter when either end is an
+  // uncertain position (Mark: a 1-byte hop; Hide: any, once hops were dropped).
+  function isUncertainSegment(a, b) {
+    return !!((a && a.uncertain) || (b && b.uncertain));
+  }
+
+  // mode: the 1-byte hop setting (#912 M1); anything but 'hide' / 'mark'
+  // draws every hop unmarked.
+  function resolveHopPositions(hops, payload, resolvedPath, mode) {
     // Hoist sender GPS guard once — reject (0,0) as "no GPS"
     const hasValidGps = payload.lat != null && payload.lon != null
       && !(payload.lat === 0 && payload.lon === 0);
     const senderLat = hasValidGps ? payload.lat : null;
     const senderLon = hasValidGps ? payload.lon : null;
-    const raw = resolveHopEntries(hops, payload, resolvedPath);
+    const filtered = applyOneByteHopsMode(hops, resolvedPath, mode);
+    const raw = resolveHopEntries(filtered.hops, payload, filtered.resolvedPath);
+    if (filtered.oneByte) {
+      for (let i = 0; i < raw.length; i++) if (filtered.oneByte[i]) raw[i].uncertain = true;
+    }
 
     // Add sender position as anchor if available
     if (payload.pubKey && senderLat != null) {
@@ -4845,6 +4935,11 @@
       if (!existing) {
         raw.unshift({ key: payload.pubKey, pos: [payload.lat, payload.lon], name: payload.name || payload.pubKey.slice(0, 8), known: true });
       }
+    }
+    // Hide dropped hops: no segment of what is left reads as a direct link
+    // (route-render.js does the same, #1689 r1).
+    if (filtered.hidden > 0) {
+      for (let i = 0; i < raw.length; i++) raw[i].uncertain = true;
     }
 
     if (!showGhostHops) return raw.filter(h => h.known);
@@ -4931,7 +5026,8 @@
         const lineColor = (isGhost || nextGhost) ? '#94a3b8' : color;
         const lineOpacity = (isGhost || nextGhost) ? 0.3 : undefined;
         const segHash = forceColor ? null : pktMeta?.hash;
-        drawAnimatedLine(hp.pos, nextPos, lineColor, () => { hopIndex++; nextHop(); }, lineOpacity, rawHex, segHash);
+        const uncertain = isUncertainSegment(hp, hopPositions[hopIndex + 1]);
+        drawAnimatedLine(hp.pos, nextPos, lineColor, () => { hopIndex++; nextHop(); }, lineOpacity, rawHex, segHash, uncertain);
       } else {
         if (!isGhost) pulseNode(hp.key, hp.pos, typeName);
         hopIndex++; nextHop();
@@ -5506,7 +5602,8 @@
     const line = L.polyline([anim.from, anim.to], {
       pane: 'animationsPane', // #1514 M2 — fades stack with the moving phase (z=625).
       color: anim.lineColor, weight: anim.isDashed ? 1.5 : 2, opacity: anim.opacity,
-      lineCap: 'round', dashArray: anim.isDashed ? '4 6' : null
+      lineCap: 'round', dashArray: anim.isDashed ? '4 6' : null,
+      className: anim.uncertain ? 'live-path-uncertain' : ''
     }).addTo(pathsLayer);
 
           recentPaths.push({ line, glowLine: contrail, time: Date.now() });
@@ -5529,7 +5626,9 @@
     }
   }
 
-  function drawAnimatedLine(from, to, color, onComplete, overrideOpacity, rawHex, hash) {
+  // uncertain (#912 M1): a segment at a 1-byte hop (Mark) or of a path whose
+  // 1-byte hops were left out (Hide): dashed and lighter, in its own colour.
+  function drawAnimatedLine(from, to, color, onComplete, overrideOpacity, rawHex, hash, uncertain) {
     // GUARD: Prevent stale callbacks from pushing to a destroyed map
     if (!map || !animCtx) {
       if (onComplete) onComplete();
@@ -5538,14 +5637,15 @@
 
     if (matrixMode) return drawMatrixLine(from, to, color, onComplete, rawHex);
 
-    const mainOpacity = overrideOpacity ?? 0.8;
-    const isDashed = overrideOpacity != null;
+    const isGhostLine = overrideOpacity != null;
+    const mainOpacity = overrideOpacity ?? (uncertain ? UNCERTAIN_SEGMENT_OPACITY : 0.8);
+    const isDashed = isGhostLine || !!uncertain;
 
     var hashFill = '#fff';
     var hashOutline = color;
     var contrailColor = color;
 
-    if (colorByHash && hash && !isDashed && window.HashColor) {
+    if (colorByHash && hash && !isGhostLine && window.HashColor) {
       var hsl = HashColor.hashToHsl(hash, _liveTheme());
       hashFill = hsl;
       hashOutline = HashColor.hashToOutline(hash, _liveTheme());
@@ -5560,7 +5660,8 @@
       lastTick: null,
       opacity: mainOpacity,
       isDashed: isDashed,
-      lineColor: (colorByHash && hash && !isDashed && window.HashColor) ? hashFill : color,
+      uncertain: !!uncertain,
+      lineColor: (colorByHash && hash && !isGhostLine && window.HashColor) ? hashFill : color,
       contrailColor: contrailColor,
       hashFill: hashFill,
       hashOutline: hashOutline,
@@ -6351,7 +6452,7 @@
     if (_heardReapplyTimer) { clearTimeout(_heardReapplyTimer); _heardReapplyTimer = null; }
     if (_scopeLegendTimer) { clearTimeout(_scopeLegendTimer); _scopeLegendTimer = null; }
     _scopeLegendSig = '';
-    if (_scopeThemeListening) { window.removeEventListener('theme-changed', invalidateScopePalette); _scopeThemeListening = false; }
+    if (_scopeThemeListening) { window.removeEventListener('theme-changed', onScopeThemeChanged); _scopeThemeListening = false; }
     if (_feedTimestampInterval) { clearInterval(_feedTimestampInterval); _feedTimestampInterval = null; }
     stopAffinityRefresh();
     // Unsubscribe rather than close: the socket belongs to app.js and the rest
