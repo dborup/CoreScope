@@ -294,6 +294,7 @@ run test-issue-1279-p2-code-filter.js
 run test-area-filter.js
 run test-scope-member-filter.js
 run test-dagi-filter.js
+run test-issue-740-m3b-dagi-packets-map.js
 run test-issue-1293-marker-shapes.js
 run test-issue-1356-map-a11y.js
 run test-issue-1360-pill-letter-count.js

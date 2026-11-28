@@ -4350,6 +4350,15 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
   box-shadow: 0 4px 16px var(--shadow); font-family: var(--font);
 }
 .dagi-panel[hidden] { display: none; }
+/* #740 M3b: opened beside a scrolling panel (the Map's controls), which would
+   clip it; dagi-filter.js sets left and top. */
+.dagi-panel.dagi-panel-beside { position: fixed; }
+/* In the Map's narrow controls panel the trigger shrinks (its label ends in
+   an ellipsis), so the clear button stays inside the panel. */
+.map-controls .dagi-filter-container { display: flex; margin-bottom: 10px; }
+/* On Packets the picker sits in the filter bar, whose inputs are 120 px
+   (100% when expanded on a phone); the search box keeps the panel's width. */
+.filter-bar .dagi-panel input.dagi-search { width: auto; }
 .dagi-panel:focus { outline: none; }
 .dagi-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 6px 2px 12px; }
 .dagi-title { font-size: 13px; font-weight: 600; }
@@ -4419,6 +4428,14 @@ button.region-pill-active:hover { opacity: 0.85; color: var(--text-on-accent); }
   .dagi-option-meta { font-size: 12px; }
   .dagi-credit { font-size: 12px; }
   .dagi-notice { padding: 4px 10px; }
+  /* #740 M3b: the Map's controls panel (z-index 1000) and the map area
+     (z-index 0) are stacking contexts, so a sheet opened from the panel
+     would stay under the bottom nav and the map's own controls. */
+  #map-wrap:has(.map-controls .dagi-open),
+  .map-controls:has(.dagi-open) { z-index: var(--z-modal); }
+  /* The Packets dropdown row gained the DAGI control: it wraps instead of
+     pushing Types and Channels off the screen. */
+  .filter-bar .filter-group.filter-group-dropdowns { flex-wrap: wrap; }
 }
 @media (pointer: coarse) {
   /* As .region-dropdown-trigger beside it: the 48 px house minimum (#630). */

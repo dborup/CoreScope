@@ -19,6 +19,7 @@
     "Chart": "readonly",
     "DIST_THRESHOLDS": "readonly",
     "DagiFilter": "readonly",
+    "DagiOutline": "readonly",
     "DragManager": "readonly",
     "EXTERNAL_URLS": "readonly",
     "FAV_KEY": "readonly",
