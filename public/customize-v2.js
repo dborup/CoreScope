@@ -2871,7 +2871,7 @@
       return '<option value="' + value + '"' + (mode === value ? ' selected' : '') + '>' + label + '</option>';
     };
     return '<p class="cust-section-title" style="font-size:14px;margin:16px 0 8px">Path Display</p>' +
-      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">1-byte path-hash prefixes (firmware default) collide often: several nodes share each one, so a 1-byte hop on a route is a best guess. Mark flags the uncertain hops on the map route; Hide leaves 1-byte hops out everywhere without changing what\'s stored.</p>' +
+      '<p class="cust-hint" style="font-size:12px;color:var(--text-muted);margin-bottom:8px">1-byte path-hash prefixes (firmware default) collide often: several nodes share each one, so a 1-byte hop on a route is a best guess. Mark flags the uncertain hops on the map route; Hide leaves 1-byte hops out everywhere without changing what\'s stored. Until you pick a mode here, the Live map shows every hop unmarked.</p>' +
       '<div class="cust-field">' +
         '<label for="cv2-hide-1byte-hops" style="display:block;margin-bottom:4px">Short (1-byte) path-hash hops</label>' +
         '<select id="cv2-hide-1byte-hops" data-cv2-hide-1byte-hops style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text)">' +

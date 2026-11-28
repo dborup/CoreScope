@@ -19,8 +19,10 @@
   //   show — as before #674, no markings;
   //   mark — (default) visible, uncertain hops marked in the map route view;
   //   hide — the #1633 behaviour: 1-byte hops left out everywhere.
-  // The default is stored as "no key". The #1633 boolean key migrates once:
-  // "true" becomes mode "hide"; anything else is dropped.
+  // "No key" means the visitor never chose; an explicit choice, Mark
+  // included, is always stored (#912 M1: Live tells the two apart). The #1633
+  // boolean key migrates once: "true" becomes mode "hide"; anything else is
+  // dropped.
   var MODE_KEY = 'meshcore-1byte-hops-mode';
   var LEGACY_KEY = 'meshcore-hide-1byte-hops';
   var MODES = ['show', 'mark', 'hide'];
@@ -52,8 +54,7 @@
   function set1ByteHopsMode(mode) {
     if (!isMode(mode)) return;
     try {
-      if (mode === DEFAULT_MODE) localStorage.removeItem(MODE_KEY);
-      else localStorage.setItem(MODE_KEY, mode);
+      localStorage.setItem(MODE_KEY, mode);
       localStorage.removeItem(LEGACY_KEY);
     } catch (_e) { /* private mode */ }
     if (typeof window !== 'undefined' && typeof window.CustomEvent === 'function') {
@@ -61,6 +62,15 @@
         detail: { mode: mode, value: mode === 'hide' }
       }));
     }
+  }
+
+  // #912 M1 — the visitor's own choice, or null when they never made one.
+  // Runs get1ByteHopsMode() first so junk is dropped and the #1633 key
+  // migrates exactly as for every other reader.
+  function getStored1ByteHopsMode() {
+    var mode = get1ByteHopsMode();
+    try { return localStorage.getItem(MODE_KEY) != null ? mode : null; }
+    catch (_e) { return null; }
   }
 
   // #1633 API, kept for its callers: "hide" is mode hide; turning it off
@@ -139,6 +149,7 @@
     window.MC_setHide1ByteHops = setHide1ByteHops;
     window.MC_get1ByteHopsMode = get1ByteHopsMode;
     window.MC_set1ByteHopsMode = set1ByteHopsMode;
+    window.MC_getStored1ByteHopsMode = getStored1ByteHopsMode;
     window.MC_isVisibleHop = isVisibleHop;
     window.MC_filterPathHops = filterPathHops;
     window.MC_hopByteLen = hopByteLen;
@@ -151,6 +162,7 @@
       setHide1ByteHops: setHide1ByteHops,
       get1ByteHopsMode: get1ByteHopsMode,
       set1ByteHopsMode: set1ByteHopsMode,
+      getStored1ByteHopsMode: getStored1ByteHopsMode,
       isVisibleHop: isVisibleHop,
       filterPathHops: filterPathHops,
       hopByteLen: hopByteLen,

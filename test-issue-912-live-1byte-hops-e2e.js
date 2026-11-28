@@ -11,11 +11,18 @@
  *
  *   1. 1440x900, the mode switched through the customizer's own select and no
  *      reload between modes (mc-hide-1byte-hops-changed):
- *      - Show: a vertex sits on B and no segment is marked (control);
+ *      - no stored mode (cold start): Live uses Show, so B is drawn unmarked
+ *        (owner decision on #912, 2026-11-27, until M2);
+ *      - Show: a vertex sits on B and no segment is marked (control); a pure
+ *        1-byte path is drawn;
  *      - Hide: no polyline vertex sits on B, and A→C is drawn dashed and
  *        lighter (class live-path-uncertain), since a hop was dropped;
+ *      - Hide, pure 1-byte path with decoded.path.hops set: the path_json
+ *        route filters down to the sender, so renderPacketTree falls back to
+ *        decoded.path.hops; that fallback must apply Hide too (no vertex
+ *        other than the sender's);
  *      - Mark: B stays, A→B and B→C carry the dashed class, and a route
- *        with only multi-byte hops carries none;
+ *        with only multi-byte hops carries none; the choice is stored;
  *   2. a 375x560 touch phone from a cold start: More → Customize → Display by
  *      real taps, Hide picked, Live by a real tap; no vertex on B.
  *
@@ -102,18 +109,23 @@ function pickNodes(page) {
 // every animation is done. Returns the polylines it drew. Headless Chromium
 // without a GPU paints Live at a few frames a second and a segment's progress
 // per frame is capped (tickDt), so a 3-segment route can take ~15 s.
-async function send(page, id, a, hops) {
-  return page.evaluate(async ({ id, a, hops }) => {
+// With { decodedPath: true } the packet also carries decoded.path.hops, the
+// transmission-level path renderPacketTree falls back to when no observation
+// path yields two positions.
+async function send(page, id, a, hops, { decodedPath = false } = {}) {
+  return page.evaluate(async ({ id, a, hops, decodedPath }) => {
     window.__e2e912Polys.length = 0;
+    const prefixes = hops.map((h) => h.node.key.slice(0, h.bytes * 2).toUpperCase());
     window._liveWSHandler()({ type: 'packet', data: {
       id: 912000000 + id,
       hash: (0x912000000000 + id).toString(16).padStart(16, '0'),
       timestamp: new Date().toISOString(),
       observer_id: 'E2E912', observer_name: 'e2e-912',
-      path_json: JSON.stringify(hops.map((h) => h.node.key.slice(0, h.bytes * 2).toUpperCase())),
+      path_json: JSON.stringify(prefixes),
       resolved_path: JSON.stringify(hops.map((h) => h.node.key)),
-      decoded: { header: { payloadTypeName: 'ADVERT' },
+      decoded: Object.assign({ header: { payloadTypeName: 'ADVERT' },
         payload: { type: 'ADVERT', pubKey: a.key, name: a.name, lat: a.lat, lon: a.lon } },
+      decodedPath ? { path: { hops: prefixes } } : {}),
     } });
     const t0 = Date.now();
     await new Promise((r) => setTimeout(r, 100));
@@ -125,11 +137,14 @@ async function send(page, id, a, hops) {
       await new Promise((r) => setTimeout(r, 50));
     }
     return window.__e2e912Polys.slice();
-  }, { id, a, hops });
+  }, { id, a, hops, decodedPath });
 }
 
 const at = (ll, n) => Math.abs(ll[0] - n.lat) < 1e-9 && Math.abs(ll[1] - n.lon) < 1e-9;
 const hasVertex = (polys, n) => polys.some((p) => p.latlngs.some((ll) => at(ll, n)));
+// Any vertex that is not the sender's: whichever node a heuristic picks for a
+// 1-byte prefix, a drawn hop shows up here.
+const offSender = (polys, a) => polys.filter((p) => p.latlngs.some((ll) => !at(ll, a)));
 // The fading core line of the segment from → to: not its glow (weight 6) and
 // not the invisible clickable route (opacity 0, weight 12).
 const segment = (polys, from, to) => polys.find((p) => p.latlngs.length === 2 && p.opacity > 0 &&
@@ -176,7 +191,19 @@ async function pickMode(page, mode, phone) {
       const [A, B, C, D] = await pickNodes(h.page);
       assert(D, 'the fixture needs four nodes with distinct GPS positions');
       const route = [{ node: B, bytes: 1 }, { node: C, bytes: 2 }];
+      const pureOneByte = [{ node: B, bytes: 1 }];
       let id = 0;
+
+      await step('no stored mode (cold start): Live uses Show, the 1-byte hop is drawn unmarked', async () => {
+        const st = await h.page.evaluate(() => ({ stored: localStorage.getItem('meshcore-1byte-hops-mode'),
+          global: window.MC_get1ByteHopsMode() }));
+        assert(st.stored === null, 'precondition: no stored mode, got ' + st.stored);
+        assert(st.global === 'mark', 'other pages keep hop-filter.js\'s default (mark), got ' + st.global);
+        const polys = await send(h.page, ++id, A, route);
+        assert(hasVertex(polys, B), 'Live must draw a vertex on B: ' + JSON.stringify(polys));
+        assert(segment(polys, A, B) && segment(polys, B, C), 'A→B and B→C must be drawn');
+        assert(!polys.some(uncertain), 'no stored mode marks nothing on Live: ' + JSON.stringify(polys.filter(uncertain)));
+      });
 
       await step('Show (control): the 1-byte hop is drawn, nothing is marked', async () => {
         await pickMode(h.page, 'show', false);
@@ -184,6 +211,9 @@ async function pickMode(page, mode, phone) {
         assert(hasVertex(polys, B), 'Show must draw a vertex on B: ' + JSON.stringify(polys));
         assert(segment(polys, A, B) && segment(polys, B, C), 'A→B and B→C must be drawn');
         assert(!polys.some(uncertain), 'Show marks nothing');
+        // Control for the Hide fallback step below: this packet does draw.
+        const pure = await send(h.page, ++id, A, pureOneByte, { decodedPath: true });
+        assert(offSender(pure, A).length > 0, 'Show must draw the pure 1-byte path: ' + JSON.stringify(pure));
       });
 
       await step('Hide: no Live polyline vertex sits on the 1-byte hop, A→C is dashed and lighter', async () => {
@@ -195,6 +225,12 @@ async function pickMode(page, mode, phone) {
         assert(ac, 'A→C must be drawn: ' + JSON.stringify(polys));
         assert(uncertain(ac), 'A→C must carry live-path-uncertain + 4 6 dashes: ' + JSON.stringify(ac));
         assert(ac.opacity < 0.8, 'A→C must be lighter than a certain segment (0.8): ' + ac.opacity);
+      });
+
+      await step('Hide: a pure 1-byte path with decoded.path.hops set draws no hop (fallback path)', async () => {
+        const polys = await send(h.page, ++id, A, pureOneByte, { decodedPath: true });
+        assert(offSender(polys, A).length === 0,
+          'the decoded.path fallback drew a hidden 1-byte hop: ' + JSON.stringify(polys));
       });
 
       await step('Hide: a route without 1-byte hops is drawn unmarked', async () => {
@@ -212,6 +248,8 @@ async function pickMode(page, mode, phone) {
         assert(uncertain(bc), 'B→C must be marked: ' + JSON.stringify(bc));
         assert(cd && !uncertain(cd), 'C→D is certain: ' + JSON.stringify(cd));
         assert(ab.opacity < cd.opacity, 'a marked segment is lighter: ' + ab.opacity + ' vs ' + cd.opacity);
+        const stored = await h.page.evaluate(() => localStorage.getItem('meshcore-1byte-hops-mode'));
+        assert(stored === 'mark', 'an explicit Mark must be stored, or Live falls back to Show: ' + stored);
       });
 
       await step('no page errors', async () => {

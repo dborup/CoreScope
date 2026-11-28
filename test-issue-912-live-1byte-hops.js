@@ -6,9 +6,11 @@
  * Live map animation follows it too, against the real public/live.js,
  * public/hop-filter.js and public/hop-resolver.js in a vm sandbox:
  *
- *   1. the mode is read per packet from MC_get1ByteHopsMode(), so a change
- *      (MC_set1ByteHopsMode fires mc-hide-1byte-hops-changed) reaches the next
- *      packet at once; without hop-filter.js the map behaves as Show;
+ *   1. the mode is read per packet from the visitor's stored choice
+ *      (MC_getStored1ByteHopsMode), so a change (MC_set1ByteHopsMode fires
+ *      mc-hide-1byte-hops-changed) reaches the next packet at once; with no
+ *      stored choice, or without hop-filter.js, Live uses Show (owner
+ *      decision on #912, 2026-11-27, until M2);
  *   2. Show: every hop reaches the animation, no segment is marked;
  *   3. Hide: 1-byte hops are left out, the server's resolved_path stays
  *      paired with the hop it belongs to, and when hops were dropped every
@@ -34,8 +36,8 @@ function test(name, fn) {
   catch (e) { failed++; console.log('  ❌ ' + name + ': ' + e.message); }
 }
 
-function makeStorage() {
-  const store = {};
+function makeStorage(seed) {
+  const store = Object.assign({}, seed);
   return {
     getItem: k => (k in store ? store[k] : null),
     setItem: (k, v) => { store[k] = String(v); },
@@ -46,7 +48,7 @@ function makeStorage() {
 // A browser-like sandbox with just enough DOM for live.js to load. Leaflet,
 // the app shell and the WS channel are stubs; hop filtering and resolution
 // are the real files.
-function loadLive({ withHopFilter = true } = {}) {
+function loadLive({ withHopFilter = true, storage = {} } = {}) {
   const el = () => ({
     style: {}, dataset: {}, textContent: '', innerHTML: '',
     classList: { add() {}, remove() {}, contains() { return false; } },
@@ -77,7 +79,7 @@ function loadLive({ withHopFilter = true } = {}) {
     setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
     requestAnimationFrame: () => 0, cancelAnimationFrame() {},
     performance: { now: () => Date.now() },
-    localStorage: makeStorage(),
+    localStorage: makeStorage(storage),
     location: { hash: '', protocol: 'https:', host: 'localhost' },
     getComputedStyle: () => ({ getPropertyValue: () => '' }),
     matchMedia: () => ({ matches: false, addEventListener() {} }),
@@ -134,9 +136,37 @@ console.log('\n=== #912 M1: the mode Live reads ===');
   const ctx = setup();
   const mode = ctx.window._liveOneByteHopsMode;
 
-  test('the Live map reads the hop-filter.js mode (default mark)', () => {
+  test('no stored mode: the Live map uses Show; other pages keep hop-filter.js\'s default', () => {
+    // Owner decision on #912 (2026-11-27): Live defaults to Show until M2.
     assert.strictEqual(typeof mode, 'function', '_liveOneByteHopsMode must be exposed');
-    assert.strictEqual(mode(), 'mark');
+    assert.strictEqual(ctx.localStorage.getItem('meshcore-1byte-hops-mode'), null, 'precondition: no choice');
+    assert.strictEqual(mode(), 'show');
+    assert.strictEqual(ctx.window.MC_get1ByteHopsMode(), 'mark', 'hop-filter.js DEFAULT_MODE is unchanged');
+    assert.strictEqual(ctx.window.MC_getStored1ByteHopsMode(), null);
+  });
+
+  test('no stored mode: a 1-byte route is drawn unmarked on Live', () => {
+    const out = ctx.window._liveResolveHopPositions(['18', 'C2C2'], PAYLOAD,
+      [B.public_key, C.public_key], mode());
+    assert.deepStrictEqual(keys(out), [A.public_key, B.public_key, C.public_key]);
+    assert.deepStrictEqual(marked(out), [false, false, false]);
+  });
+
+  for (const stored of ['show', 'mark', 'hide']) {
+    test('a stored "' + stored + '" from an earlier visit applies on Live', () => {
+      const fresh = loadLive({ storage: { 'meshcore-1byte-hops-mode': stored } });
+      assert.strictEqual(fresh.window._liveOneByteHopsMode(), stored);
+    });
+  }
+
+  test('the #1633 "hide" key migrates and applies on Live', () => {
+    const fresh = loadLive({ storage: { 'meshcore-hide-1byte-hops': 'true' } });
+    assert.strictEqual(fresh.window._liveOneByteHopsMode(), 'hide');
+  });
+
+  test('a junk stored mode counts as no choice: Show on Live', () => {
+    const fresh = loadLive({ storage: { 'meshcore-1byte-hops-mode': 'constructor' } });
+    assert.strictEqual(fresh.window._liveOneByteHopsMode(), 'show');
   });
 
   test('a mode change reaches the next packet at once (MC_set1ByteHopsMode)', () => {
@@ -337,7 +367,8 @@ console.log('\n=== #912 M1: perf — filter + resolveHopPositions on 10k paths =
     }
   });
 
-  // About 0.8–1.1 s here; the absolute cap leaves room for a loaded CI runner.
+  // About 60–125 ms per mode locally and in CI, so the 6 s cap (and the
+  // 250 ms filter cap above) only catch a gross regression such as a hang.
   // The relative checks are what catch a regression in the filter.
   test('filter + resolve: 10k paths within 6 s per mode', () => {
     for (const m of ['show', 'hide', 'mark']) {

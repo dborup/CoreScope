@@ -4841,9 +4841,14 @@
   // #912 M1 — the 1-byte hop setting of hop-filter.js (#674), read per
   // packet so a change (MC_set1ByteHopsMode fires mc-hide-1byte-hops-changed)
   // reaches the next packet at once; animations in flight just finish.
-  // Without hop-filter.js the map draws every hop, as before.
+  // A visitor who never chose (or no hop-filter.js) gets Show on Live: owner
+  // decision on #912 (2026-11-27) until M2's operator default replaces this
+  // fallback. Other pages keep hop-filter.js's own default.
+  const LIVE_1BYTE_HOPS_FALLBACK = 'show';
   function oneByteHopsMode() {
-    return typeof window.MC_get1ByteHopsMode === 'function' ? window.MC_get1ByteHopsMode() : 'show';
+    const stored = typeof window.MC_getStored1ByteHopsMode === 'function'
+      ? window.MC_getStored1ByteHopsMode() : null;
+    return stored || LIVE_1BYTE_HOPS_FALLBACK;
   }
 
   // #912 M1 — applies the mode to a path before it is resolved. Hide leaves

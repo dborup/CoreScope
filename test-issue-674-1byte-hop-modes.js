@@ -92,7 +92,7 @@ test('an invalid stored mode reads as the default and is removed', () => {
   }
 });
 
-test('set1ByteHopsMode stores show/hide, clears the key for the default, rejects junk', () => {
+test('set1ByteHopsMode stores every explicit choice (mark too, #912 M1), rejects junk', () => {
   const store = {};
   const w = sandbox(store, ['hop-filter.js']);
   w.MC_set1ByteHopsMode('hide');
@@ -100,7 +100,7 @@ test('set1ByteHopsMode stores show/hide, clears the key for the default, rejects
   w.MC_set1ByteHopsMode('show');
   assert(store[MODE_KEY] === 'show', JSON.stringify(store));
   w.MC_set1ByteHopsMode('mark');
-  assert(!(MODE_KEY in store), 'default is stored as "no key": ' + JSON.stringify(store));
+  assert(store[MODE_KEY] === 'mark', 'an explicit mark is stored (#912 M1): ' + JSON.stringify(store));
   w.MC_set1ByteHopsMode('hide');
   for (const junk of ['nonsense', 'constructor', '__proto__', 'toString']) {
     w.MC_set1ByteHopsMode(junk);
